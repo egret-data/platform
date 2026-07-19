@@ -56,6 +56,11 @@ vi.mock("@/lib/kernel/KernelConnection", () => ({
     disconnect = kernelDisconnect;
     interrupt = kernelInterrupt;
     restart = kernelRestart;
+    status = "idle" as const;
+    onStatusChange = (cb: (s: string) => void) => {
+      cb("idle");
+      return () => {};
+    };
   },
 }));
 
@@ -201,6 +206,18 @@ afterEach(() => {
 });
 
 describe("NotebookPage", () => {
+  // ── IDE shell ─────────────────────────────────────────────────────────────
+
+  it("renders the sidebar rail and a kernel status badge", () => {
+    renderAt();
+    expect(
+      screen.getByRole("button", { name: /table of contents/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /data sources/i }),
+    ).toBeInTheDocument();
+  });
+
   // ── Header ────────────────────────────────────────────────────────────────
 
   it("shows the notebook name in the header", () => {
