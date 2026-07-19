@@ -3,6 +3,7 @@
 //! and driven through the [`EngineProvisioner`] trait; k8s access goes through the
 //! [`KubeClient`] trait so tests can inject a fake.
 
+pub mod ingress;
 pub mod kube_client;
 pub mod provisioner;
 pub mod spec;

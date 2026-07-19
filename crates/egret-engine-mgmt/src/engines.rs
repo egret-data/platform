@@ -2284,11 +2284,31 @@ async fn build_starrocks_provision_req(
         None => None,
     };
 
+    // FE HTTP ingress, parsed from the stored top-level `spec["ingress"]` (create/
+    // update persist it there). Only `ingress` is used off this Trino-shaped config
+    // for a StarRocks engine — it's the field the orchestrator's `starrocks_ingress`
+    // renders from.
+    let mut config = TrinoConfigReq {
+        ingress: parse_ingress(&engine.spec["ingress"]),
+        ..Default::default()
+    };
+    // Ingress TLS from a typed secret (FE HTTP ingress): resolve the referenced
+    // kubernetes.io/tls secret, project it into `{name}-ingress-tls`, and point the
+    // Ingress at it. Typed ref wins over a raw `tls_secret` string when both are set.
+    if let Some(ing) = config.ingress.as_mut() {
+        if let Some(ref_id) = ing.tls_cert_secret_ref {
+            let (cert_pem, key_pem) = resolve_tls_cert_secret(st, ref_id).await?;
+            ing.tls_cert_pem = Some(cert_pem);
+            ing.tls_key_pem = Some(key_pem);
+            ing.tls_secret = Some(format!("{}-ingress-tls", engine.name));
+        }
+    }
+
     let req = EngineProvisionReq {
         name: engine.name.clone(),
         namespace: engine.namespace.clone(),
         image_version: fe_image.clone(),
-        config: TrinoConfigReq::default(),
+        config,
         catalogs: vec![],
         ranger,
         kind: egret_engine_mgmt_api::EngineKind::StarRocks,
@@ -2622,7 +2642,15 @@ async fn create_starrocks_engine(
     // JSON `null`, which `store::Engine::delegation_mode`'s `.get("mode")` chain
     // treats exactly like a wholly-absent key — it must NOT default to
     // impersonate the way Trino's `trinoConfig.delegationMode` does.
-    let spec = build_starrocks_spec(&sr_body, None);
+    let mut spec = build_starrocks_spec(&sr_body, None);
+    // Persist the FE HTTP ingress at TOP-LEVEL `spec["ingress"]` (kind-agnostic —
+    // `build_starrocks_provision_req` reads it back into `config.ingress`, the
+    // field the orchestrator's `starrocks_ingress` renders from). The shared
+    // create form builds `trinoConfig.ingress` even for a StarRocks engine, so the
+    // wire ingress arrives on `b.trino_config`; copy it in when present.
+    if let Some(ing) = b.trino_config.as_ref().and_then(|tc| tc.get("ingress")) {
+        spec["ingress"] = ing.clone();
+    }
 
     let engine = match st
         .engine_mgmt
@@ -3273,6 +3301,18 @@ async fn update_starrocks_engine(
     // guard was originally wired into create only; an edit must enforce it too
     // (a config that can't be created must not be reachable via update either).
     validate_sr_autoscaling(&sr_body)?;
+    // Validate an optional FE-ingress-TLS secret reference up front (400 on a
+    // missing / non-TLS / incomplete secret), mirroring the shared create-time
+    // guard — the StarRocks update path dispatches before that Trino-only check.
+    if let Some(ing) = b
+        .trino_config
+        .as_ref()
+        .and_then(|tc| parse_ingress(&tc["ingress"]))
+    {
+        if let Some(ref_id) = ing.tls_cert_secret_ref {
+            resolve_tls_cert_secret(&st, ref_id).await?;
+        }
+    }
 
     // Capture the OLD delegation block ({mode, tlsEnabled} or null) from the
     // pre-update engine before we overwrite the spec, so we can detect a
@@ -3281,7 +3321,15 @@ async fn update_starrocks_engine(
 
     // Merge the body over the CURRENT spec so a PUT that omits image/replicas/
     // resources (or delegation) preserves what's already stored.
-    let spec = build_starrocks_spec(&sr_body, Some(&engine.spec));
+    let mut spec = build_starrocks_spec(&sr_body, Some(&engine.spec));
+    // Preserve the top-level FE ingress across the merge (mirrors how
+    // `build_starrocks_spec` falls back to `existing` for omitted fields): a PUT
+    // body carrying an ingress wins; otherwise keep whatever the stored spec had.
+    if let Some(ing) = b.trino_config.as_ref().and_then(|tc| tc.get("ingress")) {
+        spec["ingress"] = ing.clone();
+    } else if let Some(existing) = engine.spec.get("ingress") {
+        spec["ingress"] = existing.clone();
+    }
     // A delegation change flips the connector's auth mode (impersonate ⇄ jwt) or
     // its in-band TLS, so it must re-bootstrap the FE. Compare the full stored
     // `delegation` block before vs. after (see `sr_delegation_block`); a spurious

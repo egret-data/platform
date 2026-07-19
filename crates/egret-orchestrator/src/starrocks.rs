@@ -695,6 +695,45 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
     })
 }
 
+/// Render a `networking.k8s.io/v1` Ingress exposing the StarRocks FE HTTP
+/// endpoint (`{name}-fe-service` port 8030). Returns `None` unless the ingress
+/// is enabled. TLS terminates at the ingress; the FE stays HTTP internally.
+/// (The MySQL query port 9030 is raw TCP and is NOT exposed here.)
+pub fn starrocks_ingress(spec: &EngineSpec) -> Option<Value> {
+    let ing = spec.config.ingress.as_ref()?;
+    if !ing.enabled {
+        return None;
+    }
+    let mut meta = json!({
+        "name": format!("{}-fe", spec.name), "namespace": spec.namespace,
+        "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name }
+    });
+    if !ing.annotations.is_empty() {
+        meta["annotations"] = Value::Object(
+            ing.annotations
+                .iter()
+                .map(|(k, v)| (k.clone(), json!(v)))
+                .collect(),
+        );
+    }
+    let mut spec_obj = json!({
+        "rules": [{ "host": ing.host, "http": { "paths": [{
+            "path": "/", "pathType": "Prefix",
+            "backend": { "service": { "name": format!("{}-fe-service", spec.name), "port": { "number": 8030 } } }
+        }]}}]
+    });
+    if let Some(cn) = &ing.class_name {
+        spec_obj["ingressClassName"] = json!(cn);
+    }
+    if let Some(ts) = &ing.tls_secret {
+        spec_obj["tls"] = json!([{ "hosts": [ing.host], "secretName": ts }]);
+    }
+    Some(json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+        "metadata": meta, "spec": spec_obj
+    }))
+}
+
 /// Provisions a StarRocks engine (shared-data mode) via the kube-starrocks
 /// operator: an `fe.conf` ConfigMap, an optional Ranger XML ConfigMap, and the
 /// `StarRocksCluster` CR. The operator owns the FE/CN StatefulSets and pods.
@@ -751,6 +790,15 @@ impl StarRocksProvisioner {
             }
         }
         self.kube.apply(&starrocks_cluster_cr(spec)).await?;
+        if let Some(ing) = spec.config.ingress.as_ref() {
+            if let Some(sec) = crate::ingress::ingress_tls_secret(&spec.name, &spec.namespace, ing)
+            {
+                self.kube.apply(&sec).await?;
+            }
+        }
+        if let Some(ing) = starrocks_ingress(spec) {
+            self.kube.apply(&ing).await?;
+        }
         Ok(())
     }
 
@@ -933,6 +981,19 @@ impl EngineProvisioner for StarRocksProvisioner {
             .kube
             .delete("v1", "Secret", namespace, &format!("{name}-initpwd-secret"))
             .await;
+        let _ = self
+            .kube
+            .delete(
+                "networking.k8s.io/v1",
+                "Ingress",
+                namespace,
+                &format!("{name}-fe"),
+            )
+            .await;
+        let _ = self
+            .kube
+            .delete("v1", "Secret", namespace, &format!("{name}-ingress-tls"))
+            .await;
         Ok(())
     }
 }
@@ -988,6 +1049,32 @@ mod tests {
             tls_enabled: true,
         });
         spec
+    }
+
+    #[test]
+    fn starrocks_ingress_targets_fe_http_with_tls() {
+        let mut spec = sample_sr_spec();
+        spec.name = "sr1".into();
+        spec.namespace = "egret-engines".into();
+        spec.config.ingress = Some(egret_engine_mgmt_api::Ingress {
+            enabled: true,
+            class_name: Some("nginx".into()),
+            host: "sr1.localtest.me".into(),
+            tls_secret: Some("sr1-ingress-tls".into()),
+            tls_cert_secret_ref: None,
+            tls_cert_pem: None,
+            tls_key_pem: None,
+            annotations: Default::default(),
+        });
+        let ing = starrocks_ingress(&spec).unwrap();
+        assert_eq!(ing["kind"], "Ingress");
+        assert_eq!(ing["metadata"]["name"], "sr1-fe");
+        let b = &ing["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"];
+        assert_eq!(b["name"], "sr1-fe-service");
+        assert_eq!(b["port"]["number"], 8030);
+        assert_eq!(ing["spec"]["tls"][0]["secretName"], "sr1-ingress-tls");
+        spec.config.ingress.as_mut().unwrap().enabled = false;
+        assert!(starrocks_ingress(&spec).is_none());
     }
 
     #[test]
