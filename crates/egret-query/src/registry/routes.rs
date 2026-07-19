@@ -124,11 +124,27 @@ async fn resolve_secret_id(
 ) -> Result<Option<Uuid>, DbApiError> {
     match (&body.new_secret, body.secret_id) {
         (Some(n), _) => {
-            let id = st
-                .workspace_secrets
-                .create(Some(workspace_id), &n.name, None, &n.value)
-                .await
-                .map_err(DatabaseError::from)?;
+            let user = body.options.user.clone().unwrap_or_default();
+            let id = if user.is_empty() {
+                st.workspace_secrets
+                    .create(Some(workspace_id), &n.name, None, &n.value)
+                    .await
+                    .map_err(DatabaseError::from)?
+            } else {
+                let mut data = std::collections::BTreeMap::new();
+                data.insert("username".to_string(), user);
+                data.insert("password".to_string(), n.value.clone());
+                st.workspace_secrets
+                    .create_typed(
+                        Some(workspace_id),
+                        &n.name,
+                        None,
+                        egret_secrets::secret_type::BASIC_AUTH,
+                        &data,
+                    )
+                    .await
+                    .map_err(DatabaseError::from)?
+            };
             Ok(Some(id))
         }
         (None, Some(id)) => {
