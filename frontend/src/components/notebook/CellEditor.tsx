@@ -177,6 +177,7 @@ export function CellEditor({
                 <SelectValue placeholder="Select engine" />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value="daft">Daft (local)</SelectItem>
                 {engines
                   .filter((e) => e.enabled)
                   .map((e) => (
