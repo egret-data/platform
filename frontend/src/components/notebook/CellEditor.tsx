@@ -132,6 +132,10 @@ export function CellEditor({
     // Let the page drive focus into this cell (keyboard nav / j-k / Enter).
     registerFocus?.(() => editor.focus());
     editor.onDidFocusEditorText(() => focusCellRef.current?.());
+    // Blurring the editor by any means (clicking the tools panel / blank space,
+    // not just Escape) must return the page to command mode, else `mode` sticks
+    // at "edit" and keyboard nav silently stops working.
+    editor.onDidBlurEditorText(() => commandModeRef.current?.());
     // Run shortcuts: Shift+Enter = run + select next (Jupyter convention),
     // Ctrl/Cmd+Enter = run in place, Alt+Enter = run + insert-and-select below.
     editor.addCommand(monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => runAndNextRef.current?.());

@@ -367,6 +367,69 @@ describe("NotebookPage", () => {
 
       expect(deleteCellMutate).not.toHaveBeenCalled();
     });
+
+    it("ignores keys bubbling from an open Radix popover (role=menu)", () => {
+      renderAt();
+      const section = selectCellOneAndGetSection();
+
+      // Simulate a Radix Select/DropdownMenu content: its keydowns bubble
+      // through the React tree to the section, but must NOT drive cell nav.
+      const menu = document.createElement("div");
+      menu.setAttribute("role", "menu");
+      const item = document.createElement("button");
+      menu.appendChild(item);
+      section.appendChild(menu);
+
+      fireEvent.keyDown(item, { key: "b" });
+      expect(addCellMutate).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(item, { key: "d" });
+      fireEvent.keyDown(item, { key: "d" });
+      expect(deleteCellMutate).not.toHaveBeenCalled();
+    });
+
+    it("'dd' split by a nav key (moving to another cell) does not delete", () => {
+      renderAt();
+      const section = selectCellOneAndGetSection();
+
+      fireEvent.keyDown(section, { key: "d" }); // arm chord on cell-1
+      fireEvent.keyDown(section, { key: "j" }); // move to cell-2 + break chord
+      fireEvent.keyDown(section, { key: "d" }); // lone d on cell-2
+
+      expect(deleteCellMutate).not.toHaveBeenCalled();
+    });
+
+    it("selects the newly-inserted cell (activeCellId follows the insert)", () => {
+      const view = renderAt();
+      const section = selectCellOneAndGetSection();
+
+      // 'b' inserts below cell-1; grab the onSuccess passed to the mutate mock
+      // and drive it with a server response carrying a brand-new cell.
+      fireEvent.keyDown(section, { key: "b" });
+      const [, opts] = addCellMutate.mock.calls.at(-1)!;
+      const newCell = {
+        ...mockCodeCell,
+        id: "cell-new",
+        cell_order: 5,
+      };
+      // The page re-reads notebook.data for its cell list on re-render, so make
+      // the new cell visible before re-rendering the tree via onSuccess.
+      notebookMock.mockReturnValue({
+        data: { ...mockNotebook, cells: [mockCodeCell, mockMarkdownCell, newCell] },
+        isLoading: false,
+        isError: false,
+        error: null,
+      });
+      act(() => {
+        (opts as { onSuccess: (d: unknown) => void }).onSuccess({
+          ...mockNotebook,
+          cells: [mockCodeCell, mockMarkdownCell, newCell],
+        });
+      });
+
+      const inserted = view.container.querySelector("#cell-cell-new [data-active]");
+      expect(inserted).toHaveAttribute("data-active", "true");
+    });
   });
 
   // ── Markdown cell ─────────────────────────────────────────────────────────

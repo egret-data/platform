@@ -16,10 +16,12 @@ const monacoStub = vi.hoisted(() => {
     KeyCode,
     commands: {} as Record<number, () => void>,
     focusListener: undefined as (() => void) | undefined,
+    blurListener: undefined as (() => void) | undefined,
     domBlurred: false,
     reset() {
       this.commands = {};
       this.focusListener = undefined;
+      this.blurListener = undefined;
       this.domBlurred = false;
     },
   };
@@ -44,6 +46,9 @@ vi.mock("@monaco-editor/react", () => ({
       }),
       onDidFocusEditorText: (cb: () => void) => {
         monacoStub.focusListener = cb;
+      },
+      onDidBlurEditorText: (cb: () => void) => {
+        monacoStub.blurListener = cb;
       },
       onDidContentSizeChange: () => {},
       getContentHeight: () => 100,
@@ -248,6 +253,16 @@ describe("CellEditor", () => {
       commands[KeyCode.Escape]?.();
       expect(onEnterCommandMode).toHaveBeenCalledTimes(1);
       expect(monacoStub.domBlurred).toBe(true);
+    });
+
+    it("returns to command mode when the editor is blurred without Escape", () => {
+      const onEnterCommandMode = vi.fn();
+      render(
+        <CellEditor {...baseProps} cell={codeCell} onEnterCommandMode={onEnterCommandMode} />,
+      );
+      // Simulate Monaco reporting a plain blur (clicked away, no Escape).
+      monacoStub.blurListener?.();
+      expect(onEnterCommandMode).toHaveBeenCalledTimes(1);
     });
   });
 });

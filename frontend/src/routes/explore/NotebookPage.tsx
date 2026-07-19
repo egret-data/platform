@@ -342,9 +342,23 @@ export default function NotebookPage() {
   const [activeCellId, setActiveCellId] = useState<string | null>(null);
   const [mode, setMode] = useState<"edit" | "command">("command");
   const cellFocus = useRef<Record<string, () => void>>({});
-  // Timestamp of the last unpaired "d" press, for the "dd" delete chord.
-  const ddRef = useRef<number>(0);
+  // Last unpaired "d" press (cell + timestamp) for the "dd" delete chord. The
+  // cell id is tracked so a stray "d" then a nav/click to another cell can't
+  // pair with a later "d" and delete the wrong cell.
+  const ddRef = useRef<{ at: number; cid: string }>({ at: 0, cid: "" });
   const sectionRef = useRef<HTMLElement | null>(null);
+
+  // Seed the active cell to the first one once cells load, so keyboard nav
+  // (j/k, a/b, dd) works without requiring a first click. Guarded so it never
+  // overrides a selection the user (or an insert) has already made.
+  useEffect(() => {
+    if (activeCellId === null && (notebook.data?.cells?.length ?? 0) > 0) {
+      const first = [...notebook.data!.cells].sort(
+        (a, b) => a.cell_order - b.cell_order,
+      )[0];
+      setActiveCellId(first.id);
+    }
+  }, [notebook.data?.cells, activeCellId]);
 
   const focusCell = (cid: string) => {
     setActiveCellId(cid);
@@ -372,7 +386,15 @@ export default function NotebookPage() {
 
   // Insert a cell at an arbitrary position: add it (server assigns the next
   // cell_order), then reorder so it lands at `atIndex` among the existing cells.
-  const insertCell = (cellType: CellType, atIndex: number) => {
+  // The new cell always becomes the active cell; opts.focus additionally enters
+  // edit mode and drives focus into it (Alt+Enter). A rapid second insert while
+  // the first add/reorder is still in flight is dropped so the ordering can't race.
+  const insertCell = (
+    cellType: CellType,
+    atIndex: number,
+    opts?: { focus?: boolean },
+  ) => {
+    if (addCell.isPending || reorderCells.isPending) return;
     const cells = [...(notebook.data?.cells ?? [])].sort(
       (a, b) => a.cell_order - b.cell_order,
     );
@@ -398,6 +420,12 @@ export default function NotebookPage() {
           const order = cells.map((c) => c.id).filter((cid) => cid !== created.id);
           order.splice(Math.max(0, Math.min(atIndex, order.length)), 0, created.id);
           reorderCells.mutate(order);
+          // Select the freshly-inserted cell; optionally focus + enter edit mode.
+          setActiveCellId(created.id);
+          if (opts?.focus) {
+            setMode("edit");
+            requestAnimationFrame(() => cellFocus.current[created.id]?.());
+          }
         },
       },
     );
@@ -408,15 +436,24 @@ export default function NotebookPage() {
   };
 
   // Command-mode keyboard nav must never hijack typing in a real input/select/
-  // Monaco (the notebook-name field, the SQL result-variable input, etc.).
+  // Monaco (the notebook-name field, the SQL result-variable input, etc.) nor
+  // steal keys from an open Radix popover.
   const isEditableTarget = (el: EventTarget | null): boolean => {
-    if (!(el instanceof HTMLElement)) return false;
-    return (
-      el.tagName === "INPUT" ||
-      el.tagName === "TEXTAREA" ||
-      el.tagName === "SELECT" ||
-      el.isContentEditable
-    );
+    const node = el as HTMLElement | null;
+    if (!node) return false;
+    const tag = node.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+    if (node.isContentEditable) return true;
+    // Radix Select/DropdownMenu/Dialog render in a portal but their keydowns
+    // still bubble through the React tree to this section — ignore keys while
+    // any of them is open/focused so arrows/letters don't drive cell nav.
+    if (
+      node.closest?.(
+        '[role="listbox"],[role="menu"],[role="menuitem"],[role="dialog"],[data-radix-popper-content-wrapper]',
+      )
+    )
+      return true;
+    return false;
   };
 
   // Jupyter-style command-mode chords, bound to the scrollable section. Only
@@ -430,6 +467,9 @@ export default function NotebookPage() {
     const cid = activeCellId;
     const idx = cells.findIndex((c) => c.id === cid);
     if (idx === -1) return;
+    // Any key other than "d" breaks a pending "dd" chord (nav keys land in
+    // their own switch case, so reset here rather than only in `default`).
+    if (e.key !== "d") ddRef.current = { at: 0, cid: "" };
     switch (e.key) {
       case "Enter":
         e.preventDefault();
@@ -448,22 +488,24 @@ export default function NotebookPage() {
         break;
       case "a":
         e.preventDefault();
-        insertCell("code", idx); // insert above
+        insertCell("code", idx); // insert above (command mode: select only)
         break;
       case "b":
         e.preventDefault();
-        insertCell("code", idx + 1); // insert below
+        insertCell("code", idx + 1); // insert below (command mode: select only)
         break;
-      case "d":
-        // "dd" — two d presses within 400ms deletes the active cell.
-        if (Date.now() - ddRef.current < 400) {
-          e.preventDefault();
+      case "d": {
+        // "dd" — two d presses within 400ms on the SAME active cell deletes it.
+        e.preventDefault();
+        const now = Date.now();
+        if (now - ddRef.current.at < 400 && ddRef.current.cid === cid) {
           handleDeleteCell(cid);
-          ddRef.current = 0;
+          ddRef.current = { at: 0, cid: "" };
         } else {
-          ddRef.current = Date.now();
+          ddRef.current = { at: now, cid };
         }
         break;
+      }
       default:
         break;
     }
@@ -658,7 +700,7 @@ export default function NotebookPage() {
                     cellFocus.current[cid] = fn;
                   }}
                   onSelectNext={(cid) => selectAdjacent(cid, 1)}
-                  onInsertBelow={(idx) => insertCell("code", idx + 1)}
+                  onInsertBelow={(idx) => insertCell("code", idx + 1, { focus: true })}
                   onEnterCommandMode={() => {
                     setMode("command");
                     sectionRef.current?.focus();
