@@ -26,7 +26,7 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import type { KernelConnection } from "@/lib/kernel/KernelConnection";
 import type { CellOutput } from "@/lib/kernel/protocol";
 import { useKernel } from "@/lib/kernel/useKernel";
-import { useKernelStatus } from "@/lib/kernel/useKernelStatus";
+import { useKernelConnectionStatus } from "@/lib/kernel/useKernelConnectionStatus";
 import { NotebookHeader } from "@/components/notebook/NotebookHeader";
 import { SidebarIconRail, type SidebarTab } from "@/components/notebook/SidebarIconRail";
 import { TableOfContentsPanel } from "@/components/notebook/panels/TableOfContentsPanel";
@@ -191,7 +191,7 @@ export default function NotebookPage() {
   const reorderCells = useReorderCells(ws!, id!);
   const active = useActiveExecutions(ws!, id!);
 
-  const kernelStatus = useKernelStatus(kernel);
+  const kernelStatus = useKernelConnectionStatus(kernel);
   const [nameDirty, setNameDirty] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("toc");
   const [sidebarOpen, setSidebarOpen] = useState(true);
