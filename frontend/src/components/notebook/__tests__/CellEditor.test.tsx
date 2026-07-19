@@ -92,4 +92,15 @@ describe("CellEditor", () => {
     fireEvent.blur(input);
     expect(onChangeSqlInto).toHaveBeenCalledWith("sales_df");
   });
+
+  it("offers a Daft-local target option for SQL cells", () => {
+    render(
+      <CellEditor
+        {...baseProps}
+        engines={[{ id: "e1", name: "Trino", engine: "trino", enabled: true }]}
+        cell={cell({ id: "s", cell_type: "sql", source: "SELECT 1", cell_order: 0, sql_target: "daft", sql_into: "df" })}
+      />,
+    );
+    expect(screen.getByLabelText("SQL target")).toHaveTextContent(/daft/i);
+  });
 });
