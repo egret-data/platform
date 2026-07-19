@@ -188,9 +188,16 @@ impl SecretStore {
         Ok(())
     }
 
-    /// Backward-compat: decrypt the single `value` key.
+    /// Backward-compat single-value read: decrypt the `value` key, falling back to
+    /// `password` for a `kubernetes.io/basic-auth` secret (P1b). This lets every
+    /// legacy single-value reader (`resolve_plaintext` → `get`) transparently read
+    /// the password of a connection credential that has been migrated to basic-auth,
+    /// without changing each call site.
     pub async fn get(&self, id: Uuid) -> Result<String, SecretsError> {
-        self.get_key(id, "value").await
+        match self.get_key(id, "value").await {
+            Err(SecretsError::NotFound) => self.get_key(id, "password").await,
+            other => other,
+        }
     }
 
     /// Delete a secret by id (idempotent).
