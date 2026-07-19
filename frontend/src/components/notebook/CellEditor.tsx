@@ -37,6 +37,10 @@ export interface CellEditorProps {
   outputs?: CellOutput[];
   onRunAbove?: () => void;
   onRunBelow?: () => void;
+  /** Enabled engines for the SQL target dropdown (from useNotebookRuntime). */
+  engines?: { id: string; name: string; engine: string; enabled: boolean }[];
+  onChangeSqlTarget?: (target: string) => void;
+  onChangeSqlInto?: (into: string) => void;
 }
 
 export function CellEditor({
@@ -51,6 +55,9 @@ export function CellEditor({
   outputs,
   onRunAbove,
   onRunBelow,
+  engines = [],
+  onChangeSqlTarget,
+  onChangeSqlInto,
 }: CellEditorProps) {
   const [mdFocused, setMdFocused] = useState(false);
   // Latest onRun for the Monaco Shift+Enter command (captured once on mount).
@@ -73,6 +80,8 @@ export function CellEditor({
       : cell.execution_count == null
         ? "In [ ]:"
         : `In [${cell.execution_count}]:`;
+
+  const monacoLanguage = cell.cell_type === "sql" ? "sql" : "python";
 
   const handleMount = (editor: MonacoEditor.IStandaloneCodeEditor, monaco: Monaco) => {
     registerStaticCompletions(monaco);
@@ -99,6 +108,7 @@ export function CellEditor({
             <SelectContent>
               <SelectItem value="code">Code</SelectItem>
               <SelectItem value="markdown">Markdown</SelectItem>
+              <SelectItem value="sql">SQL</SelectItem>
             </SelectContent>
           </Select>
 
@@ -150,6 +160,34 @@ export function CellEditor({
           </div>
         </div>
 
+        {cell.cell_type === "sql" && (
+          <div className="flex items-center gap-2 border-b px-2 py-1 text-xs">
+            <span className="text-muted-foreground">Target</span>
+            <Select value={cell.sql_target ?? ""} onValueChange={(v) => onChangeSqlTarget?.(v)}>
+              <SelectTrigger className="h-7 w-40 text-xs" aria-label="SQL target">
+                <SelectValue placeholder="Select engine" />
+              </SelectTrigger>
+              <SelectContent>
+                {engines
+                  .filter((e) => e.enabled)
+                  .map((e) => (
+                    <SelectItem key={e.id} value={e.id}>
+                      {e.name}
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+            <span className="ml-2 text-muted-foreground">→</span>
+            <input
+              aria-label="Result variable"
+              value={cell.sql_into ?? ""}
+              onChange={(e) => onChangeSqlInto?.(e.target.value)}
+              className="h-7 w-32 rounded border bg-transparent px-2 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+              placeholder="df"
+            />
+          </div>
+        )}
+
         {/* Body */}
         {cell.cell_type === "markdown" ? (
           mdFocused || !cell.source.trim() ? (
@@ -183,8 +221,8 @@ export function CellEditor({
           <div className="min-h-[120px]">
             <Editor
               height="200px"
-              defaultLanguage="python"
-              language="python"
+              defaultLanguage={monacoLanguage}
+              language={monacoLanguage}
               value={cell.source}
               onChange={(v) => onChangeSource(v ?? "")}
               onMount={handleMount}

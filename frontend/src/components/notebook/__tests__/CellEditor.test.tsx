@@ -20,6 +20,9 @@ const baseProps = {
   onDelete: noop,
   onMoveUp: noop,
   onMoveDown: noop,
+  engines: [],
+  onChangeSqlTarget: noop,
+  onChangeSqlInto: noop,
 };
 
 describe("CellEditor", () => {
@@ -56,5 +59,16 @@ describe("CellEditor", () => {
     fireEvent.focus(ta);
     fireEvent.change(ta, { target: { value: "h" } });
     expect(screen.getByLabelText("Markdown source")).toBeInTheDocument();
+  });
+
+  it("shows a target dropdown and variable input for SQL cells", () => {
+    render(
+      <CellEditor
+        {...baseProps}
+        engines={[{ id: "e1", name: "Trino", engine: "trino", enabled: true }]}
+        cell={cell({ id: "s", cell_type: "sql", source: "SELECT 1", cell_order: 0, sql_target: "e1", sql_into: "df" })}
+      />,
+    );
+    expect(screen.getByLabelText(/result variable/i)).toHaveValue("df");
   });
 });
