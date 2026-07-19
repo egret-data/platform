@@ -15,6 +15,14 @@ function fakeMonaco() {
         providers[lang] = provider;
         return { dispose: vi.fn() };
       },
+      registerHoverProvider: (lang: string, provider: any) => {
+        providers[`${lang}:hover`] = provider;
+        return { dispose: vi.fn() };
+      },
+      registerSignatureHelpProvider: (lang: string, provider: any) => {
+        providers[`${lang}:signature`] = provider;
+        return { dispose: vi.fn() };
+      },
     },
   };
 }
@@ -49,7 +57,9 @@ describe("registerNotebookCompletions", () => {
     const before = { ...m.providers };
     registerNotebookCompletions(m as any); // second call must be a no-op
     expect(m.providers).toEqual(before);
-    expect(Object.keys(m.providers).sort()).toEqual(["python", "sql"]);
+    expect(Object.keys(m.providers).sort()).toEqual(
+      ["python", "python:hover", "python:signature", "sql"].sort()
+    );
   });
 
   it("SQL-Lab-safe: with no context, python returns only statics and sql returns EMPTY", async () => {
@@ -96,5 +106,46 @@ describe("registerNotebookCompletions", () => {
     const sqlResult = m.providers.sql.provideCompletionItems(fakeModel(), fakePosition);
     const sqlLabels = sqlResult.suggestions.map((s: any) => s.label);
     expect(sqlLabels).not.toEqual(expect.arrayContaining(["orders"]));
+  });
+
+  it("hover: with a notebook context, returns contents from the kernel's inspect() text", async () => {
+    setNotebookCompletionContext({
+      kernel: {
+        inspect: async () => "def foo(a, b):\n\n    my docstring",
+        complete: async () => ({ matches: [], cursorStart: 0, cursorEnd: 0 }),
+      } as any,
+      sqlWords: () => [],
+    });
+
+    const result = await m.providers["python:hover"].provideHover(fakeModel(), fakePosition);
+    expect(result).not.toBeNull();
+    const text = result.contents.map((c: any) => c.value).join("\n");
+    expect(text).toContain("my docstring");
+  });
+
+  it("hover: with no context, returns null", async () => {
+    setNotebookCompletionContext(null);
+    const result = await m.providers["python:hover"].provideHover(fakeModel(), fakePosition);
+    expect(result).toBeNull();
+  });
+
+  it("signature help: with a notebook context, returns a signature whose label contains the call shape", async () => {
+    setNotebookCompletionContext({
+      kernel: {
+        inspect: async () => "def foo(a, b):\n\n    my docstring",
+        complete: async () => ({ matches: [], cursorStart: 0, cursorEnd: 0 }),
+      } as any,
+      sqlWords: () => [],
+    });
+
+    const result = await m.providers["python:signature"].provideSignatureHelp(fakeModel(), fakePosition);
+    expect(result).not.toBeNull();
+    expect(result.value.signatures[0].label).toContain("foo(a, b)");
+  });
+
+  it("signature help: with no context, returns null", async () => {
+    setNotebookCompletionContext(null);
+    const result = await m.providers["python:signature"].provideSignatureHelp(fakeModel(), fakePosition);
+    expect(result).toBeNull();
   });
 });

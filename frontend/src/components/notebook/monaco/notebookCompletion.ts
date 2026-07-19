@@ -1,6 +1,7 @@
 import type { Monaco } from "@monaco-editor/react";
 import type * as MonacoNS from "monaco-editor";
 import type { KernelConnection } from "@/lib/kernel/KernelConnection";
+import { stripAnsi } from "../ansiToHtml";
 
 /** Set by NotebookPage on mount / cleared on unmount. Monaco completion
  *  providers are registered ONCE, globally, per language — this module-level
@@ -111,6 +112,46 @@ export function registerNotebookCompletions(monaco: Monaco): void {
         range,
       }));
       return { suggestions: [...objs, ...kw] };
+    },
+  });
+
+  // Kernel-powered hover: shows the docstring/repr the kernel's `inspect_request`
+  // returns for the symbol under the cursor. Silent (returns null) outside a
+  // notebook, same ctx-gating as the completion providers above.
+  monaco.languages.registerHoverProvider("python", {
+    async provideHover(model: MonacoNS.editor.ITextModel, position: MonacoNS.Position) {
+      if (!ctx) return null;
+      const txt = await ctx.kernel.inspect(model.getValue(), model.getOffsetAt(position), 0).catch(() => null);
+      if (!txt) return null;
+      const clean = stripAnsi(txt).slice(0, 2000);
+      return { contents: [{ value: "```text\n" + clean + "\n```" }] };
+    },
+  });
+
+  // Kernel-powered signature help. Best-effort: the kernel's inspect text is
+  // free-form (docstring + signature line from IPython's oinspect), so this
+  // takes the first line containing "(" as the signature label rather than
+  // structurally parsing parameters — good enough to surface the call shape
+  // while typing, not a fully-parsed parameter list (no per-parameter
+  // highlighting). Hover above is the primary win for this task.
+  monaco.languages.registerSignatureHelpProvider("python", {
+    signatureHelpTriggerCharacters: ["(", ","],
+    async provideSignatureHelp(model: MonacoNS.editor.ITextModel, position: MonacoNS.Position) {
+      if (!ctx) return null;
+      const txt = await ctx.kernel.inspect(model.getValue(), model.getOffsetAt(position), 0).catch(() => null);
+      if (!txt) return null;
+      const clean = stripAnsi(txt);
+      const lines = clean.split("\n").map((l) => l.trim());
+      const sigLine = lines.find((l) => l.includes("(")) ?? lines.find(Boolean);
+      if (!sigLine) return null;
+      return {
+        value: {
+          signatures: [{ label: sigLine.slice(0, 200), parameters: [] }],
+          activeSignature: 0,
+          activeParameter: 0,
+        },
+        dispose: () => {},
+      };
     },
   });
 }
