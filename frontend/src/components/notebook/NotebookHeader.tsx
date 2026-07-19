@@ -43,7 +43,10 @@ export function NotebookHeader(props: NotebookHeaderProps) {
   };
 
   return (
-    <div className="sticky top-0 z-10 flex flex-col gap-3 border-b bg-background/95 px-4 py-3 backdrop-blur">
+    <div className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur">
+      {/* Constrain to the same width as the cell column so the toolbar sits
+          above the content, not floating at the far screen edge. */}
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-3 px-6 py-3">
       <Link
         to={`/explore/${props.ws}/notebooks`}
         className="flex w-fit items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
@@ -119,6 +122,7 @@ export function NotebookHeader(props: NotebookHeaderProps) {
             </Button>
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

@@ -426,8 +426,9 @@ export default function NotebookPage() {
           onDirtyChange={setNameDirty}
         />
 
-        {/* Centered, document-width cell column for readability. */}
-        <div className="mx-auto flex w-full max-w-4xl flex-col gap-3 px-4 py-6">
+        {/* Centered, wide cell column — code-first, so generous width with a
+            cap that keeps lines readable on ultra-wide monitors. */}
+        <div className="mx-auto flex w-full max-w-7xl flex-col gap-3 px-6 py-6">
           {sortedCells.map((cell, index) => (
             <div key={cell.id} id={`cell-${cell.id}`} style={{ scrollMarginTop: "6rem" }}>
               <ManagedCell
