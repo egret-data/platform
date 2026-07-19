@@ -11,6 +11,8 @@ function renderHeader(overrides: Partial<React.ComponentProps<typeof NotebookHea
     isPublic: false,
     status: "idle",
     runningAll: false,
+    activePanel: null,
+    onTogglePanel: vi.fn(),
     onRename: vi.fn(),
     onTogglePublic: vi.fn(),
     onRunAll: vi.fn(),

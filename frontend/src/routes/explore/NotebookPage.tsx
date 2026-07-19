@@ -30,10 +30,10 @@ import type { KernelConnection } from "@/lib/kernel/KernelConnection";
 import type { CellOutput } from "@/lib/kernel/protocol";
 import { useKernel } from "@/lib/kernel/useKernel";
 import { useKernelConnectionStatus } from "@/lib/kernel/useKernelConnectionStatus";
-import { NotebookHeader } from "@/components/notebook/NotebookHeader";
-import { SidebarIconRail, type SidebarTab } from "@/components/notebook/SidebarIconRail";
+import { NotebookHeader, type NotebookPanel } from "@/components/notebook/NotebookHeader";
 import { TableOfContentsPanel } from "@/components/notebook/panels/TableOfContentsPanel";
 import { DataSourcesPanel } from "@/components/notebook/panels/DataSourcesPanel";
+import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import type { ApiError } from "@/api/client";
@@ -221,16 +221,12 @@ export default function NotebookPage() {
 
   const kernelStatus = useKernelConnectionStatus(kernel);
   const [nameDirty, setNameDirty] = useState(false);
-  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("toc");
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-
-  const pickTab = (t: SidebarTab) => {
-    if (t === sidebarTab) setSidebarOpen((v) => !v);
-    else {
-      setSidebarTab(t);
-      setSidebarOpen(true);
-    }
-  };
+  // Tools (outline / data sources) live in an on-demand RIGHT panel, closed by
+  // default — the notebook content stays centered and full-width (Deepnote /
+  // Databricks pattern), avoiding a second left sidebar next to the app nav.
+  const [activePanel, setActivePanel] = useState<NotebookPanel>(null);
+  const togglePanel = (p: Exclude<NotebookPanel, null>) =>
+    setActivePanel((cur) => (cur === p ? null : p));
 
   const jumpToCell = (cellId: string) => {
     document
@@ -403,19 +399,10 @@ export default function NotebookPage() {
     sortedCells.forEach((c) => runners.current[c.id]?.clear());
   }
 
+  const panelTitle = activePanel === "toc" ? "Outline" : "Data sources";
+
   return (
     <div className="flex h-full min-h-0">
-      <SidebarIconRail tab={sidebarTab} open={sidebarOpen} onPick={pickTab} />
-      {sidebarOpen && (
-        <div className="w-64 shrink-0 overflow-y-auto border-r bg-muted/20">
-          {sidebarTab === "toc" ? (
-            <TableOfContentsPanel cells={sortedCells} onJump={jumpToCell} />
-          ) : (
-            <DataSourcesPanel ws={ws!} />
-          )}
-        </div>
-      )}
-
       <section className="flex min-w-0 flex-1 flex-col overflow-y-auto">
         <h1 className="sr-only">{nb.name}</h1>
         <NotebookHeader
@@ -424,6 +411,8 @@ export default function NotebookPage() {
           isPublic={nb.is_public}
           status={kernelStatus}
           runningAll={runningAll}
+          activePanel={activePanel}
+          onTogglePanel={togglePanel}
           onRename={(name) => updateNotebook.mutate({ name })}
           onTogglePublic={(v) => updateNotebook.mutate({ is_public: v })}
           onRunAll={runAll}
@@ -437,7 +426,9 @@ export default function NotebookPage() {
           onDirtyChange={setNameDirty}
         />
 
-        <div className="flex flex-col gap-3 p-4">
+        {/* Centered, wide cell column — code-first, so generous width with a
+            cap that keeps lines readable on ultra-wide monitors. */}
+        <div className="mx-auto flex w-full max-w-7xl flex-col gap-3 px-6 py-6">
           {sortedCells.map((cell, index) => (
             <div key={cell.id} id={`cell-${cell.id}`} style={{ scrollMarginTop: "6rem" }}>
               <ManagedCell
@@ -465,7 +456,7 @@ export default function NotebookPage() {
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => handleAddCell("code")} aria-label="Add cell">
               <Plus className="h-4 w-4" />
-              Add cell
+              Code
             </Button>
             <Button
               variant="outline"
@@ -474,15 +465,40 @@ export default function NotebookPage() {
               aria-label="Add markdown cell"
             >
               <Plus className="h-4 w-4" />
-              Add markdown
+              Markdown
             </Button>
             <Button variant="outline" size="sm" onClick={() => handleAddCell("sql")} aria-label="Add SQL cell">
               <Plus className="h-4 w-4" />
-              Add SQL
+              SQL
             </Button>
           </div>
         </div>
       </section>
+
+      {/* On-demand tools panel (right). */}
+      {activePanel && (
+        <aside className="flex w-72 shrink-0 flex-col overflow-y-auto border-l bg-muted/10">
+          <div className="sticky top-0 flex items-center justify-between border-b bg-background/95 px-3 py-2 backdrop-blur">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              {panelTitle}
+            </span>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6"
+              aria-label="Close panel"
+              onClick={() => setActivePanel(null)}
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+          {activePanel === "toc" ? (
+            <TableOfContentsPanel cells={sortedCells} onJump={jumpToCell} />
+          ) : (
+            <DataSourcesPanel ws={ws!} />
+          )}
+        </aside>
+      )}
     </div>
   );
 }

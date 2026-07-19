@@ -208,16 +208,23 @@ afterEach(() => {
 describe("NotebookPage", () => {
   // ── IDE shell ─────────────────────────────────────────────────────────────
 
-  it("renders the sidebar rail and a kernel status badge", () => {
+  it("renders the header tool toggles and a kernel status badge", () => {
     renderAt();
-    expect(
-      screen.getByRole("button", { name: /table of contents/i }),
-    ).toBeInTheDocument();
+    // Outline + Data sources open the on-demand right-hand tools panel.
+    expect(screen.getByRole("button", { name: /outline/i })).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /data sources/i }),
     ).toBeInTheDocument();
     // KernelStatusBadge shows "Ready" for the mocked "idle" status.
     expect(screen.getByText(/ready/i)).toBeInTheDocument();
+  });
+
+  it("opens the outline panel from the header toggle", () => {
+    // This suite uses fake timers; userEvent hangs under them, so fireEvent.
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /outline/i }));
+    // Panel header shows the title.
+    expect(screen.getByText("Outline")).toBeInTheDocument();
   });
 
   // ── Header ────────────────────────────────────────────────────────────────
