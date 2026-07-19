@@ -119,7 +119,9 @@ async fn assign_materializes_a_delegated_connection() {
         .expect("materialized row");
     assert!(mat.delegated);
     assert_eq!(mat.host, engine.coordinator_host());
-    assert_eq!(mat.port, engine.coordinator_port());
+    // A delegated Trino connection materializes over the coordinator's separate
+    // https listener (8443), not the plain coordinator port (8080).
+    assert_eq!(mat.port, 8443);
 
     // Idempotent: re-assigning does not create a second row.
     svc.assign(engine_id, ws, admin).await.unwrap();
@@ -143,15 +145,16 @@ async fn assign_materializes_a_delegated_connection() {
 }
 
 #[tokio::test]
-async fn assign_rejects_non_jwt_engine() {
+async fn assign_rejects_non_delegation_engine() {
     let Some((catalog, engine_mgmt, svc)) = harness().await else {
         eprintln!("DATABASE_URL unset — skipping");
         return;
     };
-    // No `auth.jwt` block → not assignable.
-    let non_jwt_spec = serde_json::json!({ "trinoConfig": {} });
+    // Trino's delegation mode defaults to `impersonate`, so an engine is only
+    // non-assignable when delegation is explicitly `none` (and it has no jwt).
+    let non_deleg_spec = serde_json::json!({ "trinoConfig": { "delegationMode": "none" } });
     let (engine_id, ws, admin) =
-        seed_engine_and_ws(&catalog, &engine_mgmt, "reject", non_jwt_spec).await;
+        seed_engine_and_ws(&catalog, &engine_mgmt, "reject", non_deleg_spec).await;
 
     assert!(matches!(
         svc.assign(engine_id, ws, admin).await,
