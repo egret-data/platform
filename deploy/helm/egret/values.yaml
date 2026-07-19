@@ -8,6 +8,13 @@ ingress:
   enabled: false
   host: egret.localtest.me
   className: nginx
+  tls:
+    enabled: false
+    # Bring-your-own existing k8s TLS Secret (e.g. cert-manager). Wins when set.
+    secretName: ""
+    # OR inline PEM cert+key — the chart creates `egret-ingress-tls` from them.
+    cert: ""
+    key: ""
 engineNamespace: egret-engines
 # The engine namespace is normally pre-created by `just k8s-up`. Set true only on
 # a bare cluster where it doesn't exist yet (else Helm can't adopt it).

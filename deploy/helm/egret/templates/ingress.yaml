@@ -6,6 +6,12 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
+{{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host }}
+      secretName: {{ .Values.ingress.tls.secretName | default "egret-ingress-tls" }}
+{{- end }}
   rules:
     - host: {{ .Values.ingress.host }}
       http:
