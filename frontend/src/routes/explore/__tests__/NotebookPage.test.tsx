@@ -389,6 +389,32 @@ describe("NotebookPage", () => {
     expect(code.endsWith("SELECT 1")).toBe(true);
   });
 
+  it("renders a binding chip for a SQL cell with a variable and outputs", () => {
+    const sqlCell = {
+      id: "cell-sql",
+      cell_type: "sql" as const,
+      source: "SELECT 1",
+      cell_order: 0,
+      execution_count: null,
+      // Seeds ManagedCell's outputs state on load → chip renders without a run.
+      last_output: [{ type: "stream", name: "stdout", text: "ok" }],
+      last_execution_time_ms: null,
+      sql_target: "e1",
+      sql_into: "df",
+    };
+    notebookMock.mockReturnValue({
+      data: { ...mockNotebook, cells: [sqlCell] },
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    renderAt();
+    // sql_into is wrapped in a <code>, so assert on the chip's full text content
+    // (which spans the element boundary) rather than a single text node.
+    const chip = screen.getByText(/Daft DataFrame/);
+    expect(chip).toHaveTextContent(/df · Daft DataFrame/);
+  });
+
   it("does not render a SQL target control", () => {
     renderAt();
     expect(screen.queryByLabelText("SQL target")).not.toBeInTheDocument();

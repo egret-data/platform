@@ -275,7 +275,14 @@ export default function NotebookPage() {
     addCell.mutate({
       cell_type: cellType,
       cell_order: maxOrder + 1,
-      ...(cellType === "sql" ? { sql_into: defaultSqlInto(cells) } : {}),
+      // Seed a collision-free variable and default to the first enabled engine so
+      // Run doesn't emit `%%egret_sql --target  …` (an IPython parse-time error).
+      ...(cellType === "sql"
+        ? {
+            sql_into: defaultSqlInto(cells),
+            sql_target: engines.find((e) => e.enabled)?.id,
+          }
+        : {}),
     });
   };
 

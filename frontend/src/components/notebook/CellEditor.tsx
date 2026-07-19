@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import type { Monaco } from "@monaco-editor/react";
 import type { editor as MonacoEditor } from "monaco-editor";
@@ -60,6 +60,15 @@ export function CellEditor({
   onChangeSqlInto,
 }: CellEditorProps) {
   const [mdFocused, setMdFocused] = useState(false);
+  // Local buffer for the SQL result-variable input: cell.sql_into is react-query
+  // server state that only settles after a mutation refetch, so binding the input
+  // directly to it reverts every keystroke. Edit locally, commit on blur.
+  const [sqlIntoLocal, setSqlIntoLocal] = useState(cell.sql_into ?? "");
+  // Re-seed only when the cell identity changes (not on every server refetch,
+  // which would clobber an in-progress edit).
+  useEffect(() => {
+    setSqlIntoLocal(cell.sql_into ?? "");
+  }, [cell.id]);
   // Latest onRun for the Monaco Shift+Enter command (captured once on mount).
   const runRef = useRef<(() => void) | undefined>(onRun);
   runRef.current = onRun;
@@ -180,8 +189,11 @@ export function CellEditor({
             <span className="ml-2 text-muted-foreground">→</span>
             <input
               aria-label="Result variable"
-              value={cell.sql_into ?? ""}
-              onChange={(e) => onChangeSqlInto?.(e.target.value)}
+              value={sqlIntoLocal}
+              onChange={(e) => setSqlIntoLocal(e.target.value)}
+              onBlur={() => {
+                if (sqlIntoLocal !== (cell.sql_into ?? "")) onChangeSqlInto?.(sqlIntoLocal);
+              }}
               className="h-7 w-32 rounded border bg-transparent px-2 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-ring"
               placeholder="df"
             />
