@@ -30,6 +30,9 @@ class OutputErrorBoundary extends React.Component<
   static getDerivedStateFromError(error: Error) {
     return { error };
   }
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error("CellOutputRenderer render error:", error, info.componentStack);
+  }
   render() {
     if (this.state.error) {
       return (

@@ -19,9 +19,7 @@ function fakeMonaco() {
 describe("registerStaticCompletions", () => {
   it("registers python and sql once (idempotent)", () => {
     const m = fakeMonaco();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     registerStaticCompletions(m as any);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     registerStaticCompletions(m as any);
     expect(m.registered.sort()).toEqual(["python", "sql"]);
   });
