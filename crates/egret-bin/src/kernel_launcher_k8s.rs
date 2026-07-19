@@ -1,12 +1,8 @@
 //! `KubernetesLauncher` — one kernel Pod per (user×workspace), addressed by Pod IP.
 //! Implements `egret_kernel::KernelLauncher`. Reference: sparklabx k8s_per_user_gateway.
 //!
-//! Task A1 lands this launcher as a standalone, unit-tested module; Task A2
-//! wires `KubernetesLauncher`/`K8sKernelConfig` into `main.rs`'s launcher
-//! selection switch. Until that lands, nothing in the bin target references
-//! these public items, so silence the resulting dead-code lint here rather
-//! than on every item.
-#![allow(dead_code)]
+//! Wired into `main.rs`'s launcher-selection switch (Task A2): constructed
+//! when `kernel.launcher = "kubernetes"`.
 
 use std::collections::BTreeMap;
 use std::time::Duration;

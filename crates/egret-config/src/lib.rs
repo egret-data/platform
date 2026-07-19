@@ -94,6 +94,32 @@ pub struct StorageSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KernelConfig {
+    /// Which `KernelLauncher` impl to use: `"subprocess"` (default, local dev)
+    /// or `"kubernetes"` (one pod per user×workspace; requires an in-cluster
+    /// or kubeconfig-reachable API server).
+    pub launcher: String,
+    /// Namespace the `KubernetesLauncher` creates kernel Pods in.
+    pub namespace: String,
+    /// Kernel container image.
+    pub image: String,
+    pub image_pull_policy: String,
+    pub cpu_request: String,
+    pub mem_request: String,
+    pub cpu_limit: String,
+    pub mem_limit: String,
+    /// Name of an existing `kubernetes.io/dockerconfigjson` Secret for pulling
+    /// `image`, if the registry requires auth. `None` omits imagePullSecrets.
+    pub pull_secret: Option<String>,
+    /// Externally/cluster-reachable base URL kernels use to call back into
+    /// egret (`EGRET_API_URL`). Overrides `catalog.public_url`-derived
+    /// `api_url` for the kernel-env path only — set this when the server's
+    /// own public URL isn't reachable from inside the cluster (e.g. behind an
+    /// ingress the kernel pods can't resolve), such as a Service DNS name.
+    pub callback_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditConfig {
     /// When false, the PDP is not wrapped and no events are emitted.
     pub enabled: bool,
@@ -123,6 +149,7 @@ pub struct Config {
     pub secrets: SecretsConfig,
     pub engine: EngineConfig,
     pub audit: AuditConfig,
+    pub kernel: KernelConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +274,18 @@ impl Default for Config {
                 channel_capacity: 8192,
                 batch_size: 256,
                 flush_interval_ms: 1000,
+            },
+            kernel: KernelConfig {
+                launcher: "subprocess".into(),
+                namespace: "egret-notebooks".into(),
+                image: "egret-kernel:dev".into(),
+                image_pull_policy: "IfNotPresent".into(),
+                cpu_request: "250m".into(),
+                mem_request: "512Mi".into(),
+                cpu_limit: "1".into(),
+                mem_limit: "2Gi".into(),
+                pull_secret: None,
+                callback_url: None,
             },
         }
     }
@@ -485,5 +524,29 @@ mod tests {
         let mut cfg = Config::default();
         cfg.engine.preview_rows = 200_000; // > max_rows
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn kernel_defaults_to_subprocess_launcher() {
+        figment::Jail::expect_with(|_j| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.kernel.launcher, "subprocess");
+            assert_eq!(cfg.kernel.namespace, "egret-notebooks");
+            assert!(cfg.kernel.pull_secret.is_none());
+            assert!(cfg.kernel.callback_url.is_none());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn kernel_launcher_selectable_via_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_KERNEL__LAUNCHER", "kubernetes");
+            jail.set_env("EGRET_KERNEL__NAMESPACE", "custom-ns");
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.kernel.launcher, "kubernetes");
+            assert_eq!(cfg.kernel.namespace, "custom-ns");
+            Ok(())
+        });
     }
 }
