@@ -27,6 +27,7 @@ import {
   useUpdateNotebook,
 } from "@/api/notebooks";
 import { CellEditor } from "@/components/notebook/CellEditor";
+import { setNotebookCompletionContext } from "@/components/notebook/monaco/notebookCompletion";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import type { KernelConnection } from "@/lib/kernel/KernelConnection";
 import type { CellOutput } from "@/lib/kernel/protocol";
@@ -291,6 +292,17 @@ export default function NotebookPage() {
   useEffect(() => {
     kernel.connect().catch(() => {});
     // kernel is stable for the page's lifetime (keyed on ws/id remount).
+  }, [kernel]);
+
+  // Notebook completion context (S2-2/S2-3): Monaco's python/sql completion
+  // providers are registered ONCE globally, so they read this module-level
+  // context to reach this page's kernel (python) and the schema browser's
+  // accumulated object names (sql). Cleared on unmount so a stale kernel
+  // reference can't leak into a different notebook / SQL Lab.
+  const sqlWordsRef = useRef<string[]>([]);
+  useEffect(() => {
+    setNotebookCompletionContext({ kernel, sqlWords: () => sqlWordsRef.current });
+    return () => setNotebookCompletionContext(null);
   }, [kernel]);
 
   const kernelStatus = useKernelConnectionStatus(kernel);
@@ -783,6 +795,9 @@ export default function NotebookPage() {
               onNewSqlCell={(sql) =>
                 insertCell("sql", sortedCells.length, { focus: true, initialSource: sql })
               }
+              onObjectsLoaded={(names) => {
+                sqlWordsRef.current = Array.from(new Set([...sqlWordsRef.current, ...names]));
+              }}
             />
           )}
         </aside>

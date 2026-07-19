@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, Columns3, Database, Loader2, Table } from "lucide-react";
 
 import {
@@ -16,6 +16,12 @@ export interface SchemaBrowserPanelProps {
   onInsertText: (text: string) => void;
   /** Create a new SQL cell seeded with this query (table click). */
   onNewSqlCell: (sql: string) => void;
+  /** Fired as each level of the tree loads (catalogs/schemas/tables/columns),
+   *  reporting the identifiers now known so SQL autocomplete (S2-2/S2-3) can
+   *  suggest them. Called with the flat set of names at that level — the
+   *  caller is expected to accumulate (this fires many times as the user
+   *  browses). */
+  onObjectsLoaded?: (names: string[]) => void;
 }
 
 /** A collapsible tree row shared by every level of the browser. Each level
@@ -108,6 +114,7 @@ function ColumnList({
   table,
   depth,
   onInsertText,
+  onObjectsLoaded,
 }: {
   ws: string;
   db: string;
@@ -116,8 +123,14 @@ function ColumnList({
   table: string;
   depth: number;
   onInsertText: (text: string) => void;
+  onObjectsLoaded?: (names: string[]) => void;
 }) {
   const columns = useColumns(ws, db, catalog, schema, table, true);
+  useEffect(() => {
+    if (columns.data && columns.data.length > 0) {
+      onObjectsLoaded?.(columns.data.map((c) => c.name));
+    }
+  }, [columns.data, onObjectsLoaded]);
   if (columns.isLoading) return <LoadingRow depth={depth} />;
   if (!columns.data || columns.data.length === 0)
     return <EmptyRow depth={depth} label="No columns." />;
@@ -153,6 +166,7 @@ function TableNode({
   depth,
   onInsertText,
   onNewSqlCell,
+  onObjectsLoaded,
 }: {
   ws: string;
   db: string;
@@ -162,6 +176,7 @@ function TableNode({
   depth: number;
   onInsertText: (text: string) => void;
   onNewSqlCell: (sql: string) => void;
+  onObjectsLoaded?: (names: string[]) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const qualified = catalog ? `${catalog}.${schema}.${table}` : `${schema}.${table}`;
@@ -185,6 +200,7 @@ function TableNode({
           table={table}
           depth={depth + 1}
           onInsertText={onInsertText}
+          onObjectsLoaded={onObjectsLoaded}
         />
       )}
     </div>
@@ -199,6 +215,7 @@ function TableList({
   depth,
   onInsertText,
   onNewSqlCell,
+  onObjectsLoaded,
 }: {
   ws: string;
   db: string;
@@ -207,8 +224,17 @@ function TableList({
   depth: number;
   onInsertText: (text: string) => void;
   onNewSqlCell: (sql: string) => void;
+  onObjectsLoaded?: (names: string[]) => void;
 }) {
   const tables = useTables(ws, db, catalog, schema);
+  useEffect(() => {
+    if (tables.data && tables.data.length > 0) {
+      const qualified = tables.data.map((t) =>
+        catalog ? `${catalog}.${schema}.${t}` : `${schema}.${t}`,
+      );
+      onObjectsLoaded?.([...tables.data, ...qualified]);
+    }
+  }, [tables.data, catalog, schema, onObjectsLoaded]);
   if (tables.isLoading) return <LoadingRow depth={depth} />;
   if (!tables.data || tables.data.length === 0)
     return <EmptyRow depth={depth} label="No tables." />;
@@ -225,6 +251,7 @@ function TableList({
           depth={depth}
           onInsertText={onInsertText}
           onNewSqlCell={onNewSqlCell}
+          onObjectsLoaded={onObjectsLoaded}
         />
       ))}
     </>
@@ -240,6 +267,7 @@ function SchemaNode({
   depth,
   onInsertText,
   onNewSqlCell,
+  onObjectsLoaded,
 }: {
   ws: string;
   db: string;
@@ -248,6 +276,7 @@ function SchemaNode({
   depth: number;
   onInsertText: (text: string) => void;
   onNewSqlCell: (sql: string) => void;
+  onObjectsLoaded?: (names: string[]) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   return (
@@ -268,6 +297,7 @@ function SchemaNode({
           depth={depth + 1}
           onInsertText={onInsertText}
           onNewSqlCell={onNewSqlCell}
+          onObjectsLoaded={onObjectsLoaded}
         />
       )}
     </div>
@@ -281,6 +311,7 @@ function SchemaList({
   depth,
   onInsertText,
   onNewSqlCell,
+  onObjectsLoaded,
 }: {
   ws: string;
   db: string;
@@ -288,8 +319,12 @@ function SchemaList({
   depth: number;
   onInsertText: (text: string) => void;
   onNewSqlCell: (sql: string) => void;
+  onObjectsLoaded?: (names: string[]) => void;
 }) {
   const schemas = useSchemas(ws, db, catalog);
+  useEffect(() => {
+    if (schemas.data && schemas.data.length > 0) onObjectsLoaded?.(schemas.data);
+  }, [schemas.data, onObjectsLoaded]);
   if (schemas.isLoading) return <LoadingRow depth={depth} />;
   if (!schemas.data || schemas.data.length === 0)
     return <EmptyRow depth={depth} label="No schemas." />;
@@ -305,6 +340,7 @@ function SchemaList({
           depth={depth}
           onInsertText={onInsertText}
           onNewSqlCell={onNewSqlCell}
+          onObjectsLoaded={onObjectsLoaded}
         />
       ))}
     </>
@@ -319,6 +355,7 @@ function CatalogNode({
   depth,
   onInsertText,
   onNewSqlCell,
+  onObjectsLoaded,
 }: {
   ws: string;
   db: string;
@@ -326,6 +363,7 @@ function CatalogNode({
   depth: number;
   onInsertText: (text: string) => void;
   onNewSqlCell: (sql: string) => void;
+  onObjectsLoaded?: (names: string[]) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   return (
@@ -345,6 +383,7 @@ function CatalogNode({
           depth={depth + 1}
           onInsertText={onInsertText}
           onNewSqlCell={onNewSqlCell}
+          onObjectsLoaded={onObjectsLoaded}
         />
       )}
     </div>
@@ -357,14 +396,19 @@ function CatalogList({
   depth,
   onInsertText,
   onNewSqlCell,
+  onObjectsLoaded,
 }: {
   ws: string;
   db: string;
   depth: number;
   onInsertText: (text: string) => void;
   onNewSqlCell: (sql: string) => void;
+  onObjectsLoaded?: (names: string[]) => void;
 }) {
   const catalogs = useCatalogs(ws, db);
+  useEffect(() => {
+    if (catalogs.data && catalogs.data.length > 0) onObjectsLoaded?.(catalogs.data);
+  }, [catalogs.data, onObjectsLoaded]);
   if (catalogs.isLoading) return <LoadingRow depth={depth} />;
   if (!catalogs.data || catalogs.data.length === 0)
     return <EmptyRow depth={depth} label="No catalogs." />;
@@ -379,6 +423,7 @@ function CatalogList({
           depth={depth}
           onInsertText={onInsertText}
           onNewSqlCell={onNewSqlCell}
+          onObjectsLoaded={onObjectsLoaded}
         />
       ))}
     </>
@@ -392,12 +437,14 @@ function DatabaseNode({
   depth,
   onInsertText,
   onNewSqlCell,
+  onObjectsLoaded,
 }: {
   ws: string;
   db: DatabaseListItem;
   depth: number;
   onInsertText: (text: string) => void;
   onNewSqlCell: (sql: string) => void;
+  onObjectsLoaded?: (names: string[]) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const isTrino = db.engine === "trino";
@@ -424,6 +471,7 @@ function DatabaseNode({
             depth={depth + 1}
             onInsertText={onInsertText}
             onNewSqlCell={onNewSqlCell}
+            onObjectsLoaded={onObjectsLoaded}
           />
         ) : (
           <SchemaList
@@ -433,13 +481,19 @@ function DatabaseNode({
             depth={depth + 1}
             onInsertText={onInsertText}
             onNewSqlCell={onNewSqlCell}
+            onObjectsLoaded={onObjectsLoaded}
           />
         ))}
     </div>
   );
 }
 
-export function SchemaBrowserPanel({ ws, onInsertText, onNewSqlCell }: SchemaBrowserPanelProps) {
+export function SchemaBrowserPanel({
+  ws,
+  onInsertText,
+  onNewSqlCell,
+  onObjectsLoaded,
+}: SchemaBrowserPanelProps) {
   const databases = useDatabases(ws);
 
   if (databases.isLoading) {
@@ -467,6 +521,7 @@ export function SchemaBrowserPanel({ ws, onInsertText, onNewSqlCell }: SchemaBro
           depth={0}
           onInsertText={onInsertText}
           onNewSqlCell={onNewSqlCell}
+          onObjectsLoaded={onObjectsLoaded}
         />
       ))}
     </div>

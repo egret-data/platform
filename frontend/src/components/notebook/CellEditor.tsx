@@ -9,7 +9,7 @@ import { ArrowDown, ArrowUp, ChevronDown, Loader2, Play, Trash2 } from "lucide-r
 import type { Cell, CellType } from "@/api/notebooks";
 import { Button } from "@/components/ui/button";
 import { CellOutputRenderer } from "@/components/notebook/CellOutputRenderer";
-import { registerStaticCompletions } from "@/components/notebook/monaco/registerStatic";
+import { registerNotebookCompletions } from "@/components/notebook/monaco/notebookCompletion";
 import type { CellOutput } from "@/lib/kernel/protocol";
 import {
   Select,
@@ -133,7 +133,7 @@ export function CellEditor({
   const monacoLanguage = cell.cell_type === "sql" ? "sql" : "python";
 
   const handleMount = (editor: MonacoEditor.IStandaloneCodeEditor, monaco: Monaco) => {
-    registerStaticCompletions(monaco);
+    registerNotebookCompletions(monaco);
     // Let the page drive focus into this cell (keyboard nav / j-k / Enter).
     registerFocus?.(() => editor.focus());
     registerEdit?.((text: string) => {
