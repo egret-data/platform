@@ -19,11 +19,21 @@ COPY egret_kernel_helpers ./egret_kernel_helpers
 RUN pip install --no-cache-dir .
 
 # Auto-load helpers into every kernel (IPython startup runs these at kernel boot).
-RUN mkdir -p /root/.ipython/profile_default/startup
-COPY startup/00-egret.py /root/.ipython/profile_default/startup/00-egret.py
+# Run as a non-root user (uid 1000) so the pod satisfies the hardened
+# securityContext (runAsNonRoot / runAsUser=1000) + the `restricted` PodSecurity
+# namespace. jupyter writes its runtime under $HOME, so uid 1000 needs a real,
+# owned home dir — a root-only image (HOME=/root, files in /root/.ipython) fails
+# with "cannot create /.local/share/jupyter/runtime" when run as 1000.
+RUN useradd --uid 1000 --create-home --home-dir /home/egret egret \
+ && mkdir -p /home/egret/.ipython/profile_default/startup
+COPY startup/00-egret.py /home/egret/.ipython/profile_default/startup/00-egret.py
 
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh \
+ && chown -R 1000:1000 /home/egret /opt/egret-kernel
+
+ENV HOME=/home/egret
+USER 1000
 
 EXPOSE 8888
 ENTRYPOINT ["/entrypoint.sh"]

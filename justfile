@@ -43,22 +43,24 @@ k8s-up:
 k8s-down:
     kind delete cluster --name egret
 
-# Build both egret images (backend + frontend).
+# Build all egret images (backend + frontend + kernel).
 images-build:
     docker build -f deploy/docker/backend.Dockerfile -t egret-backend:dev .
     docker build -f frontend/Dockerfile -t egret-frontend:dev frontend
+    docker build -t egret-kernel:dev kernel-image
 
 # Build images, load them into the kind `egret` cluster, and (re)install the chart.
 deploy-kind: images-build
-    kind load docker-image egret-backend:dev egret-frontend:dev --name egret
+    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m
     @echo "egret SPA: http://localhost:30080  (login admin@egret.local / Admin12345!)"
 
 # Like deploy-kind but OIDC-on + ingress (Milestone B) — required for the data-plane e2e.
+# Also enables the k8s per-user kernel launcher: this is the canonical notebook-execution path.
 deploy-kind-oidc: images-build
-    kind load docker-image egret-backend:dev egret-frontend:dev --name egret
+    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
-      --set oidc.enabled=true --set ingress.enabled=true
+      --set oidc.enabled=true --set ingress.enabled=true --set kernel.launcher=kubernetes
     @echo "egret SPA: http://egret.localtest.me  (login admin@egret.local / Admin12345!)"
 
 # Opt-in data-plane e2e against the in-cluster kind deploy (egret.localtest.me).
@@ -71,9 +73,9 @@ e2e-kind: deploy-kind-oidc
 # Like deploy-kind-oidc but ALSO Ranger-on — provisioned Trino engines bind Ranger
 # (egret embeds the Ranger admin at /service). For the governance enforcement e2e.
 deploy-kind-governance: images-build
-    kind load docker-image egret-backend:dev egret-frontend:dev --name egret
+    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
-      --set oidc.enabled=true --set ingress.enabled=true --set ranger.enabled=true
+      --set oidc.enabled=true --set ingress.enabled=true --set ranger.enabled=true --set kernel.launcher=kubernetes
     @echo "egret (ranger-on): http://egret.localtest.me"
 
 # Opt-in governance enforcement e2e (mask + row-filter on a live Trino query).

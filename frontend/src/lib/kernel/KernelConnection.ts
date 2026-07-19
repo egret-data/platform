@@ -3,7 +3,7 @@ import {
   kernelKernelInterrupt,
   kernelKernelRestart,
 } from "@/api/generated/kernel/kernel";
-import { newMsg, iopubToOutput, type CellOutput } from "./protocol";
+import { newMsg, iopubToOutput, randomId, type CellOutput } from "./protocol";
 
 export type KernelStatus =
   | "idle"
@@ -26,7 +26,7 @@ export interface ExecuteHandlers {
 /** Hand-rolled Jupyter client over the D1c channels WS. One per open notebook. */
 export class KernelConnection {
   private ws: WebSocket | null = null;
-  private session = crypto.randomUUID();
+  private session = randomId();
   private pending = new Map<string, ExecuteHandlers>(); // execute_request msg_id → handlers
   private ready: Promise<void> | null = null;
   private _status: KernelStatus = "disconnected";

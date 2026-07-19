@@ -2,6 +2,7 @@
 
 mod backfill;
 mod cli;
+mod kernel_launcher_k8s;
 
 use anyhow::Context;
 use chrono::Duration;
@@ -1244,7 +1245,26 @@ async fn serve(config: Config) -> anyhow::Result<()> {
 
     let kernel_registry = egret_kernel::KernelRegistry::new(db.clone());
     let kernel_launcher: std::sync::Arc<dyn egret_kernel::KernelLauncher> =
-        std::sync::Arc::new(egret_kernel::SubprocessLauncher::default());
+        if config.kernel.launcher == "kubernetes" {
+            let client = kube::Client::try_default()
+                .await
+                .expect("kernel.launcher=kubernetes but no in-cluster kube config");
+            let kcfg = crate::kernel_launcher_k8s::K8sKernelConfig {
+                namespace: config.kernel.namespace.clone(),
+                image: config.kernel.image.clone(),
+                image_pull_policy: config.kernel.image_pull_policy.clone(),
+                cpu_request: config.kernel.cpu_request.clone(),
+                mem_request: config.kernel.mem_request.clone(),
+                cpu_limit: config.kernel.cpu_limit.clone(),
+                mem_limit: config.kernel.mem_limit.clone(),
+                pull_secret: config.kernel.pull_secret.clone(),
+            };
+            std::sync::Arc::new(crate::kernel_launcher_k8s::KubernetesLauncher::new(
+                client, kcfg,
+            ))
+        } else {
+            std::sync::Arc::new(egret_kernel::SubprocessLauncher::default())
+        };
     let kernel_idle = std::time::Duration::from_secs(30 * 60); // 30 min idle timeout
 
     let kernel_manager = std::sync::Arc::new(egret_kernel::KernelManager::new(
@@ -1280,6 +1300,16 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .public_url
         .clone()
         .unwrap_or_else(|| format!("http://127.0.0.1:{}", config.server.port));
+    // kernel_api_url: the callback base handed to kernel processes/pods as
+    // EGRET_API_URL (via `manifest_to_env`). Distinct from `api_url` above
+    // because a `kubernetes` launcher's pods often can't reach the server's
+    // externally-facing `public_url` (e.g. an ingress host) and need a
+    // cluster-internal address (e.g. a Service DNS name) instead.
+    let kernel_api_url = config
+        .kernel
+        .callback_url
+        .clone()
+        .unwrap_or_else(|| api_url.clone());
 
     let kernel = Some(egret_kernel::KernelState {
         manager: kernel_manager,
@@ -1290,7 +1320,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
         pdp: pdp.clone(),
-        api_url,
+        api_url: kernel_api_url,
         notebook_kernels: egret_kernel::NotebookKernelStore::new(db.clone()),
         proxy: std::sync::Arc::new(egret_kernel::BackendWsProxy),
         engine_conn: std::sync::Arc::new(EngineConnResolverImpl {
