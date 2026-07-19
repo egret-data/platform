@@ -29,7 +29,7 @@ import {
 import { CellEditor } from "@/components/notebook/CellEditor";
 import { setNotebookCompletionContext } from "@/components/notebook/monaco/notebookCompletion";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import type { KernelConnection } from "@/lib/kernel/KernelConnection";
+import type { KernelConnection, VarInfo } from "@/lib/kernel/KernelConnection";
 import type { CellOutput } from "@/lib/kernel/protocol";
 import { useKernel } from "@/lib/kernel/useKernel";
 import { useKernelConnectionStatus } from "@/lib/kernel/useKernelConnectionStatus";
@@ -37,6 +37,7 @@ import { NotebookHeader, type NotebookPanel } from "@/components/notebook/Notebo
 import { TableOfContentsPanel } from "@/components/notebook/panels/TableOfContentsPanel";
 import { DataSourcesPanel } from "@/components/notebook/panels/DataSourcesPanel";
 import { SchemaBrowserPanel } from "@/components/notebook/panels/SchemaBrowserPanel";
+import { VariablesPanel } from "@/components/notebook/panels/VariablesPanel";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -319,6 +320,28 @@ export default function NotebookPage() {
   const togglePanel = (p: Exclude<NotebookPanel, null>) =>
     setActivePanel((cur) => (cur === p ? null : p));
 
+  // Variables panel (S3-2): introspect the kernel namespace on demand. Kept
+  // page-level (not inside VariablesPanel) so the auto-refresh effect below
+  // can react to `activePanel`/`kernelStatus` without the panel needing to
+  // know about either.
+  const [vars, setVars] = useState<VarInfo[]>([]);
+  const [varsLoading, setVarsLoading] = useState(false);
+  const refreshVars = useCallback(async () => {
+    setVarsLoading(true);
+    try {
+      setVars(await kernel.inspectVariables());
+    } finally {
+      setVarsLoading(false);
+    }
+  }, [kernel]);
+  // Refresh when the panel opens, and again on each busy→idle transition
+  // (i.e. after a run) while it stays open — cheap silent introspection call.
+  useEffect(() => {
+    if (activePanel === "vars" && (kernelStatus === "idle" || kernelStatus === "connected")) {
+      void refreshVars();
+    }
+  }, [activePanel, kernelStatus, refreshVars]);
+
   const jumpToCell = (cellId: string) => {
     document
       .getElementById(`cell-${cellId}`)
@@ -464,6 +487,16 @@ export default function NotebookPage() {
         },
       },
     );
+  };
+
+  // Variables panel click-to-display: append + focus a new code cell seeded
+  // with `display(name)` (same insertCell mechanism the schema browser uses
+  // to seed a SQL cell — Sprint 1 S1-5).
+  const displayVar = (name: string) => {
+    insertCell("code", (notebook.data?.cells ?? []).length, {
+      focus: true,
+      initialSource: `display(${name})`,
+    });
   };
 
   const handleAddCell = (cellType: CellType = "code") => {
@@ -664,7 +697,13 @@ export default function NotebookPage() {
   }
 
   const panelTitle =
-    activePanel === "toc" ? "Outline" : activePanel === "data" ? "Data sources" : "Schema";
+    activePanel === "toc"
+      ? "Outline"
+      : activePanel === "data"
+        ? "Data sources"
+        : activePanel === "vars"
+          ? "Variables"
+          : "Schema";
 
   return (
     <div className="flex h-full min-h-0">
@@ -793,6 +832,13 @@ export default function NotebookPage() {
             <TableOfContentsPanel cells={sortedCells} onJump={jumpToCell} />
           ) : activePanel === "data" ? (
             <DataSourcesPanel ws={ws!} />
+          ) : activePanel === "vars" ? (
+            <VariablesPanel
+              vars={vars}
+              loading={varsLoading}
+              onRefresh={refreshVars}
+              onDisplay={displayVar}
+            />
           ) : (
             <SchemaBrowserPanel
               ws={ws!}
