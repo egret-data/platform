@@ -19,10 +19,16 @@ import { SchemaBrowserPanel } from "../SchemaBrowserPanel";
 function renderPanel() {
   const onInsertText = vi.fn();
   const onNewSqlCell = vi.fn();
+  const onObjectsLoaded = vi.fn();
   render(
-    <SchemaBrowserPanel ws="eng" onInsertText={onInsertText} onNewSqlCell={onNewSqlCell} />,
+    <SchemaBrowserPanel
+      ws="eng"
+      onInsertText={onInsertText}
+      onNewSqlCell={onNewSqlCell}
+      onObjectsLoaded={onObjectsLoaded}
+    />,
   );
-  return { onInsertText, onNewSqlCell };
+  return { onInsertText, onNewSqlCell, onObjectsLoaded };
 }
 
 describe("SchemaBrowserPanel", () => {
@@ -81,6 +87,30 @@ describe("SchemaBrowserPanel", () => {
     await user.click(columnRow);
 
     expect(onInsertText).toHaveBeenCalledWith("id");
+  });
+
+  it("reports catalog/schema/table/column names via onObjectsLoaded as the tree expands", async () => {
+    const user = userEvent.setup();
+    const { onObjectsLoaded } = renderPanel();
+
+    await user.click(screen.getByText("Warehouse"));
+    // Catalog level loaded.
+    expect(onObjectsLoaded).toHaveBeenCalledWith(["main"]);
+
+    await user.click(await screen.findByText("main"));
+    // Schema level loaded.
+    expect(onObjectsLoaded).toHaveBeenCalledWith(["public"]);
+
+    await user.click(await screen.findByText("public"));
+    // Table level loaded: bare name + fully-qualified.
+    expect(onObjectsLoaded).toHaveBeenCalledWith(["orders", "main.public.orders"]);
+
+    const tableRow = await screen.findByTitle(/main\.public\.orders/i);
+    const chevron = tableRow.querySelector('[role="button"]')!;
+    await user.click(chevron);
+    // Column level loaded.
+    expect(await screen.findByTitle("Insert id")).toBeInTheDocument();
+    expect(onObjectsLoaded).toHaveBeenCalledWith(["id"]);
   });
 
   it("shows an empty hint when there are no databases granted", () => {
