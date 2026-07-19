@@ -29,15 +29,38 @@ export interface CompleteResult {
   cursorEnd: number;
 }
 
+export interface VarInfo { name: string; type: string; columns: string[] | null }
+
+/** atob → UTF-8 decode. The kernel introspection payload is base64-encoded so
+ *  the `text/plain` repr stays quote-clean regardless of the JSON content. */
+function decodeUtf8Base64(b64: string): string {
+  const bin = atob(b64);
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
 /** Hand-rolled Jupyter client over the D1c channels WS. One per open notebook. */
 export class KernelConnection {
   private ws: WebSocket | null = null;
   private session = randomId();
   private pending = new Map<string, ExecuteHandlers>(); // execute_request msg_id → handlers
   private pendingCompletes = new Map<string, (r: CompleteResult) => void>(); // complete_request msg_id → resolver
+  private pendingInspects = new Map<string, (u: Record<string, any> | undefined) => void>(); // inspect execute_request msg_id → resolver
   private ready: Promise<void> | null = null;
   private _status: KernelStatus = "disconnected";
   private statusListeners = new Set<(s: KernelStatus) => void>();
+
+  // The introspection is a SINGLE Python expression (evaluated via user_expressions,
+  // so no def is needed). base64 so the text/plain repr is quote-clean.
+  private static readonly VARS_EXPR =
+    "__import__('base64').b64encode(__import__('json').dumps([" +
+    "{'name': k, 'type': type(v).__name__, 'columns': (list(v.column_names) " +
+    "if hasattr(v, 'column_names') and getattr(type(v), '__module__', '').split('.')[0] == 'daft' else None)} " +
+    "for k, v in list(get_ipython().user_ns.items()) " +
+    "if not k.startswith('_') " +
+    "and k not in ('In','Out','exit','quit','get_ipython','open','runtime','me','trino','starrocks','display','write_table') " +
+    "and type(v).__name__ not in ('module','function','builtin_function_or_method','method','type','ZMQExitAutocall','MagicsManager')" +
+    "], default=str).encode()).decode()";
 
   constructor(private ws_slug: string, private nb: string) {}
 
@@ -114,6 +137,10 @@ export class KernelConnection {
         // Same for in-flight completion requests: no promise should hang forever.
         this.pendingCompletes.forEach((resolve) => resolve({ matches: [], cursorStart: 0, cursorEnd: 0 }));
         this.pendingCompletes.clear();
+        // Same for in-flight inspect requests: an undefined user_expressions
+        // payload short-circuits the resolver's own parsing to `[]`.
+        this.pendingInspects.forEach((cb) => cb(undefined));
+        this.pendingInspects.clear();
       };
       ws.onerror = () => { this.setStatus("error"); reject(new Error("kernel WS error")); };
       ws.onmessage = (e) => this.onMessage(String((e as MessageEvent).data));
@@ -133,6 +160,11 @@ export class KernelConnection {
         cb({ matches: content.matches ?? [], cursorStart: content.cursor_start ?? 0, cursorEnd: content.cursor_end ?? 0 });
       }
       return;
+    }
+    if (m.header?.msg_type === "execute_reply") {
+      const cb = this.pendingInspects.get(parent);
+      if (cb) { this.pendingInspects.delete(parent); cb(m.content?.user_expressions); return; }
+      // else: a normal cell run's execute_reply — currently unused; fall through.
     }
     const h = this.pending.get(parent);
     if (!h) return;
@@ -172,6 +204,33 @@ export class KernelConnection {
     });
   }
 
+  /** Introspect the kernel namespace via a silent `execute_request` +
+   *  `user_expressions` (no execution_count pollution, no cell output).
+   *  Resolves empty on timeout / no connection / any parse failure — never
+   *  throws to the UI. */
+  async inspectVariables(): Promise<VarInfo[]> {
+    if (!this.ws) return [];
+    const msg = newMsg("execute_request", this.session, {
+      code: "", silent: true, store_history: false,
+      user_expressions: { v: KernelConnection.VARS_EXPR },
+    });
+    return new Promise((resolve) => {
+      const id = msg.header.msg_id;
+      const timer = setTimeout(() => { this.pendingInspects.delete(id); resolve([]); }, 3000);
+      this.pendingInspects.set(id, (u) => {
+        clearTimeout(timer);
+        try {
+          const raw = u?.v?.data?.["text/plain"] as string | undefined;
+          if (!raw) return resolve([]);
+          const b64 = raw.replace(/^['"]|['"]$/g, "");
+          const json = decodeUtf8Base64(b64);
+          resolve(JSON.parse(json) as VarInfo[]);
+        } catch { resolve([]); }
+      });
+      this.ws!.send(JSON.stringify(msg));
+    });
+  }
+
   /** Interrupt the running kernel (best-effort; requires a connected kernel). */
   async interrupt(): Promise<void> {
     this.setStatus("interrupting");
@@ -199,6 +258,8 @@ export class KernelConnection {
     this.pending.clear();
     this.pendingCompletes.forEach((resolve) => resolve({ matches: [], cursorStart: 0, cursorEnd: 0 }));
     this.pendingCompletes.clear();
+    this.pendingInspects.forEach((cb) => cb(undefined));
+    this.pendingInspects.clear();
     this.setStatus("disconnected");
   }
 }
