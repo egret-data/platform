@@ -2,6 +2,7 @@
 
 mod backfill;
 mod cli;
+mod kernel_launcher_k8s;
 
 use anyhow::Context;
 use chrono::Duration;
