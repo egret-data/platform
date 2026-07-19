@@ -25,6 +25,25 @@ async fn put_get_delete_roundtrip() {
     assert!(s.get(id).await.is_err());
 }
 
+// P1b: a basic-auth secret has no `value` key; the single-value `get` shim must
+// fall back to `password` so legacy `resolve_plaintext` readers keep working.
+#[tokio::test]
+async fn get_falls_back_to_password_for_basic_auth() {
+    let Some(s) = store().await else {
+        eprintln!("skip");
+        return;
+    };
+    let data = std::collections::BTreeMap::from([
+        ("username".to_string(), "ak".to_string()),
+        ("password".to_string(), "sk".to_string()),
+    ]);
+    let id = s
+        .put_typed("cfg", egret_secrets::secret_type::BASIC_AUTH, &data)
+        .await
+        .unwrap();
+    assert_eq!(s.get(id).await.unwrap(), "sk");
+}
+
 #[tokio::test]
 async fn put_without_key_errors() {
     let Some(s) = store().await else {

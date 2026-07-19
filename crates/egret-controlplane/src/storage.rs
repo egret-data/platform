@@ -154,11 +154,14 @@ async fn open_store(st: &CpState, id: Uuid) -> Result<(egret_storage::S3Store, S
         .await?
         .ok_or(CpError::NotFound)?;
     let secret_key = match conn.secret_ref {
-        Some(ref_id) => st
-            .secrets
-            .resolve_plaintext(None, ref_id)
-            .await
-            .map_err(|e| CpError::BadRequest(format!("resolve secret: {e}")))?,
+        Some(ref_id) => {
+            let (_user, pw) = st
+                .secrets
+                .resolve_basic_auth(None, ref_id)
+                .await
+                .map_err(|e| CpError::BadRequest(format!("resolve secret: {e}")))?;
+            pw
+        }
         None => return Err(CpError::BadRequest("connection has no secret".into())),
     };
     let cfg = egret_storage::StorageConfig {
@@ -246,7 +249,22 @@ async fn browse_objects(
 async fn resolve_secret_ref(st: &CpState, body: &StorageInput) -> Result<Option<Uuid>, CpError> {
     match &body.new_secret {
         Some(ns) => {
-            let id = st.secrets.create(None, &ns.name, None, &ns.value).await?;
+            let id = if body.access_key.is_empty() {
+                st.secrets.create(None, &ns.name, None, &ns.value).await?
+            } else {
+                let mut data = std::collections::BTreeMap::new();
+                data.insert("username".to_string(), body.access_key.clone());
+                data.insert("password".to_string(), ns.value.clone());
+                st.secrets
+                    .create_typed(
+                        None,
+                        &ns.name,
+                        None,
+                        egret_secrets::secret_type::BASIC_AUTH,
+                        &data,
+                    )
+                    .await?
+            };
             Ok(Some(id))
         }
         None => Ok(body.secret_ref),

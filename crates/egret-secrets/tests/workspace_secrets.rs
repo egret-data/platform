@@ -290,6 +290,51 @@ async fn resolve_typed_returns_type_and_data_map() {
 }
 
 #[tokio::test]
+async fn resolve_basic_auth_reads_username_and_password() {
+    let Some(c) = ctx().await else {
+        eprintln!("skip");
+        return;
+    };
+
+    use std::collections::BTreeMap;
+    let mut ba = BTreeMap::new();
+    ba.insert("username".to_string(), "ak".to_string());
+    ba.insert("password".to_string(), "sk".to_string());
+    let id = c
+        .store
+        .create_typed(None, "p1b-ba", None, "kubernetes.io/basic-auth", &ba)
+        .await
+        .unwrap();
+
+    let (user, pass) = c.store.resolve_basic_auth(None, id).await.unwrap();
+    assert_eq!(user, "ak");
+    assert_eq!(pass, "sk");
+
+    c.store.delete(None, id).await.unwrap();
+}
+
+#[tokio::test]
+async fn resolve_basic_auth_falls_back_to_opaque_value() {
+    let Some(c) = ctx().await else {
+        eprintln!("skip");
+        return;
+    };
+
+    // A legacy single-value Opaque secret yields ("", <value>).
+    let id = c
+        .store
+        .create(None, "p1b-op", None, "justpw")
+        .await
+        .unwrap();
+
+    let (user, pass) = c.store.resolve_basic_auth(None, id).await.unwrap();
+    assert_eq!(user, "");
+    assert_eq!(pass, "justpw");
+
+    c.store.delete(None, id).await.unwrap();
+}
+
+#[tokio::test]
 async fn global_and_workspace_scopes_are_isolated() {
     let Some(c) = ctx().await else {
         eprintln!("skip");

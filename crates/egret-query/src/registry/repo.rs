@@ -272,11 +272,13 @@ impl DatabaseRepo {
                 .fetch_optional(&self.db.pool)
                 .await?;
         match row {
-            Some((Some(secret_id), workspace_id)) => Ok(Some(
-                self.workspace_secrets
-                    .resolve_plaintext_ws_or_global(workspace_id, secret_id)
-                    .await?,
-            )),
+            Some((Some(secret_id), workspace_id)) => {
+                let (_user, pw) = self
+                    .workspace_secrets
+                    .resolve_basic_auth_ws_or_global(workspace_id, secret_id)
+                    .await?;
+                Ok(Some(pw))
+            }
             _ => Ok(None),
         }
     }
