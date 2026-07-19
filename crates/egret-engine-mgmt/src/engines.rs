@@ -3301,6 +3301,18 @@ async fn update_starrocks_engine(
     // guard was originally wired into create only; an edit must enforce it too
     // (a config that can't be created must not be reachable via update either).
     validate_sr_autoscaling(&sr_body)?;
+    // Validate an optional FE-ingress-TLS secret reference up front (400 on a
+    // missing / non-TLS / incomplete secret), mirroring the shared create-time
+    // guard — the StarRocks update path dispatches before that Trino-only check.
+    if let Some(ing) = b
+        .trino_config
+        .as_ref()
+        .and_then(|tc| parse_ingress(&tc["ingress"]))
+    {
+        if let Some(ref_id) = ing.tls_cert_secret_ref {
+            resolve_tls_cert_secret(&st, ref_id).await?;
+        }
+    }
 
     // Capture the OLD delegation block ({mode, tlsEnabled} or null) from the
     // pre-update engine before we overwrite the spec, so we can detect a
