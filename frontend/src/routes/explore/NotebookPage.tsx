@@ -313,7 +313,18 @@ export default function NotebookPage() {
   };
 
   const handleChangeType = (cid: string, cellType: CellType) => {
-    updateCell.mutate({ cid, cell_type: cellType });
+    if (cellType === "sql") {
+      const cells = notebook.data?.cells ?? [];
+      const existing = cells.find((c) => c.id === cid);
+      updateCell.mutate({
+        cid,
+        cell_type: cellType,
+        ...(existing?.sql_into ? {} : { sql_into: defaultSqlInto(cells) }),
+        ...(existing?.sql_target ? {} : { sql_target: (runtime.data?.engines ?? []).find((e) => e.enabled)?.id }),
+      });
+    } else {
+      updateCell.mutate({ cid, cell_type: cellType });
+    }
   };
 
   // ── Loading / error states ────────────────────────────────────────────────
