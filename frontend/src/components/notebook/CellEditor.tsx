@@ -74,14 +74,16 @@ export function CellEditor({
   runRef.current = onRun;
 
   const errored = outputs?.some((o) => o.type === "error") ?? false;
-  // Left accent bar keyed to state.
+  // Thin left accent, colored only for active states (running / error); at rest
+  // it stays the neutral border so cells don't read as a wall of green.
   const accent = running
     ? "var(--primary)"
     : errored
       ? "var(--destructive)"
-      : outputs && outputs.length > 0
-        ? "var(--success)"
-        : "var(--border)";
+      : "var(--border)";
+
+  // Monaco grows with its content (no fixed empty box); capped, then scrolls.
+  const [editorHeight, setEditorHeight] = useState(52);
 
   const execLabel =
     cell.cell_type === "markdown"
@@ -95,12 +97,16 @@ export function CellEditor({
   const handleMount = (editor: MonacoEditor.IStandaloneCodeEditor, monaco: Monaco) => {
     registerStaticCompletions(monaco);
     editor.addCommand(monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => runRef.current?.());
+    const sync = () =>
+      setEditorHeight(Math.min(Math.max(editor.getContentHeight(), 40), 480));
+    editor.onDidContentSizeChange(sync);
+    sync();
   };
 
   return (
     <div
-      className="group flex rounded-lg border bg-card shadow-sm"
-      style={{ borderLeft: `3px solid ${accent}` }}
+      className="group flex overflow-hidden rounded-lg border bg-card shadow-sm transition-shadow hover:shadow-md"
+      style={{ borderLeftWidth: "2px", borderLeftColor: accent }}
     >
       {/* Gutter */}
       <div className="w-16 shrink-0 select-none px-2 py-2 text-right font-mono text-[11px] text-muted-foreground">
@@ -231,15 +237,24 @@ export function CellEditor({
             </div>
           )
         ) : (
-          <div className="min-h-[120px]">
+          <div className="py-1">
             <Editor
-              height="200px"
+              height={editorHeight}
               defaultLanguage={monacoLanguage}
               language={monacoLanguage}
               value={cell.source}
               onChange={(v) => onChangeSource(v ?? "")}
               onMount={handleMount}
-              options={{ minimap: { enabled: false }, fontSize: 13, scrollBeyondLastLine: false }}
+              options={{
+                minimap: { enabled: false },
+                fontSize: 13,
+                scrollBeyondLastLine: false,
+                lineNumbersMinChars: 3,
+                folding: false,
+                overviewRulerLanes: 0,
+                renderLineHighlight: "none",
+                padding: { top: 6, bottom: 6 },
+              }}
             />
           </div>
         )}
