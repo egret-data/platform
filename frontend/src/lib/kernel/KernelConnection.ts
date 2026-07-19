@@ -5,7 +5,17 @@ import {
 } from "@/api/generated/kernel/kernel";
 import { newMsg, iopubToOutput, type CellOutput } from "./protocol";
 
-export type KernelStatus = "idle" | "busy" | "spawning" | "connected" | "disconnected";
+export type KernelStatus =
+  | "idle"
+  | "busy"
+  | "spawning"
+  | "connected"
+  | "disconnected"
+  | "connecting"
+  | "interrupting"
+  | "restarting"
+  | "error"
+  | "dead";
 
 export interface ExecuteHandlers {
   onOutput: (o: CellOutput) => void;
@@ -19,14 +29,37 @@ export class KernelConnection {
   private session = crypto.randomUUID();
   private pending = new Map<string, ExecuteHandlers>(); // execute_request msg_id → handlers
   private ready: Promise<void> | null = null;
+  private _status: KernelStatus = "disconnected";
+  private statusListeners = new Set<(s: KernelStatus) => void>();
 
   constructor(private ws_slug: string, private nb: string) {}
+
+  get status(): KernelStatus {
+    return this._status;
+  }
+
+  /** Subscribe to connection-status changes. Fires immediately with the
+   *  current value; returns an unsubscribe function. */
+  onStatusChange(cb: (s: KernelStatus) => void): () => void {
+    this.statusListeners.add(cb);
+    cb(this._status);
+    return () => {
+      this.statusListeners.delete(cb);
+    };
+  }
+
+  private setStatus(s: KernelStatus): void {
+    if (this._status === s) return;
+    this._status = s;
+    this.statusListeners.forEach((cb) => cb(s));
+  }
 
   private path(suffix: string) { return `/ws/${this.ws_slug}/notebooks/${this.nb}/kernel${suffix}`; }
 
   async connect(): Promise<void> {
     if (this.ready) return this.ready;
     this.ready = (async () => {
+      this.setStatus("connecting");
       try {
         // ensure the kernel (retries while spawning)
         let ready = false;
@@ -41,6 +74,7 @@ export class KernelConnection {
         await this.openSocket();
       } catch (e) {
         this.ready = null; // allow a later retry to re-attempt
+        this.setStatus("error");
         throw e;
       }
     })();
@@ -53,8 +87,9 @@ export class KernelConnection {
       const url = `${proto}//${location.host}/api${this.path("/channels")}`;
       const ws = new WebSocket(url);
       this.ws = ws;
-      ws.onopen = () => resolve();
+      ws.onopen = () => { this.setStatus("connected"); resolve(); };
       ws.onclose = () => {
+        this.setStatus("disconnected");
         this.ws = null;
         // Unexpected close: flush pending handlers so no cell stays stuck-running.
         this.pending.forEach((h) => {
@@ -63,7 +98,7 @@ export class KernelConnection {
         });
         this.pending.clear();
       };
-      ws.onerror = () => reject(new Error("kernel WS error"));
+      ws.onerror = () => { this.setStatus("error"); reject(new Error("kernel WS error")); };
       ws.onmessage = (e) => this.onMessage(String((e as MessageEvent).data));
     });
   }
@@ -77,7 +112,12 @@ export class KernelConnection {
     if (!h) return;
     const t = m.header?.msg_type;
     if (t === "execute_input") { const n = m.content?.execution_count; if (typeof n === "number") h.onExecutionCount(n); return; }
-    if (t === "status") { const s = m.content?.execution_state; if (s === "busy" || s === "idle") h.onStatus(s); if (s === "idle") this.pending.delete(parent); return; }
+    if (t === "status") {
+      const s = m.content?.execution_state;
+      if (s === "busy" || s === "idle") { h.onStatus(s); this.setStatus(s); }
+      if (s === "idle") this.pending.delete(parent);
+      return;
+    }
     const out = iopubToOutput(t, m.content ?? {});
     if (out) h.onOutput(out);
   }
@@ -91,13 +131,29 @@ export class KernelConnection {
 
   /** Interrupt the running kernel (best-effort; requires a connected kernel). */
   async interrupt(): Promise<void> {
-    await kernelKernelInterrupt(this.ws_slug, this.nb);
+    this.setStatus("interrupting");
+    try {
+      await kernelKernelInterrupt(this.ws_slug, this.nb);
+    } finally {
+      if (this._status === "interrupting") this.setStatus(this.ws ? "idle" : "disconnected");
+    }
   }
 
   /** Restart the kernel. The channels WS drops → onclose flushes pending (clears running). */
   async restart(): Promise<void> {
-    await kernelKernelRestart(this.ws_slug, this.nb);
+    this.setStatus("restarting");
+    try {
+      await kernelKernelRestart(this.ws_slug, this.nb);
+    } finally {
+      if (this._status === "restarting") this.setStatus(this.ws ? "connected" : "disconnected");
+    }
   }
 
-  disconnect(): void { this.ws?.close(); this.ws = null; this.ready = null; this.pending.clear(); }
+  disconnect(): void {
+    this.ws?.close();
+    this.ws = null;
+    this.ready = null;
+    this.pending.clear();
+    this.setStatus("disconnected");
+  }
 }
