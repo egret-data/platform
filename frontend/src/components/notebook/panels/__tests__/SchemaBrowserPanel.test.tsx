@@ -20,15 +20,17 @@ function renderPanel() {
   const onInsertText = vi.fn();
   const onNewSqlCell = vi.fn();
   const onObjectsLoaded = vi.fn();
+  const onColumnsLoaded = vi.fn();
   render(
     <SchemaBrowserPanel
       ws="eng"
       onInsertText={onInsertText}
       onNewSqlCell={onNewSqlCell}
       onObjectsLoaded={onObjectsLoaded}
+      onColumnsLoaded={onColumnsLoaded}
     />,
   );
-  return { onInsertText, onNewSqlCell, onObjectsLoaded };
+  return { onInsertText, onNewSqlCell, onObjectsLoaded, onColumnsLoaded };
 }
 
 describe("SchemaBrowserPanel", () => {
@@ -111,6 +113,25 @@ describe("SchemaBrowserPanel", () => {
     // Column level loaded.
     expect(await screen.findByTitle("Insert id")).toBeInTheDocument();
     expect(onObjectsLoaded).toHaveBeenCalledWith(["id"]);
+  });
+
+  it("reports the table's bare name + FQN alongside its columns via onColumnsLoaded (S4-4)", async () => {
+    const user = userEvent.setup();
+    const { onColumnsLoaded } = renderPanel();
+
+    await user.click(screen.getByText("Warehouse"));
+    await user.click(await screen.findByText("main"));
+    await user.click(await screen.findByText("public"));
+
+    const tableRow = await screen.findByTitle(/main\.public\.orders/i);
+    const chevron = tableRow.querySelector('[role="button"]')!;
+    await user.click(chevron);
+
+    expect(await screen.findByTitle("Insert id")).toBeInTheDocument();
+    expect(onColumnsLoaded).toHaveBeenCalledWith(
+      { name: "orders", fqn: "main.public.orders" },
+      ["id"],
+    );
   });
 
   it("shows an empty hint when there are no databases granted", () => {

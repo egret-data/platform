@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  parseFromTables,
   registerNotebookCompletions,
   setNotebookCompletionContext,
 } from "../notebookCompletion";
@@ -39,6 +40,26 @@ function fakeModel(value = "df.") {
 }
 
 const fakePosition = { lineNumber: 1, column: 1 };
+
+describe("parseFromTables", () => {
+  it("extracts a single bare table after FROM", () => {
+    expect(parseFromTables("SELECT * FROM orders")).toEqual(["orders"]);
+  });
+
+  it("extracts FQN and aliased tables from FROM/JOIN, ignoring the alias tokens", () => {
+    const tables = parseFromTables(
+      "select a from cat.sch.orders o join users u on o.id = u.id",
+    );
+    expect(tables).toEqual(expect.arrayContaining(["cat.sch.orders", "users"]));
+    expect(tables).not.toEqual(expect.arrayContaining(["o", "u"]));
+  });
+
+  it("never throws on junk/empty input and returns []", () => {
+    expect(parseFromTables("")).toEqual([]);
+    expect(parseFromTables("!!! not sql at all ///")).toEqual([]);
+    expect(() => parseFromTables(null as unknown as string)).not.toThrow();
+  });
+});
 
 // `registerNotebookCompletions` registers ONCE globally (module-level
 // `registered` flag, matching the real Monaco constraint of one provider per
@@ -85,6 +106,7 @@ describe("registerNotebookCompletions", () => {
         complete: async () => ({ matches: ["df.a", "df.b"], cursorStart: 0, cursorEnd: 3 }),
       } as any,
       sqlWords: () => ["orders", "user_id"],
+      tableColumns: () => ({}),
     });
 
     const pyResult = await m.providers.python.provideCompletionItems(fakeModel("df."), fakePosition);
@@ -96,10 +118,48 @@ describe("registerNotebookCompletions", () => {
     expect(sqlLabels).toEqual(expect.arrayContaining(["orders", "user_id"]));
   });
 
+  it("sql: FROM-aware — ranks a referenced table's columns above keywords and generic words", () => {
+    setNotebookCompletionContext({
+      kernel: { complete: async () => ({ matches: [], cursorStart: 0, cursorEnd: 0 }) } as any,
+      sqlWords: () => ["orders", "users"],
+      tableColumns: () => ({ orders: ["id", "total"] }),
+    });
+
+    const sqlResult = m.providers.sql.provideCompletionItems(
+      fakeModel("SELECT  FROM orders"),
+      fakePosition,
+    );
+    const suggestions = sqlResult.suggestions as any[];
+    const byLabel = (label: string) => suggestions.find((s) => s.label === label);
+
+    expect(byLabel("id")).toBeDefined();
+    expect(byLabel("total")).toBeDefined();
+    const idSort = byLabel("id").sortText;
+    const keywordSort = byLabel("SELECT").sortText;
+    expect(idSort < keywordSort).toBe(true);
+    // Also still ranked ahead of an unrelated generic word.
+    const usersSort = byLabel("users").sortText;
+    expect(idSort < usersSort).toBe(true);
+  });
+
+  it("sql: with no FROM-table match, falls back to sqlWords + keywords", () => {
+    setNotebookCompletionContext({
+      kernel: { complete: async () => ({ matches: [], cursorStart: 0, cursorEnd: 0 }) } as any,
+      sqlWords: () => ["orders", "user_id"],
+      tableColumns: () => ({ orders: ["id", "total"] }),
+    });
+
+    const sqlResult = m.providers.sql.provideCompletionItems(fakeModel("SELECT 1"), fakePosition);
+    const sqlLabels = sqlResult.suggestions.map((s: any) => s.label);
+    expect(sqlLabels).toEqual(expect.arrayContaining(["orders", "user_id", "SELECT"]));
+    expect(sqlLabels).not.toEqual(expect.arrayContaining(["id", "total"]));
+  });
+
   it("reverts to SQL-Lab-safe behavior once the context is cleared", async () => {
     setNotebookCompletionContext({
       kernel: { complete: async () => ({ matches: ["df.a"], cursorStart: 0, cursorEnd: 3 }) } as any,
       sqlWords: () => ["orders"],
+      tableColumns: () => ({}),
     });
     setNotebookCompletionContext(null);
 
@@ -115,6 +175,7 @@ describe("registerNotebookCompletions", () => {
         complete: async () => ({ matches: [], cursorStart: 0, cursorEnd: 0 }),
       } as any,
       sqlWords: () => [],
+      tableColumns: () => ({}),
     });
 
     const result = await m.providers["python:hover"].provideHover(fakeModel(), fakePosition);
@@ -136,6 +197,7 @@ describe("registerNotebookCompletions", () => {
         complete: async () => ({ matches: [], cursorStart: 0, cursorEnd: 0 }),
       } as any,
       sqlWords: () => [],
+      tableColumns: () => ({}),
     });
 
     const result = await m.providers["python:signature"].provideSignatureHelp(fakeModel(), fakePosition);

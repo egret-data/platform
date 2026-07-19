@@ -13,6 +13,12 @@ export interface NotebookCompletionContext {
   kernel: KernelConnection;
   /** Loaded catalog object names (catalogs/schemas/tables/columns) for SQL. */
   sqlWords: () => string[];
+  /** Table identifier (lowercased — both the bare name and the fully-qualified
+   *  `catalog.schema.table`) → its column names, as reported by the schema
+   *  browser's `onColumnsLoaded` (S4-4). Used to rank a referenced table's own
+   *  columns above the generic `sqlWords` list when the cursor is in a column
+   *  position. */
+  tableColumns: () => Record<string, string[]>;
 }
 
 let ctx: NotebookCompletionContext | null = null;
@@ -36,6 +42,27 @@ const SQL_KEYWORDS = [
   "LEFT JOIN", "INNER JOIN", "ON", "AS", "WITH", "DISTINCT", "COUNT",
   "SUM", "AVG", "MIN", "MAX", "HAVING", "UNION", "INSERT INTO", "VALUES",
 ];
+
+/** Regex-extract table references following `FROM`/`JOIN` from raw SQL text —
+ *  identifiers with optional dotted qualification (`catalog.schema.table`),
+ *  capturing only the table token (not a trailing alias). Defensive by
+ *  construction (no backtracking blowup, wrapped in try/catch) so a partial /
+ *  malformed query being typed can never throw out of the completion
+ *  provider. Exported for unit testing. */
+export function parseFromTables(sql: string): string[] {
+  try {
+    if (!sql) return [];
+    const re = /\b(?:from|join)\s+([a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*){0,2})/gi;
+    const out: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(sql)) !== null) {
+      out.push(m[1].toLowerCase());
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
 
 let registered = false;
 
@@ -104,14 +131,41 @@ export function registerNotebookCompletions(monaco: Monaco): void {
         kind: monaco.languages.CompletionItemKind.Keyword,
         insertText: k,
         range,
+        // Lowest priority: FROM-aware columns (0) then generic catalog words (1)
+        // then keywords (2), so Monaco's default sort (by sortText) surfaces the
+        // most relevant suggestions first.
+        sortText: "2" + k,
       }));
-      const objs = Array.from(new Set(ctx.sqlWords())).map((w) => ({
+
+      // FROM-aware ranking (S4-4): pull the tables referenced in the query's
+      // FROM/JOIN clauses and surface THEIR columns above the generic word list.
+      const fromTables = parseFromTables(model.getValue());
+      const tableColumns = ctx.tableColumns();
+      const fromCols = new Set<string>();
+      for (const t of fromTables) {
+        const c = tableColumns[t];
+        if (c) c.forEach((x) => fromCols.add(x));
+      }
+      const cols = Array.from(fromCols).map((w) => ({
         label: w,
         kind: monaco.languages.CompletionItemKind.Field,
         insertText: w,
         range,
+        sortText: "0" + w,
       }));
-      return { suggestions: [...objs, ...kw] };
+
+      // De-dup: a column already surfaced via fromCols shouldn't also appear in
+      // the generic list.
+      const objs = Array.from(new Set(ctx.sqlWords()))
+        .filter((w) => !fromCols.has(w))
+        .map((w) => ({
+          label: w,
+          kind: monaco.languages.CompletionItemKind.Field,
+          insertText: w,
+          range,
+          sortText: "1" + w,
+        }));
+      return { suggestions: [...cols, ...objs, ...kw] };
     },
   });
 

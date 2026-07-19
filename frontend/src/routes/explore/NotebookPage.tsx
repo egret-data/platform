@@ -332,8 +332,17 @@ export default function NotebookPage() {
   // accumulated object names (sql). Cleared on unmount so a stale kernel
   // reference can't leak into a different notebook / SQL Lab.
   const sqlWordsRef = useRef<string[]>([]);
+  // Table identifier (lowercased — bare name AND fully-qualified
+  // `catalog.schema.table`) → its column names, accumulated as the schema
+  // browser expands tables (S4-4). Read by the sql completion provider to
+  // rank a FROM-referenced table's own columns above the generic word list.
+  const tableColumnsRef = useRef<Record<string, string[]>>({});
   useEffect(() => {
-    setNotebookCompletionContext({ kernel, sqlWords: () => sqlWordsRef.current });
+    setNotebookCompletionContext({
+      kernel,
+      sqlWords: () => sqlWordsRef.current,
+      tableColumns: () => tableColumnsRef.current,
+    });
     return () => setNotebookCompletionContext(null);
   }, [kernel]);
   // Stable identity (only mutates the ref) so passing it to SchemaBrowserPanel
@@ -341,6 +350,16 @@ export default function NotebookPage() {
   const handleObjectsLoaded = useCallback((names: string[]) => {
     sqlWordsRef.current = Array.from(new Set([...sqlWordsRef.current, ...names]));
   }, []);
+  const handleColumnsLoaded = useCallback(
+    (table: { name: string; fqn: string }, cols: string[]) => {
+      tableColumnsRef.current = {
+        ...tableColumnsRef.current,
+        [table.name.toLowerCase()]: cols,
+        [table.fqn.toLowerCase()]: cols,
+      };
+    },
+    [],
+  );
 
   const kernelStatus = useKernelConnectionStatus(kernel);
   const [nameDirty, setNameDirty] = useState(false);
@@ -966,6 +985,7 @@ export default function NotebookPage() {
                 insertCell("sql", sortedCells.length, { focus: true, initialSource: sql })
               }
               onObjectsLoaded={handleObjectsLoaded}
+              onColumnsLoaded={handleColumnsLoaded}
             />
           )}
         </aside>
