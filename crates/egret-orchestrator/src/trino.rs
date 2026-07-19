@@ -437,6 +437,19 @@ pub fn trino_tls_secret(spec: &EngineSpec) -> Option<Value> {
     }))
 }
 
+/// Project the resolved dockerconfigjson value (populated at provision from a
+/// typed `kubernetes.io/dockerconfigjson` secret) into a k8s Secret named
+/// `{name}-pull`, referenced from the pod's `imagePullSecrets`.
+pub fn trino_pull_secret(spec: &EngineSpec) -> Option<Value> {
+    let json = spec.config.image_pull_secret_json.as_ref()?;
+    Some(json!({
+        "apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/dockerconfigjson",
+        "metadata": { "name": format!("{}-pull", spec.name), "namespace": spec.namespace,
+                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
+        "stringData": { ".dockerconfigjson": json }
+    }))
+}
+
 /// Project the resolved ingress TLS cert/key into a real k8s
 /// `type: kubernetes.io/tls` Secret named `{name}-ingress-tls`. Returns `None`
 /// unless the ingress is enabled and carries resolved cert+key PEMs (populated
@@ -1150,6 +1163,11 @@ impl TrinoProvisioner {
         if let Some(tls) = trino_tls_secret(spec) {
             self.kube.apply(&tls).await?;
         }
+        // Apply the image pull Secret before the Deployments so it exists when
+        // the pods schedule and pull the image.
+        if let Some(ps) = trino_pull_secret(spec) {
+            self.kube.apply(&ps).await?;
+        }
         self.kube.apply(&trino_service(spec)).await?;
         self.kube
             .apply(&trino_deployment(spec, Role::Coordinator))
@@ -1307,6 +1325,11 @@ impl EngineProvisioner for TrinoProvisioner {
         let _ = self
             .kube
             .delete("v1", "Secret", namespace, &format!("{name}-ingress-tls"))
+            .await;
+        // Best-effort delete the image pull Secret (managed by egret).
+        let _ = self
+            .kube
+            .delete("v1", "Secret", namespace, &format!("{name}-pull"))
             .await;
         // Best-effort; harmless when no Ingress was ever applied.
         let _ = self
@@ -2425,6 +2448,20 @@ mod tests {
     }
 
     #[test]
+    fn trino_pull_secret_renders_dockerconfigjson() {
+        let mut spec = sample_spec();
+        spec.name = "eng1".into();
+        spec.namespace = "egret-engines".into();
+        spec.config.image_pull_secret_json = Some(r#"{"auths":{}}"#.into());
+        let s = trino_pull_secret(&spec).unwrap();
+        assert_eq!(s["type"], "kubernetes.io/dockerconfigjson");
+        assert_eq!(s["metadata"]["name"], "eng1-pull");
+        assert_eq!(s["stringData"][".dockerconfigjson"], r#"{"auths":{}}"#);
+        spec.config.image_pull_secret_json = None;
+        assert!(trino_pull_secret(&spec).is_none());
+    }
+
+    #[test]
     fn containers_envfrom_mounts_render_and_gs_preserved() {
         let mut s = sample_spec();
         // worker graceful shutdown sets a grace period we must not clobber:
@@ -2579,6 +2616,6 @@ mod tests {
         let p = TrinoProvisioner::new(kube.clone());
         p.delete("egret-engines", "demo").await.unwrap();
         let d = kube.deleted.lock().unwrap();
-        assert_eq!(d.len(), 11); // 2 deployments, service, 2 configmaps, env secret, tls secret, ingress-tls secret, ingress, hpa, scaledobject
+        assert_eq!(d.len(), 12); // 2 deployments, service, 2 configmaps, env secret, tls secret, ingress-tls secret, pull secret, ingress, hpa, scaledobject
     }
 }

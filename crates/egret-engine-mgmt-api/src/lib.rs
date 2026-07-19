@@ -347,6 +347,16 @@ pub struct TrinoConfig {
     /// falls back to `trinodb/trino:{image_version}`.
     pub image: Option<String>,
     pub image_pull_secrets: Vec<String>,
+    /// Typed `kubernetes.io/dockerconfigjson` secret backing an image-pull
+    /// secret. When set, the provision step resolves it, projects a
+    /// `{name}-pull` k8s Secret, and appends that name to `image_pull_secrets`.
+    pub image_pull_secret_ref: Option<Uuid>,
+    /// Resolved `.dockerconfigjson` payload, injected at provision (NOT
+    /// persisted). The orchestrator renders the `{name}-pull` Secret from this.
+    /// Like the sibling runtime fields, this struct is not serde-serialized
+    /// (its wire form is parsed/rendered by hand), so the payload never reaches
+    /// stored config.
+    pub image_pull_secret_json: Option<String>,
     pub image_pull_policy: Option<String>,
     pub service_account: Option<String>,
     pub pod_security_context: Option<SecurityContext>,

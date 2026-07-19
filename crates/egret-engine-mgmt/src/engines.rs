@@ -600,6 +600,18 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
             ing.tls_secret = Some(format!("{}-ingress-tls", engine.name));
         }
     }
+    // Image-pull from a typed secret: resolve the referenced
+    // kubernetes.io/dockerconfigjson secret, stash its `.dockerconfigjson`
+    // payload for the orchestrator to project into `{name}-pull`, and append
+    // that Secret name to `imagePullSecrets`.
+    if let Some(ref_id) = config.image_pull_secret_ref {
+        let json = resolve_dockerconfigjson_secret(st, ref_id).await?;
+        config.image_pull_secret_json = Some(json);
+        let pull = format!("{}-pull", engine.name);
+        if !config.image_pull_secrets.contains(&pull) {
+            config.image_pull_secrets.push(pull);
+        }
+    }
     // Impersonate-mode delegation: when auth is on, provision the `egret_delegator`
     // service user (generate + store its password once, inject its bcrypt into the
     // auth block so it lands in `password.db`) and seed the impersonate + query-
@@ -1170,6 +1182,10 @@ fn trino_config_from_json(v: &serde_json::Value) -> TrinoConfigReq {
                     .collect()
             })
             .unwrap_or_default(),
+        image_pull_secret_ref: v["imagePullSecretRef"]
+            .as_str()
+            .and_then(|s| s.parse().ok()),
+        image_pull_secret_json: None,
         image_pull_policy: v["imagePullPolicy"].as_str().map(Into::into),
         service_account: v["serviceAccount"].as_str().map(Into::into),
         pod_security_context: parse_security_context(&v["podSecurityContext"]),
@@ -1586,6 +1602,33 @@ async fn resolve_tls_cert_secret(
     Ok((get("tls.crt")?, get("tls.key")?))
 }
 
+/// Projection primitive: resolve a `kubernetes.io/dockerconfigjson` named secret
+/// to its `.dockerconfigjson` payload. Reused wherever a typed image-pull secret
+/// backs a k8s `imagePullSecrets` entry.
+async fn resolve_dockerconfigjson_secret(
+    st: &CpState,
+    secret_ref: Uuid,
+) -> Result<String, CpError> {
+    let ts = st
+        .secrets
+        .resolve_typed(None, secret_ref)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("resolve dockerconfigjson secret: {e}")))?;
+    if ts.r#type != egret_secrets::secret_type::DOCKER_CONFIG_JSON {
+        return Err(CpError::BadRequest(format!(
+            "secret is not a {} secret",
+            egret_secrets::secret_type::DOCKER_CONFIG_JSON
+        )));
+    }
+    ts.data
+        .get(".dockerconfigjson")
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .ok_or_else(|| {
+            CpError::BadRequest("dockerconfigjson secret missing .dockerconfigjson".into())
+        })
+}
+
 async fn ensure_tls_cert(st: &CpState, engine: &Engine) -> Result<(String, String), CpError> {
     if let (Some(sid), Some(cert)) = (engine.tls_secret_id, engine.coordinator_cert.clone()) {
         let keystore = st
@@ -1836,6 +1879,18 @@ async fn create_engine(
         if let Some(ref_id) = ing.tls_cert_secret_ref {
             resolve_tls_cert_secret(&st, ref_id).await?;
         }
+    }
+
+    // Validate an optional image-pull (dockerconfigjson) secret reference the
+    // same way (400 on a missing / non-dockerconfigjson / incomplete secret)
+    // before any resources are minted.
+    if let Some(ref_id) = b
+        .trino_config
+        .as_ref()
+        .and_then(|tc| tc["imagePullSecretRef"].as_str())
+        .and_then(|s| s.parse::<Uuid>().ok())
+    {
+        resolve_dockerconfigjson_secret(&st, ref_id).await?;
     }
 
     match egret_engine_mgmt_api::EngineKind::parse(&b.kind) {
@@ -3252,6 +3307,15 @@ async fn update_engine(
         if let Some(ref_id) = ing.tls_cert_secret_ref {
             resolve_tls_cert_secret(&st, ref_id).await?;
         }
+    }
+    // Validate an optional image-pull (dockerconfigjson) secret reference the
+    // same way (400 on a missing / non-dockerconfigjson / incomplete secret)
+    // before persisting, mirroring create.
+    if let Some(ref_id) = spec["trinoConfig"]["imagePullSecretRef"]
+        .as_str()
+        .and_then(|s| s.parse::<Uuid>().ok())
+    {
+        resolve_dockerconfigjson_secret(&st, ref_id).await?;
     }
     st.engine_mgmt
         .update_engine(id, &spec, &engine.status)
