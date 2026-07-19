@@ -1,62 +1,60 @@
-import type { ComponentProps } from "react";
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { CellEditor } from "../CellEditor";
+import type { Cell } from "@/api/notebooks";
 
-// jsdom cannot load Monaco.
 vi.mock("@monaco-editor/react", () => ({
-  default: ({ value, onChange }: { value: string; onChange: (v: string) => void }) => (
-    <textarea data-testid="monaco" value={value} onChange={(e) => onChange(e.target.value)} />
+  default: ({ value, onChange }: { value: string; onChange?: (v?: string) => void }) => (
+    <textarea aria-label="code" value={value} onChange={(e) => onChange?.(e.target.value)} />
   ),
 }));
 
-import { CellEditor } from "@/components/notebook/CellEditor";
-import type { Cell } from "@/api/notebooks";
-
-const codeCell: Cell = {
-  id: "cell-1",
-  cell_type: "code",
-  source: "print(1)",
-  cell_order: 0,
-  execution_count: null,
-  last_output: null,
-  last_execution_time_ms: null,
-};
-
-function renderCell(overrides: Partial<ComponentProps<typeof CellEditor>> = {}) {
-  render(
-    <form>
-      <CellEditor
-        cell={codeCell}
-        onChangeSource={vi.fn()}
-        onChangeType={vi.fn()}
-        onDelete={vi.fn()}
-        onMoveUp={vi.fn()}
-        onMoveDown={vi.fn()}
-        {...overrides}
-      />
-    </form>,
-  );
+function cell(partial: Partial<Cell> & Pick<Cell, "id" | "cell_type" | "source" | "cell_order">): Cell {
+  return { execution_count: null, last_output: null, last_execution_time_ms: null, ...partial };
 }
 
-describe("CellEditor cell-type select (dataframe-first, no SQL)", () => {
-  it("offers only Code and Markdown as cell types", () => {
-    renderCell();
-    // The Radix Select renders a hidden native <select> inside the <form>.
-    const native = Array.from(
-      document.querySelectorAll<HTMLSelectElement>("select"),
-    ).find((s) => Array.from(s.options).some((o) => o.value === "code"));
-    expect(native).toBeTruthy();
-    const values = Array.from(native!.options).map((o) => o.value);
-    expect(values).toEqual(["code", "markdown"]);
+const noop = () => {};
+const baseProps = {
+  onChangeSource: noop,
+  onChangeType: noop,
+  onDelete: noop,
+  onMoveUp: noop,
+  onMoveDown: noop,
+};
+
+describe("CellEditor", () => {
+  it("shows the In [N] execution prompt for code cells", () => {
+    render(
+      <CellEditor
+        {...baseProps}
+        cell={cell({ id: "a", cell_type: "code", source: "x = 1", cell_order: 0, execution_count: 7 })}
+      />,
+    );
+    expect(screen.getByText("In [7]:")).toBeInTheDocument();
   });
 
-  it("does not render a SQL target control for a code cell", () => {
-    renderCell();
-    expect(screen.queryByLabelText("SQL target")).not.toBeInTheDocument();
+  it("renders markdown as preview when the source is set and cell is unfocused", () => {
+    render(
+      <CellEditor
+        {...baseProps}
+        cell={cell({ id: "b", cell_type: "markdown", source: "# Hello", cell_order: 0 })}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "Hello" })).toBeInTheDocument();
   });
 
-  it("does not render a SQL target control for a markdown cell", () => {
-    renderCell({ cell: { ...codeCell, cell_type: "markdown" } });
-    expect(screen.queryByLabelText("SQL target")).not.toBeInTheDocument();
+  it("keeps the markdown textarea mounted while typing into an empty cell", () => {
+    const changes: string[] = [];
+    render(
+      <CellEditor
+        {...baseProps}
+        onChangeSource={(s) => changes.push(s)}
+        cell={cell({ id: "e", cell_type: "markdown", source: "", cell_order: 0 })}
+      />,
+    );
+    const ta = screen.getByLabelText("Markdown source");
+    fireEvent.focus(ta);
+    fireEvent.change(ta, { target: { value: "h" } });
+    expect(screen.getByLabelText("Markdown source")).toBeInTheDocument();
   });
 });

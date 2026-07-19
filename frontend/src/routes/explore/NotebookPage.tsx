@@ -7,7 +7,7 @@ import {
   useState,
 } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowLeft, Eraser, Play, Plus, RotateCcw, Square } from "lucide-react";
+import { ArrowLeft, Plus } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -26,10 +26,12 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import type { KernelConnection } from "@/lib/kernel/KernelConnection";
 import type { CellOutput } from "@/lib/kernel/protocol";
 import { useKernel } from "@/lib/kernel/useKernel";
+import { useKernelConnectionStatus } from "@/lib/kernel/useKernelConnectionStatus";
+import { NotebookHeader } from "@/components/notebook/NotebookHeader";
+import { SidebarIconRail, type SidebarTab } from "@/components/notebook/SidebarIconRail";
+import { TableOfContentsPanel } from "@/components/notebook/panels/TableOfContentsPanel";
+import { DataSourcesPanel } from "@/components/notebook/panels/DataSourcesPanel";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import type { ApiError } from "@/api/client";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
@@ -189,6 +191,25 @@ export default function NotebookPage() {
   const reorderCells = useReorderCells(ws!, id!);
   const active = useActiveExecutions(ws!, id!);
 
+  const kernelStatus = useKernelConnectionStatus(kernel);
+  const [nameDirty, setNameDirty] = useState(false);
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("toc");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  const pickTab = (t: SidebarTab) => {
+    if (t === sidebarTab) setSidebarOpen((v) => !v);
+    else {
+      setSidebarTab(t);
+      setSidebarOpen(true);
+    }
+  };
+
+  const jumpToCell = (cellId: string) => {
+    document
+      .getElementById(`cell-${cellId}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   // Per-cell runner registry: each ManagedCell registers { run, clear } under
   // its cell id on mount; the toolbar iterates and drives them.
   const runners = useRef<
@@ -215,32 +236,9 @@ export default function NotebookPage() {
     [active.data],
   );
 
-  // Local name state for rename-on-blur
-  const [localName, setLocalName] = useState("");
-  useEffect(() => {
-    if (notebook.data?.name) {
-      setLocalName(notebook.data.name);
-    }
-  }, [notebook.data?.name]);
-
-  const handleNameBlur = () => {
-    if (!notebook.data) return;
-    const trimmed = localName.trim();
-    if (trimmed && trimmed !== notebook.data.name) {
-      updateNotebook.mutate({ name: trimmed });
-    }
-  };
-
-  const handlePublicToggle = (checked: boolean) => {
-    updateNotebook.mutate({ is_public: checked });
-  };
-
-  // Name saves only on blur; a cell save debounces ~600ms. Warn on refresh/close while
-  // either is unpersisted (beforeunload-only; SPA nav flushes cell saves on unmount).
-  const nameDirty =
-    !!notebook.data &&
-    localName.trim() !== "" &&
-    localName.trim() !== notebook.data.name;
+  // A cell save debounces ~600ms; a name edit commits only on blur. Warn on
+  // refresh/close while either is unpersisted (beforeunload-only; SPA nav
+  // flushes cell saves on unmount).
   useUnsavedChangesWarning(pendingCells.size > 0 || nameDirty);
 
   const handleAddCell = (cellType: CellType = "code") => {
@@ -356,118 +354,80 @@ export default function NotebookPage() {
   }
 
   return (
-    <section className="flex flex-col gap-4 p-4">
-      <h1 className="sr-only">{nb.name}</h1>
-      {/* Header */}
-      <div className="flex flex-col gap-3">
-        <Link
-          to={`/explore/${ws}/notebooks`}
-          className="flex w-fit items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-        >
-          <ArrowLeft className="h-3.5 w-3.5" />
-          Notebooks
-        </Link>
+    <div className="flex h-full min-h-0">
+      <SidebarIconRail tab={sidebarTab} open={sidebarOpen} onPick={pickTab} />
+      {sidebarOpen && (
+        <div className="w-64 shrink-0 overflow-y-auto border-r bg-muted/20">
+          {sidebarTab === "toc" ? (
+            <TableOfContentsPanel cells={sortedCells} onJump={jumpToCell} />
+          ) : (
+            <DataSourcesPanel ws={ws!} />
+          )}
+        </div>
+      )}
 
-        <div className="flex flex-wrap items-center gap-4">
-          {/* Rename on blur */}
-          <Input
-            value={localName}
-            onChange={(e) => setLocalName(e.target.value)}
-            onBlur={handleNameBlur}
-            className="max-w-xs text-base font-semibold"
-            aria-label="Notebook name"
-          />
+      <section className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+        <h1 className="sr-only">{nb.name}</h1>
+        <NotebookHeader
+          ws={ws!}
+          name={nb.name}
+          isPublic={nb.is_public}
+          status={kernelStatus}
+          runningAll={runningAll}
+          onRename={(name) => updateNotebook.mutate({ name })}
+          onTogglePublic={(v) => updateNotebook.mutate({ is_public: v })}
+          onRunAll={runAll}
+          onInterrupt={() =>
+            kernel.interrupt().catch((e) => toast.error(String((e as Error)?.message ?? e)))
+          }
+          onRestart={() =>
+            kernel.restart().catch((e) => toast.error(String((e as Error)?.message ?? e)))
+          }
+          onClear={clearAll}
+          onDirtyChange={setNameDirty}
+        />
 
-          {/* Public toggle */}
+        <div className="flex flex-col gap-3 p-4">
+          {sortedCells.map((cell, index) => (
+            <div key={cell.id} id={`cell-${cell.id}`} style={{ scrollMarginTop: "6rem" }}>
+              <ManagedCell
+                cell={cell}
+                kernel={kernel}
+                onChangeType={handleChangeType}
+                onDelete={handleDeleteCell}
+                onMoveUp={handleMoveUp}
+                onMoveDown={handleMoveDown}
+                updateCellMutate={updateCell.mutate}
+                runners={runners}
+                onPendingChange={setCellPending}
+                initialRunning={runningSet.has(cell.id)}
+                onRunAbove={index > 0 ? () => runSlice(0, index) : undefined}
+                onRunBelow={
+                  index < sortedCells.length - 1
+                    ? () => runSlice(index + 1, sortedCells.length)
+                    : undefined
+                }
+              />
+            </div>
+          ))}
+
           <div className="flex items-center gap-2">
-            <Switch
-              id="nb-public"
-              checked={nb.is_public}
-              onCheckedChange={handlePublicToggle}
-              aria-label="Public"
-            />
-            <Label htmlFor="nb-public" className="text-sm">
-              Public
-            </Label>
-          </div>
-
-          {/* Notebook run controls */}
-          <div className="flex items-center gap-1">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={runAll}
-              disabled={runningAll}
-            >
-              <Play className="h-3.5 w-3.5" />
-              Run all
+            <Button variant="outline" size="sm" onClick={() => handleAddCell("code")} aria-label="Add cell">
+              <Plus className="h-4 w-4" />
+              Add cell
             </Button>
             <Button
-              size="sm"
               variant="outline"
-              onClick={() => kernel.interrupt().catch((e) => toast.error(String((e as Error)?.message ?? e)))}
-            >
-              <Square className="h-3.5 w-3.5" />
-              Interrupt
-            </Button>
-            <Button
               size="sm"
-              variant="outline"
-              onClick={() => kernel.restart().catch((e) => toast.error(String((e as Error)?.message ?? e)))}
+              onClick={() => handleAddCell("markdown")}
+              aria-label="Add markdown cell"
             >
-              <RotateCcw className="h-3.5 w-3.5" />
-              Restart
-            </Button>
-            <Button size="sm" variant="ghost" onClick={clearAll}>
-              <Eraser className="h-3.5 w-3.5" />
-              Clear outputs
+              <Plus className="h-4 w-4" />
+              Add markdown
             </Button>
           </div>
         </div>
-      </div>
-
-      {/* Cells */}
-      <div className="flex flex-col gap-3">
-        {sortedCells.map((cell, index) => (
-          <ManagedCell
-            key={cell.id}
-            cell={cell}
-            kernel={kernel}
-            onChangeType={handleChangeType}
-            onDelete={handleDeleteCell}
-            onMoveUp={handleMoveUp}
-            onMoveDown={handleMoveDown}
-            updateCellMutate={updateCell.mutate}
-            runners={runners}
-            onPendingChange={setCellPending}
-            initialRunning={runningSet.has(cell.id)}
-            onRunAbove={index > 0 ? () => runSlice(0, index) : undefined}
-            onRunBelow={index < sortedCells.length - 1 ? () => runSlice(index + 1, sortedCells.length) : undefined}
-          />
-        ))}
-      </div>
-
-      {/* Add cell buttons */}
-      <div className="flex items-center gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => handleAddCell("code")}
-          aria-label="Add cell"
-        >
-          <Plus className="h-4 w-4" />
-          Add cell
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => handleAddCell("markdown")}
-          aria-label="Add markdown cell"
-        >
-          <Plus className="h-4 w-4" />
-          Add markdown
-        </Button>
-      </div>
-    </section>
+      </section>
+    </div>
   );
 }

@@ -1,4 +1,7 @@
+import { useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
+import type { Monaco } from "@monaco-editor/react";
+import type { editor as MonacoEditor } from "monaco-editor";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowDown, ArrowUp, ChevronDown, Loader2, Play, Trash2 } from "lucide-react";
@@ -6,6 +9,7 @@ import { ArrowDown, ArrowUp, ChevronDown, Loader2, Play, Trash2 } from "lucide-r
 import type { Cell, CellType } from "@/api/notebooks";
 import { Button } from "@/components/ui/button";
 import { CellOutputRenderer } from "@/components/notebook/CellOutputRenderer";
+import { registerStaticCompletions } from "@/components/notebook/monaco/registerStatic";
 import type { CellOutput } from "@/lib/kernel/protocol";
 import {
   Select,
@@ -48,129 +52,149 @@ export function CellEditor({
   onRunAbove,
   onRunBelow,
 }: CellEditorProps) {
-  const monacoLanguage = "python";
+  const [mdFocused, setMdFocused] = useState(false);
+  // Latest onRun for the Monaco Shift+Enter command (captured once on mount).
+  const runRef = useRef<(() => void) | undefined>(onRun);
+  runRef.current = onRun;
+
+  const errored = outputs?.some((o) => o.type === "error") ?? false;
+  // Left accent bar keyed to state.
+  const accent = running
+    ? "var(--primary)"
+    : errored
+      ? "var(--destructive)"
+      : outputs && outputs.length > 0
+        ? "var(--success)"
+        : "var(--border)";
+
+  const execLabel =
+    cell.cell_type === "markdown"
+      ? ""
+      : cell.execution_count == null
+        ? "In [ ]:"
+        : `In [${cell.execution_count}]:`;
+
+  const handleMount = (editor: MonacoEditor.IStandaloneCodeEditor, monaco: Monaco) => {
+    registerStaticCompletions(monaco);
+    editor.addCommand(monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => runRef.current?.());
+  };
 
   return (
-    <div className="rounded-lg border border-border bg-card shadow-sm">
-      {/* Toolbar */}
-      <div className="flex items-center gap-1 border-b border-border px-2 py-1">
-        <Select
-          value={cell.cell_type}
-          onValueChange={(v) => onChangeType(v as CellType)}
-        >
-          <SelectTrigger className="h-7 w-28 text-xs">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="code">Code</SelectItem>
-            <SelectItem value="markdown">Markdown</SelectItem>
-          </SelectContent>
-        </Select>
-
-        <div className="ml-auto flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 w-7 p-0"
-            onClick={onMoveUp}
-            aria-label="Move cell up"
-          >
-            <ArrowUp className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 w-7 p-0"
-            onClick={onMoveDown}
-            aria-label="Move cell down"
-          >
-            <ArrowDown className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
-            onClick={onDelete}
-            aria-label="Delete cell"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 gap-1 text-xs"
-            disabled={!onRun || running}
-            title={running ? "Running…" : "Run"}
-            aria-label="Run"
-            onClick={onRun}
-          >
-            {running ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <Play className="h-3 w-3" />
-            )}
-            Run
-          </Button>
-          {cell.cell_type !== "markdown" && (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className="h-7 w-7"
-                  aria-label="Run options"
-                >
-                  <ChevronDown className="h-4 w-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem disabled={!onRunAbove} onClick={onRunAbove}>
-                  Run all above
-                </DropdownMenuItem>
-                <DropdownMenuItem disabled={!onRunBelow} onClick={onRunBelow}>
-                  Run all below
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-        </div>
+    <div
+      className="group flex rounded-lg border bg-card shadow-sm"
+      style={{ borderLeft: `3px solid ${accent}` }}
+    >
+      {/* Gutter */}
+      <div className="w-16 shrink-0 select-none px-2 py-2 text-right font-mono text-[11px] text-muted-foreground">
+        {running ? <Loader2 className="ml-auto h-3.5 w-3.5 animate-spin" /> : execLabel}
       </div>
 
-      {/* Cell body */}
-      {cell.cell_type === "markdown" ? (
-        <div className="flex flex-col gap-0">
-          <textarea
-            className="min-h-[80px] w-full resize-y border-b border-border bg-transparent p-3 font-mono text-sm focus:outline-none"
-            value={cell.source}
-            onChange={(e) => onChangeSource(e.target.value)}
-            aria-label="Markdown source"
-            placeholder="Write markdown…"
-          />
-          {cell.source.trim() ? (
-            <div className="px-3 py-2 text-sm [&_h1]:mb-1 [&_h1]:text-lg [&_h1]:font-semibold [&_h2]:mb-1 [&_h2]:text-base [&_h2]:font-semibold [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_a]:text-primary [&_a]:underline [&_code]:rounded [&_code]:bg-muted [&_code]:px-1">
+      <div className="min-w-0 flex-1">
+        {/* Toolbar — revealed on hover/focus */}
+        <div className="flex items-center gap-1 border-b px-2 py-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+          <Select value={cell.cell_type} onValueChange={(v) => onChangeType(v as CellType)}>
+            <SelectTrigger className="h-7 w-28 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="code">Code</SelectItem>
+              <SelectItem value="markdown">Markdown</SelectItem>
+            </SelectContent>
+          </Select>
+
+          <div className="ml-auto flex items-center gap-1">
+            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={onMoveUp} aria-label="Move cell up">
+              <ArrowUp className="h-3.5 w-3.5" />
+            </Button>
+            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={onMoveDown} aria-label="Move cell down">
+              <ArrowDown className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
+              onClick={onDelete}
+              aria-label="Delete cell"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1 text-xs"
+              disabled={!onRun || running}
+              title={running ? "Running…" : "Run (Shift+Enter)"}
+              aria-label="Run"
+              onClick={onRun}
+            >
+              {running ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+              Run
+            </Button>
+            {cell.cell_type !== "markdown" && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button size="icon" variant="ghost" className="h-7 w-7" aria-label="Run options">
+                    <ChevronDown className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem disabled={!onRunAbove} onClick={onRunAbove}>
+                    Run all above
+                  </DropdownMenuItem>
+                  <DropdownMenuItem disabled={!onRunBelow} onClick={onRunBelow}>
+                    Run all below
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+          </div>
+        </div>
+
+        {/* Body */}
+        {cell.cell_type === "markdown" ? (
+          mdFocused || !cell.source.trim() ? (
+            <textarea
+              autoFocus={mdFocused}
+              className="min-h-[80px] w-full resize-y bg-transparent p-3 font-mono text-sm focus:outline-none"
+              value={cell.source}
+              onChange={(e) => onChangeSource(e.target.value)}
+              onFocus={() => setMdFocused(true)}
+              onBlur={() => setMdFocused(false)}
+              aria-label="Markdown source"
+              placeholder="Write markdown…"
+            />
+          ) : (
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => setMdFocused(true)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setMdFocused(true);
+                }
+              }}
+              className="cursor-text px-3 py-2 text-sm [&_a]:text-primary [&_a]:underline [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_h1]:mb-1 [&_h1]:text-lg [&_h1]:font-semibold [&_h2]:mb-1 [&_h2]:text-base [&_h2]:font-semibold [&_ol]:list-decimal [&_ol]:pl-5 [&_ul]:list-disc [&_ul]:pl-5"
+            >
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{cell.source}</ReactMarkdown>
             </div>
-          ) : null}
-        </div>
-      ) : (
-        <div className="min-h-[120px]">
-          <Editor
-            height="200px"
-            defaultLanguage={monacoLanguage}
-            language={monacoLanguage}
-            value={cell.source}
-            onChange={(v) => onChangeSource(v ?? "")}
-            options={{
-              minimap: { enabled: false },
-              fontSize: 13,
-              scrollBeyondLastLine: false,
-            }}
-          />
-        </div>
-      )}
+          )
+        ) : (
+          <div className="min-h-[120px]">
+            <Editor
+              height="200px"
+              defaultLanguage="python"
+              language="python"
+              value={cell.source}
+              onChange={(v) => onChangeSource(v ?? "")}
+              onMount={handleMount}
+              options={{ minimap: { enabled: false }, fontSize: 13, scrollBeyondLastLine: false }}
+            />
+          </div>
+        )}
 
-      {/* Outputs */}
-      {outputs && outputs.length > 0 && <CellOutputRenderer outputs={outputs} />}
+        {outputs && outputs.length > 0 && <CellOutputRenderer outputs={outputs} />}
+      </div>
     </div>
   );
 }
