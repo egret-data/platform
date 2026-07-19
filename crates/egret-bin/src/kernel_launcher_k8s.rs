@@ -67,15 +67,6 @@ fn label_short(id: &uuid::Uuid) -> String {
     id.simple().to_string()[..8].to_string()
 }
 
-/// Map a container Ready flag to a phase (true → Ready).
-pub fn phase_of_ready(ready: bool) -> KernelPhase {
-    if ready {
-        KernelPhase::Ready
-    } else {
-        KernelPhase::Spawning
-    }
-}
-
 /// Terminal container waiting reasons → Dead; transient (ContainerCreating) → None.
 pub fn phase_of_waiting_reason(reason: &str) -> Option<KernelPhase> {
     match reason {
@@ -259,16 +250,12 @@ impl KernelLauncher for KubernetesLauncher {
             Err(e) => return Err(KernelError::Spawn(format!("pod create: {e}"))),
         }
 
-        // Poll until Ready or terminal or timeout.
+        // Poll until Ready or terminal or timeout. Evaluate readiness FIRST each
+        // iteration so a pod that turns Ready in the last polling window isn't
+        // deleted by the deadline check before it's ever inspected.
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            if tokio::time::Instant::now() >= deadline {
-                let _ = pods.delete(&name, &DeleteParams::default()).await;
-                return Err(KernelError::Spawn(format!(
-                    "kernel pod {name} not ready within {timeout:?}"
-                )));
-            }
             match pods.get(&name).await {
                 Ok(p) => {
                     if let Some(url) = ready_url(&p) {
@@ -287,6 +274,12 @@ impl KernelLauncher for KubernetesLauncher {
                 }
                 Err(kube::Error::Api(ae)) if ae.code == 404 => { /* not yet visible */ }
                 Err(e) => return Err(KernelError::Spawn(format!("pod get: {e}"))),
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let _ = pods.delete(&name, &DeleteParams::default()).await;
+                return Err(KernelError::Spawn(format!(
+                    "kernel pod {name} not ready within {timeout:?}"
+                )));
             }
         }
     }
@@ -376,6 +369,14 @@ mod tests {
             csc.capabilities.unwrap().drop.unwrap(),
             vec!["ALL".to_string()]
         );
+        // seccomp + fsGroup
+        assert_eq!(psc.fs_group, Some(1000));
+        assert_eq!(psc.seccomp_profile.unwrap().type_, "RuntimeDefault");
+        // image pull policy + resources from cfg
+        assert_eq!(c.image_pull_policy.as_deref(), Some("IfNotPresent"));
+        let res = c.resources.clone().unwrap();
+        assert_eq!(res.requests.as_ref().unwrap().get("cpu").unwrap().0, "250m");
+        assert_eq!(res.limits.as_ref().unwrap().get("memory").unwrap().0, "2Gi");
         // env passthrough + injected port
         let names: Vec<_> = c.env.clone().unwrap().into_iter().map(|e| e.name).collect();
         assert!(names.contains(&"EGRET_API_URL".to_string()));
@@ -393,7 +394,6 @@ mod tests {
 
     #[test]
     fn phase_of_maps_pod_status() {
-        assert_eq!(phase_of_ready(true), KernelPhase::Ready);
         assert_eq!(
             phase_of_waiting_reason("ImagePullBackOff"),
             Some(KernelPhase::Dead)
