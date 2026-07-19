@@ -56,6 +56,8 @@ const SECRET_TYPES = [
   "Opaque",
   "kubernetes.io/tls",
   "kubernetes.io/basic-auth",
+  "kubernetes.io/dockerconfigjson",
+  "kubernetes.io/ssh-auth",
 ] as const;
 
 export const secretsQueryKey = ["control-plane", "secrets"] as const;
@@ -242,6 +244,13 @@ function AddSecretDialog({
   // kubernetes.io/basic-auth
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  // kubernetes.io/dockerconfigjson
+  const [dockerRegistry, setDockerRegistry] = useState("");
+  const [dockerUsername, setDockerUsername] = useState("");
+  const [dockerPassword, setDockerPassword] = useState("");
+  const [dockerEmail, setDockerEmail] = useState("");
+  // kubernetes.io/ssh-auth
+  const [sshKey, setSshKey] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   function reset() {
@@ -253,6 +262,11 @@ function AddSecretDialog({
     setTlsKey("");
     setUsername("");
     setPassword("");
+    setDockerRegistry("");
+    setDockerUsername("");
+    setDockerPassword("");
+    setDockerEmail("");
+    setSshKey("");
     setError(null);
     createMutation.reset();
   }
@@ -268,6 +282,24 @@ function AddSecretDialog({
     }
     if (type === "kubernetes.io/basic-auth") {
       return { username, password };
+    }
+    if (type === "kubernetes.io/dockerconfigjson") {
+      const registry = dockerRegistry.trim();
+      const auth = btoa(`${dockerUsername}:${dockerPassword}`);
+      const dockercfg = JSON.stringify({
+        auths: {
+          [registry]: {
+            username: dockerUsername,
+            password: dockerPassword,
+            email: dockerEmail.trim() || undefined,
+            auth,
+          },
+        },
+      });
+      return { ".dockerconfigjson": dockercfg };
+    }
+    if (type === "kubernetes.io/ssh-auth") {
+      return { "ssh-privatekey": sshKey };
     }
     // Opaque
     return Object.fromEntries(
@@ -467,6 +499,68 @@ function AddSecretDialog({
                   />
                 </div>
               </>
+            )}
+
+            {type === "kubernetes.io/dockerconfigjson" && (
+              <>
+                <div className="space-y-1.5">
+                  <Label htmlFor="cp-secret-docker-registry">Registry</Label>
+                  <Input
+                    id="cp-secret-docker-registry"
+                    value={dockerRegistry}
+                    onChange={(e) => setDockerRegistry(e.target.value)}
+                    placeholder="registry.example.com"
+                    required
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="cp-secret-docker-username">Username</Label>
+                  <Input
+                    id="cp-secret-docker-username"
+                    value={dockerUsername}
+                    onChange={(e) => setDockerUsername(e.target.value)}
+                    placeholder="Username"
+                    required
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="cp-secret-docker-password">Password</Label>
+                  <Input
+                    id="cp-secret-docker-password"
+                    type="password"
+                    value={dockerPassword}
+                    onChange={(e) => setDockerPassword(e.target.value)}
+                    placeholder="Password"
+                    autoComplete="new-password"
+                    required
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="cp-secret-docker-email">Email</Label>
+                  <Input
+                    id="cp-secret-docker-email"
+                    type="email"
+                    value={dockerEmail}
+                    onChange={(e) => setDockerEmail(e.target.value)}
+                    placeholder="Optional"
+                  />
+                </div>
+              </>
+            )}
+
+            {type === "kubernetes.io/ssh-auth" && (
+              <div className="space-y-1.5">
+                <Label htmlFor="cp-secret-ssh-key">ssh-privatekey</Label>
+                <Textarea
+                  id="cp-secret-ssh-key"
+                  value={sshKey}
+                  onChange={(e) => setSshKey(e.target.value)}
+                  placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                  className="font-mono text-xs"
+                  rows={4}
+                  required
+                />
+              </div>
             )}
 
             {error && (
