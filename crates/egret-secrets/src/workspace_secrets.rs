@@ -309,6 +309,39 @@ impl WorkspaceSecretStore {
         self.secrets.get(secret_ref).await
     }
 
+    /// Read a named secret as a `(username, password)` pair. A
+    /// `kubernetes.io/basic-auth` secret yields its two keys; any other (legacy
+    /// Opaque) secret yields `("", <single value>)` so callers keep working before
+    /// the P1b backfill converts it.
+    pub async fn resolve_basic_auth(
+        &self,
+        workspace_id: Option<Uuid>,
+        id: Uuid,
+    ) -> Result<(String, String), SecretsError> {
+        let typed = self.resolve_typed(workspace_id, id).await?;
+        Ok(split_basic_auth(typed))
+    }
+
+    /// Like `resolve_basic_auth` but resolves a workspace-scoped OR global secret
+    /// (mirrors `resolve_plaintext_ws_or_global`; same security precondition — `id`
+    /// must be an egret-set `secret_id`, never user-supplied).
+    pub async fn resolve_basic_auth_ws_or_global(
+        &self,
+        workspace_id: Uuid,
+        id: Uuid,
+    ) -> Result<(String, String), SecretsError> {
+        let secret_ref: Option<Uuid> = sqlx::query_scalar(
+            "SELECT secret_ref FROM workspace_secrets \
+             WHERE id = $1 AND (workspace_id = $2 OR workspace_id IS NULL)",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .fetch_optional(&self.db.pool)
+        .await?;
+        let secret_ref = secret_ref.ok_or(SecretsError::NotFound)?;
+        Ok(split_basic_auth(self.secrets.get_typed(secret_ref).await?))
+    }
+
     /// Resolve the vault `secret_ref` for a workspace-scoped named secret (404 if absent).
     async fn secret_ref(&self, workspace_id: Option<Uuid>, id: Uuid) -> Result<Uuid, SecretsError> {
         let row: Option<Uuid> = sqlx::query_scalar(
@@ -320,6 +353,23 @@ impl WorkspaceSecretStore {
         .fetch_optional(&self.db.pool)
         .await?;
         row.ok_or(SecretsError::NotFound)
+    }
+}
+
+/// Split a resolved typed secret into a `(username, password)` pair. A
+/// `kubernetes.io/basic-auth` secret maps its two keys; any other (legacy Opaque)
+/// secret returns its single `value` under the password slot with an empty username.
+fn split_basic_auth(typed: crate::store::TypedSecret) -> (String, String) {
+    if typed.r#type == crate::secret_type::BASIC_AUTH {
+        (
+            typed.data.get("username").cloned().unwrap_or_default(),
+            typed.data.get("password").cloned().unwrap_or_default(),
+        )
+    } else {
+        (
+            String::new(),
+            typed.data.get("value").cloned().unwrap_or_default(),
+        )
     }
 }
 
