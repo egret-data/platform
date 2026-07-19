@@ -23,11 +23,18 @@ export interface ExecuteHandlers {
   onExecutionCount: (n: number) => void;
 }
 
+export interface CompleteResult {
+  matches: string[];
+  cursorStart: number;
+  cursorEnd: number;
+}
+
 /** Hand-rolled Jupyter client over the D1c channels WS. One per open notebook. */
 export class KernelConnection {
   private ws: WebSocket | null = null;
   private session = randomId();
   private pending = new Map<string, ExecuteHandlers>(); // execute_request msg_id → handlers
+  private pendingCompletes = new Map<string, (r: CompleteResult) => void>(); // complete_request msg_id → resolver
   private ready: Promise<void> | null = null;
   private _status: KernelStatus = "disconnected";
   private statusListeners = new Set<(s: KernelStatus) => void>();
@@ -104,6 +111,9 @@ export class KernelConnection {
           h.onStatus("idle"); // resets the cell's running state
         });
         this.pending.clear();
+        // Same for in-flight completion requests: no promise should hang forever.
+        this.pendingCompletes.forEach((resolve) => resolve({ matches: [], cursorStart: 0, cursorEnd: 0 }));
+        this.pendingCompletes.clear();
       };
       ws.onerror = () => { this.setStatus("error"); reject(new Error("kernel WS error")); };
       ws.onmessage = (e) => this.onMessage(String((e as MessageEvent).data));
@@ -115,6 +125,15 @@ export class KernelConnection {
     try { m = JSON.parse(raw); } catch { return; }
     const parent = m.parent_header?.msg_id;
     if (!parent) return;
+    if (m.header?.msg_type === "complete_reply") {
+      const cb = this.pendingCompletes.get(parent);
+      if (cb) {
+        this.pendingCompletes.delete(parent);
+        const content = m.content ?? {};
+        cb({ matches: content.matches ?? [], cursorStart: content.cursor_start ?? 0, cursorEnd: content.cursor_end ?? 0 });
+      }
+      return;
+    }
     const h = this.pending.get(parent);
     if (!h) return;
     const t = m.header?.msg_type;
@@ -134,6 +153,23 @@ export class KernelConnection {
     const msg = newMsg("execute_request", this.session, { code, silent: false, store_history: true, stop_on_error: true }, { egret_cell_id: cellId });
     this.pending.set(msg.header.msg_id, handlers);
     this.ws.send(JSON.stringify(msg));
+  }
+
+  /** Ask the kernel to complete `code` at byte offset `cursorPos`. Resolves with
+   *  matches; resolves empty on timeout / no connection (never throws to the UI).
+   *  NOTE: `cursor_pos` is a Jupyter *codepoint* offset, while Monaco's
+   *  `model.getOffsetAt` is UTF-16; these agree for ASCII code (the common case)
+   *  but can diverge for code containing astral-plane characters — acceptable
+   *  for v1. */
+  async complete(code: string, cursorPos: number): Promise<CompleteResult> {
+    if (!this.ws) return { matches: [], cursorStart: cursorPos, cursorEnd: cursorPos };
+    const msg = newMsg("complete_request", this.session, { code, cursor_pos: cursorPos });
+    return new Promise((resolve) => {
+      const id = msg.header.msg_id;
+      const timer = setTimeout(() => { this.pendingCompletes.delete(id); resolve({ matches: [], cursorStart: cursorPos, cursorEnd: cursorPos }); }, 3000);
+      this.pendingCompletes.set(id, (r) => { clearTimeout(timer); resolve(r); });
+      this.ws!.send(JSON.stringify(msg));
+    });
   }
 
   /** Interrupt the running kernel (best-effort; requires a connected kernel). */
@@ -161,6 +197,8 @@ export class KernelConnection {
     this.ws = null;
     this.ready = null;
     this.pending.clear();
+    this.pendingCompletes.forEach((resolve) => resolve({ matches: [], cursorStart: 0, cursorEnd: 0 }));
+    this.pendingCompletes.clear();
     this.setStatus("disconnected");
   }
 }
