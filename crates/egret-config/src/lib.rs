@@ -282,7 +282,7 @@ impl Default for Config {
                 image_pull_policy: "IfNotPresent".into(),
                 cpu_request: "250m".into(),
                 mem_request: "512Mi".into(),
-                cpu_limit: "1".into(),
+                cpu_limit: "1000m".into(),
                 mem_limit: "2Gi".into(),
                 pull_secret: None,
                 callback_url: None,
