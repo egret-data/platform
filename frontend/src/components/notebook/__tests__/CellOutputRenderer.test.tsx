@@ -1,8 +1,30 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, it, expect } from "vitest";
 import { CellOutputRenderer } from "../CellOutputRenderer";
+import type { CellOutput } from "@/lib/kernel/protocol";
 
 describe("CellOutputRenderer", () => {
+  it("renders stdout inline and collapses stderr under a Logs disclosure", async () => {
+    const outputs: CellOutput[] = [
+      { type: "stream", name: "stdout", text: "hello user" },
+      { type: "stream", name: "stderr", text: "a warning line" },
+    ];
+    render(<CellOutputRenderer outputs={outputs} />);
+    expect(screen.getByText(/hello user/)).toBeInTheDocument();
+    expect(screen.queryByText(/a warning line/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /logs/i }));
+    expect(screen.getByText(/a warning line/)).toBeInTheDocument();
+  });
+
+  it("renders an error with its ename and evalue", () => {
+    const outputs: CellOutput[] = [
+      { type: "error", ename: "ValueError", evalue: "bad", traceback: ["Traceback…"] },
+    ];
+    render(<CellOutputRenderer outputs={outputs} />);
+    expect(screen.getByText(/ValueError: bad/)).toBeInTheDocument();
+  });
+
   it("renders stream text", () => {
     render(<CellOutputRenderer outputs={[{ type: "stream", name: "stdout", text: "hello" }]} />);
     expect(screen.getByText(/hello/)).toBeInTheDocument();
