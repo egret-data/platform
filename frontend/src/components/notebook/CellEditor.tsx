@@ -4,7 +4,8 @@ import type { Monaco } from "@monaco-editor/react";
 import type { editor as MonacoEditor } from "monaco-editor";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowDown, ArrowUp, ChevronDown, Loader2, Play, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, GripVertical, Loader2, Play, Trash2 } from "lucide-react";
+import type { DraggableAttributes, DraggableSyntheticListeners } from "@dnd-kit/core";
 
 import type { Cell, CellType } from "@/api/notebooks";
 import { Button } from "@/components/ui/button";
@@ -62,6 +63,10 @@ export interface CellEditorProps {
   onRunAndBelow?: () => void;
   /** Esc inside the editor: blur and return the page to command mode. */
   onEnterCommandMode?: () => void;
+  /** dnd-kit sortable attributes+listeners (from the page's SortableCell
+   *  wrapper) for the drag-handle button rendered in the toolbar. Undefined
+   *  outside a DndContext (e.g. standalone tests) → no handle is rendered. */
+  dragHandleProps?: { attributes: DraggableAttributes; listeners: DraggableSyntheticListeners };
 }
 
 export function CellEditor({
@@ -87,6 +92,7 @@ export function CellEditor({
   onRunAndNext,
   onRunAndBelow,
   onEnterCommandMode,
+  dragHandleProps,
 }: CellEditorProps) {
   const [mdFocused, setMdFocused] = useState(false);
   // Local buffer for the SQL result-variable input: cell.sql_into is react-query
@@ -181,6 +187,18 @@ export function CellEditor({
           className="flex items-center gap-1 border-b px-2 py-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100"
           onClick={() => onSelectCell?.()}
         >
+          {dragHandleProps && (
+            <button
+              type="button"
+              aria-label="Drag to reorder cell"
+              className="cursor-grab touch-none text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-foreground"
+              onClick={(e) => e.stopPropagation()}
+              {...dragHandleProps.attributes}
+              {...dragHandleProps.listeners}
+            >
+              <GripVertical className="h-3.5 w-3.5" />
+            </button>
+          )}
 
           <Select value={cell.cell_type} onValueChange={(v) => onChangeType(v as CellType)}>
             <SelectTrigger className="h-7 w-28 text-xs">
