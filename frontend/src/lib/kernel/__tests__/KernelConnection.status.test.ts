@@ -34,4 +34,24 @@ describe("KernelConnection status stream", () => {
     expect(seen).toContain("restarting");
     expect(k.status).toBe("disconnected");
   });
+
+  it("interrupt() emits a transient 'interrupting' then settles 'disconnected' with no socket", async () => {
+    const k = new KernelConnection("ws", "nb");
+    const seen: string[] = [];
+    k.onStatusChange((s) => seen.push(s));
+    await k.interrupt();
+    expect(seen).toContain("interrupting");
+    expect(k.status).toBe("disconnected");
+  });
+
+  it("a throwing listener does not break a subsequent good listener", async () => {
+    const k = new KernelConnection("ws", "nb");
+    const seen: string[] = [];
+    k.onStatusChange(() => {
+      throw new Error("bad listener");
+    });
+    k.onStatusChange((s) => seen.push(s));
+    await k.restart();
+    expect(seen).toContain("restarting");
+  });
 });

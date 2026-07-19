@@ -42,7 +42,9 @@ export class KernelConnection {
    *  current value; returns an unsubscribe function. */
   onStatusChange(cb: (s: KernelStatus) => void): () => void {
     this.statusListeners.add(cb);
-    cb(this._status);
+    // Isolate the immediate fire too, so a throwing subscriber can't break
+    // the caller that is registering it.
+    try { cb(this._status); } catch (e) { console.error("kernel status listener threw", e); }
     return () => {
       this.statusListeners.delete(cb);
     };
@@ -51,7 +53,12 @@ export class KernelConnection {
   private setStatus(s: KernelStatus): void {
     if (this._status === s) return;
     this._status = s;
-    this.statusListeners.forEach((cb) => cb(s));
+    // Snapshot so a listener that (un)subscribes during dispatch doesn't
+    // double-fire or mutate the set mid-iteration; isolate throws so one bad
+    // subscriber can't break connect()/message handling.
+    for (const cb of Array.from(this.statusListeners)) {
+      try { cb(s); } catch (e) { console.error("kernel status listener threw", e); }
+    }
   }
 
   private path(suffix: string) { return `/ws/${this.ws_slug}/notebooks/${this.nb}/kernel${suffix}`; }
