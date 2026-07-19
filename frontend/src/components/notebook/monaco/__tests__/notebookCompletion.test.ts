@@ -52,18 +52,21 @@ describe("registerNotebookCompletions", () => {
     expect(Object.keys(m.providers).sort()).toEqual(["python", "sql"]);
   });
 
-  it("SQL-Lab-safe: with no context, python returns only statics and sql returns only keywords", async () => {
+  it("SQL-Lab-safe: with no context, python returns only statics and sql returns EMPTY", async () => {
     setNotebookCompletionContext(null);
 
+    // Python Monaco is notebook-only, so returning static helper snippets when
+    // there's no context is harmless and useful.
     const pyResult = await m.providers.python.provideCompletionItems(fakeModel(), fakePosition);
     const pyLabels = pyResult.suggestions.map((s: any) => s.label);
     expect(pyLabels).toEqual(expect.arrayContaining(["trino", "starrocks", "display"]));
     expect(pyLabels).not.toEqual(expect.arrayContaining(["df.a"]));
 
+    // The SQL provider is global + never disposed, so it also fires in SQL Lab
+    // (which has its own provider). It must contribute NOTHING there — not even
+    // keywords — or SQL Lab shows duplicate keyword suggestions.
     const sqlResult = m.providers.sql.provideCompletionItems(fakeModel(), fakePosition);
-    const sqlLabels = sqlResult.suggestions.map((s: any) => s.label);
-    expect(sqlLabels).toEqual(expect.arrayContaining(["SELECT", "FROM", "WHERE"]));
-    expect(sqlLabels).not.toEqual(expect.arrayContaining(["orders"]));
+    expect(sqlResult.suggestions).toEqual([]);
   });
 
   it("with a notebook context, python suggestions include kernel matches and sql includes schema words", async () => {

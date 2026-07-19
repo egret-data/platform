@@ -86,6 +86,11 @@ export function registerNotebookCompletions(monaco: Monaco): void {
 
   monaco.languages.registerCompletionItemProvider("sql", {
     provideCompletionItems(model: MonacoNS.editor.ITextModel, position: MonacoNS.Position) {
+      // Fully silent outside a notebook. This provider is registered globally
+      // and never disposed, so it also fires in SQL Lab (which has its own SQL
+      // provider) — returning nothing there avoids duplicate keyword/word
+      // suggestions. Only inside a notebook (ctx set) do we contribute.
+      if (!ctx) return { suggestions: [] };
       const word = model.getWordUntilPosition(position);
       const range = {
         startLineNumber: position.lineNumber,
@@ -99,11 +104,7 @@ export function registerNotebookCompletions(monaco: Monaco): void {
         insertText: k,
         range,
       }));
-      // Empty (not undefined) when there's no active notebook — this is what
-      // keeps SQL Lab's own SQL editor (which has its own provider anyway)
-      // from ever seeing notebook-only words.
-      const words = ctx ? ctx.sqlWords() : [];
-      const objs = Array.from(new Set(words)).map((w) => ({
+      const objs = Array.from(new Set(ctx.sqlWords())).map((w) => ({
         label: w,
         kind: monaco.languages.CompletionItemKind.Field,
         insertText: w,

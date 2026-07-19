@@ -304,6 +304,11 @@ export default function NotebookPage() {
     setNotebookCompletionContext({ kernel, sqlWords: () => sqlWordsRef.current });
     return () => setNotebookCompletionContext(null);
   }, [kernel]);
+  // Stable identity (only mutates the ref) so passing it to SchemaBrowserPanel
+  // doesn't re-fire its per-level load-report effects on every page render.
+  const handleObjectsLoaded = useCallback((names: string[]) => {
+    sqlWordsRef.current = Array.from(new Set([...sqlWordsRef.current, ...names]));
+  }, []);
 
   const kernelStatus = useKernelConnectionStatus(kernel);
   const [nameDirty, setNameDirty] = useState(false);
@@ -795,9 +800,7 @@ export default function NotebookPage() {
               onNewSqlCell={(sql) =>
                 insertCell("sql", sortedCells.length, { focus: true, initialSource: sql })
               }
-              onObjectsLoaded={(names) => {
-                sqlWordsRef.current = Array.from(new Set([...sqlWordsRef.current, ...names]));
-              }}
+              onObjectsLoaded={handleObjectsLoaded}
             />
           )}
         </aside>
