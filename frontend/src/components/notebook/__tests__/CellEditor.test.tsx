@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { CellEditor } from "../CellEditor";
 import type { Cell } from "@/api/notebooks";
 
@@ -41,5 +41,20 @@ describe("CellEditor", () => {
       />,
     );
     expect(screen.getByRole("heading", { name: "Hello" })).toBeInTheDocument();
+  });
+
+  it("keeps the markdown textarea mounted while typing into an empty cell", () => {
+    const changes: string[] = [];
+    render(
+      <CellEditor
+        {...baseProps}
+        onChangeSource={(s) => changes.push(s)}
+        cell={cell({ id: "e", cell_type: "markdown", source: "", cell_order: 0 })}
+      />,
+    );
+    const ta = screen.getByLabelText("Markdown source");
+    fireEvent.focus(ta);
+    fireEvent.change(ta, { target: { value: "h" } });
+    expect(screen.getByLabelText("Markdown source")).toBeInTheDocument();
   });
 });

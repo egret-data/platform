@@ -158,6 +158,7 @@ export function CellEditor({
               className="min-h-[80px] w-full resize-y bg-transparent p-3 font-mono text-sm focus:outline-none"
               value={cell.source}
               onChange={(e) => onChangeSource(e.target.value)}
+              onFocus={() => setMdFocused(true)}
               onBlur={() => setMdFocused(false)}
               aria-label="Markdown source"
               placeholder="Write markdown…"
@@ -167,7 +168,12 @@ export function CellEditor({
               role="button"
               tabIndex={0}
               onClick={() => setMdFocused(true)}
-              onKeyDown={(e) => e.key === "Enter" && setMdFocused(true)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setMdFocused(true);
+                }
+              }}
               className="cursor-text px-3 py-2 text-sm [&_a]:text-primary [&_a]:underline [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_h1]:mb-1 [&_h1]:text-lg [&_h1]:font-semibold [&_h2]:mb-1 [&_h2]:text-base [&_h2]:font-semibold [&_ol]:list-decimal [&_ol]:pl-5 [&_ul]:list-disc [&_ul]:pl-5"
             >
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{cell.source}</ReactMarkdown>
