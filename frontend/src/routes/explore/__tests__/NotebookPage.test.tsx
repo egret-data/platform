@@ -342,7 +342,7 @@ describe("NotebookPage", () => {
     expect(screen.getByText(/restored/)).toBeInTheDocument();
   });
 
-  it("Run sends the raw cell source (no %%egret_sql prefix — SQL lives in code cells)", async () => {
+  it("Run on a code cell sends the raw cell source (no %%egret_sql prefix)", async () => {
     renderAt();
     const runButton = screen.getAllByRole("button", { name: /^run$/i })[0];
 
@@ -356,6 +356,63 @@ describe("NotebookPage", () => {
       "print(1)",
       expect.any(Object),
     );
+  });
+
+  it("Run on a SQL cell sends the %%egret_sql magic-prefixed code", async () => {
+    const sqlCell = {
+      id: "cell-sql",
+      cell_type: "sql" as const,
+      source: "SELECT 1",
+      cell_order: 0,
+      execution_count: null,
+      last_output: null,
+      last_execution_time_ms: null,
+      sql_target: "e1",
+      sql_into: "df",
+    };
+    notebookMock.mockReturnValue({
+      data: { ...mockNotebook, cells: [sqlCell] },
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    renderAt();
+    const runButton = screen.getAllByRole("button", { name: /^run$/i })[0];
+
+    await act(async () => {
+      fireEvent.click(runButton);
+    });
+
+    const code = kernelExecute.mock.calls[0][1] as string;
+    expect(code).toMatch(/^%%egret_sql/);
+    expect(code).toContain("--into df");
+    expect(code.endsWith("SELECT 1")).toBe(true);
+  });
+
+  it("renders a binding chip for a SQL cell with a variable and outputs", () => {
+    const sqlCell = {
+      id: "cell-sql",
+      cell_type: "sql" as const,
+      source: "SELECT 1",
+      cell_order: 0,
+      execution_count: null,
+      // Seeds ManagedCell's outputs state on load → chip renders without a run.
+      last_output: [{ type: "stream", name: "stdout", text: "ok" }],
+      last_execution_time_ms: null,
+      sql_target: "e1",
+      sql_into: "df",
+    };
+    notebookMock.mockReturnValue({
+      data: { ...mockNotebook, cells: [sqlCell] },
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    renderAt();
+    // sql_into is wrapped in a <code>, so assert on the chip's full text content
+    // (which spans the element boundary) rather than a single text node.
+    const chip = screen.getByText(/Daft DataFrame/);
+    expect(chip).toHaveTextContent(/df · Daft DataFrame/);
   });
 
   it("does not render a SQL target control", () => {

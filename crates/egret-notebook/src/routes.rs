@@ -488,6 +488,8 @@ async fn add_cell(
             &b.cell_type,
             b.source.as_deref().unwrap_or(""),
             b.cell_order.unwrap_or(0),
+            b.sql_target.as_deref(),
+            b.sql_into.as_deref(),
         )
         .await?;
     let detail = st

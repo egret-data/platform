@@ -57,6 +57,19 @@ export interface Cell {
   execution_count: number | null;
   last_output: unknown | null;
   last_execution_time_ms: number | null;
+  sql_target?: string | null;
+  sql_into?: string | null;
+}
+
+/** Pick a collision-free default DataFrame variable name for a new SQL cell:
+ *  `df`, then `df_2`, `df_3`, … skipping any `sql_into` already in use. */
+export function defaultSqlInto(cells: Cell[]): string {
+  const used = new Set(cells.map((c) => c.sql_into).filter(Boolean) as string[]);
+  if (!used.has("df")) return "df";
+  for (let i = 2; ; i++) {
+    const candidate = `df_${i}`;
+    if (!used.has(candidate)) return candidate;
+  }
 }
 
 export interface NotebookSummary {
@@ -181,7 +194,13 @@ export function useAddCell(ws: string, id: string) {
   return useMutation<
     NotebookDetail,
     ApiError,
-    { cell_type: CellType; source?: string; cell_order?: number }
+    {
+      cell_type: CellType;
+      source?: string;
+      cell_order?: number;
+      sql_target?: string;
+      sql_into?: string;
+    }
   >({
     mutationFn: async (b) => (await notebooksAddCell(ws, id, b)).data as NotebookDetail,
     onSuccess: () => qc.invalidateQueries({ queryKey: getNotebooksGetOneQueryKey(ws, id) }),
@@ -191,11 +210,23 @@ export function useAddCell(ws: string, id: string) {
 // PATCH cell → 204
 export function useUpdateCell(ws: string, id: string) {
   const qc = useQueryClient();
-  return useMutation<void, ApiError, { cid: string; cell_type?: CellType; source?: string }>({
+  return useMutation<
+    void,
+    ApiError,
+    {
+      cid: string;
+      cell_type?: CellType;
+      source?: string;
+      sql_target?: string;
+      sql_into?: string;
+    }
+  >({
     mutationFn: async (a) => {
       await notebooksUpdateCell(ws, id, a.cid, {
         cell_type: a.cell_type,
         source: a.source,
+        sql_target: a.sql_target,
+        sql_into: a.sql_into,
       });
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: getNotebooksGetOneQueryKey(ws, id) }),

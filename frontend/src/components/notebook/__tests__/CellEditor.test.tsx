@@ -20,6 +20,9 @@ const baseProps = {
   onDelete: noop,
   onMoveUp: noop,
   onMoveDown: noop,
+  engines: [],
+  onChangeSqlTarget: noop,
+  onChangeSqlInto: noop,
 };
 
 describe("CellEditor", () => {
@@ -56,5 +59,37 @@ describe("CellEditor", () => {
     fireEvent.focus(ta);
     fireEvent.change(ta, { target: { value: "h" } });
     expect(screen.getByLabelText("Markdown source")).toBeInTheDocument();
+  });
+
+  it("shows a target dropdown and variable input for SQL cells", () => {
+    render(
+      <CellEditor
+        {...baseProps}
+        engines={[{ id: "e1", name: "Trino", engine: "trino", enabled: true }]}
+        cell={cell({ id: "s", cell_type: "sql", source: "SELECT 1", cell_order: 0, sql_target: "e1", sql_into: "df" })}
+      />,
+    );
+    expect(screen.getByLabelText(/result variable/i)).toHaveValue("df");
+  });
+
+  it("lets you type a multi-char result variable (local state) and commits on blur", () => {
+    const onChangeSqlInto = vi.fn();
+    render(
+      <CellEditor
+        {...baseProps}
+        onChangeSqlInto={onChangeSqlInto}
+        engines={[{ id: "e1", name: "Trino", engine: "trino", enabled: true }]}
+        cell={cell({ id: "s", cell_type: "sql", source: "SELECT 1", cell_order: 0, sql_target: "e1", sql_into: "df" })}
+      />,
+    );
+    const input = screen.getByLabelText(/result variable/i);
+    // Typing updates local state (server state hasn't changed, so no revert).
+    fireEvent.change(input, { target: { value: "sales_df" } });
+    expect(input).toHaveValue("sales_df");
+    // No premature per-keystroke commit.
+    expect(onChangeSqlInto).not.toHaveBeenCalled();
+    // Commit happens on blur.
+    fireEvent.blur(input);
+    expect(onChangeSqlInto).toHaveBeenCalledWith("sales_df");
   });
 });
