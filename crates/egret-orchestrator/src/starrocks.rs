@@ -790,6 +790,15 @@ impl StarRocksProvisioner {
             }
         }
         self.kube.apply(&starrocks_cluster_cr(spec)).await?;
+        if let Some(ing) = spec.config.ingress.as_ref() {
+            if let Some(sec) = crate::ingress::ingress_tls_secret(&spec.name, &spec.namespace, ing)
+            {
+                self.kube.apply(&sec).await?;
+            }
+        }
+        if let Some(ing) = starrocks_ingress(spec) {
+            self.kube.apply(&ing).await?;
+        }
         Ok(())
     }
 
@@ -971,6 +980,19 @@ impl EngineProvisioner for StarRocksProvisioner {
         let _ = self
             .kube
             .delete("v1", "Secret", namespace, &format!("{name}-initpwd-secret"))
+            .await;
+        let _ = self
+            .kube
+            .delete(
+                "networking.k8s.io/v1",
+                "Ingress",
+                namespace,
+                &format!("{name}-fe"),
+            )
+            .await;
+        let _ = self
+            .kube
+            .delete("v1", "Secret", namespace, &format!("{name}-ingress-tls"))
             .await;
         Ok(())
     }
