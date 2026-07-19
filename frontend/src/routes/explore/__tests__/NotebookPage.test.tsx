@@ -216,6 +216,8 @@ describe("NotebookPage", () => {
     expect(
       screen.getByRole("button", { name: /data sources/i }),
     ).toBeInTheDocument();
+    // KernelStatusBadge shows "Ready" for the mocked "idle" status.
+    expect(screen.getByText(/ready/i)).toBeInTheDocument();
   });
 
   // ── Header ────────────────────────────────────────────────────────────────

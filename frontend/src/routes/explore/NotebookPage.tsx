@@ -192,6 +192,7 @@ export default function NotebookPage() {
   const active = useActiveExecutions(ws!, id!);
 
   const kernelStatus = useKernelStatus(kernel);
+  const [nameDirty, setNameDirty] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("toc");
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
@@ -235,9 +236,10 @@ export default function NotebookPage() {
     [active.data],
   );
 
-  // A cell save debounces ~600ms. Warn on refresh/close while unpersisted
-  // (beforeunload-only; SPA nav flushes cell saves on unmount).
-  useUnsavedChangesWarning(pendingCells.size > 0);
+  // A cell save debounces ~600ms; a name edit commits only on blur. Warn on
+  // refresh/close while either is unpersisted (beforeunload-only; SPA nav
+  // flushes cell saves on unmount).
+  useUnsavedChangesWarning(pendingCells.size > 0 || nameDirty);
 
   const handleAddCell = (cellType: CellType = "code") => {
     const cells = notebook.data?.cells ?? [];
@@ -382,11 +384,12 @@ export default function NotebookPage() {
             kernel.restart().catch((e) => toast.error(String((e as Error)?.message ?? e)))
           }
           onClear={clearAll}
+          onDirtyChange={setNameDirty}
         />
 
         <div className="flex flex-col gap-3 p-4">
           {sortedCells.map((cell, index) => (
-            <div key={cell.id} id={`cell-${cell.id}`} style={{ scrollMarginTop: "5rem" }}>
+            <div key={cell.id} id={`cell-${cell.id}`} style={{ scrollMarginTop: "6rem" }}>
               <ManagedCell
                 cell={cell}
                 kernel={kernel}

@@ -20,11 +20,17 @@ export interface NotebookHeaderProps {
   onInterrupt: () => void;
   onRestart: () => void;
   onClear: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 export function NotebookHeader(props: NotebookHeaderProps) {
   const [localName, setLocalName] = useState(props.name);
   useEffect(() => setLocalName(props.name), [props.name]);
+
+  useEffect(() => {
+    const dirty = localName.trim() !== "" && localName.trim() !== props.name;
+    props.onDirtyChange?.(dirty);
+  }, [localName, props.name]);
 
   const commitName = () => {
     const trimmed = localName.trim();
