@@ -61,6 +61,8 @@ vi.mock("@monaco-editor/react", () => ({
       KeyCode: monacoStub.KeyCode,
       languages: {
         registerCompletionItemProvider: () => {},
+        registerHoverProvider: () => {},
+        registerSignatureHelpProvider: () => {},
         CompletionItemKind: { Function: 1, Keyword: 2 },
         CompletionItemInsertTextRule: { InsertAsSnippet: 4 },
       },
