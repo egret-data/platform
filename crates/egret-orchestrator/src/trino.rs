@@ -442,17 +442,7 @@ pub fn trino_tls_secret(spec: &EngineSpec) -> Option<Value> {
 /// unless the ingress is enabled and carries resolved cert+key PEMs (populated
 /// at provision from a typed `kubernetes.io/tls` secret ref).
 pub fn trino_ingress_tls_secret(spec: &EngineSpec) -> Option<Value> {
-    let ing = spec.config.ingress.as_ref()?;
-    if !ing.enabled {
-        return None;
-    }
-    let (crt, key) = (ing.tls_cert_pem.as_ref()?, ing.tls_key_pem.as_ref()?);
-    Some(json!({
-        "apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/tls",
-        "metadata": { "name": format!("{}-ingress-tls", spec.name), "namespace": spec.namespace,
-                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
-        "stringData": { "tls.crt": crt, "tls.key": key }
-    }))
+    crate::ingress::ingress_tls_secret(&spec.name, &spec.namespace, spec.config.ingress.as_ref()?)
 }
 
 fn config_checksum(spec: &EngineSpec) -> String {
