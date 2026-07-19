@@ -1,4 +1,6 @@
 import {
+  Fragment,
+  type KeyboardEvent,
   type MutableRefObject,
   useCallback,
   useEffect,
@@ -33,6 +35,7 @@ import { useKernelConnectionStatus } from "@/lib/kernel/useKernelConnectionStatu
 import { NotebookHeader, type NotebookPanel } from "@/components/notebook/NotebookHeader";
 import { TableOfContentsPanel } from "@/components/notebook/panels/TableOfContentsPanel";
 import { DataSourcesPanel } from "@/components/notebook/panels/DataSourcesPanel";
+import { SchemaBrowserPanel } from "@/components/notebook/panels/SchemaBrowserPanel";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -43,6 +46,8 @@ import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 
 interface ManagedCellProps {
   cell: Cell;
+  /** Position among the sorted cells — needed for "insert below" (Alt+Enter). */
+  index: number;
   kernel: KernelConnection;
   onChangeType: (cid: string, type: CellType) => void;
   onDelete: (cid: string) => void;
@@ -68,10 +73,28 @@ interface ManagedCellProps {
   onPendingChange?: (cid: string, pending: boolean) => void;
   /** Enabled engines for the SQL target dropdown (from useNotebookRuntime). */
   engines?: EngineOption[];
+  /** Whether this cell is the page's active cell (focus ring). */
+  active?: boolean;
+  /** Editor gained edit-focus (Monaco text focus / markdown edit) → page sets mode="edit". */
+  onFocusCell?: (cid: string) => void;
+  /** Non-editor chrome clicked → page sets active while staying in command mode. */
+  onSelectCell?: (cid: string) => void;
+  /** Registers this cell's programmatic-focus function under its id. */
+  registerFocus?: (cid: string, focus: () => void) => void;
+  /** Registers this cell's insert-at-cursor function under its id (schema
+   *  browser click-to-insert). */
+  registerEdit?: (cid: string, fn: (text: string) => void) => void;
+  /** Shift+Enter: select the next cell (the run itself is driven by handleRun below). */
+  onSelectNext?: (cid: string) => void;
+  /** Alt+Enter: insert + select a new code cell right below this index. */
+  onInsertBelow?: (index: number) => void;
+  /** Esc inside the editor: return the page to command mode. */
+  onEnterCommandMode?: () => void;
 }
 
 function ManagedCell({
   cell,
+  index,
   kernel,
   onChangeType,
   onDelete,
@@ -84,6 +107,14 @@ function ManagedCell({
   onRunBelow,
   onPendingChange,
   engines,
+  active,
+  onFocusCell,
+  onSelectCell,
+  registerFocus,
+  registerEdit,
+  onSelectNext,
+  onInsertBelow,
+  onEnterCommandMode,
 }: ManagedCellProps) {
   const [source, setSource] = useState(cell.source);
   // Restore-on-load: seed outputs from the persisted last_output.
@@ -193,6 +224,20 @@ function ManagedCell({
         engines={engines}
         onChangeSqlTarget={(t) => updateCellMutate({ cid: cell.id, sql_target: t })}
         onChangeSqlInto={(v) => updateCellMutate({ cid: cell.id, sql_into: v })}
+        active={active}
+        onFocusCell={() => onFocusCell?.(cell.id)}
+        onSelectCell={() => onSelectCell?.(cell.id)}
+        registerFocus={(fn) => registerFocus?.(cell.id, fn)}
+        registerEdit={(fn) => registerEdit?.(cell.id, fn)}
+        onRunAndNext={() => {
+          if (cell.cell_type !== "markdown") void handleRun();
+          onSelectNext?.(cell.id);
+        }}
+        onRunAndBelow={() => {
+          if (cell.cell_type !== "markdown") void handleRun();
+          onInsertBelow?.(index);
+        }}
+        onEnterCommandMode={onEnterCommandMode}
       />
       {cell.cell_type === "sql" && cell.sql_into && (outputs?.length ?? 0) > 0 && (
         <div className="px-3 pb-2 text-[11px] text-muted-foreground">
@@ -200,6 +245,27 @@ function ManagedCell({
         </div>
       )}
     </>
+  );
+}
+
+/** A slim, hover-revealed "+ insert" row rendered between cells (and after the
+ *  last one) so a cell can be inserted at any position, not just appended. */
+function InsertBar({ onInsert }: { onInsert: () => void }) {
+  return (
+    <div className="group/insert relative h-2">
+      <div className="pointer-events-none absolute inset-x-0 top-1/2 flex -translate-y-1/2 items-center justify-center opacity-0 transition-opacity group-hover/insert:opacity-100">
+        <div className="h-px flex-1 bg-border" />
+        <button
+          type="button"
+          aria-label="Insert cell here"
+          onClick={onInsert}
+          className="pointer-events-auto mx-2 rounded-full border bg-background p-0.5 text-muted-foreground shadow-sm hover:text-foreground"
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </button>
+        <div className="h-px flex-1 bg-border" />
+      </div>
+    </div>
   );
 }
 
@@ -218,6 +284,14 @@ export default function NotebookPage() {
   const reorderCells = useReorderCells(ws!, id!);
   const active = useActiveExecutions(ws!, id!);
   const engines = runtime.data?.engines ?? [];
+
+  // Connect the kernel eagerly so the first Run is instant (ad-hoc friction
+  // fix): don't make the user click Run just to see "Connecting…". Best-effort
+  // — a real failure surfaces on the first actual Run, not as a passive-open toast.
+  useEffect(() => {
+    kernel.connect().catch(() => {});
+    // kernel is stable for the page's lifetime (keyed on ws/id remount).
+  }, [kernel]);
 
   const kernelStatus = useKernelConnectionStatus(kernel);
   const [nameDirty, setNameDirty] = useState(false);
@@ -265,21 +339,194 @@ export default function NotebookPage() {
   // flushes cell saves on unmount).
   useUnsavedChangesWarning(pendingCells.size > 0 || nameDirty);
 
-  const handleAddCell = (cellType: CellType = "code") => {
-    const cells = notebook.data?.cells ?? [];
+  // ── Active-cell + mode model (S1-3 / S1-4) ────────────────────────────────
+  // activeCellId is the selected cell; mode="edit" while its editor has text
+  // focus, mode="command" while the keyboard drives the notebook (Jupyter-
+  // style j/k/a/b/dd). cellFocus is a per-cell registry of "focus this editor"
+  // closures (parallel to the `runners` registry above) so the page can drive
+  // focus programmatically from keyboard nav / Shift+Enter.
+  const [activeCellId, setActiveCellId] = useState<string | null>(null);
+  const [mode, setMode] = useState<"edit" | "command">("command");
+  const cellFocus = useRef<Record<string, () => void>>({});
+  // Per-cell insert-at-cursor registry (parallel to cellFocus), populated by
+  // CellEditor's Monaco onMount — lets the schema browser insert a column
+  // name into whichever cell is active without owning its editor state.
+  const cellEdit = useRef<Record<string, (text: string) => void>>({});
+  // Last unpaired "d" press (cell + timestamp) for the "dd" delete chord. The
+  // cell id is tracked so a stray "d" then a nav/click to another cell can't
+  // pair with a later "d" and delete the wrong cell.
+  const ddRef = useRef<{ at: number; cid: string }>({ at: 0, cid: "" });
+  const sectionRef = useRef<HTMLElement | null>(null);
+
+  // Seed the active cell to the first one once cells load, so keyboard nav
+  // (j/k, a/b, dd) works without requiring a first click. Guarded so it never
+  // overrides a selection the user (or an insert) has already made.
+  useEffect(() => {
+    if (activeCellId === null && (notebook.data?.cells?.length ?? 0) > 0) {
+      const first = [...notebook.data!.cells].sort(
+        (a, b) => a.cell_order - b.cell_order,
+      )[0];
+      setActiveCellId(first.id);
+    }
+  }, [notebook.data?.cells, activeCellId]);
+
+  const focusCell = (cid: string) => {
+    setActiveCellId(cid);
+    cellFocus.current[cid]?.();
+  };
+
+  // Insert text at the active cell's cursor (schema browser column click). A
+  // no-op if there's no active cell or its editor hasn't registered (e.g. a
+  // markdown cell in preview mode).
+  const insertIntoActive = (text: string) => {
+    if (activeCellId && cellEdit.current[activeCellId]) cellEdit.current[activeCellId](text);
+  };
+
+  // Move the active selection to the adjacent cell. In edit mode (Shift+Enter
+  // from within an editor) this focuses the next editor so typing can continue;
+  // in command mode (j/k/arrow nav) it just moves the highlight and keeps
+  // keyboard focus on the section so further chords keep routing here.
+  const selectAdjacent = (cid: string, dir: 1 | -1) => {
+    const cells = [...(notebook.data?.cells ?? [])].sort(
+      (a, b) => a.cell_order - b.cell_order,
+    );
+    const ids = cells.map((c) => c.id);
+    const next = ids[ids.indexOf(cid) + dir];
+    if (!next) return;
+    if (mode === "edit") {
+      focusCell(next);
+    } else {
+      setActiveCellId(next);
+      sectionRef.current?.focus();
+    }
+  };
+
+  // Insert a cell at an arbitrary position: add it (server assigns the next
+  // cell_order), then reorder so it lands at `atIndex` among the existing cells.
+  // The new cell always becomes the active cell; opts.focus additionally enters
+  // edit mode and drives focus into it (Alt+Enter). A rapid second insert while
+  // the first add/reorder is still in flight is dropped so the ordering can't race.
+  const insertCell = (
+    cellType: CellType,
+    atIndex: number,
+    opts?: { focus?: boolean; initialSource?: string },
+  ) => {
+    if (addCell.isPending || reorderCells.isPending) return;
+    const cells = [...(notebook.data?.cells ?? [])].sort(
+      (a, b) => a.cell_order - b.cell_order,
+    );
     const maxOrder = cells.reduce((m, c) => Math.max(m, c.cell_order), -1);
-    addCell.mutate({
-      cell_type: cellType,
-      cell_order: maxOrder + 1,
-      // Seed a collision-free variable and default to the first enabled engine so
-      // Run doesn't emit `%%egret_sql --target  …` (an IPython parse-time error).
-      ...(cellType === "sql"
-        ? {
-            sql_into: defaultSqlInto(cells),
-            sql_target: engines.find((e) => e.enabled)?.id,
+    addCell.mutate(
+      {
+        cell_type: cellType,
+        cell_order: maxOrder + 1,
+        ...(opts?.initialSource ? { source: opts.initialSource } : {}),
+        // Seed a collision-free variable and default to the first enabled engine so
+        // Run doesn't emit `%%egret_sql --target  …` (an IPython parse-time error).
+        ...(cellType === "sql"
+          ? {
+              sql_into: defaultSqlInto(cells),
+              sql_target: engines.find((e) => e.enabled)?.id,
+            }
+          : {}),
+      },
+      {
+        onSuccess: (detail) => {
+          // The new cell is the highest-order one; move it to `atIndex`.
+          const created = [...detail.cells].sort((a, b) => a.cell_order - b.cell_order).at(-1);
+          if (!created) return;
+          const order = cells.map((c) => c.id).filter((cid) => cid !== created.id);
+          order.splice(Math.max(0, Math.min(atIndex, order.length)), 0, created.id);
+          reorderCells.mutate(order);
+          // Select the freshly-inserted cell; optionally focus + enter edit mode.
+          setActiveCellId(created.id);
+          if (opts?.focus) {
+            setMode("edit");
+            requestAnimationFrame(() => cellFocus.current[created.id]?.());
           }
-        : {}),
-    });
+        },
+      },
+    );
+  };
+
+  const handleAddCell = (cellType: CellType = "code") => {
+    insertCell(cellType, (notebook.data?.cells ?? []).length);
+  };
+
+  // Command-mode keyboard nav must never hijack typing in a real input/select/
+  // Monaco (the notebook-name field, the SQL result-variable input, etc.) nor
+  // steal keys from an open Radix popover.
+  const isEditableTarget = (el: EventTarget | null): boolean => {
+    const node = el as HTMLElement | null;
+    if (!node) return false;
+    const tag = node.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+    if (node.isContentEditable) return true;
+    // Radix Select/DropdownMenu/Dialog render in a portal but their keydowns
+    // still bubble through the React tree to this section — ignore keys while
+    // any of them is open/focused so arrows/letters don't drive cell nav.
+    if (
+      node.closest?.(
+        '[role="listbox"],[role="menu"],[role="menuitem"],[role="dialog"],[data-radix-popper-content-wrapper]',
+      )
+    )
+      return true;
+    return false;
+  };
+
+  // Jupyter-style command-mode chords, bound to the scrollable section. Only
+  // acts when mode==="command" (mode flips to "edit" the instant a cell's
+  // editor gains focus) and never over an editable target.
+  const onSectionKeyDown = (e: KeyboardEvent<HTMLElement>) => {
+    if (mode !== "command" || !activeCellId || isEditableTarget(e.target)) return;
+    const cells = [...(notebook.data?.cells ?? [])].sort(
+      (a, b) => a.cell_order - b.cell_order,
+    );
+    const cid = activeCellId;
+    const idx = cells.findIndex((c) => c.id === cid);
+    if (idx === -1) return;
+    // Any key other than "d" breaks a pending "dd" chord (nav keys land in
+    // their own switch case, so reset here rather than only in `default`).
+    if (e.key !== "d") ddRef.current = { at: 0, cid: "" };
+    switch (e.key) {
+      case "Enter":
+        e.preventDefault();
+        setMode("edit");
+        focusCell(cid);
+        break;
+      case "ArrowDown":
+      case "j":
+        e.preventDefault();
+        selectAdjacent(cid, 1);
+        break;
+      case "ArrowUp":
+      case "k":
+        e.preventDefault();
+        selectAdjacent(cid, -1);
+        break;
+      case "a":
+        e.preventDefault();
+        insertCell("code", idx); // insert above (command mode: select only)
+        break;
+      case "b":
+        e.preventDefault();
+        insertCell("code", idx + 1); // insert below (command mode: select only)
+        break;
+      case "d": {
+        // "dd" — two d presses within 400ms on the SAME active cell deletes it.
+        e.preventDefault();
+        const now = Date.now();
+        if (now - ddRef.current.at < 400 && ddRef.current.cid === cid) {
+          handleDeleteCell(cid);
+          ddRef.current = { at: 0, cid: "" };
+        } else {
+          ddRef.current = { at: now, cid };
+        }
+        break;
+      }
+      default:
+        break;
+    }
   };
 
   const handleDeleteCell = (cid: string) => {
@@ -399,11 +646,17 @@ export default function NotebookPage() {
     sortedCells.forEach((c) => runners.current[c.id]?.clear());
   }
 
-  const panelTitle = activePanel === "toc" ? "Outline" : "Data sources";
+  const panelTitle =
+    activePanel === "toc" ? "Outline" : activePanel === "data" ? "Data sources" : "Schema";
 
   return (
     <div className="flex h-full min-h-0">
-      <section className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+      <section
+        ref={sectionRef}
+        tabIndex={0}
+        onKeyDown={onSectionKeyDown}
+        className="flex min-w-0 flex-1 flex-col overflow-y-auto focus:outline-none"
+      >
         <h1 className="sr-only">{nb.name}</h1>
         <NotebookHeader
           ws={ws!}
@@ -430,28 +683,55 @@ export default function NotebookPage() {
             cap that keeps lines readable on ultra-wide monitors. */}
         <div className="mx-auto flex w-full max-w-7xl flex-col gap-3 px-6 py-6">
           {sortedCells.map((cell, index) => (
-            <div key={cell.id} id={`cell-${cell.id}`} style={{ scrollMarginTop: "6rem" }}>
-              <ManagedCell
-                cell={cell}
-                kernel={kernel}
-                onChangeType={handleChangeType}
-                onDelete={handleDeleteCell}
-                onMoveUp={handleMoveUp}
-                onMoveDown={handleMoveDown}
-                updateCellMutate={updateCell.mutate}
-                runners={runners}
-                engines={engines}
-                onPendingChange={setCellPending}
-                initialRunning={runningSet.has(cell.id)}
-                onRunAbove={index > 0 ? () => runSlice(0, index) : undefined}
-                onRunBelow={
-                  index < sortedCells.length - 1
-                    ? () => runSlice(index + 1, sortedCells.length)
-                    : undefined
-                }
-              />
-            </div>
+            <Fragment key={cell.id}>
+              <InsertBar onInsert={() => insertCell("code", index)} />
+              <div id={`cell-${cell.id}`} style={{ scrollMarginTop: "6rem" }}>
+                <ManagedCell
+                  cell={cell}
+                  index={index}
+                  kernel={kernel}
+                  onChangeType={handleChangeType}
+                  onDelete={handleDeleteCell}
+                  onMoveUp={handleMoveUp}
+                  onMoveDown={handleMoveDown}
+                  updateCellMutate={updateCell.mutate}
+                  runners={runners}
+                  engines={engines}
+                  onPendingChange={setCellPending}
+                  initialRunning={runningSet.has(cell.id)}
+                  onRunAbove={index > 0 ? () => runSlice(0, index) : undefined}
+                  onRunBelow={
+                    index < sortedCells.length - 1
+                      ? () => runSlice(index + 1, sortedCells.length)
+                      : undefined
+                  }
+                  active={activeCellId === cell.id}
+                  onFocusCell={(cid) => {
+                    setActiveCellId(cid);
+                    setMode("edit");
+                  }}
+                  onSelectCell={(cid) => {
+                    setActiveCellId(cid);
+                    setMode("command");
+                    sectionRef.current?.focus();
+                  }}
+                  registerFocus={(cid, fn) => {
+                    cellFocus.current[cid] = fn;
+                  }}
+                  registerEdit={(cid, fn) => {
+                    cellEdit.current[cid] = fn;
+                  }}
+                  onSelectNext={(cid) => selectAdjacent(cid, 1)}
+                  onInsertBelow={(idx) => insertCell("code", idx + 1, { focus: true })}
+                  onEnterCommandMode={() => {
+                    setMode("command");
+                    sectionRef.current?.focus();
+                  }}
+                />
+              </div>
+            </Fragment>
           ))}
+          <InsertBar onInsert={() => insertCell("code", sortedCells.length)} />
 
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={() => handleAddCell("code")} aria-label="Add cell">
@@ -494,8 +774,16 @@ export default function NotebookPage() {
           </div>
           {activePanel === "toc" ? (
             <TableOfContentsPanel cells={sortedCells} onJump={jumpToCell} />
-          ) : (
+          ) : activePanel === "data" ? (
             <DataSourcesPanel ws={ws!} />
+          ) : (
+            <SchemaBrowserPanel
+              ws={ws!}
+              onInsertText={insertIntoActive}
+              onNewSqlCell={(sql) =>
+                insertCell("sql", sortedCells.length, { focus: true, initialSource: sql })
+              }
+            />
           )}
         </aside>
       )}

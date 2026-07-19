@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { ArrowLeft, Database, Eraser, ListTree, Play, RotateCcw, Square } from "lucide-react";
+import { ArrowLeft, Columns3, Database, Eraser, ListTree, Play, RotateCcw, Square } from "lucide-react";
 import type { KernelStatus } from "@/lib/kernel/KernelConnection";
 import { KernelStatusBadge } from "./KernelStatusBadge";
 import { Button } from "@/components/ui/button";
@@ -9,7 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 
 /** Which on-demand right-hand tools panel is open (null = none). */
-export type NotebookPanel = "toc" | "data" | null;
+export type NotebookPanel = "toc" | "data" | "schema" | null;
 
 export interface NotebookHeaderProps {
   ws: string;
@@ -119,6 +119,16 @@ export function NotebookHeader(props: NotebookHeaderProps) {
               onClick={() => props.onTogglePanel("data")}
             >
               <Database className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              size="sm"
+              variant={props.activePanel === "schema" ? "secondary" : "ghost"}
+              aria-label="Schema"
+              aria-pressed={props.activePanel === "schema"}
+              title="Schema"
+              onClick={() => props.onTogglePanel("schema")}
+            >
+              <Columns3 className="h-3.5 w-3.5" />
             </Button>
           </div>
         </div>

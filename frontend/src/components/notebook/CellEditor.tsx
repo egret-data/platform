@@ -41,6 +41,27 @@ export interface CellEditorProps {
   engines?: { id: string; name: string; engine: string; enabled: boolean }[];
   onChangeSqlTarget?: (target: string) => void;
   onChangeSqlInto?: (into: string) => void;
+  /** Whether this cell is the page's active cell (shows a focus ring). */
+  active?: boolean;
+  /** Fired when the cell gains editing focus (Monaco text focus / markdown
+   *  textarea focus) — the page sets activeCellId + mode="edit". */
+  onFocusCell?: () => void;
+  /** Fired when non-editor chrome (gutter / toolbar) is clicked — the page
+   *  sets activeCellId while staying in command mode. */
+  onSelectCell?: () => void;
+  /** Registers a function that programmatically focuses this cell's editor,
+   *  so the page can drive focus from keyboard navigation. */
+  registerFocus?: (focus: () => void) => void;
+  /** Registers a function that inserts text at the current cursor/selection
+   *  in this cell's editor (Monaco cells only) — used by the schema browser's
+   *  click-to-insert. */
+  registerEdit?: (fn: (text: string) => void) => void;
+  /** Shift+Enter: run this cell, then select the next one. */
+  onRunAndNext?: () => void;
+  /** Alt+Enter: run this cell, then insert a new cell below and select it. */
+  onRunAndBelow?: () => void;
+  /** Esc inside the editor: blur and return the page to command mode. */
+  onEnterCommandMode?: () => void;
 }
 
 export function CellEditor({
@@ -58,6 +79,14 @@ export function CellEditor({
   engines = [],
   onChangeSqlTarget,
   onChangeSqlInto,
+  active,
+  onFocusCell,
+  onSelectCell,
+  registerFocus,
+  registerEdit,
+  onRunAndNext,
+  onRunAndBelow,
+  onEnterCommandMode,
 }: CellEditorProps) {
   const [mdFocused, setMdFocused] = useState(false);
   // Local buffer for the SQL result-variable input: cell.sql_into is react-query
@@ -69,9 +98,18 @@ export function CellEditor({
   useEffect(() => {
     setSqlIntoLocal(cell.sql_into ?? "");
   }, [cell.id]);
-  // Latest onRun for the Monaco Shift+Enter command (captured once on mount).
+  // Latest callbacks for Monaco commands (captured once on mount, so they must
+  // be read through refs kept fresh every render rather than closed over).
   const runRef = useRef<(() => void) | undefined>(onRun);
   runRef.current = onRun;
+  const focusCellRef = useRef<(() => void) | undefined>(onFocusCell);
+  focusCellRef.current = onFocusCell;
+  const runAndNextRef = useRef<(() => void) | undefined>(onRunAndNext);
+  runAndNextRef.current = onRunAndNext;
+  const runAndBelowRef = useRef<(() => void) | undefined>(onRunAndBelow);
+  runAndBelowRef.current = onRunAndBelow;
+  const commandModeRef = useRef<(() => void) | undefined>(onEnterCommandMode);
+  commandModeRef.current = onEnterCommandMode;
 
   const errored = outputs?.some((o) => o.type === "error") ?? false;
   // Thin left accent, colored only for active states (running / error); at rest
@@ -96,7 +134,27 @@ export function CellEditor({
 
   const handleMount = (editor: MonacoEditor.IStandaloneCodeEditor, monaco: Monaco) => {
     registerStaticCompletions(monaco);
-    editor.addCommand(monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => runRef.current?.());
+    // Let the page drive focus into this cell (keyboard nav / j-k / Enter).
+    registerFocus?.(() => editor.focus());
+    registerEdit?.((text: string) => {
+      const sel = editor.getSelection();
+      if (sel) editor.executeEdits("schema-insert", [{ range: sel, text, forceMoveMarkers: true }]);
+      editor.focus();
+    });
+    editor.onDidFocusEditorText(() => focusCellRef.current?.());
+    // Blurring the editor by any means (clicking the tools panel / blank space,
+    // not just Escape) must return the page to command mode, else `mode` sticks
+    // at "edit" and keyboard nav silently stops working.
+    editor.onDidBlurEditorText(() => commandModeRef.current?.());
+    // Run shortcuts: Shift+Enter = run + select next (Jupyter convention),
+    // Ctrl/Cmd+Enter = run in place, Alt+Enter = run + insert-and-select below.
+    editor.addCommand(monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => runAndNextRef.current?.());
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => runRef.current?.());
+    editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.Enter, () => runAndBelowRef.current?.());
+    editor.addCommand(monaco.KeyCode.Escape, () => {
+      editor.getDomNode()?.blur();
+      commandModeRef.current?.();
+    });
     const sync = () =>
       setEditorHeight(Math.min(Math.max(editor.getContentHeight(), 40), 480));
     editor.onDidContentSizeChange(sync);
@@ -105,17 +163,25 @@ export function CellEditor({
 
   return (
     <div
-      className="group flex overflow-hidden rounded-lg border bg-card shadow-sm transition-shadow hover:shadow-md"
+      className={`group flex overflow-hidden rounded-lg border bg-card shadow-sm transition-shadow hover:shadow-md ${active ? "ring-2 ring-primary/40" : ""}`}
       style={{ borderLeftWidth: "2px", borderLeftColor: accent }}
+      data-active={active ? "true" : "false"}
     >
-      {/* Gutter */}
-      <div className="w-16 shrink-0 select-none px-2 py-2 text-right font-mono text-[11px] text-muted-foreground">
+      {/* Gutter — non-editor chrome: selects the cell without entering edit mode. */}
+      <div
+        className="w-16 shrink-0 select-none px-2 py-2 text-right font-mono text-[11px] text-muted-foreground"
+        onClick={() => onSelectCell?.()}
+      >
         {running ? <Loader2 className="ml-auto h-3.5 w-3.5 animate-spin" /> : execLabel}
       </div>
 
       <div className="min-w-0 flex-1">
-        {/* Toolbar — revealed on hover/focus */}
-        <div className="flex items-center gap-1 border-b px-2 py-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+        {/* Toolbar — revealed on hover/focus; also non-editor chrome. */}
+        <div
+          className="flex items-center gap-1 border-b px-2 py-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100"
+          onClick={() => onSelectCell?.()}
+        >
+
           <Select value={cell.cell_type} onValueChange={(v) => onChangeType(v as CellType)}>
             <SelectTrigger className="h-7 w-28 text-xs">
               <SelectValue />
@@ -215,8 +281,14 @@ export function CellEditor({
               className="min-h-[80px] w-full resize-y bg-transparent p-3 font-mono text-sm focus:outline-none"
               value={cell.source}
               onChange={(e) => onChangeSource(e.target.value)}
-              onFocus={() => setMdFocused(true)}
-              onBlur={() => setMdFocused(false)}
+              onFocus={() => {
+                setMdFocused(true);
+                onFocusCell?.();
+              }}
+              onBlur={() => {
+                setMdFocused(false);
+                onEnterCommandMode?.();
+              }}
               aria-label="Markdown source"
               placeholder="Write markdown…"
             />
@@ -224,11 +296,15 @@ export function CellEditor({
             <div
               role="button"
               tabIndex={0}
-              onClick={() => setMdFocused(true)}
+              onClick={() => {
+                setMdFocused(true);
+                onFocusCell?.();
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
                   setMdFocused(true);
+                  onFocusCell?.();
                 }
               }}
               className="cursor-text px-3 py-2 text-sm [&_a]:text-primary [&_a]:underline [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_h1]:mb-1 [&_h1]:text-lg [&_h1]:font-semibold [&_h2]:mb-1 [&_h2]:text-base [&_h2]:font-semibold [&_ol]:list-decimal [&_ol]:pl-5 [&_ul]:list-disc [&_ul]:pl-5"
