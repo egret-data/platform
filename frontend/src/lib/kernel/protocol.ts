@@ -15,9 +15,24 @@ export interface JupyterMsg {
   channel: string;
 }
 
+/** UUIDv4 that also works in non-secure contexts (plain http, non-localhost)
+ *  where `crypto.randomUUID` is undefined — the in-cluster SPA is served over
+ *  http, so we must not depend on the secure-context-only API. */
+export function randomId(): string {
+  const c = globalThis.crypto as Crypto | undefined;
+  if (c && typeof c.randomUUID === "function") return c.randomUUID();
+  const b = new Uint8Array(16);
+  if (c && typeof c.getRandomValues === "function") c.getRandomValues(b);
+  else for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256);
+  b[6] = (b[6] & 0x0f) | 0x40; // version 4
+  b[8] = (b[8] & 0x3f) | 0x80; // variant
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0"));
+  return `${h[0]}${h[1]}${h[2]}${h[3]}-${h[4]}${h[5]}-${h[6]}${h[7]}-${h[8]}${h[9]}-${h[10]}${h[11]}${h[12]}${h[13]}${h[14]}${h[15]}`;
+}
+
 export function newMsg(msgType: string, session: string, content: Record<string, unknown>, metadata: Record<string, unknown> = {}): JupyterMsg {
   return {
-    header: { msg_id: crypto.randomUUID(), msg_type: msgType, session, username: "egret", version: "5.3" },
+    header: { msg_id: randomId(), msg_type: msgType, session, username: "egret", version: "5.3" },
     parent_header: {},
     metadata,
     content,
