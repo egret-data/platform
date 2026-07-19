@@ -23,5 +23,19 @@ spec:
             - { name: EGRET_CATALOG__AUTH_TOKEN, valueFrom: { secretKeyRef: { name: egret-secrets, key: catalog-auth-token } } }
             - { name: EGRET_ADMIN_PASSWORD, valueFrom: { secretKeyRef: { name: egret-secrets, key: admin-password } } }
             - { name: EGRET_OIDC__CLIENT_SECRET, valueFrom: { secretKeyRef: { name: egret-secrets, key: oidc-client-secret } } }
+            {{- if eq .Values.kernel.launcher "kubernetes" }}
+            - { name: EGRET_KERNEL__LAUNCHER, value: "kubernetes" }
+            - { name: EGRET_KERNEL__NAMESPACE, value: "{{ .Values.kernel.namespace }}" }
+            - { name: EGRET_KERNEL__IMAGE, value: "{{ .Values.kernel.image }}" }
+            - { name: EGRET_KERNEL__IMAGE_PULL_POLICY, value: "{{ .Values.kernel.imagePullPolicy }}" }
+            - { name: EGRET_KERNEL__CPU_REQUEST, value: "{{ .Values.kernel.resources.cpuRequest }}" }
+            - { name: EGRET_KERNEL__MEM_REQUEST, value: "{{ .Values.kernel.resources.memRequest }}" }
+            - { name: EGRET_KERNEL__CPU_LIMIT, value: "{{ .Values.kernel.resources.cpuLimit }}" }
+            - { name: EGRET_KERNEL__MEM_LIMIT, value: "{{ .Values.kernel.resources.memLimit }}" }
+            - { name: EGRET_KERNEL__CALLBACK_URL, value: "http://egret.{{ .Release.Namespace }}.svc.cluster.local:8080" }
+            {{- if .Values.kernel.pullSecret }}
+            - { name: EGRET_KERNEL__PULL_SECRET, value: "{{ .Values.kernel.pullSecret }}" }
+            {{- end }}
+            {{- end }}
           readinessProbe: { tcpSocket: { port: 8080 }, initialDelaySeconds: 5, periodSeconds: 5 }
           livenessProbe: { tcpSocket: { port: 8080 }, initialDelaySeconds: 30, periodSeconds: 20 }

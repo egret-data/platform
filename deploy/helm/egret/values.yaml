@@ -48,5 +48,18 @@ deps:
 storage:
   region: us-east-1
   pathStyle: true
+kernel:
+  launcher: subprocess        # "kubernetes" enables per-user kernel pods
+  namespace: egret-notebooks
+  image: egret-kernel:dev
+  imagePullPolicy: IfNotPresent
+  pullSecret: ""
+  resources:
+    cpuRequest: "250m"
+    memRequest: "512Mi"
+    cpuLimit: "1"
+    memLimit: "2Gi"
+  networkPolicy:
+    enabled: true
 # master/secret keys: generated-and-persisted by the chart (see secret.yaml); do
 # NOT put real secrets here.
