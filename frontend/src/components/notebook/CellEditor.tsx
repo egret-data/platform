@@ -52,6 +52,10 @@ export interface CellEditorProps {
   /** Registers a function that programmatically focuses this cell's editor,
    *  so the page can drive focus from keyboard navigation. */
   registerFocus?: (focus: () => void) => void;
+  /** Registers a function that inserts text at the current cursor/selection
+   *  in this cell's editor (Monaco cells only) — used by the schema browser's
+   *  click-to-insert. */
+  registerEdit?: (fn: (text: string) => void) => void;
   /** Shift+Enter: run this cell, then select the next one. */
   onRunAndNext?: () => void;
   /** Alt+Enter: run this cell, then insert a new cell below and select it. */
@@ -79,6 +83,7 @@ export function CellEditor({
   onFocusCell,
   onSelectCell,
   registerFocus,
+  registerEdit,
   onRunAndNext,
   onRunAndBelow,
   onEnterCommandMode,
@@ -131,6 +136,11 @@ export function CellEditor({
     registerStaticCompletions(monaco);
     // Let the page drive focus into this cell (keyboard nav / j-k / Enter).
     registerFocus?.(() => editor.focus());
+    registerEdit?.((text: string) => {
+      const sel = editor.getSelection();
+      if (sel) editor.executeEdits("schema-insert", [{ range: sel, text, forceMoveMarkers: true }]);
+      editor.focus();
+    });
     editor.onDidFocusEditorText(() => focusCellRef.current?.());
     // Blurring the editor by any means (clicking the tools panel / blank space,
     // not just Escape) must return the page to command mode, else `mode` sticks

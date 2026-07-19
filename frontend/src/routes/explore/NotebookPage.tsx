@@ -35,6 +35,7 @@ import { useKernelConnectionStatus } from "@/lib/kernel/useKernelConnectionStatu
 import { NotebookHeader, type NotebookPanel } from "@/components/notebook/NotebookHeader";
 import { TableOfContentsPanel } from "@/components/notebook/panels/TableOfContentsPanel";
 import { DataSourcesPanel } from "@/components/notebook/panels/DataSourcesPanel";
+import { SchemaBrowserPanel } from "@/components/notebook/panels/SchemaBrowserPanel";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -80,6 +81,9 @@ interface ManagedCellProps {
   onSelectCell?: (cid: string) => void;
   /** Registers this cell's programmatic-focus function under its id. */
   registerFocus?: (cid: string, focus: () => void) => void;
+  /** Registers this cell's insert-at-cursor function under its id (schema
+   *  browser click-to-insert). */
+  registerEdit?: (cid: string, fn: (text: string) => void) => void;
   /** Shift+Enter: select the next cell (the run itself is driven by handleRun below). */
   onSelectNext?: (cid: string) => void;
   /** Alt+Enter: insert + select a new code cell right below this index. */
@@ -107,6 +111,7 @@ function ManagedCell({
   onFocusCell,
   onSelectCell,
   registerFocus,
+  registerEdit,
   onSelectNext,
   onInsertBelow,
   onEnterCommandMode,
@@ -223,6 +228,7 @@ function ManagedCell({
         onFocusCell={() => onFocusCell?.(cell.id)}
         onSelectCell={() => onSelectCell?.(cell.id)}
         registerFocus={(fn) => registerFocus?.(cell.id, fn)}
+        registerEdit={(fn) => registerEdit?.(cell.id, fn)}
         onRunAndNext={() => {
           if (cell.cell_type !== "markdown") void handleRun();
           onSelectNext?.(cell.id);
@@ -342,6 +348,10 @@ export default function NotebookPage() {
   const [activeCellId, setActiveCellId] = useState<string | null>(null);
   const [mode, setMode] = useState<"edit" | "command">("command");
   const cellFocus = useRef<Record<string, () => void>>({});
+  // Per-cell insert-at-cursor registry (parallel to cellFocus), populated by
+  // CellEditor's Monaco onMount — lets the schema browser insert a column
+  // name into whichever cell is active without owning its editor state.
+  const cellEdit = useRef<Record<string, (text: string) => void>>({});
   // Last unpaired "d" press (cell + timestamp) for the "dd" delete chord. The
   // cell id is tracked so a stray "d" then a nav/click to another cell can't
   // pair with a later "d" and delete the wrong cell.
@@ -363,6 +373,13 @@ export default function NotebookPage() {
   const focusCell = (cid: string) => {
     setActiveCellId(cid);
     cellFocus.current[cid]?.();
+  };
+
+  // Insert text at the active cell's cursor (schema browser column click). A
+  // no-op if there's no active cell or its editor hasn't registered (e.g. a
+  // markdown cell in preview mode).
+  const insertIntoActive = (text: string) => {
+    if (activeCellId && cellEdit.current[activeCellId]) cellEdit.current[activeCellId](text);
   };
 
   // Move the active selection to the adjacent cell. In edit mode (Shift+Enter
@@ -392,7 +409,7 @@ export default function NotebookPage() {
   const insertCell = (
     cellType: CellType,
     atIndex: number,
-    opts?: { focus?: boolean },
+    opts?: { focus?: boolean; initialSource?: string },
   ) => {
     if (addCell.isPending || reorderCells.isPending) return;
     const cells = [...(notebook.data?.cells ?? [])].sort(
@@ -403,6 +420,7 @@ export default function NotebookPage() {
       {
         cell_type: cellType,
         cell_order: maxOrder + 1,
+        ...(opts?.initialSource ? { source: opts.initialSource } : {}),
         // Seed a collision-free variable and default to the first enabled engine so
         // Run doesn't emit `%%egret_sql --target  …` (an IPython parse-time error).
         ...(cellType === "sql"
@@ -628,7 +646,8 @@ export default function NotebookPage() {
     sortedCells.forEach((c) => runners.current[c.id]?.clear());
   }
 
-  const panelTitle = activePanel === "toc" ? "Outline" : "Data sources";
+  const panelTitle =
+    activePanel === "toc" ? "Outline" : activePanel === "data" ? "Data sources" : "Schema";
 
   return (
     <div className="flex h-full min-h-0">
@@ -699,6 +718,9 @@ export default function NotebookPage() {
                   registerFocus={(cid, fn) => {
                     cellFocus.current[cid] = fn;
                   }}
+                  registerEdit={(cid, fn) => {
+                    cellEdit.current[cid] = fn;
+                  }}
                   onSelectNext={(cid) => selectAdjacent(cid, 1)}
                   onInsertBelow={(idx) => insertCell("code", idx + 1, { focus: true })}
                   onEnterCommandMode={() => {
@@ -752,8 +774,16 @@ export default function NotebookPage() {
           </div>
           {activePanel === "toc" ? (
             <TableOfContentsPanel cells={sortedCells} onJump={jumpToCell} />
-          ) : (
+          ) : activePanel === "data" ? (
             <DataSourcesPanel ws={ws!} />
+          ) : (
+            <SchemaBrowserPanel
+              ws={ws!}
+              onInsertText={insertIntoActive}
+              onNewSqlCell={(sql) =>
+                insertCell("sql", sortedCells.length, { focus: true, initialSource: sql })
+              }
+            />
           )}
         </aside>
       )}
