@@ -41,6 +41,8 @@ pub struct Cell {
     pub execution_count: Option<i32>,
     pub last_output: Option<serde_json::Value>,
     pub last_execution_time_ms: Option<i32>,
+    pub sql_target: Option<String>,
+    pub sql_into: Option<String>,
 }
 
 /// Body for `PATCH /notebooks/{id}/folder`: move a notebook into a folder
@@ -79,12 +81,16 @@ pub struct CreateCell {
     pub cell_type: String,
     pub source: Option<String>,
     pub cell_order: Option<i32>,
+    pub sql_target: Option<String>,
+    pub sql_into: Option<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateCell {
     pub cell_type: Option<String>,
     pub source: Option<String>,
+    pub sql_target: Option<String>,
+    pub sql_into: Option<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
