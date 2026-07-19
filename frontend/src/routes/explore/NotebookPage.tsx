@@ -13,10 +13,13 @@ import { toast } from "sonner";
 import {
   type Cell,
   type CellType,
+  type EngineOption,
+  defaultSqlInto,
   useActiveExecutions,
   useAddCell,
   useDeleteCell,
   useNotebook,
+  useNotebookRuntime,
   useReorderCells,
   useUpdateCell,
   useUpdateNotebook,
@@ -49,6 +52,8 @@ interface ManagedCellProps {
     cid: string;
     source?: string;
     cell_type?: CellType;
+    sql_target?: string;
+    sql_into?: string;
   }) => void;
   /** Per-cell runner registry keyed by cell id; owned by the page toolbar. */
   runners: MutableRefObject<
@@ -61,6 +66,8 @@ interface ManagedCellProps {
   /** Report whether this cell has an unflushed debounced save pending (for the page's
    *  beforeunload guard). Called on edit (true) and on flush/persist (false). */
   onPendingChange?: (cid: string, pending: boolean) => void;
+  /** Enabled engines for the SQL target dropdown (from useNotebookRuntime). */
+  engines?: EngineOption[];
 }
 
 function ManagedCell({
@@ -76,6 +83,7 @@ function ManagedCell({
   onRunAbove,
   onRunBelow,
   onPendingChange,
+  engines,
 }: ManagedCellProps) {
   const [source, setSource] = useState(cell.source);
   // Restore-on-load: seed outputs from the persisted last_output.
@@ -132,7 +140,13 @@ function ManagedCell({
       await kernel.connect();
       setOutputs([]);
       setRunning(true);
-      kernel.execute(cell.id, source, {
+      // SQL cells edit clean SQL in the Monaco buffer; the kernel needs the
+      // %%egret_sql magic prefix so it binds the query result to sql_into.
+      const runSource =
+        cell.cell_type === "sql"
+          ? `%%egret_sql --target ${cell.sql_target ?? ""} --into ${cell.sql_into || "df"}\n${source}`
+          : source;
+      kernel.execute(cell.id, runSource, {
         onOutput: (o) => setOutputs((prev) => [...prev, o]),
         onStatus: (s) => {
           if (s === "idle") setRunning(false);
@@ -157,23 +171,35 @@ function ManagedCell({
     return () => {
       delete runners.current[cell.id];
     };
-    // Re-register when the run closure's inputs change.
-  }, [cell.id, source, cell.cell_type, runners]);
+    // Re-register when the run closure's inputs change. sql_target/sql_into
+    // are included so run-all/run-above/run-below (which drive the cell via
+    // `runners.current`, not the CellEditor's onRun prop) pick up target changes.
+  }, [cell.id, source, cell.cell_type, cell.sql_target, cell.sql_into, runners]);
 
   return (
-    <CellEditor
-      cell={{ ...cell, source }}
-      onChangeSource={handleChangeSource}
-      onChangeType={(type) => onChangeType(cell.id, type)}
-      onDelete={() => onDelete(cell.id)}
-      onMoveUp={() => onMoveUp(cell.id)}
-      onMoveDown={() => onMoveDown(cell.id)}
-      onRun={cell.cell_type === "markdown" ? undefined : handleRun}
-      running={running}
-      outputs={outputs}
-      onRunAbove={onRunAbove}
-      onRunBelow={onRunBelow}
-    />
+    <>
+      <CellEditor
+        cell={{ ...cell, source }}
+        onChangeSource={handleChangeSource}
+        onChangeType={(type) => onChangeType(cell.id, type)}
+        onDelete={() => onDelete(cell.id)}
+        onMoveUp={() => onMoveUp(cell.id)}
+        onMoveDown={() => onMoveDown(cell.id)}
+        onRun={cell.cell_type === "markdown" ? undefined : handleRun}
+        running={running}
+        outputs={outputs}
+        onRunAbove={onRunAbove}
+        onRunBelow={onRunBelow}
+        engines={engines}
+        onChangeSqlTarget={(t) => updateCellMutate({ cid: cell.id, sql_target: t })}
+        onChangeSqlInto={(v) => updateCellMutate({ cid: cell.id, sql_into: v })}
+      />
+      {cell.cell_type === "sql" && cell.sql_into && (outputs?.length ?? 0) > 0 && (
+        <div className="px-3 pb-2 text-[11px] text-muted-foreground">
+          Bound to <code className="font-mono">{cell.sql_into}</code> · Daft DataFrame
+        </div>
+      )}
+    </>
   );
 }
 
@@ -184,12 +210,14 @@ export default function NotebookPage() {
 
   const kernel = useKernel(ws!, id!);
   const notebook = useNotebook(ws!, id ?? null);
+  const runtime = useNotebookRuntime(ws!);
   const updateNotebook = useUpdateNotebook(ws!, id!);
   const addCell = useAddCell(ws!, id!);
   const updateCell = useUpdateCell(ws!, id!);
   const deleteCell = useDeleteCell(ws!, id!);
   const reorderCells = useReorderCells(ws!, id!);
   const active = useActiveExecutions(ws!, id!);
+  const engines = runtime.data?.engines ?? [];
 
   const kernelStatus = useKernelConnectionStatus(kernel);
   const [nameDirty, setNameDirty] = useState(false);
@@ -244,7 +272,11 @@ export default function NotebookPage() {
   const handleAddCell = (cellType: CellType = "code") => {
     const cells = notebook.data?.cells ?? [];
     const maxOrder = cells.reduce((m, c) => Math.max(m, c.cell_order), -1);
-    addCell.mutate({ cell_type: cellType, cell_order: maxOrder + 1 });
+    addCell.mutate({
+      cell_type: cellType,
+      cell_order: maxOrder + 1,
+      ...(cellType === "sql" ? { sql_into: defaultSqlInto(cells) } : {}),
+    });
   };
 
   const handleDeleteCell = (cid: string) => {
@@ -399,6 +431,7 @@ export default function NotebookPage() {
                 onMoveDown={handleMoveDown}
                 updateCellMutate={updateCell.mutate}
                 runners={runners}
+                engines={engines}
                 onPendingChange={setCellPending}
                 initialRunning={runningSet.has(cell.id)}
                 onRunAbove={index > 0 ? () => runSlice(0, index) : undefined}
@@ -424,6 +457,10 @@ export default function NotebookPage() {
             >
               <Plus className="h-4 w-4" />
               Add markdown
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => handleAddCell("sql")} aria-label="Add SQL cell">
+              <Plus className="h-4 w-4" />
+              Add SQL
             </Button>
           </div>
         </div>
