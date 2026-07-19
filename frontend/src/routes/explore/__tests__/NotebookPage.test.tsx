@@ -278,9 +278,95 @@ describe("NotebookPage", () => {
     const addBtn = screen.getByRole("button", { name: /add cell/i });
     fireEvent.click(addBtn);
 
+    // insertCell (S1-2) calls addCell.mutate(vars, { onSuccess }) so it can
+    // reorder the new cell into place — assert both arguments.
     expect(addCellMutate).toHaveBeenCalledWith(
       expect.objectContaining({ cell_type: "code" }),
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
     );
+  });
+
+  // ── Auto-connect (S1-1) ──────────────────────────────────────────────────
+
+  it("auto-connects the kernel on open", () => {
+    renderAt();
+    expect(kernelConnect).toHaveBeenCalled();
+  });
+
+  // ── Insert cell anywhere (S1-2) ──────────────────────────────────────────
+
+  it("clicking a hover insert bar inserts a cell at that position", () => {
+    renderAt();
+    // One InsertBar renders before each cell plus one trailing bar.
+    const insertButtons = screen.getAllByRole("button", { name: /insert cell here/i });
+    expect(insertButtons.length).toBeGreaterThanOrEqual(3); // before cell-1, before cell-2, trailing
+
+    fireEvent.click(insertButtons[0]);
+
+    expect(addCellMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ cell_type: "code" }),
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    );
+  });
+
+  // ── Command-mode keyboard nav (S1-3 / S1-4) ───────────────────────────────
+
+  describe("command-mode keyboard nav", () => {
+    // Selects cell-1 (the code cell) via its gutter — non-editor chrome —
+    // which sets activeCellId without entering edit mode.
+    function selectCellOneAndGetSection() {
+      fireEvent.click(screen.getByText("In [ ]:"));
+      return screen.getByText("In [ ]:").closest("section")!;
+    }
+
+    it("ArrowDown moves the active-cell ring to the next cell", () => {
+      const view = renderAt();
+      selectCellOneAndGetSection();
+
+      const cell1 = view.container.querySelector("#cell-cell-1 [data-active]")!;
+      const cell2 = view.container.querySelector("#cell-cell-2 [data-active]")!;
+      expect(cell1).toHaveAttribute("data-active", "true");
+      expect(cell2).toHaveAttribute("data-active", "false");
+
+      const section = selectCellOneAndGetSection();
+      fireEvent.keyDown(section, { key: "ArrowDown" });
+
+      expect(cell1).toHaveAttribute("data-active", "false");
+      expect(cell2).toHaveAttribute("data-active", "true");
+    });
+
+    it("'b' inserts a new cell below the active cell", () => {
+      renderAt();
+      const section = selectCellOneAndGetSection();
+
+      fireEvent.keyDown(section, { key: "b" });
+
+      expect(addCellMutate).toHaveBeenCalledWith(
+        expect.objectContaining({ cell_type: "code" }),
+        expect.objectContaining({ onSuccess: expect.any(Function) }),
+      );
+    });
+
+    it("'dd' (double d within 400ms) deletes the active cell", () => {
+      renderAt();
+      const section = selectCellOneAndGetSection();
+
+      fireEvent.keyDown(section, { key: "d" });
+      fireEvent.keyDown(section, { key: "d" });
+
+      expect(deleteCellMutate).toHaveBeenCalledWith("cell-1");
+    });
+
+    it("does not hijack keys typed into the notebook name field", () => {
+      renderAt();
+      selectCellOneAndGetSection();
+
+      const nameInput = screen.getByLabelText("Notebook name");
+      fireEvent.keyDown(nameInput, { key: "d" });
+      fireEvent.keyDown(nameInput, { key: "d" });
+
+      expect(deleteCellMutate).not.toHaveBeenCalled();
+    });
   });
 
   // ── Markdown cell ─────────────────────────────────────────────────────────
