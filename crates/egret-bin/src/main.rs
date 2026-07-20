@@ -1227,6 +1227,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         audit: audit_sink.clone(),
     });
 
+    // egret's own machine-IdP public root URL: the SAME value used as the
+    // catalog-token issuer (`idp_issuer` / `IdpState.issuer` below) and, per
+    // Task 3, as the issuer/JWKS engines are configured to trust (STS). Bound
+    // once here so every consumer in this fn (and the minter wiring added in
+    // Task 4) shares one derivation.
+    let egret_public_url = config
+        .catalog
+        .public_url
+        .clone()
+        .unwrap_or_else(|| "http://localhost:8080".to_string());
+
     let notebook_state = egret_notebook::NotebookState {
         store: egret_notebook::NotebookStore::new(db.clone()),
         catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
@@ -1240,11 +1251,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
         // Same value the machine-IdP (`IdpState.issuer`) uses below, so a
         // notebook-minted catalog JWT carries the same `iss` as OAuth-minted ones.
-        idp_issuer: config
-            .catalog
-            .public_url
-            .clone()
-            .unwrap_or_else(|| "http://localhost:8080".to_string()),
+        idp_issuer: egret_public_url.clone(),
     };
     let notebook = Some(notebook_state.clone());
 
@@ -1507,27 +1514,20 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         engine_provisioner,
         kube,
         engine_egret_url,
-        // Default JWKS the JWT authenticator validates engine tokens against.
-        // Derived from the OIDC realm (Keycloak `.../realms/<realm>` issuer):
-        // JWKS lives at `.../protocol/openid-connect/certs`. Empty when OIDC is
-        // unconfigured — the admin then sets `jwksUri` per engine. Not hard-failed.
-        engine_jwks_uri: if config.oidc.enabled && !config.oidc.issuer_url.is_empty() {
-            format!(
-                "{}/protocol/openid-connect/certs",
-                config.oidc.issuer_url.trim_end_matches('/')
-            )
-        } else {
-            String::new()
-        },
+        // Engines trust egret's OWN machine-IdP (the STS): the same issuer that
+        // signs catalog + engine tokens, independent of whether external OIDC is
+        // configured. This replaces the old Keycloak-realm-derived JWKS/issuer
+        // (which went empty whenever `oidc.enabled` was false, breaking
+        // jwt-delegation) now that egret itself is the single token issuer.
+        engine_jwks_uri: format!(
+            "{}/.well-known/jwks.json",
+            egret_public_url.trim_end_matches('/')
+        ),
         // Raw issuer, for StarRocks' `CREATE SECURITY INTEGRATION
         // ... required_issuer=<issuer>` (Trino instead reads its own
         // `trinoConfig.auth.jwt.requiredAudience`/JWKS default per-engine, so
         // it has no equivalent need for the raw issuer here).
-        engine_oidc_issuer: if config.oidc.enabled {
-            config.oidc.issuer_url.clone()
-        } else {
-            String::new()
-        },
+        engine_oidc_issuer: egret_public_url.clone(),
         // Gates the Ranger auto-bind on Trino engine create. Disabled by default,
         // so new engines stay unbound (allow-all) and delegated impersonation
         // queries work; an admin who explicitly picks an `authz_service_id` still
@@ -1541,11 +1541,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // will trust in EB-3's Authorizer integration).
     let idp = Some(egret_machine_idp::IdpState {
         keys: std::sync::Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone())),
-        issuer: config
-            .catalog
-            .public_url
-            .clone()
-            .unwrap_or_else(|| "http://localhost:8080".to_string()),
+        issuer: egret_public_url.clone(),
         clients: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
     });
 
