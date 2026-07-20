@@ -231,6 +231,7 @@ pub static PERMISSIONS: &[Permission] = &[
         Scope::Platform
     ),
     perm!("user:disable", "Users", "Disable users", Scope::Platform),
+    perm!("user:delete", "Users", "Delete users", Scope::Platform),
     perm!("group:read", "Groups", "View groups", Scope::Platform),
     perm!(
         "group:create",

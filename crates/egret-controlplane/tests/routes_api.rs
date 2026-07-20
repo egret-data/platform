@@ -16,6 +16,7 @@ use axum::response::Response;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
 use egret_controlplane::{control_plane_router, CpState};
+use egret_core::UserId;
 use egret_metastore::Db;
 use http_body_util::BodyExt;
 use tower::ServiceExt; // oneshot
@@ -602,15 +603,16 @@ async fn pdp_backed_secret_reader_reads_but_cannot_create() {
 /// `search_path` pin cannot rename, so a schema-isolated pool collides with the
 /// shared-database tests' already-moved tables ("relation … already exists in
 /// schema …"). A per-database pool gives every schema — public AND the seam
-/// schemas — its own namespace, so `migrate()` runs cleanly. The database name
-/// is fixed and DROP+CREATE'd each run (drop stale backends first), so temp
-/// databases don't accumulate.
-async fn setup_isolated_schema() -> Option<Fixture> {
+/// schemas — its own namespace, so `migrate()` runs cleanly. `iso_db` names the
+/// database, DROP+CREATE'd each run (drop stale backends first), so temp
+/// databases don't accumulate; callers pass a name unique to their test so two
+/// isolated-schema tests running concurrently don't race each other's
+/// DROP/CREATE.
+async fn setup_isolated_schema(iso_db: &str) -> Option<Fixture> {
     use sqlx::{ConnectOptions, Connection};
     use std::str::FromStr;
 
     let dsn = std::env::var("DATABASE_URL").ok()?;
-    let iso_db = "egret_test_iso_last_admin";
     let base_opts = sqlx::postgres::PgConnectOptions::from_str(&dsn).expect("parse DATABASE_URL");
 
     // On a maintenance connection (the DATABASE_URL's own db), drop any stale
@@ -932,7 +934,7 @@ async fn role_assign_emits_audit_mutation() {
 /// why the shared-schema fixture can't give this a deterministic count).
 #[tokio::test]
 async fn last_admin_guard() {
-    let Some(f) = setup_isolated_schema().await else {
+    let Some(f) = setup_isolated_schema("egret_test_iso_last_admin").await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -2326,5 +2328,576 @@ async fn tag_access_policy_group_clearance_and_uuid_validation() {
         resp.status(),
         StatusCode::BAD_REQUEST,
         "a non-uuid required_groups entry must be rejected 400"
+    );
+}
+
+/// `PATCH /users/{id}` with `status: "disabled"` must take effect
+/// IMMEDIATELY: `SessionService::validate` used to only reject a disabled
+/// user on their NEXT request (sub-project 1), leaving any already-live
+/// session valid until it naturally expired. Task 1 wires in
+/// `revoke_all_for_user` on the disable branch so the user's current session
+/// stops validating the moment the admin disables them.
+///
+/// Also asserts the self-guard half of `guard_not_last_admin`: the admin
+/// cannot disable their own account (400), independent of the last-admin
+/// count.
+#[tokio::test]
+async fn disabling_a_user_revokes_their_sessions() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin_token = session_for(&f, "disable_admin", true).await;
+
+    // The admin cannot disable themselves, regardless of how many other
+    // admins exist.
+    let (admin_id,): (Uuid,) = sqlx::query_as(
+        "SELECT pra.principal_id FROM access_grants pra \
+         JOIN roles r ON r.id = pra.role_id \
+         JOIN sessions s ON s.token_hash = $1 \
+         WHERE r.name = 'platform_admin' AND pra.scope_type = 'platform' \
+           AND pra.principal_id = s.user_id",
+    )
+    .bind(egret_auth::token::hash_token(&admin_token))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the admin's own platform_admin grant");
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &format!("/users/{admin_id}"),
+            &admin_token,
+            Some(serde_json::json!({ "status": "disabled" })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an admin cannot disable their own account; body={j}"
+    );
+
+    // Create a target (non-admin) user and a live session for them.
+    let email = format!("lockout_{}@egret.local", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/users",
+            &admin_token,
+            Some(serde_json::json!({
+                "email": email,
+                "name": "Lockout Target",
+                "password": "S3curePassw0rd!",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create target user; body={j}");
+    let user_id: Uuid = j["id"].as_str().expect("user id in body").parse().unwrap();
+
+    let issued = f
+        .sessions
+        .create(UserId(user_id), "test-agent", "127.0.0.1")
+        .await
+        .expect("create a live session for the target user");
+    assert!(
+        f.sessions
+            .validate(&issued.token)
+            .await
+            .expect("validate")
+            .is_some(),
+        "the target's session must be live before disabling them"
+    );
+
+    // Disable the target — must succeed and immediately kill their session.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &format!("/users/{user_id}"),
+            &admin_token,
+            Some(serde_json::json!({ "status": "disabled" })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "disable target user; body={j}");
+    assert_eq!(j["status"], "disabled", "user status in body; body={j}");
+
+    assert!(
+        f.sessions
+            .validate(&issued.token)
+            .await
+            .expect("validate")
+            .is_none(),
+        "disabling the user must revoke their live session immediately, \
+         not just on their next request"
+    );
+}
+
+/// `guard_not_last_admin` blocks disabling the platform-wide LAST
+/// `platform_admin` — 409 Conflict, not 200. Run against `setup_isolated_schema` (see
+/// its docstring for why the shared-schema fixture can't give this a
+/// deterministic count).
+#[tokio::test]
+async fn cannot_disable_the_last_platform_admin() {
+    let Some(f) = setup_isolated_schema("egret_test_iso_disable_last_admin").await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    // The lone platform_admin in this isolated schema.
+    let _lone_admin_token = session_for(&f, "lone_admin", true).await;
+    let (admin_id,): (Uuid,) = sqlx::query_as(
+        "SELECT pra.principal_id FROM access_grants pra \
+         JOIN roles r ON r.id = pra.role_id \
+         WHERE r.name = 'platform_admin' AND pra.scope_type = 'platform'",
+    )
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the sole platform_admin assignment");
+
+    // A distinct caller with just `user:disable` (not platform_admin), so the
+    // self-guard doesn't mask the last-admin guard under test.
+    let caller_token = session_for_with_permission(&f, "disabler", "user:disable").await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &format!("/users/{admin_id}"),
+            &caller_token,
+            Some(serde_json::json!({ "status": "disabled" })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "disabling the last platform_admin must 409; body={j}"
+    );
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("last platform admin"),
+        "409 body should explain the last-admin guard; body={j}"
+    );
+
+    // A second admin breaks the tie: the same disable now succeeds.
+    let _second_admin_token = session_for(&f, "second_admin", true).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &format!("/users/{admin_id}"),
+            &caller_token,
+            Some(serde_json::json!({ "status": "disabled" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "disable succeeds once a second platform_admin exists"
+    );
+}
+
+/// `POST /users/{id}/password` (Task 2): an admin reset rehashes a LOCAL
+/// user's password and immediately revokes their live sessions — mirroring
+/// the disable branch's `revoke_all_for_user` call — so a session issued
+/// under the old password can't linger past the reset.
+#[tokio::test]
+async fn reset_password_rehashes_and_revokes_sessions() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin_token = session_for(&f, "resetpw_admin", true).await;
+
+    let email = format!("resetpw_{}@egret.local", Uuid::new_v4().simple());
+    let user_id = f
+        .users
+        .insert_local(&email, "Reset Target", "old-hash-placeholder")
+        .await
+        .expect("insert target user");
+
+    // A live session, issued before the reset.
+    let issued = f
+        .sessions
+        .create(user_id, "test-agent", "127.0.0.1")
+        .await
+        .expect("create a live session for the target user");
+    assert!(
+        f.sessions
+            .validate(&issued.token)
+            .await
+            .expect("validate")
+            .is_some(),
+        "the target's session must be live before the reset"
+    );
+
+    let new_password = "N3wSecurePassw0rd!";
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/users/{}/password", user_id.0),
+            &admin_token,
+            Some(serde_json::json!({ "password": new_password })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "resetting a local user's password should 204"
+    );
+
+    // The old session must no longer validate.
+    assert!(
+        f.sessions
+            .validate(&issued.token)
+            .await
+            .expect("validate")
+            .is_none(),
+        "resetting the password must revoke the user's live sessions immediately"
+    );
+
+    // The stored hash must verify the NEW password (and not the placeholder).
+    let updated = f
+        .users
+        .find_by_id(user_id)
+        .await
+        .expect("find target")
+        .expect("target exists");
+    let stored_hash = updated
+        .password_hash
+        .expect("local user has a password_hash");
+    assert!(
+        egret_auth::password::verify_password(new_password, &stored_hash).expect("verify_password"),
+        "the stored hash must verify the new password"
+    );
+}
+
+/// `POST /users/{id}/password` must reject a target that isn't a LOCAL
+/// account — an OIDC-provisioned user has no password to reset.
+#[tokio::test]
+async fn reset_password_rejects_sso_user() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin_token = session_for(&f, "resetpw_admin_sso", true).await;
+
+    let sub = format!("sso-subject-{}", Uuid::new_v4().simple());
+    let email = format!("resetpw_sso_{}@egret.local", Uuid::new_v4().simple());
+    let user_id = f
+        .users
+        .insert_oidc(&sub, &email, "SSO Target")
+        .await
+        .expect("insert oidc user");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/users/{}/password", user_id.0),
+            &admin_token,
+            Some(serde_json::json!({ "password": "whatever-Passw0rd!" })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "resetting a non-local (SSO) user's password should 400; body={j}"
+    );
+}
+
+/// `DELETE /users/{id}` (Task 4): an admin cannot delete their own account
+/// (400, `guard_not_last_admin`'s self-target branch); deleting a normal
+/// (non-admin) user succeeds (204) and hard-removes the row, its group
+/// membership, and its live sessions in one transaction.
+#[tokio::test]
+async fn delete_user_route_enforces_guards() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin_token = session_for(&f, "delete_admin", true).await;
+    let (admin_id,): (Uuid,) = sqlx::query_as(
+        "SELECT pra.principal_id FROM access_grants pra \
+         JOIN roles r ON r.id = pra.role_id \
+         JOIN sessions s ON s.token_hash = $1 \
+         WHERE r.name = 'platform_admin' AND pra.scope_type = 'platform' \
+           AND pra.principal_id = s.user_id",
+    )
+    .bind(egret_auth::token::hash_token(&admin_token))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the admin's own platform_admin grant");
+
+    // Self-delete is rejected — 400, not a 200/204.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/users/{admin_id}"),
+            &admin_token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an admin cannot delete their own account; body={j}"
+    );
+    assert!(
+        f.users
+            .find_by_id(UserId(admin_id))
+            .await
+            .unwrap()
+            .is_some(),
+        "self-delete must be a no-op"
+    );
+
+    // A normal (non-admin) target, with a group membership and a live session.
+    let email = format!("delete_target_{}@egret.local", Uuid::new_v4().simple());
+    let user_id = f
+        .users
+        .insert_local(&email, "Delete Target", "x")
+        .await
+        .expect("insert target user");
+    let groups = egret_auth::groups::GroupRepo::new(f.db.clone());
+    let group_id = groups
+        .create_local(&format!("delete-test-group-{}", Uuid::new_v4().simple()))
+        .await
+        .expect("create group");
+    groups
+        .add_member(group_id, user_id)
+        .await
+        .expect("add member");
+    let issued = f
+        .sessions
+        .create(user_id, "test-agent", "127.0.0.1")
+        .await
+        .expect("create a live session for the target user");
+    assert!(f.sessions.validate(&issued.token).await.unwrap().is_some());
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/users/{}", user_id.0),
+            &admin_token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "deleting a normal user should 204"
+    );
+
+    assert!(
+        f.users.find_by_id(user_id).await.unwrap().is_none(),
+        "user row must be gone after hard-delete"
+    );
+    assert!(
+        groups.groups_of_user(user_id).await.unwrap().is_empty(),
+        "group membership must be cleaned up"
+    );
+    assert!(
+        f.sessions.validate(&issued.token).await.unwrap().is_none(),
+        "the deleted user's live session must no longer validate"
+    );
+
+    // Deleting an id that no longer exists (or never did) is a 404.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/users/{}", user_id.0),
+            &admin_token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "deleting an already-deleted user should 404"
+    );
+}
+
+/// `guard_not_last_admin` blocks deleting the platform-wide LAST
+/// `platform_admin` — 409 Conflict. Run against `setup_isolated_schema` for a
+/// deterministic admin count (see its docstring, and `cannot_disable_the_last_platform_admin`
+/// for the analogous disable-route test).
+#[tokio::test]
+async fn cannot_delete_the_last_platform_admin() {
+    let Some(f) = setup_isolated_schema("egret_test_iso_delete_last_admin").await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let _lone_admin_token = session_for(&f, "lone_admin_del", true).await;
+    let (admin_id,): (Uuid,) = sqlx::query_as(
+        "SELECT pra.principal_id FROM access_grants pra \
+         JOIN roles r ON r.id = pra.role_id \
+         WHERE r.name = 'platform_admin' AND pra.scope_type = 'platform'",
+    )
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the sole platform_admin assignment");
+
+    // A distinct caller with just `user:delete` (not platform_admin), so the
+    // self-guard doesn't mask the last-admin guard under test.
+    let caller_token = session_for_with_permission(&f, "deleter", "user:delete").await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/users/{admin_id}"),
+            &caller_token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "deleting the last platform_admin must 409; body={j}"
+    );
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("last platform admin"),
+        "409 body should explain the last-admin guard; body={j}"
+    );
+    assert!(
+        f.users
+            .find_by_id(UserId(admin_id))
+            .await
+            .unwrap()
+            .is_some(),
+        "the last admin must not be deleted"
+    );
+
+    // A second admin breaks the tie: the same delete now succeeds.
+    let _second_admin_token = session_for(&f, "second_admin_del", true).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/users/{admin_id}"),
+            &caller_token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "delete succeeds once a second platform_admin exists"
+    );
+}
+
+/// `DELETE /users/{id}` (Task 4, spec-review follow-up): a user who OWNS
+/// content (here a dashboard via `dashboards.created_by`, a plain FK to
+/// `users(id)`) cannot be hard-deleted yet — the row delete trips a Postgres
+/// `foreign_key_violation` (23503) which `UserRepo::hard_delete` maps to a
+/// `Conflict`. The route must return 409 (NOT a raw 500), and — because the
+/// whole delete runs in one transaction that rolls back — the user must still
+/// exist afterwards.
+#[tokio::test]
+async fn deleting_a_content_owner_conflicts_not_500() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin_token = session_for(&f, "delete_owner_admin", true).await;
+
+    // A normal target user who will own a dashboard.
+    let email = format!("content_owner_{}@egret.local", Uuid::new_v4().simple());
+    let user_id = f
+        .users
+        .insert_local(&email, "Content Owner", "x")
+        .await
+        .expect("insert target user");
+
+    // A workspace + a dashboard created_by the target (`analytics.dashboards`.
+    // `created_by` is a plain FK to `users(id)` with no ON DELETE action — the
+    // blocking case; the table was moved to the `analytics` schema in mig 0067).
+    let (ws_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO workspaces (slug, name) VALUES ($1, 'Delete FK Test') RETURNING id",
+    )
+    .bind(format!("delete-fk-{}", Uuid::new_v4().simple()))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert workspace");
+    sqlx::query(
+        "INSERT INTO analytics.dashboards (workspace_id, name, created_by) \
+         VALUES ($1, 'Owned', $2)",
+    )
+    .bind(ws_id)
+    .bind(user_id.0)
+    .execute(&f.db.pool)
+    .await
+    .expect("insert dashboard owned by the target");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/users/{}", user_id.0),
+            &admin_token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "deleting a content-owning user must 409, not 500; body={j}"
+    );
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("owns content"),
+        "409 body should explain the content-ownership limitation; body={j}"
+    );
+    // The transaction rolled back — the user is untouched.
+    assert!(
+        f.users.find_by_id(user_id).await.unwrap().is_some(),
+        "the content owner must still exist after the failed delete (tx rolled back)"
     );
 }

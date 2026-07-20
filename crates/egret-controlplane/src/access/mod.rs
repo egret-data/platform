@@ -40,7 +40,8 @@ const LIST_LIMIT: i64 = 1000;
 pub fn router() -> Router<CpState> {
     Router::new()
         .route("/users", get(list_users).post(create_user))
-        .route("/users/{id}", patch(update_user))
+        .route("/users/{id}", patch(update_user).delete(delete_user))
+        .route("/users/{id}/password", post(reset_password))
         .route("/users/{id}/roles", post(assign_user_role))
         .route("/users/{id}/roles/{role_id}", delete(unassign_user_role))
         .route("/groups", get(list_groups).post(create_group))
@@ -75,6 +76,35 @@ async fn guard_last_admin(st: &CpState, role_id: Uuid) -> Result<(), CpError> {
     if role.name == PLATFORM_ADMIN_ROLE && st.roles.count_platform_admins().await? == 1 {
         return Err(CpError::Conflict(
             "Cannot remove the last platform admin".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Reject an action that would remove the last active platform admin, or that
+/// a caller aims at their own account. Reused by disable + delete (Task 4).
+///
+/// A self-target is a `BadRequest` (400) — a bad actor/target, not a state
+/// conflict — while removing the last admin is a `Conflict` (409), matching the
+/// sibling `guard_last_admin`. Like `guard_last_admin`, this check-then-act is
+/// TOCTOU-racy — a known, accepted limitation: two concurrent disables aimed at
+/// different admins in a 2-admin system could both read `len == 2`, pass, and
+/// leave zero admins. The window is tiny and admin-only; a hard invariant would
+/// need a DB constraint or a serialized transaction.
+async fn guard_not_last_admin(
+    st: &CpState,
+    caller: &egret_core::Principal,
+    target: UserId,
+) -> Result<(), CpError> {
+    if caller.user_id == target {
+        return Err(CpError::BadRequest(
+            "you cannot disable or delete your own account".into(),
+        ));
+    }
+    let admins = st.roles.platform_admin_user_ids().await?;
+    if admins.contains(&target) && admins.iter().all(|a| *a == target) {
+        return Err(CpError::Conflict(
+            "Cannot remove the last platform admin".into(),
         ));
     }
     Ok(())
@@ -206,11 +236,12 @@ async fn create_user(
     params(("id" = Uuid, Path, description = "User id")),
     request_body = UpdateUserInput,
     responses(
-        (status = 200, description = "User profile and/or status updated", body = UserDto),
-        (status = 400, description = "Invalid status value", body = ErrorBody),
+        (status = 200, description = "User profile and/or status updated (disabling also revokes the user's live sessions immediately)", body = UserDto),
+        (status = 400, description = "Invalid status value, or a caller disabling their own account", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing user:update (or user:disable) permission", body = ErrorBody),
         (status = 404, description = "No such user", body = ErrorBody),
+        (status = 409, description = "Would remove the last platform admin", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -240,8 +271,15 @@ async fn update_user(
         if status == "disabled" {
             // Disabling is a stronger action than a plain profile update.
             egret_core::authz::require(&*st.pdp, &p, "user:disable").await?;
+            guard_not_last_admin(&st, &p, user_id).await?;
+            st.users.set_status(user_id, status).await?;
+            // Immediate lockout: kill the user's live sessions now, rather than
+            // waiting for `SessionService::validate` to reject them on their
+            // next request.
+            st.sessions.revoke_all_for_user(user_id).await?;
+        } else {
+            st.users.set_status(user_id, status).await?;
         }
-        st.users.set_status(user_id, status).await?;
     }
 
     let updated = st
@@ -266,6 +304,93 @@ async fn update_user(
         roles,
         groups,
     }))
+}
+
+/// `DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,
+/// not the last active platform admin (`guard_not_last_admin`, shared with the
+/// disable branch of `update_user`). Cleans up the user's sessions, group
+/// memberships, and platform role/permission grants, then the row itself, in
+/// one transaction (`UserRepo::hard_delete`).
+#[utoipa::path(
+    delete,
+    path = "/api/control-plane/users/{id}",
+    tag = "control-plane-access",
+    params(("id" = Uuid, Path, description = "User id")),
+    responses(
+        (status = 204, description = "User hard-deleted along with sessions/group memberships/grants"),
+        (status = 400, description = "Caller attempted to delete their own account", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing user:delete permission", body = ErrorBody),
+        (status = 404, description = "No such user", body = ErrorBody),
+        (status = 409, description = "Would remove the last platform admin", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn delete_user(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "user:delete").await?;
+    let user_id = UserId(id);
+    st.users
+        .find_by_id(user_id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    guard_not_last_admin(&st, &p, user_id).await?;
+    st.users.hard_delete(user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct ResetPasswordInput {
+    password: String,
+}
+
+/// `POST /users/{id}/password` — admin reset of a LOCAL user's password.
+/// Rehashes the new plaintext, then revokes the user's live sessions (mirrors
+/// the disable branch of `update_user`) so a session issued under the old
+/// password can't linger.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/users/{id}/password",
+    tag = "control-plane-access",
+    params(("id" = Uuid, Path, description = "User id")),
+    request_body = ResetPasswordInput,
+    responses(
+        (status = 204, description = "Password reset; the user's live sessions are revoked"),
+        (status = 400, description = "Empty password, or the target is not a local account", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing user:update permission", body = ErrorBody),
+        (status = 404, description = "No such user", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn reset_password(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ResetPasswordInput>,
+) -> Result<StatusCode, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "user:update").await?;
+    let user_id = UserId(id);
+    let user = st
+        .users
+        .find_by_id(user_id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    if user.provider != "local" {
+        return Err(CpError::BadRequest(
+            "cannot set a password on a non-local (SSO) account".into(),
+        ));
+    }
+    if body.password.is_empty() {
+        return Err(CpError::BadRequest("password must not be empty".into()));
+    }
+    let hash = egret_auth::password::hash_password(&body.password)?;
+    st.users.set_password(user_id, &hash).await?;
+    st.sessions.revoke_all_for_user(user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(
@@ -1169,6 +1294,8 @@ async fn who_can_access(
         list_users,
         create_user,
         update_user,
+        delete_user,
+        reset_password,
         assign_user_role,
         unassign_user_role,
         list_groups,
@@ -1195,6 +1322,7 @@ async fn who_can_access(
         UserDto,
         CreateUserInput,
         UpdateUserInput,
+        ResetPasswordInput,
         AssignRoleInput,
         GroupDto,
         CreateGroupInput,

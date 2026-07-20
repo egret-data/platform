@@ -139,6 +139,17 @@ impl UserRepo {
         Ok(())
     }
 
+    /// Set a local user's password hash (admin reset). Caller hashes the plaintext.
+    pub async fn set_password(&self, id: UserId, password_hash: &str) -> Result<()> {
+        sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
+            .bind(id.0)
+            .bind(password_hash)
+            .execute(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     /// Return the stable username for `user_id`, deriving and persisting one if
     /// not yet set.  The username is the email local-part slugified to
     /// `[a-z0-9_-]`; collisions are resolved by appending `-2`, `-3`, …
@@ -203,6 +214,73 @@ impl UserRepo {
         Err(egret_core::Error::Internal(anyhow::anyhow!(
             "could not allocate a unique username for user {user_id:?} after 999 attempts"
         )))
+    }
+
+    /// Hard-delete a user and dependents in one transaction: sessions, group
+    /// memberships, platform role/permission grants, then the user row.
+    /// (Audit history is intentionally NOT deleted — `audit.audit_log.actor_user_id`
+    /// is a denormalized `uuid` with no FK to `users`, so it survives untouched.
+    /// The legacy `policy_audit.actor` DOES carry a nullable FK, but no code writes
+    /// that table, so it never blocks a delete; if it is ever wired up, null its
+    /// `actor` in this tx rather than deleting the audit row.)
+    ///
+    /// `sessions` and `user_groups` already carry `ON DELETE CASCADE` (see
+    /// migration 0002); they're deleted explicitly anyway so this stays correct
+    /// even if that cascade is ever loosened. `access_grants.principal_id` is a
+    /// polymorphic column with no FK at all, so it MUST be cleaned explicitly.
+    ///
+    /// # Content-ownership limitation
+    /// Many tables carry a plain (often NOT-NULL) FK to `users(id)` for
+    /// *content ownership* rather than membership/audit — e.g. the NOT-NULL
+    /// `notebooks.owner_user_id`, and `dashboards`/`charts`/`datasets`/
+    /// `folders`/`databases`/`engines`.`created_by`/`granted_by`. These are
+    /// deliberately NOT cleaned here (we don't cascade-delete a user's
+    /// dashboards, nor silently reassign them). So a user who owns any such
+    /// content cannot be hard-deleted yet: the final `DELETE FROM users` trips a
+    /// Postgres `foreign_key_violation` (SQLSTATE `23503`), which we catch and
+    /// surface as [`egret_core::Error::Conflict`] (the handler returns 409) with
+    /// an actionable message rather than a raw 500. The whole transaction rolls
+    /// back, so nothing is half-deleted. Full per-table ownership reassignment
+    /// (SET NULL / reassign / block) is a tracked follow-up.
+    pub async fn hard_delete(&self, id: UserId) -> Result<()> {
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+            .bind(id.0)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        sqlx::query("DELETE FROM user_groups WHERE user_id = $1")
+            .bind(id.0)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        sqlx::query(
+            "DELETE FROM access_grants WHERE principal_type = 'user' AND principal_id = $1",
+        )
+        .bind(id.0)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        // The row delete is the one that can trip a content-ownership FK
+        // (23503). Map that specific case to a Conflict (→ 409); on return the
+        // dropped `tx` rolls back, so no dependent rows above are lost.
+        if let Err(e) = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(id.0)
+            .execute(&mut *tx)
+            .await
+        {
+            if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("23503") {
+                return Err(egret_core::Error::Conflict(
+                    "cannot delete a user who owns content (notebooks, dashboards, datasets, \
+                     engine grants, …). Disable the user instead, or reassign/remove their \
+                     content first."
+                        .into(),
+                ));
+            }
+            return Err(db_err(e));
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
     }
 }
 
@@ -290,5 +368,82 @@ mod tests {
             .unwrap();
         let ub = repo.ensure_username(b).await.unwrap();
         assert_eq!(ub, "alice-2"); // collision suffix
+    }
+
+    /// `hard_delete` removes the user row plus every dependent it's supposed to
+    /// clean up in its transaction: live sessions, group memberships, and
+    /// platform role/permission grants (`access_grants`) — leaving no orphaned
+    /// rows and no error from the final `DELETE FROM users`.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn hard_delete_removes_user_and_dependents(pool: sqlx::PgPool) {
+        let db = Db { pool };
+        let repo = UserRepo::new(db.clone());
+        let groups = crate::groups::GroupRepo::new(db.clone());
+        let sessions = crate::session::SessionService::new(
+            db.clone(),
+            chrono::Duration::hours(24),
+            chrono::Duration::minutes(60),
+        );
+
+        let uid = repo
+            .insert_local("hard_delete_target@egret.local", "Target", "x")
+            .await
+            .unwrap();
+
+        // Group membership.
+        let group_id = groups.create_local("hard-delete-test-group").await.unwrap();
+        groups.add_member(group_id, uid).await.unwrap();
+        assert_eq!(
+            groups.groups_of_user(uid).await.unwrap(),
+            vec!["hard-delete-test-group".to_string()]
+        );
+
+        // A platform role/permission grant via `access_grants`.
+        let (role_id,): (Uuid,) = sqlx::query_as(
+            "INSERT INTO roles (scope, name, description) VALUES ('platform', 'hard_delete_test_role', 't') \
+             RETURNING id",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             VALUES ('user', $1, $2, 'platform', NULL)",
+        )
+        .bind(uid.0)
+        .bind(role_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        // A live session.
+        let issued = sessions
+            .create(uid, "test-agent", "127.0.0.1")
+            .await
+            .unwrap();
+        assert!(sessions.validate(&issued.token).await.unwrap().is_some());
+
+        repo.hard_delete(uid).await.unwrap();
+
+        assert!(
+            repo.find_by_id(uid).await.unwrap().is_none(),
+            "user row gone"
+        );
+        assert!(
+            groups.groups_of_user(uid).await.unwrap().is_empty(),
+            "group membership cleaned"
+        );
+        assert!(
+            sessions.validate(&issued.token).await.unwrap().is_none(),
+            "session cleaned/invalidated"
+        );
+        let grant_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM access_grants WHERE principal_type = 'user' AND principal_id = $1",
+        )
+        .bind(uid.0)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(grant_count, 0, "access_grants cleaned");
     }
 }

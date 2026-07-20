@@ -230,6 +230,46 @@ describe("UsersPage", () => {
     expect(screen.getByTestId("list-skeleton")).toBeInTheDocument();
   });
 
+  test("Delete confirmation dialog requires typing 'delete' then calls deleteUser", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.deleteUser).mockResolvedValue(undefined);
+
+    renderPage();
+    await screen.findByText("alice@example.com");
+
+    await user.click(screen.getByRole("button", { name: /Actions for alice@example.com/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    await screen.findByRole("heading", { name: /Delete "alice@example.com"/i });
+
+    // The destructive confirm button stays disabled until "delete" is typed.
+    const confirmButton = screen.getByRole("button", { name: /^Delete$/i });
+    expect(confirmButton).toBeDisabled();
+
+    await user.type(screen.getByPlaceholderText("delete"), "delete");
+    expect(confirmButton).toBeEnabled();
+    await user.click(confirmButton);
+
+    await waitFor(() => expect(api.deleteUser).toHaveBeenCalledWith("u1"));
+  });
+
+  test("cannot delete your own account: the Delete menu item is disabled for the signed-in user", async () => {
+    const SELF_ME: Me = {
+      user_id: "u1",
+      email: "alice@example.com",
+      platform_roles: ["platform_admin"],
+      permissions: [],
+    };
+    const user = userEvent.setup();
+    renderPage(SELF_ME);
+    await screen.findByText("alice@example.com");
+
+    await user.click(screen.getByRole("button", { name: /Actions for alice@example.com/i }));
+    expect(await screen.findByRole("menuitem", { name: "Delete" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+  });
+
   test("a non-admin user:read viewer can still create/edit users but not assign roles", async () => {
     const NON_ADMIN_ME: Me = {
       user_id: "2",

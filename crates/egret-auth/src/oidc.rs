@@ -14,26 +14,10 @@ pub struct OidcClaims {
     pub groups: Vec<String>,
 }
 
-/// Result of a completed login: normalized claims + the raw refresh token
-/// (present only if the IdP issued one — e.g. `offline_access` scope).
-///
-/// `Debug` is hand-written to redact the refresh token; `Clone` is intentionally
-/// not derived so we keep as few copies of the credential alive as possible.
+/// Result of a completed login: normalized claims from the validated id_token.
+#[derive(Debug)]
 pub struct OidcLogin {
     pub claims: OidcClaims,
-    pub refresh_token: Option<String>,
-}
-
-impl std::fmt::Debug for OidcLogin {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OidcLogin")
-            .field("claims", &self.claims)
-            .field(
-                "refresh_token",
-                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
-            )
-            .finish()
-    }
 }
 
 /// JIT-provision the user (match by `sub`) and sync their OIDC group memberships.
@@ -77,8 +61,8 @@ use openidconnect::core::{
 use openidconnect::{
     AuthorizationCode, Client, ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
     EndpointMaybeSet, EndpointNotSet, EndpointSet, IdTokenClaims, IdTokenFields, IssuerUrl, Nonce,
-    OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
-    StandardErrorResponse, StandardTokenResponse, TokenResponse,
+    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, StandardErrorResponse,
+    StandardTokenResponse, TokenResponse,
 };
 use serde::{Deserialize, Serialize};
 
@@ -205,8 +189,7 @@ impl OidcService {
         }
     }
 
-    /// Exchange the code and validate the id_token; return normalized claims plus
-    /// the raw refresh token (if the IdP issued one).
+    /// Exchange the code and validate the id_token; return normalized claims.
     pub async fn finish(&self, code: &str, pkce_verifier: &str, nonce: &str) -> Result<OidcLogin> {
         let token_response = self
             .client
@@ -217,13 +200,7 @@ impl OidcService {
             .await
             .map_err(oidc_err)?;
         let claims = self.verify_from_response(&token_response, nonce)?;
-        let refresh_token = token_response
-            .refresh_token()
-            .map(|r| r.secret().to_string());
-        Ok(OidcLogin {
-            claims,
-            refresh_token,
-        })
+        Ok(OidcLogin { claims })
     }
 
     /// Validate a raw id_token string (used by tests / non-auth-code flows such as

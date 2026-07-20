@@ -1,15 +1,26 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Compass, ListChecks, MoreHorizontal, Pencil, Plus, ShieldCheck } from "lucide-react";
+import {
+  Compass,
+  KeyRound,
+  ListChecks,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  ShieldCheck,
+  Trash2,
+} from "lucide-react";
 
 import {
   type AccessRole,
   type AccessUser,
   assignUserRole,
   createUser,
+  deleteUser,
   listRoles,
   listUsers,
+  resetUserPassword,
   unassignUserRole,
   updateUser,
 } from "@/api/access";
@@ -29,6 +40,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Dialog,
   DialogContent,
@@ -41,6 +53,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -88,8 +101,21 @@ export default function UsersPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<AccessUser | null>(null);
   const [rolesTarget, setRolesTarget] = useState<AccessUser | null>(null);
+  const [resetTarget, setResetTarget] = useState<AccessUser | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AccessUser | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [statusFacet, setStatusFacet] = useState(FACET_ALL);
   const [providerFacet, setProviderFacet] = useState(FACET_ALL);
+
+  const qc = useQueryClient();
+  const deleteMutation = useMutation<void, ApiError, string>({
+    mutationFn: (id) => deleteUser(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: usersQueryKey });
+      setDeleteError(null);
+    },
+    onError: (err) => setDeleteError(err.message ?? "Failed to delete user."),
+  });
 
   const columns: Column<AccessUser>[] = [
     {
@@ -185,6 +211,25 @@ export default function UsersPage() {
               <Pencil className="mr-2 h-4 w-4" />
               Edit
             </DropdownMenuItem>
+            {u.provider === "local" && (
+              <DropdownMenuItem onClick={() => setResetTarget(u)}>
+                <KeyRound className="mr-2 h-4 w-4" />
+                Reset password
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              disabled={u.id === me?.user_id}
+              title={u.id === me?.user_id ? "You cannot delete your own account" : undefined}
+              className="text-destructive focus:text-destructive"
+              onClick={() => {
+                setDeleteError(null);
+                setDeleteTarget(u);
+              }}
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       ),
@@ -200,7 +245,6 @@ export default function UsersPage() {
   const active = rows.filter((u) => u.status === "active").length;
 
   const bulk = useBulkSelect(filtered);
-  const qc = useQueryClient();
   const refreshUsers = () => qc.invalidateQueries({ queryKey: usersQueryKey });
   const selectedUsers = () => filtered.filter((u) => bulk.selected.has(u.id));
   const [bulkRoleOpen, setBulkRoleOpen] = useState(false);
@@ -253,6 +297,11 @@ export default function UsersPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
+          {deleteError && (
+            <Alert variant="destructive">
+              <AlertDescription>{deleteError}</AlertDescription>
+            </Alert>
+          )}
           <SummaryStrip
             items={[
               { label: "users", value: total },
@@ -333,12 +382,31 @@ export default function UsersPage() {
           if (!o) setRolesTarget(null);
         }}
       />
+      <ResetPasswordDialog
+        user={resetTarget}
+        onOpenChange={(o) => {
+          if (!o) setResetTarget(null);
+        }}
+      />
       <BulkAssignRoleDialog
         open={bulkRoleOpen}
         users={selectedUsers()}
         onOpenChange={setBulkRoleOpen}
         refresh={refreshUsers}
         onDone={() => bulk.clear()}
+      />
+      <ConfirmDeleteDialog
+        open={deleteTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) setDeleteTarget(null);
+        }}
+        title={deleteTarget ? `Delete "${deleteTarget.email}"?` : "Delete user?"}
+        description="This user, their sessions, group memberships, and role grants will be permanently removed. This cannot be undone."
+        confirmText="delete"
+        onConfirm={() => {
+          if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
+          setDeleteTarget(null);
+        }}
       />
     </div>
   );
@@ -633,6 +701,94 @@ function EditUserDialog({
             </Button>
             <Button type="submit" disabled={updateMutation.isPending}>
               Save
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ResetPasswordDialog({
+  user,
+  onOpenChange,
+}: {
+  user: AccessUser | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (user) {
+      setPassword("");
+      setError(null);
+    }
+  }, [user]);
+
+  const resetMutation = useMutation<void, ApiError, string>({
+    mutationFn: (pw) => resetUserPassword(user!.id, pw),
+  });
+
+  function handleOpenChange(next: boolean) {
+    if (!next) {
+      setPassword("");
+      setError(null);
+      resetMutation.reset();
+    }
+    onOpenChange(next);
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    try {
+      await resetMutation.mutateAsync(password);
+      handleOpenChange(false);
+    } catch (err) {
+      setError((err as ApiError).message ?? "Failed to reset password.");
+    }
+  }
+
+  return (
+    <Dialog open={user !== null} onOpenChange={handleOpenChange}>
+      <DialogContent>
+        <form onSubmit={handleSubmit}>
+          <DialogHeader>
+            <DialogTitle>Reset password — {user?.email}</DialogTitle>
+            <DialogDescription>
+              Set a new password for this local account. Their existing sessions
+              are signed out immediately.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="my-4 space-y-4">
+            {error && (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+
+            <div className="space-y-1.5">
+              <Label htmlFor="reset-user-password">New password</Label>
+              <Input
+                id="reset-user-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                autoFocus
+                autoComplete="new-password"
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={resetMutation.isPending}>
+              Reset password
             </Button>
           </DialogFooter>
         </form>

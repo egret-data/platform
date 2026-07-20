@@ -209,6 +209,7 @@ export * from './rangerServiceTagsTags';
 export * from './renameFolder';
 export * from './renameGroupInput';
 export * from './reorderCells';
+export * from './resetPasswordInput';
 export * from './resourceLevel';
 export * from './resourceTagBody';
 export * from './resourceTagDto';

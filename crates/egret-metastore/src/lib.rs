@@ -4,6 +4,7 @@
 // re-embed: 0081 catalog_tag_targets (catalog table/column tag assignments)
 // re-embed: 0082 classification_policies (tag-conditioned BI object access; Access P3.3)
 // re-embed: 0083 classification_required_groups (clearance by group/department; Access P3.4)
+// re-embed: 0092 drop_oidc_refresh_tokens (STS cleanup: dead Keycloak refresh path)
 
 use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::postgres::PgPoolOptions;
