@@ -2,6 +2,7 @@
 //! principal (user/group) assignments.
 
 use crate::events::RolesChanged;
+use egret_core::ids::UserId;
 use egret_core::Result;
 use egret_events::EventBus;
 use egret_metastore::Db;
@@ -149,6 +150,22 @@ impl RoleRepo {
         .fetch_one(&self.db.pool)
         .await
         .map_err(db_err)
+    }
+
+    /// User ids directly granted the `platform_admin` role at platform scope.
+    /// (Direct user grants only — group-granted admins are not expanded here.)
+    pub async fn platform_admin_user_ids(&self) -> Result<Vec<UserId>> {
+        let rows = sqlx::query_scalar::<_, Uuid>(
+            "SELECT DISTINCT pra.principal_id FROM access_grants pra \
+             JOIN roles r ON r.id = pra.role_id \
+             WHERE r.name = 'platform_admin' \
+               AND pra.scope_type = 'platform' \
+               AND pra.principal_type = 'user'",
+        )
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(rows.into_iter().map(UserId).collect())
     }
 
     /// Create a new role; returns its id.

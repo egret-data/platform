@@ -281,6 +281,40 @@ impl PolicyStore {
         Ok(id)
     }
 
+    /// Insert a policy, or update its body in place if `(service_id, name)`
+    /// already exists, bumping the policy's `version` and the service's
+    /// `policy_version` atomically. Returns the policy id.
+    pub async fn upsert_policy(
+        &self,
+        service_id: i64,
+        name: &str,
+        policy: &Value,
+    ) -> Result<i64, PolicyStoreError> {
+        let mut tx = self.db.pool.begin().await?;
+        let id: i64 = sqlx::query_scalar::<_, i64>(
+            r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb)
+               VALUES ($1,$2,$3)
+               ON CONFLICT (service_id, name) DO UPDATE
+                 SET policy_jsonb = EXCLUDED.policy_jsonb,
+                     version = policy.authz_policies.version + 1,
+                     updated_at = now()
+               RETURNING id"#,
+        )
+        .bind(service_id)
+        .bind(name)
+        .bind(policy)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
+        )
+        .bind(service_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(id)
+    }
+
     pub async fn update_policy(
         &self,
         id: i64,

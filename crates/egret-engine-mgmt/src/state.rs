@@ -33,6 +33,12 @@ pub struct EngineMgmtState {
     pub secrets: egret_secrets::WorkspaceSecretStore,
     /// Session service backing the `Auth` extractor.
     pub sessions: SessionService,
+    /// User identity repo — resolves platform-admin `UserId`s to engine
+    /// usernames when auto-seeding Ranger admin all-access on provision.
+    pub users: egret_auth::users::UserRepo,
+    /// Role repo — lists platform-admin `UserId`s for the Ranger auto-admin
+    /// seed on governed-engine provision.
+    pub roles: egret_auth::roles::RoleRepo,
     /// PDP-backed policy decision point for the seam's authz gates
     /// (`egret_core::authz::require`); platform_admin bypasses. Injected from
     /// the shared PDP in the composition root.

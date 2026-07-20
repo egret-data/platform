@@ -56,4 +56,14 @@ pub trait PolicyPort: Send + Sync {
         name: &str,
         policy: &Value,
     ) -> Result<(), PolicyError>;
+
+    /// Seed idempotent admin all-access policies for `users` on the given
+    /// service type ("trino"/"starrocks"). Returns the count written.
+    async fn seed_admin_all_access(
+        &self,
+        service_id: i64,
+        service_name: &str,
+        service_type: &str,
+        users: &[String],
+    ) -> Result<usize, PolicyError>;
 }

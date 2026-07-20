@@ -86,6 +86,15 @@ e2e-kind-governance: deploy-kind-governance
       EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
       npx playwright test governance-kind
 
+# Opt-in auto-admin e2e: admin queries a governed engine with NO hand-seeded policy
+# (proves the backend auto-seeds the egret-admin all-access Ranger policy on provision).
+e2e-kind-ranger-auto: deploy-kind-governance
+    ./deploy/k8s/wait-ready.sh
+    cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
+      EGRET_E2E_BUCKET=e2e \
+      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      npx playwright test ranger-auto-admin-kind
+
 # Uninstall the egret release (leaves the kind cluster + operators up).
 kind-undeploy:
     helm uninstall egret -n egret-system || true
