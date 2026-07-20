@@ -191,7 +191,10 @@ async fn platform_admin_user_ids_lists_direct_user_grants() {
         .into_iter()
         .find(|r| r.name == "platform_admin")
         .expect("platform_admin seeded by migration 0003");
-    roles.assign("user", user_id.0, admin_role.id).await.unwrap();
+    roles
+        .assign("user", user_id.0, admin_role.id)
+        .await
+        .unwrap();
 
     let ids = roles.platform_admin_user_ids().await.unwrap();
     assert!(
