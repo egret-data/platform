@@ -421,6 +421,42 @@ export async function provisionTrinoEngineJwt(
   return engine.id as string;
 }
 
+/**
+ * Provision a small (1 FE, 1 CN) StarRocks engine wired to the warehouse, with
+ * egret-JWT delegation (`starrocks.delegationMode: "jwt"`) enabled at create time.
+ * FE TLS on the MySQL port (:9030) defaults to `true` once `delegationMode` is set
+ * (see `StarRocksConfigBody::tls_enabled` in egret-engine-mgmt), so it's set
+ * explicitly here for clarity rather than left implicit. StarRocks' default image
+ * is 4.1+ (JWT-auth capable), so no `feImage` override is needed. Returns the
+ * engine's id.
+ */
+export async function provisionStarRocksEngineJwt(
+  req: APIRequestContext,
+  h: Record<string, string>,
+  runId: string,
+  warehouseId: string,
+): Promise<string> {
+  const engine = await postJson(req, "/api/control-plane/engines", h, {
+    name: `e2e-sr-${runId}`,
+    warehouseId,
+    kind: "starrocks",
+    coordinatorReplicas: 1,
+    workerReplicas: 1,
+    cpuMin: "250m",
+    cpuMax: "1",
+    // A StarRocks FE needs ~2Gi+ heap and won't start on 1Gi; 4Gi is the value
+    // proven to bring the FE up live for a jwt-delegated StarRocks 4.1 engine.
+    memory: "4Gi",
+    starrocks: {
+      feReplicas: 1,
+      cnReplicas: 1,
+      delegationMode: "jwt",
+      tlsEnabled: true,
+    },
+  });
+  return engine.id as string;
+}
+
 /** Add a user (by email) to a workspace with the given role (workspace:manage_members). */
 export async function addWorkspaceMember(
   req: APIRequestContext,
