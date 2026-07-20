@@ -303,26 +303,21 @@ export async function loginViaOidcMember(page: Page): Promise<void> {
  * Retries while a freshly provisioned coordinator is warming up (500s ~30-40s until
  * SERVER STARTED) or a just-created Ranger policy hasn't propagated yet.
  */
-export async function runQuery(
+/** Submit + poll + fetch a SQL Lab query against a KNOWN database id. Unlike
+ *  `runQuery`, it does NOT list databases (that endpoint is manage_members-gated,
+ *  so a non-admin member can't use it) — pass a db id resolved by an admin. */
+export async function runQueryByDb(
   request: APIRequestContext,
   h: Record<string, string>,
   workspaceSlug: string,
-  engineName: string,
+  databaseId: string,
   sql: string,
 ): Promise<{ columns: Array<{ name: string }>; rows: string[][] }> {
-  const engineRe = new RegExp(engineName, "i");
-  const dbs = (await (await request.get(`/api/ws/${workspaceSlug}/databases`)).json()) as Array<{
-    id: string;
-    name?: string;
-  }>;
-  const db = dbs.find((d) => engineRe.test(d.name ?? ""));
-  expect(db, `database for ${engineName} is listed`).toBeTruthy();
-
   let out: { columns: Array<{ name: string }>; rows: string[][] } = { columns: [], rows: [] };
   await expect(async () => {
     const sub = await request.post(`/api/ws/${workspaceSlug}/queries`, {
       headers: h,
-      data: { database_id: db!.id, sql },
+      data: { database_id: databaseId, sql },
     });
     expect(sub.ok(), `submit → ${sub.status()} ${await sub.text()}`).toBeTruthy();
     const qid = (await sub.json()).id as string;
@@ -339,6 +334,23 @@ export async function runQuery(
     out = await (await request.get(`/api/ws/${workspaceSlug}/queries/${qid}/results`)).json();
   }).toPass({ timeout: 300_000, intervals: [4_000] });
   return out;
+}
+
+export async function runQuery(
+  request: APIRequestContext,
+  h: Record<string, string>,
+  workspaceSlug: string,
+  engineName: string,
+  sql: string,
+): Promise<{ columns: Array<{ name: string }>; rows: string[][] }> {
+  const engineRe = new RegExp(engineName, "i");
+  const dbs = (await (await request.get(`/api/ws/${workspaceSlug}/databases`)).json()) as Array<{
+    id: string;
+    name?: string;
+  }>;
+  const db = dbs.find((d) => engineRe.test(d.name ?? ""));
+  expect(db, `database for ${engineName} is listed`).toBeTruthy();
+  return runQueryByDb(request, h, workspaceSlug, db!.id, sql);
 }
 
 /** The Ranger profile (service) name auto-bound to `engineName` (= engine name). */

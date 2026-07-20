@@ -15,7 +15,7 @@ import {
   createDataset,
   createChart,
   createDashboardWithChart,
-  runQuery,
+  runQueryByDb,
   deleteEngine,
 } from "./helpers";
 
@@ -100,6 +100,7 @@ test.describe("per-user enforcement across surfaces on kind", () => {
   let chartId: string;
   let dashboardId: string;
   let cardId: string;
+  let dbId = ""; // engine's SQL Lab database id (resolved once, as admin)
 
   test.beforeAll(async ({ browser }) => {
     // 1. Break-glass admin for control-plane setup.
@@ -204,7 +205,6 @@ test.describe("per-user enforcement across surfaces on kind", () => {
     //     response shape (array or {databases|items:[]}) and retried, since the
     //     engine's SQL Lab database is materialized asynchronously after assign.
     const engineRe = new RegExp(engineName, "i");
-    let dbId = "";
     await expect(async () => {
       const resp = await request.get(`/api/ws/${ws.slug}/databases`);
       expect(resp.ok(), `list databases → ${resp.status()}`).toBeTruthy();
@@ -221,20 +221,20 @@ test.describe("per-user enforcement across surfaces on kind", () => {
     // 11. Seed the governed table AS admin-sso (has full Ranger access). The first
     //     CREATE is wrapped in a retry to absorb the Ranger execute/impersonate poll.
     await expect(async () => {
-      await runQuery(adminReq, adminH, ws.slug, engineName, "CREATE SCHEMA IF NOT EXISTS egret.gov");
+      await runQueryByDb(adminReq, adminH, ws.slug, dbId, "CREATE SCHEMA IF NOT EXISTS egret.gov");
     }).toPass({ timeout: 90_000, intervals: [5_000] });
-    await runQuery(
+    await runQueryByDb(
       adminReq,
       adminH,
       ws.slug,
-      engineName,
+      dbId,
       "CREATE TABLE IF NOT EXISTS egret.gov.sales (country varchar, item varchar, amount bigint)",
     );
-    await runQuery(
+    await runQueryByDb(
       adminReq,
       adminH,
       ws.slug,
-      engineName,
+      dbId,
       "INSERT INTO egret.gov.sales VALUES ('US','book',10),('US','pen',5),('VN','lamp',7),('SG','desk',9)",
     );
 
@@ -269,9 +269,9 @@ test.describe("per-user enforcement across surfaces on kind", () => {
   test("SQL Lab enforces per-user", async () => {
     // Wrap in a retry to absorb the Ranger mask/row-filter poll (~30s).
     await expect(async () => {
-      const admin = cells(await runQuery(adminReq, adminH, ws.slug, engineName, SELECT_SQL));
+      const admin = cells(await runQueryByDb(adminReq, adminH, ws.slug, dbId, SELECT_SQL));
       assertAdmin(admin);
-      const member = cells(await runQuery(memberReq, memberH, ws.slug, engineName, SELECT_SQL));
+      const member = cells(await runQueryByDb(memberReq, memberH, ws.slug, dbId, SELECT_SQL));
       assertMember(member);
     }).toPass({ timeout: 90_000, intervals: [5_000] });
   });
