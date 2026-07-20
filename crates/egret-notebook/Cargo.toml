@@ -8,6 +8,7 @@ license.workspace = true
 egret-core = { workspace = true, features = ["http"] }
 egret-analytics-api.workspace = true
 egret-catalog-engine.workspace = true
+egret-machine-idp.workspace = true
 egret-metastore.workspace = true
 egret-auth.workspace = true
 egret-workspace.workspace = true

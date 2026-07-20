@@ -56,6 +56,15 @@ pub struct NotebookState {
     pub catalog_base_url: String,
     /// Mints short-lived per-user engine JWTs for the runtime manifest.
     pub engine_minter: std::sync::Arc<dyn crate::engine_token::EngineTokenMinter>,
+    /// The machine-IdP signing keys — used to mint in-process `aud:"catalog"`
+    /// JWTs for kernels (scoped to the notebook warehouse + `notebook` catalog
+    /// role) so they can write directly to Iceberg. See
+    /// [`crate::runtime::mint_catalog_jwt`].
+    pub keys: egret_machine_idp::PgSigningKeyStore,
+    /// egret's public root URL, used verbatim as the `iss` of catalog JWTs so a
+    /// notebook-minted token is consistent with OAuth-minted ones. Matches the
+    /// `IdpState.issuer` value wired in `egret-bin`.
+    pub idp_issuer: String,
 }
 
 impl FromRef<NotebookState> for SessionService {

@@ -94,6 +94,8 @@ async fn runtime_manifest_carries_engine_jwt(pool: sqlx::PgPool) {
         users: UserRepo::new(db.clone()),
         catalog_base_url: "http://localhost:8181".into(),
         engine_minter: Arc::new(StubMinter),
+        keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
+        idp_issuer: "http://localhost:8080".into(),
     };
 
     let m = build_notebook_runtime(&state, ws_id.0, owner)
@@ -139,6 +141,8 @@ async fn runtime_manifest_no_refresh_token_is_ok(pool: sqlx::PgPool) {
         users: UserRepo::new(db.clone()),
         catalog_base_url: "http://localhost:8181".into(),
         engine_minter: Arc::new(NoRefreshMinter),
+        keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
+        idp_issuer: "http://localhost:8080".into(),
     };
 
     let m = build_notebook_runtime(&state, ws_id.0, owner)

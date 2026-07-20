@@ -1234,6 +1234,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         users: UserRepo::new(db.clone()),
         catalog_base_url: catalog_base_url.clone(),
         engine_minter: engine_minter.clone(),
+        keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
+        // Same value the machine-IdP (`IdpState.issuer`) uses below, so a
+        // notebook-minted catalog JWT carries the same `iss` as OAuth-minted ones.
+        idp_issuer: config
+            .catalog
+            .public_url
+            .clone()
+            .unwrap_or_else(|| "http://localhost:8080".to_string()),
     };
     let notebook = Some(notebook_state.clone());
 

@@ -16,6 +16,61 @@ use crate::routes::NotebookState;
 // `egret_notebook::NotebookRuntime`.
 pub use egret_analytics_api::NotebookRuntime;
 
+/// Build the `aud:"catalog"` claim set for a kernel, mirroring the machine-IdP
+/// OAuth path (`crates/egret-machine-idp/src/lib.rs:189-198`). Pure (no crypto,
+/// no DB) so the claim shape can be unit-tested in isolation. `exp_ts` is a Unix
+/// timestamp (seconds).
+// `mint_catalog_jwt` (its only caller) is wired into `build_notebook_runtime` in
+// Task 4; until then both are exercised only by tests.
+#[allow(dead_code)]
+fn catalog_claims(
+    issuer: &str,
+    warehouse_lakekeeper_id: &str,
+    role: &str,
+    exp_ts: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "iss": issuer.trim_end_matches('/'),
+        "sub": "notebook",
+        "aud": "catalog",
+        "warehouse": warehouse_lakekeeper_id,
+        "roles": [role],
+        "exp": exp_ts,
+    })
+}
+
+/// Mint an `aud:"catalog"` JWT scoped to `warehouse` + `role`, mirroring the
+/// machine-IdP OAuth path (`crates/egret-machine-idp/src/lib.rs:189-198`) — a
+/// local RS256 sign; no Keycloak/refresh-token dependency (works for any user).
+///
+/// Returns the signed JWT plus its expiry instant. The `issuer` should match the
+/// machine-IdP's `IdpState.issuer` so the token is consistent with OAuth-minted
+/// ones (the embedded CatalogGuard does not validate `iss`, so this is
+/// best-effort consistency, not a hard requirement).
+#[allow(dead_code)] // wired into `build_notebook_runtime` in Task 4
+pub(crate) async fn mint_catalog_jwt(
+    keys: &egret_machine_idp::PgSigningKeyStore,
+    issuer: &str,
+    warehouse_lakekeeper_id: &str,
+    role: &str,
+) -> Result<(String, chrono::DateTime<chrono::Utc>), NotebookApiError> {
+    use egret_machine_idp::SigningKeyStore as _;
+    let km = keys
+        .active()
+        .await
+        .map_err(|e| NotebookApiError(egret_core::Error::Internal(anyhow::anyhow!(e))))?;
+    let exp_ts = chrono::Utc::now().timestamp() as u64 + 3600;
+    let claims = catalog_claims(issuer, warehouse_lakekeeper_id, role, exp_ts);
+    let jwt = egret_machine_idp::sign_claims(&km, &claims)
+        .map_err(|e| NotebookApiError(egret_core::Error::Internal(anyhow::anyhow!(e))))?;
+    let exp = chrono::DateTime::from_timestamp(exp_ts as i64, 0).ok_or_else(|| {
+        NotebookApiError(egret_core::Error::Internal(anyhow::anyhow!(
+            "catalog JWT exp timestamp out of range"
+        )))
+    })?;
+    Ok((jwt, exp))
+}
+
 /// Build the [`NotebookRuntime`] manifest for `(ws, user_id)` without performing
 /// any HTTP authorization check. Steps 2–6 of the `runtime` handler.
 ///
@@ -94,4 +149,55 @@ pub async fn runtime(
     let manifest = build_notebook_runtime(&st, ctx.workspace_id.0, ctx.principal.user_id).await?;
 
     Ok(Json(manifest))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pure claim-shape check (no DB, no crypto): the catalog claim set mirrors
+    /// the machine-IdP OAuth path exactly.
+    #[test]
+    fn catalog_claims_shape() {
+        let c = catalog_claims("http://egret.local/", "wh-lakekeeper-id", "notebook", 12345);
+        assert_eq!(c["iss"], "http://egret.local"); // trailing slash trimmed
+        assert_eq!(c["sub"], "notebook");
+        assert_eq!(c["aud"], "catalog");
+        assert_eq!(c["warehouse"], "wh-lakekeeper-id");
+        assert_eq!(c["roles"], serde_json::json!(["notebook"]));
+        assert_eq!(c["exp"], 12345);
+    }
+
+    /// End-to-end mint: `active()` self-creates a signing key in the test DB, so
+    /// no manual seeding is needed. The minted JWT verifies against that key's
+    /// public JWK and decodes to the expected catalog claims.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn mint_catalog_jwt_signs_verifiable_scoped_token(pool: sqlx::PgPool) {
+        use egret_machine_idp::SigningKeyStore as _;
+
+        let db = egret_metastore::Db { pool };
+        let keys = egret_machine_idp::PgSigningKeyStore::new(db);
+
+        let (jwt, exp) =
+            mint_catalog_jwt(&keys, "http://egret.local/", "wh-lakekeeper-id", "notebook")
+                .await
+                .expect("mint catalog jwt");
+
+        let km = keys.active().await.expect("active key");
+        let claims =
+            egret_machine_idp::verify_with_jwk(&jwt, &km.public_jwk).expect("verify catalog jwt");
+
+        assert_eq!(claims["aud"], "catalog");
+        assert_eq!(claims["warehouse"], "wh-lakekeeper-id");
+        assert_eq!(claims["roles"], serde_json::json!(["notebook"]));
+        assert_eq!(claims["iss"], "http://egret.local");
+        assert_eq!(claims["sub"], "notebook");
+        let exp_claim = claims["exp"].as_i64().expect("exp is a number");
+        assert!(
+            exp_claim > chrono::Utc::now().timestamp(),
+            "exp must be in the future"
+        );
+        assert_eq!(exp_claim, exp.timestamp());
+        assert!(exp > chrono::Utc::now());
+    }
 }

@@ -135,6 +135,8 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         users: UserRepo::new(db.clone()),
         catalog_base_url: "http://localhost:8181".into(),
         engine_minter: Arc::new(FakeEngineMinter),
+        keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
+        idp_issuer: "http://localhost:8080".into(),
     });
 
     Fixture {
