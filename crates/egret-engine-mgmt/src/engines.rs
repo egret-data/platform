@@ -3205,7 +3205,8 @@ fn spawn_starrocks_catalog_wire(
         // DDL below runs only once initpwd has won. Bounded like the pod poll.
         let mut auth_ready = false;
         for _ in 0..MAX_POLLS {
-            match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, "SELECT 1", root_pw, None).await
+            match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, "SELECT 1", root_pw, None)
+                .await
             {
                 Ok(()) => {
                     auth_ready = true;
