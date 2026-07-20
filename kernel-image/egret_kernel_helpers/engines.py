@@ -9,8 +9,16 @@ import tempfile
 _REFRESH_MARGIN = _dt.timedelta(seconds=30)
 
 
+def _write_temp_pem(pem):
+    """Write a PEM string to a temp file and return its path (for pinning a CA)."""
+    cf = tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False)
+    cf.write(pem)
+    cf.close()
+    return cf.name
+
+
 def _tls_verify(tls_cert, insecure):
-    """Resolve the TLS `verify` arg for an engine connection.
+    """Resolve the requests/Trino TLS `verify` arg for an engine connection.
 
     - `insecure` (explicit EGRET_ENGINE_TLS_INSECURE opt-out) → ``False``: accept
       ANY cert. MITM-unsafe; off by default, for break-glass debugging only.
@@ -23,11 +31,22 @@ def _tls_verify(tls_cert, insecure):
     if insecure:
         return False
     if tls_cert:
-        cf = tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False)
-        cf.write(tls_cert)
-        cf.close()
-        return cf.name
+        return _write_temp_pem(tls_cert)
     return True
+
+
+def _starrocks_ssl_kwargs(tls_cert, insecure):
+    """pymysql SSL kwargs for a StarRocks (MySQL-protocol) connection.
+
+    Mirrors the backend's `mysql_async::SslOpts` (connector/starrocks.rs): PIN the
+    delivered self-signed FE cert as the trusted CA, but SKIP hostname/SAN matching
+    (the FE cert's SAN typically doesn't match the connection host). `insecure`
+    opt-out → TLS without verifying. No cert → no SSL kwargs (plain connection)."""
+    if insecure:
+        return {"ssl": {}, "ssl_verify_cert": False, "ssl_verify_identity": False}
+    if tls_cert:
+        return {"ssl": {"ca": _write_temp_pem(tls_cert)}, "ssl_verify_identity": False}
+    return {}
 
 
 def _parse_expiry(s):
@@ -192,6 +211,9 @@ def _starrocks_conn(engine="starrocks", *, env=None, cache=None, catalog=None, s
         from sqlalchemy import create_engine
         tok = _engine_token(engine, env=env, cache=cache)
 
+        _env = env or os.environ
+        insecure = _env.get("EGRET_ENGINE_TLS_INSECURE", "").lower() in ("1", "true", "yes")
+
         def _creator():
             # StarRocks rejects a mismatched login: the connection user MUST equal
             # the JWT principal (preferred_username); the JWT then carries auth.
@@ -200,6 +222,8 @@ def _starrocks_conn(engine="starrocks", *, env=None, cache=None, catalog=None, s
                 user=_jwt_username(tok["jwt"]), password="",
                 auth_plugin_map={_OPENID_PLUGIN: _openid_handler(tok["jwt"])},
             )
+            # TLS to the FE MySQL port: pin egret's delivered self-signed cert.
+            kwargs.update(_starrocks_ssl_kwargs(tok.get("tls_cert"), insecure))
             if schema:
                 kwargs["database"] = schema
             return pymysql.connect(**kwargs)
