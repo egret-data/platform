@@ -54,6 +54,8 @@ kernel:
   image: egret-kernel:dev
   imagePullPolicy: IfNotPresent
   pullSecret: ""
+  # self-signed engine TLS in dev; set false in prod with real certs
+  engineTlsInsecure: true
   resources:
     cpuRequest: "250m"
     memRequest: "512Mi"
