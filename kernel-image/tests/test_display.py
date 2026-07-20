@@ -10,8 +10,9 @@ def _fake_ipython(monkeypatch):
     return shown
 
 class _FakeDF:
-    def __init__(self): self.limited = None
+    def __init__(self): self.limited = None; self.collected = False
     def limit(self, n): self.limited = n; return self
+    def collect(self): self.collected = True; return self
 
 def _fake_daft_with_df(monkeypatch):
     mod = types.ModuleType("daft")
@@ -24,7 +25,8 @@ def test_display_limits_dataframe(monkeypatch):
     df = _FakeDF()
     display(df, n=5)
     assert df.limited == 5
-    assert shown and shown[0] is df  # limit() returns self in the fake
+    assert df.collected  # materialized so the repr shows rows, not just schema
+    assert shown and shown[0] is df  # limit().collect() returns self in the fake
 
 def test_display_falls_through_for_non_dataframe(monkeypatch):
     shown = _fake_ipython(monkeypatch)
