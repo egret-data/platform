@@ -9,7 +9,6 @@ pub mod groups;
 pub mod model;
 pub mod oidc;
 pub mod oidc_cookie;
-pub mod oidc_refresh;
 pub mod oidc_routes;
 pub mod password;
 pub mod pdp;

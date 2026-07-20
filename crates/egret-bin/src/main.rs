@@ -1041,7 +1041,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             config: config.clone(),
             cookie_key: Key::from(&key_bytes),
             secrets: secrets.clone(),
-            refresh_repo: egret_auth::oidc_refresh::OidcRefreshRepo::new(db.clone()),
         })
     } else {
         None

@@ -231,12 +231,7 @@ impl Default for Config {
                 // `groups_claim`), so a `groups` *scope* is NOT requested by default —
                 // Keycloak rejects an undefined scope with `invalid_scope`. Add "groups"
                 // here only if your IdP exposes it as a client scope.
-                scopes: vec![
-                    "openid".into(),
-                    "email".into(),
-                    "profile".into(),
-                    "offline_access".into(),
-                ],
+                scopes: vec!["openid".into(), "email".into(), "profile".into()],
                 groups_claim: "groups".into(),
                 post_login_redirect: "/".into(),
                 catalog_audience: "egret-catalog".into(),
