@@ -1,6 +1,7 @@
 //! DB-gated `RoleRepo` tests. Self-skip (pass) without `DATABASE_URL` so the
 //! suite stays green offline; CI / `just up` provides Postgres.
 
+use egret_auth::groups::GroupRepo;
 use egret_auth::roles::RoleRepo;
 use egret_auth::users::UserRepo;
 use egret_metastore::Db;
@@ -205,6 +206,61 @@ async fn platform_admin_user_ids_lists_direct_user_grants() {
     // Cleanup.
     roles
         .unassign("user", user_id.0, admin_role.id)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM users WHERE id=$1")
+        .bind(user_id.0)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn platform_admin_user_ids_expands_group_granted_admins() {
+    let Some(db) = connect().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    let roles = RoleRepo::new(db.clone(), egret_events::EventBus::new());
+    let users = UserRepo::new(db.clone());
+    let groups = GroupRepo::new(db.clone());
+
+    // A user who holds platform_admin ONLY via group membership (not directly).
+    let user_id = users
+        .insert_local(&format!("{}@test.local", uniq("gadmin")), "GAdmin", "x")
+        .await
+        .unwrap();
+    let group_id = groups.create_local(&uniq("admins-grp")).await.unwrap();
+    groups.add_member(group_id, user_id).await.unwrap();
+    let admin_role = roles
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.name == "platform_admin")
+        .expect("platform_admin seeded");
+    // Grant platform_admin to the GROUP, not the user.
+    roles.assign("group", group_id, admin_role.id).await.unwrap();
+
+    let ids = roles.platform_admin_user_ids().await.unwrap();
+    assert!(
+        ids.contains(&user_id),
+        "a group-granted platform admin must be expanded to its member users"
+    );
+
+    // Cleanup.
+    roles
+        .unassign("group", group_id, admin_role.id)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM user_groups WHERE user_id=$1")
+        .bind(user_id.0)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM groups WHERE id=$1")
+        .bind(group_id)
+        .execute(&db.pool)
         .await
         .unwrap();
     sqlx::query("DELETE FROM users WHERE id=$1")
