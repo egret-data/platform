@@ -128,6 +128,41 @@ async fn provision_creates_then_updates_same_user() {
     assert_eq!(u.email.to_lowercase(), e2.to_lowercase());
 }
 
+/// Regression (Task 5, STS token broker): the egret-minted engine token's `groups`
+/// claim is sourced from `GroupRepo::groups_of_user`, which reads `user_groups`.
+/// This proves the OIDC login callback path (`provision_and_sync`) JIT-writes the
+/// IdP's `groups` claim into `user_groups` — including creating brand-new group
+/// rows on first sight — so a freshly-logged-in SSO user's engine token carries
+/// their current IdP groups.
+#[tokio::test]
+async fn provision_and_sync_writes_through_to_user_groups() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let users = UserRepo::new(db.clone());
+    let groups = GroupRepo::new(db.clone());
+
+    let sub = uniq("sub");
+    let email = format!("{}@idp.local", uniq("u"));
+    let g1 = uniq("data-team");
+    let g2 = uniq("analysts");
+
+    let user_id = provision_and_sync(&users, &groups, &claims(&sub, &email, &[&g1, &g2]))
+        .await
+        .unwrap();
+
+    let mut names = groups.groups_of_user(user_id).await.unwrap();
+    names.sort();
+    let mut expected = vec![g1.clone(), g2.clone()];
+    expected.sort();
+    assert_eq!(
+        names, expected,
+        "user_groups (read via groups_of_user, the same source the engine-token \
+         minter uses) must contain exactly the OIDC groups claim"
+    );
+}
+
 #[tokio::test]
 async fn provision_email_collision_with_other_account_conflicts() {
     let Some(db) = connect().await else {
