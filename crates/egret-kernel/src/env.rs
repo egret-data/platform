@@ -45,6 +45,11 @@ mod tests {
             engine_jwt_expires_at: Some(
                 chrono::DateTime::<chrono::Utc>::from_timestamp(4102444800, 0).unwrap(),
             ),
+            catalog_jwt: None,
+            catalog_jwt_expires_at: None,
+            catalog_uri: None,
+            catalog_warehouse: None,
+            namespace: Vec::new(),
         }
     }
 

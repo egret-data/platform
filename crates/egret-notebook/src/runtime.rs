@@ -20,9 +20,6 @@ pub use egret_analytics_api::NotebookRuntime;
 /// OAuth path (`crates/egret-machine-idp/src/lib.rs:189-198`). Pure (no crypto,
 /// no DB) so the claim shape can be unit-tested in isolation. `exp_ts` is a Unix
 /// timestamp (seconds).
-// `mint_catalog_jwt` (its only caller) is wired into `build_notebook_runtime` in
-// Task 4; until then both are exercised only by tests.
-#[allow(dead_code)]
 fn catalog_claims(
     issuer: &str,
     warehouse_lakekeeper_id: &str,
@@ -47,7 +44,6 @@ fn catalog_claims(
 /// machine-IdP's `IdpState.issuer` so the token is consistent with OAuth-minted
 /// ones (the embedded CatalogGuard does not validate `iss`, so this is
 /// best-effort consistency, not a hard requirement).
-#[allow(dead_code)] // wired into `build_notebook_runtime` in Task 4
 pub(crate) async fn mint_catalog_jwt(
     keys: &egret_machine_idp::PgSigningKeyStore,
     issuer: &str,
@@ -111,12 +107,61 @@ pub async fn build_notebook_runtime(
         }
     };
 
+    // 5c. Best-effort catalog wiring: if this workspace has a notebook warehouse
+    // configured (Task 1/2), mint an `aud:"catalog"` JWT (Task 3) scoped to that
+    // warehouse so the kernel's `write_iceberg` helper can write directly to the
+    // Iceberg REST catalog. Any missing setting / unresolvable warehouse / mint
+    // failure leaves `catalog_jwt = None` (never fails the manifest).
+    let (catalog_jwt, catalog_jwt_expires_at, catalog_uri, catalog_warehouse, namespace) =
+        match st.store.get_notebook_warehouse(ws).await {
+            Ok(Some((wh_id, ns))) => match st.catalog.get_warehouse(wh_id).await {
+                Ok(Some(wh)) => match wh.lakekeeper_warehouse_id {
+                    Some(lk_id) => {
+                        match mint_catalog_jwt(&st.keys, &st.idp_issuer, &lk_id, "notebook").await {
+                            Ok((jwt, exp)) => (
+                                Some(jwt),
+                                Some(exp),
+                                Some(format!("{}/catalog", st.catalog_base_url)),
+                                Some(lk_id),
+                                ns,
+                            ),
+                            Err(e) => {
+                                tracing::warn!("notebook catalog token mint skipped: {}", e.0);
+                                (None, None, None, None, ns)
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            "notebook warehouse {wh_id} has no lakekeeper id; catalog token skipped"
+                        );
+                        (None, None, None, None, ns)
+                    }
+                },
+                Ok(None) => (None, None, None, None, ns),
+                Err(e) => {
+                    tracing::warn!("notebook warehouse lookup skipped: {e}");
+                    (None, None, None, None, ns)
+                }
+            },
+            Ok(None) => (None, None, None, None, Vec::new()),
+            Err(e) => {
+                tracing::warn!("notebook warehouse setting lookup skipped: {e}");
+                (None, None, None, None, Vec::new())
+            }
+        };
+
     // 6. Build and return the manifest.
     Ok(NotebookRuntime {
         username,
         engines,
         engine_jwt,
         engine_jwt_expires_at,
+        catalog_jwt,
+        catalog_jwt_expires_at,
+        catalog_uri,
+        catalog_warehouse,
+        namespace,
     })
 }
 

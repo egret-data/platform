@@ -151,4 +151,91 @@ async fn runtime_manifest_no_refresh_token_is_ok(pool: sqlx::PgPool) {
 
     assert_eq!(m.engine_jwt, None);
     assert_eq!(m.engine_jwt_expires_at, None);
+
+    // No notebook warehouse configured → all catalog_* fields are None and the
+    // namespace is empty (best-effort catalog wiring is skipped, not fatal).
+    assert_eq!(m.catalog_jwt, None);
+    assert_eq!(m.catalog_jwt_expires_at, None);
+    assert_eq!(m.catalog_uri, None);
+    assert_eq!(m.catalog_warehouse, None);
+    assert!(m.namespace.is_empty());
+}
+
+/// Positive path: with a notebook warehouse configured (a warehouse row the
+/// `CatalogStore` can resolve to a lakekeeper id + the `set_notebook_warehouse`
+/// setting), the manifest carries a minted `aud:"catalog"` token plus the
+/// catalog URI, warehouse id, and namespace the kernel writes under.
+#[sqlx::test(migrations = "../../migrations")]
+async fn runtime_manifest_carries_catalog_token(pool: sqlx::PgPool) {
+    let db = Db { pool };
+
+    let users = UserRepo::new(db.clone());
+    let suffix = Uuid::new_v4().simple().to_string();
+    let owner = users
+        .insert_local(&format!("rtcat-{suffix}@egret.test"), "RT Cat", "x")
+        .await
+        .expect("seed user");
+
+    let workspaces = WorkspaceRepo::new(db.clone());
+    let ws = workspaces
+        .create(&format!("rtcat{suffix}"), "RT Cat WS", owner)
+        .await
+        .expect("seed ws");
+    let ws_id: WorkspaceId = ws.id;
+
+    // Seed a storage connection + warehouse the CatalogStore can resolve, then
+    // stamp a lakekeeper id on it (so the manifest exposes it as catalog_warehouse).
+    let sc_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections \
+           (name, provider, region, bucket, access_key, path_style) \
+         VALUES ($1, 's3', 'us-east-1', 'warehouse', 'egret', true) RETURNING id",
+    )
+    .bind(format!("rtcat-store-{suffix}"))
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed storage connection");
+
+    let catalog = egret_catalog_engine::CatalogStore::new(db.clone());
+    let wh = catalog
+        .create_warehouse(&format!("rtcat-wh-{suffix}"), ws_id.0, sc_id)
+        .await
+        .expect("seed warehouse");
+    catalog
+        .set_lakekeeper_warehouse_id(wh.id, "wh-lakekeeper-id")
+        .await
+        .expect("stamp lakekeeper id");
+
+    let store = NotebookStore::new(db.clone());
+    store
+        .set_notebook_warehouse(ws_id.0, wh.id, &["notebook".to_string()])
+        .await
+        .expect("set notebook warehouse");
+
+    let state = NotebookState {
+        store,
+        catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
+        sessions: SessionService::new(
+            db.clone(),
+            chrono::Duration::hours(24),
+            chrono::Duration::minutes(60),
+        ),
+        workspaces,
+        authz: Authorizer::new(db.clone()),
+        pdp: Arc::new(AllowAllPdp),
+        users: UserRepo::new(db.clone()),
+        catalog_base_url: "http://localhost:8181".into(),
+        engine_minter: Arc::new(StubMinter),
+        keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
+        idp_issuer: "http://localhost:8080".into(),
+    };
+
+    let m = build_notebook_runtime(&state, ws_id.0, owner)
+        .await
+        .expect("build manifest");
+
+    assert!(m.catalog_jwt.is_some(), "catalog token minted");
+    assert!(m.catalog_jwt_expires_at.unwrap() > chrono::Utc::now());
+    assert_eq!(m.catalog_uri.as_deref(), Some("http://localhost:8181/catalog"));
+    assert_eq!(m.catalog_warehouse.as_deref(), Some("wh-lakekeeper-id"));
+    assert_eq!(m.namespace, vec!["notebook".to_string()]);
 }

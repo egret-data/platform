@@ -52,6 +52,27 @@ pub struct NotebookRuntime {
     /// Expiry of `engine_jwt` (RFC3339); kernels re-mint before this time.
     /// `None` whenever `engine_jwt` is `None`.
     pub engine_jwt_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Short-lived `aud:"catalog"` JWT scoped to the workspace's notebook
+    /// warehouse — the kernel presents it to the Iceberg REST catalog for
+    /// direct notebook writes. `None` when no notebook warehouse is configured
+    /// or minting failed (best-effort; the kernel helper errors at call time).
+    #[serde(default)]
+    pub catalog_jwt: Option<String>,
+    /// Expiry of `catalog_jwt` (RFC3339). `None` whenever `catalog_jwt` is `None`.
+    #[serde(default)]
+    pub catalog_jwt_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Base URI of the Iceberg REST catalog the kernel writes to
+    /// (`<catalog_base_url>/catalog`). `None` when no warehouse is configured.
+    #[serde(default)]
+    pub catalog_uri: Option<String>,
+    /// Lakekeeper warehouse id the `catalog_jwt` is scoped to. `None` when no
+    /// warehouse is configured.
+    #[serde(default)]
+    pub catalog_warehouse: Option<String>,
+    /// Private namespace path notebook writes land under (e.g. `["notebook"]`).
+    /// Empty when no warehouse is configured.
+    #[serde(default)]
+    pub namespace: Vec<String>,
 }
 
 /// The `notebook_cells.last_output` contract: a trimmed nbformat-style output
