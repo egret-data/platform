@@ -410,13 +410,7 @@ mod tests {
         // disabled (default): flag absent
         let pod = build_pod_spec(&k, &env, &cfg());
         let c = &pod.spec.unwrap().containers[0];
-        let names: Vec<_> = c
-            .env
-            .clone()
-            .unwrap()
-            .into_iter()
-            .map(|e| e.name)
-            .collect();
+        let names: Vec<_> = c.env.clone().unwrap().into_iter().map(|e| e.name).collect();
         assert!(!names.contains(&"EGRET_ENGINE_TLS_INSECURE".to_string()));
 
         // enabled: EGRET_ENGINE_TLS_INSECURE=1 present

@@ -206,7 +206,9 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
                 kind: "trino".into(),
                 host: "trino".into(),
                 port: 8080,
-                tls_cert: Some("-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n".into()),
+                tls_cert: Some(
+                    "-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n".into(),
+                ),
             }),
         }),
         active: Default::default(),

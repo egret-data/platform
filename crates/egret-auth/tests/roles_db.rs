@@ -240,7 +240,10 @@ async fn platform_admin_user_ids_expands_group_granted_admins() {
         .find(|r| r.name == "platform_admin")
         .expect("platform_admin seeded");
     // Grant platform_admin to the GROUP, not the user.
-    roles.assign("group", group_id, admin_role.id).await.unwrap();
+    roles
+        .assign("group", group_id, admin_role.id)
+        .await
+        .unwrap();
 
     let ids = roles.platform_admin_user_ids().await.unwrap();
     assert!(
