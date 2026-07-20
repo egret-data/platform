@@ -1,4 +1,12 @@
 # Auto-loaded by IPython at kernel start — makes the egret helpers global.
+
+# Silence Daft's per-stage execution progress bar (the "[00:00] In Memory Scan:
+# … rows out" telemetry). It streams to the cell on every collect()/display() and
+# buries the actual result; errors still surface as exceptions. Set before any
+# daft import (the helper import below pulls daft) so daft reads it at init.
+import os as _os  # noqa: E402
+_os.environ.setdefault("DAFT_PROGRESS_BAR", "0")
+
 try:
     from egret_kernel_helpers import display, runtime, me, trino, starrocks, write_table, write_iceberg, read_iceberg  # noqa: F401
 except Exception as _e:  # noqa: BLE001
