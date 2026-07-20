@@ -1,8 +1,13 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { CellOutputRenderer } from "../CellOutputRenderer";
 import type { CellOutput } from "@/lib/kernel/protocol";
+
+// Mock plotly.js so the lazy PlotlyOutput import resolves without pulling the real bundle.
+vi.mock("plotly.js-dist-min", () => ({
+  default: { react: vi.fn(), purge: vi.fn(), Plots: { resize: vi.fn() } },
+}));
 
 describe("CellOutputRenderer", () => {
   it("renders stdout inline and collapses stderr under a Logs disclosure", async () => {
@@ -45,5 +50,14 @@ describe("CellOutputRenderer", () => {
   it("shows a truncated marker", () => {
     render(<CellOutputRenderer outputs={[{ type: "truncated", dropped: 3 }]} />);
     expect(screen.getByText(/truncated/i)).toBeInTheDocument();
+  });
+  it("renders a plotly MIME bundle via the notebook-plotly container", async () => {
+    const figure = { data: [{ type: "bar", x: ["a"], y: [1] }], layout: {} };
+    render(
+      <CellOutputRenderer
+        outputs={[{ type: "display_data", data: { "application/vnd.plotly.v1+json": figure } }]}
+      />,
+    );
+    expect(await screen.findByTestId("notebook-plotly")).toBeInTheDocument();
   });
 });
