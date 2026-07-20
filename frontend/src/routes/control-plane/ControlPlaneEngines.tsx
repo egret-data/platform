@@ -79,11 +79,12 @@ const ENGINE_TYPES: EngineType[] = [
 const PROVISIONABLE = new Set(["trino", "starrocks"]);
 
 // StarRocks image defaults (shared-data FE/CN), same versions the backend
-// falls back to when the body omits them. Pinned to 3.4.x: FE MySQL-protocol
-// TLS (the delegation "Enable TLS" path) needs StarRocks open-source >= 3.4.1;
-// a 3.3 image can't serve the SSL listener.
-export const DEFAULT_SR_FE_IMAGE = "starrocks/fe-ubuntu:3.4-latest";
-export const DEFAULT_SR_CN_IMAGE = "starrocks/cn-ubuntu:3.4-latest";
+// falls back to when the body omits them. Pinned to 4.1.x: it has BOTH the FE
+// MySQL-protocol TLS listener (delegation "Enable TLS", open-source >= 3.4.1)
+// AND JWT authentication (open-source >= 3.5) that per-user delegation needs —
+// 3.4 lacks the authentication_jwt plugin, so JWT logins can't authenticate.
+export const DEFAULT_SR_FE_IMAGE = "starrocks/fe-ubuntu:4.1-latest";
+export const DEFAULT_SR_CN_IMAGE = "starrocks/cn-ubuntu:4.1-latest";
 
 // Harmless defaults for the still-required Trino-only body fields
 // (coordinatorReplicas/workerReplicas/cpuMin/cpuMax/memory) when creating a
