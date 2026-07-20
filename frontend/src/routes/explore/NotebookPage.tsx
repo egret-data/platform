@@ -2,6 +2,7 @@ import {
   Fragment,
   type KeyboardEvent,
   type MutableRefObject,
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -11,6 +12,11 @@ import {
 import { Link, useParams } from "react-router-dom";
 import { ArrowLeft, Plus } from "lucide-react";
 import { toast } from "sonner";
+import {
+  DndContext, PointerSensor, useSensor, useSensors, closestCenter, type DragEndEvent,
+} from "@dnd-kit/core";
+import { SortableContext, verticalListSortingStrategy, useSortable } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 import {
   type Cell,
@@ -26,9 +32,11 @@ import {
   useUpdateCell,
   useUpdateNotebook,
 } from "@/api/notebooks";
-import { CellEditor } from "@/components/notebook/CellEditor";
+import { CellEditor, type CellEditorProps } from "@/components/notebook/CellEditor";
+import { CommandPalette, type PaletteAction } from "@/components/notebook/CommandPalette";
 import { setNotebookCompletionContext } from "@/components/notebook/monaco/notebookCompletion";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { reorderIds } from "@/lib/reorderIds";
 import type { KernelConnection, VarInfo } from "@/lib/kernel/KernelConnection";
 import type { CellOutput } from "@/lib/kernel/protocol";
 import { useKernel } from "@/lib/kernel/useKernel";
@@ -92,6 +100,9 @@ interface ManagedCellProps {
   onInsertBelow?: (index: number) => void;
   /** Esc inside the editor: return the page to command mode. */
   onEnterCommandMode?: () => void;
+  /** dnd-kit sortable attributes+listeners for this cell's drag handle
+   *  (undefined when rendered outside the SortableCell wrapper). */
+  dragHandleProps?: CellEditorProps["dragHandleProps"];
 }
 
 function ManagedCell({
@@ -117,6 +128,7 @@ function ManagedCell({
   onSelectNext,
   onInsertBelow,
   onEnterCommandMode,
+  dragHandleProps,
 }: ManagedCellProps) {
   const [source, setSource] = useState(cell.source);
   // Restore-on-load: seed outputs from the persisted last_output.
@@ -240,6 +252,7 @@ function ManagedCell({
           onInsertBelow?.(index);
         }}
         onEnterCommandMode={onEnterCommandMode}
+        dragHandleProps={dragHandleProps}
       />
       {cell.cell_type === "sql" && cell.sql_into && (outputs?.length ?? 0) > 0 && (
         <div className="px-3 pb-2 text-[11px] text-muted-foreground">
@@ -267,6 +280,24 @@ function InsertBar({ onInsert }: { onInsert: () => void }) {
         </button>
         <div className="h-px flex-1 bg-border" />
       </div>
+    </div>
+  );
+}
+
+/** Sortable wrapper for a single cell (S4-2): `useSortable` must run inside a
+ *  component, so this owns the drag transform on the `#cell-{id}` wrapper div
+ *  and threads dnd-kit's `attributes`/`listeners` down to CellEditor's grip
+ *  button ONLY — not spread on the wrapper — so Monaco text selection and
+ *  normal clicks inside the cell keep working. */
+function SortableCell({ id, children }: { id: string; children: (dragHandleProps: CellEditorProps["dragHandleProps"]) => ReactNode }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  return (
+    <div
+      ref={setNodeRef}
+      id={`cell-${id}`}
+      style={{ scrollMarginTop: "6rem", transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.6 : 1, zIndex: isDragging ? 1 : undefined }}
+    >
+      {children({ attributes, listeners })}
     </div>
   );
 }
@@ -301,8 +332,17 @@ export default function NotebookPage() {
   // accumulated object names (sql). Cleared on unmount so a stale kernel
   // reference can't leak into a different notebook / SQL Lab.
   const sqlWordsRef = useRef<string[]>([]);
+  // Table identifier (lowercased — bare name AND fully-qualified
+  // `catalog.schema.table`) → its column names, accumulated as the schema
+  // browser expands tables (S4-4). Read by the sql completion provider to
+  // rank a FROM-referenced table's own columns above the generic word list.
+  const tableColumnsRef = useRef<Record<string, string[]>>({});
   useEffect(() => {
-    setNotebookCompletionContext({ kernel, sqlWords: () => sqlWordsRef.current });
+    setNotebookCompletionContext({
+      kernel,
+      sqlWords: () => sqlWordsRef.current,
+      tableColumns: () => tableColumnsRef.current,
+    });
     return () => setNotebookCompletionContext(null);
   }, [kernel]);
   // Stable identity (only mutates the ref) so passing it to SchemaBrowserPanel
@@ -310,9 +350,33 @@ export default function NotebookPage() {
   const handleObjectsLoaded = useCallback((names: string[]) => {
     sqlWordsRef.current = Array.from(new Set([...sqlWordsRef.current, ...names]));
   }, []);
+  const handleColumnsLoaded = useCallback(
+    (table: { name: string; fqn: string }, cols: string[]) => {
+      tableColumnsRef.current = {
+        ...tableColumnsRef.current,
+        [table.name.toLowerCase()]: cols,
+        [table.fqn.toLowerCase()]: cols,
+      };
+    },
+    [],
+  );
 
   const kernelStatus = useKernelConnectionStatus(kernel);
   const [nameDirty, setNameDirty] = useState(false);
+
+  // ⌘K / Ctrl+K command palette (S4-1).
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  useEffect(() => {
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   // Tools (outline / data sources) live in an on-demand RIGHT panel, closed by
   // default — the notebook content stays centered and full-width (Deepnote /
   // Databricks pattern), avoiding a second left sidebar next to the app nav.
@@ -503,6 +567,59 @@ export default function NotebookPage() {
     insertCell(cellType, (notebook.data?.cells ?? []).length);
   };
 
+  // Command-palette actions (S4-1): a flat list built from the existing
+  // handlers above (add cell / run / interrupt / restart / clear / toggle
+  // panel) plus one "go to cell" entry per cell. Memoized so the palette
+  // doesn't rebuild its action list on every unrelated render.
+  const paletteActions: PaletteAction[] = useMemo(() => {
+    const cells = [...(notebook.data?.cells ?? [])].sort(
+      (a, b) => a.cell_order - b.cell_order,
+    );
+    const goToCellActions: PaletteAction[] = cells.map((cell) => {
+      const execLabel =
+        cell.execution_count == null ? "In [ ]:" : `In [${cell.execution_count}]:`;
+      const firstLine =
+        cell.source.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "(empty cell)";
+      return {
+        id: `goto-${cell.id}`,
+        label: `Go to cell: ${execLabel} · ${firstLine.slice(0, 60)}`,
+        hint: cell.cell_type,
+        run: () => focusCell(cell.id),
+      };
+    });
+
+    return [
+      { id: "add-code", label: "Add code cell", run: () => handleAddCell("code") },
+      { id: "add-markdown", label: "Add markdown cell", run: () => handleAddCell("markdown") },
+      { id: "add-sql", label: "Add SQL cell", run: () => handleAddCell("sql") },
+      { id: "run-all", label: "Run all", run: () => { void runAll(); } },
+      {
+        id: "interrupt",
+        label: "Interrupt",
+        run: () =>
+          kernel.interrupt().catch((e) => toast.error(String((e as Error)?.message ?? e))),
+      },
+      {
+        id: "restart",
+        label: "Restart kernel",
+        run: () =>
+          kernel.restart().catch((e) => toast.error(String((e as Error)?.message ?? e))),
+      },
+      { id: "clear-outputs", label: "Clear outputs", run: () => clearAll() },
+      { id: "toggle-toc", label: "Toggle Outline", run: () => togglePanel("toc") },
+      { id: "toggle-data", label: "Toggle Data sources", run: () => togglePanel("data") },
+      { id: "toggle-schema", label: "Toggle Schema", run: () => togglePanel("schema") },
+      { id: "toggle-vars", label: "Toggle Variables", run: () => togglePanel("vars") },
+      ...goToCellActions,
+    ];
+    // Deliberately depend only on the cells array (the one input that actually
+    // changes what the action list contains). handleAddCell/togglePanel/focusCell/
+    // runAll/clearAll are plain closures re-created every render — like the rest
+    // of this component's inline handlers (e.g. NotebookHeader's onRunAll={runAll}
+    // below) — so tracking them here would recompute this memo on every render
+    // and defeat the point of memoizing it.
+  }, [notebook.data?.cells]);
+
   // Command-mode keyboard nav must never hijack typing in a real input/select/
   // Monaco (the notebook-name field, the SQL result-variable input, etc.) nor
   // steal keys from an open Radix popover.
@@ -603,6 +720,20 @@ export default function NotebookPage() {
     const newOrder = cells.map((c) => c.id);
     [newOrder[idx], newOrder[idx + 1]] = [newOrder[idx + 1], newOrder[idx]];
     reorderCells.mutate(newOrder);
+  };
+
+  // Drag-reorder cells (S4-2): a small pointer-activation distance so a click
+  // on the grip handle (or anywhere else) doesn't accidentally start a drag.
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
+  const handleDragEnd = (e: DragEndEvent) => {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    const cells = [...(notebook.data?.cells ?? [])].sort(
+      (a, b) => a.cell_order - b.cell_order,
+    );
+    const ids = cells.map((c) => c.id);
+    const next = reorderIds(ids, String(active.id), String(over.id));
+    if (next !== ids) reorderCells.mutate(next);
   };
 
   const handleChangeType = (cid: string, cellType: CellType) => {
@@ -738,55 +869,62 @@ export default function NotebookPage() {
         {/* Centered, wide cell column — code-first, so generous width with a
             cap that keeps lines readable on ultra-wide monitors. */}
         <div className="mx-auto flex w-full max-w-7xl flex-col gap-3 px-6 py-6">
-          {sortedCells.map((cell, index) => (
-            <Fragment key={cell.id}>
-              <InsertBar onInsert={() => insertCell("code", index)} />
-              <div id={`cell-${cell.id}`} style={{ scrollMarginTop: "6rem" }}>
-                <ManagedCell
-                  cell={cell}
-                  index={index}
-                  kernel={kernel}
-                  onChangeType={handleChangeType}
-                  onDelete={handleDeleteCell}
-                  onMoveUp={handleMoveUp}
-                  onMoveDown={handleMoveDown}
-                  updateCellMutate={updateCell.mutate}
-                  runners={runners}
-                  engines={engines}
-                  onPendingChange={setCellPending}
-                  initialRunning={runningSet.has(cell.id)}
-                  onRunAbove={index > 0 ? () => runSlice(0, index) : undefined}
-                  onRunBelow={
-                    index < sortedCells.length - 1
-                      ? () => runSlice(index + 1, sortedCells.length)
-                      : undefined
-                  }
-                  active={activeCellId === cell.id}
-                  onFocusCell={(cid) => {
-                    setActiveCellId(cid);
-                    setMode("edit");
-                  }}
-                  onSelectCell={(cid) => {
-                    setActiveCellId(cid);
-                    setMode("command");
-                    sectionRef.current?.focus();
-                  }}
-                  registerFocus={(cid, fn) => {
-                    cellFocus.current[cid] = fn;
-                  }}
-                  registerEdit={(cid, fn) => {
-                    cellEdit.current[cid] = fn;
-                  }}
-                  onSelectNext={(cid) => selectAdjacent(cid, 1)}
-                  onInsertBelow={(idx) => insertCell("code", idx + 1, { focus: true })}
-                  onEnterCommandMode={() => {
-                    setMode("command");
-                    sectionRef.current?.focus();
-                  }}
-                />
-              </div>
-            </Fragment>
-          ))}
+          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+            <SortableContext items={sortedCells.map((c) => c.id)} strategy={verticalListSortingStrategy}>
+              {sortedCells.map((cell, index) => (
+                <Fragment key={cell.id}>
+                  <InsertBar onInsert={() => insertCell("code", index)} />
+                  <SortableCell id={cell.id}>
+                    {(dragHandleProps) => (
+                      <ManagedCell
+                        cell={cell}
+                        index={index}
+                        kernel={kernel}
+                        onChangeType={handleChangeType}
+                        onDelete={handleDeleteCell}
+                        onMoveUp={handleMoveUp}
+                        onMoveDown={handleMoveDown}
+                        updateCellMutate={updateCell.mutate}
+                        runners={runners}
+                        engines={engines}
+                        onPendingChange={setCellPending}
+                        initialRunning={runningSet.has(cell.id)}
+                        onRunAbove={index > 0 ? () => runSlice(0, index) : undefined}
+                        onRunBelow={
+                          index < sortedCells.length - 1
+                            ? () => runSlice(index + 1, sortedCells.length)
+                            : undefined
+                        }
+                        active={activeCellId === cell.id}
+                        onFocusCell={(cid) => {
+                          setActiveCellId(cid);
+                          setMode("edit");
+                        }}
+                        onSelectCell={(cid) => {
+                          setActiveCellId(cid);
+                          setMode("command");
+                          sectionRef.current?.focus();
+                        }}
+                        registerFocus={(cid, fn) => {
+                          cellFocus.current[cid] = fn;
+                        }}
+                        registerEdit={(cid, fn) => {
+                          cellEdit.current[cid] = fn;
+                        }}
+                        onSelectNext={(cid) => selectAdjacent(cid, 1)}
+                        onInsertBelow={(idx) => insertCell("code", idx + 1, { focus: true })}
+                        onEnterCommandMode={() => {
+                          setMode("command");
+                          sectionRef.current?.focus();
+                        }}
+                        dragHandleProps={dragHandleProps}
+                      />
+                    )}
+                  </SortableCell>
+                </Fragment>
+              ))}
+            </SortableContext>
+          </DndContext>
           <InsertBar onInsert={() => insertCell("code", sortedCells.length)} />
 
           <div className="flex items-center gap-2">
@@ -847,10 +985,13 @@ export default function NotebookPage() {
                 insertCell("sql", sortedCells.length, { focus: true, initialSource: sql })
               }
               onObjectsLoaded={handleObjectsLoaded}
+              onColumnsLoaded={handleColumnsLoaded}
             />
           )}
         </aside>
       )}
+
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} actions={paletteActions} />
     </div>
   );
 }

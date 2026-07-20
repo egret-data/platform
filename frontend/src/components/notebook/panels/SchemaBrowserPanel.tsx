@@ -22,6 +22,11 @@ export interface SchemaBrowserPanelProps {
    *  caller is expected to accumulate (this fires many times as the user
    *  browses). */
   onObjectsLoaded?: (names: string[]) => void;
+  /** Fired once a table's columns finish loading (S4-4), reporting both the
+   *  bare table name and its fully-qualified `catalog.schema.table` alongside
+   *  the column names — so SQL autocomplete can rank a FROM-referenced
+   *  table's own columns above the generic word list. */
+  onColumnsLoaded?: (table: { name: string; fqn: string }, cols: string[]) => void;
 }
 
 /** A collapsible tree row shared by every level of the browser. Each level
@@ -115,6 +120,7 @@ function ColumnList({
   depth,
   onInsertText,
   onObjectsLoaded,
+  onColumnsLoaded,
 }: {
   ws: string;
   db: string;
@@ -124,13 +130,17 @@ function ColumnList({
   depth: number;
   onInsertText: (text: string) => void;
   onObjectsLoaded?: (names: string[]) => void;
+  onColumnsLoaded?: (table: { name: string; fqn: string }, cols: string[]) => void;
 }) {
   const columns = useColumns(ws, db, catalog, schema, table, true);
   useEffect(() => {
     if (columns.data && columns.data.length > 0) {
-      onObjectsLoaded?.(columns.data.map((c) => c.name));
+      const names = columns.data.map((c) => c.name);
+      onObjectsLoaded?.(names);
+      const fqn = catalog ? `${catalog}.${schema}.${table}` : `${schema}.${table}`;
+      onColumnsLoaded?.({ name: table, fqn }, names);
     }
-  }, [columns.data, onObjectsLoaded]);
+  }, [columns.data, onObjectsLoaded, onColumnsLoaded, catalog, schema, table]);
   if (columns.isLoading) return <LoadingRow depth={depth} />;
   if (!columns.data || columns.data.length === 0)
     return <EmptyRow depth={depth} label="No columns." />;
@@ -167,6 +177,7 @@ function TableNode({
   onInsertText,
   onNewSqlCell,
   onObjectsLoaded,
+  onColumnsLoaded,
 }: {
   ws: string;
   db: string;
@@ -177,6 +188,7 @@ function TableNode({
   onInsertText: (text: string) => void;
   onNewSqlCell: (sql: string) => void;
   onObjectsLoaded?: (names: string[]) => void;
+  onColumnsLoaded?: (table: { name: string; fqn: string }, cols: string[]) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const qualified = catalog ? `${catalog}.${schema}.${table}` : `${schema}.${table}`;
@@ -201,6 +213,7 @@ function TableNode({
           depth={depth + 1}
           onInsertText={onInsertText}
           onObjectsLoaded={onObjectsLoaded}
+          onColumnsLoaded={onColumnsLoaded}
         />
       )}
     </div>
@@ -216,6 +229,7 @@ function TableList({
   onInsertText,
   onNewSqlCell,
   onObjectsLoaded,
+  onColumnsLoaded,
 }: {
   ws: string;
   db: string;
@@ -225,6 +239,7 @@ function TableList({
   onInsertText: (text: string) => void;
   onNewSqlCell: (sql: string) => void;
   onObjectsLoaded?: (names: string[]) => void;
+  onColumnsLoaded?: (table: { name: string; fqn: string }, cols: string[]) => void;
 }) {
   const tables = useTables(ws, db, catalog, schema);
   useEffect(() => {
@@ -252,6 +267,7 @@ function TableList({
           onInsertText={onInsertText}
           onNewSqlCell={onNewSqlCell}
           onObjectsLoaded={onObjectsLoaded}
+          onColumnsLoaded={onColumnsLoaded}
         />
       ))}
     </>
@@ -268,6 +284,7 @@ function SchemaNode({
   onInsertText,
   onNewSqlCell,
   onObjectsLoaded,
+  onColumnsLoaded,
 }: {
   ws: string;
   db: string;
@@ -277,6 +294,7 @@ function SchemaNode({
   onInsertText: (text: string) => void;
   onNewSqlCell: (sql: string) => void;
   onObjectsLoaded?: (names: string[]) => void;
+  onColumnsLoaded?: (table: { name: string; fqn: string }, cols: string[]) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   return (
@@ -298,6 +316,7 @@ function SchemaNode({
           onInsertText={onInsertText}
           onNewSqlCell={onNewSqlCell}
           onObjectsLoaded={onObjectsLoaded}
+          onColumnsLoaded={onColumnsLoaded}
         />
       )}
     </div>
@@ -312,6 +331,7 @@ function SchemaList({
   onInsertText,
   onNewSqlCell,
   onObjectsLoaded,
+  onColumnsLoaded,
 }: {
   ws: string;
   db: string;
@@ -320,6 +340,7 @@ function SchemaList({
   onInsertText: (text: string) => void;
   onNewSqlCell: (sql: string) => void;
   onObjectsLoaded?: (names: string[]) => void;
+  onColumnsLoaded?: (table: { name: string; fqn: string }, cols: string[]) => void;
 }) {
   const schemas = useSchemas(ws, db, catalog);
   useEffect(() => {
@@ -341,6 +362,7 @@ function SchemaList({
           onInsertText={onInsertText}
           onNewSqlCell={onNewSqlCell}
           onObjectsLoaded={onObjectsLoaded}
+          onColumnsLoaded={onColumnsLoaded}
         />
       ))}
     </>
@@ -356,6 +378,7 @@ function CatalogNode({
   onInsertText,
   onNewSqlCell,
   onObjectsLoaded,
+  onColumnsLoaded,
 }: {
   ws: string;
   db: string;
@@ -364,6 +387,7 @@ function CatalogNode({
   onInsertText: (text: string) => void;
   onNewSqlCell: (sql: string) => void;
   onObjectsLoaded?: (names: string[]) => void;
+  onColumnsLoaded?: (table: { name: string; fqn: string }, cols: string[]) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   return (
@@ -384,6 +408,7 @@ function CatalogNode({
           onInsertText={onInsertText}
           onNewSqlCell={onNewSqlCell}
           onObjectsLoaded={onObjectsLoaded}
+          onColumnsLoaded={onColumnsLoaded}
         />
       )}
     </div>
@@ -397,6 +422,7 @@ function CatalogList({
   onInsertText,
   onNewSqlCell,
   onObjectsLoaded,
+  onColumnsLoaded,
 }: {
   ws: string;
   db: string;
@@ -404,6 +430,7 @@ function CatalogList({
   onInsertText: (text: string) => void;
   onNewSqlCell: (sql: string) => void;
   onObjectsLoaded?: (names: string[]) => void;
+  onColumnsLoaded?: (table: { name: string; fqn: string }, cols: string[]) => void;
 }) {
   const catalogs = useCatalogs(ws, db);
   useEffect(() => {
@@ -424,6 +451,7 @@ function CatalogList({
           onInsertText={onInsertText}
           onNewSqlCell={onNewSqlCell}
           onObjectsLoaded={onObjectsLoaded}
+          onColumnsLoaded={onColumnsLoaded}
         />
       ))}
     </>
@@ -438,6 +466,7 @@ function DatabaseNode({
   onInsertText,
   onNewSqlCell,
   onObjectsLoaded,
+  onColumnsLoaded,
 }: {
   ws: string;
   db: DatabaseListItem;
@@ -445,6 +474,7 @@ function DatabaseNode({
   onInsertText: (text: string) => void;
   onNewSqlCell: (sql: string) => void;
   onObjectsLoaded?: (names: string[]) => void;
+  onColumnsLoaded?: (table: { name: string; fqn: string }, cols: string[]) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const isTrino = db.engine === "trino";
@@ -472,6 +502,7 @@ function DatabaseNode({
             onInsertText={onInsertText}
             onNewSqlCell={onNewSqlCell}
             onObjectsLoaded={onObjectsLoaded}
+            onColumnsLoaded={onColumnsLoaded}
           />
         ) : (
           <SchemaList
@@ -482,6 +513,7 @@ function DatabaseNode({
             onInsertText={onInsertText}
             onNewSqlCell={onNewSqlCell}
             onObjectsLoaded={onObjectsLoaded}
+            onColumnsLoaded={onColumnsLoaded}
           />
         ))}
     </div>
@@ -493,6 +525,7 @@ export function SchemaBrowserPanel({
   onInsertText,
   onNewSqlCell,
   onObjectsLoaded,
+  onColumnsLoaded,
 }: SchemaBrowserPanelProps) {
   const databases = useDatabases(ws);
 
@@ -522,6 +555,7 @@ export function SchemaBrowserPanel({
           onInsertText={onInsertText}
           onNewSqlCell={onNewSqlCell}
           onObjectsLoaded={onObjectsLoaded}
+          onColumnsLoaded={onColumnsLoaded}
         />
       ))}
     </div>

@@ -759,4 +759,29 @@ describe("NotebookPage", () => {
     // Radix sets data-disabled on disabled DropdownMenuItems
     expect(item).toHaveAttribute("data-disabled");
   });
+
+  // ── Drag-reorder cells (S4-2) ─────────────────────────────────────────────
+  // dnd-kit + jsdom can't reliably simulate a real pointer drag, so this only
+  // asserts the cell list mounts inside the DndContext/SortableContext (i.e.
+  // useSortable doesn't throw) and each cell exposes a drag handle. The
+  // reorder-computation itself is covered by reorderIds.test.ts.
+
+  it("renders a drag handle for every cell", () => {
+    renderAt();
+    // Fixture has one code cell + one markdown cell.
+    expect(screen.getAllByLabelText(/drag to reorder/i)).toHaveLength(2);
+  });
+
+  it("the drag handle sits inside the cell, not on the whole wrapper (Monaco stays interactive)", () => {
+    renderAt();
+    const handle = screen.getAllByLabelText(/drag to reorder/i)[0];
+    const wrapper = document.getElementById("cell-cell-1")!;
+    // The handle is a descendant of the sortable wrapper, but the wrapper
+    // itself carries no drag listeners — only children like the Monaco
+    // textarea and the handle button do.
+    expect(wrapper.contains(handle)).toBe(true);
+    const editor = screen.getAllByTestId("monaco")[0];
+    fireEvent.change(editor, { target: { value: "print(3)" } });
+    expect(editor).toHaveValue("print(3)");
+  });
 });

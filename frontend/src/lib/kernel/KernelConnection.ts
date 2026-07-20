@@ -46,6 +46,7 @@ export class KernelConnection {
   private pending = new Map<string, ExecuteHandlers>(); // execute_request msg_id → handlers
   private pendingCompletes = new Map<string, (r: CompleteResult) => void>(); // complete_request msg_id → resolver
   private pendingInspects = new Map<string, (u: Record<string, any> | undefined) => void>(); // inspect execute_request msg_id → resolver
+  private pendingInspectReq = new Map<string, (r: string | null) => void>(); // inspect_request msg_id → resolver
   private ready: Promise<void> | null = null;
   private _status: KernelStatus = "disconnected";
   private statusListeners = new Set<(s: KernelStatus) => void>();
@@ -141,6 +142,9 @@ export class KernelConnection {
         // payload short-circuits the resolver's own parsing to `[]`.
         this.pendingInspects.forEach((cb) => cb(undefined));
         this.pendingInspects.clear();
+        // Same for in-flight inspect() (hover/signature-help) requests.
+        this.pendingInspectReq.forEach((cb) => cb(null));
+        this.pendingInspectReq.clear();
       };
       ws.onerror = () => { this.setStatus("error"); reject(new Error("kernel WS error")); };
       ws.onmessage = (e) => this.onMessage(String((e as MessageEvent).data));
@@ -165,6 +169,15 @@ export class KernelConnection {
       const cb = this.pendingInspects.get(parent);
       if (cb) { this.pendingInspects.delete(parent); cb(m.content?.user_expressions); return; }
       // else: a normal cell run's execute_reply — currently unused; fall through.
+    }
+    if (m.header?.msg_type === "inspect_reply") {
+      const cb = this.pendingInspectReq.get(parent);
+      if (cb) {
+        this.pendingInspectReq.delete(parent);
+        const content = m.content ?? {};
+        cb(content.found ? (content.data?.["text/plain"] ?? null) : null);
+      }
+      return;
     }
     const h = this.pending.get(parent);
     if (!h) return;
@@ -200,6 +213,21 @@ export class KernelConnection {
       const id = msg.header.msg_id;
       const timer = setTimeout(() => { this.pendingCompletes.delete(id); resolve({ matches: [], cursorStart: cursorPos, cursorEnd: cursorPos }); }, 3000);
       this.pendingCompletes.set(id, (r) => { clearTimeout(timer); resolve(r); });
+      this.ws!.send(JSON.stringify(msg));
+    });
+  }
+
+  /** Ask the kernel to introspect (docstring/signature) `code` at byte offset
+   *  `cursorPos` via a Jupyter `inspect_request`. Resolves the `text/plain`
+   *  repr when found, `null` on not-found / timeout / no connection (never
+   *  throws to the UI). Powers Monaco hover + signature-help. */
+  async inspect(code: string, cursorPos: number, detailLevel = 0): Promise<string | null> {
+    if (!this.ws) return null;
+    const msg = newMsg("inspect_request", this.session, { code, cursor_pos: cursorPos, detail_level: detailLevel });
+    return new Promise((resolve) => {
+      const id = msg.header.msg_id;
+      const timer = setTimeout(() => { this.pendingInspectReq.delete(id); resolve(null); }, 3000);
+      this.pendingInspectReq.set(id, (r) => { clearTimeout(timer); resolve(r); });
       this.ws!.send(JSON.stringify(msg));
     });
   }
@@ -260,6 +288,8 @@ export class KernelConnection {
     this.pendingCompletes.clear();
     this.pendingInspects.forEach((cb) => cb(undefined));
     this.pendingInspects.clear();
+    this.pendingInspectReq.forEach((cb) => cb(null));
+    this.pendingInspectReq.clear();
     this.setStatus("disconnected");
   }
 }
