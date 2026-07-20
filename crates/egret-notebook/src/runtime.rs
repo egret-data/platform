@@ -115,14 +115,19 @@ pub async fn build_notebook_runtime(
     let (catalog_jwt, catalog_jwt_expires_at, catalog_uri, catalog_warehouse, namespace) =
         match st.store.get_notebook_warehouse(ws).await {
             Ok(Some((wh_id, ns))) => match st.catalog.get_warehouse(wh_id).await {
+                // Require the warehouse to be lakekeeper-provisioned, but the token
+                // `warehouse` claim + pyiceberg `warehouse=` param use the warehouse
+                // NAME — the catalog guard resolves the claim via get_warehouse_by_name
+                // (the lakekeeper id is only the REST path prefix).
                 Ok(Some(wh)) => match wh.lakekeeper_warehouse_id {
-                    Some(lk_id) => {
-                        match mint_catalog_jwt(&st.keys, &st.idp_issuer, &lk_id, "notebook").await {
+                    Some(_) => {
+                        match mint_catalog_jwt(&st.keys, &st.idp_issuer, &wh.name, "notebook").await
+                        {
                             Ok((jwt, exp)) => (
                                 Some(jwt),
                                 Some(exp),
                                 Some(format!("{}/catalog", st.catalog_base_url)),
-                                Some(lk_id),
+                                Some(wh.name.clone()),
                                 ns,
                             ),
                             Err(e) => {

@@ -239,6 +239,11 @@ async fn runtime_manifest_carries_catalog_token(pool: sqlx::PgPool) {
         m.catalog_uri.as_deref(),
         Some("http://localhost:8181/catalog")
     );
-    assert_eq!(m.catalog_warehouse.as_deref(), Some("wh-lakekeeper-id"));
+    // The token/pyiceberg use the warehouse NAME (the guard resolves it by name);
+    // the lakekeeper id is only the REST path prefix.
+    assert_eq!(
+        m.catalog_warehouse.as_deref(),
+        Some(format!("rtcat-wh-{suffix}").as_str())
+    );
     assert_eq!(m.namespace, vec!["notebook".to_string()]);
 }
