@@ -1486,6 +1486,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
         secrets: workspace_secrets.clone(),
         sessions: sessions.clone(),
+        // Identity, for the Ranger auto-admin seed on governed-engine provision:
+        // list platform admins (roles) → resolve engine usernames (users).
+        users: egret_auth::users::UserRepo::new(db.clone()),
+        roles: egret_auth::roles::RoleRepo::new(db.clone(), bus.clone()),
         pdp: pdp.clone(),
         engine_provisioner,
         kube,

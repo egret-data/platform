@@ -626,6 +626,30 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
             seed_delegator_policies(st, service_name).await?;
         }
     }
+    // Ranger auto-admin (sub-project A): grant each platform admin all-access on
+    // the bound Ranger service so a governed engine is immediately queryable with
+    // no manual policy seeding. Fires for impersonate AND jwt. Idempotent (upsert).
+    if let Some(service_name) = ranger_service_name.as_deref() {
+        if engine.supports_delegation() {
+            if let Some(svc) = st
+                .authz
+                .get_service_opt(service_name)
+                .await
+                .map_err(|e| CpError::BadRequest(format!("resolve ranger service: {e}")))?
+            {
+                let service_type = if engine.is_starrocks() {
+                    "starrocks"
+                } else {
+                    "trino"
+                };
+                let admins = admin_usernames(st).await?;
+                st.authz
+                    .seed_admin_all_access(svc.id, service_name, service_type, &admins)
+                    .await
+                    .map_err(|e| CpError::BadRequest(format!("seed admin policy: {e}")))?;
+            }
+        }
+    }
     // Trino requires a coordinator<->worker shared secret whenever auth is enabled.
     // Derive a stable per-engine value (both roles read it from the env Secret).
     if config.auth.is_some() {
@@ -1691,6 +1715,25 @@ async fn ensure_tls_cert(st: &CpState, engine: &Engine) -> Result<(String, Strin
     };
     st.engine_mgmt.set_tls(engine.id, sid, &cert_pem).await?;
     Ok((keystore, cert_pem))
+}
+
+/// Engine usernames of every platform admin (deduped). Unresolvable usernames
+/// are skipped; an empty list is valid (nothing to seed).
+async fn admin_usernames(st: &CpState) -> Result<Vec<String>, CpError> {
+    let ids = st
+        .roles
+        .platform_admin_user_ids()
+        .await
+        .map_err(|e| CpError::BadRequest(format!("list platform admins: {e}")))?;
+    let mut names = Vec::new();
+    for id in ids {
+        if let Ok(u) = st.users.ensure_username(id).await {
+            if !names.contains(&u) {
+                names.push(u);
+            }
+        }
+    }
+    Ok(names)
 }
 
 /// Seed the two impersonate-mode Ranger policies (delegator-impersonate +
@@ -5327,6 +5370,8 @@ mod tests {
                 chrono::Duration::hours(24),
                 chrono::Duration::minutes(60),
             ),
+            users: egret_auth::users::UserRepo::new(db.clone()),
+            roles: egret_auth::roles::RoleRepo::new(db.clone(), egret_events::EventBus::new()),
             pdp: std::sync::Arc::new(AllowAllPdp),
             engine_provisioner: None,
             kube: None,

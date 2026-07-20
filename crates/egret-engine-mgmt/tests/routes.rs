@@ -79,6 +79,8 @@ fn build_app(
             authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
             secrets: workspace_secrets,
             sessions: sessions.clone(),
+            users: egret_auth::users::UserRepo::new(db.clone()),
+            roles: egret_auth::roles::RoleRepo::new(db.clone(), egret_events::EventBus::new()),
             pdp,
             engine_provisioner,
             kube,
