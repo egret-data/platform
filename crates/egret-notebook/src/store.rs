@@ -514,6 +514,47 @@ impl NotebookStore {
         Ok(NotebookSettings { engines })
     }
 
+    /// Get the per-workspace notebook warehouse setting, if configured.
+    ///
+    /// Returns `(warehouse_id, namespace)` — the admin-chosen Iceberg warehouse
+    /// and the private namespace path notebook writes land under.
+    pub async fn get_notebook_warehouse(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Option<(Uuid, Vec<String>)>, sqlx::Error> {
+        let row = sqlx::query_as::<_, (Uuid, Vec<String>)>(
+            "SELECT warehouse_id, namespace FROM analytics.notebook_warehouse_settings \
+             WHERE workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .fetch_optional(&self.db.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Upsert the per-workspace notebook warehouse setting.
+    pub async fn set_notebook_warehouse(
+        &self,
+        workspace_id: Uuid,
+        warehouse_id: Uuid,
+        namespace: &[String],
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO analytics.notebook_warehouse_settings \
+             (workspace_id, warehouse_id, namespace) VALUES ($1, $2, $3) \
+             ON CONFLICT (workspace_id) DO UPDATE SET \
+                 warehouse_id = EXCLUDED.warehouse_id, \
+                 namespace = EXCLUDED.namespace, \
+                 updated_at = now()",
+        )
+        .bind(workspace_id)
+        .bind(warehouse_id)
+        .bind(namespace)
+        .execute(&self.db.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Replace the engine access set for a workspace.
     ///
     /// Validates that every id in `engine_ids` belongs to this workspace
@@ -1087,5 +1128,37 @@ mod tests {
         assert_eq!(ec, Some(3));
         assert_eq!(ms, Some(42));
         assert_eq!(lo.unwrap()[0]["type"], "stream");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn notebook_warehouse_set_get_upsert(pool: sqlx::PgPool) {
+        let db = Db { pool };
+        let store = NotebookStore::new(db.clone());
+        let (ws, _user) = seed(&db).await;
+
+        // Nothing configured yet.
+        assert!(store.get_notebook_warehouse(ws).await.unwrap().is_none());
+
+        // Set once → get returns the values.
+        let wh_id = Uuid::new_v4();
+        store
+            .set_notebook_warehouse(ws, wh_id, &["notebook".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_notebook_warehouse(ws).await.unwrap(),
+            Some((wh_id, vec!["notebook".to_string()]))
+        );
+
+        // Set again → upserts (new warehouse + namespace).
+        let wh_id2 = Uuid::new_v4();
+        store
+            .set_notebook_warehouse(ws, wh_id2, &["scratch".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_notebook_warehouse(ws).await.unwrap(),
+            Some((wh_id2, vec!["scratch".to_string()]))
+        );
     }
 }
