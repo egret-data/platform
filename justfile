@@ -50,9 +50,21 @@ images-build:
     docker build -t egret-kernel:dev kernel-image
 
 # Build images, load them into the kind `egret` cluster, and (re)install the chart.
+# Force fresh pods onto the just-loaded `:dev` images. A `helm upgrade` with an
+# unchanged image tag does NOT restart pods, so a rebuilt `:dev` image is ignored
+# without this — the classic same-tag gotcha. Also refreshes per-user kernel pods
+# (spawned on-demand, they'd otherwise keep the old kernel image). NOTE: never run
+# two image builds concurrently — both tag `:dev` and the last to finish wins,
+# which can deploy stale code.
+_kind-refresh:
+    kubectl rollout restart deploy/egret deploy/egret-frontend -n egret-system
+    kubectl rollout status deploy/egret -n egret-system --timeout=180s
+    kubectl delete pods -n egret-notebooks --all --ignore-not-found=true
+
 deploy-kind: images-build
     kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m
+    just _kind-refresh
     @echo "egret SPA: http://localhost:30080  (login admin@egret.local / Admin12345!)"
 
 # Like deploy-kind but OIDC-on + ingress (Milestone B) — required for the data-plane e2e.
@@ -61,6 +73,7 @@ deploy-kind-oidc: images-build
     kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
       --set oidc.enabled=true --set ingress.enabled=true --set kernel.launcher=kubernetes
+    just _kind-refresh
     @echo "egret SPA: http://egret.localtest.me  (login admin@egret.local / Admin12345!)"
 
 # Opt-in data-plane e2e against the in-cluster kind deploy (egret.localtest.me).
@@ -93,6 +106,7 @@ deploy-kind-governance: images-build
     kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
       --set oidc.enabled=true --set ingress.enabled=true --set ranger.enabled=true --set kernel.launcher=kubernetes
+    just _kind-refresh
     @echo "egret (ranger-on): http://egret.localtest.me"
 
 # Opt-in governance enforcement e2e (mask + row-filter on a live Trino query).
