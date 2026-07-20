@@ -15,6 +15,10 @@ pub struct StarRocksConnector {
     opts: mysql_async::Opts,
     /// Set on the impersonate path (service-user login + run AS this user).
     execute_as: Option<String>,
+    /// Set (to a refusal message) when this connection carries a per-user JWT but
+    /// no TLS — StarRocks sends the JWT as a *cleartext* MySQL password, so without
+    /// TLS the token leaks verbatim. Enforced in `execute`/`describe` (fail closed).
+    insecure_bearer: Option<String>,
 }
 
 impl StarRocksConnector {
@@ -57,7 +61,9 @@ impl StarRocksConnector {
             None
         };
         // TLS: pin the FE cert. mysql_clear_password sends the JWT in cleartext, so a
-        // bearer connection MUST be TLS in production.
+        // bearer connection MUST be TLS — enforced (fail closed) via `insecure_bearer`
+        // below, no longer just a comment.
+        let has_tls = spec.options.tls_cert.is_some();
         if let Some(pem) = &spec.options.tls_cert {
             let ssl = mysql_async::SslOpts::default()
                 .with_root_certs(vec![mysql_async::PathOrBuf::from(pem.clone().into_bytes())])
@@ -71,6 +77,23 @@ impl StarRocksConnector {
         StarRocksConnector {
             opts: b.into(),
             execute_as,
+            // StarRocks' only TLS path here is the pinned FE cert, so the transport is
+            // TLS iff `tls_cert` was provided. Without it, the cleartext JWT password
+            // would go over a plaintext socket → refuse.
+            insecure_bearer: super::insecure_bearer_reason(
+                spec.bearer_token.is_some(),
+                has_tls,
+                super::tls_insecure_optout(),
+            ),
+        }
+    }
+
+    /// The transport-security refusal, if this connection would leak a bearer JWT
+    /// (StarRocks sends it as a cleartext password) over a non-TLS socket.
+    fn guard(&self) -> Result<(), EngineError> {
+        match &self.insecure_bearer {
+            Some(reason) => Err(EngineError::Connect(reason.clone())),
+            None => Ok(()),
         }
     }
 
@@ -92,6 +115,11 @@ impl StarRocksConnector {
     pub fn execute_as(&self) -> Option<&str> {
         self.execute_as.as_deref()
     }
+
+    #[cfg(test)]
+    pub fn insecure_bearer(&self) -> Option<&str> {
+        self.insecure_bearer.as_deref()
+    }
 }
 
 #[async_trait]
@@ -102,6 +130,7 @@ impl Connector for StarRocksConnector {
         limits: &Limits,
         cancel: CancellationToken,
     ) -> Result<TabularResult, EngineError> {
+        self.guard()?;
         let mut conn = mysql_async::Conn::new(self.opts.clone())
             .await
             .map_err(|e| EngineError::Connect(e.to_string()))?;
@@ -173,6 +202,7 @@ impl Connector for StarRocksConnector {
     }
 
     async fn describe(&self, sql: &str, timeout: Duration) -> Result<Vec<ColumnMeta>, EngineError> {
+        self.guard()?;
         let wrapped = format!("SELECT * FROM (\n{sql}\n) AS _egret_ds LIMIT 0");
         let opts = self.opts.clone();
         let execute_as = self.execute_as.clone();
@@ -391,6 +421,28 @@ mod tests {
         s.options.tls_cert =
             Some("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n".into());
         assert!(StarRocksConnector::new(&s).opts().ssl_opts().is_some());
+    }
+
+    // StarRocks sends the JWT as a CLEARTEXT password, so a bearer connection
+    // without TLS (no pinned cert) would leak it → flagged insecure (execute/
+    // describe fail closed). With the pinned cert it's fine; no bearer is never
+    // flagged. (Assumes EGRET_ENGINE_TLS_INSECURE unset, the default.)
+    #[test]
+    fn bearer_requires_tls() {
+        // bearer, no tls_cert → refused
+        let mut s = base_spec();
+        s.bearer_token = Some("eyJ.jwt.sig".into());
+        s.session_user = Some("alice".into());
+        assert!(StarRocksConnector::new(&s).insecure_bearer().is_some());
+
+        // bearer + pinned cert → allowed
+        s.options.tls_cert =
+            Some("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n".into());
+        assert!(StarRocksConnector::new(&s).insecure_bearer().is_none());
+
+        // no bearer (service user / impersonate), no tls → never flagged
+        let plain = base_spec();
+        assert!(StarRocksConnector::new(&plain).insecure_bearer().is_none());
     }
 
     #[test]

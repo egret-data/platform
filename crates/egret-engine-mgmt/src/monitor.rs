@@ -190,11 +190,17 @@ async fn try_ingress(
 ) -> Option<(u16, Vec<u8>)> {
     let url = format!("{}{path}", ingress_base(engine)?);
     let m = method.parse::<reqwest::Method>().ok()?;
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(4))
-        .build()
-        .ok()?;
+    let mut cb = reqwest::Client::builder().timeout(std::time::Duration::from_secs(4));
+    // Verify the ingress cert by default; only accept an invalid/self-signed cert
+    // when the operator sets the explicit `EGRET_ENGINE_TLS_INSECURE` opt-out (the
+    // same escape hatch the query connectors honor). This is a health probe (no
+    // per-user credentials), so on a verify failure `send` errors and the caller
+    // falls back to the internal seam — a self-signed dev ingress just degrades to
+    // the fallback instead of being silently trusted.
+    if egret_query::execution::connector::tls_insecure_optout() {
+        cb = cb.danger_accept_invalid_certs(true);
+    }
+    let client = cb.build().ok()?;
     let mut rb = client.request(m, &url);
     for (k, v) in headers {
         rb = rb.header(k.as_str(), v.as_str());

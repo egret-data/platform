@@ -27,6 +27,10 @@ pub struct TrinoConnector {
     /// PEM of the coordinator's self-signed cert to pin as a trusted root when
     /// connecting over TLS (jwt-mode). `None` = system roots / plain HTTP.
     tls_cert: Option<String>,
+    /// Set (to a refusal message) when this connection carries a per-user JWT but
+    /// the transport is not TLS — sending the bearer would leak it in the clear.
+    /// Enforced in `execute` (fail closed). `None` = safe or explicit opt-out.
+    insecure_bearer: Option<String>,
 }
 
 impl TrinoConnector {
@@ -44,14 +48,23 @@ impl TrinoConnector {
         } else {
             auth_user.clone()
         };
+        let secure = scheme == "https";
         TrinoConnector {
             base_url: format!("{scheme}://{}:{}", spec.host, spec.port),
             auth_user,
             session_user,
             secret: spec.secret.clone(),
             bearer: spec.bearer_token.clone(),
-            secure: scheme == "https",
+            secure,
             tls_cert: spec.options.tls_cert.clone(),
+            // Trino carries the JWT in an `Authorization: Bearer` header — TLS is the
+            // `https` transport (pinned cert or system roots both protect it), so the
+            // guard keys on `secure` (scheme == https), not on `tls_cert` presence.
+            insecure_bearer: super::insecure_bearer_reason(
+                spec.bearer_token.is_some(),
+                secure,
+                super::tls_insecure_optout(),
+            ),
         }
     }
 
@@ -84,6 +97,13 @@ impl TrinoConnector {
     #[allow(dead_code)]
     pub fn bearer(&self) -> Option<&str> {
         self.bearer.as_deref()
+    }
+
+    /// The transport-security refusal, if this connection would leak a bearer JWT
+    /// over non-TLS. `execute` returns this as a `Connect` error (fail closed).
+    #[cfg(test)]
+    pub fn insecure_bearer(&self) -> Option<&str> {
+        self.insecure_bearer.as_deref()
     }
 
     /// Attach auth + identity to a Trino request.
@@ -175,6 +195,9 @@ impl Connector for TrinoConnector {
         limits: &Limits,
         cancel: CancellationToken,
     ) -> Result<TabularResult, EngineError> {
+        if let Some(reason) = &self.insecure_bearer {
+            return Err(EngineError::Connect(reason.clone()));
+        }
         let client = self.build_client(limits.timeout)?;
 
         let session = format!("query_max_run_time={}s", limits.timeout.as_secs().max(1));
@@ -351,6 +374,38 @@ mod tests {
             bearer_token: None,
         };
         assert_eq!(TrinoConnector::new(&s).bearer(), None);
+    }
+
+    // A per-user JWT over plain HTTP would leak the token — the connection is
+    // flagged insecure so `execute` fails closed. Over `https` (jwt-mode) it's fine.
+    // No bearer (impersonate / service user) is never flagged, plain HTTP or not.
+    #[test]
+    fn bearer_requires_tls() {
+        let mk = |scheme: Option<&str>, bearer: Option<&str>| {
+            TrinoConnector::new(&ConnSpec {
+                engine: Engine::Trino,
+                host: "h".into(),
+                port: 8080,
+                options: ConnOptions {
+                    http_scheme: scheme.map(str::to_string),
+                    ..Default::default()
+                },
+                secret: None,
+                session_user: Some("alice".into()),
+                bearer_token: bearer.map(str::to_string),
+            })
+        };
+        // bearer over plain http → refused
+        assert!(mk(None, Some("eyJ.jwt.sig")).insecure_bearer().is_some());
+        assert!(mk(Some("http"), Some("eyJ.jwt.sig"))
+            .insecure_bearer()
+            .is_some());
+        // bearer over https → allowed
+        assert!(mk(Some("https"), Some("eyJ.jwt.sig"))
+            .insecure_bearer()
+            .is_none());
+        // no bearer → never flagged, even over plain http
+        assert!(mk(None, None).insecure_bearer().is_none());
     }
 
     // The emitted headers — not just the accessors — are what Trino sees. Trino

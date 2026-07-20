@@ -99,6 +99,42 @@ pub fn build_connector(spec: &ConnSpec) -> Box<dyn Connector> {
     }
 }
 
+/// The off-by-default TLS insecure opt-out, shared with the notebook kernel
+/// (`EGRET_ENGINE_TLS_INSECURE`). `1`/`true`/`yes` (case-insensitive) enable it.
+/// When set, engine connections skip the transport-security guard below — an
+/// explicit, operator-chosen escape hatch, never a silent fallback.
+pub fn tls_insecure_optout() -> bool {
+    std::env::var("EGRET_ENGINE_TLS_INSECURE")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+/// Refusal reason when a per-user engine JWT would be transmitted without TLS.
+///
+/// A bearer token is a credential: Trino sends it as an `Authorization: Bearer`
+/// header, StarRocks as a **cleartext** MySQL password (`mysql_clear_password`).
+/// Either leaks the JWT verbatim over a non-TLS transport. We pin the engine's
+/// cert to provide that TLS, so a bearer connection with no TLS would send the
+/// credential in the clear. Fail closed: return `Some(reason)` unless the
+/// operator set the explicit `EGRET_ENGINE_TLS_INSECURE` opt-out.
+pub(crate) fn insecure_bearer_reason(
+    has_bearer: bool,
+    transport_tls: bool,
+    insecure_optout: bool,
+) -> Option<String> {
+    if has_bearer && !transport_tls && !insecure_optout {
+        Some(
+            "refusing to send a per-user engine JWT over a non-TLS connection: the \
+             engine connection has no TLS/pinned cert, so the token would be \
+             transmitted in the clear. Configure the engine's TLS, or set \
+             EGRET_ENGINE_TLS_INSECURE=1 to override (insecure)."
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 /// A production `ConnectorFactory` resolves a database id → connector via the registry.
 /// Defined here so `JobManager` can be tested with a fake factory.
 #[async_trait]
@@ -130,5 +166,36 @@ impl ConnectorFactory for DefaultConnectorFactory {
             session_user,
             bearer_token,
         )))
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::insecure_bearer_reason as reason;
+
+    #[test]
+    fn bearer_without_tls_is_refused() {
+        // The dangerous case: a per-user JWT and no TLS, opt-out off → refuse.
+        assert!(reason(true, false, false).is_some());
+    }
+
+    #[test]
+    fn bearer_with_tls_is_allowed() {
+        // jwt-mode engines are provisioned with TLS (pinned cert / https) → allowed.
+        assert!(reason(true, true, false).is_none());
+    }
+
+    #[test]
+    fn no_bearer_is_always_allowed() {
+        // The impersonate / service-user paths carry no per-user JWT — unaffected,
+        // even over plain transport.
+        assert!(reason(false, false, false).is_none());
+        assert!(reason(false, true, false).is_none());
+    }
+
+    #[test]
+    fn explicit_optout_permits_insecure_bearer() {
+        // The escape hatch: only an explicit opt-out downgrades the refusal.
+        assert!(reason(true, false, true).is_none());
     }
 }
