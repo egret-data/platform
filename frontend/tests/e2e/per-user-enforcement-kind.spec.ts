@@ -12,7 +12,6 @@ import {
   engineProfileName,
   createPolicy,
   addWorkspaceMember,
-  firstDatabaseId,
   createDataset,
   createChart,
   createDashboardWithChart,
@@ -201,15 +200,23 @@ test.describe("per-user enforcement across surfaces on kind", () => {
     }
 
     // 10. Resolve the SQL Lab db id for the engine — AS the break-glass admin, since
-    //     `firstDatabaseId`/the databases list is gated on workspace:manage_members.
-    //     Prefer the db whose name matches the engine; else fall back to the first.
-    const dbList = (await (await request.get(`/api/ws/${ws.slug}/databases`)).json()) as Array<{
-      id: string;
-      name?: string;
-    }>;
+    //     the databases list is gated on workspace:manage_members. Robust to the
+    //     response shape (array or {databases|items:[]}) and retried, since the
+    //     engine's SQL Lab database is materialized asynchronously after assign.
     const engineRe = new RegExp(engineName, "i");
-    const dbId =
-      dbList.find((d) => engineRe.test(d.name ?? ""))?.id ?? (await firstDatabaseId(request, ws.slug));
+    let dbId = "";
+    await expect(async () => {
+      const resp = await request.get(`/api/ws/${ws.slug}/databases`);
+      expect(resp.ok(), `list databases → ${resp.status()}`).toBeTruthy();
+      const raw = (await resp.json()) as unknown;
+      const list = (Array.isArray(raw)
+        ? raw
+        : ((raw as { databases?: unknown[]; items?: unknown[] }).databases ??
+          (raw as { items?: unknown[] }).items ??
+          [])) as Array<{ id: string; name?: string }>;
+      expect(list.length, "engine's SQL Lab database exists").toBeGreaterThan(0);
+      dbId = (list.find((d) => engineRe.test(d.name ?? "")) ?? list[0]).id;
+    }).toPass({ timeout: 60_000, intervals: [3_000] });
 
     // 11. Seed the governed table AS admin-sso (has full Ranger access). The first
     //     CREATE is wrapped in a retry to absorb the Ranger execute/impersonate poll.
