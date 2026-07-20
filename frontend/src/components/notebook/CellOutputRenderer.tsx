@@ -1,8 +1,12 @@
-import React, { useState } from "react";
+import React, { useState, lazy, Suspense } from "react";
 import DOMPurify from "dompurify";
 import { AlertCircle, ChevronRight } from "lucide-react";
 import { ansiToHtml } from "./ansiToHtml";
 import type { CellOutput } from "@/lib/kernel/protocol";
+
+// Lazy so plotly.js (~3.5MB) only loads when a cell actually has a plotly output.
+const PlotlyOutput = lazy(() => import("./PlotlyOutput"));
+const PLOTLY_MIME = "application/vnd.plotly.v1+json";
 
 // Bounded ANSI→HTML cache. Keys are the exact output strings already held in
 // memory by the cell's outputs state; FIFO eviction caps growth. Avoids
@@ -46,6 +50,26 @@ class OutputErrorBoundary extends React.Component<
 }
 
 function MimeBundle({ data }: { data: Record<string, unknown> }) {
+  // Interactive plotly (application/vnd.plotly.v1+json) → the lazy plotly.js
+  // renderer. Checked first so it wins over plotly's text/html fallback in the
+  // same bundle (which the DOMPurify path would strip to a non-interactive shell).
+  const plotlyRaw = data[PLOTLY_MIME];
+  if (plotlyRaw != null) {
+    const figure = (typeof plotlyRaw === "string" ? JSON.parse(plotlyRaw) : plotlyRaw) as {
+      data: unknown[];
+      layout?: Record<string, unknown>;
+      config?: Record<string, unknown>;
+    };
+    return (
+      <div className="h-96 w-full" data-testid="notebook-plotly">
+        <Suspense
+          fallback={<div className="text-xs text-muted-foreground">Loading chart…</div>}
+        >
+          <PlotlyOutput figure={figure} />
+        </Suspense>
+      </div>
+    );
+  }
   const html = data["text/html"] as string | undefined;
   const png = data["image/png"] as string | undefined;
   const jpeg = data["image/jpeg"] as string | undefined;
