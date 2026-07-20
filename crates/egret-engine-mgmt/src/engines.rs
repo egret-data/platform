@@ -46,12 +46,15 @@ const DEFAULT_IMAGE_VERSION: &str = "470";
 const DEFAULT_NAMESPACE: &str = "egret-engines";
 /// Shared per-warehouse role that engine Catalog Clients are bound to.
 const ENGINE_ROLE_NAME: &str = "engine";
-/// Default StarRocks FE/CN images when the body omits them. Pinned to a 3.4.x
-/// line because FE MySQL-protocol TLS (the delegation `tlsEnabled` path) is only
-/// available in StarRocks open-source from v3.4.1 onwards — a 3.3 image can't
-/// serve the SSL listener, so `tlsEnabled=true` would fail the handshake.
-const DEFAULT_SR_FE_IMAGE: &str = "starrocks/fe-ubuntu:3.4-latest";
-const DEFAULT_SR_CN_IMAGE: &str = "starrocks/cn-ubuntu:3.4-latest";
+/// Default StarRocks FE/CN images when the body omits them. Pinned to the 4.1.x
+/// line: it carries BOTH features egret's delegation needs in open-source —
+/// FE MySQL-protocol TLS (`tlsEnabled`, from v3.4.1) AND JWT authentication
+/// (`CREATE SECURITY INTEGRATION ... authentication_jwt`, community from v3.5+;
+/// the `authentication_jwt` plugin is absent in 3.4, so per-user JWT logins —
+/// the notebook `starrocks()` path — could not authenticate there). Live-proven
+/// end-to-end on 4.1.3 (per-user JWT over pinned TLS returning a row).
+const DEFAULT_SR_FE_IMAGE: &str = "starrocks/fe-ubuntu:4.1-latest";
+const DEFAULT_SR_CN_IMAGE: &str = "starrocks/cn-ubuntu:4.1-latest";
 /// StarRocks FE MySQL-protocol (query) port — where the Iceberg external-catalog
 /// auto-wire runs its `CREATE EXTERNAL CATALOG` DDL (`query_port` in `fe.conf`).
 const STARROCKS_FE_MYSQL_PORT: u16 = 9030;
@@ -3191,13 +3194,42 @@ fn spawn_starrocks_catalog_wire(
             return;
         }
 
+        let fe_host = format!("{engine_name}-fe-service.{namespace}.svc");
+        let root_pw = root_password.as_deref();
+
+        // FE-pod-Ready is NOT root-login-ready: the `{name}-initpwd` Job (#268)
+        // sets root's password via a SEPARATE Job that races the FE coming up, so
+        // the pod reports Ready before the password is set. Running the bootstrap
+        // DDL now would hit `Access denied for user 'root' (using password: YES)`.
+        // Probe a real root login (a trivial `SELECT 1`) until it succeeds, so the
+        // DDL below runs only once initpwd has won. Bounded like the pod poll.
+        let mut auth_ready = false;
+        for _ in 0..MAX_POLLS {
+            match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, "SELECT 1", root_pw, None).await
+            {
+                Ok(()) => {
+                    auth_ready = true;
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!(engine = %engine_name, error = %e,
+                        "starrocks auto-wire: root login not ready yet (initpwd race); retrying");
+                }
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        if !auth_ready {
+            tracing::warn!(engine = %engine_name,
+                "starrocks auto-wire: root login never succeeded within the poll budget \
+                 (initpwd race?); skipping — the admin can retry (e.g. re-provision)");
+            return;
+        }
+
         // The OAuth2 credential is the SAME `client_id:client_secret` the Trino
         // path stores (see `build_catalog_req`'s egret-warehouse arm); StarRocks
         // exchanges it for an access token itself and refreshes on expiry.
         let credential = format!("{client_id}:{client_secret}");
         let sql = starrocks_external_catalog_sql("egret", &egret_url, &warehouse_name, &credential);
-        let fe_host = format!("{engine_name}-fe-service.{namespace}.svc");
-        let root_pw = root_password.as_deref();
         match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, &sql, root_pw, None).await {
             Ok(()) => {
                 tracing::info!(engine = %engine_name,
