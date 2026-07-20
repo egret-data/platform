@@ -95,6 +95,16 @@ e2e-kind-ranger-auto: deploy-kind-governance
       EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
       npx playwright test ranger-auto-admin-kind
 
+# Opt-in per-user-enforcement e2e: drives two OIDC identities (admin-sso full vs
+# member-sso masked+row-filtered) against the same table/dataset/chart/dashboard/
+# notebook, proving per-user Ranger enforcement is consistent across all surfaces.
+e2e-kind-per-user: deploy-kind-governance
+    ./deploy/k8s/wait-ready.sh
+    cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
+      EGRET_E2E_BUCKET=e2e \
+      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      npx playwright test per-user-enforcement-kind
+
 # Uninstall the egret release (leaves the kind cluster + operators up).
 kind-undeploy:
     helm uninstall egret -n egret-system || true

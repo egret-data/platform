@@ -303,26 +303,21 @@ export async function loginViaOidcMember(page: Page): Promise<void> {
  * Retries while a freshly provisioned coordinator is warming up (500s ~30-40s until
  * SERVER STARTED) or a just-created Ranger policy hasn't propagated yet.
  */
-export async function runQuery(
+/** Submit + poll + fetch a SQL Lab query against a KNOWN database id. Unlike
+ *  `runQuery`, it does NOT list databases (that endpoint is manage_members-gated,
+ *  so a non-admin member can't use it) — pass a db id resolved by an admin. */
+export async function runQueryByDb(
   request: APIRequestContext,
   h: Record<string, string>,
   workspaceSlug: string,
-  engineName: string,
+  databaseId: string,
   sql: string,
 ): Promise<{ columns: Array<{ name: string }>; rows: string[][] }> {
-  const engineRe = new RegExp(engineName, "i");
-  const dbs = (await (await request.get(`/api/ws/${workspaceSlug}/databases`)).json()) as Array<{
-    id: string;
-    name?: string;
-  }>;
-  const db = dbs.find((d) => engineRe.test(d.name ?? ""));
-  expect(db, `database for ${engineName} is listed`).toBeTruthy();
-
   let out: { columns: Array<{ name: string }>; rows: string[][] } = { columns: [], rows: [] };
   await expect(async () => {
     const sub = await request.post(`/api/ws/${workspaceSlug}/queries`, {
       headers: h,
-      data: { database_id: db!.id, sql },
+      data: { database_id: databaseId, sql },
     });
     expect(sub.ok(), `submit → ${sub.status()} ${await sub.text()}`).toBeTruthy();
     const qid = (await sub.json()).id as string;
@@ -339,6 +334,23 @@ export async function runQuery(
     out = await (await request.get(`/api/ws/${workspaceSlug}/queries/${qid}/results`)).json();
   }).toPass({ timeout: 300_000, intervals: [4_000] });
   return out;
+}
+
+export async function runQuery(
+  request: APIRequestContext,
+  h: Record<string, string>,
+  workspaceSlug: string,
+  engineName: string,
+  sql: string,
+): Promise<{ columns: Array<{ name: string }>; rows: string[][] }> {
+  const engineRe = new RegExp(engineName, "i");
+  const dbs = (await (await request.get(`/api/ws/${workspaceSlug}/databases`)).json()) as Array<{
+    id: string;
+    name?: string;
+  }>;
+  const db = dbs.find((d) => engineRe.test(d.name ?? ""));
+  expect(db, `database for ${engineName} is listed`).toBeTruthy();
+  return runQueryByDb(request, h, workspaceSlug, db!.id, sql);
 }
 
 /** The Ranger profile (service) name auto-bound to `engineName` (= engine name). */
@@ -365,4 +377,154 @@ export async function createPolicy(
   const res = await request.post("/api/control-plane/policies", { headers: h, data: body });
   expect(res.ok(), `create policy ${body.name} → ${res.status()} ${await res.text()}`).toBeTruthy();
   return (await res.json()).id as number;
+}
+
+const OIDC_ADMIN_USER = process.env.EGRET_E2E_OIDC_ADMIN_USER ?? "admin-sso@egret.local";
+const OIDC_ADMIN_PASSWORD = process.env.EGRET_E2E_OIDC_ADMIN_PASSWORD ?? "Admin12345!";
+
+/**
+ * Sign in through the real Keycloak as the SSO admin identity (`admin-sso`, a full
+ * platform admin). Like `loginViaOidc` it drives the Keycloak-hosted form, but it
+ * only waits for the OIDC callback to land back in the app (off the `/realms/`
+ * pages) rather than a specific `/explore/{ws}/` URL.
+ */
+export async function loginViaOidcAdminSso(page: Page): Promise<void> {
+  await page.goto("/login");
+  await page.getByRole("link", { name: /sign in with sso/i }).click();
+  await page.locator("#username, input[name='username']").first().fill(OIDC_ADMIN_USER);
+  await page.locator("#password, input[name='password']").first().fill(OIDC_ADMIN_PASSWORD);
+  await page.locator("#kc-login, button[type='submit'], input[type='submit']").first().click();
+  await page.waitForURL((u) => !u.pathname.includes("/realms/"), { timeout: 30_000 });
+}
+
+/**
+ * Provision a small (1Gi, 1 worker) Trino engine wired to the warehouse, with
+ * egret-JWT auth enabled at create time (`trinoConfig.auth.jwt`). Returns its id.
+ */
+export async function provisionTrinoEngineJwt(
+  req: APIRequestContext,
+  h: Record<string, string>,
+  runId: string,
+  warehouseId: string,
+): Promise<string> {
+  const engine = await postJson(req, "/api/control-plane/engines", h, {
+    name: `e2e-trino-${runId}`,
+    warehouseId,
+    kind: "trino",
+    coordinatorReplicas: 1,
+    workerReplicas: 1,
+    cpuMin: "250m",
+    cpuMax: "1",
+    memory: "1Gi",
+    trinoConfig: { auth: { jwt: {} } },
+  });
+  return engine.id as string;
+}
+
+/** Add a user (by email) to a workspace with the given role (workspace:manage_members). */
+export async function addWorkspaceMember(
+  req: APIRequestContext,
+  h: Record<string, string>,
+  wsSlug: string,
+  email: string,
+  role: string,
+): Promise<void> {
+  const res = await req.post(`/api/ws/${wsSlug}/members`, {
+    headers: h,
+    data: { principal_type: "user", principal_id: email, role },
+  });
+  expect(
+    res.ok(),
+    `add member ${email} (${role}) → ${res.status()} ${await res.text()}`,
+  ).toBeTruthy();
+}
+
+/** The first database (engine) visible in a workspace's SQL Lab. Returns its id. */
+export async function firstDatabaseId(
+  req: APIRequestContext,
+  wsSlug: string,
+): Promise<string> {
+  const res = await req.get(`/api/ws/${wsSlug}/databases`);
+  expect(res.ok(), `GET /api/ws/${wsSlug}/databases → ${res.status()}`).toBeTruthy();
+  const body = await res.json();
+  const list: Array<{ id: string }> = Array.isArray(body)
+    ? body
+    : (body.databases ?? body.items ?? []);
+  expect(list.length, `at least one database in workspace ${wsSlug}`).toBeGreaterThan(0);
+  return list[0].id;
+}
+
+/** Create a dataset on a physical source; returns its id. */
+export async function createDataset(
+  req: APIRequestContext,
+  h: Record<string, string>,
+  wsSlug: string,
+  body: { name: string; database_id: string; source: Record<string, unknown> },
+): Promise<string> {
+  const ds = await postJson(req, `/api/ws/${wsSlug}/datasets`, h, body);
+  return ds.id as string;
+}
+
+/** Create a chart on a dataset; returns its id. */
+export async function createChart(
+  req: APIRequestContext,
+  h: Record<string, string>,
+  wsSlug: string,
+  body: { dataset_id: string; name: string; viz_type: string; params: Record<string, unknown> },
+): Promise<string> {
+  const chart = await postJson(req, `/api/ws/${wsSlug}/charts`, h, body);
+  return chart.id as string;
+}
+
+/**
+ * Create a dashboard and lay out a single card for `chartId`. Returns the dashboard
+ * id plus that card's id. The card id is read from the PUT (`db_update`) response —
+ * which returns a `DashboardDetailDto` with `cards[].id` — and falls back to a GET
+ * of the dashboard if the PUT body is missing the layout.
+ */
+export async function createDashboardWithChart(
+  req: APIRequestContext,
+  h: Record<string, string>,
+  wsSlug: string,
+  name: string,
+  chartId: string,
+): Promise<{ dashboardId: string; cardId: string }> {
+  const dash = await postJson(req, `/api/ws/${wsSlug}/dashboards`, h, {
+    name,
+    description: "",
+  });
+  const res = await req.put(`/api/ws/${wsSlug}/dashboards/${dash.id}`, {
+    headers: h,
+    data: {
+      name,
+      description: "",
+      parameters: [],
+      width: "full",
+      tabs: [],
+      cards: [
+        {
+          chart_id: chartId,
+          card_type: "chart",
+          grid_col: 0,
+          grid_row: 0,
+          size_x: 6,
+          size_y: 4,
+          options: {},
+        },
+      ],
+    },
+  });
+  expect(res.ok(), `set dashboard cards → ${res.status()} ${await res.text()}`).toBeTruthy();
+
+  const firstCardId = (body: any): string | undefined =>
+    body?.cards?.[0]?.id ?? body?.dashboard?.cards?.[0]?.id;
+
+  let cardId = firstCardId(await res.json());
+  if (!cardId) {
+    const got = await req.get(`/api/ws/${wsSlug}/dashboards/${dash.id}`);
+    expect(got.ok(), `GET dashboard → ${got.status()}`).toBeTruthy();
+    cardId = firstCardId(await got.json());
+  }
+  expect(cardId, `dashboard ${dash.id} has a card for chart ${chartId}`).toBeTruthy();
+  return { dashboardId: dash.id as string, cardId: cardId as string };
 }
