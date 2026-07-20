@@ -147,6 +147,17 @@ e2e-kind-sts: deploy-kind-governance
       EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
       npx playwright test sts-broker-kind
 
+# Opt-in local user-management e2e: admin creates a local user, the user logs in and
+# holds a live session, then admin disables them — proving the disabled user's live
+# session is revoked IMMEDIATELY (not just blocked on their next login). Also covers
+# password-reset session invalidation and hard-delete.
+e2e-kind-local-user: deploy-kind-governance
+    ./deploy/k8s/wait-ready.sh
+    cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
+      EGRET_E2E_BUCKET=e2e \
+      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      npx playwright test local-user-mgmt-kind
+
 # Uninstall the egret release (leaves the kind cluster + operators up).
 kind-undeploy:
     helm uninstall egret -n egret-system || true
