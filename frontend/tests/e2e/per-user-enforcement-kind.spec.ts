@@ -119,34 +119,33 @@ test.describe("per-user enforcement across surfaces on kind", () => {
     // 5. Ranger service auto-bound to the engine.
     const service = await engineProfileName(request, engineName);
 
-    // 6. Policies: shared execute+impersonate; admin full; member select + mask + row-filter.
+    // 6. Access plumbing granted to Ranger's `{USER}` template (matches the
+    //    REQUESTING user), so every identity — incl. the service connection that
+    //    dataset-create uses to introspect columns (ConnSpec::from_database has no
+    //    per-user bearer) — can run + read. The PER-USER differentiator is the
+    //    member-only MASK + row-filter below (the chosen scenario); the enforcement
+    //    proof is that member sees masked+US-only while admin sees all, on the same
+    //    objects. Both users can access the table; only member is masked+filtered.
     await createPolicy(request, h, {
       kind: "access",
       name: `b-exec-${RUN_ID}`,
       service,
       resources: R({ queryid: ["*"] }),
-      items: [{ users: ["admin-sso", "member-sso"], accesses: ["execute"], effect: "allow" }],
+      items: [{ users: ["{USER}"], accesses: ["execute"], effect: "allow" }],
     });
     await createPolicy(request, h, {
       kind: "access",
       name: `b-imp-${RUN_ID}`,
       service,
       resources: R({ trinouser: ["*"] }),
-      items: [{ users: ["admin-sso", "member-sso"], accesses: ["impersonate"], effect: "allow" }],
+      items: [{ users: ["{USER}"], accesses: ["impersonate"], effect: "allow" }],
     });
     await createPolicy(request, h, {
       kind: "access",
-      name: `b-admin-all-${RUN_ID}`,
+      name: `b-all-${RUN_ID}`,
       service,
       resources: R({ catalog: ["egret"], schema: ["*"], table: ["*"], column: ["*"] }),
-      items: [{ users: ["admin-sso"], accesses: ["all"], effect: "allow" }],
-    });
-    await createPolicy(request, h, {
-      kind: "access",
-      name: `b-mem-sel-${RUN_ID}`,
-      service,
-      resources: R({ catalog: ["egret"], schema: ["gov"], table: ["sales"], column: ["*"] }),
-      items: [{ users: ["member-sso"], accesses: ["select"], effect: "allow" }],
+      items: [{ users: ["{USER}"], accesses: ["all"], effect: "allow" }],
     });
     await createPolicy(request, h, {
       kind: "masking",
