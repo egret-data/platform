@@ -152,8 +152,10 @@ impl RoleRepo {
         .map_err(db_err)
     }
 
-    /// User ids directly granted the `platform_admin` role at platform scope.
-    /// (Direct user grants only — group-granted admins are not expanded here.)
+    /// User ids that hold the `platform_admin` role at platform scope — both
+    /// DIRECT user grants AND users who hold it via a GROUP grant (group-granted
+    /// admins ARE expanded through `user_groups`; see the query below). Used to
+    /// count/enumerate the effective platform admins (e.g. the last-admin guard).
     pub async fn platform_admin_user_ids(&self) -> Result<Vec<UserId>> {
         // Both DIRECT user grants AND users who hold platform_admin via a GROUP
         // (OIDC groups sync into `user_groups`). The group arm expands each

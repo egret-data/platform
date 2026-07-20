@@ -16,6 +16,7 @@ use axum::response::Response;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
 use egret_controlplane::{control_plane_router, CpState};
+use egret_core::UserId;
 use egret_metastore::Db;
 use http_body_util::BodyExt;
 use tower::ServiceExt; // oneshot
@@ -602,15 +603,16 @@ async fn pdp_backed_secret_reader_reads_but_cannot_create() {
 /// `search_path` pin cannot rename, so a schema-isolated pool collides with the
 /// shared-database tests' already-moved tables ("relation … already exists in
 /// schema …"). A per-database pool gives every schema — public AND the seam
-/// schemas — its own namespace, so `migrate()` runs cleanly. The database name
-/// is fixed and DROP+CREATE'd each run (drop stale backends first), so temp
-/// databases don't accumulate.
-async fn setup_isolated_schema() -> Option<Fixture> {
+/// schemas — its own namespace, so `migrate()` runs cleanly. `iso_db` names the
+/// database, DROP+CREATE'd each run (drop stale backends first), so temp
+/// databases don't accumulate; callers pass a name unique to their test so two
+/// isolated-schema tests running concurrently don't race each other's
+/// DROP/CREATE.
+async fn setup_isolated_schema(iso_db: &str) -> Option<Fixture> {
     use sqlx::{ConnectOptions, Connection};
     use std::str::FromStr;
 
     let dsn = std::env::var("DATABASE_URL").ok()?;
-    let iso_db = "egret_test_iso_last_admin";
     let base_opts = sqlx::postgres::PgConnectOptions::from_str(&dsn).expect("parse DATABASE_URL");
 
     // On a maintenance connection (the DATABASE_URL's own db), drop any stale
@@ -932,7 +934,7 @@ async fn role_assign_emits_audit_mutation() {
 /// why the shared-schema fixture can't give this a deterministic count).
 #[tokio::test]
 async fn last_admin_guard() {
-    let Some(f) = setup_isolated_schema().await else {
+    let Some(f) = setup_isolated_schema("egret_test_iso_last_admin").await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -2326,5 +2328,187 @@ async fn tag_access_policy_group_clearance_and_uuid_validation() {
         resp.status(),
         StatusCode::BAD_REQUEST,
         "a non-uuid required_groups entry must be rejected 400"
+    );
+}
+
+/// `PATCH /users/{id}` with `status: "disabled"` must take effect
+/// IMMEDIATELY: `SessionService::validate` used to only reject a disabled
+/// user on their NEXT request (sub-project 1), leaving any already-live
+/// session valid until it naturally expired. Task 1 wires in
+/// `revoke_all_for_user` on the disable branch so the user's current session
+/// stops validating the moment the admin disables them.
+///
+/// Also asserts the self-guard half of `guard_not_last_admin`: the admin
+/// cannot disable their own account (400), independent of the last-admin
+/// count.
+#[tokio::test]
+async fn disabling_a_user_revokes_their_sessions() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin_token = session_for(&f, "disable_admin", true).await;
+
+    // The admin cannot disable themselves, regardless of how many other
+    // admins exist.
+    let (admin_id,): (Uuid,) = sqlx::query_as(
+        "SELECT pra.principal_id FROM access_grants pra \
+         JOIN roles r ON r.id = pra.role_id \
+         JOIN sessions s ON s.token_hash = $1 \
+         WHERE r.name = 'platform_admin' AND pra.scope_type = 'platform' \
+           AND pra.principal_id = s.user_id",
+    )
+    .bind(egret_auth::token::hash_token(&admin_token))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the admin's own platform_admin grant");
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &format!("/users/{admin_id}"),
+            &admin_token,
+            Some(serde_json::json!({ "status": "disabled" })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an admin cannot disable their own account; body={j}"
+    );
+
+    // Create a target (non-admin) user and a live session for them.
+    let email = format!("lockout_{}@egret.local", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/users",
+            &admin_token,
+            Some(serde_json::json!({
+                "email": email,
+                "name": "Lockout Target",
+                "password": "S3curePassw0rd!",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create target user; body={j}");
+    let user_id: Uuid = j["id"].as_str().expect("user id in body").parse().unwrap();
+
+    let issued = f
+        .sessions
+        .create(UserId(user_id), "test-agent", "127.0.0.1")
+        .await
+        .expect("create a live session for the target user");
+    assert!(
+        f.sessions
+            .validate(&issued.token)
+            .await
+            .expect("validate")
+            .is_some(),
+        "the target's session must be live before disabling them"
+    );
+
+    // Disable the target — must succeed and immediately kill their session.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &format!("/users/{user_id}"),
+            &admin_token,
+            Some(serde_json::json!({ "status": "disabled" })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "disable target user; body={j}");
+    assert_eq!(j["status"], "disabled", "user status in body; body={j}");
+
+    assert!(
+        f.sessions
+            .validate(&issued.token)
+            .await
+            .expect("validate")
+            .is_none(),
+        "disabling the user must revoke their live session immediately, \
+         not just on their next request"
+    );
+}
+
+/// `guard_not_last_admin` blocks disabling the platform-wide LAST
+/// `platform_admin` — 409 Conflict, not 200. Run against `setup_isolated_schema` (see
+/// its docstring for why the shared-schema fixture can't give this a
+/// deterministic count).
+#[tokio::test]
+async fn cannot_disable_the_last_platform_admin() {
+    let Some(f) = setup_isolated_schema("egret_test_iso_disable_last_admin").await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    // The lone platform_admin in this isolated schema.
+    let _lone_admin_token = session_for(&f, "lone_admin", true).await;
+    let (admin_id,): (Uuid,) = sqlx::query_as(
+        "SELECT pra.principal_id FROM access_grants pra \
+         JOIN roles r ON r.id = pra.role_id \
+         WHERE r.name = 'platform_admin' AND pra.scope_type = 'platform'",
+    )
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the sole platform_admin assignment");
+
+    // A distinct caller with just `user:disable` (not platform_admin), so the
+    // self-guard doesn't mask the last-admin guard under test.
+    let caller_token = session_for_with_permission(&f, "disabler", "user:disable").await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &format!("/users/{admin_id}"),
+            &caller_token,
+            Some(serde_json::json!({ "status": "disabled" })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "disabling the last platform_admin must 409; body={j}"
+    );
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("last platform admin"),
+        "409 body should explain the last-admin guard; body={j}"
+    );
+
+    // A second admin breaks the tie: the same disable now succeeds.
+    let _second_admin_token = session_for(&f, "second_admin", true).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &format!("/users/{admin_id}"),
+            &caller_token,
+            Some(serde_json::json!({ "status": "disabled" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "disable succeeds once a second platform_admin exists"
     );
 }

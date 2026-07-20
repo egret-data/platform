@@ -80,6 +80,35 @@ async fn guard_last_admin(st: &CpState, role_id: Uuid) -> Result<(), CpError> {
     Ok(())
 }
 
+/// Reject an action that would remove the last active platform admin, or that
+/// a caller aims at their own account. Reused by disable + delete (Task 4).
+///
+/// A self-target is a `BadRequest` (400) — a bad actor/target, not a state
+/// conflict — while removing the last admin is a `Conflict` (409), matching the
+/// sibling `guard_last_admin`. Like `guard_last_admin`, this check-then-act is
+/// TOCTOU-racy — a known, accepted limitation: two concurrent disables aimed at
+/// different admins in a 2-admin system could both read `len == 2`, pass, and
+/// leave zero admins. The window is tiny and admin-only; a hard invariant would
+/// need a DB constraint or a serialized transaction.
+async fn guard_not_last_admin(
+    st: &CpState,
+    caller: &egret_core::Principal,
+    target: UserId,
+) -> Result<(), CpError> {
+    if caller.user_id == target {
+        return Err(CpError::BadRequest(
+            "you cannot disable or delete your own account".into(),
+        ));
+    }
+    let admins = st.roles.platform_admin_user_ids().await?;
+    if admins.contains(&target) && admins.iter().all(|a| *a == target) {
+        return Err(CpError::Conflict(
+            "Cannot remove the last platform admin".into(),
+        ));
+    }
+    Ok(())
+}
+
 // ---------- Users ----------
 
 // Renamed in the emitted OpenAPI to `ControlPlaneUserDto`: egret-workspace
@@ -206,11 +235,12 @@ async fn create_user(
     params(("id" = Uuid, Path, description = "User id")),
     request_body = UpdateUserInput,
     responses(
-        (status = 200, description = "User profile and/or status updated", body = UserDto),
-        (status = 400, description = "Invalid status value", body = ErrorBody),
+        (status = 200, description = "User profile and/or status updated (disabling also revokes the user's live sessions immediately)", body = UserDto),
+        (status = 400, description = "Invalid status value, or a caller disabling their own account", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing user:update (or user:disable) permission", body = ErrorBody),
         (status = 404, description = "No such user", body = ErrorBody),
+        (status = 409, description = "Would remove the last platform admin", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -240,8 +270,15 @@ async fn update_user(
         if status == "disabled" {
             // Disabling is a stronger action than a plain profile update.
             egret_core::authz::require(&*st.pdp, &p, "user:disable").await?;
+            guard_not_last_admin(&st, &p, user_id).await?;
+            st.users.set_status(user_id, status).await?;
+            // Immediate lockout: kill the user's live sessions now, rather than
+            // waiting for `SessionService::validate` to reject them on their
+            // next request.
+            st.sessions.revoke_all_for_user(user_id).await?;
+        } else {
+            st.users.set_status(user_id, status).await?;
         }
-        st.users.set_status(user_id, status).await?;
     }
 
     let updated = st
