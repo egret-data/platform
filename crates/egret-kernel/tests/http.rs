@@ -170,6 +170,7 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
 
     let notebook_state = NotebookState {
         store: NotebookStore::new(db.clone()),
+        catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
         sessions: sessions.clone(),
         workspaces: workspaces.clone(),
         authz: Authorizer::new(db.clone()),

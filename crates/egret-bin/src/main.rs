@@ -1226,6 +1226,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
 
     let notebook_state = egret_notebook::NotebookState {
         store: egret_notebook::NotebookStore::new(db.clone()),
+        catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),

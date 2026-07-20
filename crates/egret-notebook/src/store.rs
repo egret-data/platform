@@ -511,7 +511,15 @@ impl NotebookStore {
     /// Get current notebook settings (engines with enabled flags).
     pub async fn get_settings(&self, ws: Uuid) -> Result<NotebookSettings, NotebookApiError> {
         let engines = self.list_engine_options(ws).await?;
-        Ok(NotebookSettings { engines })
+        let (warehouse_id, namespace) = match self.get_notebook_warehouse(ws).await? {
+            Some((id, ns)) => (Some(id), ns),
+            None => (None, Vec::new()),
+        };
+        Ok(NotebookSettings {
+            engines,
+            warehouse_id,
+            namespace,
+        })
     }
 
     /// Get the per-workspace notebook warehouse setting, if configured.

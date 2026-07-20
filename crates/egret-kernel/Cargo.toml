@@ -42,5 +42,6 @@ futures-channel.workspace = true
 # `NotebookDocsPort` impl over a concrete `NotebookState`. Production kernel code
 # depends only on the `egret-analytics-api` Port (E5c-1).
 egret-notebook.workspace = true
+egret-catalog-engine.workspace = true
 egret-kernel = { path = ".", features = ["test-util"] }
 egret-events.workspace = true

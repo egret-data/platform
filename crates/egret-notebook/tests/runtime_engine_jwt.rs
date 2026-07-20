@@ -82,6 +82,7 @@ async fn runtime_manifest_carries_engine_jwt(pool: sqlx::PgPool) {
 
     let state = NotebookState {
         store: NotebookStore::new(db.clone()),
+        catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
         sessions: SessionService::new(
             db.clone(),
             chrono::Duration::hours(24),
@@ -126,6 +127,7 @@ async fn runtime_manifest_no_refresh_token_is_ok(pool: sqlx::PgPool) {
 
     let state = NotebookState {
         store: NotebookStore::new(db.clone()),
+        catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
         sessions: SessionService::new(
             db.clone(),
             chrono::Duration::hours(24),

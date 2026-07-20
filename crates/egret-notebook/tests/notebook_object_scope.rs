@@ -47,6 +47,7 @@ impl egret_notebook::engine_token::EngineTokenMinter for FakeEngineMinter {
 fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> NotebookState {
     NotebookState {
         store: NotebookStore::new(db.clone()),
+        catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
         sessions: egret_auth::session::SessionService::new(
             db.clone(),
             chrono::Duration::hours(24),
