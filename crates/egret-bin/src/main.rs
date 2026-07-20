@@ -1040,7 +1040,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             ),
             config: config.clone(),
             cookie_key: Key::from(&key_bytes),
-            secrets: secrets.clone(),
         })
     } else {
         None

@@ -219,7 +219,10 @@ impl UserRepo {
     /// Hard-delete a user and dependents in one transaction: sessions, group
     /// memberships, platform role/permission grants, then the user row.
     /// (Audit history is intentionally NOT deleted — `audit.audit_log.actor_user_id`
-    /// is a denormalized `uuid` with no FK to `users`, so it survives untouched.)
+    /// is a denormalized `uuid` with no FK to `users`, so it survives untouched.
+    /// The legacy `policy_audit.actor` DOES carry a nullable FK, but no code writes
+    /// that table, so it never blocks a delete; if it is ever wired up, null its
+    /// `actor` in this tx rather than deleting the audit row.)
     ///
     /// `sessions` and `user_groups` already carry `ON DELETE CASCADE` (see
     /// migration 0002); they're deleted explicitly anyway so this stays correct

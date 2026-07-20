@@ -27,7 +27,6 @@ pub struct OidcRoutesState {
     pub sessions: SessionService,
     pub config: Config,
     pub cookie_key: Key,
-    pub secrets: egret_secrets::SecretStore,
 }
 
 impl FromRef<OidcRoutesState> for Key {
