@@ -1,7 +1,15 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Compass, ListChecks, MoreHorizontal, Pencil, Plus, ShieldCheck } from "lucide-react";
+import {
+  Compass,
+  KeyRound,
+  ListChecks,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  ShieldCheck,
+} from "lucide-react";
 
 import {
   type AccessRole,
@@ -10,6 +18,7 @@ import {
   createUser,
   listRoles,
   listUsers,
+  resetUserPassword,
   unassignUserRole,
   updateUser,
 } from "@/api/access";
@@ -88,6 +97,7 @@ export default function UsersPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<AccessUser | null>(null);
   const [rolesTarget, setRolesTarget] = useState<AccessUser | null>(null);
+  const [resetTarget, setResetTarget] = useState<AccessUser | null>(null);
   const [statusFacet, setStatusFacet] = useState(FACET_ALL);
   const [providerFacet, setProviderFacet] = useState(FACET_ALL);
 
@@ -185,6 +195,12 @@ export default function UsersPage() {
               <Pencil className="mr-2 h-4 w-4" />
               Edit
             </DropdownMenuItem>
+            {u.provider === "local" && (
+              <DropdownMenuItem onClick={() => setResetTarget(u)}>
+                <KeyRound className="mr-2 h-4 w-4" />
+                Reset password
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       ),
@@ -331,6 +347,12 @@ export default function UsersPage() {
         user={rolesTarget}
         onOpenChange={(o) => {
           if (!o) setRolesTarget(null);
+        }}
+      />
+      <ResetPasswordDialog
+        user={resetTarget}
+        onOpenChange={(o) => {
+          if (!o) setResetTarget(null);
         }}
       />
       <BulkAssignRoleDialog
@@ -633,6 +655,94 @@ function EditUserDialog({
             </Button>
             <Button type="submit" disabled={updateMutation.isPending}>
               Save
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ResetPasswordDialog({
+  user,
+  onOpenChange,
+}: {
+  user: AccessUser | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (user) {
+      setPassword("");
+      setError(null);
+    }
+  }, [user]);
+
+  const resetMutation = useMutation<void, ApiError, string>({
+    mutationFn: (pw) => resetUserPassword(user!.id, pw),
+  });
+
+  function handleOpenChange(next: boolean) {
+    if (!next) {
+      setPassword("");
+      setError(null);
+      resetMutation.reset();
+    }
+    onOpenChange(next);
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    try {
+      await resetMutation.mutateAsync(password);
+      handleOpenChange(false);
+    } catch (err) {
+      setError((err as ApiError).message ?? "Failed to reset password.");
+    }
+  }
+
+  return (
+    <Dialog open={user !== null} onOpenChange={handleOpenChange}>
+      <DialogContent>
+        <form onSubmit={handleSubmit}>
+          <DialogHeader>
+            <DialogTitle>Reset password — {user?.email}</DialogTitle>
+            <DialogDescription>
+              Set a new password for this local account. Their existing sessions
+              are signed out immediately.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="my-4 space-y-4">
+            {error && (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+
+            <div className="space-y-1.5">
+              <Label htmlFor="reset-user-password">New password</Label>
+              <Input
+                id="reset-user-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                autoFocus
+                autoComplete="new-password"
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={resetMutation.isPending}>
+              Reset password
             </Button>
           </DialogFooter>
         </form>

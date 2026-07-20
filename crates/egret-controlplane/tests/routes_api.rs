@@ -2512,3 +2512,118 @@ async fn cannot_disable_the_last_platform_admin() {
         "disable succeeds once a second platform_admin exists"
     );
 }
+
+/// `POST /users/{id}/password` (Task 2): an admin reset rehashes a LOCAL
+/// user's password and immediately revokes their live sessions — mirroring
+/// the disable branch's `revoke_all_for_user` call — so a session issued
+/// under the old password can't linger past the reset.
+#[tokio::test]
+async fn reset_password_rehashes_and_revokes_sessions() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin_token = session_for(&f, "resetpw_admin", true).await;
+
+    let email = format!("resetpw_{}@egret.local", Uuid::new_v4().simple());
+    let user_id = f
+        .users
+        .insert_local(&email, "Reset Target", "old-hash-placeholder")
+        .await
+        .expect("insert target user");
+
+    // A live session, issued before the reset.
+    let issued = f
+        .sessions
+        .create(user_id, "test-agent", "127.0.0.1")
+        .await
+        .expect("create a live session for the target user");
+    assert!(
+        f.sessions
+            .validate(&issued.token)
+            .await
+            .expect("validate")
+            .is_some(),
+        "the target's session must be live before the reset"
+    );
+
+    let new_password = "N3wSecurePassw0rd!";
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/users/{}/password", user_id.0),
+            &admin_token,
+            Some(serde_json::json!({ "password": new_password })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "resetting a local user's password should 204"
+    );
+
+    // The old session must no longer validate.
+    assert!(
+        f.sessions
+            .validate(&issued.token)
+            .await
+            .expect("validate")
+            .is_none(),
+        "resetting the password must revoke the user's live sessions immediately"
+    );
+
+    // The stored hash must verify the NEW password (and not the placeholder).
+    let updated = f
+        .users
+        .find_by_id(user_id)
+        .await
+        .expect("find target")
+        .expect("target exists");
+    let stored_hash = updated
+        .password_hash
+        .expect("local user has a password_hash");
+    assert!(
+        egret_auth::password::verify_password(new_password, &stored_hash).expect("verify_password"),
+        "the stored hash must verify the new password"
+    );
+}
+
+/// `POST /users/{id}/password` must reject a target that isn't a LOCAL
+/// account — an OIDC-provisioned user has no password to reset.
+#[tokio::test]
+async fn reset_password_rejects_sso_user() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin_token = session_for(&f, "resetpw_admin_sso", true).await;
+
+    let sub = format!("sso-subject-{}", Uuid::new_v4().simple());
+    let email = format!("resetpw_sso_{}@egret.local", Uuid::new_v4().simple());
+    let user_id = f
+        .users
+        .insert_oidc(&sub, &email, "SSO Target")
+        .await
+        .expect("insert oidc user");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/users/{}/password", user_id.0),
+            &admin_token,
+            Some(serde_json::json!({ "password": "whatever-Passw0rd!" })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "resetting a non-local (SSO) user's password should 400; body={j}"
+    );
+}

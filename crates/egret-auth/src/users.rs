@@ -139,6 +139,17 @@ impl UserRepo {
         Ok(())
     }
 
+    /// Set a local user's password hash (admin reset). Caller hashes the plaintext.
+    pub async fn set_password(&self, id: UserId, password_hash: &str) -> Result<()> {
+        sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
+            .bind(id.0)
+            .bind(password_hash)
+            .execute(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     /// Return the stable username for `user_id`, deriving and persisting one if
     /// not yet set.  The username is the email local-part slugified to
     /// `[a-z0-9_-]`; collisions are resolved by appending `-2`, `-3`, …

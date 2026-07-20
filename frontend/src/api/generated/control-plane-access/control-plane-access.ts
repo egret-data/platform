@@ -39,6 +39,7 @@ import type {
   GroupMemberDto,
   PermissionGroupDto,
   RenameGroupInput,
+  ResetPasswordInput,
   RoleAssigneeDto,
   RoleDto,
   SetPermissionsInput,
@@ -2574,6 +2575,122 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getControlPlaneAccessUpdateUserMutationOptions(options), queryClient);
+    }
+    export type controlPlaneAccessResetPasswordResponse204 = {
+  data: void
+  status: 204
+}
+
+export type controlPlaneAccessResetPasswordResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneAccessResetPasswordResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessResetPasswordResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessResetPasswordResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessResetPasswordResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessResetPasswordResponseSuccess = (controlPlaneAccessResetPasswordResponse204) & {
+  headers: Headers;
+};
+export type controlPlaneAccessResetPasswordResponseError = (controlPlaneAccessResetPasswordResponse400 | controlPlaneAccessResetPasswordResponse401 | controlPlaneAccessResetPasswordResponse403 | controlPlaneAccessResetPasswordResponse404 | controlPlaneAccessResetPasswordResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessResetPasswordResponse = (controlPlaneAccessResetPasswordResponseSuccess | controlPlaneAccessResetPasswordResponseError)
+
+export const getControlPlaneAccessResetPasswordUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/users/${encodeURIComponent(id)}/password`
+}
+
+/**
+ * @summary `POST /users/{id}/password` — admin reset of a LOCAL user's password.
+Rehashes the new plaintext, then revokes the user's live sessions (mirrors
+the disable branch of `update_user`) so a session issued under the old
+password can't linger.
+ */
+export const controlPlaneAccessResetPassword = async (id: string,
+    resetPasswordInput: ResetPasswordInput, options?: RequestInit): Promise<controlPlaneAccessResetPasswordResponse> => {
+
+  return customInstance<controlPlaneAccessResetPasswordResponse>(getControlPlaneAccessResetPasswordUrl(id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(resetPasswordInput)
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessResetPasswordMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessResetPassword>>, TError,{id: string;data: ResetPasswordInput}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessResetPassword>>, TError,{id: string;data: ResetPasswordInput}, TContext> => {
+
+const mutationKey = ['controlPlaneAccessResetPassword'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneAccessResetPassword>>, {id: string;data: ResetPasswordInput}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  controlPlaneAccessResetPassword(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneAccessResetPasswordMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessResetPassword>>>
+    export type ControlPlaneAccessResetPasswordMutationBody = ResetPasswordInput
+    export type ControlPlaneAccessResetPasswordMutationError = ErrorBody
+
+    /**
+ * @summary `POST /users/{id}/password` — admin reset of a LOCAL user's password.
+Rehashes the new plaintext, then revokes the user's live sessions (mirrors
+the disable branch of `update_user`) so a session issued under the old
+password can't linger.
+ */
+export const useControlPlaneAccessResetPassword = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessResetPassword>>, TError,{id: string;data: ResetPasswordInput}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneAccessResetPassword>>,
+        TError,
+        {id: string;data: ResetPasswordInput},
+        TContext
+      > => {
+      return useMutation(getControlPlaneAccessResetPasswordMutationOptions(options), queryClient);
     }
     export type controlPlaneAccessAssignUserRoleResponse204 = {
   data: void
