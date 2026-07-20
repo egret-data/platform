@@ -79,6 +79,14 @@ e2e-kind-notebook-write: deploy-kind-oidc
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       npx playwright test notebook-write-isolation-kind
 
+# Opt-in notebook visualization e2e: a real per-user kernel renders a plotly figure
+# (application/vnd.plotly.v1+json → notebook-plotly + lazy plotly.js) and a matplotlib
+# figure (image/png → inline <img>). NO Ranger — the notebook kernel stack suffices.
+e2e-kind-notebook-viz: deploy-kind-oidc
+    ./deploy/k8s/wait-ready.sh
+    cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
+      npx playwright test notebook-viz-kind
+
 # Like deploy-kind-oidc but ALSO Ranger-on — provisioned Trino engines bind Ranger
 # (egret embeds the Ranger admin at /service). For the governance enforcement e2e.
 deploy-kind-governance: images-build
