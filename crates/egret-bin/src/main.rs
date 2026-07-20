@@ -1146,12 +1146,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // catalog-token issuer (`idp_issuer` / `IdpState.issuer` below) and, per
     // Task 3, as the issuer/JWKS engines are configured to trust (STS). Bound
     // once here — before the minter below, which is its first consumer — so
-    // every consumer in this fn shares one derivation.
+    // every consumer in this fn shares one derivation. Trailing slash is trimmed
+    // AT THE SOURCE so the token `iss` (also trimmed in `engine_claims`) is
+    // byte-equal to StarRocks' `required_issuer` (which uses this value raw) —
+    // else a `catalog.public_url` set with a trailing slash silently breaks
+    // StarRocks JWT auth while Trino keeps working (a confusing partial failure).
     let egret_public_url = config
         .catalog
         .public_url
         .clone()
-        .unwrap_or_else(|| "http://localhost:8080".to_string());
+        .unwrap_or_else(|| "http://localhost:8080".to_string())
+        .trim_end_matches('/')
+        .to_string();
 
     // Task 4 (STS cutover): the machine-IdP mints the short-lived per-user
     // engine JWT carried in the notebook-runtime manifest — replacing the old
