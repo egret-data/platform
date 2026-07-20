@@ -155,12 +155,25 @@ impl RoleRepo {
     /// User ids directly granted the `platform_admin` role at platform scope.
     /// (Direct user grants only — group-granted admins are not expanded here.)
     pub async fn platform_admin_user_ids(&self) -> Result<Vec<UserId>> {
+        // Both DIRECT user grants AND users who hold platform_admin via a GROUP
+        // (OIDC groups sync into `user_groups`). The group arm expands each
+        // group-scoped grant to its members, mirroring the group-membership
+        // expansion in `SessionService` (see session.rs). This is what lets a
+        // group-granted platform admin (e.g. an OIDC `platform-admins` group) be
+        // auto-seeded a Ranger policy on engine provision.
         let rows = sqlx::query_scalar::<_, Uuid>(
             "SELECT DISTINCT pra.principal_id FROM access_grants pra \
-             JOIN roles r ON r.id = pra.role_id \
-             WHERE r.name = 'platform_admin' \
-               AND pra.scope_type = 'platform' \
-               AND pra.principal_type = 'user'",
+               JOIN roles r ON r.id = pra.role_id \
+              WHERE r.name = 'platform_admin' \
+                AND pra.scope_type = 'platform' \
+                AND pra.principal_type = 'user' \
+             UNION \
+             SELECT DISTINCT ug.user_id FROM access_grants pra \
+               JOIN roles r ON r.id = pra.role_id \
+               JOIN user_groups ug ON ug.group_id = pra.principal_id \
+              WHERE r.name = 'platform_admin' \
+                AND pra.scope_type = 'platform' \
+                AND pra.principal_type = 'group'",
         )
         .fetch_all(&self.db.pool)
         .await
