@@ -7,9 +7,14 @@ actually called.
 """
 from .display import display
 from .engines import starrocks, trino, write_table  # noqa: F401
+from .iceberg import read_iceberg, write_iceberg  # noqa: F401
 from .runtime import load_runtime
 
 runtime = load_runtime()
 me = runtime.username if runtime is not None else None
 
-__all__ = ["display", "load_runtime", "runtime", "me", "trino", "starrocks", "write_table"]
+__all__ = [
+    "display", "load_runtime", "runtime", "me",
+    "trino", "starrocks", "write_table",
+    "write_iceberg", "read_iceberg",
+]

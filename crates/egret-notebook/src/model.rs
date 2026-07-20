@@ -104,12 +104,27 @@ pub struct ReorderCells {
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct NotebookSettings {
     pub engines: Vec<EngineOption>,
+    /// The workspace's chosen notebook (scratch) Iceberg warehouse, if set.
+    #[serde(default)]
+    pub warehouse_id: Option<Uuid>,
+    /// The private namespace path notebook writes land under (empty when unset).
+    #[serde(default)]
+    pub namespace: Vec<String>,
 }
 
 /// Request body for PUT /ws/{workspace}/notebook-settings.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateNotebookSettings {
     pub engine_ids: Vec<Uuid>,
+}
+
+/// Request body for PUT /ws/{workspace}/notebook-settings/warehouse: choose the
+/// notebook scratch warehouse + (optionally) the private namespace path. A
+/// missing/empty `namespace` defaults to `["notebook"]`.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SetNotebookWarehouse {
+    pub warehouse_id: Uuid,
+    pub namespace: Option<Vec<String>>,
 }
 
 #[cfg(test)]

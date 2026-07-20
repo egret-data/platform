@@ -216,6 +216,7 @@ impl IntoResponse for IdpError {
 }
 
 /// Postgres-backed [`SigningKeyStore`] over the `oidc_signing_keys` table.
+#[derive(Clone)]
 pub struct PgSigningKeyStore {
     db: egret_metastore::Db,
 }

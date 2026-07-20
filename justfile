@@ -70,6 +70,15 @@ e2e-kind: deploy-kind-oidc
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       npx playwright test dataplane-kind
 
+# Opt-in notebook write-isolation e2e: an admin reserves the workspace's notebook
+# (scratch) warehouse + namespace, then a real per-user kernel round-trips a Daft
+# frame through that private Iceberg namespace and a raw out-of-namespace write is
+# denied by the catalog guard. NO Ranger — the notebook kernel stack suffices.
+e2e-kind-notebook-write: deploy-kind-oidc
+    ./deploy/k8s/wait-ready.sh
+    cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
+      npx playwright test notebook-write-isolation-kind
+
 # Like deploy-kind-oidc but ALSO Ranger-on — provisioned Trino engines bind Ranger
 # (egret embeds the Ranger admin at /service). For the governance enforcement e2e.
 deploy-kind-governance: images-build

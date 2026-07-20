@@ -127,6 +127,7 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
 
     let app = notebook_router().with_state(NotebookState {
         store: NotebookStore::new(db.clone()),
+        catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
         sessions: sessions.clone(),
         workspaces,
         authz: Authorizer::new(db.clone()),
@@ -134,6 +135,8 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         users: UserRepo::new(db.clone()),
         catalog_base_url: "http://localhost:8181".into(),
         engine_minter: Arc::new(FakeEngineMinter),
+        keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
+        idp_issuer: "http://localhost:8080".into(),
     });
 
     Fixture {
@@ -1369,4 +1372,144 @@ async fn get_runtime_non_member_is_403_or_404(pool: sqlx::PgPool) {
         status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
         "non-member must get 403 or 404; got {status}"
     );
+}
+
+// ── set-notebook-warehouse (C-Task 2) ────────────────────────────────────────
+
+/// Seed a `storage.storage_connections` row + a `catalog.warehouses` row owned by
+/// `ws`, returning the warehouse id.
+async fn seed_warehouse(f: &Fixture, ws: Uuid) -> Uuid {
+    let sc_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections \
+           (name, provider, region, bucket, access_key, path_style) \
+         VALUES ($1, 's3', 'us-east-1', 'warehouse', 'egret', true) RETURNING id",
+    )
+    .bind(format!("nb-store-{}", Uuid::new_v4().simple()))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("seed storage connection");
+    let catalog = egret_catalog_engine::CatalogStore::new(f.db.clone());
+    catalog
+        .create_warehouse(&format!("nb-wh-{}", Uuid::new_v4().simple()), ws, sc_id)
+        .await
+        .expect("seed warehouse")
+        .id
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn set_notebook_warehouse_provisions_and_is_idempotent(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    let (_uid, token) = add_member(&f, f.ws_a, "admin", "ws_admin").await;
+    let wh_id = seed_warehouse(&f, f.ws_a.0).await;
+    let catalog = egret_catalog_engine::CatalogStore::new(f.db.clone());
+
+    // PUT the warehouse for the workspace that OWNS it → 200; the response
+    // reflects the new warehouse + default namespace.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/ws/{}/notebook-settings/warehouse", f.slug_a),
+            &token,
+            Some(serde_json::json!({ "warehouse_id": wh_id })),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "set warehouse; body={json}");
+    assert_eq!(json["warehouse_id"], serde_json::json!(wh_id.to_string()));
+    assert_eq!(json["namespace"], serde_json::json!(["notebook"]));
+
+    // GET reflects the setting.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/ws/{}/notebook-settings", f.slug_a),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "get settings; body={json}");
+    assert_eq!(json["warehouse_id"], serde_json::json!(wh_id.to_string()));
+    assert_eq!(json["namespace"], serde_json::json!(["notebook"]));
+
+    // A catalog role named `notebook` + a namespace-scoped write grant exist.
+    let roles = catalog.list_roles(wh_id).await.unwrap();
+    let role = roles
+        .iter()
+        .find(|r| r.name == "notebook")
+        .expect("notebook role provisioned");
+    let grants = catalog.list_grants(role.id).await.unwrap();
+    assert_eq!(grants.len(), 1, "exactly one grant provisioned");
+    assert_eq!(grants[0].securable_type, "namespace");
+    assert_eq!(grants[0].privilege, "write");
+    assert_eq!(
+        grants[0].namespace.as_deref(),
+        Some(&["notebook".to_string()][..])
+    );
+
+    // Re-PUT is idempotent: still 200, and no duplicate role/grant.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/ws/{}/notebook-settings/warehouse", f.slug_a),
+            &token,
+            Some(serde_json::json!({ "warehouse_id": wh_id })),
+        ))
+        .await
+        .unwrap();
+    let (status, _json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "re-PUT idempotent");
+    let roles = catalog.list_roles(wh_id).await.unwrap();
+    assert_eq!(
+        roles.iter().filter(|r| r.name == "notebook").count(),
+        1,
+        "no duplicate notebook role after re-PUT"
+    );
+    assert_eq!(
+        catalog.list_grants(role.id).await.unwrap().len(),
+        1,
+        "no duplicate grant after re-PUT"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn set_notebook_warehouse_rejects_foreign_warehouse(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    let (_uid, token) = add_member(&f, f.ws_a, "admin", "ws_admin").await;
+    // Warehouse owned by ws_B, PUT through ws_A's path → 400, no mutation.
+    let wh_b = seed_warehouse(&f, f.ws_b.0).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/ws/{}/notebook-settings/warehouse", f.slug_a),
+            &token,
+            Some(serde_json::json!({ "warehouse_id": wh_b })),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "cross-tenant warehouse rejected; body={json}"
+    );
+
+    // Nothing was persisted for ws_A.
+    let store = NotebookStore::new(f.db.clone());
+    assert!(store
+        .get_notebook_warehouse(f.ws_a.0)
+        .await
+        .unwrap()
+        .is_none());
 }

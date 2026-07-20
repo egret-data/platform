@@ -28,7 +28,8 @@ use uuid::Uuid;
 use crate::error::NotebookApiError;
 use crate::model::{
     CellType, CreateCell, CreateNotebook, NotebookDetail, NotebookSettings, NotebookSummary,
-    ReorderCells, SetFolder, UpdateCell, UpdateNotebook, UpdateNotebookSettings,
+    ReorderCells, SetFolder, SetNotebookWarehouse, UpdateCell, UpdateNotebook,
+    UpdateNotebookSettings,
 };
 use crate::runtime::runtime;
 use crate::store::NotebookStore;
@@ -40,6 +41,10 @@ const MANAGE: &str = "workspace:manage_members";
 #[derive(Clone)]
 pub struct NotebookState {
     pub store: NotebookStore,
+    /// Embedded-catalog RBAC store — used to provision the notebook scratch
+    /// role + namespace-scoped write grant when a workspace's notebook
+    /// warehouse is set.
+    pub catalog: egret_catalog_engine::CatalogStore,
     pub sessions: SessionService,
     pub workspaces: WorkspaceRepo,
     pub authz: Authorizer,
@@ -51,6 +56,15 @@ pub struct NotebookState {
     pub catalog_base_url: String,
     /// Mints short-lived per-user engine JWTs for the runtime manifest.
     pub engine_minter: std::sync::Arc<dyn crate::engine_token::EngineTokenMinter>,
+    /// The machine-IdP signing keys — used to mint in-process `aud:"catalog"`
+    /// JWTs for kernels (scoped to the notebook warehouse + `notebook` catalog
+    /// role) so they can write directly to Iceberg. See
+    /// [`crate::runtime::mint_catalog_jwt`].
+    pub keys: egret_machine_idp::PgSigningKeyStore,
+    /// egret's public root URL, used verbatim as the `iss` of catalog JWTs so a
+    /// notebook-minted token is consistent with OAuth-minted ones. Matches the
+    /// `IdpState.issuer` value wired in `egret-bin`.
+    pub idp_issuer: String,
 }
 
 impl FromRef<NotebookState> for SessionService {
@@ -92,6 +106,10 @@ pub fn notebook_router() -> Router<NotebookState> {
         .route(
             "/ws/{workspace}/notebook-settings",
             get(get_settings).put(update_settings),
+        )
+        .route(
+            "/ws/{workspace}/notebook-settings/warehouse",
+            put(set_notebook_warehouse),
         )
         .route("/ws/{workspace}/notebook-runtime", get(runtime))
 }
@@ -652,6 +670,119 @@ async fn update_settings(
     Ok(Json(settings))
 }
 
+/// Map an embedded-catalog store error onto the shared HTTP error taxonomy.
+fn cat_err(e: egret_catalog_engine::CatalogError) -> NotebookApiError {
+    use egret_catalog_engine::CatalogError as C;
+    NotebookApiError::from(match e {
+        C::NotFound(m) => Error::NotFound(m),
+        C::AlreadyExists(m) => Error::Conflict(m),
+        C::InUse => Error::Conflict("in use".into()),
+        C::BadRequest(m) => Error::InvalidInput(m),
+        C::Db(db) => Error::Internal(anyhow::anyhow!(db)),
+    })
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/notebook-settings/warehouse",
+    tag = "notebooks",
+    params(WorkspacePath),
+    request_body = SetNotebookWarehouse,
+    responses(
+        (status = 200, description = "Notebook warehouse set; catalog role + write grant provisioned", body = NotebookSettings),
+        (status = 400, description = "Warehouse not found or not owned by this workspace", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace:manage_members permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn set_notebook_warehouse(
+    State(st): State<NotebookState>,
+    WsContext(ctx): WsContext,
+    Json(b): Json<SetNotebookWarehouse>,
+) -> Result<Json<NotebookSettings>, NotebookApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
+        .await
+        .map_err(NotebookApiError::from)?;
+
+    // The warehouse must exist AND belong to this workspace (cross-tenant → 400,
+    // no partial mutation).
+    let wh = st
+        .catalog
+        .get_warehouse(b.warehouse_id)
+        .await
+        .map_err(cat_err)?
+        .ok_or_else(|| NotebookApiError::from(Error::InvalidInput("warehouse not found".into())))?;
+    if wh.workspace_id != ctx.workspace_id.0 {
+        return Err(NotebookApiError::from(Error::InvalidInput(
+            "warehouse not in this workspace".into(),
+        )));
+    }
+
+    let ns = b
+        .namespace
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| vec!["notebook".to_string()]);
+
+    st.store
+        .set_notebook_warehouse(ctx.workspace_id.0, b.warehouse_id, &ns)
+        .await?;
+
+    // ── Provision (idempotent) the notebook scratch role + namespace write grant ──
+    // `create_role` errors `AlreadyExists` on a re-PUT; fall back to the existing
+    // role. `add_grant` dedupes identical grants (also `AlreadyExists`), which we
+    // treat as success — so a re-PUT is a guaranteed no-op-or-success.
+    let role_id = match st
+        .catalog
+        .create_role(
+            b.warehouse_id,
+            "notebook",
+            "notebook",
+            Some("notebook scratch"),
+        )
+        .await
+    {
+        Ok(role) => role.id,
+        Err(egret_catalog_engine::CatalogError::AlreadyExists(_)) => {
+            st.catalog
+                .list_roles(b.warehouse_id)
+                .await
+                .map_err(cat_err)?
+                .into_iter()
+                .find(|r| r.name == "notebook")
+                .ok_or_else(|| {
+                    NotebookApiError::from(Error::Internal(anyhow::anyhow!(
+                        "notebook role missing after AlreadyExists"
+                    )))
+                })?
+                .id
+        }
+        Err(e) => return Err(cat_err(e)),
+    };
+
+    match st
+        .catalog
+        .add_grant(
+            role_id,
+            &egret_catalog_engine::GrantInput {
+                securable_type: "namespace".into(),
+                namespace: Some(ns.clone()),
+                table_name: None,
+                privilege: "write".into(),
+            },
+        )
+        .await
+    {
+        Ok(_) => {}
+        // An identical grant already exists — idempotent success.
+        Err(egret_catalog_engine::CatalogError::AlreadyExists(_)) => {}
+        Err(e) => return Err(cat_err(e)),
+    }
+
+    let settings = st.store.get_settings(ctx.workspace_id.0).await?;
+    Ok(Json(settings))
+}
+
 // ── OpenAPI fragment (E0·P4b-8) ──────────────────────────────────────────────
 //
 // The `#[derive(utoipa::OpenApi)]` doc struct for the notebook router, merged
@@ -683,6 +814,7 @@ async fn update_settings(
         delete_cell,
         get_settings,
         update_settings,
+        set_notebook_warehouse,
         crate::runtime::runtime,
     ),
     components(schemas(
@@ -697,6 +829,7 @@ async fn update_settings(
         SetFolder,
         NotebookSettings,
         UpdateNotebookSettings,
+        SetNotebookWarehouse,
         crate::model::EngineOption,
         crate::runtime::NotebookRuntime,
         ErrorBody,
