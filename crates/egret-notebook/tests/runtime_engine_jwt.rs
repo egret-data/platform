@@ -235,7 +235,10 @@ async fn runtime_manifest_carries_catalog_token(pool: sqlx::PgPool) {
 
     assert!(m.catalog_jwt.is_some(), "catalog token minted");
     assert!(m.catalog_jwt_expires_at.unwrap() > chrono::Utc::now());
-    assert_eq!(m.catalog_uri.as_deref(), Some("http://localhost:8181/catalog"));
+    assert_eq!(
+        m.catalog_uri.as_deref(),
+        Some("http://localhost:8181/catalog")
+    );
     assert_eq!(m.catalog_warehouse.as_deref(), Some("wh-lakekeeper-id"));
     assert_eq!(m.namespace, vec!["notebook".to_string()]);
 }
