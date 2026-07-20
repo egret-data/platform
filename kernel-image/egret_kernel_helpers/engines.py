@@ -4,8 +4,30 @@ import datetime as _dt
 import json
 import os
 import struct
+import tempfile
 
 _REFRESH_MARGIN = _dt.timedelta(seconds=30)
+
+
+def _tls_verify(tls_cert, insecure):
+    """Resolve the TLS `verify` arg for an engine connection.
+
+    - `insecure` (explicit EGRET_ENGINE_TLS_INSECURE opt-out) → ``False``: accept
+      ANY cert. MITM-unsafe; off by default, for break-glass debugging only.
+    - a pinned cert PEM (`tls_cert`, delivered by egret for the engine's
+      self-signed coordinator cert) → a temp CA file: the client still validates
+      TLS but trusts ONLY this cert (not "accept anything"). Mirrors the backend's
+      `reqwest::Certificate` pinning. Secure default.
+    - neither → ``True``: verify against the system CA bundle (real cert case).
+    """
+    if insecure:
+        return False
+    if tls_cert:
+        cf = tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False)
+        cf.write(tls_cert)
+        cf.close()
+        return cf.name
+    return True
 
 
 def _parse_expiry(s):
@@ -78,10 +100,15 @@ def _trino_conn(engine="trino", *, env=None, cache=None, catalog=None, schema=No
         tok = _engine_token(engine, env=env, cache=cache)
         from sqlalchemy import create_engine
         from trino.auth import JWTAuthentication
-        # TLS verification is on by default (prod-correct); dev sets
-        # EGRET_ENGINE_TLS_INSECURE=1 to accept the self-signed Trino cert.
+        # TLS verification is ALWAYS on. The coordinator serves a self-signed cert,
+        # so egret delivers that cert (tok["tls_cert"]) and we PIN it: verify the
+        # server against THIS cert only — the client still validates TLS, it just
+        # trusts this one cert (not "accept any cert"). Mirrors the backend's
+        # reqwest::Certificate pinning. EGRET_ENGINE_TLS_INSECURE=1 is an explicit,
+        # off-by-default opt-out escape hatch that disables verification entirely.
         _env = env or os.environ
         insecure = _env.get("EGRET_ENGINE_TLS_INSECURE", "").lower() in ("1", "true", "yes")
+        verify = _tls_verify(tok.get("tls_cert"), insecure)
         # The username is the real user from the JWT (preferred_username) —
         # Trino sends it as X-Trino-User for the governed path. http_scheme="https"
         # is required: egret enforces Trino JWT auth over TLS.
@@ -95,7 +122,7 @@ def _trino_conn(engine="trino", *, env=None, cache=None, catalog=None, schema=No
             connect_args={
                 "auth": JWTAuthentication(tok["jwt"]),
                 "http_scheme": "https",
-                "verify": not insecure,
+                "verify": verify,
             },
         )
         return eng.connect()

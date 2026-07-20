@@ -157,6 +157,7 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
                 kind: "trino".into(),
                 host: "trino".into(),
                 port: 8080,
+                tls_cert: None,
             }),
         }),
         active: Default::default(),

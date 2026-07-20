@@ -214,6 +214,9 @@ impl egret_kernel::engine_conn::EngineConnResolver for EngineConnResolverImpl {
             kind: db.engine.as_str().to_string(),
             host: db.host,
             port: db.port,
+            // Deliver the engine's self-signed cert so the kernel can PIN it
+            // (verify against this cert only) rather than disabling TLS verification.
+            tls_cert: db.options.tls_cert,
         })
     }
 }

@@ -728,6 +728,11 @@ struct EngineTokenResp {
     kind: String,
     host: String,
     port: i32,
+    /// The engine's self-signed TLS cert (PEM) when it serves over TLS, so the
+    /// kernel can PIN it (verify against this cert only) instead of disabling
+    /// verification. `None` for plain-HTTP engines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tls_cert: Option<String>,
 }
 
 /// `POST /kernel/engine-token` — mint a fresh per-user engine JWT and return the
@@ -793,6 +798,7 @@ async fn engine_token(
     Ok(Json(EngineTokenResp {
         jwt: tok.access_token,
         expires_at: tok.expires_at,
+        tls_cert: conn.tls_cert,
         kind: conn.kind,
         host: conn.host,
         port: conn.port,
