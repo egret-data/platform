@@ -539,7 +539,8 @@ pub struct StarRocksConfig {
 /// public cert alone and prints fine.
 #[derive(Clone)]
 pub struct StarRocksDelegation {
-    /// Keycloak JWKS URL reachable from the FE pod.
+    /// egret machine-IdP JWKS URL (the STS issuer engines trust), reachable
+    /// from the FE pod.
     pub jwks_url: String,
     pub issuer: String,
     pub audience: String,

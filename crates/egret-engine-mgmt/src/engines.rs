@@ -1385,18 +1385,31 @@ async fn resolve_auth(st: &CpState, tc: &serde_json::Value) -> Result<Option<Aut
             // the Trino coordinator at boot (FileSigningKeyLocator /
             // io.jsonwebtoken.security.SecurityException). Reject at the API
             // boundary instead of provisioning a broken engine. Falls back to the
-            // platform default JWKS above, so this fires only when BOTH the engine
-            // block and the platform (OIDC) have no JWKS.
+            // platform default JWKS above (egret's own machine-IdP, derived from
+            // `catalog.public_url`), so this fires only when BOTH the engine block
+            // has no `jwksUri` AND the platform has no machine-IdP JWKS configured.
             if jwks_uri.is_empty() {
                 return Err(CpError::BadRequest(
-                    "Cannot enable engine JWT authentication: the platform has no JWKS \
-                     (OIDC is not configured). Enable OIDC first, or disable JWT on this engine."
+                    "Cannot enable engine JWT authentication: the platform has no \
+                     machine-IdP JWKS configured. Set `catalog.public_url`, or set a \
+                     per-engine `jwksUri`, or disable JWT on this engine."
                         .into(),
                 ));
             }
             Some(JwtReq {
                 jwks_uri,
-                required_audience: j["requiredAudience"].as_str().map(Into::into),
+                // Unified STS audience (Task 3): egret's machine-IdP mints every
+                // engine token with `aud:"engine"`. Default to that so a Trino
+                // coordinator validates the SAME audience StarRocks' JWT
+                // integration requires unconditionally; an explicit per-engine
+                // override is still honored.
+                required_audience: Some(
+                    j["requiredAudience"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .unwrap_or_else(|| "engine".to_string()),
+                ),
             })
         } else {
             None
@@ -2358,7 +2371,10 @@ async fn build_starrocks_provision_req(
     let delegation = delegation_mode.map(|_| egret_engine_mgmt_api::StarRocksDelegation {
         jwks_url: st.engine_jwks_uri.clone(),
         issuer: st.engine_oidc_issuer.clone(),
-        audience: "starrocks".into(),
+        // Unified STS audience (Task 3): egret's machine-IdP mints every engine
+        // token with `aud:"engine"`, so the JWT integration must require that,
+        // not a per-engine-kind literal.
+        audience: "engine".into(),
         tls_cert_pem: delegation_cert_pem.clone().unwrap_or_default(),
         tls_keystore_pem: delegation_keystore_pem.clone().unwrap_or_default(),
         tls_enabled,
@@ -2366,7 +2382,7 @@ async fn build_starrocks_provision_req(
     let delegation_bootstrap = delegation_mode.map(|_| StarRocksDelegationBootstrap {
         jwks_url: st.engine_jwks_uri.clone(),
         issuer: st.engine_oidc_issuer.clone(),
-        audience: "starrocks".into(),
+        audience: "engine".into(),
         tls_cert_pem: delegation_cert_pem.clone(),
         service_user: crate::delegator_policy::DELEGATOR_USERNAME.into(),
         service_password: delegation_service_password.clone().unwrap_or_default(),
@@ -3205,7 +3221,8 @@ fn spawn_starrocks_catalog_wire(
         // DDL below runs only once initpwd has won. Bounded like the pod poll.
         let mut auth_ready = false;
         for _ in 0..MAX_POLLS {
-            match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, "SELECT 1", root_pw, None).await
+            match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, "SELECT 1", root_pw, None)
+                .await
             {
                 Ok(()) => {
                     auth_ready = true;
@@ -5063,6 +5080,41 @@ mod tests {
         assert_eq!(jwt.jwks_uri, "https://idp/jwks");
     }
 
+    /// Task 3: `resolve_auth`'s jwt block defaults `required_audience` to
+    /// `"engine"` — the SAME audience egret's machine-IdP mints into every
+    /// engine token and StarRocks' JWT integration requires unconditionally —
+    /// when the admin doesn't set `trinoConfig.auth.jwt.requiredAudience`. An
+    /// explicit per-engine override is still honored.
+    #[tokio::test]
+    async fn resolve_auth_defaults_jwt_audience_to_engine() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping resolve_auth_defaults_jwt_audience_to_engine: DATABASE_URL not set"
+            );
+            return;
+        };
+        st.engine_jwks_uri = "https://idp/jwks".into();
+
+        // No requiredAudience in the request ⇒ defaults to "engine".
+        let tc = serde_json::json!({ "auth": { "jwt": {} } });
+        let jwt = resolve_auth(&st, &tc)
+            .await
+            .expect("jwt accepted")
+            .and_then(|a| a.jwt)
+            .expect("jwt present");
+        assert_eq!(jwt.required_audience.as_deref(), Some("engine"));
+
+        // Explicit override is preserved, not clobbered by the default.
+        let tc_override =
+            serde_json::json!({ "auth": { "jwt": { "requiredAudience": "custom-aud" } } });
+        let jwt2 = resolve_auth(&st, &tc_override)
+            .await
+            .expect("jwt accepted")
+            .and_then(|a| a.jwt)
+            .expect("jwt present");
+        assert_eq!(jwt2.required_audience.as_deref(), Some("custom-aud"));
+    }
+
     /// An engine whose stored spec selects a given delegation mode (+ jwt auth so
     /// jwt mode qualifies as delegation-capable).
     fn engine_with_mode(mode: &str) -> Engine {
@@ -5567,6 +5619,11 @@ mod tests {
         // Delegation block present in the stored spec ⇒ delegation + bootstrap.
         assert!(sr.delegation.is_some());
         assert!(boot.is_some());
+        // Task 3: unified STS audience — every engine's JWT integration must
+        // require `aud:"engine"` (egret's machine-IdP-minted claim), not the
+        // old per-kind literal `"starrocks"`.
+        assert_eq!(sr.delegation.as_ref().unwrap().audience, "engine");
+        assert_eq!(boot.as_ref().unwrap().audience, "engine");
 
         // (b) A NO-DELEGATION engine row: images default, delegation absent.
         let spec2 = serde_json::json!({

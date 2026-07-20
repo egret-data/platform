@@ -92,6 +92,91 @@ async fn revoke_invalidates() {
     assert!(svc.validate(&issued.token).await.unwrap().is_none());
 }
 
+/// Two-tier expiry is independent: a session past its *absolute* cap must be
+/// rejected even when its idle window is still wide open (the reverse of
+/// `expired_session_does_not_validate`, which pins the idle side instead).
+#[tokio::test]
+async fn absolute_expiry_invalidates_session_even_when_idle_fresh() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let uid = seed_user(&db).await;
+    // absolute_ttl in the past, idle_ttl generous → only the max-lifetime cap
+    // should be the reason this fails.
+    let svc = SessionService::new(db.clone(), Duration::minutes(-1), Duration::hours(24));
+    let issued = svc.create(uid, "agent", "127.0.0.1").await.unwrap();
+    assert!(svc.validate(&issued.token).await.unwrap().is_none());
+}
+
+use chrono::{DateTime, Utc};
+
+/// A disabled user's session must stop resolving immediately, even though the
+/// session row itself is still within both expiry windows — this is the
+/// "central revocation deferred, egret-side revocation kept" posture: egret's
+/// own `users.status` is authoritative for session validity.
+#[tokio::test]
+async fn disabled_user_session_is_invalid() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let uid = seed_user(&db).await;
+    let svc = SessionService::new(db.clone(), Duration::hours(24), Duration::minutes(60));
+    let issued = svc.create(uid, "agent", "127.0.0.1").await.unwrap();
+    // Sanity: valid before disabling.
+    assert!(svc.validate(&issued.token).await.unwrap().is_some());
+
+    sqlx::query("UPDATE users SET status = 'disabled' WHERE id = $1")
+        .bind(uid.0)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    assert!(svc.validate(&issued.token).await.unwrap().is_none());
+}
+
+/// `validate` slides both `last_seen_at` and `idle_expires_at` forward — the
+/// sliding half of the two-tier expiry, asserted directly against the row
+/// rather than just "still resolves" (which `create_then_validate_slides_idle`
+/// already covers).
+#[tokio::test]
+async fn validate_slides_last_seen_and_idle_expiry() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let uid = seed_user(&db).await;
+    let svc = SessionService::new(db.clone(), Duration::hours(24), Duration::minutes(60));
+    let issued = svc.create(uid, "agent", "127.0.0.1").await.unwrap();
+    let token_hash = egret_auth::token::hash_token(&issued.token);
+
+    let (last_seen_before, idle_before): (DateTime<Utc>, DateTime<Utc>) =
+        sqlx::query_as("SELECT last_seen_at, idle_expires_at FROM sessions WHERE token_hash = $1")
+            .bind(&token_hash)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+
+    assert!(svc.validate(&issued.token).await.unwrap().is_some());
+
+    let (last_seen_after, idle_after): (DateTime<Utc>, DateTime<Utc>) =
+        sqlx::query_as("SELECT last_seen_at, idle_expires_at FROM sessions WHERE token_hash = $1")
+            .bind(&token_hash)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+
+    assert!(
+        last_seen_after > last_seen_before,
+        "last_seen_at should slide forward on validate"
+    );
+    assert!(
+        idle_after > idle_before,
+        "idle_expires_at should slide forward on validate"
+    );
+}
+
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
 use egret_auth::routes::{auth_router, AuthState};

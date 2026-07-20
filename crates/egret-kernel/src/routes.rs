@@ -67,7 +67,7 @@ pub struct KernelState {
     pub notebook_kernels: NotebookKernelStore,
     pub proxy: Arc<dyn KernelProxy>,
     /// Mints fresh per-user engine JWTs for `POST /ws/{ws}/notebook-runtime/token`.
-    /// Shares the SAME `EngineTokenBroker` Arc as `NotebookState` (wired in egret-bin).
+    /// Shares the SAME `MachineIdpEngineMinter` Arc as `NotebookState` (wired in egret-bin).
     pub engine_minter: std::sync::Arc<dyn egret_analytics_api::EngineTokenMinter>,
     /// Resolves an engine's database id to its connection coordinates for
     /// `POST /kernel/engine-token`. Concrete impl injected from egret-bin.

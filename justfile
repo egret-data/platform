@@ -136,6 +136,17 @@ e2e-kind-per-user: deploy-kind-governance
       EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
       npx playwright test per-user-enforcement-kind
 
+# Opt-in STS token-broker e2e: a break-glass local admin (NO Keycloak refresh token)
+# queries a governed StarRocks engine from a notebook purely off an egret-minted
+# token, and admin-sso/member-sso Ranger enforcement (full vs masked) still holds
+# under that same egret-minted-token path.
+e2e-kind-sts: deploy-kind-governance
+    ./deploy/k8s/wait-ready.sh
+    cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
+      EGRET_E2E_BUCKET=e2e \
+      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      npx playwright test sts-broker-kind
+
 # Uninstall the egret release (leaves the kind cluster + operators up).
 kind-undeploy:
     helm uninstall egret -n egret-system || true
