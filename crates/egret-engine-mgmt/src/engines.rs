@@ -637,14 +637,12 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
                 .await
                 .map_err(|e| CpError::BadRequest(format!("resolve ranger service: {e}")))?
             {
-                let service_type = if engine.is_starrocks() {
-                    "starrocks"
-                } else {
-                    "trino"
-                };
+                // This hook only runs on the Trino provision path (the StarRocks
+                // path returns early into `build_starrocks_provision_req`), so the
+                // service type is always "trino".
                 let admins = admin_usernames(st).await?;
                 st.authz
-                    .seed_admin_all_access(svc.id, service_name, service_type, &admins)
+                    .seed_admin_all_access(svc.id, service_name, "trino", &admins)
                     .await
                     .map_err(|e| CpError::BadRequest(format!("seed admin policy: {e}")))?;
             }
@@ -2315,11 +2313,14 @@ async fn build_starrocks_provision_req(
     // bound profile (authz_service_id set) → RangerBinding named after the
     // engine; unbound → None.
     let ranger_service_name = engine.authz_service_id.map(|_| engine.name.clone());
-    let ranger = ranger_service_name.map(|service_name| egret_engine_mgmt_api::RangerBinding {
-        service_name,
-        egret_url: st.engine_egret_url.clone(),
-        poll_interval_ms: 30_000,
-    });
+    let ranger =
+        ranger_service_name
+            .clone()
+            .map(|service_name| egret_engine_mgmt_api::RangerBinding {
+                service_name,
+                egret_url: st.engine_egret_url.clone(),
+                poll_interval_ms: 30_000,
+            });
 
     // Delegation wiring: provision (idempotently reuse) the TLS cert + delegator
     // secret the runtime `StarRocksDelegation` + post-Ready bootstrap need,
@@ -2367,6 +2368,26 @@ async fn build_starrocks_provision_req(
         service_user: crate::delegator_policy::DELEGATOR_USERNAME.into(),
         service_password: delegation_service_password.clone().unwrap_or_default(),
     });
+
+    // Ranger auto-admin (sub-project A): grant platform admins all-access on the
+    // bound Ranger service so a governed StarRocks engine is immediately queryable
+    // with no manual policy seeding. Idempotent (upsert). Mirrors the Trino path.
+    if let Some(service_name) = ranger_service_name.as_deref() {
+        if engine.supports_delegation() {
+            if let Some(svc) = st
+                .authz
+                .get_service_opt(service_name)
+                .await
+                .map_err(|e| CpError::BadRequest(format!("resolve ranger service: {e}")))?
+            {
+                let admins = admin_usernames(st).await?;
+                st.authz
+                    .seed_admin_all_access(svc.id, service_name, "starrocks", &admins)
+                    .await
+                    .map_err(|e| CpError::BadRequest(format!("seed admin policy: {e}")))?;
+            }
+        }
+    }
 
     // Secure-by-default root password: resolve the engine's stored FE `root`
     // password (minted at create) so the provisioner (Task 2) applies it via
