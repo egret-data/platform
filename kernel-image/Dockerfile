@@ -11,7 +11,11 @@ WORKDIR /opt/egret-kernel
 # sqlglot is required by daft.read_sql; sqlalchemy + pymysql + trino back the
 # trino/starrocks connection factories (trino provides the SQLAlchemy dialect +
 # JWTAuthentication); pandas backs write_table (Daft's write_sql → pandas.to_sql).
-RUN pip install --no-cache-dir jupyter_kernel_gateway ipykernel daft "pyiceberg[s3fs]" pymysql sqlglot sqlalchemy trino pandas
+# plotly/matplotlib/seaborn + numpy/scipy/scikit-learn give DA/DS the standard
+# ad-hoc viz + numeric stack: plotly renders interactively via its mimetype bundle
+# (frontend plotly.js), matplotlib/seaborn via inline image/png.
+RUN pip install --no-cache-dir jupyter_kernel_gateway ipykernel daft "pyiceberg[s3fs]" pymysql sqlglot sqlalchemy trino pandas \
+    plotly matplotlib seaborn numpy scipy scikit-learn
 
 # Install the helper package.
 COPY pyproject.toml ./
