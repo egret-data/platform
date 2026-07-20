@@ -510,6 +510,8 @@ git commit -m "feat(users): hard-delete user (user:delete perm + self/last-admin
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
 
+**Known limitation / follow-up:** full user-content ownership reassignment (per-table SET NULL / reassign / block for the ~16 tables with a plain FK to `users(id)` — e.g. NOT-NULL `notebooks.owner_user_id`, `analytics.dashboards/charts/datasets.created_by`, engine grants) is deferred. Today hard-delete only succeeds for a user with no owned content; a content-owning user returns **409 Conflict** ("cannot delete a user who owns content …") — the `DELETE FROM users` trips a Postgres `foreign_key_violation` (23503), which `UserRepo::hard_delete` maps to `Conflict` and the whole transaction rolls back (nothing half-deleted).
+
 ---
 
 ## Task 5: Live e2e — disable → immediate lockout

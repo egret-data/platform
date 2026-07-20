@@ -2472,6 +2472,128 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getControlPlaneAccessCreateUserMutationOptions(options), queryClient);
     }
+    export type controlPlaneAccessDeleteUserResponse204 = {
+  data: void
+  status: 204
+}
+
+export type controlPlaneAccessDeleteUserResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneAccessDeleteUserResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessDeleteUserResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessDeleteUserResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessDeleteUserResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneAccessDeleteUserResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessDeleteUserResponseSuccess = (controlPlaneAccessDeleteUserResponse204) & {
+  headers: Headers;
+};
+export type controlPlaneAccessDeleteUserResponseError = (controlPlaneAccessDeleteUserResponse400 | controlPlaneAccessDeleteUserResponse401 | controlPlaneAccessDeleteUserResponse403 | controlPlaneAccessDeleteUserResponse404 | controlPlaneAccessDeleteUserResponse409 | controlPlaneAccessDeleteUserResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessDeleteUserResponse = (controlPlaneAccessDeleteUserResponseSuccess | controlPlaneAccessDeleteUserResponseError)
+
+export const getControlPlaneAccessDeleteUserUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/users/${encodeURIComponent(id)}`
+}
+
+/**
+ * @summary `DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,
+not the last active platform admin (`guard_not_last_admin`, shared with the
+disable branch of `update_user`). Cleans up the user's sessions, group
+memberships, and platform role/permission grants, then the row itself, in
+one transaction (`UserRepo::hard_delete`).
+ */
+export const controlPlaneAccessDeleteUser = async (id: string, options?: RequestInit): Promise<controlPlaneAccessDeleteUserResponse> => {
+
+  return customInstance<controlPlaneAccessDeleteUserResponse>(getControlPlaneAccessDeleteUserUrl(id),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessDeleteUserMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessDeleteUser>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessDeleteUser>>, TError,{id: string}, TContext> => {
+
+const mutationKey = ['controlPlaneAccessDeleteUser'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneAccessDeleteUser>>, {id: string}> = (props) => {
+          const {id} = props ?? {};
+
+          return  controlPlaneAccessDeleteUser(id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneAccessDeleteUserMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessDeleteUser>>>
+
+    export type ControlPlaneAccessDeleteUserMutationError = ErrorBody
+
+    /**
+ * @summary `DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,
+not the last active platform admin (`guard_not_last_admin`, shared with the
+disable branch of `update_user`). Cleans up the user's sessions, group
+memberships, and platform role/permission grants, then the row itself, in
+one transaction (`UserRepo::hard_delete`).
+ */
+export const useControlPlaneAccessDeleteUser = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessDeleteUser>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneAccessDeleteUser>>,
+        TError,
+        {id: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneAccessDeleteUserMutationOptions(options), queryClient);
+    }
     export type controlPlaneAccessUpdateUserResponse200 = {
   data: ControlPlaneUserDto
   status: 200

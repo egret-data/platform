@@ -2627,3 +2627,277 @@ async fn reset_password_rejects_sso_user() {
         "resetting a non-local (SSO) user's password should 400; body={j}"
     );
 }
+
+/// `DELETE /users/{id}` (Task 4): an admin cannot delete their own account
+/// (400, `guard_not_last_admin`'s self-target branch); deleting a normal
+/// (non-admin) user succeeds (204) and hard-removes the row, its group
+/// membership, and its live sessions in one transaction.
+#[tokio::test]
+async fn delete_user_route_enforces_guards() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin_token = session_for(&f, "delete_admin", true).await;
+    let (admin_id,): (Uuid,) = sqlx::query_as(
+        "SELECT pra.principal_id FROM access_grants pra \
+         JOIN roles r ON r.id = pra.role_id \
+         JOIN sessions s ON s.token_hash = $1 \
+         WHERE r.name = 'platform_admin' AND pra.scope_type = 'platform' \
+           AND pra.principal_id = s.user_id",
+    )
+    .bind(egret_auth::token::hash_token(&admin_token))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the admin's own platform_admin grant");
+
+    // Self-delete is rejected — 400, not a 200/204.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/users/{admin_id}"),
+            &admin_token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an admin cannot delete their own account; body={j}"
+    );
+    assert!(
+        f.users
+            .find_by_id(UserId(admin_id))
+            .await
+            .unwrap()
+            .is_some(),
+        "self-delete must be a no-op"
+    );
+
+    // A normal (non-admin) target, with a group membership and a live session.
+    let email = format!("delete_target_{}@egret.local", Uuid::new_v4().simple());
+    let user_id = f
+        .users
+        .insert_local(&email, "Delete Target", "x")
+        .await
+        .expect("insert target user");
+    let groups = egret_auth::groups::GroupRepo::new(f.db.clone());
+    let group_id = groups
+        .create_local(&format!("delete-test-group-{}", Uuid::new_v4().simple()))
+        .await
+        .expect("create group");
+    groups
+        .add_member(group_id, user_id)
+        .await
+        .expect("add member");
+    let issued = f
+        .sessions
+        .create(user_id, "test-agent", "127.0.0.1")
+        .await
+        .expect("create a live session for the target user");
+    assert!(f.sessions.validate(&issued.token).await.unwrap().is_some());
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/users/{}", user_id.0),
+            &admin_token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "deleting a normal user should 204"
+    );
+
+    assert!(
+        f.users.find_by_id(user_id).await.unwrap().is_none(),
+        "user row must be gone after hard-delete"
+    );
+    assert!(
+        groups.groups_of_user(user_id).await.unwrap().is_empty(),
+        "group membership must be cleaned up"
+    );
+    assert!(
+        f.sessions.validate(&issued.token).await.unwrap().is_none(),
+        "the deleted user's live session must no longer validate"
+    );
+
+    // Deleting an id that no longer exists (or never did) is a 404.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/users/{}", user_id.0),
+            &admin_token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "deleting an already-deleted user should 404"
+    );
+}
+
+/// `guard_not_last_admin` blocks deleting the platform-wide LAST
+/// `platform_admin` — 409 Conflict. Run against `setup_isolated_schema` for a
+/// deterministic admin count (see its docstring, and `cannot_disable_the_last_platform_admin`
+/// for the analogous disable-route test).
+#[tokio::test]
+async fn cannot_delete_the_last_platform_admin() {
+    let Some(f) = setup_isolated_schema("egret_test_iso_delete_last_admin").await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let _lone_admin_token = session_for(&f, "lone_admin_del", true).await;
+    let (admin_id,): (Uuid,) = sqlx::query_as(
+        "SELECT pra.principal_id FROM access_grants pra \
+         JOIN roles r ON r.id = pra.role_id \
+         WHERE r.name = 'platform_admin' AND pra.scope_type = 'platform'",
+    )
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the sole platform_admin assignment");
+
+    // A distinct caller with just `user:delete` (not platform_admin), so the
+    // self-guard doesn't mask the last-admin guard under test.
+    let caller_token = session_for_with_permission(&f, "deleter", "user:delete").await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/users/{admin_id}"),
+            &caller_token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "deleting the last platform_admin must 409; body={j}"
+    );
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("last platform admin"),
+        "409 body should explain the last-admin guard; body={j}"
+    );
+    assert!(
+        f.users
+            .find_by_id(UserId(admin_id))
+            .await
+            .unwrap()
+            .is_some(),
+        "the last admin must not be deleted"
+    );
+
+    // A second admin breaks the tie: the same delete now succeeds.
+    let _second_admin_token = session_for(&f, "second_admin_del", true).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/users/{admin_id}"),
+            &caller_token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "delete succeeds once a second platform_admin exists"
+    );
+}
+
+/// `DELETE /users/{id}` (Task 4, spec-review follow-up): a user who OWNS
+/// content (here a dashboard via `dashboards.created_by`, a plain FK to
+/// `users(id)`) cannot be hard-deleted yet — the row delete trips a Postgres
+/// `foreign_key_violation` (23503) which `UserRepo::hard_delete` maps to a
+/// `Conflict`. The route must return 409 (NOT a raw 500), and — because the
+/// whole delete runs in one transaction that rolls back — the user must still
+/// exist afterwards.
+#[tokio::test]
+async fn deleting_a_content_owner_conflicts_not_500() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin_token = session_for(&f, "delete_owner_admin", true).await;
+
+    // A normal target user who will own a dashboard.
+    let email = format!("content_owner_{}@egret.local", Uuid::new_v4().simple());
+    let user_id = f
+        .users
+        .insert_local(&email, "Content Owner", "x")
+        .await
+        .expect("insert target user");
+
+    // A workspace + a dashboard created_by the target (`analytics.dashboards`.
+    // `created_by` is a plain FK to `users(id)` with no ON DELETE action — the
+    // blocking case; the table was moved to the `analytics` schema in mig 0067).
+    let (ws_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO workspaces (slug, name) VALUES ($1, 'Delete FK Test') RETURNING id",
+    )
+    .bind(format!("delete-fk-{}", Uuid::new_v4().simple()))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert workspace");
+    sqlx::query(
+        "INSERT INTO analytics.dashboards (workspace_id, name, created_by) \
+         VALUES ($1, 'Owned', $2)",
+    )
+    .bind(ws_id)
+    .bind(user_id.0)
+    .execute(&f.db.pool)
+    .await
+    .expect("insert dashboard owned by the target");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/users/{}", user_id.0),
+            &admin_token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "deleting a content-owning user must 409, not 500; body={j}"
+    );
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("owns content"),
+        "409 body should explain the content-ownership limitation; body={j}"
+    );
+    // The transaction rolled back — the user is untouched.
+    assert!(
+        f.users.find_by_id(user_id).await.unwrap().is_some(),
+        "the content owner must still exist after the failed delete (tx rolled back)"
+    );
+}

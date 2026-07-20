@@ -24,6 +24,7 @@ import {
   controlPlaneAccessCreateUser,
   controlPlaneAccessDeleteGroup,
   controlPlaneAccessDeleteRole,
+  controlPlaneAccessDeleteUser,
   controlPlaneAccessGetEffectiveAccess,
   controlPlaneAccessGetRole,
   controlPlaneAccessListGroupMembers,
@@ -84,6 +85,10 @@ export async function updateUser(id: string, input: { name?: string; status?: st
 
 export async function resetUserPassword(id: string, password: string): Promise<void> {
   await controlPlaneAccessResetPassword(id, { password });
+}
+
+export async function deleteUser(id: string): Promise<void> {
+  await controlPlaneAccessDeleteUser(id);
 }
 
 export async function assignUserRole(id: string, roleId: string): Promise<void> {

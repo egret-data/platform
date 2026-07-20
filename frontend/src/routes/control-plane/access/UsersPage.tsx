@@ -9,6 +9,7 @@ import {
   Pencil,
   Plus,
   ShieldCheck,
+  Trash2,
 } from "lucide-react";
 
 import {
@@ -16,6 +17,7 @@ import {
   type AccessUser,
   assignUserRole,
   createUser,
+  deleteUser,
   listRoles,
   listUsers,
   resetUserPassword,
@@ -38,6 +40,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Dialog,
   DialogContent,
@@ -50,6 +53,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -98,8 +102,20 @@ export default function UsersPage() {
   const [editTarget, setEditTarget] = useState<AccessUser | null>(null);
   const [rolesTarget, setRolesTarget] = useState<AccessUser | null>(null);
   const [resetTarget, setResetTarget] = useState<AccessUser | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AccessUser | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [statusFacet, setStatusFacet] = useState(FACET_ALL);
   const [providerFacet, setProviderFacet] = useState(FACET_ALL);
+
+  const qc = useQueryClient();
+  const deleteMutation = useMutation<void, ApiError, string>({
+    mutationFn: (id) => deleteUser(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: usersQueryKey });
+      setDeleteError(null);
+    },
+    onError: (err) => setDeleteError(err.message ?? "Failed to delete user."),
+  });
 
   const columns: Column<AccessUser>[] = [
     {
@@ -201,6 +217,19 @@ export default function UsersPage() {
                 Reset password
               </DropdownMenuItem>
             )}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              disabled={u.id === me?.user_id}
+              title={u.id === me?.user_id ? "You cannot delete your own account" : undefined}
+              className="text-destructive focus:text-destructive"
+              onClick={() => {
+                setDeleteError(null);
+                setDeleteTarget(u);
+              }}
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       ),
@@ -216,7 +245,6 @@ export default function UsersPage() {
   const active = rows.filter((u) => u.status === "active").length;
 
   const bulk = useBulkSelect(filtered);
-  const qc = useQueryClient();
   const refreshUsers = () => qc.invalidateQueries({ queryKey: usersQueryKey });
   const selectedUsers = () => filtered.filter((u) => bulk.selected.has(u.id));
   const [bulkRoleOpen, setBulkRoleOpen] = useState(false);
@@ -269,6 +297,11 @@ export default function UsersPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
+          {deleteError && (
+            <Alert variant="destructive">
+              <AlertDescription>{deleteError}</AlertDescription>
+            </Alert>
+          )}
           <SummaryStrip
             items={[
               { label: "users", value: total },
@@ -361,6 +394,19 @@ export default function UsersPage() {
         onOpenChange={setBulkRoleOpen}
         refresh={refreshUsers}
         onDone={() => bulk.clear()}
+      />
+      <ConfirmDeleteDialog
+        open={deleteTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) setDeleteTarget(null);
+        }}
+        title={deleteTarget ? `Delete "${deleteTarget.email}"?` : "Delete user?"}
+        description="This user, their sessions, group memberships, and role grants will be permanently removed. This cannot be undone."
+        confirmText="delete"
+        onConfirm={() => {
+          if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
+          setDeleteTarget(null);
+        }}
       />
     </div>
   );

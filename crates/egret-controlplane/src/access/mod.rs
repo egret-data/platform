@@ -40,7 +40,7 @@ const LIST_LIMIT: i64 = 1000;
 pub fn router() -> Router<CpState> {
     Router::new()
         .route("/users", get(list_users).post(create_user))
-        .route("/users/{id}", patch(update_user))
+        .route("/users/{id}", patch(update_user).delete(delete_user))
         .route("/users/{id}/password", post(reset_password))
         .route("/users/{id}/roles", post(assign_user_role))
         .route("/users/{id}/roles/{role_id}", delete(unassign_user_role))
@@ -304,6 +304,42 @@ async fn update_user(
         roles,
         groups,
     }))
+}
+
+/// `DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,
+/// not the last active platform admin (`guard_not_last_admin`, shared with the
+/// disable branch of `update_user`). Cleans up the user's sessions, group
+/// memberships, and platform role/permission grants, then the row itself, in
+/// one transaction (`UserRepo::hard_delete`).
+#[utoipa::path(
+    delete,
+    path = "/api/control-plane/users/{id}",
+    tag = "control-plane-access",
+    params(("id" = Uuid, Path, description = "User id")),
+    responses(
+        (status = 204, description = "User hard-deleted along with sessions/group memberships/grants"),
+        (status = 400, description = "Caller attempted to delete their own account", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing user:delete permission", body = ErrorBody),
+        (status = 404, description = "No such user", body = ErrorBody),
+        (status = 409, description = "Would remove the last platform admin", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn delete_user(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "user:delete").await?;
+    let user_id = UserId(id);
+    st.users
+        .find_by_id(user_id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    guard_not_last_admin(&st, &p, user_id).await?;
+    st.users.hard_delete(user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -1258,6 +1294,7 @@ async fn who_can_access(
         list_users,
         create_user,
         update_user,
+        delete_user,
         reset_password,
         assign_user_role,
         unassign_user_role,
