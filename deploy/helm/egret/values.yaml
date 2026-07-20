@@ -54,6 +54,11 @@ kernel:
   image: egret-kernel:dev
   imagePullPolicy: IfNotPresent
   pullSecret: ""
+  # Break-glass ONLY: disable engine-TLS verification in the kernel entirely
+  # (accepts any cert — MITM-unsafe). Leave false: the kernel securely PINS the
+  # engine's self-signed cert (delivered via the engine-token endpoint), so
+  # self-signed engines work without disabling verification.
+  engineTlsInsecure: false
   resources:
     cpuRequest: "250m"
     memRequest: "512Mi"

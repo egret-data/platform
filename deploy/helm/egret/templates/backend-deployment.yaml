@@ -33,6 +33,7 @@ spec:
             - { name: EGRET_KERNEL__CPU_LIMIT, value: "{{ .Values.kernel.resources.cpuLimit }}" }
             - { name: EGRET_KERNEL__MEM_LIMIT, value: "{{ .Values.kernel.resources.memLimit }}" }
             - { name: EGRET_KERNEL__CALLBACK_URL, value: "http://egret.{{ .Release.Namespace }}.svc.cluster.local:8080" }
+            - { name: EGRET_KERNEL__ENGINE_TLS_INSECURE, value: {{ .Values.kernel.engineTlsInsecure | quote }} }
             {{- if .Values.kernel.pullSecret }}
             - { name: EGRET_KERNEL__PULL_SECRET, value: "{{ .Values.kernel.pullSecret }}" }
             {{- end }}

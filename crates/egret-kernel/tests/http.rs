@@ -206,6 +206,7 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
                 kind: "trino".into(),
                 host: "trino".into(),
                 port: 8080,
+                tls_cert: Some("-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n".into()),
             }),
         }),
         active: Default::default(),
@@ -1327,6 +1328,14 @@ async fn engine_token_returns_jwt_and_coords_for_enabled_engine(pool: sqlx::PgPo
     assert_eq!(json["kind"].as_str(), Some("trino"), "body={json}");
     assert_eq!(json["host"].as_str(), Some("trino"), "body={json}");
     assert_eq!(json["port"].as_i64(), Some(8080), "body={json}");
+    // The engine's self-signed cert is delivered so the kernel can PIN it.
+    assert!(
+        json["tls_cert"]
+            .as_str()
+            .map(|c| c.contains("BEGIN CERTIFICATE"))
+            .unwrap_or(false),
+        "tls_cert must carry the pinned PEM; body={json}"
+    );
     assert!(
         json["jwt"].as_str().map(|j| !j.is_empty()).unwrap_or(false),
         "jwt must be non-empty; body={json}"

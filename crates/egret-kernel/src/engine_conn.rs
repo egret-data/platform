@@ -14,6 +14,10 @@ pub struct EngineConn {
     pub host: String,
     /// Engine port.
     pub port: i32,
+    /// The engine's self-signed TLS cert (PEM), when it serves over TLS. Delivered
+    /// to the kernel so it can PIN this cert (verify against it only) rather than
+    /// disabling verification — mirrors the backend's `reqwest::Certificate` pinning.
+    pub tls_cert: Option<String>,
 }
 
 #[derive(Debug)]
@@ -58,6 +62,7 @@ mod tests {
                 kind: "trino".into(),
                 host: "trino".into(),
                 port: 8080,
+                tls_cert: None,
             }),
         };
         let got = r.resolve(Uuid::nil()).await.unwrap();
@@ -66,7 +71,8 @@ mod tests {
             EngineConn {
                 kind: "trino".into(),
                 host: "trino".into(),
-                port: 8080
+                port: 8080,
+                tls_cert: None,
             }
         );
     }

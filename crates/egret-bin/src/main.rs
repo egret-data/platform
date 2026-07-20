@@ -214,6 +214,9 @@ impl egret_kernel::engine_conn::EngineConnResolver for EngineConnResolverImpl {
             kind: db.engine.as_str().to_string(),
             host: db.host,
             port: db.port,
+            // Deliver the engine's self-signed cert so the kernel can PIN it
+            // (verify against this cert only) rather than disabling TLS verification.
+            tls_cert: db.options.tls_cert,
         })
     }
 }
@@ -1267,6 +1270,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 cpu_limit: config.kernel.cpu_limit.clone(),
                 mem_limit: config.kernel.mem_limit.clone(),
                 pull_secret: config.kernel.pull_secret.clone(),
+                engine_tls_insecure: config.kernel.engine_tls_insecure,
             };
             std::sync::Arc::new(crate::kernel_launcher_k8s::KubernetesLauncher::new(
                 client, kcfg,

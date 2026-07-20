@@ -34,6 +34,9 @@ pub struct K8sKernelConfig {
     pub cpu_limit: String,
     pub mem_limit: String,
     pub pull_secret: Option<String>,
+    /// Inject EGRET_ENGINE_TLS_INSECURE=1 so kernel `trino()`/`starrocks()` accept
+    /// the engine's self-signed TLS cert. Dev/self-signed deploys only.
+    pub engine_tls_insecure: bool,
 }
 
 pub struct KubernetesLauncher {
@@ -100,6 +103,13 @@ pub fn build_pod_spec(key: &KernelKey, env: &KernelEnv, cfg: &K8sKernelConfig) -
         value: Some(GATEWAY_PORT.to_string()),
         value_from: None,
     });
+    if cfg.engine_tls_insecure {
+        env_vars.push(EnvVar {
+            name: "EGRET_ENGINE_TLS_INSECURE".to_string(),
+            value: Some("1".to_string()),
+            value_from: None,
+        });
+    }
     env_vars.sort_by(|a, b| a.name.cmp(&b.name)); // deterministic for tests
 
     let resources = ResourceRequirements {
@@ -322,6 +332,7 @@ mod tests {
             cpu_limit: "1".into(),
             mem_limit: "2Gi".into(),
             pull_secret: None,
+            engine_tls_insecure: false,
         }
     }
 
@@ -386,6 +397,41 @@ mod tests {
         // labels
         let labels = pod.metadata.labels.unwrap();
         assert_eq!(labels.get("managed-by").map(String::as_str), Some("egret"));
+    }
+
+    #[test]
+    fn engine_tls_insecure_injects_env_only_when_enabled() {
+        let k = KernelKey {
+            user_id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+        };
+        let env: KernelEnv = KernelEnv::new();
+
+        // disabled (default): flag absent
+        let pod = build_pod_spec(&k, &env, &cfg());
+        let c = &pod.spec.unwrap().containers[0];
+        let names: Vec<_> = c
+            .env
+            .clone()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(!names.contains(&"EGRET_ENGINE_TLS_INSECURE".to_string()));
+
+        // enabled: EGRET_ENGINE_TLS_INSECURE=1 present
+        let mut insecure = cfg();
+        insecure.engine_tls_insecure = true;
+        let pod = build_pod_spec(&k, &env, &insecure);
+        let c = &pod.spec.unwrap().containers[0];
+        let var = c
+            .env
+            .clone()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.name == "EGRET_ENGINE_TLS_INSECURE")
+            .expect("EGRET_ENGINE_TLS_INSECURE should be injected");
+        assert_eq!(var.value.as_deref(), Some("1"));
     }
 
     #[test]

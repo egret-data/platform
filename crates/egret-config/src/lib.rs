@@ -117,6 +117,10 @@ pub struct KernelConfig {
     /// own public URL isn't reachable from inside the cluster (e.g. behind an
     /// ingress the kernel pods can't resolve), such as a Service DNS name.
     pub callback_url: Option<String>,
+    /// Accept the engine's self-signed TLS cert in kernel `trino()`/`starrocks()`
+    /// — sets EGRET_ENGINE_TLS_INSECURE=1 on kernel pods. Dev/self-signed deploys
+    /// only.
+    pub engine_tls_insecure: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,6 +290,7 @@ impl Default for Config {
                 mem_limit: "2Gi".into(),
                 pull_secret: None,
                 callback_url: None,
+                engine_tls_insecure: false,
             },
         }
     }
