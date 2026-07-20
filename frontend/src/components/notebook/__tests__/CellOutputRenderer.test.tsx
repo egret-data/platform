@@ -51,6 +51,25 @@ describe("CellOutputRenderer", () => {
     render(<CellOutputRenderer outputs={[{ type: "truncated", dropped: 3 }]} />);
     expect(screen.getByText(/truncated/i)).toBeInTheDocument();
   });
+  it("renders a DataFrame table MIME bundle as a styled table", () => {
+    const table = {
+      columns: [{ name: "x", type: "Int64" }, { name: "s", type: "Int64" }],
+      rows: [[1, 4], [2, 5], [3, 6]],
+      truncated: false,
+    };
+    render(
+      <CellOutputRenderer
+        outputs={[{ type: "display_data", data: { "application/vnd.egret.table+json": table } }]}
+      />,
+    );
+    expect(screen.getByTestId("notebook-dataframe")).toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    // column headers + a couple cell values render
+    expect(screen.getByText("x")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
+    expect(screen.getByText("6")).toBeInTheDocument();
+    expect(screen.getByText(/3 rows/)).toBeInTheDocument();
+  });
   it("renders a plotly MIME bundle via the notebook-plotly container", async () => {
     const figure = { data: [{ type: "bar", x: ["a"], y: [1] }], layout: {} };
     render(

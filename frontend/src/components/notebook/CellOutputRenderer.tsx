@@ -4,9 +4,13 @@ import { AlertCircle, ChevronRight } from "lucide-react";
 import { ansiToHtml } from "./ansiToHtml";
 import type { CellOutput } from "@/lib/kernel/protocol";
 
+import DataFrameTable, { type DataFrameTableData } from "./DataFrameTable";
+
 // Lazy so plotly.js (~3.5MB) only loads when a cell actually has a plotly output.
 const PlotlyOutput = lazy(() => import("./PlotlyOutput"));
 const PLOTLY_MIME = "application/vnd.plotly.v1+json";
+// Structured DataFrame table (from the kernel's display() helper) → styled table.
+const TABLE_MIME = "application/vnd.egret.table+json";
 
 // Bounded ANSI→HTML cache. Keys are the exact output strings already held in
 // memory by the cell's outputs state; FIFO eviction caps growth. Avoids
@@ -67,6 +71,17 @@ function MimeBundle({ data }: { data: Record<string, unknown> }) {
         >
           <PlotlyOutput figure={figure} />
         </Suspense>
+      </div>
+    );
+  }
+  // Structured DataFrame table (kernel display() of a Daft frame) → styled table.
+  // Checked before text/html so it wins over any HTML fallback in the bundle.
+  const tableRaw = data[TABLE_MIME];
+  if (tableRaw != null) {
+    const table = (typeof tableRaw === "string" ? JSON.parse(tableRaw) : tableRaw) as DataFrameTableData;
+    return (
+      <div data-testid="notebook-dataframe">
+        <DataFrameTable data={table} />
       </div>
     );
   }
