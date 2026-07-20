@@ -1142,28 +1142,31 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workspace_secrets: workspace_secrets.clone(),
     });
 
-    // F2-P1 T6: one shared engine-token broker (Keycloak refresh-grant) mints the
-    // short-lived per-user engine JWT carried in the notebook-runtime manifest.
-    // When OIDC is disabled the deps are empty strings, so this still constructs
-    // and only fails at mint-time. Reused by EngineState (B3a SQL Lab delegation),
+    // egret's own machine-IdP public root URL: the SAME value used as the
+    // catalog-token issuer (`idp_issuer` / `IdpState.issuer` below) and, per
+    // Task 3, as the issuer/JWKS engines are configured to trust (STS). Bound
+    // once here — before the minter below, which is its first consumer — so
+    // every consumer in this fn shares one derivation.
+    let egret_public_url = config
+        .catalog
+        .public_url
+        .clone()
+        .unwrap_or_else(|| "http://localhost:8080".to_string());
+
+    // Task 4 (STS cutover): the machine-IdP mints the short-lived per-user
+    // engine JWT carried in the notebook-runtime manifest — replacing the old
+    // Keycloak refresh-grant broker (deleted; couldn't mint for local users or
+    // when OIDC is disabled). Reused by EngineState (B3a SQL Lab delegation),
     // BiState (B3a per-user delegation), NotebookState, and KernelState — one
     // shared Arc.
-    let engine_minter: std::sync::Arc<dyn egret_notebook::engine_token::EngineTokenMinter> = {
-        use egret_bin::engine_broker::{EngineTokenBroker, KeycloakRefresher};
-        std::sync::Arc::new(EngineTokenBroker::new(
-            secrets.clone(),
-            egret_auth::oidc_refresh::OidcRefreshRepo::new(db.clone()),
-            KeycloakRefresher {
-                http: reqwest::Client::new(),
-                token_url: format!(
-                    "{}/protocol/openid-connect/token",
-                    config.oidc.issuer_url.trim_end_matches('/')
-                ),
-                client_id: config.oidc.client_id.clone(),
-                client_secret: config.oidc.client_secret.clone(),
-            },
-        ))
-    };
+    let engine_minter: std::sync::Arc<dyn egret_notebook::engine_token::EngineTokenMinter> =
+        std::sync::Arc::new(egret_bin::engine_minter::MachineIdpEngineMinter::new(
+            egret_machine_idp::PgSigningKeyStore::new(db.clone()),
+            egret_auth::users::UserRepo::new(db.clone()),
+            egret_auth::groups::GroupRepo::new(db.clone()),
+            egret_public_url.clone(),
+            900, // 15-min engine-token TTL (revocation granularity — see spec §7)
+        ));
 
     let engine = {
         let storage_cfg = egret_storage::StorageConfig {
@@ -1226,17 +1229,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         folders: egret_bi::folder::FolderRepo::new(db.clone()),
         audit: audit_sink.clone(),
     });
-
-    // egret's own machine-IdP public root URL: the SAME value used as the
-    // catalog-token issuer (`idp_issuer` / `IdpState.issuer` below) and, per
-    // Task 3, as the issuer/JWKS engines are configured to trust (STS). Bound
-    // once here so every consumer in this fn (and the minter wiring added in
-    // Task 4) shares one derivation.
-    let egret_public_url = config
-        .catalog
-        .public_url
-        .clone()
-        .unwrap_or_else(|| "http://localhost:8080".to_string());
 
     let notebook_state = egret_notebook::NotebookState {
         store: egret_notebook::NotebookStore::new(db.clone()),
