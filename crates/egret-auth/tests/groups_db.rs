@@ -114,3 +114,25 @@ async fn rename_and_delete_are_noop_on_oidc_group() {
     assert_eq!(groups.rename(group_id, "renamed").await.unwrap(), 0);
     assert_eq!(groups.delete_local(group_id).await.unwrap(), 0);
 }
+
+#[tokio::test]
+async fn groups_of_user_returns_membership() {
+    let Some(db) = connect().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    let groups = GroupRepo::new(db.clone());
+    let users = UserRepo::new(db.clone());
+
+    let name = uniq("t_groups_of_user");
+    let group_id = groups.create_local(&name).await.unwrap();
+
+    let user_id = users
+        .insert_local(&format!("{}@test.local", uniq("gn_user")), "GnUser", "x")
+        .await
+        .unwrap();
+    groups.add_member(group_id, user_id).await.unwrap();
+
+    let names = groups.groups_of_user(user_id).await.unwrap();
+    assert_eq!(names, vec![name]);
+}
