@@ -79,7 +79,7 @@ describe("StarRocksSecuritySection", () => {
     expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
   });
 
-  test("engine WITH delegation shows the can't-disable note + disables None", async () => {
+  test("engine WITH delegation: None is selectable and actually disables delegation (no longer a no-op)", async () => {
     const user = userEvent.setup();
     const withDeleg: Omit<Engine, "status"> = {
       ...ENGINE,
@@ -93,30 +93,37 @@ describe("StarRocksSecuritySection", () => {
     };
     renderTab(withDeleg);
 
-    expect(
-      screen.getByText(/Delegation can't be disabled after creation/i),
-    ).toBeInTheDocument();
-
-    // The "None" option is disabled — picking it would be a silent no-op.
+    // "None" is a freely reachable choice — picking it now sends "none"
+    // literally (build_starrocks_spec rewrites the block), so it isn't
+    // disabled the way it was under the old omit=preserve semantics.
     await user.click(screen.getByLabelText("Per-user delegation"));
-    const noneOpt = await screen.findByRole("option", { name: "None (default)" });
-    expect(noneOpt).toHaveAttribute("aria-disabled", "true");
+    const noneOpt = await screen.findByRole("option", {
+      name: "None (open engine)",
+    });
+    expect(noneOpt).not.toHaveAttribute("aria-disabled", "true");
+
+    await user.click(noneOpt);
+    // TLS toggle hides again once "none" is picked.
+    expect(screen.queryByLabelText("Enable TLS")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(api.updateEngine).toHaveBeenCalledTimes(1));
+    const [, body] = vi.mocked(api.updateEngine).mock.calls[0];
+    expect(body.starrocks).toEqual(
+      expect.objectContaining({ delegationMode: "none" }),
+    );
   });
 
-  test("engine WITHOUT delegation does NOT show the can't-disable note", () => {
-    renderTab();
-    expect(
-      screen.queryByText(/Delegation can't be disabled after creation/i),
-    ).not.toBeInTheDocument();
-  });
-
-  test("changing None→Impersonate reveals TLS and Save PUTs the new mode", async () => {
+  test("changing Auto→Impersonate reveals TLS and Save PUTs the new mode", async () => {
     const user = userEvent.setup();
     renderTab();
 
     // Radix Select trigger is a combobox associated with the label.
     await user.click(screen.getByLabelText("Per-user delegation"));
-    await user.click(await screen.findByRole("option", { name: "Impersonate" }));
+    await user.click(
+      await screen.findByRole("option", { name: "Impersonate (service user)" }),
+    );
 
     // TLS switch appears (defaults on) once a real mode is chosen.
     expect(screen.getByLabelText("Enable TLS")).toBeInTheDocument();

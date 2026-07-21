@@ -101,18 +101,21 @@ export const TRINO_FIELD_DEFAULTS = {
 
 const COLUMNS = ["Name", "Type", "Endpoint", "Status", "Actions"];
 
-// StarRocks per-user delegation mode (Access parity slice 3). `"none"` is the
-// slice-2 open-engine default (no delegation, omitted from the body); `"jwt"`
-// and `"impersonate"` mirror Trino's two delegation modes (see
-// `EngineSecurity.tsx`'s `DelegationMode`), applied to the FE JWT integration
-// / service user the backend provisions (`create_starrocks_engine`).
-type StarRocksDelegationOption = "none" | "jwt" | "impersonate";
+// StarRocks per-user delegation mode (Access parity slice 3 + default-on
+// delegation, Task 4). `""` (Auto) is the DEFAULT — omitted from the body so
+// the backend resolves jwt→impersonate gracefully. `"jwt"`/`"impersonate"`
+// mirror Trino's two delegation modes (see `EngineSecurity.tsx`'s
+// `DelegationMode`), applied to the FE JWT integration / service user the
+// backend provisions (`create_starrocks_engine`). `"none"` is an EXPLICIT
+// open-engine opt-out — sent literally, never omitted.
+type StarRocksDelegationOption = "" | "jwt" | "impersonate" | "none";
 
 export const DELEGATION_HELP: Record<StarRocksDelegationOption, string> = {
-  none: "Queries run without per-user delegation — the connection's own configured credential is used for every query.",
+  "": "Recommended — per-user JWT when the platform supports it, otherwise impersonation.",
+  jwt: "Each query uses the caller's own short-lived JWT, bound to their identity over TLS. No shared credential. OIDC users only.",
   impersonate:
     "egret connects as a trusted service account and runs the query as the caller. Works for any signed-in user; runs over TLS.",
-  jwt: "Each query uses the caller's own short-lived JWT, bound to their identity over TLS. No shared credential. OIDC users only.",
+  none: "No delegation — the engine's own configured credential is used for all queries.",
 };
 
 export const enginesQueryKey = ["cp", "engines"] as const;
@@ -360,7 +363,7 @@ function AddEngineDialog({
   const [feReplicas, setFeReplicas] = useState(1);
   const [cnReplicas, setCnReplicas] = useState(1);
   const [delegationMode, setDelegationMode] =
-    useState<StarRocksDelegationOption>("none");
+    useState<StarRocksDelegationOption>("");
   const [tlsEnabled, setTlsEnabled] = useState(true);
   // Optional coordinator TLS cert: "" = self-signed (default); otherwise the id
   // of a kubernetes.io/tls named secret.
@@ -385,7 +388,7 @@ function AddEngineDialog({
     setCnImage(DEFAULT_SR_CN_IMAGE);
     setFeReplicas(1);
     setCnReplicas(1);
-    setDelegationMode("none");
+    setDelegationMode("");
     setTlsEnabled(true);
     setTlsCertSecretRef("");
     setError(null);
@@ -416,9 +419,11 @@ function AddEngineDialog({
             cnImage: cnImage.trim(),
             feReplicas,
             cnReplicas,
-            // Omit entirely when "None" — the backend treats an absent
-            // delegationMode as the slice-2 open-engine default.
-            ...(delegationMode !== "none"
+            // Omit entirely for Auto ("") — the backend resolves an absent
+            // delegationMode to jwt, degrading to impersonate. An explicit
+            // "none" is sent LITERALLY so the backend provisions an open
+            // engine instead of applying the Auto default.
+            ...(delegationMode !== ""
               ? { delegationMode, tlsEnabled }
               : {}),
           },
@@ -544,18 +549,25 @@ function AddEngineDialog({
                 <div className="space-y-1.5">
                   <Label htmlFor="cpe-sr-delegation">Per-user delegation</Label>
                   <Select
-                    value={delegationMode}
+                    value={delegationMode || "auto"}
                     onValueChange={(v) =>
-                      setDelegationMode(v as StarRocksDelegationOption)
+                      setDelegationMode(
+                        v === "auto" ? "" : (v as StarRocksDelegationOption),
+                      )
                     }
                   >
                     <SelectTrigger id="cpe-sr-delegation" className="w-full">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="none">None (default)</SelectItem>
-                      <SelectItem value="jwt">JWT over TLS</SelectItem>
-                      <SelectItem value="impersonate">Impersonate</SelectItem>
+                      <SelectItem value="auto">
+                        Auto — JWT, else impersonate (recommended)
+                      </SelectItem>
+                      <SelectItem value="jwt">JWT (per-user)</SelectItem>
+                      <SelectItem value="impersonate">
+                        Impersonate (service user)
+                      </SelectItem>
+                      <SelectItem value="none">None (open engine)</SelectItem>
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground">
@@ -563,7 +575,8 @@ function AddEngineDialog({
                   </p>
                 </div>
 
-                {delegationMode !== "none" && (
+                {(delegationMode === "jwt" ||
+                  delegationMode === "impersonate") && (
                   <div className="space-y-1.5">
                     <div className="flex items-center justify-between gap-4">
                       <Label htmlFor="cpe-sr-tls" className="font-normal">

@@ -453,9 +453,11 @@ describe("StarRocksConfigTab", () => {
       }),
     );
 
-    // Switch None → Impersonate and Save via the single shared SaveBar.
+    // Switch Auto → Impersonate and Save via the single shared SaveBar.
     await user.click(screen.getByLabelText("Per-user delegation"));
-    await user.click(await screen.findByRole("option", { name: "Impersonate" }));
+    await user.click(
+      await screen.findByRole("option", { name: "Impersonate (service user)" }),
+    );
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => expect(api.updateEngine).toHaveBeenCalledTimes(1));

@@ -835,10 +835,12 @@ export interface StarRocksCreateConfig {
   // sizing. On UPDATE an omitted value preserves the stored resources.
   feResources?: RoleResources;
   cnResources?: RoleResources;
-  // Per-user delegation (Access parity slice 3). Omitted = no delegation (the
-  // slice-2 open-engine default). `tlsEnabled` is only meaningful alongside a
-  // delegation mode — the backend ignores it otherwise.
-  delegationMode?: "jwt" | "impersonate";
+  // Per-user delegation (Access parity slice 3 + default-on delegation, Task 4).
+  // Omitted = Auto (backend resolves jwt→impersonate gracefully, matching
+  // Trino). `none` = explicit open-engine opt-out (no per-user delegation),
+  // sent LITERALLY — never omitted. `tlsEnabled` is only meaningful alongside
+  // jwt/impersonate.
+  delegationMode?: "jwt" | "impersonate" | "none";
   tlsEnabled?: boolean;
   // Deep-config surface (Phase 1.5). fe.conf / cn.conf overrides merged into the
   // generated config; omitting a field on UPDATE preserves the stored value.

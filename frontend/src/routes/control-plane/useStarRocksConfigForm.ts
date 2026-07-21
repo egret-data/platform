@@ -18,13 +18,15 @@ import {
 } from "./ControlPlaneEngines";
 
 /**
- * Per-user delegation mode for a StarRocks engine. `"none"` is the slice-2
- * open-engine default (no delegation, omitted from the PUT body); `"jwt"` and
- * `"impersonate"` mirror the create wizard + Trino's two modes. Held here (seeded
- * from the stored `delegation` block) so the Security tab — a LATER task — can
- * edit it off the SAME hook instance while a config-only save preserves it.
+ * Per-user delegation mode for a StarRocks engine. `""` (Auto) is the
+ * DEFAULT — omitted from the PUT body so the backend preserves whatever mode
+ * is already stored. `"jwt"`/`"impersonate"` mirror the create wizard +
+ * Trino's two modes; `"none"` is an EXPLICIT open-engine opt-out, sent
+ * literally (never omitted — it actually disables delegation). Held here
+ * (seeded from the stored `delegation` block) so the Security tab can edit it
+ * off the SAME hook instance while a config-only save preserves it.
  */
-export type StarRocksDelegationOption = "none" | "jwt" | "impersonate";
+export type StarRocksDelegationOption = "" | "jwt" | "impersonate" | "none";
 
 /** A role's resource-request form (Kubernetes resource strings kept as text). */
 export interface RoleResourcesForm {
@@ -220,8 +222,9 @@ function normDelegation(
 /**
  * The `starrocks` body a save would PUT, in the omit-when-blank shape `save()`
  * sends: blank image/replicas/resources are OMITTED (an absent field means
- * "preserve the stored value" server-side), and delegation rides along only for
- * a real mode.
+ * "preserve the stored value" server-side), and delegation rides along for any
+ * explicit mode — including `"none"`, which now disables delegation literally
+ * instead of being dropped.
  */
 interface SrBody {
   feImage: string;
@@ -230,7 +233,7 @@ interface SrBody {
   cnReplicas?: number;
   feResources?: RoleResources;
   cnResources?: RoleResources;
-  delegationMode?: "jwt" | "impersonate";
+  delegationMode?: "jwt" | "impersonate" | "none";
   tlsEnabled?: boolean;
   feConfig?: Record<string, string>;
   cnConfig?: Record<string, string>;
@@ -360,7 +363,7 @@ export function useStarRocksConfigForm(
     resourcesToForm(sc?.cnResources),
   );
   const [delegationMode, setDelegationMode] = useState<StarRocksDelegationOption>(
-    (sc?.delegation?.mode as StarRocksDelegationOption) || "none",
+    (sc?.delegation?.mode as StarRocksDelegationOption) || "",
   );
   const [tlsEnabled, setTlsEnabled] = useState(sc?.delegation?.tlsEnabled ?? true);
   const [feConfig, setFeConfig] = useState<Record<string, string>>(
@@ -401,7 +404,7 @@ export function useStarRocksConfigForm(
     setCnReplicas(next?.cnReplicas?.toString() ?? "");
     setFeResources(resourcesToForm(next?.feResources));
     setCnResources(resourcesToForm(next?.cnResources));
-    setDelegationMode((next?.delegation?.mode as StarRocksDelegationOption) || "none");
+    setDelegationMode((next?.delegation?.mode as StarRocksDelegationOption) || "");
     setTlsEnabled(next?.delegation?.tlsEnabled ?? true);
     setFeConfig({ ...(next?.feConfig ?? {}) });
     setCnConfig({ ...(next?.cnConfig ?? {}) });
@@ -468,7 +471,7 @@ export function useStarRocksConfigForm(
     cnReplicas: numOrUndef(cnReplicas),
     ...(builtFeResources ? { feResources: builtFeResources } : {}),
     ...(builtCnResources ? { cnResources: builtCnResources } : {}),
-    ...(delegationMode !== "none" ? { delegationMode, tlsEnabled } : {}),
+    ...(delegationMode !== "" ? { delegationMode, tlsEnabled } : {}),
     ...(builtFeConfig ? { feConfig: builtFeConfig } : {}),
     ...(builtCnConfig ? { cnConfig: builtCnConfig } : {}),
     ...(builtAutoscaling ? { cnAutoscaling: builtAutoscaling } : {}),
@@ -498,8 +501,9 @@ export function useStarRocksConfigForm(
       warehouseId: engine.warehouseId ?? "",
       kind: "starrocks",
       // The SAME body `dirty` is computed from — blank image/replicas/resources
-      // are omitted (preserve stored) and delegation rides along only for a real
-      // mode (so a config-only save never drops the stored delegation block).
+      // are omitted (preserve stored) and delegation rides along for any
+      // explicit mode, including "none" (so a config-only save never drops the
+      // stored delegation block, and an explicit "none" actually disables it).
       starrocks: body,
       // Required by the body regardless of kind; ignored server-side for StarRocks.
       ...TRINO_FIELD_DEFAULTS,
