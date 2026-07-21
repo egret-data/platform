@@ -8,13 +8,6 @@ import { FilterableTable, type Column } from "@/components/explore/FilterableTab
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Badge } from "@/components/ui/badge";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 
 /** One permission flattened out of its catalog group, carrying its area. */
 type PermRow = {
@@ -27,8 +20,8 @@ type PermRow = {
 /**
  * Control Plane → Access → Permissions (read-only reference).
  *
- * The platform's full permission catalog. Standardised onto the shared list
- * scaffold used by Users/Roles/Groups (header → Card → SummaryStrip →
+ * The platform's full permission catalog. Standardised onto the shared card-less
+ * list scaffold used by Users/Roles/Groups (header → SummaryStrip → bordered
  * FilterableTable + facet): the catalog's areas become a filterable `Area`
  * column + facet rather than separate grouped tables. Roles are managed on the
  * Roles page — this view just shows which roles each permission is granted to.
@@ -89,16 +82,24 @@ export default function PermissionsPage() {
       key: "roles",
       label: "Granted to",
       value: (r) => r.roles.join(", "),
+      // Cap to a few chips + a "+N" overflow (rest on hover), matching Users/
+      // Groups — a permission can be granted to dozens of roles, which would
+      // otherwise blow up the row height into a wall of badges.
       cell: (r) =>
         r.roles.length === 0 ? (
           <span className="text-muted-foreground">—</span>
         ) : (
-          <div className="flex flex-wrap gap-1">
-            {r.roles.map((role) => (
-              <Badge key={role} variant="secondary">
+          <div className="flex flex-wrap items-center gap-1">
+            {r.roles.slice(0, 4).map((role) => (
+              <Badge key={role} variant="secondary" className="max-w-[12rem] truncate" title={role}>
                 {role}
               </Badge>
             ))}
+            {r.roles.length > 4 ? (
+              <Badge variant="outline" title={r.roles.slice(4).join(", ")}>
+                +{r.roles.length - 4}
+              </Badge>
+            ) : null}
           </div>
         ),
     },
@@ -119,48 +120,42 @@ export default function PermissionsPage() {
         </p>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">All permissions</CardTitle>
-          <CardDescription>
-            A read-only reference — assign permissions by editing a role.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <SummaryStrip
-            items={[
-              { label: "permissions", value: rows.length },
-              { label: "areas", value: groups.length },
-              { label: "granted", value: grantedCount },
-              { label: "ungranted", value: rows.length - grantedCount },
-            ]}
+      <div className="space-y-4">
+        <SummaryStrip
+          items={[
+            { label: "permissions", value: rows.length },
+            { label: "areas", value: groups.length },
+            { label: "granted", value: grantedCount },
+            { label: "ungranted", value: rows.length - grantedCount },
+          ]}
+        />
+        {permissions.isLoading ? (
+          <ListSkeleton rows={6} cols={4} />
+        ) : (
+          <FilterableTable
+            rows={filtered}
+            columns={columns}
+            getId={(r) => r.key}
+            searchPlaceholder="Search permissions…"
+            initialSort={{ key: "key", dir: "asc" }}
+            pageSize={25}
+            bordered
+            emptyText={
+              permissions.isError
+                ? (permissions.error?.message ?? "Failed to load permissions.")
+                : "No permissions defined."
+            }
+            filters={
+              <FacetSelect
+                label="Area"
+                value={areaFacet}
+                onChange={setAreaFacet}
+                options={areaOptions}
+              />
+            }
           />
-          {permissions.isLoading ? (
-            <ListSkeleton rows={6} cols={4} />
-          ) : (
-            <FilterableTable
-              rows={filtered}
-              columns={columns}
-              getId={(r) => r.key}
-              searchPlaceholder="Search permissions…"
-              initialSort={{ key: "key", dir: "asc" }}
-              emptyText={
-                permissions.isError
-                  ? (permissions.error?.message ?? "Failed to load permissions.")
-                  : "No permissions defined."
-              }
-              filters={
-                <FacetSelect
-                  label="Area"
-                  value={areaFacet}
-                  onChange={setAreaFacet}
-                  options={areaOptions}
-                />
-              }
-            />
-          )}
-        </CardContent>
-      </Card>
+        )}
+      </div>
     </div>
   );
 }
