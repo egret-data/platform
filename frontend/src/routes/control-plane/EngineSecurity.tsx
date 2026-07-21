@@ -242,22 +242,33 @@ export function EngineSecurity(props: {
           {(
             [
               {
-                value: "impersonate",
-                title: "Impersonate (default)",
-                desc: "egret connects as a trusted service account and runs the query as the caller. Works for any signed-in user; runs over TLS.",
+                value: "",
+                title: "Auto — JWT, else impersonate (recommended)",
+                desc: "egret uses per-user JWT when the coordinator can verify it, and otherwise degrades to impersonation automatically. Best default for most engines.",
               },
               {
                 value: "jwt",
-                title: "JWT over TLS",
+                title: "JWT (per-user)",
                 desc: "Each query uses the caller's own short-lived JWT, bound to their identity over TLS. No shared credential. OIDC users only.",
+              },
+              {
+                value: "impersonate",
+                title: "Impersonate (service user)",
+                desc: "egret connects as a trusted service account and runs the query as the caller. Works for any signed-in user; runs over TLS.",
+              },
+              {
+                value: "none",
+                title: "None (open engine)",
+                desc: "No per-user delegation — every query runs with the connection's own configured credential.",
               },
             ] as const
           ).map((opt) => {
             const selected = delegationMode === opt.value;
+            const optKey = opt.value || "auto";
             return (
               <Label
-                key={opt.value}
-                htmlFor={`deleg-${opt.value}`}
+                key={optKey}
+                htmlFor={`deleg-${optKey}`}
                 className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 font-normal transition-colors ${
                   selected
                     ? "border-primary bg-primary/5"
@@ -265,7 +276,7 @@ export function EngineSecurity(props: {
                 }`}
               >
                 <RadioGroupItem
-                  id={`deleg-${opt.value}`}
+                  id={`deleg-${optKey}`}
                   value={opt.value}
                   className="mt-0.5"
                 />

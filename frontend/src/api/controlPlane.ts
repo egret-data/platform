@@ -752,10 +752,11 @@ export interface TrinoConfig {
     passwordUsers: { username: string; secretRef: string }[];
     jwt?: { jwksUri?: string; requiredAudience?: string };
   };
-  // Per-user delegation mode for delegated BI queries. `impersonate` (default,
-  // absent) = trusted egret_delegator service account; `jwt` = the caller's own
-  // JWT over TLS (OIDC users only).
-  delegationMode?: "impersonate" | "jwt";
+  // Per-user delegation mode for delegated BI queries. Absent = Auto (backend
+  // resolves jwt→impersonate gracefully). `impersonate` = trusted egret_delegator
+  // service account; `jwt` = the caller's own JWT over TLS (OIDC users only);
+  // `none` = explicit open-engine opt-out (no per-user delegation).
+  delegationMode?: "impersonate" | "jwt" | "none";
   // Kubernetes Ingress exposure (TLS terminates at the ingress).
   ingress?: {
     enabled: boolean;

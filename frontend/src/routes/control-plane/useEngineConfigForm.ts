@@ -354,12 +354,16 @@ function emptyDeploymentStrategy(): DeploymentStrategy {
 export type PasswordUserForm = { username: string; secretRef: string };
 
 /**
- * Per-user delegation mode for delegated BI queries (spec 2026-07-15). Both run
- * the query AS the caller: `impersonate` authenticates to Trino as a trusted
- * `egret_delegator` service account (works for any user); `jwt` uses the caller's
- * own short-lived JWT over TLS (OIDC users only). Absent = `impersonate` (default).
+ * Per-user delegation mode for delegated BI queries (spec 2026-07-15).
+ * `""` (Auto) is the DEFAULT: serialization OMITS `delegationMode` so the backend
+ * resolves jwt→impersonate gracefully (explicit `"jwt"` on a no-JWKS platform is a
+ * deliberate 400 — Auto avoids turning the intended degrade into a hard failure).
+ * The explicit modes run the query AS the caller: `impersonate` authenticates to
+ * Trino as a trusted `egret_delegator` service account (works for any user); `jwt`
+ * uses the caller's own short-lived JWT over TLS (OIDC users only). `"none"` is the
+ * explicit open-engine opt-out (no per-user delegation).
  */
-export type DelegationMode = "impersonate" | "jwt";
+export type DelegationMode = "" | "jwt" | "impersonate" | "none";
 
 // ── autoscaling form models ──────────────────────────────────────────────────
 
@@ -815,8 +819,10 @@ export function useEngineConfigForm(
     tc?.auth?.passwordUsers?.map((u) => ({ ...u })) ?? [],
   );
   const [jwtEnabled, setJwtEnabled] = useState(tc?.auth?.jwt != null);
+  // Seed from the stored (resolved) mode — the backend now persists a concrete
+  // "jwt"/"impersonate"/"none". Absent ⇒ Auto ("") for new engines.
   const [delegationMode, setDelegationMode] = useState<DelegationMode>(
-    tc?.delegationMode === "jwt" ? "jwt" : "impersonate",
+    (tc?.delegationMode as DelegationMode | undefined) ?? "",
   );
   const [jwksUri, setJwksUri] = useState(tc?.auth?.jwt?.jwksUri ?? "");
   const [requiredAudience, setRequiredAudience] = useState(
@@ -949,7 +955,7 @@ export function useEngineConfigForm(
     setSessionRules(sessionRulesToForm(next?.sessionProperties));
     setPasswordUsers(next?.auth?.passwordUsers?.map((u) => ({ ...u })) ?? []);
     setJwtEnabled(next?.auth?.jwt != null);
-    setDelegationMode(next?.delegationMode === "jwt" ? "jwt" : "impersonate");
+    setDelegationMode((next?.delegationMode as DelegationMode | undefined) ?? "");
     setJwksUri(next?.auth?.jwt?.jwksUri ?? "");
     setRequiredAudience(next?.auth?.jwt?.requiredAudience ?? "");
     setIngressEnabled(next?.ingress?.enabled ?? false);
@@ -1073,11 +1079,12 @@ export function useEngineConfigForm(
       };
     }
 
-    // Per-user delegation mode. Emit only for `jwt` (the non-default); absent ⇒
-    // the backend defaults to `impersonate`, keeping untouched engines' payloads
-    // unchanged. Emitting it here also PRESERVES the mode across a UI save (the
-    // key is otherwise not a form field and would be dropped on round-trip).
-    if (delegationMode === "jwt") trinoConfig.delegationMode = "jwt";
+    // Per-user delegation mode. `""` (Auto) OMITS the field entirely so the
+    // backend resolves jwt→impersonate gracefully (never send `""`). Any explicit
+    // mode ("jwt"/"impersonate"/"none") is sent literally — this also PRESERVES an
+    // existing engine's resolved mode across an unrelated UI save (the key is
+    // otherwise not a form field and would be dropped on round-trip).
+    if (delegationMode !== "") trinoConfig.delegationMode = delegationMode;
 
     if (ingressEnabled && ingressHost.trim()) {
       const anns = kvToRecord(ingressAnnotations);
