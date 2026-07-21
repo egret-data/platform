@@ -283,3 +283,199 @@ fn extract_groups(claims: &GroupsIdTokenClaims, claim: &str) -> Vec<String> {
         _ => Vec::new(),
     }
 }
+
+/// OIDC Back-Channel Logout 1.0 token validation. Verifies the JWS against `jwks`
+/// (RS256, by `kid`), enforces `iss`/`aud`/`exp`, requires the back-channel-logout
+/// `events` key, and rejects any token carrying a `nonce` (that's an ID token, not
+/// a logout token). Returns the `sub` on success.
+pub fn verify_logout_token(
+    jwks: &jsonwebtoken::jwk::JwkSet,
+    issuer: &str,
+    audience: &str,
+    token: &str,
+) -> Result<String> {
+    use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+    let kid = decode_header(token)
+        .map_err(oidc_err)?
+        .kid
+        .ok_or(Error::Unauthorized)?;
+    let jwk = jwks.find(&kid).ok_or(Error::Unauthorized)?;
+    let key = DecodingKey::from_jwk(jwk).map_err(oidc_err)?;
+    let mut v = Validation::new(Algorithm::RS256);
+    v.set_issuer(&[issuer]);
+    v.set_audience(&[audience]);
+    // jsonwebtoken only checks iss/aud *if the claim is present*; require them
+    // (plus exp/sub) so a token that omits iss/aud can't slip past the match.
+    v.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+    let c = decode::<serde_json::Value>(token, &key, &v)
+        .map_err(oidc_err)?
+        .claims;
+    let has_event = c
+        .get("events")
+        .and_then(|e| e.as_object())
+        .map(|o| o.contains_key("http://schemas.openid.net/event/backchannel-logout"))
+        .unwrap_or(false);
+    if !has_event {
+        return Err(Error::Unauthorized);
+    }
+    if c.get("nonce").is_some() {
+        return Err(Error::Unauthorized);
+    }
+    c.get("sub")
+        .and_then(|s| s.as_str())
+        .map(String::from)
+        .ok_or(Error::Unauthorized)
+}
+
+#[cfg(test)]
+mod logout_token_tests {
+    use super::verify_logout_token;
+    use egret_machine_idp::{generate_rsa_key, KeyMaterial};
+    use jsonwebtoken::{encode, jwk::JwkSet, EncodingKey, Header};
+    use serde_json::json;
+
+    const ISSUER: &str = "https://keycloak.example.com/realms/egret";
+    const AUDIENCE: &str = "egret-backend";
+
+    /// Build a fresh RSA keypair + the JWKS an issuer would publish for it.
+    fn keypair() -> (KeyMaterial, JwkSet) {
+        let km = generate_rsa_key("test-kid").expect("generate rsa key");
+        let jwks: JwkSet =
+            serde_json::from_value(json!({ "keys": [km.public_jwk] })).expect("parse jwks");
+        (km, jwks)
+    }
+
+    /// Sign `claims` (already containing header-relevant fields like `kid` via
+    /// the encoding key) with `km`'s private key.
+    fn sign(km: &KeyMaterial, claims: &serde_json::Value) -> String {
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(km.kid.clone());
+        let key = EncodingKey::from_rsa_pem(km.private_pem.as_bytes()).expect("encoding key");
+        encode(&header, claims, &key).expect("sign token")
+    }
+
+    fn base_claims(sub: &str, exp: i64) -> serde_json::Value {
+        json!({
+            "iss": ISSUER,
+            "aud": AUDIENCE,
+            "sub": sub,
+            "exp": exp,
+            "iat": chrono::Utc::now().timestamp(),
+            "jti": "logout-jti-1",
+            "events": {
+                "http://schemas.openid.net/event/backchannel-logout": {}
+            }
+        })
+    }
+
+    fn future_exp() -> i64 {
+        (chrono::Utc::now() + chrono::Duration::minutes(5)).timestamp()
+    }
+
+    #[test]
+    fn accepts_valid_logout_token() {
+        let (km, jwks) = keypair();
+        let claims = base_claims("user-123", future_exp());
+        let token = sign(&km, &claims);
+        let sub = verify_logout_token(&jwks, ISSUER, AUDIENCE, &token).unwrap();
+        assert_eq!(sub, "user-123");
+    }
+
+    #[test]
+    fn rejects_missing_events() {
+        let (km, jwks) = keypair();
+        let mut claims = base_claims("user-123", future_exp());
+        claims.as_object_mut().unwrap().remove("events");
+        let token = sign(&km, &claims);
+        assert!(verify_logout_token(&jwks, ISSUER, AUDIENCE, &token).is_err());
+    }
+
+    #[test]
+    fn rejects_nonce_present() {
+        let (km, jwks) = keypair();
+        let mut claims = base_claims("user-123", future_exp());
+        claims["nonce"] = json!("some-nonce");
+        let token = sign(&km, &claims);
+        assert!(verify_logout_token(&jwks, ISSUER, AUDIENCE, &token).is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_aud() {
+        let (km, jwks) = keypair();
+        let claims = base_claims("user-123", future_exp());
+        let token = sign(&km, &claims);
+        assert!(verify_logout_token(&jwks, ISSUER, "some-other-aud", &token).is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_iss() {
+        let (km, jwks) = keypair();
+        let claims = base_claims("user-123", future_exp());
+        let token = sign(&km, &claims);
+        assert!(verify_logout_token(
+            &jwks,
+            "https://not-the-issuer.example.com",
+            AUDIENCE,
+            &token
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_expired() {
+        let (km, jwks) = keypair();
+        let expired = (chrono::Utc::now() - chrono::Duration::minutes(5)).timestamp();
+        let claims = base_claims("user-123", expired);
+        let token = sign(&km, &claims);
+        assert!(verify_logout_token(&jwks, ISSUER, AUDIENCE, &token).is_err());
+    }
+
+    #[test]
+    fn rejects_bad_signature() {
+        let (_km, jwks) = keypair();
+        let (other_km, _other_jwks) = keypair();
+        let claims = base_claims("user-123", future_exp());
+        // Signed by a key that is NOT in `jwks`, but whose `kid` happens to not
+        // match — exercise the "signed by a different key than published" path
+        // by reusing the same kid so lookup succeeds but the signature check fails.
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some("test-kid".to_string());
+        let key = EncodingKey::from_rsa_pem(other_km.private_pem.as_bytes()).unwrap();
+        let token = encode(&header, &claims, &key).unwrap();
+        assert!(verify_logout_token(&jwks, ISSUER, AUDIENCE, &token).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_aud() {
+        // A token that OMITS `aud` must be rejected — jsonwebtoken only checks
+        // aud when the claim is present, so `required_spec_claims` must force it.
+        let (km, jwks) = keypair();
+        let mut claims = base_claims("user-123", future_exp());
+        claims.as_object_mut().unwrap().remove("aud");
+        let token = sign(&km, &claims);
+        assert!(verify_logout_token(&jwks, ISSUER, AUDIENCE, &token).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_iss() {
+        // A token that OMITS `iss` must likewise be rejected.
+        let (km, jwks) = keypair();
+        let mut claims = base_claims("user-123", future_exp());
+        claims.as_object_mut().unwrap().remove("iss");
+        let token = sign(&km, &claims);
+        assert!(verify_logout_token(&jwks, ISSUER, AUDIENCE, &token).is_err());
+    }
+
+    #[test]
+    fn rejects_hs256_or_alg_none() {
+        // The verifier pins RS256; a token signed with a symmetric HS256 key
+        // (the classic alg-confusion attack) must not verify.
+        let (_km, jwks) = keypair();
+        let claims = base_claims("user-123", future_exp());
+        let mut header = Header::new(jsonwebtoken::Algorithm::HS256);
+        header.kid = Some("test-kid".to_string());
+        let key = EncodingKey::from_secret(b"attacker-secret");
+        let token = encode(&header, &claims, &key).unwrap();
+        assert!(verify_logout_token(&jwks, ISSUER, AUDIENCE, &token).is_err());
+    }
+}

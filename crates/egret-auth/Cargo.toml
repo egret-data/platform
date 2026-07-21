@@ -27,6 +27,7 @@ async-trait.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 openidconnect.workspace = true
+jsonwebtoken.workspace = true
 reqwest.workspace = true
 time = "0.3"
 # OpenAPI emit (E0·P4b-1): `#[utoipa::path]` on the auth + oidc routers'
@@ -43,3 +44,6 @@ tower.workspace = true
 http-body-util = "0.1"
 testcontainers.workspace = true
 reqwest.workspace = true
+# Reuses `generate_rsa_key`/`KeyMaterial` to mint a real RSA signing key for the
+# `verify_logout_token` tests (sign with the private key, verify against the JWKS).
+egret-machine-idp.workspace = true
