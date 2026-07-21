@@ -110,36 +110,38 @@ export default function GroupsPage() {
 
   const columns: Column<AccessGroup>[] = [
     {
+      // Identity cell: a group glyph + name (primary) with the source folded in
+      // as a secondary line ("Synced from OIDC" / "Local group"). OIDC groups are
+      // read-only so their name is plain text; a local group's name links to its
+      // rename dialog.
       key: "name",
-      label: "Name",
+      label: "Group",
       sortable: true,
-      className: "font-medium",
       value: (g) => g.name,
-      cell: (g) =>
-        g.source === "oidc" ? (
-          g.name
-        ) : (
-          <button
-            type="button"
-            onClick={() => setRenameTarget(g)}
-            className="font-medium text-primary hover:underline"
-          >
-            {g.name}
-          </button>
-        ),
-    },
-    {
-      key: "source",
-      label: "Source",
       cell: (g) => {
         const isOidc = g.source === "oidc";
         return (
-          <>
-            <Badge variant={isOidc ? "secondary" : "outline"}>{g.source}</Badge>
-            {isOidc && (
-              <div className="text-xs font-normal text-muted-foreground">synced</div>
-            )}
-          </>
+          <div className="flex items-center gap-3">
+            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-primary/10 text-primary">
+              <UsersRound className="h-4 w-4" />
+            </span>
+            <div className="min-w-0">
+              {isOidc ? (
+                <div className="truncate font-medium text-foreground">{g.name}</div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setRenameTarget(g)}
+                  className="block max-w-full truncate text-left font-medium text-primary hover:underline"
+                >
+                  {g.name}
+                </button>
+              )}
+              <div className="truncate text-xs text-muted-foreground">
+                {isOidc ? "Synced from OIDC" : "Local group"}
+              </div>
+            </div>
+          </div>
         );
       },
     },
@@ -164,16 +166,22 @@ export default function GroupsPage() {
     {
       key: "roles",
       label: "Roles",
+      // Cap to two chips + a "+N" overflow (rest on hover), matching Users.
       cell: (g) =>
         g.roles.length === 0 ? (
           <span className="text-muted-foreground">—</span>
         ) : (
-          <div className="flex flex-wrap gap-1">
-            {g.roles.map((r) => (
-              <Badge key={r} variant="secondary">
+          <div className="flex flex-wrap items-center gap-1">
+            {g.roles.slice(0, 2).map((r) => (
+              <Badge key={r} variant="secondary" className="max-w-[10rem] truncate" title={r}>
                 {r}
               </Badge>
             ))}
+            {g.roles.length > 2 ? (
+              <Badge variant="outline" title={g.roles.slice(2).join(", ")}>
+                +{g.roles.length - 2}
+              </Badge>
+            ) : null}
           </div>
         ),
     },
@@ -423,7 +431,12 @@ function CreateGroupDialog({
               </Alert>
             )}
             <div className="space-y-1.5">
-              <Label htmlFor="new-group-name">Name</Label>
+              <div className="flex items-center gap-0.5">
+                <Label htmlFor="new-group-name">Name</Label>
+                <span className="text-destructive" aria-hidden>
+                  *
+                </span>
+              </div>
               <Input
                 id="new-group-name"
                 value={name}
@@ -438,7 +451,7 @@ function CreateGroupDialog({
             <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
               Cancel
             </Button>
-            <Button type="submit" disabled={createMutation.isPending}>
+            <Button type="submit" disabled={!name.trim() || createMutation.isPending}>
               Create
             </Button>
           </DialogFooter>
