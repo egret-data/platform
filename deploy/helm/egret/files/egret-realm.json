@@ -13,7 +13,11 @@
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": true,
       "redirectUris": ["http://localhost:8080/*", "http://localhost/*", "*"],
-      "attributes": { "pkce.code.challenge.method": "S256" },
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "backchannel.logout.url": "http://egret.egret-system.svc.cluster.local:8080/api/auth/oidc/backchannel-logout",
+        "backchannel.logout.session.required": "false"
+      },
       "defaultClientScopes": [
         "basic",
         "web-origins",
