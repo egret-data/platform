@@ -137,7 +137,29 @@ pub struct OidcService {
     http: reqwest::Client,
     scopes: Vec<String>,
     groups_claim: String,
+    issuer_url: String,
+    client_id: String,
+    /// The provider's JWKS endpoint, captured from discovery metadata so
+    /// [`Self::provider_jwks`] can fetch it independently of the `openidconnect`
+    /// client (which caches its own copy for id_token verification only).
+    jwks_uri: String,
+    /// Short-TTL cache of the provider JWKS, shared across clones. Backs
+    /// [`Self::logout_jwks`] so a stream of unauthenticated back-channel logout
+    /// POSTs can't amplify into a JWKS fetch per request, and so revocation
+    /// survives a transient IdP JWKS outage (fetch failure → last good keys).
+    jwks_cache: std::sync::Arc<std::sync::RwLock<Option<CachedJwks>>>,
 }
+
+/// A provider JWKS with the instant it was fetched, for TTL expiry.
+struct CachedJwks {
+    jwks: jsonwebtoken::jwk::JwkSet,
+    fetched_at: std::time::Instant,
+}
+
+/// How long a fetched JWKS is served from cache before a refetch. Keycloak key
+/// rotation is infrequent and back-channel delivery is retried, so a few minutes
+/// of staleness is safe; the win is bounding unauthenticated fetch amplification.
+const JWKS_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 fn oidc_err(msg: impl std::fmt::Display) -> Error {
     Error::Internal(anyhow::anyhow!("oidc: {msg}"))
@@ -155,6 +177,7 @@ impl OidcService {
         let meta = CoreProviderMetadata::discover_async(issuer, &http)
             .await
             .map_err(oidc_err)?;
+        let jwks_uri = meta.jwks_uri().url().to_string();
         let client: GroupsClient = Client::from_provider_metadata(
             meta,
             ClientId::new(cfg.client_id.clone()),
@@ -166,7 +189,84 @@ impl OidcService {
             http,
             scopes: cfg.scopes.clone(),
             groups_claim: cfg.groups_claim.clone(),
+            issuer_url: cfg.issuer_url.clone(),
+            client_id: cfg.client_id.clone(),
+            jwks_uri,
+            jwks_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
         })
+    }
+
+    /// The configured issuer URL (used to validate back-channel logout tokens).
+    pub fn issuer(&self) -> &str {
+        &self.issuer_url
+    }
+
+    /// The configured client id (the expected `aud` on back-channel logout tokens).
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
+    /// Provider JWKS for verifying back-channel logout tokens, served from a
+    /// short-TTL in-memory cache (see [`JWKS_TTL`]). Callers on the unauthenticated
+    /// `/backchannel-logout` path must use this, not [`Self::provider_jwks`]:
+    /// caching stops a stream of logout POSTs (including garbage ones) from
+    /// amplifying into one IdP fetch each, and a fetch failure falls back to the
+    /// last good keys so a transient JWKS outage doesn't silently drop a revoke.
+    pub async fn logout_jwks(&self) -> Result<jsonwebtoken::jwk::JwkSet> {
+        // Fast path: a cached copy still within its TTL.
+        if let Some(jwks) = self.cached_jwks(true) {
+            return Ok(jwks);
+        }
+        // Cold or stale: refetch. On failure, fall back to any cached copy so
+        // revocation keeps working through a transient IdP JWKS outage.
+        match self.provider_jwks().await {
+            Ok(jwks) => {
+                if let Ok(mut guard) = self.jwks_cache.write() {
+                    *guard = Some(CachedJwks {
+                        jwks: jwks.clone(),
+                        fetched_at: std::time::Instant::now(),
+                    });
+                }
+                Ok(jwks)
+            }
+            Err(e) => match self.cached_jwks(false) {
+                Some(jwks) => {
+                    tracing::warn!(error = %e, "provider JWKS refetch failed; using cached keys");
+                    Ok(jwks)
+                }
+                None => Err(e),
+            },
+        }
+    }
+
+    /// Read the cached JWKS. When `fresh_only`, returns `None` unless the cached
+    /// copy is still within [`JWKS_TTL`]; otherwise returns any cached copy
+    /// (used as the stale fallback when a refetch fails).
+    fn cached_jwks(&self, fresh_only: bool) -> Option<jsonwebtoken::jwk::JwkSet> {
+        let guard = self.jwks_cache.read().ok()?;
+        let c = guard.as_ref()?;
+        if fresh_only && c.fetched_at.elapsed() >= JWKS_TTL {
+            return None;
+        }
+        Some(c.jwks.clone())
+    }
+
+    /// Fetch the provider's current JWKS directly (no cache). Prefer
+    /// [`Self::logout_jwks`] on the unauthenticated back-channel path.
+    pub async fn provider_jwks(&self) -> Result<jsonwebtoken::jwk::JwkSet> {
+        let resp = self
+            .http
+            .get(&self.jwks_uri)
+            .send()
+            .await
+            .map_err(oidc_err)?
+            .error_for_status()
+            .map_err(oidc_err)?;
+        let jwks = resp
+            .json::<jsonwebtoken::jwk::JwkSet>()
+            .await
+            .map_err(oidc_err)?;
+        Ok(jwks)
     }
 
     /// Build the authorize URL with a fresh PKCE challenge, nonce, and state.
@@ -281,5 +381,201 @@ fn extract_groups(claims: &GroupsIdTokenClaims, claim: &str) -> Vec<String> {
             .filter_map(|v| v.as_str().map(String::from))
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+/// OIDC Back-Channel Logout 1.0 token validation. Verifies the JWS against `jwks`
+/// (RS256, by `kid`), enforces `iss`/`aud`/`exp`, requires the back-channel-logout
+/// `events` key, and rejects any token carrying a `nonce` (that's an ID token, not
+/// a logout token). Returns the `sub` on success.
+pub fn verify_logout_token(
+    jwks: &jsonwebtoken::jwk::JwkSet,
+    issuer: &str,
+    audience: &str,
+    token: &str,
+) -> Result<String> {
+    use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+    let kid = decode_header(token)
+        .map_err(oidc_err)?
+        .kid
+        .ok_or(Error::Unauthorized)?;
+    let jwk = jwks.find(&kid).ok_or(Error::Unauthorized)?;
+    let key = DecodingKey::from_jwk(jwk).map_err(oidc_err)?;
+    let mut v = Validation::new(Algorithm::RS256);
+    v.set_issuer(&[issuer]);
+    v.set_audience(&[audience]);
+    // jsonwebtoken only checks iss/aud *if the claim is present*; require them
+    // (plus exp/sub) so a token that omits iss/aud can't slip past the match.
+    v.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+    let c = decode::<serde_json::Value>(token, &key, &v)
+        .map_err(oidc_err)?
+        .claims;
+    let has_event = c
+        .get("events")
+        .and_then(|e| e.as_object())
+        .map(|o| o.contains_key("http://schemas.openid.net/event/backchannel-logout"))
+        .unwrap_or(false);
+    if !has_event {
+        return Err(Error::Unauthorized);
+    }
+    if c.get("nonce").is_some() {
+        return Err(Error::Unauthorized);
+    }
+    c.get("sub")
+        .and_then(|s| s.as_str())
+        .map(String::from)
+        .ok_or(Error::Unauthorized)
+}
+
+#[cfg(test)]
+mod logout_token_tests {
+    use super::verify_logout_token;
+    use egret_machine_idp::{generate_rsa_key, KeyMaterial};
+    use jsonwebtoken::{encode, jwk::JwkSet, EncodingKey, Header};
+    use serde_json::json;
+
+    const ISSUER: &str = "https://keycloak.example.com/realms/egret";
+    const AUDIENCE: &str = "egret-backend";
+
+    /// Build a fresh RSA keypair + the JWKS an issuer would publish for it.
+    fn keypair() -> (KeyMaterial, JwkSet) {
+        let km = generate_rsa_key("test-kid").expect("generate rsa key");
+        let jwks: JwkSet =
+            serde_json::from_value(json!({ "keys": [km.public_jwk] })).expect("parse jwks");
+        (km, jwks)
+    }
+
+    /// Sign `claims` (already containing header-relevant fields like `kid` via
+    /// the encoding key) with `km`'s private key.
+    fn sign(km: &KeyMaterial, claims: &serde_json::Value) -> String {
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(km.kid.clone());
+        let key = EncodingKey::from_rsa_pem(km.private_pem.as_bytes()).expect("encoding key");
+        encode(&header, claims, &key).expect("sign token")
+    }
+
+    fn base_claims(sub: &str, exp: i64) -> serde_json::Value {
+        json!({
+            "iss": ISSUER,
+            "aud": AUDIENCE,
+            "sub": sub,
+            "exp": exp,
+            "iat": chrono::Utc::now().timestamp(),
+            "jti": "logout-jti-1",
+            "events": {
+                "http://schemas.openid.net/event/backchannel-logout": {}
+            }
+        })
+    }
+
+    fn future_exp() -> i64 {
+        (chrono::Utc::now() + chrono::Duration::minutes(5)).timestamp()
+    }
+
+    #[test]
+    fn accepts_valid_logout_token() {
+        let (km, jwks) = keypair();
+        let claims = base_claims("user-123", future_exp());
+        let token = sign(&km, &claims);
+        let sub = verify_logout_token(&jwks, ISSUER, AUDIENCE, &token).unwrap();
+        assert_eq!(sub, "user-123");
+    }
+
+    #[test]
+    fn rejects_missing_events() {
+        let (km, jwks) = keypair();
+        let mut claims = base_claims("user-123", future_exp());
+        claims.as_object_mut().unwrap().remove("events");
+        let token = sign(&km, &claims);
+        assert!(verify_logout_token(&jwks, ISSUER, AUDIENCE, &token).is_err());
+    }
+
+    #[test]
+    fn rejects_nonce_present() {
+        let (km, jwks) = keypair();
+        let mut claims = base_claims("user-123", future_exp());
+        claims["nonce"] = json!("some-nonce");
+        let token = sign(&km, &claims);
+        assert!(verify_logout_token(&jwks, ISSUER, AUDIENCE, &token).is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_aud() {
+        let (km, jwks) = keypair();
+        let claims = base_claims("user-123", future_exp());
+        let token = sign(&km, &claims);
+        assert!(verify_logout_token(&jwks, ISSUER, "some-other-aud", &token).is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_iss() {
+        let (km, jwks) = keypair();
+        let claims = base_claims("user-123", future_exp());
+        let token = sign(&km, &claims);
+        assert!(verify_logout_token(
+            &jwks,
+            "https://not-the-issuer.example.com",
+            AUDIENCE,
+            &token
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_expired() {
+        let (km, jwks) = keypair();
+        let expired = (chrono::Utc::now() - chrono::Duration::minutes(5)).timestamp();
+        let claims = base_claims("user-123", expired);
+        let token = sign(&km, &claims);
+        assert!(verify_logout_token(&jwks, ISSUER, AUDIENCE, &token).is_err());
+    }
+
+    #[test]
+    fn rejects_bad_signature() {
+        let (_km, jwks) = keypair();
+        let (other_km, _other_jwks) = keypair();
+        let claims = base_claims("user-123", future_exp());
+        // Signed by a key that is NOT in `jwks`, but whose `kid` happens to not
+        // match — exercise the "signed by a different key than published" path
+        // by reusing the same kid so lookup succeeds but the signature check fails.
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some("test-kid".to_string());
+        let key = EncodingKey::from_rsa_pem(other_km.private_pem.as_bytes()).unwrap();
+        let token = encode(&header, &claims, &key).unwrap();
+        assert!(verify_logout_token(&jwks, ISSUER, AUDIENCE, &token).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_aud() {
+        // A token that OMITS `aud` must be rejected — jsonwebtoken only checks
+        // aud when the claim is present, so `required_spec_claims` must force it.
+        let (km, jwks) = keypair();
+        let mut claims = base_claims("user-123", future_exp());
+        claims.as_object_mut().unwrap().remove("aud");
+        let token = sign(&km, &claims);
+        assert!(verify_logout_token(&jwks, ISSUER, AUDIENCE, &token).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_iss() {
+        // A token that OMITS `iss` must likewise be rejected.
+        let (km, jwks) = keypair();
+        let mut claims = base_claims("user-123", future_exp());
+        claims.as_object_mut().unwrap().remove("iss");
+        let token = sign(&km, &claims);
+        assert!(verify_logout_token(&jwks, ISSUER, AUDIENCE, &token).is_err());
+    }
+
+    #[test]
+    fn rejects_hs256_or_alg_none() {
+        // The verifier pins RS256; a token signed with a symmetric HS256 key
+        // (the classic alg-confusion attack) must not verify.
+        let (_km, jwks) = keypair();
+        let claims = base_claims("user-123", future_exp());
+        let mut header = Header::new(jsonwebtoken::Algorithm::HS256);
+        header.kid = Some("test-kid".to_string());
+        let key = EncodingKey::from_secret(b"attacker-secret");
+        let token = encode(&header, &claims, &key).unwrap();
+        assert!(verify_logout_token(&jwks, ISSUER, AUDIENCE, &token).is_err());
     }
 }

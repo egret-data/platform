@@ -158,6 +158,23 @@ e2e-kind-local-user: deploy-kind-governance
       EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
       npx playwright test local-user-mgmt-kind
 
+# Opt-in back-channel logout e2e: Keycloak force-logout → egret session revoked.
+# Port-forwards Keycloak to loopback so the admin API (used to wire the client +
+# force-logout) is reachable over HTTP — Keycloak's sslRequired=external rejects
+# admin-cli over plain HTTP from non-loopback but exempts 127.0.0.1 (weakens no config).
+e2e-kind-backchannel-logout: deploy-kind-governance
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./deploy/k8s/wait-ready.sh
+    kubectl port-forward -n egret-system svc/keycloak 18080:8080 >/tmp/egret-kc-pf.log 2>&1 &
+    PF=$!
+    trap 'kill $PF 2>/dev/null || true' EXIT
+    sleep 3
+    cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
+      EGRET_E2E_KC_ADMIN_URL=http://127.0.0.1:18080 \
+      EGRET_E2E_BUCKET=e2e EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      npx playwright test backchannel-logout-kind
+
 # Uninstall the egret release (leaves the kind cluster + operators up).
 kind-undeploy:
     helm uninstall egret -n egret-system || true
