@@ -74,8 +74,9 @@ describe("GroupsPage", () => {
     renderPage();
     expect(await screen.findByText("Engineering")).toBeInTheDocument();
     expect(screen.getByText("SSO-Everyone")).toBeInTheDocument();
-    expect(screen.getByText("local")).toBeInTheDocument();
-    expect(screen.getByText("oidc")).toBeInTheDocument();
+    // Source is folded into the identity cell as a secondary line.
+    expect(screen.getByText("Local group")).toBeInTheDocument();
+    expect(screen.getByText("Synced from OIDC")).toBeInTheDocument();
     expect(screen.getByText("3")).toBeInTheDocument();
     expect(screen.getByText("5")).toBeInTheDocument();
     expect(screen.getByText("Admin")).toBeInTheDocument();
@@ -97,8 +98,13 @@ describe("GroupsPage", () => {
     await user.click(screen.getByRole("button", { name: /New group/i }));
     await screen.findByRole("heading", { name: /New group/i });
 
+    // Create is gated until a name is entered.
+    const create = screen.getByRole("button", { name: /^Create$/i });
+    expect(create).toBeDisabled();
+
     await user.type(screen.getByLabelText("Name"), "Data");
-    await user.click(screen.getByRole("button", { name: /^Create$/i }));
+    expect(create).toBeEnabled();
+    await user.click(create);
 
     await waitFor(() => expect(api.createGroup).toHaveBeenCalledWith({ name: "Data" }));
   });
