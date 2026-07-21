@@ -251,13 +251,29 @@ test.describe("default-on jwt delegation on kind", () => {
           "print('EGRET_DELEGDEFAULT_VALUE=' + str(d.get('one', [None])[0]))",
         ].join("\n"),
       );
+      // The StarRocks JWT security integration (CREATE SECURITY INTEGRATION +
+      // authentication_chain="native,egret_oidc") is bootstrapped ASYNCHRONOUSLY
+      // after the FE pod reports "running" (waitForEngineReady only gates on the
+      // pod phase). Until it lands, the FE's chain is just "native", so the
+      // per-user JWT login for `preferred_username` falls to native auth and is
+      // rejected ("Access denied ... using password: NO"). A single-shot cell run
+      // races that window, so RE-RUN the query until the integration is live (the
+      // marker appears) or the budget is spent. Each re-run mints a fresh JWT and
+      // opens a fresh connection, so it succeeds as soon as the chain is active.
+      const marker = page.getByText("EGRET_DELEGDEFAULT_ROWS=1");
+      const deadline = Date.now() + 240_000;
       await page.getByRole("button", { name: "Run all" }).click();
-
-      // First run also cold-starts the per-user kernel pod → generous wait. The
-      // printed markers are the unambiguous proof the query ran through the
-      // default-resolved jwt delegation path (no explicit delegationMode:"jwt"
-      // was ever sent for this engine).
-      await expect(page.getByText("EGRET_DELEGDEFAULT_ROWS=1")).toBeVisible({ timeout: 150_000 });
+      while (Date.now() < deadline) {
+        try {
+          await expect(marker).toBeVisible({ timeout: 30_000 });
+          break;
+        } catch {
+          if (Date.now() >= deadline) throw new Error("StarRocks jwt query never succeeded");
+          // Not yet — the security integration is likely still bootstrapping. Re-run.
+          await page.getByRole("button", { name: "Run all" }).click();
+        }
+      }
+      await expect(marker).toBeVisible();
       await expect(page.getByText("EGRET_DELEGDEFAULT_VALUE=1")).toBeVisible();
       await expect(page.getByText("1 row", { exact: false })).toBeVisible();
     } finally {
