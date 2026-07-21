@@ -137,6 +137,12 @@ pub struct OidcService {
     http: reqwest::Client,
     scopes: Vec<String>,
     groups_claim: String,
+    issuer_url: String,
+    client_id: String,
+    /// The provider's JWKS endpoint, captured from discovery metadata so
+    /// [`Self::provider_jwks`] can fetch it independently of the `openidconnect`
+    /// client (which caches its own copy for id_token verification only).
+    jwks_uri: String,
 }
 
 fn oidc_err(msg: impl std::fmt::Display) -> Error {
@@ -155,6 +161,7 @@ impl OidcService {
         let meta = CoreProviderMetadata::discover_async(issuer, &http)
             .await
             .map_err(oidc_err)?;
+        let jwks_uri = meta.jwks_uri().url().to_string();
         let client: GroupsClient = Client::from_provider_metadata(
             meta,
             ClientId::new(cfg.client_id.clone()),
@@ -166,7 +173,40 @@ impl OidcService {
             http,
             scopes: cfg.scopes.clone(),
             groups_claim: cfg.groups_claim.clone(),
+            issuer_url: cfg.issuer_url.clone(),
+            client_id: cfg.client_id.clone(),
+            jwks_uri,
         })
+    }
+
+    /// The configured issuer URL (used to validate back-channel logout tokens).
+    pub fn issuer(&self) -> &str {
+        &self.issuer_url
+    }
+
+    /// The configured client id (the expected `aud` on back-channel logout tokens).
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
+    /// Fetch the provider's current JWKS. Used to verify back-channel logout
+    /// tokens, which arrive server-to-server outside the `openidconnect` client's
+    /// own (id_token-only) verification path. Not cached: back-channel logout is
+    /// low-volume and a fresh fetch tolerates IdP key rotation.
+    pub async fn provider_jwks(&self) -> Result<jsonwebtoken::jwk::JwkSet> {
+        let resp = self
+            .http
+            .get(&self.jwks_uri)
+            .send()
+            .await
+            .map_err(oidc_err)?
+            .error_for_status()
+            .map_err(oidc_err)?;
+        let jwks = resp
+            .json::<jsonwebtoken::jwk::JwkSet>()
+            .await
+            .map_err(oidc_err)?;
+        Ok(jwks)
     }
 
     /// Build the authorize URL with a fresh PKCE challenge, nonce, and state.
