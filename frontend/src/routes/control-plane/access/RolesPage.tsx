@@ -1,19 +1,15 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { MoreHorizontal, Pencil, Plus, Search, Trash2, UserCog } from "lucide-react";
+import { MoreHorizontal, Pencil, Plus, Trash2, UserCog } from "lucide-react";
 
 import {
   type AccessRole,
-  type PermissionCatalogGroup,
   type RoleAssignee,
   createRole,
   deleteRole,
-  getRole,
   getRoleAssignees,
-  listPermissions,
   listRoles,
-  setRolePermissions,
-  updateRole,
 } from "@/api/access";
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
@@ -33,7 +29,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Dialog,
@@ -65,7 +60,7 @@ export const rolesQueryKey = ["control-plane", "access", "roles"] as const;
 export const permissionsQueryKey = ["control-plane", "access", "permissions"] as const;
 
 /** Built-in role names, seeded on install — these cannot be deleted. */
-const SEEDED_ROLE_NAMES = new Set([
+export const SEEDED_ROLE_NAMES = new Set([
   "platform_admin",
   "data_steward",
   "ws_admin",
@@ -75,15 +70,12 @@ const SEEDED_ROLE_NAMES = new Set([
 
 const BUILTIN_DELETE_TOOLTIP = "Built-in role";
 
-/** Sentinel Select value for "no parent" (a role at the top of a chain). */
-const NO_PARENT = "__none__";
-
 /**
  * Role ids that must not be offered as `role`'s parent: `role` itself and any
  * role whose parent chain already reaches `role` (choosing one would form an
  * obvious cycle). Computed from the flat roles list.
  */
-function cyclicParentIds(roleId: string, roles: AccessRole[]): Set<string> {
+export function cyclicParentIds(roleId: string, roles: AccessRole[]): Set<string> {
   const parentOf = new Map(roles.map((r) => [r.id, r.parentRoleId ?? null]));
   const banned = new Set<string>([roleId]);
   for (const r of roles) {
@@ -108,11 +100,9 @@ function isSeeded(role: AccessRole): boolean {
 /** Read-only indented tree of the role hierarchy, grouped by scope. */
 function RolesTree({
   roles,
-  isAdmin,
   onEdit,
 }: {
   roles: AccessRole[];
-  isAdmin: boolean;
   onEdit: (role: AccessRole) => void;
 }) {
   const childrenOf = useMemo(() => {
@@ -134,19 +124,29 @@ function RolesTree({
       <div key={r.id}>
         <button
           type="button"
-          disabled={!isAdmin}
-          onClick={() => isAdmin && onEdit(r)}
-          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent disabled:cursor-default disabled:hover:bg-transparent"
-          style={{ paddingLeft: `${8 + depth * 20}px` }}
+          onClick={() => onEdit(r)}
+          title={r.description || undefined}
+          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent"
         >
-          <span className="font-medium">{r.name}</span>
+          <UserCog className="h-4 w-4 shrink-0 text-primary" />
+          <span className="min-w-0 truncate font-medium">{r.name}</span>
           {isSeeded(r) && (
-            <Badge variant="secondary" className="font-normal">
+            <Badge variant="secondary" className="shrink-0 font-normal">
               built-in
             </Badge>
           )}
+          <span className="ml-auto shrink-0 pl-2 text-xs tabular-nums text-muted-foreground">
+            {r.permissionCount} perm{r.permissionCount === 1 ? "" : "s"}
+            {r.assigneeCount > 0 ? ` · ${r.assigneeCount} assigned` : ""}
+          </span>
         </button>
-        {kids.map((k) => renderNode(k, depth + 1))}
+        {kids.length > 0 && (
+          // Nested container with a left rail so the hierarchy reads as a tree,
+          // not a flat indented list.
+          <div className="ml-[15px] border-l pl-2">
+            {kids.map((k) => renderNode(k, depth + 1))}
+          </div>
+        )}
       </div>
     );
   };
@@ -192,9 +192,10 @@ export default function RolesPage() {
   });
   const rows = roles.data ?? [];
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const openRole = (r: AccessRole) => navigate(`/control-plane/roles/${r.id}`);
 
   const [createOpen, setCreateOpen] = useState(false);
-  const [editTarget, setEditTarget] = useState<AccessRole | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AccessRole | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [assigneesTarget, setAssigneesTarget] = useState<AccessRole | null>(null);
@@ -214,60 +215,44 @@ export default function RolesPage() {
 
   const columns: Column<AccessRole>[] = [
     {
-      key: "scope",
-      label: "Scope",
-      cell: (r) => (
-        <Badge variant={r.scope === "platform" ? "default" : "outline"}>{r.scope}</Badge>
-      ),
-    },
-    {
+      // Identity cell: a role glyph + name (primary) + a subtitle that folds in
+      // the scope and, when present, the parent it inherits from — replacing the
+      // separate Scope / Inherits from / Description columns (description moves
+      // to the name's hover title). The Scope facet filter is kept.
       key: "name",
-      label: "Name",
+      label: "Role",
       sortable: true,
-      className: "font-medium",
       value: (r) => r.name,
-      cell: (r) => (
-        <>
-          {isAdmin ? (
-            <button
-              type="button"
-              onClick={() => setEditTarget(r)}
-              className="font-medium text-primary hover:underline"
-            >
-              {r.name}
-            </button>
-          ) : (
-            r.name
-          )}
-          {isSeeded(r) && (
-            <Badge variant="secondary" className="ml-2 font-normal">
-              built-in
-            </Badge>
-          )}
-        </>
-      ),
-    },
-    {
-      key: "parent",
-      label: "Inherits from",
-      sortable: true,
-      value: (r) => (r.parentRoleId ? (nameById.get(r.parentRoleId) ?? "") : ""),
-      cell: (r) =>
-        r.parentRoleId && nameById.get(r.parentRoleId) ? (
-          <Badge variant="outline" className="font-normal">
-            {nameById.get(r.parentRoleId)}
-          </Badge>
-        ) : (
-          <span className="text-muted-foreground">—</span>
-        ),
-    },
-    {
-      key: "description",
-      label: "Description",
-      value: (r) => r.description,
-      cell: (r) => (
-        <span className="text-muted-foreground">{r.description || "—"}</span>
-      ),
+      cell: (r) => {
+        const parentName = r.parentRoleId ? nameById.get(r.parentRoleId) : undefined;
+        const scopeLabel = r.scope === "platform" ? "Platform role" : "Workspace role";
+        const subtitle = parentName ? `${scopeLabel} · inherits ${parentName}` : scopeLabel;
+        return (
+          <div className="flex items-center gap-3">
+            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-primary/10 text-primary">
+              <UserCog className="h-4 w-4" />
+            </span>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => openRole(r)}
+                  title={r.description || undefined}
+                  className="min-w-0 truncate text-left font-medium text-primary hover:underline"
+                >
+                  {r.name}
+                </button>
+                {isSeeded(r) && (
+                  <Badge variant="secondary" className="shrink-0 font-normal">
+                    built-in
+                  </Badge>
+                )}
+              </div>
+              <div className="truncate text-xs text-muted-foreground">{subtitle}</div>
+            </div>
+          </div>
+        );
+      },
     },
     {
       key: "permissions",
@@ -309,7 +294,7 @@ export default function RolesPage() {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={() => setEditTarget(r)}>
+                <DropdownMenuItem onClick={() => openRole(r)}>
                   <Pencil className="mr-2 h-4 w-4" />
                   Edit permissions
                 </DropdownMenuItem>
@@ -396,7 +381,7 @@ export default function RolesPage() {
               <p className="text-xs text-muted-foreground">
                 Tree view shows the full hierarchy — switch to list to search or filter.
               </p>
-              <RolesTree roles={rows} isAdmin={isAdmin} onEdit={setEditTarget} />
+              <RolesTree roles={rows} onEdit={openRole} />
             </>
           ) : (
             <FilterableTable
@@ -442,13 +427,6 @@ export default function RolesPage() {
       </Card>
 
       <CreateRoleDialog open={createOpen} onOpenChange={setCreateOpen} />
-      <EditRoleDialog
-        role={editTarget}
-        roles={rows}
-        onOpenChange={(o) => {
-          if (!o) setEditTarget(null);
-        }}
-      />
       <RoleAssigneesDialog
         role={assigneesTarget}
         onOpenChange={(o) => {
@@ -557,7 +535,12 @@ function CreateRoleDialog({
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="new-role-name">Name</Label>
+              <div className="flex items-center gap-0.5">
+                <Label htmlFor="new-role-name">Name</Label>
+                <span className="text-destructive" aria-hidden>
+                  *
+                </span>
+              </div>
               <Input
                 id="new-role-name"
                 value={name}
@@ -581,305 +564,11 @@ function CreateRoleDialog({
             <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
               Cancel
             </Button>
-            <Button type="submit" disabled={createMutation.isPending}>
+            <Button type="submit" disabled={!name.trim() || createMutation.isPending}>
               Create
             </Button>
           </DialogFooter>
         </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/**
- * Edit-permissions dialog for a single role.
- *
- * `AccessRole` doesn't carry the role's current permission keys directly
- * (only a `permissionCount`) — there is no "get one role's permissions"
- * endpoint. Instead this derives the checked set from `listPermissions`:
- * a key is checked iff this role's name appears in that permission's
- * `roles` array. `platform_admin` is a superuser that bypasses permission
- * checks entirely, so its checklist is shown for reference only, disabled.
- */
-function EditRoleDialog({
-  role,
-  roles,
-  onOpenChange,
-}: {
-  role: AccessRole | null;
-  roles: AccessRole[];
-  onOpenChange: (open: boolean) => void;
-}) {
-  const queryClient = useQueryClient();
-  const permissions = useQuery<PermissionCatalogGroup[], ApiError>({
-    queryKey: permissionsQueryKey,
-    queryFn: listPermissions,
-    retry: false,
-  });
-
-  // The list endpoint returns an empty `inheritedPermissions`; the single-role
-  // GET populates it (and the current parent), so fetch it while open.
-  const detail = useQuery<AccessRole, ApiError>({
-    queryKey: ["control-plane", "access", "role", role?.id ?? ""],
-    queryFn: () => getRole(role!.id),
-    enabled: role !== null,
-    retry: false,
-  });
-
-  const [description, setDescription] = useState("");
-  const [parent, setParent] = useState<string>(NO_PARENT);
-  const [checked, setChecked] = useState<Set<string>>(new Set());
-  const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  const isSuperuser = role?.name === "platform_admin";
-  const groups = permissions.data ?? [];
-
-  const [permQuery, setPermQuery] = useState("");
-
-  // Only permissions this role's scope can hold; then apply the in-dialog search.
-  const shownGroups = useMemo(() => {
-    const needle = permQuery.trim().toLowerCase();
-    return groups
-      .map((g) => ({
-        ...g,
-        permissions: g.permissions.filter(
-          (p) =>
-            (!role || p.scope === role.scope) &&
-            (needle === "" ||
-              p.key.toLowerCase().includes(needle) ||
-              p.description.toLowerCase().includes(needle)),
-        ),
-      }))
-      .filter((g) => g.permissions.length > 0);
-  }, [groups, role, permQuery]);
-
-  // Roles offered as a parent: same scope, excluding self and any role whose
-  // chain already reaches this one (obvious cycle).
-  const parentOptions = useMemo(() => {
-    if (!role) return [] as AccessRole[];
-    const banned = cyclicParentIds(role.id, roles);
-    return roles.filter((r) => r.scope === role.scope && !banned.has(r.id));
-  }, [role, roles]);
-
-  const inherited = useMemo(
-    () => new Set(detail.data?.inheritedPermissions ?? []),
-    [detail.data],
-  );
-
-  const initialChecked = useMemo(() => {
-    if (!role) return new Set<string>();
-    const keys = new Set<string>();
-    for (const group of groups) {
-      for (const p of group.permissions) {
-        if (p.roles.includes(role.name)) keys.add(p.key);
-      }
-    }
-    return keys;
-  }, [role, groups]);
-
-  useEffect(() => {
-    if (role) {
-      setDescription(role.description);
-      setParent(role.parentRoleId ?? NO_PARENT);
-      setChecked(initialChecked);
-      setError(null);
-    }
-  }, [role, initialChecked]);
-
-  function handleOpenChange(next: boolean) {
-    if (!next) setError(null);
-    onOpenChange(next);
-  }
-
-  function toggle(key: string, isChecked: boolean) {
-    setChecked((prev) => {
-      const next = new Set(prev);
-      if (isChecked) next.add(key);
-      else next.delete(key);
-      return next;
-    });
-  }
-
-  /** Toggle every non-inherited permission of a group on/off at once. */
-  function toggleGroup(perms: { key: string }[], on: boolean) {
-    setChecked((prev) => {
-      const next = new Set(prev);
-      for (const p of perms) {
-        if (inherited.has(p.key)) continue; // inherited perms are fixed
-        if (on) next.add(p.key);
-        else next.delete(p.key);
-      }
-      return next;
-    });
-  }
-
-  async function handleSave() {
-    if (!role) return;
-    setError(null);
-    setSaving(true);
-    try {
-      const nextParent = parent === NO_PARENT ? null : parent;
-      const parentChanged = nextParent !== (role.parentRoleId ?? null);
-      if (description !== role.description || parentChanged) {
-        await updateRole(role.id, description.trim(), nextParent);
-      }
-      if (!isSuperuser) {
-        await setRolePermissions(role.id, Array.from(checked));
-      }
-      queryClient.invalidateQueries({ queryKey: rolesQueryKey });
-      queryClient.invalidateQueries({ queryKey: permissionsQueryKey });
-      handleOpenChange(false);
-    } catch (err) {
-      setError((err as ApiError).message ?? "Failed to save role.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <Dialog open={role !== null} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Edit role — {role?.name}</DialogTitle>
-          <DialogDescription>
-            Update the description and choose which permissions this role
-            grants.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="my-4 space-y-4">
-          {error && (
-            <Alert variant="destructive">
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          )}
-
-          {role && <RoleImpactNotice role={role} roles={roles} />}
-
-          <div className="space-y-1.5">
-            <Label htmlFor="edit-role-description">Description</Label>
-            <Textarea
-              id="edit-role-description"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="edit-role-parent">Inherits from</Label>
-            <Select value={parent} onValueChange={setParent} disabled={isSuperuser}>
-              <SelectTrigger id="edit-role-parent" aria-label="Inherits from" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={NO_PARENT}>No parent</SelectItem>
-                {parentOptions.map((r) => (
-                  <SelectItem key={r.id} value={r.id}>
-                    {r.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              This role also grants everything its parent grants.
-            </p>
-          </div>
-
-          {isSuperuser && (
-            <Alert>
-              <AlertDescription className="text-muted-foreground">
-                Superuser — bypasses all permission checks.
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {!isSuperuser && role && (
-            <p className="text-xs text-muted-foreground">
-              This is a <span className="font-medium text-foreground">{role.scope}</span> role
-              — it can hold {role.scope}-scoped permissions.
-            </p>
-          )}
-
-          {!isSuperuser && !permissions.isLoading && !permissions.isError && groups.length > 0 && (
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                className="pl-8"
-                placeholder="Search permissions…"
-                value={permQuery}
-                onChange={(e) => setPermQuery(e.target.value)}
-              />
-            </div>
-          )}
-
-          <div className="space-y-4">
-            {permissions.isLoading ? (
-              <p className="text-sm text-muted-foreground">Loading…</p>
-            ) : permissions.isError ? (
-              <p className="text-sm text-destructive">
-                {permissions.error?.message ?? "Failed to load permissions."}
-              </p>
-            ) : shownGroups.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No permissions match your search.</p>
-            ) : (
-              shownGroups.map((group) => {
-                const editable = group.permissions.filter((p) => !inherited.has(p.key));
-                const allOn = editable.length > 0 && editable.every((p) => checked.has(p.key));
-                const someOn = editable.some((p) => checked.has(p.key));
-                return (
-                  <div key={group.group} className="space-y-1.5">
-                    <div className="flex items-center gap-2">
-                      {!isSuperuser && editable.length > 0 && (
-                        <Checkbox
-                          aria-label={`Select all ${group.group}`}
-                          checked={allOn ? true : someOn ? "indeterminate" : false}
-                          onCheckedChange={(c) => toggleGroup(editable, c === true)}
-                        />
-                      )}
-                      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                        {group.group}
-                      </h3>
-                    </div>
-                    <div className="grid grid-cols-1 gap-x-6 gap-y-1.5 rounded-md border p-3 sm:grid-cols-2">
-                      {group.permissions.map((p) => {
-                        const id = `perm-${p.key}`;
-                        const isInherited = inherited.has(p.key);
-                        return (
-                          <div key={p.key} className="flex items-center gap-2">
-                            <Checkbox
-                              id={id}
-                              checked={isInherited || checked.has(p.key)}
-                              disabled={isSuperuser || isInherited}
-                              onCheckedChange={(c) => toggle(p.key, c === true)}
-                            />
-                            <Label htmlFor={id} className="cursor-pointer font-normal" title={p.description}>
-                              {p.key}
-                            </Label>
-                            {isInherited && (
-                              <Badge variant="secondary" className="font-normal">
-                                inherited
-                              </Badge>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button type="button" onClick={handleSave} disabled={saving}>
-            Save
-          </Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

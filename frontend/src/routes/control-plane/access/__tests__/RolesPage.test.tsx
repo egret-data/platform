@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import RolesPage from "@/routes/control-plane/access/RolesPage";
@@ -67,7 +68,9 @@ function renderPage(me: Me | null = ADMIN_ME) {
   return render(
     <AuthContext.Provider value={{ me, isLoading: false }}>
       <QueryClientProvider client={qc}>
-        <RolesPage />
+        <MemoryRouter>
+          <RolesPage />
+        </MemoryRouter>
       </QueryClientProvider>
     </AuthContext.Provider>,
   );
@@ -131,9 +134,14 @@ describe("RolesPage", () => {
     await user.click(screen.getByRole("button", { name: /New role/i }));
     await screen.findByRole("heading", { name: /New role/i });
 
+    // Create is gated until a name is entered.
+    const create = screen.getByRole("button", { name: /^Create$/i });
+    expect(create).toBeDisabled();
+
     await user.type(screen.getByLabelText("Name"), "auditor");
+    expect(create).toBeEnabled();
     await user.type(screen.getByLabelText("Description"), "Read-only audit access");
-    await user.click(screen.getByRole("button", { name: /^Create$/i }));
+    await user.click(create);
 
     await waitFor(() =>
       expect(api.createRole).toHaveBeenCalledWith({
@@ -144,193 +152,24 @@ describe("RolesPage", () => {
     );
   });
 
-  test("Edit dialog prefills checked permissions from listPermissions and Save persists the toggled set", async () => {
+  test("clicking a role name navigates to its detail page", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.setRolePermissions).mockResolvedValue(undefined);
-    // custom_role is a workspace role; the matrix only shows workspace-scoped
-    // permissions, so this fixture matches the role's scope.
-    vi.mocked(api.listPermissions).mockResolvedValue([
-      {
-        group: "Catalog",
-        permissions: [
-          {
-            key: "catalog.read",
-            description: "Read catalog metadata",
-            roles: ["data_steward", "custom_role"],
-            scope: "workspace",
-          },
-          {
-            key: "catalog.write",
-            description: "Write catalog metadata",
-            roles: ["data_steward"],
-            scope: "workspace",
-          },
-        ],
-      },
-    ]);
-
-    renderPage();
-    await screen.findByText("custom_role");
-
-    await user.click(screen.getByRole("button", { name: /Actions for custom_role/i }));
-    await user.click(await screen.findByRole("menuitem", { name: "Edit permissions" }));
-    await screen.findByRole("heading", { name: /Edit role — custom_role/i });
-
-    // custom_role is only in the `roles` list of catalog.read, so it should
-    // start checked; catalog.write should start unchecked.
-    const readCheckbox = screen.getByRole("checkbox", { name: "catalog.read" });
-    const writeCheckbox = screen.getByRole("checkbox", { name: "catalog.write" });
-    expect(readCheckbox).toHaveAttribute("data-state", "checked");
-    expect(writeCheckbox).toHaveAttribute("data-state", "unchecked");
-
-    // With one-of-two editable perms checked, the group's select-all is tri-state
-    // indeterminate (Radix exposes this as aria-checked="mixed").
-    expect(screen.getByRole("checkbox", { name: "Select all Catalog" })).toHaveAttribute(
-      "aria-checked",
-      "mixed",
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <AuthContext.Provider value={{ me: ADMIN_ME, isLoading: false }}>
+        <QueryClientProvider client={qc}>
+          <MemoryRouter initialEntries={["/control-plane/roles"]}>
+            <Routes>
+              <Route path="/control-plane/roles" element={<RolesPage />} />
+              <Route path="/control-plane/roles/:id" element={<div>role detail page</div>} />
+            </Routes>
+          </MemoryRouter>
+        </QueryClientProvider>
+      </AuthContext.Provider>,
     );
 
-    await user.click(writeCheckbox);
-    await user.click(screen.getByRole("button", { name: /^Save$/i }));
-
-    await waitFor(() => expect(api.setRolePermissions).toHaveBeenCalledTimes(1));
-    const [roleId, keys] = vi.mocked(api.setRolePermissions).mock.calls[0];
-    expect(roleId).toBe("r2");
-    expect(new Set(keys)).toEqual(new Set(["catalog.read", "catalog.write"]));
-  });
-
-  test("Edit dialog offers a same-scope Inherits from picker and shows inherited permissions read-only", async () => {
-    const user = userEvent.setup();
-    // Two workspace roles so the picker has a same-scope option other than self.
-    vi.mocked(api.listRoles).mockResolvedValue([
-      ...ROLES,
-      {
-        id: "r4",
-        scope: "workspace",
-        name: "ws_base",
-        description: "",
-        permissionCount: 1,
-        assigneeCount: 0,
-        inheritedPermissions: [],
-      },
-    ]);
-    // custom_role is a workspace role; scope its catalog perms to workspace so
-    // the (scope-filtered) matrix shows them.
-    vi.mocked(api.listPermissions).mockResolvedValue([
-      {
-        group: "Catalog",
-        permissions: [
-          {
-            key: "catalog.read",
-            description: "Read catalog metadata",
-            roles: ["data_steward", "custom_role"],
-            scope: "workspace",
-          },
-          {
-            key: "catalog.write",
-            description: "Write catalog metadata",
-            roles: ["data_steward"],
-            scope: "workspace",
-          },
-        ],
-      },
-    ]);
-    // custom_role (r2) inherits catalog.write from its parent (read-only row).
-    vi.mocked(api.getRole).mockResolvedValue({
-      id: "r2",
-      scope: "workspace",
-      name: "custom_role",
-      description: "A custom workspace role",
-      permissionCount: 1,
-      assigneeCount: 0,
-      parentRoleId: null,
-      inheritedPermissions: ["catalog.write"],
-    });
-
-    renderPage();
-    await screen.findByText("custom_role");
-
-    await user.click(screen.getByRole("button", { name: /Actions for custom_role/i }));
-    await user.click(await screen.findByRole("menuitem", { name: "Edit permissions" }));
-    await screen.findByRole("heading", { name: /Edit role — custom_role/i });
-
-    // The picker offers the same-scope role ws_base, but not the role itself
-    // (data_steward is platform scope, so it must not appear either).
-    const picker = await screen.findByLabelText("Inherits from");
-    await user.click(picker);
-    expect(await screen.findByRole("option", { name: "ws_base" })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "custom_role" })).toBeNull();
-    expect(screen.queryByRole("option", { name: "data_steward" })).toBeNull();
-    await user.keyboard("{Escape}");
-
-    // The inherited permission renders checked + disabled and badged "inherited".
-    const inheritedCb = await screen.findByRole("checkbox", { name: "catalog.write" });
-    expect(inheritedCb).toBeDisabled();
-    expect(inheritedCb).toHaveAttribute("data-state", "checked");
-    expect(screen.getByText("inherited")).toBeInTheDocument();
-  });
-
-  test("Edit dialog for a workspace role hides platform-scoped permissions, filters by search, and select-all-per-group toggles", async () => {
-    const user = userEvent.setup();
-    vi.mocked(api.setRolePermissions).mockResolvedValue(undefined);
-    // A workspace group and a platform group; only the workspace one is holdable
-    // by custom_role (a workspace role).
-    vi.mocked(api.listPermissions).mockResolvedValue([
-      {
-        group: "Charts",
-        permissions: [
-          {
-            key: "chart:read",
-            description: "Read charts",
-            roles: [],
-            scope: "workspace",
-          },
-        ],
-      },
-      {
-        group: "Engines",
-        permissions: [
-          {
-            key: "engine:read",
-            description: "Read engines",
-            roles: [],
-            scope: "platform",
-          },
-        ],
-      },
-    ]);
-    vi.mocked(api.getRole).mockResolvedValue({
-      id: "r2",
-      scope: "workspace",
-      name: "custom_role",
-      description: "A custom workspace role",
-      permissionCount: 1,
-      assigneeCount: 0,
-      parentRoleId: null,
-      inheritedPermissions: [],
-    });
-
-    renderPage();
-    await screen.findByText("custom_role");
-
-    await user.click(screen.getByRole("button", { name: /Actions for custom_role/i }));
-    await user.click(await screen.findByRole("menuitem", { name: "Edit permissions" }));
-    await screen.findByRole("heading", { name: /Edit role — custom_role/i });
-
-    // The workspace permission renders; the platform group/permission does not.
-    expect(await screen.findByRole("checkbox", { name: "chart:read" })).toBeInTheDocument();
-    expect(screen.queryByRole("checkbox", { name: "engine:read" })).toBeNull();
-    expect(screen.queryByText("Engines")).toBeNull();
-
-    // Searching for "chart" keeps chart:read visible.
-    await user.type(screen.getByPlaceholderText("Search permissions…"), "chart");
-    expect(screen.getByRole("checkbox", { name: "chart:read" })).toBeInTheDocument();
-
-    // Clicking the group's select-all toggles chart:read's checkbox on.
-    const chartCb = screen.getByRole("checkbox", { name: "chart:read" });
-    expect(chartCb).toHaveAttribute("data-state", "unchecked");
-    await user.click(screen.getByRole("checkbox", { name: "Select all Charts" }));
-    expect(chartCb).toHaveAttribute("data-state", "checked");
+    await user.click(await screen.findByRole("button", { name: "custom_role" }));
+    expect(await screen.findByText("role detail page")).toBeInTheDocument();
   });
 
   test("clicking the assignee count opens the assignees dialog and lists them", async () => {
@@ -354,32 +193,6 @@ describe("RolesPage", () => {
     expect(await screen.findByText("alice@example.com")).toBeInTheDocument();
     expect(screen.getByText("Engineering")).toBeInTheDocument();
     expect(api.getRoleAssignees).toHaveBeenCalledWith("r1");
-  });
-
-  test("platform_admin's checklist is shown read-only with a superuser note", async () => {
-    vi.mocked(api.listRoles).mockResolvedValue([
-      {
-        id: "r0",
-        scope: "platform",
-        name: "platform_admin",
-        description: "Superuser",
-        permissionCount: 0,
-        assigneeCount: 1,
-        inheritedPermissions: [],
-      },
-      ...ROLES,
-    ]);
-    const user = userEvent.setup();
-
-    renderPage();
-    await screen.findByText("platform_admin");
-
-    await user.click(screen.getByRole("button", { name: /Actions for platform_admin/i }));
-    await user.click(await screen.findByRole("menuitem", { name: "Edit permissions" }));
-    await screen.findByRole("heading", { name: /Edit role — platform_admin/i });
-
-    expect(screen.getByText(/Superuser — bypasses all permission checks/i)).toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: "catalog.read" })).toBeDisabled();
   });
 
   test("renders an empty state when there are no roles", async () => {
@@ -490,7 +303,7 @@ describe("RolesPage", () => {
     ).not.toBeInTheDocument();
   });
 
-  test("the Inherits from column shows the parent role's name as a chip, and — for a root role", async () => {
+  test("a child role's subtitle names the parent it inherits from", async () => {
     // A parent role and a child whose parentRoleId points at it.
     vi.mocked(api.listRoles).mockResolvedValue([
       {
@@ -517,13 +330,11 @@ describe("RolesPage", () => {
     renderPage();
     await screen.findByText("child_role");
 
-    // The child's row renders the parent's name (base_role) in the Inherits
-    // from column. base_role also appears as its own row's Name cell, so assert
-    // that the parent name is present at least twice (own row + child's chip).
-    expect(screen.getAllByText("base_role").length).toBeGreaterThanOrEqual(2);
-
-    // The root role (base_role, no parentRoleId) renders an em dash placeholder.
-    expect(screen.getByText("—")).toBeInTheDocument();
+    // Inheritance is folded into the child's identity subtitle rather than a
+    // separate column ("Workspace role · inherits base_role").
+    expect(screen.getByText(/inherits base_role/i)).toBeInTheDocument();
+    // base_role still appears as its own row's name.
+    expect(screen.getByText("base_role")).toBeInTheDocument();
   });
 
   test("Delete confirmation shows the impact: assignee count and inheriting-role count", async () => {
@@ -557,56 +368,6 @@ describe("RolesPage", () => {
     await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
 
     await screen.findByRole("heading", { name: /Delete "analyst"\?/i });
-    expect(screen.getByText(/5 assignee/i)).toBeInTheDocument();
-    expect(screen.getByText(/1 role[^.]*inherit/i)).toBeInTheDocument();
-  });
-
-  test("Edit permissions dialog shows the same impact summary", async () => {
-    const user = userEvent.setup();
-    vi.mocked(api.listRoles).mockResolvedValue([
-      {
-        id: "analyst-id",
-        scope: "workspace",
-        name: "analyst",
-        description: "Analyst role",
-        permissionCount: 3,
-        assigneeCount: 5,
-        inheritedPermissions: [],
-      },
-      {
-        id: "junior-id",
-        scope: "workspace",
-        name: "junior",
-        description: "Junior role",
-        permissionCount: 1,
-        assigneeCount: 0,
-        parentRoleId: "analyst-id",
-        inheritedPermissions: [],
-      },
-    ]);
-    vi.mocked(api.getRole).mockImplementation(async (id) => {
-      const found =
-        id === "analyst-id"
-          ? {
-              id: "analyst-id",
-              scope: "workspace" as const,
-              name: "analyst",
-              description: "Analyst role",
-              permissionCount: 3,
-              assigneeCount: 5,
-              inheritedPermissions: [],
-            }
-          : ROLES[0];
-      return { ...found, inheritedPermissions: [] };
-    });
-
-    renderPage();
-    await screen.findAllByText("analyst");
-
-    await user.click(screen.getByRole("button", { name: /Actions for analyst/i }));
-    await user.click(await screen.findByRole("menuitem", { name: "Edit permissions" }));
-
-    await screen.findByRole("heading", { name: /Edit role — analyst/i });
     expect(screen.getByText(/5 assignee/i)).toBeInTheDocument();
     expect(screen.getByText(/1 role[^.]*inherit/i)).toBeInTheDocument();
   });

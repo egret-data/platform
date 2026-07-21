@@ -164,7 +164,7 @@ export default function UsersPage() {
       cell: (u) => (
         <button
           type="button"
-          onClick={() => setEditTarget(u)}
+          onClick={() => navigate(`/control-plane/users/${u.id}`)}
           className="group flex items-center gap-3 text-left"
         >
           <Avatar className="h-8 w-8">

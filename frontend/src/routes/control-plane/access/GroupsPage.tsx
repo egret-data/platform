@@ -126,17 +126,13 @@ export default function GroupsPage() {
               <UsersRound className="h-4 w-4" />
             </span>
             <div className="min-w-0">
-              {isOidc ? (
-                <div className="truncate font-medium text-foreground">{g.name}</div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setRenameTarget(g)}
-                  className="block max-w-full truncate text-left font-medium text-primary hover:underline"
-                >
-                  {g.name}
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => navigate(`/control-plane/groups/${g.id}`)}
+                className="block max-w-full truncate text-left font-medium text-primary hover:underline"
+              >
+                {g.name}
+              </button>
               <div className="truncate text-xs text-muted-foreground">
                 {isOidc ? "Synced from OIDC" : "Local group"}
               </div>
