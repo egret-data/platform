@@ -1,5 +1,6 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, Search } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -30,7 +31,9 @@ export function FilterableTable<T>({
   filters,
   initialSort,
   emptyText = "No results.",
+  noMatchText = "No matches.",
   selection,
+  pageSize,
 }: {
   rows: T[];
   columns: Column<T>[];
@@ -38,14 +41,25 @@ export function FilterableTable<T>({
   searchPlaceholder?: string;
   filters?: ReactNode;
   initialSort?: SortState<string>;
-  emptyText?: string;
+  /** Shown when there is genuinely no data. Pass an `<EmptyState>` for a CTA. */
+  emptyText?: ReactNode;
+  /** Shown when a search query matches nothing (data exists). Kept plain so a
+   * first-run CTA never appears just because a search missed. */
+  noMatchText?: ReactNode;
   selection?: {
     selected: Set<string>;
     onToggle: (id: string) => void;
   };
+  /**
+   * When set, only this many rows render at a time and a pager is shown once
+   * the filtered set exceeds it. Opt-in — omitting it keeps the table
+   * un-paginated (renders every row), matching the original behavior.
+   */
+  pageSize?: number;
 }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<SortState<string> | undefined>(initialSort);
+  const [page, setPage] = useState(0);
 
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -76,10 +90,25 @@ export function FilterableTable<T>({
     return r;
   }, [rows, q, sort, columns]);
 
-  const onSort = (key: string) =>
+  const onSort = (key: string) => {
+    setPage(0);
     setSort((s) =>
       s?.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" },
     );
+  };
+
+  // Pagination is opt-in via `pageSize`. `clampedPage` keeps us on a valid page
+  // even when the filtered set shrinks under us (e.g. an external filter
+  // narrows `rows` while we're on a later page).
+  const size = pageSize != null && pageSize > 0 ? pageSize : 0;
+  const paginated = size > 0;
+  const pageCount = paginated ? Math.max(1, Math.ceil(shown.length / size)) : 1;
+  const clampedPage = Math.min(page, pageCount - 1);
+  const pageRows = paginated
+    ? shown.slice(clampedPage * size, clampedPage * size + size)
+    : shown;
+  const rangeStart = shown.length === 0 ? 0 : clampedPage * size + 1;
+  const rangeEnd = paginated ? clampedPage * size + pageRows.length : shown.length;
 
   return (
     <div className="space-y-3">
@@ -90,7 +119,10 @@ export function FilterableTable<T>({
             className="pl-8"
             placeholder={searchPlaceholder}
             value={q}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={(e) => {
+              setPage(0);
+              setQ(e.target.value);
+            }}
           />
         </div>
         {filters}
@@ -141,13 +173,13 @@ export function FilterableTable<T>({
               <TableRow className="hover:bg-transparent">
                 <TableCell
                   colSpan={columns.length + (selection ? 1 : 0)}
-                  className="py-6 text-center text-muted-foreground"
+                  className="py-10 text-center text-muted-foreground"
                 >
-                  {emptyText}
+                  {q.trim() ? noMatchText : emptyText}
                 </TableCell>
               </TableRow>
             ) : (
-              shown.map((row) => (
+              pageRows.map((row) => (
                 <TableRow key={getId(row)}>
                   {selection && (
                     <TableCell className="w-8">
@@ -169,6 +201,38 @@ export function FilterableTable<T>({
           </TableBody>
         </Table>
       </div>
+      {paginated && shown.length > size && (
+        <div className="flex items-center justify-between gap-2 text-sm text-muted-foreground">
+          <span>
+            Showing <span className="tabular-nums">{rangeStart}</span>–
+            <span className="tabular-nums">{rangeEnd}</span> of{" "}
+            <span className="tabular-nums">{shown.length}</span>
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              disabled={clampedPage === 0}
+            >
+              <ChevronLeft className="h-4 w-4" />
+              Previous
+            </Button>
+            <span className="tabular-nums">
+              {clampedPage + 1} / {pageCount}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+              disabled={clampedPage >= pageCount - 1}
+            >
+              Next
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

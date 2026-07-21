@@ -134,11 +134,13 @@ describe("AccessOverview", () => {
     expect(twos.length).toBeGreaterThan(0);
   });
 
-  test("shows a warning row for a role with zero assignees", async () => {
+  test("aggregates zero-assignee roles into a single warning row", async () => {
     renderPage();
 
+    // One line for the whole set (one zero-assignee role in this fixture),
+    // not one line per role.
     expect(
-      await screen.findByText(/Empty has no assignees/i),
+      await screen.findByText(/1 role has no assignees/i),
     ).toBeInTheDocument();
   });
 

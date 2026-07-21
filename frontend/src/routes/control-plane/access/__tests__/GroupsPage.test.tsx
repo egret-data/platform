@@ -173,7 +173,7 @@ describe("GroupsPage", () => {
   test("renders an empty state when there are no groups", async () => {
     vi.mocked(api.listGroups).mockResolvedValue([]);
     renderPage();
-    expect(await screen.findByText("No groups.")).toBeInTheDocument();
+    expect(await screen.findByText("No groups yet")).toBeInTheDocument();
   });
 
   test("typing in the search box narrows the rows by name", async () => {

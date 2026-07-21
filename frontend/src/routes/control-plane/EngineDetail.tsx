@@ -125,6 +125,31 @@ function phaseVariant(phase: string): BadgeVariant {
   }
 }
 
+// Low-level transport/plumbing errors the backend can surface verbatim while an
+// engine is still coming up (the coordinator/FE isn't reachable yet). These are
+// expected churn during provisioning, not something to show an admin raw.
+const INTERNAL_ERROR_RE =
+  /ServiceError|client error|reqwest|dial tcp|connection refused|connection reset|no route to host|i\/o timeout|\bEOF\b|\(Connect\)/i;
+
+/**
+ * Human-facing engine status subtitle. The raw `status.message` can be a
+ * low-level transport error (e.g. `ServiceError: client error (Connect)`); during
+ * a transient phase that just means "not reachable yet", so we show a
+ * phase-appropriate line and keep the raw text on a tooltip for debugging. A
+ * genuine failure keeps its message (admins want the detail).
+ */
+function statusDescription(
+  phase: string,
+  message: string | null,
+): { text: string; title?: string } {
+  if (!message) return { text: `Phase: ${phase}` };
+  const variant = phaseVariant(phase);
+  if (variant === "warning" && INTERNAL_ERROR_RE.test(message)) {
+    return { text: "Starting up — the engine isn't reachable yet.", title: message };
+  }
+  return { text: message };
+}
+
 const isStarRocksType = (t: string) => t.toLowerCase() === "starrocks";
 
 /**
@@ -406,7 +431,9 @@ function EngineTabs({
 
   // Warn before refresh/close while a config or security edit is unsaved — these
   // saves re-provision the engine, so a lost edit is expensive.
-  useUnsavedChangesWarning(isStarRocks ? srCfg.dirty : cfg.dirty);
+  useUnsavedChangesWarning(
+    isStarRocks ? srCfg.editedSinceLoad : cfg.editedSinceLoad,
+  );
 
   // Active top-level tab lives in the URL (`?tab=`) so the view is
   // deep-linkable and survives a refresh. Default preserved: "overview".
@@ -777,9 +804,10 @@ function StatusCard({
       <CardHeader>
         <div className="space-y-1.5">
           <CardTitle className="text-lg">Status</CardTitle>
-          <CardDescription>
-            {status.message ?? `Phase: ${status.phase}`}
-          </CardDescription>
+          {(() => {
+            const d = statusDescription(status.phase, status.message);
+            return <CardDescription title={d.title}>{d.text}</CardDescription>;
+          })()}
         </div>
       </CardHeader>
       <CardContent>
@@ -855,9 +883,10 @@ function StarRocksMonitor({
         <CardHeader>
           <div className="space-y-1.5">
             <CardTitle className="text-lg">Pods</CardTitle>
-            <CardDescription>
-              {status.message ?? `Phase: ${status.phase}`}
-            </CardDescription>
+            {(() => {
+              const d = statusDescription(status.phase, status.message);
+              return <CardDescription title={d.title}>{d.text}</CardDescription>;
+            })()}
           </div>
         </CardHeader>
         <CardContent>

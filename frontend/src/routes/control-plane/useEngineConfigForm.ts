@@ -750,6 +750,9 @@ export interface EngineConfigForm {
   // meta
   error: string | null;
   dirty: boolean;
+  // True only after a real user edit (built-vs-load-baseline). Arms the browser
+  // unsaved-changes guard without the false positives `dirty` can have on load.
+  editedSinceLoad: boolean;
   saving: boolean;
   saved: boolean; // last save succeeded (drives the transient "Saved" banner)
   save: () => void; // builds the payload + saveMutation.mutate; sets error on throw
@@ -929,6 +932,13 @@ export function useEngineConfigForm(
   // ahead of the form during an external update).
   const builtRef = useRef<TrinoConfig | undefined>(undefined);
   const loadedSpecRef = useRef<TrinoConfig | undefined>(undefined);
+  // Built config captured at load / last external sync. The browser
+  // unsaved-changes guard (`editedSinceLoad`) diffs against THIS — a built-vs-built
+  // comparison, so it's immune to a sparse stored spec that merely normalises
+  // differently from the built payload. Reset to undefined on a genuine re-sync so
+  // the next render re-snapshots the new baseline. (Distinct from `dirty`, which is
+  // built-vs-stored and legitimately drives what a Save would PUT.)
+  const editBaselineRef = useRef<TrinoConfig | undefined>(undefined);
 
   // Keep inputs in sync when the polled engine changes (e.g. an external update).
   useEffect(() => {
@@ -942,6 +952,13 @@ export function useEngineConfigForm(
       return;
     }
     const next = engine.spec.trinoConfig;
+    // A genuine content change (first load or an external update) — as opposed to
+    // the 5s status poll handing back identical content — rebaselines the
+    // unsaved-edits guard. Guarding on real content change means a concurrent user
+    // edit landing on the same tick can't be mistaken for pristine.
+    const specChanged =
+      loadedSpecRef.current === undefined ||
+      diffConfig(loadedSpecRef.current, next ?? {}).length > 0;
     setQueryMaxMemory(next?.queryMaxMemory ?? "");
     setLogLevel(next?.logLevel ?? "INFO");
     setConfigProps(recordToKv(next?.configProperties));
@@ -1014,6 +1031,7 @@ export function useEngineConfigForm(
     // Remember what the form now reflects, so the next poll/update can tell a real
     // user edit apart from an identical (or externally-changed) spec.
     loadedSpecRef.current = next;
+    if (specChanged) editBaselineRef.current = undefined;
   }, [engine.spec]);
 
   const saveMutation = useMutation<Engine, ApiError, CreateEngineInput>({
@@ -1295,6 +1313,16 @@ export function useEngineConfigForm(
   // Expose the current built config to the prefill effect's unsaved-edits guard.
   builtRef.current = builtTrinoConfig;
 
+  // `editedSinceLoad`: true only once the user actually changes the form from the
+  // config it loaded with. Unlike `dirty` (built-vs-stored, which can read true on
+  // load when the stored spec is sparse), this compares built-vs-built against the
+  // baseline captured at load, so the browser unsaved-changes prompt never fires on
+  // a page the user only viewed. Lazily (re)snapshot the baseline whenever a sync
+  // cleared it.
+  if (editBaselineRef.current === undefined) editBaselineRef.current = builtTrinoConfig;
+  const editedSinceLoad =
+    diffConfig(editBaselineRef.current, builtTrinoConfig).length > 0;
+
   return {
     queryMaxMemory,
     setQueryMaxMemory,
@@ -1400,6 +1428,7 @@ export function useEngineConfigForm(
     setAutoscaleKeda,
     error,
     dirty,
+    editedSinceLoad,
     saving: saveMutation.isPending,
     // Transient: the "Saved" banner clears the moment the user edits again, so it
     // never lingers next to unsaved changes and mislead them into thinking those

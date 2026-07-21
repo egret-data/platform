@@ -76,6 +76,58 @@ describe("useEngineConfigForm dirty tracking", () => {
   });
 });
 
+describe("useEngineConfigForm editedSinceLoad (beforeunload guard)", () => {
+  // A provisioning / connect-error engine can arrive with an absent (or sparse)
+  // stored trinoConfig. The built payload then carries defaults the stored spec
+  // lacks, so `dirty` (built-vs-stored) reads true on load — but the user hasn't
+  // touched anything, so the browser unsaved-changes guard must stay disarmed.
+  function makeSparseEngine() {
+    return {
+      id: "e1",
+      name: "eng",
+      type: "trino",
+      namespace: "ns",
+      warehouseId: "w1",
+      status: "provisioning",
+      spec: { trinoConfig: undefined },
+    } as unknown as Parameters<typeof useEngineConfigForm>[0];
+  }
+
+  it("is false on load even when `dirty` is true for an unedited sparse spec", () => {
+    const { result } = renderHook(({ e }) => useEngineConfigForm(e), {
+      initialProps: { e: makeSparseEngine() },
+      wrapper,
+    });
+    // The whole point of the guard: `dirty` may be noisy on load, but the user
+    // has made no edit, so we must NOT prompt on navigate/close.
+    expect(result.current.dirty).toBe(true);
+    expect(result.current.editedSinceLoad).toBe(false);
+  });
+
+  it("arms on a real edit and disarms again on revert", () => {
+    const { result } = renderHook(({ e }) => useEngineConfigForm(e), {
+      initialProps: { e: makeSparseEngine() },
+      wrapper,
+    });
+    expect(result.current.editedSinceLoad).toBe(false);
+
+    act(() => result.current.setLogLevel("DEBUG"));
+    expect(result.current.editedSinceLoad).toBe(true);
+
+    act(() => result.current.setLogLevel("INFO"));
+    expect(result.current.editedSinceLoad).toBe(false);
+  });
+
+  it("an identical 5s status poll keeps it false", () => {
+    const { result, rerender } = renderHook(
+      ({ e }) => useEngineConfigForm(e),
+      { initialProps: { e: makeSparseEngine() }, wrapper },
+    );
+    for (let i = 0; i < 3; i++) rerender({ e: makeSparseEngine() });
+    expect(result.current.editedSinceLoad).toBe(false);
+  });
+});
+
 describe("useEngineConfigForm delegation mode", () => {
   function withDelegation(mode?: "impersonate" | "jwt") {
     const e = makeEngine();

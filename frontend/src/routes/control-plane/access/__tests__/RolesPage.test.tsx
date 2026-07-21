@@ -385,7 +385,7 @@ describe("RolesPage", () => {
   test("renders an empty state when there are no roles", async () => {
     vi.mocked(api.listRoles).mockResolvedValue([]);
     renderPage();
-    expect(await screen.findByText("No roles.")).toBeInTheDocument();
+    expect(await screen.findByText("No roles yet")).toBeInTheDocument();
   });
 
   test("the Scope facet filters to platform-only rows", async () => {

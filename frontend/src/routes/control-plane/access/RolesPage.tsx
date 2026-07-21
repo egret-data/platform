@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { MoreHorizontal, Pencil, Plus, Search, Trash2, UserCog } from "lucide-react";
 
 import {
   type AccessRole,
@@ -20,6 +20,7 @@ import { useAuth } from "@/auth/useAuth";
 import { RoleImpactNotice } from "@/components/access/RoleImpactNotice";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
+import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -404,10 +405,25 @@ export default function RolesPage() {
               getId={(r) => r.id}
               searchPlaceholder="Search roles…"
               initialSort={{ key: "name", dir: "asc" }}
+              pageSize={25}
               emptyText={
-                roles.isError
-                  ? (roles.error?.message ?? "Failed to load roles.")
-                  : "No roles."
+                roles.isError ? (
+                  (roles.error?.message ?? "Failed to load roles.")
+                ) : (
+                  <EmptyState
+                    icon={UserCog}
+                    title="No roles yet"
+                    description="Roles bundle permissions, then get assigned to users and groups."
+                    action={
+                      isAdmin ? (
+                        <Button size="sm" onClick={() => setCreateOpen(true)}>
+                          <Plus className="mr-1 h-4 w-4" />
+                          New role
+                        </Button>
+                      ) : undefined
+                    }
+                  />
+                )
               }
               filters={
                 <FacetSelect

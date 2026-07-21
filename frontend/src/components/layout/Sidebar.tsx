@@ -61,7 +61,7 @@ const EXPLORE_GROUPS: NavGroup[] = [
 const CONTROL_PLANE_GROUPS: NavGroup[] = [
   {
     heading: "Overview",
-    items: [{ label: "Overview", icon: Gauge, perm: "user:read", to: "access-overview" }],
+    items: [{ label: "Access overview", icon: Gauge, perm: "user:read", to: "access-overview" }],
   },
   {
     heading: "Identity",
