@@ -1971,38 +1971,17 @@ async fn create_engine(
         .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
     let s3_endpoint = sc.endpoint.unwrap_or_default();
 
-    // 3. Auto-wire: mint a fresh Catalog Client for the warehouse.
-    let role_id = ensure_engine_role(&st, wh.id).await?;
-    let client = st
-        .catalog
-        .create_client(NewClient {
-            name: format!("engine-{}", b.name),
-            consumer_type: "engine".into(),
-            workspace_id: wh.workspace_id,
-            warehouse_id: wh.id,
-            catalog_role_id: role_id,
-        })
-        .await?;
-
-    // 4. Record the intent row (status `provisioning`). The auto-wired client id
-    //    lives on the PRIMARY catalog row now, not in the engine spec.
-    let image_version = b
-        .image_version
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_IMAGE_VERSION.into());
-    let namespace = DEFAULT_NAMESPACE.to_string();
-    let mut spec = serde_json::json!({
-        "coordinatorReplicas": b.coordinator_replicas,
-        "workerReplicas": b.worker_replicas,
-        "cpuMin": b.cpu_min,
-        "cpuMax": b.cpu_max,
-        "memory": b.memory,
-        "imageVersion": image_version,
-    });
-    // Seed the per-role trinoConfig from the wizard inputs (both roles share the
-    // cpuMin/cpuMax/memory resources; replicas come from the body). Any
-    // per-role block supplied in the body overlays these seeded defaults.
+    // 3. Build + resolve the per-role trinoConfig — including default-on
+    //    delegation — BEFORE minting the catalog client. Ordering matters: the
+    //    delegation resolver 400s on an explicit `jwt` a no-JWKS platform can't
+    //    satisfy (or an unknown mode), and if the catalog client were already
+    //    minted that early-return would orphan a client row + credentials. Mirror
+    //    the StarRocks path (`create_starrocks_engine`), which resolves delegation
+    //    before `catalog.create_client`, so a 400 leaves nothing behind.
+    //
+    //    Seed the per-role trinoConfig from the wizard inputs (both roles share the
+    //    cpuMin/cpuMax/memory resources; replicas come from the body). Any
+    //    per-role block supplied in the body overlays these seeded defaults.
     let mut trino_config = seed_trino_config(&b);
     if let (Some(seed), Some(supplied)) = (
         trino_config.as_object_mut(),
@@ -2018,7 +1997,8 @@ async fn create_engine(
     // Create-only; update preserves the stored mode. `trino_config` is always a JSON
     // object (seed_trino_config), so a bare create (no `trinoConfig` in the body)
     // still gets the default injected here. This also VALIDATES the mode (an unknown
-    // value / an explicit `jwt` with no platform JWKS 400s here, before provisioning).
+    // value / an explicit `jwt` with no platform JWKS 400s here, before any catalog
+    // client is minted — see the ordering note above).
     // NOTE: unlike StarRocks (whose absent delegation reads back as "none"), Trino's
     // `store::Engine::delegation_mode()` defaults an ABSENT `delegationMode` to
     // "impersonate" — so the "none" opt-out must be persisted EXPLICITLY as "none",
@@ -2056,6 +2036,37 @@ async fn create_engine(
             }
         }
     }
+
+    // 4. Auto-wire: mint a fresh Catalog Client for the warehouse. Minted only
+    //    AFTER delegation resolves (step 3), so a resolver 400 leaks no client.
+    let role_id = ensure_engine_role(&st, wh.id).await?;
+    let client = st
+        .catalog
+        .create_client(NewClient {
+            name: format!("engine-{}", b.name),
+            consumer_type: "engine".into(),
+            workspace_id: wh.workspace_id,
+            warehouse_id: wh.id,
+            catalog_role_id: role_id,
+        })
+        .await?;
+
+    // 5. Record the intent row (status `provisioning`). The auto-wired client id
+    //    lives on the PRIMARY catalog row now, not in the engine spec.
+    let image_version = b
+        .image_version
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_IMAGE_VERSION.into());
+    let namespace = DEFAULT_NAMESPACE.to_string();
+    let mut spec = serde_json::json!({
+        "coordinatorReplicas": b.coordinator_replicas,
+        "workerReplicas": b.worker_replicas,
+        "cpuMin": b.cpu_min,
+        "cpuMax": b.cpu_max,
+        "memory": b.memory,
+        "imageVersion": image_version,
+    });
     spec["trinoConfig"] = trino_config;
     validate_spec_resource_groups(&spec)?;
     let engine = match st
@@ -6455,6 +6466,81 @@ mod tests {
             }
             other => panic!("expected BadRequest, got {other:?}"),
         }
+    }
+
+    /// Orphan-client guard (holistic review, Finding A): the explicit-jwt-without-
+    /// JWKS 400 must fire BEFORE the auto-wired catalog client is minted, so a
+    /// rejected create leaves NO `engine-{name}` client row behind. This proves the
+    /// resolve-delegation → create_client ordering (mirrors StarRocks). Before the
+    /// fix, `create_client` ran first and the resolver's `?` early-return leaked the
+    /// client every time.
+    #[tokio::test]
+    async fn trino_create_explicit_jwt_without_jwks_leaves_no_orphan_client() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping trino_create_explicit_jwt_without_jwks_leaves_no_orphan_client: DATABASE_URL not set"
+            );
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        st.engine_jwks_uri.clear();
+        st.engine_oidc_issuer.clear();
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        // Seed a lakekeeper-backed warehouse (same setup create_trino_for_delegation
+        // uses) so the handler reaches the Trino delegation-resolution block.
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        egret_catalog_engine::CatalogStore::new(db.clone())
+            .set_lakekeeper_warehouse_id(wh.id, "lk-test")
+            .await
+            .expect("mark warehouse provisioned");
+
+        let name = format!("trino-{}", Uuid::new_v4().simple());
+        let body = CreateEngineBody {
+            name: name.clone(),
+            warehouse_id: wh.id,
+            image_version: None,
+            coordinator_replicas: 1,
+            worker_replicas: 1,
+            cpu_min: "1".into(),
+            cpu_max: "1".into(),
+            memory: "1Gi".into(),
+            trino_config: Some(serde_json::json!({ "delegationMode": "jwt" })),
+            authz_service_id: None,
+            kind: "trino".into(),
+            starrocks: None,
+            tls_cert_secret_ref: None,
+        };
+        let principal = egret_core::context::Principal {
+            user_id: egret_core::ids::UserId::new(),
+            email: "admin@egret.local".into(),
+            platform_roles: vec!["platform_admin".into()],
+            permissions: vec![],
+            group_ids: vec![],
+        };
+
+        // `create_engine`'s Ok type (`Json<EngineDto>`) isn't `Debug`, so match
+        // rather than `.expect_err`.
+        let err = match create_engine(State(st.clone()), Auth(principal), Json(body)).await {
+            Ok(_) => panic!("explicit jwt without jwks must 400, but create succeeded"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, CpError::BadRequest(_)),
+            "expected 400, got {err:?}"
+        );
+
+        // No `engine-{name}` catalog client may exist — the 400 fired before the
+        // client was minted, so nothing was orphaned.
+        let clients = st.catalog.list_clients(wh.id).await.expect("list clients");
+        assert!(
+            !clients.iter().any(|c| c.name == format!("engine-{name}")),
+            "jwt-no-JWKS 400 must not orphan a catalog client; found: {:?}",
+            clients.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
     }
 
     /// `build_starrocks_provision_req` threads the stored root password into
