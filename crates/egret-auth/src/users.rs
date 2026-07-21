@@ -216,64 +216,51 @@ impl UserRepo {
         )))
     }
 
-    /// Hard-delete a user and dependents in one transaction: sessions, group
-    /// memberships, platform role/permission grants, then the user row.
-    /// (Audit history is intentionally NOT deleted — `audit.audit_log.actor_user_id`
-    /// is a denormalized `uuid` with no FK to `users`, so it survives untouched.
-    /// The legacy `policy_audit.actor` DOES carry a nullable FK, but no code writes
-    /// that table, so it never blocks a delete; if it is ever wired up, null its
-    /// `actor` in this tx rather than deleting the audit row.)
-    ///
-    /// `sessions` and `user_groups` already carry `ON DELETE CASCADE` (see
-    /// migration 0002); they're deleted explicitly anyway so this stays correct
-    /// even if that cascade is ever loosened. `access_grants.principal_id` is a
-    /// polymorphic column with no FK at all, so it MUST be cleaned explicitly.
-    ///
-    /// # Content-ownership limitation
-    /// Many tables carry a plain (often NOT-NULL) FK to `users(id)` for
-    /// *content ownership* rather than membership/audit — e.g. the NOT-NULL
-    /// `notebooks.owner_user_id`, and `dashboards`/`charts`/`datasets`/
-    /// `folders`/`databases`/`engines`.`created_by`/`granted_by`. These are
-    /// deliberately NOT cleaned here (we don't cascade-delete a user's
-    /// dashboards, nor silently reassign them). So a user who owns any such
-    /// content cannot be hard-deleted yet: the final `DELETE FROM users` trips a
-    /// Postgres `foreign_key_violation` (SQLSTATE `23503`), which we catch and
-    /// surface as [`egret_core::Error::Conflict`] (the handler returns 409) with
-    /// an actionable message rather than a raw 500. The whole transaction rolls
-    /// back, so nothing is half-deleted. Full per-table ownership reassignment
-    /// (SET NULL / reassign / block) is a tracked follow-up.
-    pub async fn hard_delete(&self, id: UserId) -> Result<()> {
+    /// Hard-delete `target` and dependents in one transaction. `target`'s notebooks
+    /// are reassigned to `reassign_notebooks_to` (the deleting admin) because
+    /// `notebooks.owner_user_id` is NOT NULL; attribution columns (created_by/
+    /// assigned_by/…) are auto-nulled by their `ON DELETE SET NULL` FKs (mig 0093);
+    /// cascade tables (sessions/user_groups/…) auto-clean. `access_grants` is swept
+    /// explicitly (polymorphic principal_id, no FK). The 23503 catch is now a rare
+    /// safety net: it fires only if a future table adds a NOT-NULL FK to users(id)
+    /// without an ON DELETE rule or reassignment here.
+    pub async fn hard_delete(&self, target: UserId, reassign_notebooks_to: UserId) -> Result<()> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        sqlx::query("UPDATE analytics.notebooks SET owner_user_id = $2 WHERE owner_user_id = $1")
+            .bind(target.0)
+            .bind(reassign_notebooks_to.0)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
         sqlx::query("DELETE FROM sessions WHERE user_id = $1")
-            .bind(id.0)
+            .bind(target.0)
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
         sqlx::query("DELETE FROM user_groups WHERE user_id = $1")
-            .bind(id.0)
+            .bind(target.0)
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
         sqlx::query(
             "DELETE FROM access_grants WHERE principal_type = 'user' AND principal_id = $1",
         )
-        .bind(id.0)
+        .bind(target.0)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
         // The row delete is the one that can trip a content-ownership FK
         // (23503). Map that specific case to a Conflict (→ 409); on return the
         // dropped `tx` rolls back, so no dependent rows above are lost.
-        if let Err(e) = sqlx::query("DELETE FROM users WHERE id = $1")
-            .bind(id.0)
+        let res = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(target.0)
             .execute(&mut *tx)
-            .await
-        {
+            .await;
+        if let Err(e) = res {
             if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("23503") {
                 return Err(egret_core::Error::Conflict(
-                    "cannot delete a user who owns content (notebooks, dashboards, datasets, \
-                     engine grants, …). Disable the user instead, or reassign/remove their \
-                     content first."
+                    "cannot delete: this user owns content in a table that isn't auto-handled \
+                     on delete — a new FK to users(id) needs an ON DELETE rule."
                         .into(),
                 ));
             }
@@ -389,6 +376,10 @@ mod tests {
             .insert_local("hard_delete_target@egret.local", "Target", "x")
             .await
             .unwrap();
+        let admin_id = repo
+            .insert_local("hard_delete_admin@egret.local", "Admin", "x")
+            .await
+            .unwrap();
 
         // Group membership.
         let group_id = groups.create_local("hard-delete-test-group").await.unwrap();
@@ -423,7 +414,7 @@ mod tests {
             .unwrap();
         assert!(sessions.validate(&issued.token).await.unwrap().is_some());
 
-        repo.hard_delete(uid).await.unwrap();
+        repo.hard_delete(uid, admin_id).await.unwrap();
 
         assert!(
             repo.find_by_id(uid).await.unwrap().is_none(),
