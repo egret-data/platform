@@ -85,13 +85,15 @@ describe("useEngineConfigForm delegation mode", () => {
     return e;
   }
 
-  it("defaults to impersonate and omits the key from the built payload", () => {
+  it("defaults to Auto and omits the key from the built payload", () => {
     const { result } = renderHook(({ e }) => useEngineConfigForm(e), {
       initialProps: { e: withDelegation(undefined) },
       wrapper,
     });
-    expect(result.current.delegationMode).toBe("impersonate");
-    // Back-compat: an impersonate (default) engine must not emit delegationMode.
+    // An engine with no stored delegationMode seeds "" (Auto); the backend then
+    // resolves the default (jwt→impersonate). Auto must OMIT the key so the
+    // backend default applies rather than pinning an explicit mode.
+    expect(result.current.delegationMode).toBe("");
     expect(result.current.builtTrinoConfig.delegationMode).toBeUndefined();
   });
 
@@ -107,7 +109,7 @@ describe("useEngineConfigForm delegation mode", () => {
     expect(result.current.dirty).toBe(false);
   });
 
-  it("switching impersonate → jwt marks dirty and emits the key", () => {
+  it("switching Auto → jwt marks dirty and emits the key", () => {
     const { result } = renderHook(({ e }) => useEngineConfigForm(e), {
       initialProps: { e: withDelegation(undefined) },
       wrapper,
