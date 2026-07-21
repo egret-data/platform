@@ -1425,6 +1425,34 @@
         }
       }
     },
+    "/api/auth/oidc/backchannel-logout": {
+      "post": {
+        "tags": [
+          "oidc"
+        ],
+        "summary": "`POST /api/auth/oidc/backchannel-logout` — OIDC Back-Channel Logout 1.0.",
+        "description": "Keycloak (or any conformant IdP) calls this server-to-server when a user logs\nout or their session ends upstream. There is no cookie and no CSRF token on\nthis request — it's secured entirely by the logout token's JWS signature\n(verified against the provider's JWKS, `iss`/`aud`/`exp` enforced) — see\n[`crate::oidc::verify_logout_token`]. On success, every egret session for the\ntoken's `sub` is revoked. An unrecognized `sub` (e.g. a user who never\ncompleted OIDC login) is a no-op 200, matching the spec's guidance that the\nRP should not leak whether it knows a given subject. Always sets\n`Cache-Control: no-store` per the Back-Channel Logout spec.",
+        "operationId": "backchannel_logout",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/BackchannelLogoutForm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Logout token accepted; matching sessions (if any) revoked"
+          },
+          "400": {
+            "description": "Missing/invalid logout token, or JWKS unavailable"
+          }
+        }
+      }
+    },
     "/api/auth/oidc/callback": {
       "get": {
         "tags": [
@@ -1465,7 +1493,7 @@
             "description": "Email already used by another account (text/plain body)"
           },
           "500": {
-            "description": "Provisioning, session, or refresh-token persistence failure (text/plain body)"
+            "description": "Provisioning or session failure (text/plain body)"
           }
         }
       }
@@ -7493,7 +7521,7 @@
         "tags": [
           "control-plane-access"
         ],
-        "summary": "`DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,\nnot the last active platform admin (`guard_not_last_admin`, shared with the\ndisable branch of `update_user`). Cleans up the user's sessions, group\nmemberships, and platform role/permission grants, then the row itself, in\none transaction (`UserRepo::hard_delete`).",
+        "summary": "`DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,\nnot the last active platform admin (`guard_not_last_admin`, shared with the\ndisable branch of `update_user`). Cleans up the user's sessions, group\nmemberships, and platform role/permission grants, reassigns the target's\nnotebooks to the deleting admin (`p.user_id`, since `owner_user_id` is NOT\nNULL), then removes the row itself, in one transaction\n(`UserRepo::hard_delete`).",
         "operationId": "delete_user",
         "parameters": [
           {
@@ -7602,7 +7630,7 @@
         },
         "responses": {
           "200": {
-            "description": "User profile and/or status updated",
+            "description": "User profile and/or status updated (disabling also revokes the user's live sessions immediately)",
             "content": {
               "application/json": {
                 "schema": {
@@ -7612,7 +7640,7 @@
             }
           },
           "400": {
-            "description": "Invalid status value",
+            "description": "Invalid status value, or a caller disabling their own account",
             "content": {
               "application/json": {
                 "schema": {
@@ -7643,6 +7671,16 @@
           },
           "404": {
             "description": "No such user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Would remove the last platform admin",
             "content": {
               "application/json": {
                 "schema": {
@@ -16077,6 +16115,87 @@
         }
       }
     },
+    "/api/ws/{workspace}/notebook-settings/warehouse": {
+      "put": {
+        "tags": [
+          "notebooks"
+        ],
+        "operationId": "set_notebook_warehouse",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetNotebookWarehouse"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Notebook warehouse set; catalog role + write grant provisioned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Warehouse not found or not owned by this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workspace:manage_members permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/notebooks": {
       "get": {
         "tags": [
@@ -20969,6 +21088,17 @@
           }
         }
       },
+      "BackchannelLogoutForm": {
+        "type": "object",
+        "required": [
+          "logout_token"
+        ],
+        "properties": {
+          "logout_token": {
+            "type": "string"
+          }
+        }
+      },
       "CardInput": {
         "type": "object",
         "description": "Card as supplied by the client when saving a layout.",
@@ -23050,6 +23180,13 @@
           "port": {
             "type": "integer",
             "format": "int32"
+          },
+          "tls_cert": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The engine's self-signed TLS cert (PEM) when it serves over TLS, so the\nkernel can PIN it (verify against this cert only) instead of disabling\nverification. `None` for plain-HTTP engines."
           }
         }
       },
@@ -23668,6 +23805,42 @@
             ],
             "format": "date-time",
             "description": "Expiry of `engine_jwt` (RFC3339); kernels re-mint before this time.\n`None` whenever `engine_jwt` is `None`."
+          },
+          "catalog_jwt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Short-lived `aud:\"catalog\"` JWT scoped to the workspace's notebook\nwarehouse — the kernel presents it to the Iceberg REST catalog for\ndirect notebook writes. `None` when no notebook warehouse is configured\nor minting failed (best-effort; the kernel helper errors at call time)."
+          },
+          "catalog_jwt_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Expiry of `catalog_jwt` (RFC3339). `None` whenever `catalog_jwt` is `None`."
+          },
+          "catalog_uri": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base URI of the Iceberg REST catalog the kernel writes to\n(`<catalog_base_url>/catalog`). `None` when no warehouse is configured."
+          },
+          "catalog_warehouse": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Lakekeeper warehouse id the `catalog_jwt` is scoped to. `None` when no\nwarehouse is configured."
+          },
+          "namespace": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Private namespace path notebook writes land under (e.g. `[\"notebook\"]`).\nEmpty when no warehouse is configured."
           }
         }
       },
@@ -23696,6 +23869,21 @@
             "items": {
               "$ref": "#/components/schemas/EngineOption"
             }
+          },
+          "warehouse_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The workspace's chosen notebook (scratch) Iceberg warehouse, if set."
+          },
+          "namespace": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The private namespace path notebook writes land under (empty when unset)."
           }
         }
       },
@@ -25256,6 +25444,28 @@
               "null"
             ],
             "format": "uuid"
+          }
+        }
+      },
+      "SetNotebookWarehouse": {
+        "type": "object",
+        "description": "Request body for PUT /ws/{workspace}/notebook-settings/warehouse: choose the\nnotebook scratch warehouse + (optionally) the private namespace path. A\nmissing/empty `namespace` defaults to `[\"notebook\"]`.",
+        "required": [
+          "warehouse_id"
+        ],
+        "properties": {
+          "warehouse_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "namespace": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
