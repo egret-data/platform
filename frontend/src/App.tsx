@@ -47,8 +47,11 @@ import Warehouses from "@/routes/control-plane/Warehouses";
 import WarehouseDetail from "@/routes/control-plane/WarehouseDetail";
 import AuditLog from "@/routes/control-plane/AuditLog";
 import UsersPage from "@/routes/control-plane/access/UsersPage";
+import UserDetail from "@/routes/control-plane/access/UserDetail";
 import GroupsPage from "@/routes/control-plane/access/GroupsPage";
+import GroupDetail from "@/routes/control-plane/access/GroupDetail";
 import RolesPage from "@/routes/control-plane/access/RolesPage";
+import RoleDetail from "@/routes/control-plane/access/RoleDetail";
 import PermissionsPage from "@/routes/control-plane/access/PermissionsPage";
 import AccessExplorer from "@/routes/control-plane/access/AccessExplorer";
 import AccessOverview from "@/routes/control-plane/access/AccessOverview";
@@ -151,8 +154,11 @@ function ControlPlaneRoutes() {
           <Route path="classifications" element={<RequirePermission perm="tag:read"><Classifications /></RequirePermission>} />
           <Route path="data-lineage" element={<RequireGlobalAdmin><Placeholder title="Data Lineage" /></RequireGlobalAdmin>} />
           <Route path="users" element={<RequirePermission perm="user:read"><UsersPage /></RequirePermission>} />
+          <Route path="users/:id" element={<RequirePermission perm="user:read"><UserDetail /></RequirePermission>} />
           <Route path="groups" element={<RequirePermission perm="group:read"><GroupsPage /></RequirePermission>} />
+          <Route path="groups/:id" element={<RequirePermission perm="group:read"><GroupDetail /></RequirePermission>} />
           <Route path="roles" element={<RequirePermission perm="role:read"><RolesPage /></RequirePermission>} />
+          <Route path="roles/:id" element={<RequirePermission perm="role:read"><RoleDetail /></RequirePermission>} />
           <Route path="permissions" element={<RequirePermission perm="role:read"><PermissionsPage /></RequirePermission>} />
           <Route path="access-overview" element={<RequirePermission perm="user:read"><AccessOverview /></RequirePermission>} />
           <Route path="access-explorer" element={<RequirePermission perm="role:read"><AccessExplorer /></RequirePermission>} />
