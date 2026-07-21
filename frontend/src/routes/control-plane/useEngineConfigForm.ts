@@ -683,6 +683,14 @@ export interface EngineConfigForm {
   setJwtEnabled: (v: boolean) => void;
   delegationMode: DelegationMode;
   setDelegationMode: (v: DelegationMode) => void;
+  /**
+   * The delegation mode PERSISTED on the stored engine (`trinoConfig.delegationMode`),
+   * unaffected by in-progress form edits. Drives the "None" ratchet on the edit
+   * screen: an engine already running jwt/impersonate can't be downgraded to open
+   * (no backend teardown of `auth.jwt` / rematerialize), so "None" is disabled for
+   * it. Empty (`""`) for a new or currently-open engine, where all modes are offered.
+   */
+  storedDelegationMode: DelegationMode;
   jwksUri: string;
   setJwksUri: (v: string) => void;
   requiredAudience: string;
@@ -1332,6 +1340,10 @@ export function useEngineConfigForm(
     setJwtEnabled,
     delegationMode,
     setDelegationMode,
+    // Ratchet source: the delegation mode PERSISTED on the stored engine, read
+    // straight off the stored trinoConfig (not the moving form value). Drives the
+    // "None" disable on the edit screen.
+    storedDelegationMode: (tc?.delegationMode as DelegationMode | undefined) ?? "",
     jwksUri,
     setJwksUri,
     requiredAudience,
