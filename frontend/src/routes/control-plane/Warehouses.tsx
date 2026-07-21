@@ -13,6 +13,7 @@ import {
 } from "@/api/controlPlane";
 import { useMyWorkspaces } from "@/api/hooks";
 import { ApiError } from "@/api/client";
+import { EmptyState } from "@/components/explore/EmptyState";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -43,17 +44,84 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-
-const COLUMNS = ["Name", "Workspace", "Storage", "Provisioned", ""];
+  FilterableTable,
+  type Column,
+} from "@/components/explore/FilterableTable";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 
 export const warehousesQueryKey = ["control-plane", "warehouses"] as const;
+
+/**
+ * Column set for the warehouses table. `value` (used for search + sort) resolves
+ * the workspace/storage ids to their display names so a search matches what the
+ * row actually shows, and the provisioned column returns its badge label so
+ * "provisioned"/"pending" are searchable too.
+ */
+function warehouseColumns(
+  wsName: (id: string) => string,
+  storageName: (id: string) => string,
+  onDelete: (wh: Warehouse) => void,
+): Column<Warehouse>[] {
+  return [
+    {
+      key: "name",
+      label: "Name",
+      sortable: true,
+      className: "font-medium",
+      value: (wh) => wh.name,
+      cell: (wh) => (
+        <Link
+          to={`/control-plane/warehouses/${wh.id}`}
+          className="font-medium text-primary hover:underline"
+        >
+          {wh.name}
+        </Link>
+      ),
+    },
+    {
+      key: "workspace",
+      label: "Workspace",
+      sortable: true,
+      value: (wh) => wsName(wh.workspaceId),
+      cell: (wh) => <span className="text-muted-foreground">{wsName(wh.workspaceId)}</span>,
+    },
+    {
+      key: "storage",
+      label: "Storage",
+      sortable: true,
+      value: (wh) => storageName(wh.storageConnId),
+      cell: (wh) => <span className="text-muted-foreground">{storageName(wh.storageConnId)}</span>,
+    },
+    {
+      key: "provisioned",
+      label: "Provisioned",
+      sortable: true,
+      value: (wh) => (wh.lakekeeperWarehouseId ? "Provisioned" : "Pending"),
+      cell: (wh) => (
+        <Badge variant={wh.lakekeeperWarehouseId ? "secondary" : "outline"}>
+          {wh.lakekeeperWarehouseId ? "Provisioned" : "Pending"}
+        </Badge>
+      ),
+    },
+    {
+      key: "actions",
+      label: "",
+      className: "text-right w-10",
+      cell: (wh) => (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-muted-foreground hover:text-destructive"
+          onClick={() => onDelete(wh)}
+          aria-label={`Delete ${wh.name}`}
+        >
+          <Trash2 className="h-4 w-4" />
+          Delete
+        </Button>
+      ),
+    },
+  ];
+}
 
 /**
  * Control Plane → Warehouses
@@ -138,60 +206,34 @@ export default function Warehouses() {
           <Alert variant="destructive">
             <AlertDescription>Failed to load warehouses. Please try again.</AlertDescription>
           </Alert>
+        ) : warehouses.isLoading ? (
+          <ListSkeleton rows={6} cols={5} />
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                {COLUMNS.map((col) => (
-                  <TableHead key={col || "actions"} className={col === "" ? "text-right" : undefined}>
-                    {col || <span className="sr-only">Actions</span>}
-                  </TableHead>
-                ))}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.length === 0 ? (
-                <TableRow className="hover:bg-transparent">
-                  <TableCell colSpan={COLUMNS.length} className="py-10 text-center text-muted-foreground">
-                    {warehouses.isLoading
-                      ? "Loading…"
-                      : wsFilter
-                        ? "No warehouses for this workspace."
-                        : "No warehouses yet — add one to get started."}
-                  </TableCell>
-                </TableRow>
+          <FilterableTable
+            rows={rows}
+            columns={warehouseColumns(wsName, storageName, setDeleteTarget)}
+            getId={(wh) => wh.id}
+            searchPlaceholder="Search warehouses…"
+            initialSort={{ key: "name", dir: "asc" }}
+            pageSize={25}
+            emptyText={
+              wsFilter ? (
+                "No warehouses for this workspace."
               ) : (
-                rows.map((wh) => (
-                  <TableRow key={wh.id}>
-                    <TableCell className="font-medium">
-                      <Link to={`/control-plane/warehouses/${wh.id}`} className="text-primary font-medium hover:underline">
-                        {wh.name}
-                      </Link>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">{wsName(wh.workspaceId)}</TableCell>
-                    <TableCell className="text-muted-foreground">{storageName(wh.storageConnId)}</TableCell>
-                    <TableCell>
-                      <Badge variant={wh.lakekeeperWarehouseId ? "secondary" : "outline"}>
-                        {wh.lakekeeperWarehouseId ? "Provisioned" : "Pending"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-muted-foreground hover:text-destructive"
-                        onClick={() => setDeleteTarget(wh)}
-                        aria-label={`Delete ${wh.name}`}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                        Delete
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
+                <EmptyState
+                  icon={Boxes}
+                  title="No warehouses yet"
+                  description="Provision an embedded-catalog warehouse over a storage connection."
+                  action={
+                    <Button size="sm" onClick={() => setAddOpen(true)}>
+                      <Plus className="mr-1 h-4 w-4" />
+                      Add warehouse
+                    </Button>
+                  }
+                />
+              )
+            }
+          />
         )}
       </CardContent>
 

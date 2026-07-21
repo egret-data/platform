@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArchiveRestore, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import { ArchiveRestore, FolderKanban, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -15,6 +15,7 @@ import {
 import type { WorkspaceDto } from "@/api/generated/model/workspaceDto";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
+import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { timeAgo, fullTimestamp } from "@/lib/relativeTime";
@@ -104,27 +105,24 @@ export default function Workspaces() {
 
   const columns: Column<WorkspaceDto>[] = [
     {
-      key: "slug",
-      label: "Slug",
+      // Name-first: humans recognise a workspace by its name, so that's the
+      // primary link; the slug (a machine id) rides along as a muted sub-line.
+      // `value` includes both so search still matches a slug.
+      key: "name",
+      label: "Workspace",
       sortable: true,
-      value: (w) => w.slug,
+      className: "font-medium",
+      value: (w) => `${w.name} ${w.slug}`,
       cell: (w) => (
         <button
           type="button"
           onClick={() => navigate(`/control-plane/workspaces/${w.id}`)}
-          className="font-mono text-sm text-primary hover:underline"
+          className="group flex flex-col items-start text-left"
         >
-          {w.slug}
+          <span className="text-primary group-hover:underline">{w.name}</span>
+          <span className="font-mono text-xs text-muted-foreground">{w.slug}</span>
         </button>
       ),
-    },
-    {
-      key: "name",
-      label: "Name",
-      sortable: true,
-      className: "font-medium",
-      value: (w) => w.name,
-      cell: (w) => w.name,
     },
     {
       key: "owner",
@@ -244,10 +242,23 @@ export default function Workspaces() {
               getId={(w) => w.id}
               searchPlaceholder="Search workspaces…"
               initialSort={{ key: "name", dir: "asc" }}
+              pageSize={25}
               emptyText={
-                listQ.isError
-                  ? String(listQ.error ?? "Failed to load workspaces.")
-                  : "No workspaces yet."
+                listQ.isError ? (
+                  String(listQ.error ?? "Failed to load workspaces.")
+                ) : (
+                  <EmptyState
+                    icon={FolderKanban}
+                    title="No workspaces yet"
+                    description="Create your first workspace to give a team its own data platform."
+                    action={
+                      <Button size="sm" onClick={() => setCreateOpen(true)}>
+                        <Plus className="mr-1 h-4 w-4" />
+                        New workspace
+                      </Button>
+                    }
+                  />
+                )
               }
               filters={
                 <FacetSelect

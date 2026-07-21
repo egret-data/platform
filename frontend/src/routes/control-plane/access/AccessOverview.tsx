@@ -7,6 +7,7 @@ import { listGroups, listRoles, listUsers } from "@/api/access";
 import { useControlPlaneAuditListAudit } from "@/api/generated/control-plane-audit/control-plane-audit";
 import { useAuth } from "@/auth/useAuth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 import { timeAgo } from "@/lib/relativeTime";
 import { cn } from "@/lib/utils";
 
@@ -121,14 +122,15 @@ export default function AccessOverview() {
   const highlightAdmins = platformAdmins.status === "ok" && platformAdminCount >= 3;
 
   const warnings: { key: string; message: string; to: string }[] = [];
-  if (roles.status === "ok") {
-    for (const r of roles.value.zeroAssignee) {
-      warnings.push({
-        key: `role-${r.id}`,
-        message: `Role ${r.name} has no assignees`,
-        to: "/control-plane/roles",
-      });
-    }
+  if (roles.status === "ok" && roles.value.zeroAssignee.length > 0) {
+    // Aggregate rather than list every role — hundreds of unassigned roles would
+    // otherwise bury the page in UUID-named lines. One line, linking to Roles.
+    const n = roles.value.zeroAssignee.length;
+    warnings.push({
+      key: "zero-assignee-roles",
+      message: `${n} role${n === 1 ? "" : "s"} ${n === 1 ? "has" : "have"} no assignees`,
+      to: "/control-plane/roles",
+    });
   }
   if (highlightAdmins) {
     warnings.push({
@@ -247,9 +249,13 @@ export default function AccessOverview() {
   );
 }
 
-/** Render a KPI value: "…" while loading, "—" on error, else the mapped value. */
+/**
+ * Render a KPI value: a skeleton shimmer while loading (so a slow tile reads as
+ * "loading", not "broken", next to siblings that already resolved), "—" on
+ * error, else the mapped value.
+ */
 function renderCount<T>(loadable: Loadable<T>, map: (v: T) => ReactNode): ReactNode {
-  if (loadable.status === "loading") return "…";
+  if (loadable.status === "loading") return <Skeleton className="h-7 w-14 rounded-md" />;
   if (loadable.status === "error") return "—";
   return map(loadable.value);
 }
@@ -269,9 +275,9 @@ function KpiTile({
     <Card className={highlight ? "border-highlight/50" : undefined}>
       <CardContent className="space-y-1 py-4">
         <p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p>
-        <p className={cn("text-2xl font-semibold tabular-nums", highlight && "text-highlight")}>
+        <div className={cn("text-2xl font-semibold tabular-nums", highlight && "text-highlight")}>
           {value}
-        </p>
+        </div>
         {sub ? <p className="text-xs text-muted-foreground">{sub}</p> : null}
       </CardContent>
     </Card>
@@ -297,7 +303,11 @@ function RecentChangesPanel() {
       </CardHeader>
       <CardContent className="space-y-3">
         {auditQuery.isLoading ? (
-          <p className="text-sm text-muted-foreground">…</p>
+          <div className="space-y-2">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <Skeleton key={i} className="h-4 w-full" />
+            ))}
+          </div>
         ) : auditQuery.isError || !page ? (
           <p className="text-sm text-muted-foreground">—</p>
         ) : page.entries.length === 0 ? (

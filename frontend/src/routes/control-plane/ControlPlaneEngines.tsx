@@ -44,15 +44,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  FilterableTable,
+  type Column,
+} from "@/components/explore/FilterableTable";
+import { EmptyState } from "@/components/explore/EmptyState";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 
 /**
  * Control Plane → Engines
@@ -99,7 +97,11 @@ export const TRINO_FIELD_DEFAULTS = {
   memory: "4Gi",
 };
 
-const COLUMNS = ["Name", "Type", "Endpoint", "Status", "Actions"];
+/** DNS name of the engine's coordinator/FE service, as shown in the Endpoint column. */
+function engineEndpoint(engine: Engine): string {
+  const suffix = engine.type === "starrocks" ? "-fe-service" : "-coordinator";
+  return `${engine.name}${suffix}.${engine.namespace}`;
+}
 
 // StarRocks per-user delegation mode (Access parity slice 3 + default-on
 // delegation, Task 4). `""` (Auto) is the DEFAULT — omitted from the body so
@@ -197,6 +199,9 @@ export default function ControlPlaneEngines() {
                   label={type.label}
                   rows={(engines.data ?? []).filter((e) => e.type === type.value)}
                   loading={engines.isLoading}
+                  onAdd={
+                    PROVISIONABLE.has(type.value) ? () => setAddOpen(true) : undefined
+                  }
                 />
               </TabsContent>
             ))}
@@ -214,77 +219,105 @@ export default function ControlPlaneEngines() {
   );
 }
 
+// Paginate long engine lists: the platform can hold hundreds of engines, and
+// each rendered row mounts a live status poll (`EngineStatusBadge`), so
+// capping the visible rows also caps the polling fan-out.
+const ENGINES_PAGE_SIZE = 25;
+
 function EngineTable({
   label,
   rows,
   loading,
+  onAdd,
 }: {
   label: string;
   rows: Engine[];
   loading: boolean;
+  onAdd?: () => void;
 }) {
+  if (loading) return <ListSkeleton rows={6} cols={5} />;
+
+  const columns: Column<Engine>[] = [
+    {
+      key: "name",
+      label: "Name",
+      sortable: true,
+      className: "font-medium",
+      value: (e) => e.name,
+      cell: (e) => (
+        <Link
+          to={`/control-plane/engines/${e.id}`}
+          className="text-primary hover:underline"
+        >
+          {e.name}
+        </Link>
+      ),
+    },
+    {
+      key: "type",
+      label: "Type",
+      value: (e) => e.type,
+      cell: (e) => <Badge variant="secondary">{e.type}</Badge>,
+    },
+    {
+      key: "endpoint",
+      label: "Endpoint",
+      value: (e) => engineEndpoint(e),
+      cell: (e) => (
+        <span
+          className="block max-w-[24rem] truncate font-mono text-xs text-muted-foreground"
+          title={engineEndpoint(e)}
+        >
+          {engineEndpoint(e)}
+        </span>
+      ),
+    },
+    {
+      key: "status",
+      label: "Status",
+      cell: (e) => <EngineStatusBadge id={e.id} fallback={e.status} />,
+    },
+    {
+      key: "actions",
+      label: "",
+      className: "text-right w-10",
+      cell: (e) => (
+        <Button variant="ghost" size="sm" asChild>
+          <Link
+            to={`/control-plane/engines/${e.id}`}
+            aria-label={`View ${e.name}`}
+          >
+            <ExternalLink className="h-4 w-4" />
+            Details
+          </Link>
+        </Button>
+      ),
+    },
+  ];
+
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          {COLUMNS.map((col) => (
-            <TableHead
-              key={col}
-              className={col === "Actions" ? "text-right" : undefined}
-            >
-              {col === "Actions" ? <span className="sr-only">Actions</span> : col}
-            </TableHead>
-          ))}
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {rows.length === 0 ? (
-          <TableRow className="hover:bg-transparent">
-            <TableCell
-              colSpan={COLUMNS.length}
-              className="py-10 text-center text-muted-foreground"
-            >
-              {loading ? "Loading…" : `No ${label} engines yet.`}
-            </TableCell>
-          </TableRow>
-        ) : (
-          rows.map((engine) => (
-            <TableRow key={engine.id}>
-              <TableCell className="font-medium">
-                <Link
-                  to={`/control-plane/engines/${engine.id}`}
-                  className="text-primary hover:underline"
-                >
-                  {engine.name}
-                </Link>
-              </TableCell>
-              <TableCell>
-                <Badge variant="secondary">{engine.type}</Badge>
-              </TableCell>
-              <TableCell className="font-mono text-xs text-muted-foreground">
-                {engine.name}
-                {engine.type === "starrocks" ? "-fe-service" : "-coordinator"}.
-                {engine.namespace}
-              </TableCell>
-              <TableCell>
-                <EngineStatusBadge id={engine.id} fallback={engine.status} />
-              </TableCell>
-              <TableCell className="text-right">
-                <Button variant="ghost" size="sm" asChild>
-                  <Link
-                    to={`/control-plane/engines/${engine.id}`}
-                    aria-label={`View ${engine.name}`}
-                  >
-                    <ExternalLink className="h-4 w-4" />
-                    Details
-                  </Link>
-                </Button>
-              </TableCell>
-            </TableRow>
-          ))
-        )}
-      </TableBody>
-    </Table>
+    <FilterableTable
+      rows={rows}
+      columns={columns}
+      getId={(e) => e.id}
+      searchPlaceholder={`Search ${label} engines…`}
+      initialSort={{ key: "name", dir: "asc" }}
+      pageSize={ENGINES_PAGE_SIZE}
+      emptyText={
+        <EmptyState
+          icon={Server}
+          title={`No ${label} engines yet`}
+          // No CTA button here: the page header already shows a persistent
+          // "Add engine" action, so a second one would be redundant (and the
+          // wording adapts to whether this engine kind is provisionable yet).
+          description={
+            onAdd
+              ? 'Use "Add engine" above to provision a cluster against a catalog warehouse.'
+              : "Support for this engine arrives in a later phase."
+          }
+        />
+      }
+    />
   );
 }
 

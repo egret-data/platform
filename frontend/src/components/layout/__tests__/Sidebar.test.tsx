@@ -161,7 +161,7 @@ describe("Sidebar – Identity + Access groups", () => {
       "href",
       "/control-plane/users",
     );
-    expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Access overview" })).toHaveAttribute(
       "href",
       "/control-plane/access-overview",
     );
@@ -185,7 +185,7 @@ describe("Sidebar – Identity + Access groups", () => {
 
   test("Overview leads the Control Plane, ahead of the Identity group", () => {
     renderSidebar("/control-plane/workspaces");
-    const overview = screen.getByRole("link", { name: "Overview" });
+    const overview = screen.getByRole("link", { name: "Access overview" });
     const users = screen.getByRole("link", { name: "Users" });
     // Overview is its own top zone and must precede the Identity group's Users.
     expect(overview.compareDocumentPosition(users) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

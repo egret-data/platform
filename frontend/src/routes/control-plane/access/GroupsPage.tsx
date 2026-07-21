@@ -24,6 +24,7 @@ import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
+import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -291,10 +292,23 @@ export default function GroupsPage() {
               getId={(g) => g.id}
               searchPlaceholder="Search groups…"
               initialSort={{ key: "name", dir: "asc" }}
+              pageSize={25}
               emptyText={
-                groups.isError
-                  ? (groups.error?.message ?? "Failed to load groups.")
-                  : "No groups."
+                groups.isError ? (
+                  (groups.error?.message ?? "Failed to load groups.")
+                ) : (
+                  <EmptyState
+                    icon={UsersRound}
+                    title="No groups yet"
+                    description="Groups bundle role grants — synced from OIDC or created locally."
+                    action={
+                      <Button size="sm" onClick={() => setCreateOpen(true)}>
+                        <Plus className="mr-1 h-4 w-4" />
+                        New group
+                      </Button>
+                    }
+                  />
+                )
               }
               filters={
                 <FacetSelect

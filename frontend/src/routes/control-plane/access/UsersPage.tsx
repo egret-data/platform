@@ -10,6 +10,7 @@ import {
   Plus,
   ShieldCheck,
   Trash2,
+  Users,
 } from "lucide-react";
 
 import {
@@ -28,6 +29,7 @@ import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
+import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -160,7 +162,7 @@ export default function UsersPage() {
         ) : (
           <div className="flex flex-wrap gap-1">
             {u.roles.map((r) => (
-              <Badge key={r} variant="secondary">
+              <Badge key={r} variant="secondary" className="max-w-[12rem] truncate" title={r}>
                 {r}
               </Badge>
             ))}
@@ -176,7 +178,7 @@ export default function UsersPage() {
         ) : (
           <div className="flex flex-wrap gap-1">
             {u.groups.map((g) => (
-              <Badge key={g} variant="outline">
+              <Badge key={g} variant="outline" className="max-w-[12rem] truncate" title={g}>
                 {g}
               </Badge>
             ))}
@@ -337,10 +339,23 @@ export default function UsersPage() {
               getId={(u) => u.id}
               searchPlaceholder="Search users…"
               initialSort={{ key: "email", dir: "asc" }}
+              pageSize={25}
               emptyText={
-                users.isError
-                  ? (users.error?.message ?? "Failed to load users.")
-                  : "No users."
+                users.isError ? (
+                  (users.error?.message ?? "Failed to load users.")
+                ) : (
+                  <EmptyState
+                    icon={Users}
+                    title="No users yet"
+                    description="Add a local account, or invite people to sign in with SSO."
+                    action={
+                      <Button size="sm" onClick={() => setCreateOpen(true)}>
+                        <Plus className="mr-1 h-4 w-4" />
+                        New user
+                      </Button>
+                    }
+                  />
+                )
               }
               selection={
                 bulk.bulkMode ? { selected: bulk.selected, onToggle: bulk.toggle } : undefined

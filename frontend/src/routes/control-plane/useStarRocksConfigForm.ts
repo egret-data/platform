@@ -329,6 +329,11 @@ export interface StarRocksConfigForm {
   // meta (same field names as `useEngineConfigForm` so `SaveBar` works unchanged)
   error: string | null;
   dirty: boolean;
+  // Mirrors `useEngineConfigForm.editedSinceLoad` so the unsaved-changes guard can
+  // read one field for either engine kind. Here it equals `dirty`: StarRocks
+  // `dirty` is already `resolveConfig(body, sc) !== seed`, which settles to false on
+  // load, so it never false-positives the way the Trino built-vs-stored diff can.
+  editedSinceLoad: boolean;
   saving: boolean;
   saved: boolean;
   save: () => void;
@@ -544,6 +549,7 @@ export function useStarRocksConfigForm(
     storedConfig: sc,
     error,
     dirty,
+    editedSinceLoad: dirty,
     saving: saveMutation.isPending,
     saved: saveMutation.isSuccess && !dirty,
     save,

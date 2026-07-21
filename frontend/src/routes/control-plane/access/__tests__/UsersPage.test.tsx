@@ -98,7 +98,7 @@ describe("UsersPage", () => {
   test("renders an empty state when there are no users", async () => {
     vi.mocked(api.listUsers).mockResolvedValue([]);
     renderPage();
-    expect(await screen.findByText("No users.")).toBeInTheDocument();
+    expect(await screen.findByText("No users yet")).toBeInTheDocument();
   });
 
   test("the summary strip shows the total user count", async () => {
