@@ -1,11 +1,21 @@
 import type { ComponentType, ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { ArrowRight, Compass, ShieldCheck, UserCog, Users } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  CheckCircle2,
+  ChevronDown,
+  Compass,
+  ShieldCheck,
+  UserCog,
+  Users,
+} from "lucide-react";
 
 import { listGroups, listRoles, listUsers } from "@/api/access";
 import { useControlPlaneAuditListAudit } from "@/api/generated/control-plane-audit/control-plane-audit";
 import { useAuth } from "@/auth/useAuth";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { timeAgo } from "@/lib/relativeTime";
@@ -65,17 +75,6 @@ function fromQuery<T, R>(
   return { status: "ok", value: map(q.data) };
 }
 
-const QUICK_LINKS = [
-  { to: "/control-plane/users", label: "Users" },
-  { to: "/control-plane/groups", label: "Groups" },
-  { to: "/control-plane/roles", label: "Roles" },
-  { to: "/control-plane/permissions", label: "Permissions" },
-  { to: "/control-plane/access-explorer", label: "Access Explorer" },
-  { to: "/control-plane/policies", label: "Policies" },
-  { to: "/control-plane/classifications", label: "Classifications" },
-  { to: "/control-plane/audit-log", label: "Audit log" },
-];
-
 /**
  * Control Plane → Access control → Overview.
  *
@@ -109,7 +108,11 @@ export default function AccessOverview() {
     total: data.length,
     active: data.filter((u) => u.status === "active").length,
   }));
-  const groups = fromQuery(groupsQuery, (data) => ({ total: data.length }));
+  const groups = fromQuery(groupsQuery, (data) => ({
+    total: data.length,
+    synced: data.filter((g) => g.source === "oidc").length,
+    local: data.filter((g) => g.source !== "oidc").length,
+  }));
   const roles = fromQuery(rolesQuery, (data) => ({
     total: data.length,
     platform: data.filter((r) => r.scope === "platform").length,
@@ -119,23 +122,31 @@ export default function AccessOverview() {
   const platformAdmins = fromQuery(usersQuery, (data) => data.filter((u) => u.roles.includes("platform_admin")).length);
 
   const platformAdminCount = platformAdmins.status === "ok" ? platformAdmins.value : 0;
-  const highlightAdmins = platformAdmins.status === "ok" && platformAdminCount >= 3;
+  // Share of accounts that are platform admins. Highlight the tile as a posture
+  // concern only when that share is genuinely high (> 10%) — a fixed ">= 3"
+  // threshold fired on every real deployment and so meant nothing.
+  const userTotal = users.status === "ok" ? users.value.total : 0;
+  const adminPct = userTotal > 0 ? Math.round((platformAdminCount / userTotal) * 100) : 0;
+  const highlightAdmins =
+    platformAdmins.status === "ok" && users.status === "ok" && adminPct > 10;
 
-  const warnings: { key: string; message: string; to: string }[] = [];
+  const warnings: { key: string; title: string; detail: string; to: string }[] = [];
   if (roles.status === "ok" && roles.value.zeroAssignee.length > 0) {
     // Aggregate rather than list every role — hundreds of unassigned roles would
-    // otherwise bury the page in UUID-named lines. One line, linking to Roles.
+    // otherwise bury the page in UUID-named lines. One row, linking to Roles.
     const n = roles.value.zeroAssignee.length;
     warnings.push({
       key: "zero-assignee-roles",
-      message: `${n} role${n === 1 ? "" : "s"} ${n === 1 ? "has" : "have"} no assignees`,
+      title: `${n} role${n === 1 ? "" : "s"} ${n === 1 ? "has" : "have"} no assignees`,
+      detail: "They grant nothing until assigned to a user or group.",
       to: "/control-plane/roles",
     });
   }
   if (highlightAdmins) {
     warnings.push({
       key: "platform-admins",
-      message: `Review platform admins (${platformAdminCount})`,
+      title: `${platformAdminCount} platform admins · ${adminPct}% of users`,
+      detail: "Review who holds full-platform access and trim if it's too broad.",
       to: "/control-plane/users",
     });
   }
@@ -153,27 +164,74 @@ export default function AccessOverview() {
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <KpiTile
           label="Users"
+          to="/control-plane/users"
           value={renderCount(users, (v) => v.total)}
           sub={users.status === "ok" ? `${users.value.active} active` : undefined}
         />
-        <KpiTile label="Groups" value={renderCount(groups, (v) => v.total)} />
+        <KpiTile
+          label="Groups"
+          to="/control-plane/groups"
+          value={renderCount(groups, (v) => v.total)}
+          sub={
+            groups.status === "ok"
+              ? `${groups.value.local} local · ${groups.value.synced} synced`
+              : undefined
+          }
+        />
         <KpiTile
           label="Roles"
+          to="/control-plane/roles"
           value={renderCount(roles, (v) => v.total)}
           sub={roles.status === "ok" ? `${roles.value.platform} platform · ${roles.value.workspace} workspace` : undefined}
         />
         <KpiTile
           label="Platform admins"
+          to="/control-plane/users"
           value={renderCount(platformAdmins, (v) => v)}
           highlight={highlightAdmins}
+          sub={
+            platformAdmins.status === "ok" && users.status === "ok" ? (
+              highlightAdmins ? (
+                // Icon + text, not colour alone, so the "review this" signal
+                // survives for colour-blind users (WCAG color-not-only).
+                <span
+                  className="inline-flex items-center gap-1 font-medium"
+                  style={{ color: "var(--highlight)" }}
+                >
+                  <AlertTriangle className="h-3 w-3" />
+                  {adminPct}% of users — review
+                </span>
+              ) : (
+                `${adminPct}% of users`
+              )
+            ) : undefined
+          }
         />
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">How access works</CardTitle>
-        </CardHeader>
-        <CardContent>
+      {/* The working area: what needs attention (primary) beside the recent
+          real changes (secondary). Two columns on desktop, stacked on mobile.
+          Non-admins can't read the audit feed, so they get a full-width panel. */}
+      {isPlatformAdmin ? (
+        <div className="grid gap-5 lg:grid-cols-3">
+          <div className="lg:col-span-2">
+            <NeedsAttentionCard warnings={warnings} />
+          </div>
+          <RecentChangesPanel />
+        </div>
+      ) : (
+        <NeedsAttentionCard warnings={warnings} />
+      )}
+
+      {/* Orientation content: open by default so the access model is visible at
+          a glance, but collapsible for admins who don't need the reminder. It
+          sits last so the actionable panels still lead the page. */}
+      <details open className="group rounded-xl border bg-card text-card-foreground shadow-sm">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-2 p-4 text-lg font-semibold [&::-webkit-details-marker]:hidden">
+          How access works
+          <ChevronDown className="h-5 w-5 text-muted-foreground transition-transform group-open:rotate-180" />
+        </summary>
+        <div className="px-4 pb-4">
           <ol className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             {ACCESS_LAYERS.map((layer, i) => (
               <li key={layer.name} className="relative rounded-lg border p-3">
@@ -200,52 +258,71 @@ export default function AccessOverview() {
               </li>
             ))}
           </ol>
-        </CardContent>
-      </Card>
+        </div>
+      </details>
+    </div>
+  );
+}
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">Warnings</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {warnings.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No issues found.</p>
-          ) : (
-            <ul className="space-y-2">
-              {warnings.map((w) => (
-                <li key={w.key} className="text-sm">
-                  <Link to={w.to} className="text-foreground underline-offset-2 hover:underline">
-                    {w.message}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </CardContent>
-      </Card>
-
-      {isPlatformAdmin ? <RecentChangesPanel /> : null}
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">Quick links</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <ul className="flex flex-wrap gap-3">
-            {QUICK_LINKS.map((l) => (
-              <li key={l.to}>
+/**
+ * The primary posture panel: an actionable list of things worth the admin's
+ * attention (unassigned roles, an over-broad admin set), each row linking to
+ * where it's fixed. When there's nothing, a positive "all clear" state rather
+ * than a bare line — the absence of problems is itself information.
+ */
+function NeedsAttentionCard({
+  warnings,
+}: {
+  warnings: { key: string; title: string; detail: string; to: string }[];
+}) {
+  return (
+    <Card className="h-full">
+      <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
+        <CardTitle className="text-lg">Needs attention</CardTitle>
+        {warnings.length > 0 ? (
+          <Badge variant="warning">{warnings.length}</Badge>
+        ) : null}
+      </CardHeader>
+      <CardContent>
+        {warnings.length === 0 ? (
+          <div className="flex flex-col items-center gap-2 py-8 text-center">
+            <span className="grid h-10 w-10 place-items-center rounded-full border">
+              <CheckCircle2 className="h-5 w-5" style={{ color: "var(--success)" }} />
+            </span>
+            <p className="text-sm font-medium">You&apos;re all clear</p>
+            <p className="text-xs text-muted-foreground">
+              No posture issues need your attention right now.
+            </p>
+          </div>
+        ) : (
+          <ul className="space-y-2">
+            {warnings.map((w) => (
+              <li key={w.key}>
                 <Link
-                  to={l.to}
-                  className="rounded-md border px-3 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+                  to={w.to}
+                  className="group flex items-start gap-3 rounded-lg border p-3 transition-colors hover:border-primary/40 hover:bg-accent"
                 >
-                  {l.label}
+                  <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-md border">
+                    <AlertTriangle
+                      className="h-4 w-4"
+                      style={{ color: "var(--warning)" }}
+                    />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-foreground">{w.title}</p>
+                    <p className="text-xs text-muted-foreground">{w.detail}</p>
+                  </div>
+                  <span className="mt-0.5 inline-flex shrink-0 items-center gap-1 text-xs font-medium text-primary">
+                    Review
+                    <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
+                  </span>
                 </Link>
               </li>
             ))}
           </ul>
-        </CardContent>
-      </Card>
-    </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -264,23 +341,42 @@ function KpiTile({
   label,
   value,
   sub,
+  to,
   highlight,
 }: {
   label: string;
   value: ReactNode;
   sub?: ReactNode;
+  /** When set, the whole tile is a link into the matching section. */
+  to?: string;
   highlight?: boolean;
 }) {
-  return (
-    <Card className={highlight ? "border-highlight/50" : undefined}>
+  const card = (
+    <Card
+      className={cn(
+        "h-full transition-colors",
+        to && "hover:border-primary/50",
+        highlight && "border-highlight/50",
+      )}
+    >
       <CardContent className="space-y-1 py-4">
         <p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p>
         <div className={cn("text-2xl font-semibold tabular-nums", highlight && "text-highlight")}>
           {value}
         </div>
-        {sub ? <p className="text-xs text-muted-foreground">{sub}</p> : null}
+        {sub ? <div className="text-xs text-muted-foreground">{sub}</div> : null}
       </CardContent>
     </Card>
+  );
+
+  if (!to) return card;
+  return (
+    <Link
+      to={to}
+      className="block rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+    >
+      {card}
+    </Link>
   );
 }
 
@@ -290,14 +386,16 @@ function KpiTile({
  * non-admins never issue the request.
  */
 function RecentChangesPanel() {
+  // `kind: "mutation"` filters out the read/authorization-decision events that
+  // otherwise flood the feed — "Recent changes" should mean actual changes.
   const auditQuery = useControlPlaneAuditListAudit(
-    { limit: 8 },
+    { limit: 8, kind: "mutation" },
     { query: { retry: false } },
   );
   const page = auditQuery.data?.status === 200 ? auditQuery.data.data : undefined;
 
   return (
-    <Card>
+    <Card className="h-full">
       <CardHeader>
         <CardTitle className="text-lg">Recent changes</CardTitle>
       </CardHeader>

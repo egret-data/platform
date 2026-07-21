@@ -144,7 +144,7 @@ describe("AccessOverview", () => {
     ).toBeInTheDocument();
   });
 
-  test("shows 'No issues found.' when there are no warnings", async () => {
+  test("shows an 'all clear' state when there are no warnings", async () => {
     vi.mocked(api.listRoles).mockResolvedValue([
       { id: "r1", scope: "platform", name: "Admin", description: "", permissionCount: 10, assigneeCount: 2, inheritedPermissions: [] },
     ]);
@@ -154,7 +154,7 @@ describe("AccessOverview", () => {
 
     renderPage();
 
-    expect(await screen.findByText(/No issues found\./i)).toBeInTheDocument();
+    expect(await screen.findByText(/all clear/i)).toBeInTheDocument();
   });
 
   test("renders the Recent changes panel with audit entries for a platform_admin", async () => {
@@ -173,11 +173,14 @@ describe("AccessOverview", () => {
     expect(auditApi.useControlPlaneAuditListAudit).not.toHaveBeenCalled();
   });
 
-  test("renders a quick link to the Access Explorer", async () => {
-    renderPage();
+  test("Recent changes requests mutations only (not read/decision noise)", async () => {
+    renderPage(ADMIN_ME);
 
-    const link = await screen.findByRole("link", { name: /^Access Explorer$/ });
-    expect(link).toHaveAttribute("href", "/control-plane/access-explorer");
+    await screen.findByText(/recent changes/i);
+    expect(auditApi.useControlPlaneAuditListAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "mutation" }),
+      expect.anything(),
+    );
   });
 
   test("degrades gracefully when a sub-query fails (never blanks the page)", async () => {
