@@ -166,7 +166,7 @@ export default function UsersPage() {
             </AvatarFallback>
           </Avatar>
           <div className="min-w-0">
-            <div className="truncate font-medium text-foreground group-hover:underline">
+            <div className="truncate font-medium text-primary group-hover:underline">
               {u.name?.trim() || u.email}
             </div>
             {u.name?.trim() ? (
