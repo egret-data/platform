@@ -1,5 +1,6 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight, Search } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -34,6 +35,7 @@ export function FilterableTable<T>({
   noMatchText = "No matches.",
   selection,
   pageSize,
+  bordered,
 }: {
   rows: T[];
   columns: Column<T>[];
@@ -56,6 +58,9 @@ export function FilterableTable<T>({
    * un-paginated (renders every row), matching the original behavior.
    */
   pageSize?: number;
+  /** Wrap the table in a rounded border so it reads as a contained block
+   * (for card-less pages). */
+  bordered?: boolean;
 }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<SortState<string> | undefined>(initialSort);
@@ -127,7 +132,7 @@ export function FilterableTable<T>({
         </div>
         {filters}
       </div>
-      <div className="overflow-x-auto">
+      <div className={cn("overflow-x-auto", bordered && "rounded-md border")}>
         <Table>
           <TableHeader>
             <TableRow>

@@ -22,13 +22,6 @@ import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Dialog,
@@ -326,42 +319,33 @@ export default function RolesPage() {
 
   return (
     <div className="space-y-5">
-      <div>
-        <h1 className="text-2xl font-semibold leading-tight">Roles</h1>
-        <p className="text-sm text-muted-foreground">
-          Platform roles apply across all of egret; workspace roles apply inside a single
-          workspace and are assigned per-workspace on that workspace's Members page.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold leading-tight">Roles</h1>
+          <p className="text-sm text-muted-foreground">
+            Platform roles apply across all of egret; workspace roles apply inside a single
+            workspace and are assigned per-workspace on that workspace's Members page.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant={treeView ? "secondary" : "outline"}
+            onClick={() => setTreeView((v) => !v)}
+            aria-pressed={treeView}
+          >
+            {treeView ? "List view" : "Tree view"}
+          </Button>
+          {isAdmin && (
+            <Button size="sm" onClick={() => setCreateOpen(true)}>
+              <Plus className="mr-1 h-4 w-4" />
+              New role
+            </Button>
+          )}
+        </div>
       </div>
 
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between gap-2">
-            <div className="space-y-1.5">
-              <CardTitle className="text-lg">All roles</CardTitle>
-              <CardDescription>
-                Edit a role's permissions to change what it grants.
-              </CardDescription>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button
-                size="sm"
-                variant={treeView ? "secondary" : "outline"}
-                onClick={() => setTreeView((v) => !v)}
-                aria-pressed={treeView}
-              >
-                {treeView ? "List view" : "Tree view"}
-              </Button>
-              {isAdmin && (
-                <Button size="sm" onClick={() => setCreateOpen(true)}>
-                  <Plus className="mr-1 h-4 w-4" />
-                  New role
-                </Button>
-              )}
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
+      <div className="space-y-4">
           {deleteError && (
             <Alert variant="destructive" className="mb-4">
               <AlertDescription>{deleteError}</AlertDescription>
@@ -391,6 +375,7 @@ export default function RolesPage() {
               searchPlaceholder="Search roles…"
               initialSort={{ key: "name", dir: "asc" }}
               pageSize={25}
+              bordered
               emptyText={
                 roles.isError ? (
                   (roles.error?.message ?? "Failed to load roles.")
@@ -423,8 +408,7 @@ export default function RolesPage() {
               }
             />
           )}
-        </CardContent>
-      </Card>
+      </div>
 
       <CreateRoleDialog open={createOpen} onOpenChange={setCreateOpen} />
       <RoleAssigneesDialog
