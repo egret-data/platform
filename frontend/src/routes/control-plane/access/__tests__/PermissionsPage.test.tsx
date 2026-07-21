@@ -1,5 +1,6 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, test, vi } from "vitest";
 
@@ -34,18 +35,26 @@ const GROUPS: api.PermissionCatalogGroup[] = [
   },
 ];
 
+const ROLES = [
+  { id: "r-admin", name: "Admin", scope: "platform", description: "", permissionCount: 0, assigneeCount: 0, inheritedPermissions: [] },
+  { id: "r-analyst", name: "Analyst", scope: "platform", description: "", permissionCount: 0, assigneeCount: 0, inheritedPermissions: [] },
+] as unknown as api.AccessRole[];
+
 function renderPage() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <PermissionsPage />
+      <MemoryRouter>
+        <PermissionsPage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
 
 describe("PermissionsPage", () => {
-  test("renders permission keys, their area, and role badges", async () => {
+  test("renders permission keys, their area, and a granted-role count", async () => {
     vi.mocked(api.listPermissions).mockResolvedValue(GROUPS);
+    vi.mocked(api.listRoles).mockResolvedValue(ROLES);
     renderPage();
 
     expect(await screen.findByText("users.read")).toBeInTheDocument();
@@ -53,13 +62,14 @@ describe("PermissionsPage", () => {
     // Areas surface as a column badge (the "Users" area has two permissions).
     expect(screen.getAllByText("Users").length).toBeGreaterThan(0);
     expect(screen.getByText("Policies")).toBeInTheDocument();
-    // Roles a permission is granted to.
-    expect(screen.getAllByText("Admin").length).toBeGreaterThan(0);
-    expect(screen.getByText("Analyst")).toBeInTheDocument();
+    // "Granted to" is now a count, not a chip list: policies.read → 2 roles.
+    expect(screen.getByText("2 roles")).toBeInTheDocument();
+    expect(screen.getByText("1 role")).toBeInTheDocument();
   });
 
   test("summarises the catalog in the strip", async () => {
     vi.mocked(api.listPermissions).mockResolvedValue(GROUPS);
+    vi.mocked(api.listRoles).mockResolvedValue(ROLES);
     renderPage();
 
     await screen.findByText("users.read");
@@ -70,14 +80,30 @@ describe("PermissionsPage", () => {
     expect(screen.getByText("ungranted")).toBeInTheDocument();
   });
 
-  test("renders a muted dash when a permission has no roles granted", async () => {
+  test("shows 'Not granted' for a permission with no roles", async () => {
     vi.mocked(api.listPermissions).mockResolvedValue(GROUPS);
+    vi.mocked(api.listRoles).mockResolvedValue(ROLES);
     renderPage();
 
-    // The row for users.write should show a "—" placeholder rather than a badge.
+    // The row for users.write has no grants → "Not granted", no count link.
     const row = (await screen.findByText("users.write")).closest("tr");
     expect(row).not.toBeNull();
-    expect(row!.textContent).toContain("—");
+    expect(row!.textContent).toContain("Not granted");
+  });
+
+  test("the count opens a dialog listing (and linking) the granted roles", async () => {
+    vi.mocked(api.listPermissions).mockResolvedValue(GROUPS);
+    vi.mocked(api.listRoles).mockResolvedValue(ROLES);
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("policies.read");
+    await user.click(screen.getByText("2 roles"));
+
+    const dialog = await screen.findByRole("dialog");
+    // Both granted roles are listed, and resolvable ones link to their detail page.
+    expect(within(dialog).getByText("Admin")).toBeInTheDocument();
+    expect(within(dialog).getByText("Analyst")).toBeInTheDocument();
   });
 });
 
@@ -105,6 +131,7 @@ const SEARCH_GROUPS: api.PermissionCatalogGroup[] = [
 describe("PermissionsPage search", () => {
   test("filters the table and restores when cleared", async () => {
     vi.mocked(api.listPermissions).mockResolvedValue(SEARCH_GROUPS);
+    vi.mocked(api.listRoles).mockResolvedValue(ROLES);
     const user = userEvent.setup();
     renderPage();
 
