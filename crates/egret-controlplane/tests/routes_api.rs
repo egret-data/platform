@@ -2828,22 +2828,34 @@ async fn cannot_delete_the_last_platform_admin() {
     );
 }
 
-/// `DELETE /users/{id}` (Task 4, spec-review follow-up): a user who OWNS
-/// content (here a dashboard via `dashboards.created_by`, a plain FK to
-/// `users(id)`) cannot be hard-deleted yet — the row delete trips a Postgres
-/// `foreign_key_violation` (23503) which `UserRepo::hard_delete` maps to a
-/// `Conflict`. The route must return 409 (NOT a raw 500), and — because the
-/// whole delete runs in one transaction that rolls back — the user must still
-/// exist afterwards.
+/// `DELETE /users/{id}` (Task 4, then UDR Task 2): a user who OWNS content —
+/// a dashboard via `analytics.dashboards.created_by` (nullable, `ON DELETE
+/// SET NULL` FK per mig 0093) AND a notebook via `analytics.notebooks.
+/// owner_user_id` (NOT NULL, no `ON DELETE` action) — can now be hard-deleted:
+/// the dashboard's attribution is nulled out by its FK, and the notebook is
+/// reassigned to the deleting admin by `UserRepo::hard_delete` before the row
+/// delete, so nothing trips `foreign_key_violation` (23503) and the content
+/// survives.
 #[tokio::test]
-async fn deleting_a_content_owner_conflicts_not_500() {
+async fn deleting_a_content_owner_reassigns_and_succeeds() {
     let Some(f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
     let admin_token = session_for(&f, "delete_owner_admin", true).await;
+    let (admin_id,): (Uuid,) = sqlx::query_as(
+        "SELECT pra.principal_id FROM access_grants pra \
+         JOIN roles r ON r.id = pra.role_id \
+         JOIN sessions s ON s.token_hash = $1 \
+         WHERE r.name = 'platform_admin' AND pra.scope_type = 'platform' \
+           AND pra.principal_id = s.user_id",
+    )
+    .bind(egret_auth::token::hash_token(&admin_token))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the admin's own platform_admin grant");
 
-    // A normal target user who will own a dashboard.
+    // A normal target user who will own a dashboard AND a notebook.
     let email = format!("content_owner_{}@egret.local", Uuid::new_v4().simple());
     let user_id = f
         .users
@@ -2852,8 +2864,7 @@ async fn deleting_a_content_owner_conflicts_not_500() {
         .expect("insert target user");
 
     // A workspace + a dashboard created_by the target (`analytics.dashboards`.
-    // `created_by` is a plain FK to `users(id)` with no ON DELETE action — the
-    // blocking case; the table was moved to the `analytics` schema in mig 0067).
+    // `created_by` is nullable and carries `ON DELETE SET NULL` since mig 0093).
     let (ws_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO workspaces (slug, name) VALUES ($1, 'Delete FK Test') RETURNING id",
     )
@@ -2861,15 +2872,27 @@ async fn deleting_a_content_owner_conflicts_not_500() {
     .fetch_one(&f.db.pool)
     .await
     .expect("insert workspace");
-    sqlx::query(
+    let (dashboard_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO analytics.dashboards (workspace_id, name, created_by) \
-         VALUES ($1, 'Owned', $2)",
+         VALUES ($1, 'Owned', $2) RETURNING id",
     )
     .bind(ws_id)
     .bind(user_id.0)
-    .execute(&f.db.pool)
+    .fetch_one(&f.db.pool)
     .await
     .expect("insert dashboard owned by the target");
+
+    // A notebook owned by the target (`analytics.notebooks.owner_user_id` is
+    // NOT NULL with a plain FK — the one column `hard_delete` must reassign).
+    let (notebook_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO analytics.notebooks (workspace_id, owner_user_id, name) \
+         VALUES ($1, $2, 'Owned Notebook') RETURNING id",
+    )
+    .bind(ws_id)
+    .bind(user_id.0)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert notebook owned by the target");
 
     let resp = f
         .app
@@ -2885,19 +2908,37 @@ async fn deleting_a_content_owner_conflicts_not_500() {
     let (status, j) = into_json(resp).await;
     assert_eq!(
         status,
-        StatusCode::CONFLICT,
-        "deleting a content-owning user must 409, not 500; body={j}"
+        StatusCode::NO_CONTENT,
+        "deleting a content-owning user must now succeed; body={j}"
     );
+
+    // The user is gone.
     assert!(
-        j["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("owns content"),
-        "409 body should explain the content-ownership limitation; body={j}"
+        f.users.find_by_id(user_id).await.unwrap().is_none(),
+        "the content owner must be deleted"
     );
-    // The transaction rolled back — the user is untouched.
-    assert!(
-        f.users.find_by_id(user_id).await.unwrap().is_some(),
-        "the content owner must still exist after the failed delete (tx rolled back)"
+
+    // The dashboard survives, attribution nulled out.
+    let dashboard_created_by: Option<Uuid> =
+        sqlx::query_scalar("SELECT created_by FROM analytics.dashboards WHERE id = $1")
+            .bind(dashboard_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("dashboard must still exist");
+    assert_eq!(
+        dashboard_created_by, None,
+        "dashboard.created_by must be nulled out by its ON DELETE SET NULL FK"
+    );
+
+    // The notebook survives, reassigned to the deleting admin.
+    let notebook_owner: Uuid =
+        sqlx::query_scalar("SELECT owner_user_id FROM analytics.notebooks WHERE id = $1")
+            .bind(notebook_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("notebook must still exist");
+    assert_eq!(
+        notebook_owner, admin_id,
+        "notebook.owner_user_id must be reassigned to the deleting admin"
     );
 }
