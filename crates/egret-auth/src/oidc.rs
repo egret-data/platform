@@ -143,7 +143,23 @@ pub struct OidcService {
     /// [`Self::provider_jwks`] can fetch it independently of the `openidconnect`
     /// client (which caches its own copy for id_token verification only).
     jwks_uri: String,
+    /// Short-TTL cache of the provider JWKS, shared across clones. Backs
+    /// [`Self::logout_jwks`] so a stream of unauthenticated back-channel logout
+    /// POSTs can't amplify into a JWKS fetch per request, and so revocation
+    /// survives a transient IdP JWKS outage (fetch failure → last good keys).
+    jwks_cache: std::sync::Arc<std::sync::RwLock<Option<CachedJwks>>>,
 }
+
+/// A provider JWKS with the instant it was fetched, for TTL expiry.
+struct CachedJwks {
+    jwks: jsonwebtoken::jwk::JwkSet,
+    fetched_at: std::time::Instant,
+}
+
+/// How long a fetched JWKS is served from cache before a refetch. Keycloak key
+/// rotation is infrequent and back-channel delivery is retried, so a few minutes
+/// of staleness is safe; the win is bounding unauthenticated fetch amplification.
+const JWKS_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 fn oidc_err(msg: impl std::fmt::Display) -> Error {
     Error::Internal(anyhow::anyhow!("oidc: {msg}"))
@@ -176,6 +192,7 @@ impl OidcService {
             issuer_url: cfg.issuer_url.clone(),
             client_id: cfg.client_id.clone(),
             jwks_uri,
+            jwks_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
         })
     }
 
@@ -189,10 +206,53 @@ impl OidcService {
         &self.client_id
     }
 
-    /// Fetch the provider's current JWKS. Used to verify back-channel logout
-    /// tokens, which arrive server-to-server outside the `openidconnect` client's
-    /// own (id_token-only) verification path. Not cached: back-channel logout is
-    /// low-volume and a fresh fetch tolerates IdP key rotation.
+    /// Provider JWKS for verifying back-channel logout tokens, served from a
+    /// short-TTL in-memory cache (see [`JWKS_TTL`]). Callers on the unauthenticated
+    /// `/backchannel-logout` path must use this, not [`Self::provider_jwks`]:
+    /// caching stops a stream of logout POSTs (including garbage ones) from
+    /// amplifying into one IdP fetch each, and a fetch failure falls back to the
+    /// last good keys so a transient JWKS outage doesn't silently drop a revoke.
+    pub async fn logout_jwks(&self) -> Result<jsonwebtoken::jwk::JwkSet> {
+        // Fast path: a cached copy still within its TTL.
+        if let Some(jwks) = self.cached_jwks(true) {
+            return Ok(jwks);
+        }
+        // Cold or stale: refetch. On failure, fall back to any cached copy so
+        // revocation keeps working through a transient IdP JWKS outage.
+        match self.provider_jwks().await {
+            Ok(jwks) => {
+                if let Ok(mut guard) = self.jwks_cache.write() {
+                    *guard = Some(CachedJwks {
+                        jwks: jwks.clone(),
+                        fetched_at: std::time::Instant::now(),
+                    });
+                }
+                Ok(jwks)
+            }
+            Err(e) => match self.cached_jwks(false) {
+                Some(jwks) => {
+                    tracing::warn!(error = %e, "provider JWKS refetch failed; using cached keys");
+                    Ok(jwks)
+                }
+                None => Err(e),
+            },
+        }
+    }
+
+    /// Read the cached JWKS. When `fresh_only`, returns `None` unless the cached
+    /// copy is still within [`JWKS_TTL`]; otherwise returns any cached copy
+    /// (used as the stale fallback when a refetch fails).
+    fn cached_jwks(&self, fresh_only: bool) -> Option<jsonwebtoken::jwk::JwkSet> {
+        let guard = self.jwks_cache.read().ok()?;
+        let c = guard.as_ref()?;
+        if fresh_only && c.fetched_at.elapsed() >= JWKS_TTL {
+            return None;
+        }
+        Some(c.jwks.clone())
+    }
+
+    /// Fetch the provider's current JWKS directly (no cache). Prefer
+    /// [`Self::logout_jwks`] on the unauthenticated back-channel path.
     pub async fn provider_jwks(&self) -> Result<jsonwebtoken::jwk::JwkSet> {
         let resp = self
             .http

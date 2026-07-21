@@ -236,7 +236,7 @@ async fn backchannel_logout(
 ) -> Response {
     use axum::http::header;
     let no_store = [(header::CACHE_CONTROL, "no-store")];
-    let jwks = match st.oidc.provider_jwks().await {
+    let jwks = match st.oidc.logout_jwks().await {
         Ok(j) => j,
         Err(_) => return (StatusCode::BAD_REQUEST, no_store).into_response(),
     };
