@@ -1,6 +1,7 @@
 //! Engine-provisioning seam storage: owns the `engine_mgmt` schema.
 
 pub mod assignment;
+pub mod delegation_default;
 pub mod delegator_policy;
 pub mod engines;
 pub mod error;
@@ -11,6 +12,9 @@ pub mod store;
 pub mod tls_cert;
 
 pub use assignment::EngineAssignmentService;
+pub use delegation_default::{
+    has_platform_jwks, resolve_delegation, starrocks_image_is_pre_3_5, ResolvedDelegation,
+};
 pub use engines::router as engine_mgmt_router;
 pub use engines::workspace_engines_router;
 pub use error::EngineMgmtError;

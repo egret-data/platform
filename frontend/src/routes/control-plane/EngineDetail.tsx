@@ -1060,6 +1060,7 @@ function SecuritySection({ cfg }: { cfg: EngineConfigForm }) {
     setJwtEnabled,
     delegationMode,
     setDelegationMode,
+    storedDelegationMode,
     jwksUri,
     setJwksUri,
     requiredAudience,
@@ -1086,6 +1087,7 @@ function SecuritySection({ cfg }: { cfg: EngineConfigForm }) {
       setJwtEnabled={setJwtEnabled}
       delegationMode={delegationMode}
       setDelegationMode={setDelegationMode}
+      storedDelegationMode={storedDelegationMode}
       jwksUri={jwksUri}
       setJwksUri={setJwksUri}
       requiredAudience={requiredAudience}

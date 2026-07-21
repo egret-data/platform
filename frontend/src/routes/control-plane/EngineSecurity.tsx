@@ -33,6 +33,13 @@ export function EngineSecurity(props: {
   setJwtEnabled: (v: boolean) => void;
   delegationMode: DelegationMode;
   setDelegationMode: (v: DelegationMode) => void;
+  /**
+   * Mode PERSISTED on the stored engine (not the live `delegationMode`, which moves
+   * as the admin picks). An engine already running jwt/impersonate can't be safely
+   * downgraded to open — the Trino update path never tears down `auth.jwt` /
+   * rematerializes — so "None" is disabled for it. Empty for a new/open engine.
+   */
+  storedDelegationMode: DelegationMode;
   jwksUri: string;
   setJwksUri: (v: string) => void;
   requiredAudience: string;
@@ -57,6 +64,7 @@ export function EngineSecurity(props: {
     setJwtEnabled,
     delegationMode,
     setDelegationMode,
+    storedDelegationMode,
     jwksUri,
     setJwksUri,
     requiredAudience,
@@ -81,6 +89,12 @@ export function EngineSecurity(props: {
     queryFn: listSecrets,
     retry: false,
   });
+
+  // A stored jwt/impersonate engine is "already delegated" — the "None" opt-out
+  // is disabled for it (see the `storedDelegationMode` prop doc). Mirrors
+  // `StarRocksSecuritySection`'s `hasDelegation`.
+  const hasDelegation =
+    storedDelegationMode === "jwt" || storedDelegationMode === "impersonate";
 
   return (
     <div className="space-y-5">
@@ -242,31 +256,50 @@ export function EngineSecurity(props: {
           {(
             [
               {
-                value: "impersonate",
-                title: "Impersonate (default)",
-                desc: "egret connects as a trusted service account and runs the query as the caller. Works for any signed-in user; runs over TLS.",
+                value: "",
+                title: "Auto — JWT, else impersonate (recommended)",
+                desc: "egret uses per-user JWT when the coordinator can verify it, and otherwise degrades to impersonation automatically. Best default for most engines.",
               },
               {
                 value: "jwt",
-                title: "JWT over TLS",
+                title: "JWT (per-user)",
                 desc: "Each query uses the caller's own short-lived JWT, bound to their identity over TLS. No shared credential. OIDC users only.",
+              },
+              {
+                value: "impersonate",
+                title: "Impersonate (service user)",
+                desc: "egret connects as a trusted service account and runs the query as the caller. Works for any signed-in user; runs over TLS.",
+              },
+              {
+                value: "none",
+                title: "None (open engine)",
+                desc: "No per-user delegation — every query runs with the connection's own configured credential.",
               },
             ] as const
           ).map((opt) => {
             const selected = delegationMode === opt.value;
+            const optKey = opt.value || "auto";
+            // Downgrading an already-delegated engine (stored jwt/impersonate) to
+            // open isn't backend-supported (no auth.jwt teardown / rematerialize on
+            // the Trino update path), so disable "None" for it. Switching jwt⇄
+            // impersonate stays allowed; a new/open engine keeps every option.
+            const disabled = opt.value === "none" && hasDelegation;
             return (
               <Label
-                key={opt.value}
-                htmlFor={`deleg-${opt.value}`}
-                className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 font-normal transition-colors ${
-                  selected
-                    ? "border-primary bg-primary/5"
-                    : "border-border hover:bg-muted/50"
+                key={optKey}
+                htmlFor={`deleg-${optKey}`}
+                className={`flex items-start gap-3 rounded-lg border p-3 font-normal transition-colors ${
+                  disabled
+                    ? "cursor-not-allowed border-border opacity-60"
+                    : selected
+                      ? "cursor-pointer border-primary bg-primary/5"
+                      : "cursor-pointer border-border hover:bg-muted/50"
                 }`}
               >
                 <RadioGroupItem
-                  id={`deleg-${opt.value}`}
+                  id={`deleg-${optKey}`}
                   value={opt.value}
+                  disabled={disabled}
                   className="mt-0.5"
                 />
                 <span className="space-y-1">
@@ -281,6 +314,13 @@ export function EngineSecurity(props: {
             );
           })}
         </RadioGroup>
+        {hasDelegation && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Removing delegation from a running engine isn&apos;t supported yet —
+            recreate the engine to make it open. You can still switch between JWT
+            and Impersonate.
+          </p>
+        )}
         {delegationMode === "jwt" && !jwtEnabled && (
           <p
             role="alert"

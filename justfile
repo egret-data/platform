@@ -147,6 +147,14 @@ e2e-kind-sts: deploy-kind-governance
       EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
       npx playwright test sts-broker-kind
 
+# Opt-in: default provision (no delegationMode) => both engines come up jwt-delegated.
+e2e-kind-delegation-default: deploy-kind-governance
+    ./deploy/k8s/wait-ready.sh
+    cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
+      EGRET_E2E_BUCKET=e2e \
+      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      npx playwright test delegation-default-kind
+
 # Opt-in local user-management e2e: admin creates a local user, the user logs in and
 # holds a live session, then admin disables them — proving the disabled user's live
 # session is revoked IMMEDIATELY (not just blocked on their next login). Also covers

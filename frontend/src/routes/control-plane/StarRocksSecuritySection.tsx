@@ -23,6 +23,23 @@ import {
  * the config sections use — so the single shared `SaveBar` covers delegation
  * edits together with any pending config edits (one form, one Save).
  *
+ * Same Auto/JWT/Impersonate/None options as the create wizard
+ * (`ControlPlaneEngines.tsx`) and the Trino `EngineSecurity.tsx` selector.
+ * Auto (`""`) is omitted from the PUT body so the backend preserves whatever
+ * mode is already stored; `"none"` is sent LITERALLY. For a NEW/open engine
+ * that literal `"none"` provisions an open engine, so all four options are
+ * available there.
+ *
+ * BUT downgrading an ALREADY-delegated engine (stored jwt/impersonate) to open
+ * is NOT backend-supported: `build_starrocks_provision_req` filters
+ * `delegation_mode` by `!is_empty()` only, so a stored `"none"` is still treated
+ * as active delegation and RE-provisions the JWT security integration + GRANT
+ * IMPERSONATE — there's no DROP-security-integration / REVOKE-impersonate
+ * teardown DDL. So for a currently-delegated engine we DISABLE the "None"
+ * option (it would silently re-affirm delegation while claiming open) and tell
+ * the user to recreate the engine instead. This teardown gap is a documented
+ * follow-up, not part of the default-on delegation work.
+ *
  * Scoped to per-user delegation + transport TLS. The Ranger/authz binding
  * (`authzServiceId`) is NOT editable here: the StarRocks update path
  * (`update_starrocks_engine` → `build_starrocks_spec`) never reads
@@ -35,12 +52,9 @@ export function StarRocksSecuritySection({
   cfg: StarRocksConfigForm;
 }) {
   // Read the CURRENTLY-STORED mode (not the live `cfg.delegationMode`, which
-  // moves as the user picks) so the "can't be disabled" note reflects the
-  // engine's persisted state regardless of the in-progress selection. Delegation
-  // can be switched jwt⇄impersonate, but not removed after creation: `save()`
-  // omits delegation when mode=none and `build_starrocks_spec` treats an omitted
-  // block as "preserve", so picking None resolves back to the stored mode (a
-  // silent no-op). Surface that honestly instead of offering a dead choice.
+  // moves as the user picks). An engine that already runs jwt/impersonate can't
+  // be safely downgraded to open (no teardown DDL — see the doc comment above),
+  // so "None" is disabled for it. Switching jwt⇄impersonate stays allowed.
   const hasDelegation =
     cfg.storedConfig?.delegation?.mode === "jwt" ||
     cfg.storedConfig?.delegation?.mode === "impersonate";
@@ -50,20 +64,25 @@ export function StarRocksSecuritySection({
       <div className="space-y-1.5">
         <Label htmlFor="sr-sec-delegation">Per-user delegation</Label>
         <Select
-          value={cfg.delegationMode}
+          value={cfg.delegationMode || "auto"}
           onValueChange={(v) =>
-            cfg.setDelegationMode(v as StarRocksDelegationOption)
+            cfg.setDelegationMode(
+              v === "auto" ? "" : (v as StarRocksDelegationOption),
+            )
           }
         >
           <SelectTrigger id="sr-sec-delegation" className="w-full">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="none" disabled={hasDelegation}>
-              None (default)
+            <SelectItem value="auto">
+              Auto — JWT, else impersonate (recommended)
             </SelectItem>
-            <SelectItem value="jwt">JWT over TLS</SelectItem>
-            <SelectItem value="impersonate">Impersonate</SelectItem>
+            <SelectItem value="jwt">JWT (per-user)</SelectItem>
+            <SelectItem value="impersonate">Impersonate (service user)</SelectItem>
+            <SelectItem value="none" disabled={hasDelegation}>
+              None (open engine)
+            </SelectItem>
           </SelectContent>
         </Select>
         <p className="text-xs text-muted-foreground">
@@ -71,14 +90,14 @@ export function StarRocksSecuritySection({
         </p>
         {hasDelegation && (
           <p className="text-xs text-muted-foreground">
-            Delegation can&apos;t be disabled after creation — you can switch
-            between JWT and Impersonate, but removing it requires recreating the
-            engine.
+            Removing delegation from a running engine isn&apos;t supported yet —
+            recreate the engine to make it open. You can still switch between JWT
+            and Impersonate.
           </p>
         )}
       </div>
 
-      {cfg.delegationMode !== "none" && (
+      {(cfg.delegationMode === "jwt" || cfg.delegationMode === "impersonate") && (
         <div className="space-y-1.5">
           <div className="flex items-center justify-between gap-4">
             <Label htmlFor="sr-sec-tls" className="font-normal">

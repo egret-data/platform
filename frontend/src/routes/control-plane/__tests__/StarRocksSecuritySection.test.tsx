@@ -79,7 +79,7 @@ describe("StarRocksSecuritySection", () => {
     expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
   });
 
-  test("engine WITH delegation shows the can't-disable note + disables None", async () => {
+  test("engine WITH stored delegation: None is DISABLED (downgrade unsupported) + the recreate note shows", async () => {
     const user = userEvent.setup();
     const withDeleg: Omit<Engine, "status"> = {
       ...ENGINE,
@@ -93,30 +93,78 @@ describe("StarRocksSecuritySection", () => {
     };
     renderTab(withDeleg);
 
+    // Downgrading a running jwt/impersonate engine to open isn't backend-
+    // supported (no security-integration / impersonation teardown DDL), so the
+    // "None" option is disabled — picking it would silently re-affirm
+    // delegation while claiming open. The recreate note explains why.
     expect(
-      screen.getByText(/Delegation can't be disabled after creation/i),
+      screen.getByText(/Removing delegation from a running engine isn't supported yet/i),
     ).toBeInTheDocument();
 
-    // The "None" option is disabled — picking it would be a silent no-op.
     await user.click(screen.getByLabelText("Per-user delegation"));
-    const noneOpt = await screen.findByRole("option", { name: "None (default)" });
+    const noneOpt = await screen.findByRole("option", {
+      name: "None (open engine)",
+    });
     expect(noneOpt).toHaveAttribute("aria-disabled", "true");
-  });
-
-  test("engine WITHOUT delegation does NOT show the can't-disable note", () => {
-    renderTab();
+    // JWT / Impersonate remain switchable.
     expect(
-      screen.queryByText(/Delegation can't be disabled after creation/i),
-    ).not.toBeInTheDocument();
+      screen.getByRole("option", { name: "Impersonate (service user)" }),
+    ).not.toHaveAttribute("aria-disabled", "true");
   });
 
-  test("changing None→Impersonate reveals TLS and Save PUTs the new mode", async () => {
+  test("engine WITHOUT stored delegation (open): all four options available; None sends 'none' literally", async () => {
+    const user = userEvent.setup();
+    // An engine with NO stored delegation block (currently open, seeds Auto):
+    // the ratchet does not apply, so None is offered and picking it is a real
+    // change vs. the absent stored block → Save enabled, PUT carries "none".
+    const open: Omit<Engine, "status"> = {
+      ...ENGINE,
+      spec: {
+        ...ENGINE.spec,
+        starrocksConfig: {
+          feImage: "starrocks/fe-ubuntu:3.4-latest",
+          cnImage: "starrocks/cn-ubuntu:3.4-latest",
+          feReplicas: 1,
+          cnReplicas: 1,
+          // no `delegation` block
+        },
+      },
+    };
+    renderTab(open);
+
+    expect(
+      screen.queryByText(/Removing delegation from a running engine isn't supported yet/i),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByLabelText("Per-user delegation"));
+    const noneOpt = await screen.findByRole("option", {
+      name: "None (open engine)",
+    });
+    expect(noneOpt).not.toHaveAttribute("aria-disabled", "true");
+
+    await user.click(noneOpt);
+    // TLS toggle stays hidden for "none" (not a delegated mode).
+    expect(screen.queryByLabelText("Enable TLS")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(api.updateEngine).toHaveBeenCalledTimes(1));
+    const [, body] = vi.mocked(api.updateEngine).mock.calls[0];
+    // "none" must be sent LITERALLY, not omitted.
+    expect(body.starrocks).toEqual(
+      expect.objectContaining({ delegationMode: "none" }),
+    );
+  });
+
+  test("changing Auto→Impersonate reveals TLS and Save PUTs the new mode", async () => {
     const user = userEvent.setup();
     renderTab();
 
     // Radix Select trigger is a combobox associated with the label.
     await user.click(screen.getByLabelText("Per-user delegation"));
-    await user.click(await screen.findByRole("option", { name: "Impersonate" }));
+    await user.click(
+      await screen.findByRole("option", { name: "Impersonate (service user)" }),
+    );
 
     // TLS switch appears (defaults on) once a real mode is chosen.
     expect(screen.getByLabelText("Enable TLS")).toBeInTheDocument();

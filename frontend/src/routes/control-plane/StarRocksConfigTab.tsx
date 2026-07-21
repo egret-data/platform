@@ -103,7 +103,9 @@ function srSectionCounts(cfg: StarRocksConfigForm): Record<string, number> {
     "cn-config": Object.keys(cfg.cnConfig).length,
     autoscaling: cfg.autoscaling.enabled ? 1 : 0,
     pod: podFieldCount(cfg.pod),
-    security: cfg.delegationMode !== "none" ? 1 : 0,
+    // Auto ("") is the unconfigured default (omitted from the PUT body); any
+    // explicit choice — including "none" — counts as configured.
+    security: cfg.delegationMode !== "" ? 1 : 0,
   };
 }
 

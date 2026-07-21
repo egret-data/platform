@@ -1971,7 +1971,74 @@ async fn create_engine(
         .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
     let s3_endpoint = sc.endpoint.unwrap_or_default();
 
-    // 3. Auto-wire: mint a fresh Catalog Client for the warehouse.
+    // 3. Build + resolve the per-role trinoConfig — including default-on
+    //    delegation — BEFORE minting the catalog client. Ordering matters: the
+    //    delegation resolver 400s on an explicit `jwt` a no-JWKS platform can't
+    //    satisfy (or an unknown mode), and if the catalog client were already
+    //    minted that early-return would orphan a client row + credentials. Mirror
+    //    the StarRocks path (`create_starrocks_engine`), which resolves delegation
+    //    before `catalog.create_client`, so a 400 leaves nothing behind.
+    //
+    //    Seed the per-role trinoConfig from the wizard inputs (both roles share the
+    //    cpuMin/cpuMax/memory resources; replicas come from the body). Any
+    //    per-role block supplied in the body overlays these seeded defaults.
+    let mut trino_config = seed_trino_config(&b);
+    if let (Some(seed), Some(supplied)) = (
+        trino_config.as_object_mut(),
+        b.trino_config.as_ref().and_then(|v| v.as_object()),
+    ) {
+        for (k, v) in supplied {
+            seed.insert(k.clone(), v.clone());
+        }
+    }
+    // Default-on delegation (spec 2026-07-21) — mirror the StarRocks path (Task 2).
+    // Resolve from trinoConfig.delegationMode; persist the resolved concrete mode so
+    // the stored spec is explicit (build_provision_req/resolve_auth read it back).
+    // Create-only; update preserves the stored mode. `trino_config` is always a JSON
+    // object (seed_trino_config), so a bare create (no `trinoConfig` in the body)
+    // still gets the default injected here. This also VALIDATES the mode (an unknown
+    // value / an explicit `jwt` with no platform JWKS 400s here, before any catalog
+    // client is minted — see the ordering note above).
+    // NOTE: unlike StarRocks (whose absent delegation reads back as "none"), Trino's
+    // `store::Engine::delegation_mode()` defaults an ABSENT `delegationMode` to
+    // "impersonate" — so the "none" opt-out must be persisted EXPLICITLY as "none",
+    // NOT by removing the key (removing it would read back as impersonate).
+    {
+        let mode = trino_config.get("delegationMode").and_then(|v| v.as_str());
+        let resolved = crate::delegation_default::resolve_delegation(
+            mode,
+            crate::delegation_default::has_platform_jwks(
+                &st.engine_jwks_uri,
+                &st.engine_oidc_issuer,
+            ),
+            None, // Trino has no engine-version floor for JWT
+        )
+        .map_err(CpError::BadRequest)?;
+        let obj = trino_config
+            .as_object_mut()
+            .expect("trinoConfig is a JSON object");
+        match resolved {
+            crate::delegation_default::ResolvedDelegation::Jwt => {
+                obj.insert("delegationMode".into(), serde_json::json!("jwt"));
+                // Ensure an auth.jwt object exists so resolve_auth synthesizes the
+                // platform JWKS + aud "engine". Don't clobber an admin-provided block.
+                let auth = obj.entry("auth").or_insert_with(|| serde_json::json!({}));
+                if let Some(a) = auth.as_object_mut() {
+                    a.entry("jwt").or_insert_with(|| serde_json::json!({}));
+                }
+            }
+            crate::delegation_default::ResolvedDelegation::Impersonate => {
+                obj.insert("delegationMode".into(), serde_json::json!("impersonate"));
+            }
+            crate::delegation_default::ResolvedDelegation::Open => {
+                // Persist "none" EXPLICITLY (absent ⇒ impersonate for Trino).
+                obj.insert("delegationMode".into(), serde_json::json!("none"));
+            }
+        }
+    }
+
+    // 4. Auto-wire: mint a fresh Catalog Client for the warehouse. Minted only
+    //    AFTER delegation resolves (step 3), so a resolver 400 leaks no client.
     let role_id = ensure_engine_role(&st, wh.id).await?;
     let client = st
         .catalog
@@ -1984,7 +2051,7 @@ async fn create_engine(
         })
         .await?;
 
-    // 4. Record the intent row (status `provisioning`). The auto-wired client id
+    // 5. Record the intent row (status `provisioning`). The auto-wired client id
     //    lives on the PRIMARY catalog row now, not in the engine spec.
     let image_version = b
         .image_version
@@ -2000,18 +2067,6 @@ async fn create_engine(
         "memory": b.memory,
         "imageVersion": image_version,
     });
-    // Seed the per-role trinoConfig from the wizard inputs (both roles share the
-    // cpuMin/cpuMax/memory resources; replicas come from the body). Any
-    // per-role block supplied in the body overlays these seeded defaults.
-    let mut trino_config = seed_trino_config(&b);
-    if let (Some(seed), Some(supplied)) = (
-        trino_config.as_object_mut(),
-        b.trino_config.as_ref().and_then(|v| v.as_object()),
-    ) {
-        for (k, v) in supplied {
-            seed.insert(k.clone(), v.clone());
-        }
-    }
     spec["trinoConfig"] = trino_config;
     validate_spec_resource_groups(&spec)?;
     let engine = match st
@@ -2477,9 +2532,9 @@ async fn build_starrocks_provision_req(
 /// fine (no delegation), otherwise it MUST be `"jwt"` or `"impersonate"`.
 fn validate_sr_delegation_mode(sr_body: &StarRocksConfigBody) -> Result<(), CpError> {
     if let Some(m) = sr_body.delegation_mode.as_deref().filter(|s| !s.is_empty()) {
-        if m != "jwt" && m != "impersonate" {
+        if m != "jwt" && m != "impersonate" && m != "none" {
             return Err(CpError::BadRequest(format!(
-                "invalid starrocks delegationMode: {m} (expected \"jwt\" or \"impersonate\")"
+                "invalid starrocks delegationMode: {m} (expected \"jwt\", \"impersonate\", or \"none\")"
             )));
         }
     }
@@ -2737,7 +2792,7 @@ async fn create_starrocks_engine(
         ));
     }
 
-    let sr_body = b.starrocks.as_ref().cloned().unwrap_or_default();
+    let mut sr_body = b.starrocks.as_ref().cloned().unwrap_or_default();
 
     // Delegation opt-in (Access parity slice 3, S3-T2b): validate the mode up
     // front, before any engine row exists, so a bad value 400s with nothing to
@@ -2748,6 +2803,32 @@ async fn create_starrocks_engine(
     // cleartext via the mysql_clear_password plugin, so TLS matters here too and
     // disabling it must be an explicit opt-out).
     validate_sr_delegation_mode(&sr_body)?;
+
+    // Default-on delegation (spec 2026-07-21): an omitted mode resolves to jwt
+    // (trust egret's machine-IdP), degrading to impersonate when JWT can't be
+    // guaranteed. Persist the RESOLVED concrete mode so the provision-req builder
+    // and update-preserve path see an explicit value. Only create resolves the
+    // default; update preserves the stored mode.
+    let resolved = crate::delegation_default::resolve_delegation(
+        sr_body.delegation_mode.as_deref(),
+        crate::delegation_default::has_platform_jwks(&st.engine_jwks_uri, &st.engine_oidc_issuer),
+        sr_body.fe_image.as_deref(),
+    )
+    .map_err(CpError::BadRequest)?;
+    match resolved {
+        crate::delegation_default::ResolvedDelegation::Jwt => {
+            sr_body.delegation_mode = Some("jwt".into());
+            // JWT is sent as a cleartext MySQL password → TLS is mandatory (the
+            // connector fail-closes without it). Force it on regardless of the body.
+            sr_body.tls_enabled = Some(true);
+        }
+        crate::delegation_default::ResolvedDelegation::Impersonate => {
+            sr_body.delegation_mode = Some("impersonate".into());
+        }
+        crate::delegation_default::ResolvedDelegation::Open => {
+            sr_body.delegation_mode = None; // no delegation block ⇒ open engine
+        }
+    }
     // Reject any `feConfig` override of an egret-managed fe.conf key up front.
     validate_sr_fe_config(&sr_body)?;
     // Reject an enabled autoscaling policy with out-of-range bounds up front, so
@@ -6002,6 +6083,463 @@ mod tests {
         assert!(
             created.root_secret_id.is_some(),
             "new StarRocks engine must have a minted root_secret_id (secure-by-default)"
+        );
+    }
+
+    /// Drive `create_starrocks_engine` with the given delegation knobs (mode +
+    /// FE image) against a fresh warehouse, returning the reloaded stored
+    /// `Engine` (or the create error). The caller wires `st` first (provisioner,
+    /// jwks/issuer) so it controls the platform-JWKS capability the resolver sees.
+    async fn create_sr_for_delegation(
+        st: &CpState,
+        db: &egret_metastore::Db,
+        delegation_mode: Option<&str>,
+        fe_image: Option<&str>,
+    ) -> Result<Engine, CpError> {
+        let (wh, _secret) = seed_sr_warehouse(st, db).await;
+        let mut body = sr_update_body(Some(StarRocksConfigBody {
+            delegation_mode: delegation_mode.map(str::to_string),
+            fe_image: fe_image.map(str::to_string),
+            ..Default::default()
+        }));
+        body.name = format!("sr-{}", Uuid::new_v4().simple());
+        let name = body.name.clone();
+        let _created = create_starrocks_engine(st.clone(), body, wh).await?;
+        Ok(st
+            .engine_mgmt
+            .list_engines()
+            .await
+            .expect("list_engines")
+            .into_iter()
+            .find(|e| e.name == name)
+            .expect("created engine present"))
+    }
+
+    /// Default-on delegation (spec 2026-07-21): an omitted mode with a
+    /// platform JWKS and a JWT-capable FE image resolves to `jwt`, and JWT
+    /// forces TLS on (cleartext-password login).
+    #[tokio::test]
+    async fn sr_create_defaults_to_jwt_with_tls_when_capable() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping sr_create_defaults_to_jwt_with_tls_when_capable: DATABASE_URL not set"
+            );
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        // test_state already sets engine_jwks_uri + engine_oidc_issuer.
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        let eng = create_sr_for_delegation(&st, &db, None, Some("starrocks/fe-ubuntu:4.1"))
+            .await
+            .expect("create");
+        assert_eq!(eng.delegation_mode(), "jwt");
+        assert!(eng.supports_jwt_delegation());
+        assert_eq!(
+            eng.spec["starrocksConfig"]["delegation"]["tlsEnabled"],
+            true
+        );
+    }
+
+    /// No platform JWKS ⇒ the omitted default degrades to `impersonate`.
+    #[tokio::test]
+    async fn sr_create_omitted_degrades_to_impersonate_without_jwks() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping sr_create_omitted_degrades_to_impersonate_without_jwks: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        st.engine_jwks_uri.clear();
+        st.engine_oidc_issuer.clear();
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        let eng = create_sr_for_delegation(&st, &db, None, None)
+            .await
+            .expect("create");
+        assert_eq!(eng.delegation_mode(), "impersonate");
+    }
+
+    /// A JWT-capable platform but a pre-3.5 FE image (no `authentication_jwt`)
+    /// degrades the omitted default to `impersonate`.
+    #[tokio::test]
+    async fn sr_create_omitted_degrades_to_impersonate_on_pre_3_5_image() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping sr_create_omitted_degrades_to_impersonate_on_pre_3_5_image: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        let eng = create_sr_for_delegation(&st, &db, None, Some("starrocks/fe-ubuntu:3.4"))
+            .await
+            .expect("create");
+        assert_eq!(eng.delegation_mode(), "impersonate");
+    }
+
+    /// An EXPLICIT `jwt` the platform can't satisfy (no JWKS) hard-fails with a
+    /// 400 that names the fix.
+    #[tokio::test]
+    async fn sr_create_explicit_jwt_without_jwks_400s() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping sr_create_explicit_jwt_without_jwks_400s: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        st.engine_jwks_uri.clear();
+        st.engine_oidc_issuer.clear();
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        let err = create_sr_for_delegation(&st, &db, Some("jwt"), None)
+            .await
+            .expect_err("explicit jwt without jwks must 400");
+        match err {
+            CpError::BadRequest(m) => {
+                assert!(m.contains("public_url"), "message names the fix: {m}")
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    /// The explicit `"none"` opt-out creates an open engine (no delegation block).
+    #[tokio::test]
+    async fn sr_create_explicit_none_is_open() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping sr_create_explicit_none_is_open: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        // JWKS present, but "none" must still win.
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        let eng = create_sr_for_delegation(&st, &db, Some("none"), None)
+            .await
+            .expect("create");
+        assert_eq!(eng.delegation_mode(), "none");
+        assert!(!eng.supports_delegation());
+    }
+
+    /// §6 regression: an update that omits `delegationMode` must PRESERVE the
+    /// stored mode (only create resolves the default). Create an open (`"none"`)
+    /// engine, then update an unrelated field with no delegation ⇒ stays `none`,
+    /// NOT flipped to `jwt`.
+    #[tokio::test]
+    async fn sr_update_with_omitted_mode_preserves_stored() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping sr_update_with_omitted_mode_preserves_stored: DATABASE_URL not set"
+            );
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        // Create an open engine (explicit "none"), JWKS present.
+        let eng = create_sr_for_delegation(&st, &db, Some("none"), None)
+            .await
+            .expect("create");
+        assert_eq!(eng.delegation_mode(), "none");
+
+        // Update an unrelated field with omitted delegationMode. The update path
+        // does NOT resolve the default; build_starrocks_spec preserves the stored
+        // (null) delegation block. Provision may fail (no k8s); the spec is
+        // persisted before that, which is what we assert.
+        let body = sr_update_body(Some(StarRocksConfigBody {
+            fe_replicas: Some(2),
+            ..Default::default()
+        }));
+        let _ = update_starrocks_engine(st.clone(), eng.clone(), body).await;
+
+        let reloaded = st
+            .engine_mgmt
+            .get_engine(eng.id)
+            .await
+            .expect("reload")
+            .expect("present");
+        assert_eq!(
+            reloaded.delegation_mode(),
+            "none",
+            "omitted update must not flip a stored open engine to jwt"
+        );
+    }
+
+    // ── Trino create-side default-on delegation (spec 2026-07-21) ───────────
+    /// Drive the FULL `create_engine` handler for a TRINO engine with the given
+    /// wire `trinoConfig` (`None` = a bare create with no `trinoConfig` key at
+    /// all) against a fresh lakekeeper-provisioned warehouse, returning the
+    /// reloaded stored `Engine` (or the create error). The caller wires `st`
+    /// (provisioner, jwks/issuer) first so it controls the platform-JWKS
+    /// capability the resolver sees. Mirrors `create_sr_for_delegation`, but the
+    /// Trino path resolves + persists the default INSIDE `create_engine`, so it
+    /// must go through the handler (not a StarRocks-style sub-fn).
+    async fn create_trino_for_delegation(
+        st: &CpState,
+        db: &egret_metastore::Db,
+        trino_config: Option<serde_json::Value>,
+    ) -> Result<Engine, CpError> {
+        let (wh, _secret) = seed_sr_warehouse(st, db).await;
+        // Engines only provision against a lakekeeper-backed warehouse; mark it so
+        // the handler passes the provisioned check and reaches the Trino path.
+        egret_catalog_engine::CatalogStore::new(db.clone())
+            .set_lakekeeper_warehouse_id(wh.id, "lk-test")
+            .await
+            .expect("mark warehouse provisioned");
+        let name = format!("trino-{}", Uuid::new_v4().simple());
+        let body = CreateEngineBody {
+            name: name.clone(),
+            warehouse_id: wh.id,
+            image_version: None,
+            coordinator_replicas: 1,
+            worker_replicas: 1,
+            cpu_min: "1".into(),
+            cpu_max: "1".into(),
+            memory: "1Gi".into(),
+            trino_config,
+            authz_service_id: None,
+            kind: "trino".into(),
+            starrocks: None,
+            tls_cert_secret_ref: None,
+        };
+        let principal = egret_core::context::Principal {
+            user_id: egret_core::ids::UserId::new(),
+            email: "admin@egret.local".into(),
+            platform_roles: vec!["platform_admin".into()],
+            permissions: vec![],
+            group_ids: vec![],
+        };
+        let _ = create_engine(State(st.clone()), Auth(principal), Json(body)).await?;
+        Ok(st
+            .engine_mgmt
+            .list_engines()
+            .await
+            .expect("list_engines")
+            .into_iter()
+            .find(|e| e.name == name)
+            .expect("created engine present"))
+    }
+
+    /// Default-on delegation: a `trinoConfig` present but with NO `delegationMode`,
+    /// on a JWT-capable platform, resolves to `jwt` — and an `auth.jwt` block is
+    /// synthesized so `resolve_auth` templates the platform JWKS + `aud:"engine"`.
+    #[tokio::test]
+    async fn trino_create_defaults_to_jwt_when_capable() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping trino_create_defaults_to_jwt_when_capable: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        // test_state already sets engine_jwks_uri + engine_oidc_issuer (JWT-capable).
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        let eng = create_trino_for_delegation(&st, &db, Some(serde_json::json!({})))
+            .await
+            .expect("create");
+        assert!(
+            eng.is_jwt_delegation(),
+            "omitted mode ⇒ jwt when JWT-capable"
+        );
+        assert!(
+            eng.spec["trinoConfig"]["auth"]["jwt"].is_object(),
+            "jwt resolution must synthesize an auth.jwt object"
+        );
+    }
+
+    /// No platform JWKS ⇒ the omitted default degrades to `impersonate`.
+    #[tokio::test]
+    async fn trino_create_omitted_degrades_to_impersonate_without_jwks() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping trino_create_omitted_degrades_to_impersonate_without_jwks: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        st.engine_jwks_uri.clear();
+        st.engine_oidc_issuer.clear();
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        let eng = create_trino_for_delegation(&st, &db, Some(serde_json::json!({})))
+            .await
+            .expect("create");
+        assert!(eng.is_impersonate_delegation());
+        assert!(!eng.is_jwt_delegation());
+    }
+
+    /// The explicit `"none"` opt-out creates an open engine — neither jwt nor
+    /// impersonate delegation. NOTE: Trino's `delegation_mode()` defaults an
+    /// ABSENT key to `impersonate`, so `"none"` must be PERSISTED explicitly (not
+    /// removed) for the engine to read back as open.
+    #[tokio::test]
+    async fn trino_create_explicit_none_is_open() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping trino_create_explicit_none_is_open: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        // JWKS present, but "none" must still win.
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        let eng = create_trino_for_delegation(
+            &st,
+            &db,
+            Some(serde_json::json!({ "delegationMode": "none" })),
+        )
+        .await
+        .expect("create");
+        assert!(!eng.is_jwt_delegation());
+        assert!(!eng.is_impersonate_delegation());
+    }
+
+    /// Edge case: a bare Trino create (NO `trinoConfig` key at all) still applies
+    /// the default — a synthesized `trinoConfig` comes up `jwt` on a JWT-capable
+    /// platform.
+    #[tokio::test]
+    async fn trino_create_bare_config_defaults_to_jwt() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping trino_create_bare_config_defaults_to_jwt: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        let eng = create_trino_for_delegation(&st, &db, None)
+            .await
+            .expect("create");
+        assert!(eng.is_jwt_delegation(), "bare create still defaults to jwt");
+        assert!(eng.spec["trinoConfig"]["auth"]["jwt"].is_object());
+    }
+
+    /// An EXPLICIT `jwt` the platform can't satisfy (no JWKS) hard-fails on create
+    /// with a 400 that names the fix — surfaced by the create-path
+    /// `resolve_delegation` call (before provisioning).
+    #[tokio::test]
+    async fn trino_create_explicit_jwt_without_jwks_400s() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping trino_create_explicit_jwt_without_jwks_400s: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        st.engine_jwks_uri.clear();
+        st.engine_oidc_issuer.clear();
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        let err = create_trino_for_delegation(
+            &st,
+            &db,
+            Some(serde_json::json!({ "delegationMode": "jwt" })),
+        )
+        .await
+        .expect_err("explicit jwt without jwks must 400");
+        match err {
+            CpError::BadRequest(m) => {
+                assert!(m.contains("public_url"), "message names the fix: {m}")
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    /// Orphan-client guard (holistic review, Finding A): the explicit-jwt-without-
+    /// JWKS 400 must fire BEFORE the auto-wired catalog client is minted, so a
+    /// rejected create leaves NO `engine-{name}` client row behind. This proves the
+    /// resolve-delegation → create_client ordering (mirrors StarRocks). Before the
+    /// fix, `create_client` ran first and the resolver's `?` early-return leaked the
+    /// client every time.
+    #[tokio::test]
+    async fn trino_create_explicit_jwt_without_jwks_leaves_no_orphan_client() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping trino_create_explicit_jwt_without_jwks_leaves_no_orphan_client: DATABASE_URL not set"
+            );
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        st.engine_jwks_uri.clear();
+        st.engine_oidc_issuer.clear();
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        // Seed a lakekeeper-backed warehouse (same setup create_trino_for_delegation
+        // uses) so the handler reaches the Trino delegation-resolution block.
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        egret_catalog_engine::CatalogStore::new(db.clone())
+            .set_lakekeeper_warehouse_id(wh.id, "lk-test")
+            .await
+            .expect("mark warehouse provisioned");
+
+        let name = format!("trino-{}", Uuid::new_v4().simple());
+        let body = CreateEngineBody {
+            name: name.clone(),
+            warehouse_id: wh.id,
+            image_version: None,
+            coordinator_replicas: 1,
+            worker_replicas: 1,
+            cpu_min: "1".into(),
+            cpu_max: "1".into(),
+            memory: "1Gi".into(),
+            trino_config: Some(serde_json::json!({ "delegationMode": "jwt" })),
+            authz_service_id: None,
+            kind: "trino".into(),
+            starrocks: None,
+            tls_cert_secret_ref: None,
+        };
+        let principal = egret_core::context::Principal {
+            user_id: egret_core::ids::UserId::new(),
+            email: "admin@egret.local".into(),
+            platform_roles: vec!["platform_admin".into()],
+            permissions: vec![],
+            group_ids: vec![],
+        };
+
+        // `create_engine`'s Ok type (`Json<EngineDto>`) isn't `Debug`, so match
+        // rather than `.expect_err`.
+        let err = match create_engine(State(st.clone()), Auth(principal), Json(body)).await {
+            Ok(_) => panic!("explicit jwt without jwks must 400, but create succeeded"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, CpError::BadRequest(_)),
+            "expected 400, got {err:?}"
+        );
+
+        // No `engine-{name}` catalog client may exist — the 400 fired before the
+        // client was minted, so nothing was orphaned.
+        let clients = st.catalog.list_clients(wh.id).await.expect("list clients");
+        assert!(
+            !clients.iter().any(|c| c.name == format!("engine-{name}")),
+            "jwt-no-JWKS 400 must not orphan a catalog client; found: {:?}",
+            clients.iter().map(|c| &c.name).collect::<Vec<_>>()
         );
     }
 
