@@ -80,14 +80,17 @@ describe("UsersPage", () => {
     expect(within(bobRow).getByText("disabled")).toBeInTheDocument();
   });
 
-  test("renders a user's groups as chips in their own Groups column", async () => {
+  test("renders a user's group membership as a count chip in the Groups column", async () => {
     renderPage();
     await screen.findByText("bob@example.com");
 
-    // Bob belongs to "Engineering"; the chip renders as its own column, no
-    // longer as a sub-line under the Name cell.
-    expect(screen.getByText("Engineering")).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "Groups" })).toBeInTheDocument();
+
+    // Bob belongs to one group ("Engineering"): the cell shows the count "1"
+    // with the full list on hover (title), not a wide row of chips.
+    const bobRow = screen.getByText("bob@example.com").closest("tr") as HTMLElement;
+    const groupChip = within(bobRow).getByTitle("Engineering");
+    expect(groupChip).toHaveTextContent("1");
 
     // Alice has no groups, so her Groups cell falls back to a dash.
     const aliceRow = screen.getByText("alice@example.com").closest("tr");
@@ -163,6 +166,44 @@ describe("UsersPage", () => {
         password: "s3cret!",
       }),
     );
+  });
+
+  test("New user: Create stays disabled until email, name and password are valid", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("alice@example.com");
+
+    await user.click(screen.getByRole("button", { name: /New user/i }));
+    await screen.findByRole("heading", { name: /New user/i });
+
+    const create = screen.getByRole("button", { name: /^Create$/i });
+    expect(create).toBeDisabled();
+
+    await user.type(screen.getByLabelText("Email"), "not-an-email");
+    await user.type(screen.getByLabelText("Name"), "Carol");
+    await user.type(screen.getByLabelText("Password"), "pw");
+    // Email is still malformed, so submit stays gated.
+    expect(create).toBeDisabled();
+
+    await user.clear(screen.getByLabelText("Email"));
+    await user.type(screen.getByLabelText("Email"), "carol@example.com");
+    expect(create).toBeEnabled();
+  });
+
+  test("New user: the password show/hide toggle flips the input type", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("alice@example.com");
+
+    await user.click(screen.getByRole("button", { name: /New user/i }));
+    await screen.findByRole("heading", { name: /New user/i });
+
+    const pw = screen.getByLabelText("Password") as HTMLInputElement;
+    expect(pw.type).toBe("password");
+    await user.click(screen.getByRole("button", { name: "Show password" }));
+    expect(pw.type).toBe("text");
+    await user.click(screen.getByRole("button", { name: "Hide password" }));
+    expect(pw.type).toBe("password");
   });
 
   test("Assign roles dialog diffs the selection into assign/unassign calls", async () => {
