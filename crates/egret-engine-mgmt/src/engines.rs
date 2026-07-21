@@ -2477,9 +2477,9 @@ async fn build_starrocks_provision_req(
 /// fine (no delegation), otherwise it MUST be `"jwt"` or `"impersonate"`.
 fn validate_sr_delegation_mode(sr_body: &StarRocksConfigBody) -> Result<(), CpError> {
     if let Some(m) = sr_body.delegation_mode.as_deref().filter(|s| !s.is_empty()) {
-        if m != "jwt" && m != "impersonate" {
+        if m != "jwt" && m != "impersonate" && m != "none" {
             return Err(CpError::BadRequest(format!(
-                "invalid starrocks delegationMode: {m} (expected \"jwt\" or \"impersonate\")"
+                "invalid starrocks delegationMode: {m} (expected \"jwt\", \"impersonate\", or \"none\")"
             )));
         }
     }
@@ -2737,7 +2737,7 @@ async fn create_starrocks_engine(
         ));
     }
 
-    let sr_body = b.starrocks.as_ref().cloned().unwrap_or_default();
+    let mut sr_body = b.starrocks.as_ref().cloned().unwrap_or_default();
 
     // Delegation opt-in (Access parity slice 3, S3-T2b): validate the mode up
     // front, before any engine row exists, so a bad value 400s with nothing to
@@ -2748,6 +2748,32 @@ async fn create_starrocks_engine(
     // cleartext via the mysql_clear_password plugin, so TLS matters here too and
     // disabling it must be an explicit opt-out).
     validate_sr_delegation_mode(&sr_body)?;
+
+    // Default-on delegation (spec 2026-07-21): an omitted mode resolves to jwt
+    // (trust egret's machine-IdP), degrading to impersonate when JWT can't be
+    // guaranteed. Persist the RESOLVED concrete mode so the provision-req builder
+    // and update-preserve path see an explicit value. Only create resolves the
+    // default; update preserves the stored mode.
+    let resolved = crate::delegation_default::resolve_delegation(
+        sr_body.delegation_mode.as_deref(),
+        crate::delegation_default::has_platform_jwks(&st.engine_jwks_uri, &st.engine_oidc_issuer),
+        sr_body.fe_image.as_deref(),
+    )
+    .map_err(CpError::BadRequest)?;
+    match resolved {
+        crate::delegation_default::ResolvedDelegation::Jwt => {
+            sr_body.delegation_mode = Some("jwt".into());
+            // JWT is sent as a cleartext MySQL password → TLS is mandatory (the
+            // connector fail-closes without it). Force it on regardless of the body.
+            sr_body.tls_enabled = Some(true);
+        }
+        crate::delegation_default::ResolvedDelegation::Impersonate => {
+            sr_body.delegation_mode = Some("impersonate".into());
+        }
+        crate::delegation_default::ResolvedDelegation::Open => {
+            sr_body.delegation_mode = None; // no delegation block ⇒ open engine
+        }
+    }
     // Reject any `feConfig` override of an egret-managed fe.conf key up front.
     validate_sr_fe_config(&sr_body)?;
     // Reject an enabled autoscaling policy with out-of-range bounds up front, so
@@ -6002,6 +6028,200 @@ mod tests {
         assert!(
             created.root_secret_id.is_some(),
             "new StarRocks engine must have a minted root_secret_id (secure-by-default)"
+        );
+    }
+
+    /// Drive `create_starrocks_engine` with the given delegation knobs (mode +
+    /// FE image) against a fresh warehouse, returning the reloaded stored
+    /// `Engine` (or the create error). The caller wires `st` first (provisioner,
+    /// jwks/issuer) so it controls the platform-JWKS capability the resolver sees.
+    async fn create_sr_for_delegation(
+        st: &CpState,
+        db: &egret_metastore::Db,
+        delegation_mode: Option<&str>,
+        fe_image: Option<&str>,
+    ) -> Result<Engine, CpError> {
+        let (wh, _secret) = seed_sr_warehouse(st, db).await;
+        let mut body = sr_update_body(Some(StarRocksConfigBody {
+            delegation_mode: delegation_mode.map(str::to_string),
+            fe_image: fe_image.map(str::to_string),
+            ..Default::default()
+        }));
+        body.name = format!("sr-{}", Uuid::new_v4().simple());
+        let name = body.name.clone();
+        let _created = create_starrocks_engine(st.clone(), body, wh).await?;
+        Ok(st
+            .engine_mgmt
+            .list_engines()
+            .await
+            .expect("list_engines")
+            .into_iter()
+            .find(|e| e.name == name)
+            .expect("created engine present"))
+    }
+
+    /// Default-on delegation (spec 2026-07-21): an omitted mode with a
+    /// platform JWKS and a JWT-capable FE image resolves to `jwt`, and JWT
+    /// forces TLS on (cleartext-password login).
+    #[tokio::test]
+    async fn sr_create_defaults_to_jwt_with_tls_when_capable() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping sr_create_defaults_to_jwt_with_tls_when_capable: DATABASE_URL not set"
+            );
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        // test_state already sets engine_jwks_uri + engine_oidc_issuer.
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        let eng = create_sr_for_delegation(&st, &db, None, Some("starrocks/fe-ubuntu:4.1"))
+            .await
+            .expect("create");
+        assert_eq!(eng.delegation_mode(), "jwt");
+        assert!(eng.supports_jwt_delegation());
+        assert_eq!(
+            eng.spec["starrocksConfig"]["delegation"]["tlsEnabled"],
+            true
+        );
+    }
+
+    /// No platform JWKS ⇒ the omitted default degrades to `impersonate`.
+    #[tokio::test]
+    async fn sr_create_omitted_degrades_to_impersonate_without_jwks() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping sr_create_omitted_degrades_to_impersonate_without_jwks: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        st.engine_jwks_uri.clear();
+        st.engine_oidc_issuer.clear();
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        let eng = create_sr_for_delegation(&st, &db, None, None)
+            .await
+            .expect("create");
+        assert_eq!(eng.delegation_mode(), "impersonate");
+    }
+
+    /// A JWT-capable platform but a pre-3.5 FE image (no `authentication_jwt`)
+    /// degrades the omitted default to `impersonate`.
+    #[tokio::test]
+    async fn sr_create_omitted_degrades_to_impersonate_on_pre_3_5_image() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping sr_create_omitted_degrades_to_impersonate_on_pre_3_5_image: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        let eng = create_sr_for_delegation(&st, &db, None, Some("starrocks/fe-ubuntu:3.4"))
+            .await
+            .expect("create");
+        assert_eq!(eng.delegation_mode(), "impersonate");
+    }
+
+    /// An EXPLICIT `jwt` the platform can't satisfy (no JWKS) hard-fails with a
+    /// 400 that names the fix.
+    #[tokio::test]
+    async fn sr_create_explicit_jwt_without_jwks_400s() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping sr_create_explicit_jwt_without_jwks_400s: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        st.engine_jwks_uri.clear();
+        st.engine_oidc_issuer.clear();
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        let err = create_sr_for_delegation(&st, &db, Some("jwt"), None)
+            .await
+            .expect_err("explicit jwt without jwks must 400");
+        match err {
+            CpError::BadRequest(m) => {
+                assert!(m.contains("public_url"), "message names the fix: {m}")
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    /// The explicit `"none"` opt-out creates an open engine (no delegation block).
+    #[tokio::test]
+    async fn sr_create_explicit_none_is_open() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping sr_create_explicit_none_is_open: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        // JWKS present, but "none" must still win.
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        let eng = create_sr_for_delegation(&st, &db, Some("none"), None)
+            .await
+            .expect("create");
+        assert_eq!(eng.delegation_mode(), "none");
+        assert!(!eng.supports_delegation());
+    }
+
+    /// §6 regression: an update that omits `delegationMode` must PRESERVE the
+    /// stored mode (only create resolves the default). Create an open (`"none"`)
+    /// engine, then update an unrelated field with no delegation ⇒ stays `none`,
+    /// NOT flipped to `jwt`.
+    #[tokio::test]
+    async fn sr_update_with_omitted_mode_preserves_stored() {
+        let Some(mut st) = test_state().await else {
+            eprintln!(
+                "skipping sr_update_with_omitted_mode_preserves_stored: DATABASE_URL not set"
+            );
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+
+        // Create an open engine (explicit "none"), JWKS present.
+        let eng = create_sr_for_delegation(&st, &db, Some("none"), None)
+            .await
+            .expect("create");
+        assert_eq!(eng.delegation_mode(), "none");
+
+        // Update an unrelated field with omitted delegationMode. The update path
+        // does NOT resolve the default; build_starrocks_spec preserves the stored
+        // (null) delegation block. Provision may fail (no k8s); the spec is
+        // persisted before that, which is what we assert.
+        let body = sr_update_body(Some(StarRocksConfigBody {
+            fe_replicas: Some(2),
+            ..Default::default()
+        }));
+        let _ = update_starrocks_engine(st.clone(), eng.clone(), body).await;
+
+        let reloaded = st
+            .engine_mgmt
+            .get_engine(eng.id)
+            .await
+            .expect("reload")
+            .expect("present");
+        assert_eq!(
+            reloaded.delegation_mode(),
+            "none",
+            "omitted update must not flip a stored open engine to jwt"
         );
     }
 
