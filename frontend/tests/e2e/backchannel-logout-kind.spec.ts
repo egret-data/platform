@@ -22,6 +22,14 @@ import { loginViaOidcMember } from "./helpers";
  * (`a5510000-0000-4000-8000-000000000002`) specifically so this test (and any
  * other) can target it without a lookup-by-username round trip.
  *
+ * The Keycloak admin API (used to wire the client + force-logout) is reached
+ * over LOOPBACK, not the ingress host: Keycloak's default `sslRequired=external`
+ * rejects the admin-cli password grant over plain HTTP from a non-loopback
+ * client ("HTTPS required"), but exempts 127.0.0.1. So the browser OIDC login
+ * uses the ingress base URL while these admin calls target
+ * `EGRET_E2E_KC_ADMIN_URL` (default `http://127.0.0.1:18080`, a
+ * `kubectl port-forward` the recipe sets up). This weakens no Keycloak config.
+ *
  * Opt-in (EGRET_E2E_KIND=1); NOT in `npm test` / GitHub CI. Run via
  * `just e2e-kind-backchannel-logout`.
  */
@@ -29,6 +37,11 @@ const ENABLED = process.env.EGRET_E2E_KIND === "1";
 
 const KEYCLOAK_ADMIN_USER = process.env.EGRET_E2E_KEYCLOAK_ADMIN_USER ?? "admin";
 const KEYCLOAK_ADMIN_PASSWORD = process.env.EGRET_E2E_KEYCLOAK_ADMIN_PASSWORD ?? "admin";
+
+// Keycloak admin-API origin. Loopback so `sslRequired=external` is satisfied over
+// HTTP (see the file docstring). Absolute URLs override the request context's
+// ingress baseURL. This Keycloak serves under a `/auth` relative path.
+const KC_ADMIN = (process.env.EGRET_E2E_KC_ADMIN_URL ?? "http://127.0.0.1:18080") + "/auth";
 
 // Fixed in deploy/keycloak/egret-realm.json (and its helm copy) precisely so tests
 // can target `member-sso` without a lookup-by-username round trip.
@@ -42,7 +55,7 @@ const BACKCHANNEL_LOGOUT_URL =
 
 /** Fetch an admin access token from Keycloak's `master` realm (admin-cli, password grant). */
 async function getKeycloakAdminToken(request: APIRequestContext): Promise<string> {
-  const res = await request.post("/auth/realms/master/protocol/openid-connect/token", {
+  const res = await request.post(`${KC_ADMIN}/realms/master/protocol/openid-connect/token`, {
     form: {
       grant_type: "password",
       client_id: "admin-cli",
@@ -62,7 +75,7 @@ async function getKeycloakAdminToken(request: APIRequestContext): Promise<string
 async function wireBackchannelLogout(request: APIRequestContext, adminToken: string): Promise<void> {
   const authHeaders = { Authorization: `Bearer ${adminToken}` };
 
-  const list = await request.get("/auth/admin/realms/egret/clients?clientId=egret", {
+  const list = await request.get(`${KC_ADMIN}/admin/realms/egret/clients?clientId=egret`, {
     headers: authHeaders,
   });
   expect(list.ok(), `find egret client → ${list.status()} ${await list.text()}`).toBeTruthy();
@@ -74,7 +87,7 @@ async function wireBackchannelLogout(request: APIRequestContext, adminToken: str
   attributes["backchannel.logout.url"] = BACKCHANNEL_LOGOUT_URL;
   attributes["backchannel.logout.session.required"] = "false";
 
-  const put = await request.put(`/auth/admin/realms/egret/clients/${client.id}`, {
+  const put = await request.put(`${KC_ADMIN}/admin/realms/egret/clients/${client.id}`, {
     headers: { ...authHeaders, "Content-Type": "application/json" },
     data: { ...client, attributes },
   });
@@ -97,7 +110,7 @@ test.describe("Keycloak backchannel-logout revokes the egret session", () => {
     // Force-logout THROUGH KEYCLOAK (not egret) — this is what makes Keycloak fire
     // the back-channel logout call to the URL wired above.
     const logout = await request.post(
-      `/auth/admin/realms/egret/users/${MEMBER_SSO_USER_ID}/logout`,
+      `${KC_ADMIN}/admin/realms/egret/users/${MEMBER_SSO_USER_ID}/logout`,
       { headers: { Authorization: `Bearer ${adminToken}` } },
     );
     expect(logout.ok(), `force logout → ${logout.status()} ${await logout.text()}`).toBeTruthy();
