@@ -26,10 +26,19 @@ import {
  * Same Auto/JWT/Impersonate/None options as the create wizard
  * (`ControlPlaneEngines.tsx`) and the Trino `EngineSecurity.tsx` selector.
  * Auto (`""`) is omitted from the PUT body so the backend preserves whatever
- * mode is already stored; `"none"` is sent LITERALLY and actually disables
- * delegation (`build_starrocks_spec` rewrites the block for any non-empty
- * mode) — so, unlike before, it is a freely reachable choice rather than a
- * disabled no-op.
+ * mode is already stored; `"none"` is sent LITERALLY. For a NEW/open engine
+ * that literal `"none"` provisions an open engine, so all four options are
+ * available there.
+ *
+ * BUT downgrading an ALREADY-delegated engine (stored jwt/impersonate) to open
+ * is NOT backend-supported: `build_starrocks_provision_req` filters
+ * `delegation_mode` by `!is_empty()` only, so a stored `"none"` is still treated
+ * as active delegation and RE-provisions the JWT security integration + GRANT
+ * IMPERSONATE — there's no DROP-security-integration / REVOKE-impersonate
+ * teardown DDL. So for a currently-delegated engine we DISABLE the "None"
+ * option (it would silently re-affirm delegation while claiming open) and tell
+ * the user to recreate the engine instead. This teardown gap is a documented
+ * follow-up, not part of the default-on delegation work.
  *
  * Scoped to per-user delegation + transport TLS. The Ranger/authz binding
  * (`authzServiceId`) is NOT editable here: the StarRocks update path
@@ -42,6 +51,14 @@ export function StarRocksSecuritySection({
 }: {
   cfg: StarRocksConfigForm;
 }) {
+  // Read the CURRENTLY-STORED mode (not the live `cfg.delegationMode`, which
+  // moves as the user picks). An engine that already runs jwt/impersonate can't
+  // be safely downgraded to open (no teardown DDL — see the doc comment above),
+  // so "None" is disabled for it. Switching jwt⇄impersonate stays allowed.
+  const hasDelegation =
+    cfg.storedConfig?.delegation?.mode === "jwt" ||
+    cfg.storedConfig?.delegation?.mode === "impersonate";
+
   return (
     <div className="space-y-4">
       <div className="space-y-1.5">
@@ -63,12 +80,21 @@ export function StarRocksSecuritySection({
             </SelectItem>
             <SelectItem value="jwt">JWT (per-user)</SelectItem>
             <SelectItem value="impersonate">Impersonate (service user)</SelectItem>
-            <SelectItem value="none">None (open engine)</SelectItem>
+            <SelectItem value="none" disabled={hasDelegation}>
+              None (open engine)
+            </SelectItem>
           </SelectContent>
         </Select>
         <p className="text-xs text-muted-foreground">
           {DELEGATION_HELP[cfg.delegationMode]}
         </p>
+        {hasDelegation && (
+          <p className="text-xs text-muted-foreground">
+            Removing delegation from a running engine isn&apos;t supported yet —
+            recreate the engine to make it open. You can still switch between JWT
+            and Impersonate.
+          </p>
+        )}
       </div>
 
       {(cfg.delegationMode === "jwt" || cfg.delegationMode === "impersonate") && (

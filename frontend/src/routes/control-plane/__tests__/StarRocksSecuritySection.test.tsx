@@ -79,7 +79,7 @@ describe("StarRocksSecuritySection", () => {
     expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
   });
 
-  test("engine WITH delegation: None is selectable and actually disables delegation (no longer a no-op)", async () => {
+  test("engine WITH stored delegation: None is DISABLED (downgrade unsupported) + the recreate note shows", async () => {
     const user = userEvent.setup();
     const withDeleg: Omit<Engine, "status"> = {
       ...ENGINE,
@@ -93,9 +93,49 @@ describe("StarRocksSecuritySection", () => {
     };
     renderTab(withDeleg);
 
-    // "None" is a freely reachable choice — picking it now sends "none"
-    // literally (build_starrocks_spec rewrites the block), so it isn't
-    // disabled the way it was under the old omit=preserve semantics.
+    // Downgrading a running jwt/impersonate engine to open isn't backend-
+    // supported (no security-integration / impersonation teardown DDL), so the
+    // "None" option is disabled — picking it would silently re-affirm
+    // delegation while claiming open. The recreate note explains why.
+    expect(
+      screen.getByText(/Removing delegation from a running engine isn't supported yet/i),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText("Per-user delegation"));
+    const noneOpt = await screen.findByRole("option", {
+      name: "None (open engine)",
+    });
+    expect(noneOpt).toHaveAttribute("aria-disabled", "true");
+    // JWT / Impersonate remain switchable.
+    expect(
+      screen.getByRole("option", { name: "Impersonate (service user)" }),
+    ).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  test("engine WITHOUT stored delegation (open): all four options available; None sends 'none' literally", async () => {
+    const user = userEvent.setup();
+    // An engine with NO stored delegation block (currently open, seeds Auto):
+    // the ratchet does not apply, so None is offered and picking it is a real
+    // change vs. the absent stored block → Save enabled, PUT carries "none".
+    const open: Omit<Engine, "status"> = {
+      ...ENGINE,
+      spec: {
+        ...ENGINE.spec,
+        starrocksConfig: {
+          feImage: "starrocks/fe-ubuntu:3.4-latest",
+          cnImage: "starrocks/cn-ubuntu:3.4-latest",
+          feReplicas: 1,
+          cnReplicas: 1,
+          // no `delegation` block
+        },
+      },
+    };
+    renderTab(open);
+
+    expect(
+      screen.queryByText(/Removing delegation from a running engine isn't supported yet/i),
+    ).not.toBeInTheDocument();
+
     await user.click(screen.getByLabelText("Per-user delegation"));
     const noneOpt = await screen.findByRole("option", {
       name: "None (open engine)",
@@ -103,13 +143,14 @@ describe("StarRocksSecuritySection", () => {
     expect(noneOpt).not.toHaveAttribute("aria-disabled", "true");
 
     await user.click(noneOpt);
-    // TLS toggle hides again once "none" is picked.
+    // TLS toggle stays hidden for "none" (not a delegated mode).
     expect(screen.queryByLabelText("Enable TLS")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => expect(api.updateEngine).toHaveBeenCalledTimes(1));
     const [, body] = vi.mocked(api.updateEngine).mock.calls[0];
+    // "none" must be sent LITERALLY, not omitted.
     expect(body.starrocks).toEqual(
       expect.objectContaining({ delegationMode: "none" }),
     );
