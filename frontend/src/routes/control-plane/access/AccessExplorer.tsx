@@ -1,7 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
-import { Search, ShieldAlert } from "lucide-react";
+import { ChevronsUpDown, ShieldAlert } from "lucide-react";
 
 import { getEffectiveAccess, type EffectiveAccess } from "@/api/access";
 import { getWhoCanAccess, type WhoCanAccess as WhoCanAccessData } from "@/api/whoCanAccess";
@@ -12,8 +12,9 @@ import type { WorkspaceDto } from "@/api/generated/model";
 import { EffectBadge, denyStyle } from "@/components/access/EffectBadge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -112,7 +113,7 @@ function SourceSuffix({ source }: { source: string }) {
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="space-y-2">
-      <h2 className="text-sm font-semibold">{title}</h2>
+      <h2 className="text-base font-semibold">{title}</h2>
       {children}
     </section>
   );
@@ -138,18 +139,13 @@ function PrincipalDirection() {
 
   return (
     <>
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">Principal</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <PrincipalPicker
-            type={principalType ?? "user"}
-            selected={principalId}
-            onPick={(t, id) => setSp(t === "user" ? { user: id } : { group: id })}
-          />
-        </CardContent>
-      </Card>
+      <Section title="Principal">
+        <PrincipalPicker
+          type={principalType ?? "user"}
+          selected={principalId}
+          onPick={(t, id) => setSp(t === "user" ? { user: id } : { group: id })}
+        />
+      </Section>
 
       {!principalId ? (
         <p className="py-10 text-center text-sm text-muted-foreground">
@@ -182,8 +178,7 @@ function PrincipalReport({ data }: { data: EffectiveAccess }) {
   const isSuper = principal.is_platform_admin;
 
   return (
-    <Card>
-      <CardContent className="space-y-6 pt-6">
+    <div className="space-y-6">
         {/* Header */}
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-2">
@@ -298,8 +293,7 @@ function PrincipalReport({ data }: { data: EffectiveAccess }) {
             </ul>
           </Section>
         )}
-      </CardContent>
-    </Card>
+    </div>
   );
 }
 
@@ -333,16 +327,19 @@ function PermissionsTable({ permissions }: { permissions: EffectiveAccess["permi
       getId={(r) => r.key}
       searchPlaceholder="Search permissions…"
       initialSort={{ key: "key", dir: "asc" }}
+      pageSize={12}
+      bordered
       emptyText="No permissions."
     />
   );
 }
 
 /**
- * Principal chooser: a User/Group toggle plus a search box with live
- * suggestions from the policy principal picker. Selecting a suggestion lifts
- * the choice to the caller (which writes it to the URL). The selected value is
- * the principal id (a user's email or a group's name).
+ * Principal chooser: a User/Group toggle plus a combobox (Popover + search)
+ * driven by the policy principal picker's server-side search — the list can be
+ * thousands of users, so we query on demand rather than loading them all.
+ * Picking an entry lifts the choice to the caller (which writes it to the URL).
+ * The selected value is the principal id (a user's email or a group's name).
  */
 function PrincipalPicker({
   type: initialType,
@@ -354,24 +351,23 @@ function PrincipalPicker({
   onPick: (type: PrincipalType, id: string) => void;
 }) {
   const [type, setType] = useState<PrincipalType>(initialType);
-  const [value, setValue] = useState(selected ?? "");
-  const [showSuggest, setShowSuggest] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
 
   const suggestQ = useQuery({
-    queryKey: ["explorer-principals", type, value],
-    queryFn: () => listPrincipals(value, type),
-    enabled: showSuggest && value.trim().length > 0,
+    queryKey: ["explorer-principals", type, q],
+    queryFn: () => listPrincipals(q, type),
+    enabled: open,
   });
   const suggestions = useMemo(() => suggestQ.data ?? [], [suggestQ.data]);
 
   return (
-    <div className="flex items-start gap-2">
+    <div className="flex items-center gap-2">
       <Select
         value={type}
         onValueChange={(v) => {
           setType(v as PrincipalType);
-          setValue("");
-          setShowSuggest(false);
+          setQ("");
         }}
       >
         <SelectTrigger className="h-9 w-28" aria-label="Principal type">
@@ -383,42 +379,58 @@ function PrincipalPicker({
         </SelectContent>
       </Select>
 
-      <div className="relative max-w-sm flex-1">
-        <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          className="h-9 pl-8"
-          aria-label={type === "group" ? "Group name" : "User email"}
-          placeholder={type === "group" ? "Search groups…" : "Search users…"}
-          value={value}
-          onChange={(e) => {
-            setValue(e.target.value);
-            setShowSuggest(true);
-          }}
-          onFocus={() => setShowSuggest(true)}
-        />
-        {showSuggest && value.trim().length > 0 && suggestions.length > 0 && (
-          <ul className="absolute z-10 mt-1 max-h-48 w-full overflow-auto rounded-md border bg-popover p-1 shadow-md">
-            {suggestions.map((p) => (
-              <li key={p.name}>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            variant="outline"
+            role="combobox"
+            aria-label={type === "group" ? "Group name" : "User email"}
+            className="h-9 w-72 justify-between font-normal"
+          >
+            <span className="truncate">
+              {selected ?? (type === "group" ? "Select a group…" : "Select a user…")}
+            </span>
+            <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-72 p-0" align="start">
+          <div className="border-b p-2">
+            <Input
+              autoFocus
+              placeholder={type === "group" ? "Search groups…" : "Search users…"}
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+          </div>
+          <div className="max-h-64 overflow-y-auto py-1">
+            {suggestQ.isLoading ? (
+              <p className="px-3 py-2 text-sm text-muted-foreground">Searching…</p>
+            ) : suggestions.length === 0 ? (
+              <p className="px-3 py-2 text-sm text-muted-foreground">
+                No {type === "group" ? "groups" : "users"} found.
+              </p>
+            ) : (
+              suggestions.map((p) => (
                 <button
+                  key={p.name}
                   type="button"
-                  className="w-full rounded px-2 py-1.5 text-left text-sm hover:bg-accent"
+                  className="block w-full px-3 py-1.5 text-left text-sm hover:bg-accent"
                   onClick={() => {
-                    setValue(p.name);
-                    setShowSuggest(false);
+                    setOpen(false);
+                    setQ("");
                     onPick(type, p.name);
                   }}
                 >
                   <span className="font-medium">{p.label}</span>
                   {p.label !== p.name && (
-                    <span className="ml-1 text-xs text-muted-foreground">{p.name}</span>
+                    <span className="text-muted-foreground"> · {p.name}</span>
                   )}
                 </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+              ))
+            )}
+          </div>
+        </PopoverContent>
+      </Popover>
     </div>
   );
 }
@@ -463,22 +475,17 @@ function ObjectDirection() {
 
   return (
     <>
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">Object</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <ObjectPicker
-            ws={ws}
-            kind={kind}
-            id={id}
-            onPickWorkspace={(newWs) => setSp({ dir: "object", ws: newWs })}
-            onPickObject={(newKind, newId) =>
-              setSp({ dir: "object", ws: ws ?? "", kind: newKind, id: newId })
-            }
-          />
-        </CardContent>
-      </Card>
+      <Section title="Object">
+        <ObjectPicker
+          ws={ws}
+          kind={kind}
+          id={id}
+          onPickWorkspace={(newWs) => setSp({ dir: "object", ws: newWs })}
+          onPickObject={(newKind, newId) =>
+            setSp({ dir: "object", ws: ws ?? "", kind: newKind, id: newId })
+          }
+        />
+      </Section>
 
       {!kind || !id ? (
         <p className="py-10 text-center text-sm text-muted-foreground">
@@ -507,9 +514,35 @@ function ObjectDirection() {
   );
 }
 
+/** Coarse category for a who-can-access entry's `source`, used by the filter. */
+type SourceCategory = "direct" | "workspace" | "platform";
+function sourceCategory(source: string): SourceCategory {
+  if (source === "direct") return "direct";
+  if (source === "platform") return "platform";
+  return "workspace";
+}
+
 /** The full who-can-access report for a resolved object. */
 function ObjectReport({ data }: { data: WhoCanAccessData }) {
   const { object, entries } = data;
+  const [sourceFilter, setSourceFilter] = useState<"all" | SourceCategory>("all");
+
+  // Platform admins typically dominate this list (every admin can reach every
+  // object), which buries the direct/workspace grants that actually explain
+  // *this* object's access. The filter lets you cut that noise.
+  const counts = useMemo(() => {
+    const c = { direct: 0, workspace: 0, platform: 0 };
+    for (const e of entries) c[sourceCategory(e.source)] += 1;
+    return c;
+  }, [entries]);
+
+  const filteredEntries = useMemo(
+    () =>
+      sourceFilter === "all"
+        ? entries
+        : entries.filter((e) => sourceCategory(e.source) === sourceFilter),
+    [entries, sourceFilter],
+  );
 
   const columns: Column<WhoCanAccessData["entries"][number]>[] = [
     {
@@ -552,8 +585,7 @@ function ObjectReport({ data }: { data: WhoCanAccessData }) {
   ];
 
   return (
-    <Card>
-      <CardContent className="space-y-6 pt-6">
+    <div className="space-y-6">
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="secondary" className="shrink-0 font-normal">
             {object.kind}
@@ -567,15 +599,33 @@ function ObjectReport({ data }: { data: WhoCanAccessData }) {
         </div>
 
         <FilterableTable
-          rows={entries}
+          rows={filteredEntries}
           columns={columns}
           getId={(e) => `${e.principal_type}:${e.principal_id}:${e.source}:${e.access}`}
           searchPlaceholder="Search principals…"
           initialSort={{ key: "principal", dir: "asc" }}
+          pageSize={12}
+          bordered
+          filters={
+            <Select
+              value={sourceFilter}
+              onValueChange={(v) => setSourceFilter(v as "all" | SourceCategory)}
+            >
+              <SelectTrigger className="h-9 w-48" aria-label="Filter by source">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All sources ({entries.length})</SelectItem>
+                <SelectItem value="direct">Direct grant ({counts.direct})</SelectItem>
+                <SelectItem value="workspace">Workspace role ({counts.workspace})</SelectItem>
+                <SelectItem value="platform">Platform admin ({counts.platform})</SelectItem>
+              </SelectContent>
+            </Select>
+          }
           emptyText="No one has access."
+          noMatchText="No principals match."
         />
-      </CardContent>
-    </Card>
+    </div>
   );
 }
 
