@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Compass,
+  Eye,
+  EyeOff,
   KeyRound,
   ListChecks,
   MoreHorizontal,
@@ -33,6 +35,7 @@ import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -80,6 +83,36 @@ const PROVIDER_OPTIONS = [
   { value: "oidc", label: "OIDC" },
 ];
 
+// Loose client-side email shape check — just enough to gate the submit button;
+// the backend remains the source of truth.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * A required-field label: the `<Label>` keeps clean text (so getByLabelText and
+ * the accessible name stay exact) with a decorative red asterisk beside it.
+ */
+function RequiredLabel({ htmlFor, children }: { htmlFor: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-0.5">
+      <Label htmlFor={htmlFor}>{children}</Label>
+      <span className="text-destructive" aria-hidden>
+        *
+      </span>
+    </div>
+  );
+}
+
+/** Two-letter avatar initials from the name (or email when unnamed). */
+function initials(u: AccessUser): string {
+  const name = u.name?.trim();
+  if (name) {
+    const parts = name.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+    return name.slice(0, 2).toUpperCase();
+  }
+  return (u.email ?? "?").slice(0, 2).toUpperCase();
+}
+
 /**
  * Control Plane → Access control → Users.
  *
@@ -121,22 +154,35 @@ export default function UsersPage() {
 
   const columns: Column<AccessUser>[] = [
     {
-      key: "email",
-      label: "Email",
+      // Identity cell: avatar + name (primary) with the email as a secondary
+      // line. `value` covers both so search and sort work on either. When a user
+      // has no name, the email becomes the primary line.
+      key: "user",
+      label: "User",
       sortable: true,
-      className: "font-medium",
-      value: (u) => u.email,
+      value: (u) => `${u.name ?? ""} ${u.email}`.trim(),
       cell: (u) => (
         <button
           type="button"
           onClick={() => setEditTarget(u)}
-          className="text-primary hover:underline"
+          className="group flex items-center gap-3 text-left"
         >
-          {u.email}
+          <Avatar className="h-8 w-8">
+            <AvatarFallback className="bg-primary/10 text-xs font-medium text-primary">
+              {initials(u)}
+            </AvatarFallback>
+          </Avatar>
+          <div className="min-w-0">
+            <div className="truncate font-medium text-foreground group-hover:underline">
+              {u.name?.trim() || u.email}
+            </div>
+            {u.name?.trim() ? (
+              <div className="truncate text-xs text-muted-foreground">{u.email}</div>
+            ) : null}
+          </div>
         </button>
       ),
     },
-    { key: "name", label: "Name", sortable: true, value: (u) => u.name, cell: (u) => u.name },
     { key: "provider", label: "Provider", cell: (u) => <Badge variant="outline">{u.provider}</Badge> },
     {
       key: "status",
@@ -156,33 +202,42 @@ export default function UsersPage() {
     {
       key: "roles",
       label: "Roles",
+      // Cap to two chips + a "+N" overflow so a heavily-assigned user never
+      // blows out the row width; the overflow badge lists the rest on hover.
       cell: (u) =>
         u.roles.length === 0 ? (
           <span className="text-muted-foreground">—</span>
         ) : (
-          <div className="flex flex-wrap gap-1">
-            {u.roles.map((r) => (
-              <Badge key={r} variant="secondary" className="max-w-[12rem] truncate" title={r}>
+          <div className="flex flex-wrap items-center gap-1">
+            {u.roles.slice(0, 2).map((r) => (
+              <Badge key={r} variant="secondary" className="max-w-[10rem] truncate" title={r}>
                 {r}
               </Badge>
             ))}
+            {u.roles.length > 2 ? (
+              <Badge variant="outline" title={u.roles.slice(2).join(", ")}>
+                +{u.roles.length - 2}
+              </Badge>
+            ) : null}
           </div>
         ),
     },
     {
       key: "groups",
       label: "Groups",
+      // Groups are mostly empty and secondary here — show a count chip (full
+      // list on hover) instead of a wide column of chips.
       cell: (u) =>
         u.groups.length === 0 ? (
           <span className="text-muted-foreground">—</span>
         ) : (
-          <div className="flex flex-wrap gap-1">
-            {u.groups.map((g) => (
-              <Badge key={g} variant="outline" className="max-w-[12rem] truncate" title={g}>
-                {g}
-              </Badge>
-            ))}
-          </div>
+          <Badge
+            variant="outline"
+            className="cursor-default tabular-nums"
+            title={u.groups.join(", ")}
+          >
+            {u.groups.length}
+          </Badge>
         ),
     },
     {
@@ -307,8 +362,20 @@ export default function UsersPage() {
           <SummaryStrip
             items={[
               { label: "users", value: total },
-              { label: "active", value: active },
-              { label: "disabled", value: total - active },
+              {
+                label: "active",
+                value: active,
+                active: statusFacet === "active",
+                onClick: () =>
+                  setStatusFacet((f) => (f === "active" ? FACET_ALL : "active")),
+              },
+              {
+                label: "disabled",
+                value: total - active,
+                active: statusFacet === "disabled",
+                onClick: () =>
+                  setStatusFacet((f) => (f === "disabled" ? FACET_ALL : "disabled")),
+              },
             ]}
           />
           {bulk.bulkMode && bulk.someSelected && (
@@ -331,14 +398,14 @@ export default function UsersPage() {
             </div>
           )}
           {users.isLoading ? (
-            <ListSkeleton rows={6} cols={7} />
+            <ListSkeleton rows={6} cols={6} />
           ) : (
             <FilterableTable
               rows={filtered}
               columns={columns}
               getId={(u) => u.id}
               searchPlaceholder="Search users…"
-              initialSort={{ key: "email", dir: "asc" }}
+              initialSort={{ key: "user", dir: "asc" }}
               pageSize={25}
               emptyText={
                 users.isError ? (
@@ -517,6 +584,7 @@ function CreateUserDialog({
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const createMutation = useMutation<
@@ -528,10 +596,19 @@ function CreateUserDialog({
     onSuccess: () => queryClient.invalidateQueries({ queryKey: usersQueryKey }),
   });
 
+  // Gate submit on a filled, plausibly-valid form — matching the other create
+  // dialogs — so "Create" isn't a dead click on an empty form.
+  const canCreate =
+    EMAIL_RE.test(email.trim()) &&
+    name.trim().length > 0 &&
+    password.length > 0 &&
+    !createMutation.isPending;
+
   function reset() {
     setEmail("");
     setName("");
     setPassword("");
+    setShowPassword(false);
     setError(null);
     createMutation.reset();
   }
@@ -575,7 +652,7 @@ function CreateUserDialog({
             )}
 
             <div className="space-y-1.5">
-              <Label htmlFor="new-user-email">Email</Label>
+              <RequiredLabel htmlFor="new-user-email">Email</RequiredLabel>
               <Input
                 id="new-user-email"
                 type="email"
@@ -583,29 +660,47 @@ function CreateUserDialog({
                 onChange={(e) => setEmail(e.target.value)}
                 required
                 autoFocus
+                autoComplete="off"
               />
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="new-user-name">Name</Label>
+              <RequiredLabel htmlFor="new-user-name">Name</RequiredLabel>
               <Input
                 id="new-user-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 required
+                autoComplete="name"
               />
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="new-user-password">Password</Label>
-              <Input
-                id="new-user-password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                autoComplete="new-password"
-              />
+              <RequiredLabel htmlFor="new-user-password">Password</RequiredLabel>
+              <div className="relative">
+                <Input
+                  id="new-user-password"
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  autoComplete="new-password"
+                  className="pr-10"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((s) => !s)}
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  aria-pressed={showPassword}
+                  className="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-muted-foreground hover:text-foreground"
+                >
+                  {showPassword ? (
+                    <EyeOff className="h-4 w-4" />
+                  ) : (
+                    <Eye className="h-4 w-4" />
+                  )}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -613,7 +708,7 @@ function CreateUserDialog({
             <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
               Cancel
             </Button>
-            <Button type="submit" disabled={createMutation.isPending}>
+            <Button type="submit" disabled={!canCreate}>
               Create
             </Button>
           </DialogFooter>
