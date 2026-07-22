@@ -697,6 +697,17 @@ function ActivityTab({ workspaceId }: { workspaceId: string }) {
   const page = auditQ.data?.status === 200 ? auditQ.data.data : undefined;
   const entries = page?.entries ?? [];
 
+  // Resolve actor UUIDs to emails, matching the Audit log page (shared cache key).
+  const usersQ = useQuery({
+    queryKey: ["control-plane", "access", "users"],
+    queryFn: listUsers,
+    retry: false,
+  });
+  const emailById = useMemo(
+    () => new Map((usersQ.data ?? []).map((u) => [u.id, u.email])),
+    [usersQ.data],
+  );
+
   if (auditQ.isLoading) {
     return <p className="text-sm text-muted-foreground">Loading activity…</p>;
   }
@@ -709,27 +720,73 @@ function ActivityTab({ workspaceId }: { workspaceId: string }) {
   }
 
   return (
-    <div className="divide-y rounded-md border">
-      {entries.map((e) => (
-        <div key={e.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-sm">
-          <span className="text-xs text-muted-foreground" title={fullTimestamp(e.ts)}>
-            {timeAgo(e.ts)}
-          </span>
-          <span className="font-medium">{e.action}</span>
-          <span className="text-muted-foreground">
-            {e.resourceType}
-            {e.resourceId ? ` (${e.resourceId})` : ""}
-          </span>
-          {e.actorUserId && (
-            <span className="text-xs text-muted-foreground" title={e.actorUserId}>
-              by {e.actorUserId.slice(0, 8)}
-            </span>
-          )}
-          {e.decision && (
-            <Badge variant={e.decision === "allow" ? "outline" : "secondary"}>{e.decision}</Badge>
-          )}
-        </div>
-      ))}
+    <div className="overflow-x-auto rounded-md border">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Time</TableHead>
+            <TableHead>Action</TableHead>
+            <TableHead>Resource</TableHead>
+            <TableHead>Actor</TableHead>
+            <TableHead>Decision</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {entries.map((e) => {
+            const actorEmail = e.actorUserId ? emailById.get(e.actorUserId) : undefined;
+            return (
+              <TableRow key={e.id}>
+                <TableCell
+                  className="whitespace-nowrap tabular-nums text-muted-foreground"
+                  title={fullTimestamp(e.ts)}
+                >
+                  {timeAgo(e.ts)}
+                </TableCell>
+                <TableCell className="font-mono text-xs font-medium">{e.action}</TableCell>
+                <TableCell className="text-muted-foreground">
+                  {e.resourceType}
+                  {/* The resourceId is often this workspace's own UUID; truncate it
+                      to keep the column quiet on a page already scoped to it. */}
+                  {e.resourceId ? (
+                    <span className="font-mono text-xs text-muted-foreground/70">
+                      {" "}
+                      ({e.resourceId.slice(0, 8)}…)
+                    </span>
+                  ) : null}
+                </TableCell>
+                <TableCell>
+                  {e.actorUserId ? (
+                    <span title={e.actorUserId}>
+                      {actorEmail ?? (
+                        <span className="font-mono text-xs">{e.actorUserId.slice(0, 8)}</span>
+                      )}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">system</span>
+                  )}
+                </TableCell>
+                <TableCell>
+                  {e.decision === "allow" ? (
+                    <Badge
+                      className="border-transparent"
+                      style={{
+                        backgroundColor: "var(--success)",
+                        color: "var(--success-foreground)",
+                      }}
+                    >
+                      allow
+                    </Badge>
+                  ) : e.decision === "deny" ? (
+                    <Badge variant="destructive">deny</Badge>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
     </div>
   );
 }
