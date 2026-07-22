@@ -32,13 +32,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -56,6 +49,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 const SLUG_RE = /^[a-z0-9-]+$/;
+
+/** Derive a URL-safe slug from a display name (lowercase, hyphen-joined). */
+function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
 
 /**
  * Control Plane → Workspaces.
@@ -202,79 +203,70 @@ export default function Workspaces() {
   ];
 
   return (
-    <div className="space-y-5">
-      <div>
-        <h1 className="text-2xl font-semibold leading-tight">Workspaces</h1>
-        <p className="text-sm text-muted-foreground">
-          Every workspace on the platform — create, rename, archive, or open one to manage it.
-        </p>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold leading-tight">Workspaces</h1>
+          <p className="text-sm text-muted-foreground">
+            Every workspace is an independent data platform with its own members and
+            resources — create, rename, archive, or open one to manage it.
+          </p>
+        </div>
+        <Button size="sm" onClick={() => setCreateOpen(true)}>
+          <Plus className="mr-1 h-4 w-4" />
+          New workspace
+        </Button>
       </div>
 
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between gap-2">
-            <div className="space-y-1.5">
-              <CardTitle className="text-lg">All workspaces</CardTitle>
-              <CardDescription>
-                Each workspace is an independent data platform with its own members and resources.
-              </CardDescription>
-            </div>
-            <Button size="sm" onClick={() => setCreateOpen(true)}>
-              <Plus className="mr-1 h-4 w-4" />
-              New workspace
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <SummaryStrip
-            items={[
-              { label: "total", value: total },
-              { label: "active", value: active },
-              { label: "archived", value: total - active },
-            ]}
-          />
-          {listQ.isLoading ? (
-            <ListSkeleton rows={6} cols={6} />
-          ) : (
-            <FilterableTable
-              rows={filtered}
-              columns={columns}
-              getId={(w) => w.id}
-              searchPlaceholder="Search workspaces…"
-              initialSort={{ key: "name", dir: "asc" }}
-              pageSize={25}
-              emptyText={
-                listQ.isError ? (
-                  String(listQ.error ?? "Failed to load workspaces.")
-                ) : (
-                  <EmptyState
-                    icon={FolderKanban}
-                    title="No workspaces yet"
-                    description="Create your first workspace to give a team its own data platform."
-                    action={
-                      <Button size="sm" onClick={() => setCreateOpen(true)}>
-                        <Plus className="mr-1 h-4 w-4" />
-                        New workspace
-                      </Button>
-                    }
-                  />
-                )
-              }
-              filters={
-                <FacetSelect
-                  label="Status"
-                  value={statusFacet}
-                  onChange={setStatusFacet}
-                  options={[
-                    { value: "active", label: "Active" },
-                    { value: "archived", label: "Archived" },
-                  ]}
-                />
-              }
+      <SummaryStrip
+        items={[
+          { label: "total", value: total },
+          { label: "active", value: active },
+          { label: "archived", value: total - active },
+        ]}
+      />
+
+      {listQ.isLoading ? (
+        <ListSkeleton rows={6} cols={6} />
+      ) : (
+        <FilterableTable
+          rows={filtered}
+          columns={columns}
+          getId={(w) => w.id}
+          searchPlaceholder="Search workspaces…"
+          initialSort={{ key: "name", dir: "asc" }}
+          pageSize={25}
+          bordered
+          emptyText={
+            listQ.isError ? (
+              String(listQ.error ?? "Failed to load workspaces.")
+            ) : (
+              <EmptyState
+                icon={FolderKanban}
+                title="No workspaces yet"
+                description="Create your first workspace to give a team its own data platform."
+                action={
+                  <Button size="sm" onClick={() => setCreateOpen(true)}>
+                    <Plus className="mr-1 h-4 w-4" />
+                    New workspace
+                  </Button>
+                }
+              />
+            )
+          }
+          filters={
+            <FacetSelect
+              label="Status"
+              value={statusFacet}
+              onChange={setStatusFacet}
+              options={[
+                { value: "active", label: "Active" },
+                { value: "archived", label: "Archived" },
+              ]}
             />
-          )}
-        </CardContent>
-      </Card>
+          }
+        />
+      )}
 
       <CreateWorkspaceDialog open={createOpen} onOpenChange={setCreateOpen} onCreated={invalidate} />
 
@@ -324,6 +316,8 @@ function CreateWorkspaceDialog({
 }) {
   const [slug, setSlug] = useState("");
   const [name, setName] = useState("");
+  // Once the admin hand-edits the slug, stop deriving it from the name.
+  const [slugEdited, setSlugEdited] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const createMut = useAdminWorkspacesCreateWs();
@@ -332,6 +326,7 @@ function CreateWorkspaceDialog({
     if (open) {
       setSlug("");
       setName("");
+      setSlugEdited(false);
       setError(null);
     }
   }, [open]);
@@ -370,30 +365,41 @@ function CreateWorkspaceDialog({
               </p>
             )}
             <div className="space-y-1.5">
-              <Label htmlFor="new-ws-slug">Slug</Label>
-              <Input
-                id="new-ws-slug"
-                value={slug}
-                onChange={(e) => setSlug(e.target.value)}
-                placeholder="e.g. engineering"
-                autoFocus
-                required
-              />
-              {slug.length > 0 && !slugValid && (
-                <p className="text-xs text-destructive">
-                  Only lowercase letters, digits, and hyphens.
-                </p>
-              )}
-            </div>
-            <div className="space-y-1.5">
               <Label htmlFor="new-ws-name">Name</Label>
               <Input
                 id="new-ws-name"
                 value={name}
-                onChange={(e) => setName(e.target.value)}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  if (!slugEdited) setSlug(slugify(e.target.value));
+                }}
                 placeholder="Engineering"
+                autoFocus
                 required
               />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="new-ws-slug">Slug</Label>
+              <Input
+                id="new-ws-slug"
+                value={slug}
+                onChange={(e) => {
+                  setSlugEdited(true);
+                  setSlug(e.target.value);
+                }}
+                placeholder="e.g. engineering"
+                className="font-mono"
+                required
+              />
+              {slug.length > 0 && !slugValid ? (
+                <p className="text-xs text-destructive">
+                  Only lowercase letters, digits, and hyphens.
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Immutable machine identifier used in URLs and APIs.
+                </p>
+              )}
             </div>
           </div>
 

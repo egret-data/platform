@@ -221,10 +221,8 @@ export default function RolesPage() {
         const scopeLabel = r.scope === "platform" ? "Platform role" : "Workspace role";
         const subtitle = parentName ? `${scopeLabel} · inherits ${parentName}` : scopeLabel;
         return (
-          <div className="flex items-center gap-3">
-            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-primary/10 text-primary">
-              <UserCog className="h-4 w-4" />
-            </span>
+          <div className="flex items-center gap-2.5">
+            <UserCog className="h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <button
