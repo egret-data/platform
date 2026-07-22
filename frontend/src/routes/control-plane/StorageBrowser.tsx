@@ -1,6 +1,6 @@
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { Navigate, useParams, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, ChevronRight, Download, File, Folder, FolderOpen } from "lucide-react";
+import { ChevronRight, Download, File, Folder } from "lucide-react";
 
 import {
   type Storage,
@@ -10,7 +10,6 @@ import {
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 
 function fmtSize(n: number): string {
@@ -20,12 +19,12 @@ function fmtSize(n: number): string {
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-export default function StorageBrowser() {
-  const { id = "" } = useParams();
-  // Folder prefix lives in the URL (`?prefix=`) so a folder is deep-linkable and
-  // survives a refresh. Default preserved: "" (bucket root). Folder navigation
-  // uses a history PUSH (the default, not { replace: true }) so the browser Back
-  // button walks UP one folder instead of exiting the browser.
+/**
+ * Object browser for a storage connection — breadcrumb + folder/file listing,
+ * with folder navigation via the `?prefix=` param (a history PUSH so Back walks
+ * up one folder). Rendered inside the storage detail's Browse tab.
+ */
+export function StorageObjectBrowser({ storageId }: { storageId: string }) {
   const [sp, setSp] = useSearchParams();
   const prefix = sp.get("prefix") ?? "";
   const setPrefix = (next: string) =>
@@ -37,13 +36,13 @@ export default function StorageBrowser() {
     });
 
   const conn = useQuery<Storage, ApiError>({
-    queryKey: ["control-plane", "storage", id],
-    queryFn: () => getStorage(id),
+    queryKey: ["control-plane", "storage", storageId],
+    queryFn: () => getStorage(storageId),
     retry: false,
   });
   const listing = useQuery<StorageListing, ApiError>({
-    queryKey: ["cp", "storage-objects", id, prefix],
-    queryFn: () => browseStorageObjects(id, prefix),
+    queryKey: ["cp", "storage-objects", storageId, prefix],
+    queryFn: () => browseStorageObjects(storageId, prefix),
     retry: false,
   });
 
@@ -53,103 +52,84 @@ export default function StorageBrowser() {
   const bucket = conn.data?.bucket ?? "bucket";
 
   return (
-    <div className="space-y-5">
-      <Link
-        to="/control-plane/storage"
-        className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        Storage
-      </Link>
+    <div className="overflow-hidden rounded-md border">
+      <div className="flex flex-wrap items-center gap-1 border-b bg-muted/30 px-4 py-2.5 text-sm">
+        <button type="button" className="font-mono text-primary hover:underline" onClick={() => setPrefix("")}>
+          {bucket}
+        </button>
+        {parts.map((part, i) => (
+          <span key={i} className="flex items-center gap-1">
+            <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+            <button
+              type="button"
+              className="font-mono text-primary hover:underline"
+              onClick={() => setPrefix(parts.slice(0, i + 1).join("/") + "/")}
+            >
+              {part}
+            </button>
+          </span>
+        ))}
+      </div>
 
-      <Card className="overflow-hidden">
-        <div className="flex items-center gap-3 border-b bg-muted/30 p-5">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-            <FolderOpen className="h-6 w-6" />
-          </div>
-          <div className="min-w-0">
-            <h1 className="truncate text-2xl font-semibold leading-tight">
-              {conn.data?.name ?? "Storage"}
-            </h1>
-            <p className="font-mono text-xs text-muted-foreground">
-              {bucket}
-              {conn.data?.endpoint ? ` · ${conn.data.endpoint}` : ""}
-            </p>
-          </div>
+      {listing.isLoading ? (
+        <div className="p-4">
+          <ListSkeleton rows={8} cols={2} />
         </div>
-
-        <div className="flex flex-wrap items-center gap-1 border-b px-5 py-3 text-sm">
-          <button
-            type="button"
-            className="text-primary hover:underline"
-            onClick={() => setPrefix("")}
-          >
-            {bucket}
-          </button>
-          {parts.map((part, i) => (
-            <span key={i} className="flex items-center gap-1">
-              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
-              <button
-                type="button"
-                className="text-primary hover:underline"
-                onClick={() => setPrefix(parts.slice(0, i + 1).join("/") + "/")}
+      ) : listing.isError ? (
+        <p className="py-14 text-center text-sm text-destructive">
+          {(listing.error as ApiError).message}
+        </p>
+      ) : folders.length === 0 && objects.length === 0 ? (
+        <p className="py-14 text-center text-sm text-muted-foreground">This folder is empty.</p>
+      ) : (
+        <div>
+          {folders.map((f) => (
+            <button
+              key={f}
+              type="button"
+              onClick={() => setPrefix(f)}
+              className="flex w-full items-center gap-2 border-b px-4 py-2.5 text-left text-sm transition-colors last:border-b-0 hover:bg-muted"
+            >
+              <Folder className="h-4 w-4 shrink-0 text-highlight" />
+              <span className="truncate">{f.slice(prefix.length).replace(/\/$/, "")}</span>
+              <Badge variant="outline" className="ml-auto text-xs uppercase">
+                folder
+              </Badge>
+            </button>
+          ))}
+          {objects.map((o) => (
+            <div
+              key={o.key}
+              className="flex items-center gap-2 border-b px-4 py-2.5 text-sm last:border-b-0"
+            >
+              <File className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <span className="flex-1 truncate font-mono text-xs">{o.key.slice(prefix.length)}</span>
+              <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{fmtSize(o.size)}</span>
+              <a
+                href={`/api/control-plane/storage/${storageId}/download?key=${encodeURIComponent(o.key)}`}
+                download
+                className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:text-primary"
+                aria-label={`Download ${o.key}`}
+                title="Download"
               >
-                {part}
-              </button>
-            </span>
+                <Download className="h-4 w-4" />
+              </a>
+            </div>
           ))}
         </div>
-
-        <CardContent className="p-0">
-          {listing.isLoading ? (
-            <div className="p-5">
-              <ListSkeleton rows={8} cols={2} />
-            </div>
-          ) : listing.isError ? (
-            <p className="py-14 text-center text-sm text-destructive">
-              {(listing.error as ApiError).message}
-            </p>
-          ) : folders.length === 0 && objects.length === 0 ? (
-            <p className="py-14 text-center text-sm text-muted-foreground">This folder is empty.</p>
-          ) : (
-            <div>
-              {folders.map((f) => (
-                <button
-                  key={f}
-                  type="button"
-                  onClick={() => setPrefix(f)}
-                  className="flex w-full items-center gap-2 border-b px-5 py-2.5 text-left text-sm transition-colors hover:bg-muted"
-                >
-                  <Folder className="h-4 w-4 shrink-0 text-highlight" />
-                  <span className="truncate">{f.slice(prefix.length).replace(/\/$/, "")}</span>
-                  <Badge variant="outline" className="ml-auto text-xs uppercase">
-                    folder
-                  </Badge>
-                </button>
-              ))}
-              {objects.map((o) => (
-                <div
-                  key={o.key}
-                  className="flex items-center gap-2 border-b px-5 py-2.5 text-sm last:border-b-0"
-                >
-                  <File className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <span className="flex-1 truncate font-mono text-xs">{o.key.slice(prefix.length)}</span>
-                  <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{fmtSize(o.size)}</span>
-                  <a
-                    href={`/api/control-plane/storage/${id}/download?key=${encodeURIComponent(o.key)}`}
-                    download
-                    className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:text-primary"
-                    aria-label={`Download ${o.key}`}
-                    title="Download"
-                  >
-                    <Download className="h-4 w-4" />
-                  </a>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      )}
     </div>
   );
+}
+
+/**
+ * Legacy `/control-plane/storage/:id/browse` — browsing now lives on the storage
+ * detail page, so redirect (preserving any `?prefix=` deep-link).
+ */
+export default function StorageBrowserRedirect() {
+  const { id = "" } = useParams();
+  const [sp] = useSearchParams();
+  const prefix = sp.get("prefix");
+  const suffix = prefix ? `&prefix=${encodeURIComponent(prefix)}` : "";
+  return <Navigate to={`/control-plane/storage/${id}?tab=browse${suffix}`} replace />;
 }

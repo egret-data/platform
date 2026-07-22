@@ -114,13 +114,12 @@ export default function ControlPlaneStorage() {
       className: "font-medium",
       value: (c) => c.name,
       cell: (c) => (
-        <button
-          type="button"
-          onClick={() => openEdit(c)}
+        <Link
+          to={`/control-plane/storage/${c.id}`}
           className="font-medium text-primary hover:underline"
         >
           {c.name}
-        </button>
+        </Link>
       ),
     },
     {
@@ -174,7 +173,7 @@ export default function ControlPlaneStorage() {
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             <DropdownMenuItem asChild>
-              <Link to={`/control-plane/storage/${c.id}/browse`}>
+              <Link to={`/control-plane/storage/${c.id}?tab=browse`}>
                 <FolderOpen className="mr-2 h-4 w-4" />
                 Browse
               </Link>
@@ -281,7 +280,7 @@ export default function ControlPlaneStorage() {
 const NO_SECRET = "__none__";
 const NEW_SECRET = "__new__";
 
-function AddStorageDialog({
+export function AddStorageDialog({
   open,
   onOpenChange,
   editing,
