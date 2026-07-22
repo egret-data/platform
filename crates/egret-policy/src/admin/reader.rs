@@ -15,6 +15,9 @@ pub struct EngineBinding {
     pub status: String,
     /// The `policy.authz_services` id this engine enforces, if bound.
     pub authz_service_id: Option<i64>,
+    /// The egret warehouse this engine reads, if any — the key for resolving
+    /// catalog metadata (schemas/tables/columns) for resource autocomplete.
+    pub warehouse_id: Option<uuid::Uuid>,
 }
 
 /// Transport-neutral read error (no engine-seam error type leaks across).
@@ -30,5 +33,30 @@ pub trait EngineBindingReader: Send + Sync {
     async fn engine_catalog_names(
         &self,
         engine_id: uuid::Uuid,
+    ) -> Result<Vec<String>, EngineReadError>;
+
+    // ── Live catalog metadata for resource autocomplete ──────────────────────
+    // Introspects a bound engine's warehouse (the embedded Iceberg catalog) so
+    // the policy resource picker can suggest real schemas/tables/columns, not
+    // just values already used in existing policies. Implementations return an
+    // empty vec when the catalog is disabled or the warehouse isn't browsable.
+
+    /// Schema (Iceberg namespace) names in a warehouse's catalog.
+    async fn warehouse_schemas(
+        &self,
+        warehouse_id: uuid::Uuid,
+    ) -> Result<Vec<String>, EngineReadError>;
+    /// Table names in a warehouse's schema (namespace).
+    async fn warehouse_tables(
+        &self,
+        warehouse_id: uuid::Uuid,
+        schema: &str,
+    ) -> Result<Vec<String>, EngineReadError>;
+    /// Column names of a warehouse table.
+    async fn warehouse_columns(
+        &self,
+        warehouse_id: uuid::Uuid,
+        schema: &str,
+        table: &str,
     ) -> Result<Vec<String>, EngineReadError>;
 }

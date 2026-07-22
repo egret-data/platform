@@ -173,6 +173,7 @@ export default function ProfileDetailPage() {
               {t.label}
             </TabsTrigger>
           ))}
+          {profile?.tag_service && <TabsTrigger value="tags">Tags</TabsTrigger>}
         </TabsList>
 
         {TYPES.map((t) => (
@@ -180,6 +181,17 @@ export default function ProfileDetailPage() {
             <PolicyTypeTable service={service} type={t.key} label={t.label} />
           </TabsContent>
         ))}
+        {profile?.tag_service && (
+          <TabsContent value="tags">
+            <PolicyTypeTable
+              service={service}
+              listFrom={profile.tag_service}
+              label="Tag"
+              showType
+              newHref={`/control-plane/policies/${encodeURIComponent(service)}/access/new?scope=tag`}
+            />
+          </TabsContent>
+        )}
       </Tabs>
 
       <TrinoConfigDialog
@@ -191,23 +203,39 @@ export default function ProfileDetailPage() {
   );
 }
 
-/** Ranger policy table for a single policy type, scoped to this profile. */
+/** Ranger policy table for one policy type (or, for the Tags tab, all types of
+ *  a separate tag service), scoped to this profile. */
 function PolicyTypeTable({
   service,
   type,
   label,
+  listFrom,
+  newHref,
+  showType = false,
 }: {
+  /** The profile whose editor create/edit links point at (the main profile). */
   service: string;
-  type: PolicyType;
+  /** Policy type; omit to list ALL types (the Tags tab mixes them). */
+  type?: PolicyType;
   label: string;
+  /** Service to LIST policies from — defaults to `service`. The Tags tab lists
+   *  the separate `<name>_tag` service while still editing via the main profile
+   *  (so the "By tag" editor round-trips correctly). */
+  listFrom?: string;
+  /** Override the "New policy" target (tag policies are created via the main
+   *  profile's By-tag editor). */
+  newHref?: string;
+  /** Show a Type column (the Tags tab mixes access/masking/row-filter). */
+  showType?: boolean;
 }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const from = listFrom ?? service;
 
   const policies = useQuery<PolicySummary[], ApiError>({
-    queryKey: ["control-plane", "policies", service, type],
-    queryFn: () => listPolicies(service, type),
-    enabled: !!service,
+    queryKey: ["control-plane", "policies", from, type ?? "all"],
+    queryFn: () => listPolicies(from, type),
+    enabled: !!from,
     retry: false,
   });
   const rows = policies.data ?? [];
@@ -243,9 +271,14 @@ function PolicyTypeTable({
   });
 
   const goToNew = () =>
-    navigate(`/control-plane/policies/${encodeURIComponent(service)}/${type}/new`);
-  const editPath = (id: number) =>
-    `/control-plane/policies/${encodeURIComponent(service)}/${type}/${id}`;
+    navigate(
+      newHref ??
+        `/control-plane/policies/${encodeURIComponent(service)}/${type ?? "access"}/new`,
+    );
+  // Always edit through the main profile (`service`) with the row's own type, so
+  // a tag policy loads in the By-tag editor that created it.
+  const editPath = (id: number, rowType: string) =>
+    `/control-plane/policies/${encodeURIComponent(service)}/${rowType}/${id}`;
 
   // The policy name links to the editor, so there's no separate Edit action —
   // Delete is the only per-row button (mirrors the other list pages).
@@ -257,7 +290,10 @@ function PolicyTypeTable({
       value: (r) => r.name,
       cell: (r) => (
         <div className="min-w-0">
-          <Link to={editPath(r.id)} className="font-medium text-primary hover:underline">
+          <Link
+            to={editPath(r.id, type ?? r.policy_type)}
+            className="font-medium text-primary hover:underline"
+          >
             {r.name}
           </Link>
           {r.description && (
@@ -266,6 +302,21 @@ function PolicyTypeTable({
         </div>
       ),
     },
+    ...(showType
+      ? [
+          {
+            key: "ptype",
+            label: "Type",
+            sortable: true,
+            value: (r: PolicySummary) => r.policy_type,
+            cell: (r: PolicySummary) => (
+              <Badge variant="outline" className="font-normal capitalize">
+                {r.policy_type}
+              </Badge>
+            ),
+          } as Column<PolicySummary>,
+        ]
+      : []),
     {
       key: "resource",
       label: "Resource",

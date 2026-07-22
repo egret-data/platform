@@ -238,6 +238,11 @@ pub struct ProfileDto {
     pub policy_version: i64,
     pub policy_count: i64,
     pub engines: Vec<ProfileEngine>,
+    /// The classification-tag policy service this Trino profile carries its
+    /// tag-based masking/row-filters in (the configured `tagService` or the
+    /// `<name>_tag` convention), if such a service exists. `None` otherwise — the
+    /// FE shows a "Tags" tab only when this is set.
+    pub tag_service: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -340,19 +345,55 @@ async fn resource_lookup(
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let svc = st.store.get_service(&qp.service).await?;
     let mut out: Vec<String> = Vec::new();
+    let push_unique = |out: &mut Vec<String>, v: String| {
+        if v != "*" && !out.contains(&v) {
+            out.push(v);
+        }
+    };
 
+    // Suggestions from the profile's bound engines: catalog names at the catalog
+    // level, and LIVE catalog metadata (real schemas/tables/columns from the
+    // engine's warehouse) at the deeper levels — so a fresh policy can pick from
+    // what actually exists, not only values already used in other policies.
+    let bindings = st.engines.list_engine_bindings().await.unwrap_or_default();
+    let bound = || {
+        bindings
+            .iter()
+            .filter(|e| e.authz_service_id == Some(svc.id))
+    };
     if qp.level == "catalog" {
-        if let Ok(engines) = st.engines.list_engine_bindings().await {
-            for e in engines
-                .iter()
-                .filter(|e| e.authz_service_id == Some(svc.id))
-            {
-                if let Ok(names) = st.engines.engine_catalog_names(e.id).await {
-                    for name in names {
-                        if !out.contains(&name) {
-                            out.push(name);
-                        }
-                    }
+        for e in bound() {
+            if let Ok(names) = st.engines.engine_catalog_names(e.id).await {
+                for name in names {
+                    push_unique(&mut out, name);
+                }
+            }
+        }
+    } else {
+        let mut warehouses: Vec<uuid::Uuid> = Vec::new();
+        for e in bound() {
+            if let Some(w) = e.warehouse_id {
+                if !warehouses.contains(&w) {
+                    warehouses.push(w);
+                }
+            }
+        }
+        for wh in warehouses {
+            let live = match qp.level.as_str() {
+                "schema" => st.engines.warehouse_schemas(wh).await,
+                "table" => match &qp.schema {
+                    Some(s) => st.engines.warehouse_tables(wh, s).await,
+                    None => Ok(Vec::new()),
+                },
+                "column" => match (&qp.schema, &qp.table) {
+                    (Some(s), Some(t)) => st.engines.warehouse_columns(wh, s, t).await,
+                    _ => Ok(Vec::new()),
+                },
+                _ => Ok(Vec::new()),
+            };
+            if let Ok(vals) = live {
+                for v in vals {
+                    push_unique(&mut out, v);
                 }
             }
         }
@@ -485,26 +526,45 @@ async fn list_profiles(
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let engines = st.engines.list_engine_bindings().await?;
     let counts = st.store.policy_counts().await?;
-    let profiles = st
-        .store
-        .list_services()
-        .await?
+    let services = st.store.list_services().await?;
+    // Owned name set so `tag_service` resolution can borrow it while we consume
+    // `services` below (can't hold a borrow of `services` across `into_iter`).
+    let names: std::collections::HashSet<String> =
+        services.iter().map(|s| s.name.clone()).collect();
+    let profiles = services
         .into_iter()
-        .map(|s| ProfileDto {
-            engines: engines
-                .iter()
-                .filter(|e| e.authz_service_id == Some(s.id))
-                .map(|e| ProfileEngine {
-                    id: e.id,
-                    name: e.name.clone(),
-                    status: e.status.clone(),
-                })
-                .collect(),
-            policy_count: counts.get(&s.id).copied().unwrap_or(0),
-            id: s.id,
-            name: s.name,
-            r#type: s.r#type,
-            policy_version: s.policy_version,
+        .map(|s| {
+            // Only Trino profiles carry tag policies, and only when their tag
+            // service (configured `tagService`, else `<name>_tag`) actually
+            // exists — otherwise the FE would show an empty, dead Tags tab.
+            let tag_service = if s.r#type == "trino" {
+                let candidate = s
+                    .config_jsonb
+                    .get("tagService")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("{}_tag", s.name));
+                names.contains(&candidate).then_some(candidate)
+            } else {
+                None
+            };
+            ProfileDto {
+                engines: engines
+                    .iter()
+                    .filter(|e| e.authz_service_id == Some(s.id))
+                    .map(|e| ProfileEngine {
+                        id: e.id,
+                        name: e.name.clone(),
+                        status: e.status.clone(),
+                    })
+                    .collect(),
+                policy_count: counts.get(&s.id).copied().unwrap_or(0),
+                id: s.id,
+                name: s.name,
+                r#type: s.r#type,
+                policy_version: s.policy_version,
+                tag_service,
+            }
         })
         .collect();
     Ok(Json(profiles))
