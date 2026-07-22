@@ -1,17 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Lock, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 
-import { listGroups, listRoles } from "@/api/access";
-import {
-  type Tag,
-  useClearTagAccessPolicy,
-  useCreateTag,
-  useDeleteTag,
-  useSetTagAccessPolicy,
-  useTags,
-  useUpdateTag,
-} from "@/api/tags";
+import { listGroups } from "@/api/access";
+import { type Tag, useCreateTag, useDeleteTag, useTags } from "@/api/tags";
 import { useAuth } from "@/auth/useAuth";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -19,7 +12,6 @@ import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Dialog,
@@ -41,7 +33,6 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { errorStatus } from "@/lib/httpStatus";
 
-const rolesQueryKey = ["control-plane", "access", "roles"] as const;
 const groupsQueryKey = ["control-plane", "access", "groups"] as const;
 
 const DEFAULT_COLOR = "#6366f1";
@@ -88,7 +79,6 @@ export default function Classifications() {
   );
 
   const [createOpen, setCreateOpen] = useState(false);
-  const [editTarget, setEditTarget] = useState<Tag | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Tag | null>(null);
 
   const forbidden = errorStatus(tags.error) === 403;
@@ -98,12 +88,16 @@ export default function Classifications() {
       key: "name",
       label: "Tag",
       sortable: true,
-      className: "font-medium",
       value: (t) => t.name,
       cell: (t) => (
         <span className="flex items-center gap-2">
           <TagSwatch color={t.color} />
-          {t.name}
+          <Link
+            to={`/control-plane/classifications/${t.id}`}
+            className="font-medium text-primary hover:underline"
+          >
+            {t.name}
+          </Link>
         </span>
       ),
     },
@@ -173,9 +167,11 @@ export default function Classifications() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem onClick={() => setEditTarget(t)}>
-                <Pencil className="mr-2 h-4 w-4" />
-                Edit
+              <DropdownMenuItem asChild>
+                <Link to={`/control-plane/classifications/${t.id}`}>
+                  <Pencil className="mr-2 h-4 w-4" />
+                  Edit
+                </Link>
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem
@@ -252,12 +248,6 @@ export default function Classifications() {
       </div>
 
       <CreateTagDialog open={createOpen} onOpenChange={setCreateOpen} />
-      <EditTagDialog
-        tag={editTarget}
-        onOpenChange={(o) => {
-          if (!o) setEditTarget(null);
-        }}
-      />
 
       <ConfirmDeleteDialog
         open={deleteTarget !== null}
@@ -398,269 +388,6 @@ function CreateTagDialog({
             </Button>
             <Button type="submit" disabled={createTag.isPending || !key.trim() || !name.trim()}>
               Create
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function EditTagDialog({
-  tag,
-  onOpenChange,
-}: {
-  tag: Tag | null;
-  onOpenChange: (open: boolean) => void;
-}) {
-  const updateTag = useUpdateTag();
-  const setAccessPolicy = useSetTagAccessPolicy();
-  const clearAccessPolicy = useClearTagAccessPolicy();
-  const roles = useQuery({
-    queryKey: rolesQueryKey,
-    queryFn: listRoles,
-    retry: false,
-    enabled: tag !== null,
-  });
-  const groups = useQuery({
-    queryKey: groupsQueryKey,
-    queryFn: listGroups,
-    retry: false,
-    enabled: tag !== null,
-  });
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [color, setColor] = useState(DEFAULT_COLOR);
-  const [requiredRoles, setRequiredRoles] = useState<string[]>([]);
-  const [requiredGroups, setRequiredGroups] = useState<string[]>([]);
-  const [roleFilter, setRoleFilter] = useState("");
-  const [groupFilter, setGroupFilter] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (tag) {
-      setName(tag.name);
-      setDescription(tag.description);
-      setColor(tag.color || DEFAULT_COLOR);
-      setRequiredRoles(tag.required_roles);
-      setRequiredGroups(tag.required_groups);
-      setRoleFilter("");
-      setGroupFilter("");
-      setError(null);
-    }
-  }, [tag]);
-
-  const roleMatches = (roles.data ?? []).filter((r) =>
-    r.name.toLowerCase().includes(roleFilter.trim().toLowerCase()),
-  );
-  const groupMatches = (groups.data ?? []).filter((g) =>
-    g.name.toLowerCase().includes(groupFilter.trim().toLowerCase()),
-  );
-
-  function handleOpenChange(next: boolean) {
-    if (!next) setError(null);
-    onOpenChange(next);
-  }
-
-  function toggleRole(roleName: string, checked: boolean) {
-    setRequiredRoles((prev) =>
-      checked ? [...prev, roleName] : prev.filter((r) => r !== roleName),
-    );
-  }
-
-  function toggleGroup(groupId: string, checked: boolean) {
-    setRequiredGroups((prev) =>
-      checked ? [...prev, groupId] : prev.filter((g) => g !== groupId),
-    );
-  }
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!tag) return;
-    setError(null);
-    try {
-      await updateTag.mutateAsync({
-        id: tag.id,
-        name: name.trim(),
-        description: description.trim(),
-        color,
-      });
-      if (requiredRoles.length > 0 || requiredGroups.length > 0) {
-        await setAccessPolicy.mutateAsync({
-          id: tag.id,
-          required_roles: requiredRoles,
-          required_groups: requiredGroups,
-        });
-      } else if (tag.required_roles.length > 0 || tag.required_groups.length > 0) {
-        await clearAccessPolicy.mutateAsync(tag.id);
-      }
-      handleOpenChange(false);
-    } catch (err) {
-      setError((err as Error).message ?? "Failed to save tag.");
-    }
-  }
-
-  const saving = updateTag.isPending || setAccessPolicy.isPending || clearAccessPolicy.isPending;
-
-  return (
-    <Dialog open={tag !== null} onOpenChange={handleOpenChange}>
-      <DialogContent>
-        <form onSubmit={handleSubmit}>
-          <DialogHeader>
-            <DialogTitle>Edit tag — {tag?.name}</DialogTitle>
-            <DialogDescription>
-              The key is immutable once a tag is created.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="my-4 space-y-4">
-            {error && (
-              <Alert variant="destructive">
-                <AlertDescription>{error}</AlertDescription>
-              </Alert>
-            )}
-
-            <div className="space-y-1.5">
-              <Label htmlFor="edit-tag-key">Key</Label>
-              <Input id="edit-tag-key" value={tag?.key ?? ""} readOnly disabled />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="edit-tag-name">Name</Label>
-              <Input
-                id="edit-tag-name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-                autoFocus
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="edit-tag-description">Description</Label>
-              <Textarea
-                id="edit-tag-description"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="edit-tag-color">Color</Label>
-              <Input
-                id="edit-tag-color"
-                type="color"
-                className="h-9 w-16 p-1"
-                value={color}
-                onChange={(e) => setColor(e.target.value)}
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label>
-                Required roles (clearance){" "}
-                {requiredRoles.length > 0 && (
-                  <span className="font-normal text-muted-foreground">
-                    · {requiredRoles.length} selected
-                  </span>
-                )}
-              </Label>
-              {roles.data && roles.data.length > 8 && (
-                <Input
-                  className="h-8"
-                  placeholder="Filter roles…"
-                  value={roleFilter}
-                  onChange={(e) => setRoleFilter(e.target.value)}
-                />
-              )}
-              <div className="max-h-40 space-y-2 overflow-y-auto rounded-md border p-3">
-                {roles.isLoading ? (
-                  <p className="text-sm text-muted-foreground">Loading roles…</p>
-                ) : roleMatches.length > 0 ? (
-                  roleMatches.map((r) => {
-                    const id = `edit-tag-clearance-${r.id}`;
-                    return (
-                      <div key={r.id} className="flex items-center gap-2">
-                        <Checkbox
-                          id={id}
-                          checked={requiredRoles.includes(r.name)}
-                          onCheckedChange={(c) => toggleRole(r.name, c === true)}
-                        />
-                        <Label htmlFor={id} className="cursor-pointer font-normal">
-                          {r.name}
-                        </Label>
-                      </div>
-                    );
-                  })
-                ) : (
-                  <p className="text-sm text-muted-foreground">
-                    {roles.data && roles.data.length > 0 ? "No roles match." : "No roles defined."}
-                  </p>
-                )}
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Objects tagged this can only be opened by principals holding one of
-                these roles. Empty = no restriction.
-              </p>
-            </div>
-
-            <div className="space-y-1.5">
-              <Label>
-                Required groups (clearance){" "}
-                {requiredGroups.length > 0 && (
-                  <span className="font-normal text-muted-foreground">
-                    · {requiredGroups.length} selected
-                  </span>
-                )}
-              </Label>
-              {groups.data && groups.data.length > 8 && (
-                <Input
-                  className="h-8"
-                  placeholder="Filter groups…"
-                  value={groupFilter}
-                  onChange={(e) => setGroupFilter(e.target.value)}
-                />
-              )}
-              <div className="max-h-40 space-y-2 overflow-y-auto rounded-md border p-3">
-                {groups.isLoading ? (
-                  <p className="text-sm text-muted-foreground">Loading groups…</p>
-                ) : groupMatches.length > 0 ? (
-                  groupMatches.map((g) => {
-                    const id = `edit-tag-clearance-group-${g.id}`;
-                    return (
-                      <div key={g.id} className="flex items-center gap-2">
-                        <Checkbox
-                          id={id}
-                          checked={requiredGroups.includes(g.id)}
-                          onCheckedChange={(c) => toggleGroup(g.id, c === true)}
-                        />
-                        <Label htmlFor={id} className="cursor-pointer font-normal">
-                          {g.name}
-                        </Label>
-                      </div>
-                    );
-                  })
-                ) : (
-                  <p className="text-sm text-muted-foreground">
-                    {groups.data && groups.data.length > 0
-                      ? "No groups match."
-                      : "No groups defined."}
-                  </p>
-                )}
-              </div>
-              <p className="text-xs text-muted-foreground">
-                …or belonging to one of these groups. Empty = no restriction from
-                groups.
-              </p>
-            </div>
-          </div>
-
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={saving}>
-              Save
             </Button>
           </DialogFooter>
         </form>
