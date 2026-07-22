@@ -13,13 +13,6 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -96,7 +89,15 @@ export default function Policies() {
       label: "Type",
       sortable: true,
       value: (p) => p.type,
-      cell: (p) => <Badge variant="secondary">{p.type}</Badge>,
+      // A profile's type can be a long Ranger service-instance name; cap it so
+      // the column stays tidy (clean ellipsis, full value on hover). The inner
+      // span carries the truncation because a bare `truncate` on the inline-flex
+      // Badge clips mid-string instead of showing an ellipsis.
+      cell: (p) => (
+        <Badge variant="secondary" className="max-w-[16rem]" title={p.type}>
+          <span className="min-w-0 truncate">{p.type}</span>
+        </Badge>
+      ),
     },
     {
       key: "engines",
@@ -150,76 +151,70 @@ export default function Policies() {
 
   return (
     <div className="space-y-5">
-      <div>
-        <h1 className="text-2xl font-semibold leading-tight">Policies</h1>
-        <p className="text-sm text-muted-foreground">
-          Ranger policy profiles — each engine enforces one profile. Open a profile to
-          manage its access, masking, and row-filter policies.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold leading-tight">Policies</h1>
+          <p className="text-sm text-muted-foreground">
+            Ranger policy profiles — each engine enforces one profile. Open a profile to
+            manage its access, masking, and row-filter policies.
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setAddOpen(true)}
+            title="For an engine egret doesn't provision itself (e.g. an existing StarRocks cluster). Provisioning an engine creates its profile automatically."
+          >
+            <Plus className="mr-1.5 h-4 w-4" />
+            New profile
+          </Button>
+          <Button asChild variant="outline" size="sm">
+            <Link to="/control-plane/engines">
+              <Server className="mr-1.5 h-4 w-4" />
+              Provision an engine
+            </Link>
+          </Button>
+        </div>
       </div>
 
-      <Card>
-        <CardHeader>
-          <div className="flex items-start justify-between gap-3">
-            <div className="space-y-1.5">
-              <CardTitle className="text-lg">Policy profiles</CardTitle>
-              <CardDescription>
-                Each engine enforces one profile; tag profiles carry classification-based
-                masking &amp; row-filters. Provisioning an engine creates its profile
-                automatically — use &ldquo;New profile&rdquo; for an engine egret doesn&apos;t
-                provision itself (e.g. an existing StarRocks cluster).
-              </CardDescription>
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => setAddOpen(true)}>
-                <Plus className="mr-1.5 h-4 w-4" />
-                New profile
-              </Button>
-              <Button asChild variant="outline" size="sm">
-                <Link to="/control-plane/engines">
-                  <Server className="mr-1.5 h-4 w-4" />
-                  Provision an engine
-                </Link>
-              </Button>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <SummaryStrip
-            items={[
-              { label: "profiles", value: rows.length },
-              { label: "policies", value: totalPolicies },
-              { label: "bound engines", value: boundEngines },
-            ]}
+      <div className="space-y-4">
+        <SummaryStrip
+          items={[
+            { label: "profiles", value: rows.length },
+            { label: "policies", value: totalPolicies },
+            { label: "bound engines", value: boundEngines },
+          ]}
+        />
+        {profiles.isLoading ? (
+          <ListSkeleton rows={5} cols={6} />
+        ) : (
+          <FilterableTable
+            rows={filtered}
+            columns={columns}
+            getId={(p) => String(p.id)}
+            searchPlaceholder="Search profiles…"
+            initialSort={{ key: "name", dir: "asc" }}
+            pageSize={25}
+            bordered
+            emptyText={
+              profiles.isError
+                ? (profiles.error?.message ?? "Failed to load profiles.")
+                : "No profiles yet — provision an engine to create one."
+            }
+            filters={
+              typeOptions.length > 1 ? (
+                <FacetSelect
+                  label="Type"
+                  value={typeFacet}
+                  onChange={setTypeFacet}
+                  options={typeOptions}
+                />
+              ) : undefined
+            }
           />
-          {profiles.isLoading ? (
-            <ListSkeleton rows={5} cols={6} />
-          ) : (
-            <FilterableTable
-              rows={filtered}
-              columns={columns}
-              getId={(p) => String(p.id)}
-              searchPlaceholder="Search profiles…"
-              initialSort={{ key: "name", dir: "asc" }}
-              emptyText={
-                profiles.isError
-                  ? (profiles.error?.message ?? "Failed to load profiles.")
-                  : "No profiles yet — provision an engine to create one."
-              }
-              filters={
-                typeOptions.length > 1 ? (
-                  <FacetSelect
-                    label="Type"
-                    value={typeFacet}
-                    onChange={setTypeFacet}
-                    options={typeOptions}
-                  />
-                ) : undefined
-              }
-            />
-          )}
-        </CardContent>
-      </Card>
+        )}
+      </div>
 
       {configTarget && (
         <TrinoConfigDialog
