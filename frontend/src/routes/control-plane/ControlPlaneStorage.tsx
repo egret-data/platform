@@ -1,7 +1,15 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FolderOpen, HardDrive, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
+import {
+  FolderOpen,
+  HardDrive,
+  Loader2,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  Trash2,
+} from "lucide-react";
 
 import {
   type Storage,
@@ -13,18 +21,20 @@ import {
   listStorage,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
+import { EmptyState } from "@/components/explore/EmptyState";
+import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Dialog,
   DialogContent,
@@ -42,16 +52,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-
-const COLUMNS = ["Name", "Purpose", "Provider", "Bucket", "Endpoint", "Secret", ""];
 
 export const storageQueryKey = ["control-plane", "storage"] as const;
 export const secretsQueryKey = ["control-plane", "secrets"] as const;
@@ -101,134 +101,160 @@ export default function ControlPlaneStorage() {
     );
   }, [editId, rows, setSearchParams]);
 
+  const openEdit = (conn: Storage) => {
+    setEditing(conn);
+    setAddOpen(true);
+  };
+
+  const columns: Column<Storage>[] = [
+    {
+      key: "name",
+      label: "Name",
+      sortable: true,
+      className: "font-medium",
+      value: (c) => c.name,
+      cell: (c) => (
+        <Link
+          to={`/control-plane/storage/${c.id}`}
+          className="font-medium text-primary hover:underline"
+        >
+          {c.name}
+        </Link>
+      ),
+    },
+    {
+      key: "purpose",
+      label: "Purpose",
+      sortable: true,
+      value: (c) => c.purpose ?? "",
+      cell: (c) => <span className="text-muted-foreground">{c.purpose ?? "—"}</span>,
+    },
+    {
+      key: "provider",
+      label: "Provider",
+      sortable: true,
+      value: (c) => c.provider,
+      cell: (c) => <Badge variant="secondary">{c.provider}</Badge>,
+    },
+    {
+      key: "bucket",
+      label: "Bucket",
+      sortable: true,
+      value: (c) => c.bucket,
+      cell: (c) => <span className="font-mono text-muted-foreground">{c.bucket}</span>,
+    },
+    {
+      key: "endpoint",
+      label: "Endpoint",
+      value: (c) => c.endpoint ?? "",
+      cell: (c) => <span className="text-muted-foreground">{c.endpoint ?? "AWS default"}</span>,
+    },
+    {
+      key: "secret",
+      label: "Secret",
+      sortable: true,
+      value: (c) => (c.secret_ref ? "Configured" : "Not set"),
+      cell: (c) => (
+        <Badge variant={c.secret_ref ? "secondary" : "outline"}>
+          {c.secret_ref ? "Configured" : "Not set"}
+        </Badge>
+      ),
+    },
+    {
+      key: "actions",
+      label: "",
+      className: "w-10 text-right",
+      cell: (c) => (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" aria-label={`Actions for ${c.name}`}>
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem asChild>
+              <Link to={`/control-plane/storage/${c.id}?tab=browse`}>
+                <FolderOpen className="mr-2 h-4 w-4" />
+                Browse
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openEdit(c)}>
+              <Pencil className="mr-2 h-4 w-4" />
+              Edit
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="text-destructive focus:text-destructive"
+              onClick={() => setDeleteTarget(c)}
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ),
+    },
+  ];
+
   return (
-    <Card data-testid="storage-frame">
-      <CardHeader>
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <CardTitle className="flex items-center gap-2 text-lg">
-              <HardDrive className="h-5 w-5 text-muted-foreground" />
-              Storage
-            </CardTitle>
-            <CardDescription>
-              Global storage connections (S3-compatible object stores) available
-              to catalogs and workspaces across the platform.
-            </CardDescription>
-          </div>
-          <Button
-            onClick={() => {
-              setEditing(null);
-              setAddOpen(true);
-            }}
-          >
-            <Plus className="h-4 w-4" />
-            Add connection
-          </Button>
+    <div className="space-y-4" data-testid="storage-frame">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="max-w-3xl">
+          <h1 className="text-2xl font-semibold leading-tight">Storage</h1>
+          <p className="text-sm text-muted-foreground">
+            Global storage connections (S3-compatible object stores) available to catalogs and
+            workspaces across the platform.
+          </p>
         </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <SummaryStrip items={[{ label: "connections", value: rows.length }]} />
-        {conns.isError ? (
-          <Alert variant="destructive">
-            <AlertDescription>
-              Failed to load storage connections. Please try again.
-            </AlertDescription>
-          </Alert>
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                {COLUMNS.map((col) => (
-                  <TableHead
-                    key={col || "actions"}
-                    className={col === "" ? "text-right" : undefined}
-                  >
-                    {col || <span className="sr-only">Actions</span>}
-                  </TableHead>
-                ))}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.length === 0 ? (
-                <TableRow className="hover:bg-transparent">
-                  <TableCell
-                    colSpan={COLUMNS.length}
-                    className="py-10 text-center text-muted-foreground"
-                  >
-                    {conns.isLoading
-                      ? "Loading…"
-                      : "No storage connections yet — add one to get started."}
-                  </TableCell>
-                </TableRow>
-              ) : (
-                rows.map((conn) => (
-                  <TableRow key={conn.id}>
-                    <TableCell className="font-medium">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditing(conn);
-                          setAddOpen(true);
-                        }}
-                        className="font-medium text-primary hover:underline"
-                      >
-                        {conn.name}
-                      </button>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {conn.purpose ?? "—"}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="secondary">{conn.provider}</Badge>
-                    </TableCell>
-                    <TableCell className="font-mono text-muted-foreground">
-                      {conn.bucket}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {conn.endpoint ?? "AWS default"}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={conn.secret_ref ? "secondary" : "outline"}>
-                        {conn.secret_ref ? "Configured" : "Not set"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button variant="ghost" size="sm" asChild>
-                        <Link to={`/control-plane/storage/${conn.id}/browse`} aria-label={`Browse ${conn.name}`}>
-                          <FolderOpen className="h-4 w-4" />
-                          Browse
-                        </Link>
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => {
-                          setEditing(conn);
-                          setAddOpen(true);
-                        }}
-                        aria-label={`Edit ${conn.name}`}
-                      >
-                        <Pencil className="h-4 w-4" />
-                        Edit
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-muted-foreground hover:text-destructive"
-                        onClick={() => setDeleteTarget(conn)}
-                        aria-label={`Delete ${conn.name}`}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                        Delete
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
-        )}
-      </CardContent>
+        <Button
+          className="shrink-0"
+          onClick={() => {
+            setEditing(null);
+            setAddOpen(true);
+          }}
+        >
+          <Plus className="h-4 w-4" />
+          Add connection
+        </Button>
+      </div>
+
+      <SummaryStrip items={[{ label: "connections", value: rows.length }]} />
+
+      {conns.isError ? (
+        <Alert variant="destructive">
+          <AlertDescription>Failed to load storage connections. Please try again.</AlertDescription>
+        </Alert>
+      ) : conns.isLoading ? (
+        <ListSkeleton rows={5} cols={7} />
+      ) : (
+        <FilterableTable
+          rows={rows}
+          columns={columns}
+          getId={(c) => c.id}
+          searchPlaceholder="Search connections…"
+          initialSort={{ key: "name", dir: "asc" }}
+          pageSize={25}
+          bordered
+          emptyText={
+            <EmptyState
+              icon={HardDrive}
+              title="No storage connections yet"
+              description="Register an S3-compatible object store so catalogs and workspaces can use it."
+              action={
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setEditing(null);
+                    setAddOpen(true);
+                  }}
+                >
+                  <Plus className="mr-1 h-4 w-4" />
+                  Add connection
+                </Button>
+              }
+            />
+          }
+        />
+      )}
 
       <AddStorageDialog open={addOpen} onOpenChange={setAddOpen} editing={editing} />
 
@@ -246,7 +272,7 @@ export default function ControlPlaneStorage() {
           if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
         }}
       />
-    </Card>
+    </div>
   );
 }
 
@@ -254,7 +280,7 @@ export default function ControlPlaneStorage() {
 const NO_SECRET = "__none__";
 const NEW_SECRET = "__new__";
 
-function AddStorageDialog({
+export function AddStorageDialog({
   open,
   onOpenChange,
   editing,

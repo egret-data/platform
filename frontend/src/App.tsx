@@ -38,6 +38,7 @@ import WorkspaceDetail from "@/routes/control-plane/WorkspaceDetail";
 import ControlPlaneEngines from "@/routes/control-plane/ControlPlaneEngines";
 import EngineDetail from "@/routes/control-plane/EngineDetail";
 import ControlPlaneStorage from "@/routes/control-plane/ControlPlaneStorage";
+import StorageDetail from "@/routes/control-plane/StorageDetail";
 import StorageBrowser from "@/routes/control-plane/StorageBrowser";
 import ControlPlaneSecrets from "@/routes/control-plane/ControlPlaneSecrets";
 import Policies from "@/routes/control-plane/Policies";
@@ -146,6 +147,7 @@ function ControlPlaneRoutes() {
           <Route path="warehouses" element={<RequirePermission perm="warehouse:read"><Warehouses /></RequirePermission>} />
           <Route path="warehouses/:id" element={<RequirePermission perm="warehouse:read"><WarehouseDetail /></RequirePermission>} />
           <Route path="storage" element={<RequirePermission perm="storage:read"><ControlPlaneStorage /></RequirePermission>} />
+          <Route path="storage/:id" element={<RequirePermission perm="storage:read"><StorageDetail /></RequirePermission>} />
           <Route path="storage/:id/browse" element={<RequirePermission perm="storage:read"><StorageBrowser /></RequirePermission>} />
           <Route path="secrets" element={<RequirePermission perm="secret:read"><ControlPlaneSecrets /></RequirePermission>} />
           <Route path="policies" element={<RequirePermission perm="policy:read"><Policies /></RequirePermission>} />
