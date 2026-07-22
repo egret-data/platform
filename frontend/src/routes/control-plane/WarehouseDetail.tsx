@@ -278,28 +278,26 @@ function WarehouseSummary({
 
   if (isLoading && !warehouse) {
     return (
-      <Card className="overflow-hidden">
-        <div className="flex flex-col gap-5 p-6 sm:flex-row sm:items-start sm:justify-between">
-          <div className="min-w-0 space-y-3">
-            <div className="flex items-center gap-3">
-              <Skeleton className="h-11 w-11 shrink-0 rounded-lg" />
-              <div className="space-y-2">
-                <Skeleton className="h-7 w-48" />
-                <Skeleton className="h-5 w-24" />
-              </div>
-            </div>
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-              <Skeleton className="h-4 w-40" />
-              <Skeleton className="h-4 w-40" />
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 space-y-3">
+          <div className="flex items-center gap-3">
+            <Skeleton className="h-11 w-11 shrink-0 rounded-lg" />
+            <div className="space-y-2">
+              <Skeleton className="h-7 w-48" />
+              <Skeleton className="h-5 w-24" />
             </div>
           </div>
-          <div className="grid grid-cols-3 gap-2 sm:gap-3">
-            {[0, 1, 2].map((i) => (
-              <Skeleton key={i} className="h-[70px] w-[76px] rounded-lg" />
-            ))}
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+            <Skeleton className="h-4 w-40" />
+            <Skeleton className="h-4 w-40" />
           </div>
         </div>
-      </Card>
+        <div className="grid grid-cols-3 gap-2 sm:gap-3">
+          {[0, 1, 2].map((i) => (
+            <Skeleton key={i} className="h-[70px] w-[76px] rounded-lg" />
+          ))}
+        </div>
+      </div>
     );
   }
 
@@ -310,8 +308,7 @@ function WarehouseSummary({
   ];
 
   return (
-    <Card className="overflow-hidden">
-      <div className="flex flex-col gap-5 p-6 sm:flex-row sm:items-start sm:justify-between">
+    <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-3">
           <div className="flex items-center gap-3">
             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
@@ -360,8 +357,7 @@ function WarehouseSummary({
             </div>
           ))}
         </div>
-      </div>
-    </Card>
+    </div>
   );
 }
 
@@ -403,34 +399,32 @@ function RolesTab({ warehouseId }: { warehouseId: string }) {
     (clients.data ?? []).filter((c) => c.catalogRoleId === roleId).length;
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <CardTitle aria-level={2} className="flex items-center gap-2 text-lg">
-              <ShieldCheck className="h-5 w-5 text-muted-foreground" />
-              Catalog roles
-            </CardTitle>
-            <CardDescription>
-              Keyed by consumer-type
-              <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-primary" />engine</span>
-              <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-success" />notebook</span>
-              <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-highlight" />external</span>
-              — their grants gate reads/writes on the warehouse.
-            </CardDescription>
-          </div>
-          <Button onClick={() => setAddOpen(true)}>
-            <Plus className="h-4 w-4" />
-            Add role
-          </Button>
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+            Catalog roles
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            Keyed by consumer-type
+            <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-primary" />engine</span>
+            <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-success" />notebook</span>
+            <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-highlight" />external</span>
+            — their grants gate reads/writes on the warehouse.
+          </p>
         </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {error && (
-          <Alert variant="destructive">
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
+        <Button className="shrink-0" onClick={() => setAddOpen(true)}>
+          <Plus className="h-4 w-4" />
+          Add role
+        </Button>
+      </div>
+      {error && (
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+      <div className="overflow-x-auto rounded-md border">
         <Table>
           <TableHeader>
             <TableRow>
@@ -471,10 +465,10 @@ function RolesTab({ warehouseId }: { warehouseId: string }) {
             )}
           </TableBody>
         </Table>
-      </CardContent>
+      </div>
 
       <AddRoleDialog warehouseId={warehouseId} open={addOpen} onOpenChange={setAddOpen} />
-    </Card>
+    </section>
   );
 }
 
@@ -888,30 +882,28 @@ function ClientsTab({ warehouseId }: { warehouseId: string }) {
   const roleName = (id: string) => roles.data?.find((r) => r.id === id)?.name ?? id.slice(0, 8);
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <CardTitle aria-level={2} className="flex items-center gap-2 text-lg">
-              <KeyRound className="h-5 w-5 text-muted-foreground" />
-              Catalog Clients
-            </CardTitle>
-            <CardDescription>
-              Machine credentials (client id + secret) an engine or notebook uses to authenticate.
-            </CardDescription>
-          </div>
-          <Button onClick={() => setAddOpen(true)} disabled={(roles.data ?? []).length === 0}>
-            <Plus className="h-4 w-4" />
-            Add client
-          </Button>
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <KeyRound className="h-4 w-4 text-muted-foreground" />
+            Catalog Clients
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            Machine credentials (client id + secret) an engine or notebook uses to authenticate.
+          </p>
         </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {error && (
-          <Alert variant="destructive">
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
+        <Button className="shrink-0" onClick={() => setAddOpen(true)} disabled={(roles.data ?? []).length === 0}>
+          <Plus className="h-4 w-4" />
+          Add client
+        </Button>
+      </div>
+      {error && (
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+      <div className="overflow-x-auto rounded-md border">
         <Table>
           <TableHeader>
             <TableRow>
@@ -967,7 +959,7 @@ function ClientsTab({ warehouseId }: { warehouseId: string }) {
             )}
           </TableBody>
         </Table>
-      </CardContent>
+      </div>
 
       <AddClientDialog
         warehouseId={warehouseId}
@@ -989,7 +981,7 @@ function ClientsTab({ warehouseId }: { warehouseId: string }) {
           setRevokeTarget(null);
         }}
       />
-    </Card>
+    </section>
   );
 }
 
