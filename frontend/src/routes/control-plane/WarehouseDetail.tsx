@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -17,6 +17,7 @@ import {
   History,
   KeyRound,
   Loader2,
+  Pencil,
   Plus,
   ListChecks,
   RotateCcw,
@@ -1855,9 +1856,14 @@ function SettingsTab({
   const [ttlDays, setTtlDays] = useState("");
   const [fmt, setFmt] = useState("1,2");
   const [hardDeleteOpen, setHardDeleteOpen] = useState(false);
+  // Which setting's edit form is open (null = table view only).
+  const [editKey, setEditKey] = useState<"status" | "retention" | "format" | null>(null);
 
   const currentDays =
     c?.deleteProfileSeconds != null ? Math.round(c.deleteProfileSeconds / 86400) : null;
+  const retentionValue = currentDays != null ? `${currentDays} day${currentDays === 1 ? "" : "s"}` : "Hard delete";
+  const fmtLabel =
+    fmt === "2" ? "Require v2" : fmt === "2,3" ? "Allow v2 and v3" : "Allow v1 and v2";
 
   return (
     <div className="space-y-4">
@@ -1881,7 +1887,7 @@ function SettingsTab({
                   Whether the catalog is active and serving reads and writes.
                 </TableCell>
                 <TableCell className="align-middle">
-                  <div className="flex items-center justify-end gap-2">
+                  <ValueEdit ariaLabel="Edit status" onClick={() => setEditKey("status")}>
                     <Badge
                       variant="outline"
                       className={
@@ -1893,20 +1899,7 @@ function SettingsTab({
                       <span className={`h-1.5 w-1.5 rounded-full ${c?.active ? "bg-primary" : "bg-muted-foreground"}`} />
                       {c?.active ? "Active" : "Inactive"}
                     </Badge>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={statusMut.isPending}
-                      onClick={() => statusMut.mutate(!c?.active)}
-                    >
-                      {c?.active ? "Deactivate" : "Activate"}
-                    </Button>
-                  </div>
-                  {statusMut.isError && (
-                    <p className="mt-1 text-right text-xs text-destructive">
-                      {statusMut.error?.message ?? "Couldn't change status."}
-                    </p>
-                  )}
+                  </ValueEdit>
                 </TableCell>
               </TableRow>
 
@@ -1914,46 +1907,12 @@ function SettingsTab({
               <TableRow>
                 <TableCell className="align-middle font-medium">Soft-delete retention</TableCell>
                 <TableCell className="hidden align-middle text-muted-foreground md:table-cell">
-                  {currentDays != null
-                    ? `Dropped tables are recoverable for ${currentDays} day${currentDays === 1 ? "" : "s"}.`
-                    : "Hard delete — dropped tables are purged immediately (no recovery)."}{" "}
-                  Minimum ~7 days.
+                  How long dropped tables stay recoverable before they are purged.
                 </TableCell>
                 <TableCell className="align-middle">
-                  <div className="flex items-center justify-end gap-2">
-                    <Input
-                      type="number"
-                      min={7}
-                      aria-label="Retention in days"
-                      className="w-20"
-                      placeholder={currentDays != null ? String(currentDays) : "7"}
-                      value={ttlDays}
-                      onChange={(e) => setTtlDays(e.target.value)}
-                    />
-                    <Button
-                      size="sm"
-                      disabled={ttlMut.isPending}
-                      onClick={() => {
-                        const days = Number(ttlDays || currentDays || 7);
-                        ttlMut.mutate(Math.max(7, days) * 86400);
-                      }}
-                    >
-                      Save
-                    </Button>
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      disabled={ttlMut.isPending}
-                      onClick={() => setHardDeleteOpen(true)}
-                    >
-                      Hard delete
-                    </Button>
-                  </div>
-                  {ttlMut.isError && (
-                    <p className="mt-1 text-right text-xs text-destructive">
-                      Retention rejected — try a longer window.
-                    </p>
-                  )}
+                  <ValueEdit ariaLabel="Edit retention" onClick={() => setEditKey("retention")}>
+                    {retentionValue}
+                  </ValueEdit>
                 </TableCell>
               </TableRow>
 
@@ -1964,48 +1923,27 @@ function SettingsTab({
                   Which Iceberg table format versions clients may create.
                 </TableCell>
                 <TableCell className="align-middle">
-                  <div className="flex items-center justify-end gap-2">
-                    <Select value={fmt} onValueChange={setFmt}>
-                      <SelectTrigger aria-label="Allowed format versions" className="w-44">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="1,2">Allow v1 and v2</SelectItem>
-                        <SelectItem value="2">Require v2</SelectItem>
-                        <SelectItem value="2,3">Allow v2 and v3</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <Button
-                      size="sm"
-                      disabled={fmtMut.isPending}
-                      onClick={() => fmtMut.mutate(fmt.split(",").map(Number))}
-                    >
-                      Save
-                    </Button>
-                  </div>
+                  <ValueEdit ariaLabel="Edit format policy" onClick={() => setEditKey("format")}>
+                    {fmtLabel}
+                  </ValueEdit>
                 </TableCell>
               </TableRow>
 
-              {/* Storage connection. */}
+              {/* Storage connection — editing lives on the Storage page. */}
               <TableRow>
                 <TableCell className="align-middle font-medium">Storage connection</TableCell>
                 <TableCell className="hidden align-middle text-muted-foreground md:table-cell">
-                  Data lives on{" "}
-                  {storageName ? (
-                    <strong className="text-foreground">{storageName}</strong>
-                  ) : (
-                    "its storage connection"
-                  )}
-                  . Its S3 access key is managed there.
+                  The connection this warehouse&apos;s data lives on. Its S3 key is managed there.
                 </TableCell>
                 <TableCell className="align-middle">
                   <div className="flex justify-end">
-                    <Button asChild variant="outline" size="sm">
-                      <Link to={storageLink} className="whitespace-nowrap">
-                        <HardDrive className="h-4 w-4" />
-                        Edit connection
-                      </Link>
-                    </Button>
+                    <Link
+                      to={storageLink}
+                      className="inline-flex items-center gap-2 rounded-md px-2 py-1 text-sm text-primary hover:bg-muted hover:underline"
+                    >
+                      {storageName ?? "connection"}
+                      <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
+                    </Link>
                   </div>
                 </TableCell>
               </TableRow>
@@ -2013,6 +1951,134 @@ function SettingsTab({
           </Table>
         </div>
       )}
+
+      {/* One edit form, opened from a row's Value cell. */}
+      <Dialog open={editKey !== null} onOpenChange={(o) => !o && setEditKey(null)}>
+        <DialogContent>
+          {editKey === "status" && (
+            <>
+              <DialogHeader>
+                <DialogTitle>Warehouse status</DialogTitle>
+                <DialogDescription>
+                  The catalog is currently {c?.active ? "active and serving reads/writes" : "inactive"}.
+                </DialogDescription>
+              </DialogHeader>
+              {statusMut.isError && (
+                <Alert variant="destructive">
+                  <AlertDescription>
+                    {statusMut.error?.message ?? "Couldn't change status."}
+                  </AlertDescription>
+                </Alert>
+              )}
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setEditKey(null)}>
+                  Cancel
+                </Button>
+                <Button
+                  variant={c?.active ? "destructive" : "default"}
+                  disabled={statusMut.isPending}
+                  onClick={() =>
+                    statusMut.mutate(!c?.active, { onSuccess: () => setEditKey(null) })
+                  }
+                >
+                  {c?.active ? "Deactivate" : "Activate"}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+
+          {editKey === "retention" && (
+            <>
+              <DialogHeader>
+                <DialogTitle>Soft-delete retention</DialogTitle>
+                <DialogDescription>
+                  How long dropped tables stay recoverable before they are purged. Minimum ~7 days.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-1.5">
+                <Label htmlFor="ttl">Retention (days)</Label>
+                <Input
+                  id="ttl"
+                  type="number"
+                  min={7}
+                  className="w-32"
+                  placeholder={currentDays != null ? String(currentDays) : "7"}
+                  value={ttlDays}
+                  onChange={(e) => setTtlDays(e.target.value)}
+                />
+                {ttlMut.isError && (
+                  <p className="text-xs text-destructive">Retention rejected — try a longer window.</p>
+                )}
+              </div>
+              <DialogFooter className="sm:justify-between">
+                <Button
+                  variant="destructive"
+                  disabled={ttlMut.isPending}
+                  onClick={() => {
+                    setEditKey(null);
+                    setHardDeleteOpen(true);
+                  }}
+                >
+                  Switch to hard delete
+                </Button>
+                <div className="flex gap-2">
+                  <Button variant="outline" onClick={() => setEditKey(null)}>
+                    Cancel
+                  </Button>
+                  <Button
+                    disabled={ttlMut.isPending}
+                    onClick={() => {
+                      const days = Number(ttlDays || currentDays || 7);
+                      ttlMut.mutate(Math.max(7, days) * 86400, {
+                        onSuccess: () => setEditKey(null),
+                      });
+                    }}
+                  >
+                    Save
+                  </Button>
+                </div>
+              </DialogFooter>
+            </>
+          )}
+
+          {editKey === "format" && (
+            <>
+              <DialogHeader>
+                <DialogTitle>Format-version policy</DialogTitle>
+                <DialogDescription>
+                  Which Iceberg table format versions clients may create.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-1.5">
+                <Label htmlFor="fmt">Allowed versions</Label>
+                <Select value={fmt} onValueChange={setFmt}>
+                  <SelectTrigger id="fmt" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1,2">Allow v1 and v2</SelectItem>
+                    <SelectItem value="2">Require v2</SelectItem>
+                    <SelectItem value="2,3">Allow v2 and v3</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setEditKey(null)}>
+                  Cancel
+                </Button>
+                <Button
+                  disabled={fmtMut.isPending}
+                  onClick={() =>
+                    fmtMut.mutate(fmt.split(",").map(Number), { onSuccess: () => setEditKey(null) })
+                  }
+                >
+                  Save
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <ConfirmDeleteDialog
         open={hardDeleteOpen}
@@ -2024,6 +2090,32 @@ function SettingsTab({
       />
 
       <WarehouseTasksCard warehouseId={warehouseId} />
+    </div>
+  );
+}
+
+/** A read-only setting value that acts as an edit trigger: shows the value with a
+ * pencil affordance, right-aligned in the table's Value column. */
+function ValueEdit({
+  ariaLabel,
+  onClick,
+  children,
+}: {
+  ariaLabel: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex justify-end">
+      <button
+        type="button"
+        aria-label={ariaLabel}
+        onClick={onClick}
+        className="inline-flex items-center gap-2 rounded-md px-2 py-1 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {children}
+        <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
+      </button>
     </div>
   );
 }
