@@ -265,6 +265,10 @@ pub fn router() -> Router<PolicyAdminState> {
             get(list_profiles).post(create_profile),
         )
         .route(
+            "/policies/services/{service}",
+            axum::routing::delete(delete_profile),
+        )
+        .route(
             "/policies/services/{service}/trino-config",
             get(trino_config),
         )
@@ -568,6 +572,54 @@ async fn create_profile(
     Ok(Json(
         json!({ "id": svc.id, "name": svc.name, "type": svc.r#type }),
     ))
+}
+
+/// DELETE /policies/services/{service} — delete a policy profile (Ranger
+/// service) and, via `ON DELETE CASCADE`, every policy under it.
+///
+/// GUARD: refused (409) while an engine still enforces the profile — deleting
+/// it out from under a bound engine would silently strip that engine's access
+/// control. The admin must unbind (or delete) the engine first. A paired tag
+/// service (`<name>_tag`), if any, is a separate profile and is deleted on its
+/// own.
+#[utoipa::path(
+    delete,
+    path = "/api/control-plane/policies/services/{service}",
+    tag = "policy-admin",
+    params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
+    responses(
+        (status = 204, description = "Profile deleted"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:delete permission", body = ErrorBody),
+        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 409, description = "Profile is still enforced by an engine", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn delete_profile(
+    State(st): State<PolicyAdminState>,
+    Auth(p): Auth,
+    Path(service): Path<String>,
+) -> Result<StatusCode, PolicyHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:delete").await?;
+    let svc = st.store.get_service(&service).await?;
+    let bound: Vec<String> = st
+        .engines
+        .list_engine_bindings()
+        .await?
+        .into_iter()
+        .filter(|e| e.authz_service_id == Some(svc.id))
+        .map(|e| e.name)
+        .collect();
+    if !bound.is_empty() {
+        return Err(PolicyHttpError::Conflict(format!(
+            "profile is enforced by {} engine(s): {} — unbind or delete the engine first",
+            bound.len(),
+            bound.join(", ")
+        )));
+    }
+    st.store.delete_service(svc.id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -1020,6 +1072,7 @@ async fn set_policy_enabled(
         set_policy_enabled,
         list_profiles,
         create_profile,
+        delete_profile,
         trino_config,
         seed_defaults,
         get_service_def,

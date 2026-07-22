@@ -729,6 +729,82 @@ async fn create_profile_makes_a_starrocks_service() {
     f.store.delete_service(svc.id).await.expect("cleanup");
 }
 
+/// DELETE /policies/services/{service} — an unbound profile deletes, taking its
+/// policies with it via `ON DELETE CASCADE` (a seeded policy proves no FK 500).
+#[tokio::test]
+async fn admin_can_delete_unbound_profile() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "delete_profile", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    f.store
+        .create_policy(svc_id, "p1", &serde_json::json!({ "name": "p1" }))
+        .await
+        .expect("seed policy");
+
+    let resp = f
+        .app_empty()
+        .oneshot(req(
+            "DELETE",
+            &format!("/policies/services/{svc_name}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        f.store.get_service(&svc_name).await.is_err(),
+        "profile should be gone"
+    );
+}
+
+/// DELETE is refused (409) while an engine still enforces the profile — deleting
+/// it would silently strip that engine's access control.
+#[tokio::test]
+async fn delete_profile_refused_while_engine_bound() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "delete_profile_bound", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let reader = Arc::new(MockEngineReader {
+        bindings: vec![EngineBinding {
+            id: Uuid::new_v4(),
+            name: "trino-prod".into(),
+            status: "Running".into(),
+            authz_service_id: Some(svc_id),
+        }],
+        catalogs: HashMap::new(),
+    });
+
+    let (status, body) = into_json(
+        f.app(reader)
+            .oneshot(req(
+                "DELETE",
+                &format!("/policies/services/{svc_name}"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "bound profile delete refused; body={body}"
+    );
+    assert!(
+        f.store.get_service(&svc_name).await.is_ok(),
+        "profile must survive a refused delete"
+    );
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
 /// Policies: `policy:read` gates `GET /policies`, `policy:create` gates
 /// `POST /policies`. Proves the NEW `resource:action` gate: a scoped,
 /// non-admin principal holding the wrong (or no) permission is Forbidden, and

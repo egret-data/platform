@@ -1,9 +1,15 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Download, Loader2, Plus, Server } from "lucide-react";
+import { Download, Loader2, MoreHorizontal, Plus, Server, Trash2 } from "lucide-react";
 
-import { type CreatedProfile, type Profile, createProfile, listProfiles } from "@/api/policies";
+import {
+  type CreatedProfile,
+  type Profile,
+  createProfile,
+  deleteProfile,
+  listProfiles,
+} from "@/api/policies";
 import { ApiError } from "@/api/client";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
@@ -12,6 +18,7 @@ import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Dialog,
   DialogContent,
@@ -20,6 +27,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -36,15 +50,19 @@ export const profilesQueryKey = ["control-plane", "profiles"] as const;
 /**
  * Control Plane → Data governance → Policies (drill-down L1: profiles landing).
  *
- * Lists Ranger policy profiles on the shared list scaffold used across the
- * Control Plane (header → Card → SummaryStrip → FilterableTable + facet). Each
- * row links into the per-profile detail page where access / masking /
- * row-filter policies are managed.
+ * Lists Ranger policy profiles on the shared card-less list scaffold used across
+ * the Control Plane (header → SummaryStrip → bordered FilterableTable + facet).
+ * Each row links into the per-profile detail page where access / masking /
+ * row-filter policies are managed, and its actions menu can download the engine
+ * config or delete the profile (only when no engine still enforces it).
  */
 export default function Policies() {
+  const queryClient = useQueryClient();
   const [configTarget, setConfigTarget] = useState<string | null>(null);
   const [typeFacet, setTypeFacet] = useState(FACET_ALL);
   const [addOpen, setAddOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Profile | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const profiles = useQuery<Profile[], ApiError>({
     queryKey: profilesQueryKey,
@@ -52,6 +70,15 @@ export default function Policies() {
     retry: false,
   });
   const rows = profiles.data ?? [];
+
+  const deleteMutation = useMutation<void, ApiError, string>({
+    mutationFn: (name) => deleteProfile(name),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: profilesQueryKey });
+      setDeleteError(null);
+    },
+    onError: (err) => setDeleteError(err.message ?? "Failed to delete profile."),
+  });
 
   const filtered = rows.filter((p) => typeFacet === FACET_ALL || p.type === typeFacet);
   const totalPolicies = rows.reduce((n, p) => n + p.policy_count, 0);
@@ -135,17 +162,41 @@ export default function Policies() {
       key: "actions",
       label: "",
       className: "text-right",
-      cell: (p) => (
-        <Button
-          size="icon"
-          variant="ghost"
-          title="Download config"
-          aria-label={`Download config for ${p.name}`}
-          onClick={() => setConfigTarget(p.name)}
-        >
-          <Download className="h-4 w-4" />
-        </Button>
-      ),
+      cell: (p) => {
+        const bound = p.engines.length > 0;
+        return (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" aria-label={`Actions for ${p.name}`}>
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => setConfigTarget(p.name)}>
+                <Download className="mr-2 h-4 w-4" />
+                Download config
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                disabled={bound}
+                title={
+                  bound
+                    ? "Enforced by an engine — unbind or delete the engine first."
+                    : undefined
+                }
+                className="text-destructive focus:text-destructive"
+                onClick={() => {
+                  setDeleteError(null);
+                  setDeleteTarget(p);
+                }}
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                Delete profile
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        );
+      },
     },
   ];
 
@@ -179,6 +230,11 @@ export default function Policies() {
       </div>
 
       <div className="space-y-4">
+        {deleteError && (
+          <Alert variant="destructive">
+            <AlertDescription>{deleteError}</AlertDescription>
+          </Alert>
+        )}
         <SummaryStrip
           items={[
             { label: "profiles", value: rows.length },
@@ -225,6 +281,20 @@ export default function Policies() {
       )}
 
       <AddProfileDialog open={addOpen} onOpenChange={setAddOpen} />
+
+      <ConfirmDeleteDialog
+        open={deleteTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) setDeleteTarget(null);
+        }}
+        title={deleteTarget ? `Delete "${deleteTarget.name}"?` : "Delete profile?"}
+        description="This profile and all of its access, masking, and row-filter policies will be permanently removed from Ranger."
+        confirmText="delete"
+        onConfirm={() => {
+          if (deleteTarget) deleteMutation.mutate(deleteTarget.name);
+          setDeleteTarget(null);
+        }}
+      />
     </div>
   );
 }

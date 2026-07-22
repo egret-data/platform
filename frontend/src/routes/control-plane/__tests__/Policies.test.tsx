@@ -8,6 +8,7 @@ import Policies from "../Policies";
 const createProfile = vi.fn((_name: string, _type: string) =>
   Promise.resolve({ id: 3, name: "sr", type: "starrocks" }),
 );
+const deleteProfile = vi.fn((_name: string) => Promise.resolve());
 
 vi.mock("@/api/policies", () => ({
   listProfiles: () =>
@@ -30,6 +31,7 @@ vi.mock("@/api/policies", () => ({
       },
     ]),
   createProfile: (name: string, type: string) => createProfile(name, type),
+  deleteProfile: (name: string) => deleteProfile(name),
 }));
 
 function wrap(ui: React.ReactNode) {
@@ -82,6 +84,35 @@ describe("Policies page (profiles landing)", () => {
     expect(trinoRow?.textContent).toContain("3");
     const starrocksRow = screen.getByRole("link", { name: "starrocks" }).closest("tr");
     expect(starrocksRow?.textContent).toContain("0");
+  });
+
+  it("deletes an unbound profile via the actions menu", async () => {
+    const user = userEvent.setup();
+    wrap(<Policies />);
+    await screen.findByRole("link", { name: "starrocks" });
+
+    // starrocks has no bound engine → delete is offered.
+    await user.click(screen.getByRole("button", { name: "Actions for starrocks" }));
+    await user.click(await screen.findByRole("menuitem", { name: /delete profile/i }));
+
+    // ConfirmDeleteDialog gates on typing "delete".
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/Delete "starrocks"\?/)).toBeInTheDocument();
+    await user.type(within(dialog).getByPlaceholderText("delete"), "delete");
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+    expect(deleteProfile).toHaveBeenCalledWith("starrocks");
+  });
+
+  it("disables delete for a profile still bound to an engine", async () => {
+    const user = userEvent.setup();
+    wrap(<Policies />);
+    await screen.findByRole("link", { name: "trino" });
+
+    // trino is enforced by an engine → its delete item is disabled.
+    await user.click(screen.getByRole("button", { name: "Actions for trino" }));
+    const del = await screen.findByRole("menuitem", { name: /delete profile/i });
+    expect(del).toHaveAttribute("aria-disabled", "true");
   });
 
   it("opens the New profile dialog with a name field and a type select", async () => {
