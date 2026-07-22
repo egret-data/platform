@@ -6,9 +6,11 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import AuditLog from "@/routes/control-plane/AuditLog";
 import * as auditApi from "@/api/generated/control-plane-audit/control-plane-audit";
+import * as accessApi from "@/api/access";
 import type { AuditEntryDto } from "@/api/generated/model/auditEntryDto";
 
 vi.mock("@/api/generated/control-plane-audit/control-plane-audit");
+vi.mock("@/api/access");
 
 const ENTRIES: AuditEntryDto[] = [
   {
@@ -75,6 +77,9 @@ describe("AuditLog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockHook({ entries: ENTRIES, nextCursor: null });
+    vi.mocked(accessApi.listUsers).mockResolvedValue([
+      { id: "user-abc-12345", email: "alice@egret.local", name: "Alice" },
+    ] as unknown as accessApi.AccessUser[]);
   });
 
   test("renders decision and mutation rows with a destructive deny badge", async () => {
@@ -89,6 +94,12 @@ describe("AuditLog", () => {
     // Mutation row: action renders; a null actor shows as "system".
     expect(screen.getByText("grant.create")).toBeInTheDocument();
     expect(screen.getByText("system")).toBeInTheDocument();
+  });
+
+  test("resolves the actor id to the user's email", async () => {
+    renderPage();
+    // The decision row's actor (user-abc-12345) surfaces as its email.
+    expect(await screen.findByText("alice@egret.local")).toBeInTheDocument();
   });
 
   test("shows the empty state when there are no entries", () => {

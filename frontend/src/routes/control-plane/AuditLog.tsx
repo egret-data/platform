@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 
+import { listUsers } from "@/api/access";
 import { useControlPlaneAuditListAudit } from "@/api/generated/control-plane-audit/control-plane-audit";
 import type { AuditEntryDto } from "@/api/generated/model/auditEntryDto";
 import type { ControlPlaneAuditListAuditParams } from "@/api/generated/model/controlPlaneAuditListAuditParams";
@@ -7,13 +9,6 @@ import { RelativeTime } from "@/components/explore/RelativeTime";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -81,6 +76,18 @@ export default function AuditLog() {
     [kind, decision, actionParam, fromIso, toIsoValue, cursor],
   );
 
+  // Resolve actor UUIDs to emails so the Actor column is readable. Both this
+  // and the audit feed are platform-admin only, so the viewer can list users.
+  const usersQ = useQuery({
+    queryKey: ["control-plane", "access", "users"],
+    queryFn: listUsers,
+    retry: false,
+  });
+  const userEmailById = useMemo(
+    () => new Map((usersQ.data ?? []).map((u) => [u.id, u.email])),
+    [usersQ.data],
+  );
+
   const query = useControlPlaneAuditListAudit(params, {
     query: { retry: false },
   });
@@ -127,17 +134,7 @@ export default function AuditLog() {
         </p>
       </div>
 
-      <Card>
-        <CardHeader>
-          <div className="space-y-1.5">
-            <CardTitle className="text-lg">Events</CardTitle>
-            <CardDescription>
-              Authorization decisions and mutations recorded across the
-              platform.
-            </CardDescription>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
+      <div className="space-y-4">
           {/* Filter bar */}
           <div className="flex flex-wrap items-end gap-3">
             <div className="space-y-1.5">
@@ -219,7 +216,7 @@ export default function AuditLog() {
               ))}
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto rounded-md border">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -230,13 +227,13 @@ export default function AuditLog() {
                 </TableHeader>
                 <TableBody>
                   {entries.map((e) => (
-                    <AuditRow key={e.id} entry={e} />
+                    <AuditRow key={e.id} entry={e} userEmailById={userEmailById} />
                   ))}
                   {entries.length === 0 && !query.isError && (
                     <TableRow className="hover:bg-transparent">
                       <TableCell
                         colSpan={COLUMNS.length}
-                        className="text-center text-muted-foreground"
+                        className="py-10 text-center text-muted-foreground"
                       >
                         No audit entries match the filters.
                       </TableCell>
@@ -247,25 +244,37 @@ export default function AuditLog() {
             </div>
           )}
 
-          {nextCursor !== null && (
-            <div className="flex justify-center">
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={query.isFetching}
-                onClick={() => setCursor(nextCursor)}
-              >
-                {query.isFetching ? "Loading…" : "Load more"}
-              </Button>
+          {entries.length > 0 && (
+            <div className="flex items-center justify-between gap-2 text-sm text-muted-foreground">
+              <span>
+                Showing <span className="tabular-nums">{entries.length}</span> event
+                {entries.length === 1 ? "" : "s"}
+                {nextCursor !== null ? " so far" : ""}
+              </span>
+              {nextCursor !== null && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={query.isFetching}
+                  onClick={() => setCursor(nextCursor)}
+                >
+                  {query.isFetching ? "Loading…" : "Load more"}
+                </Button>
+              )}
             </div>
           )}
-        </CardContent>
-      </Card>
+      </div>
     </div>
   );
 }
 
-function AuditRow({ entry }: { entry: AuditEntryDto }) {
+function AuditRow({
+  entry,
+  userEmailById,
+}: {
+  entry: AuditEntryDto;
+  userEmailById: Map<string, string>;
+}) {
   const detail =
     entry.kind === "decision"
       ? entry.reasons.join(", ")
@@ -273,19 +282,26 @@ function AuditRow({ entry }: { entry: AuditEntryDto }) {
   const detailTruncated =
     detail.length > 96 ? `${detail.slice(0, 96)}…` : detail;
 
+  // Prefer the resolved email; fall back to a short id when the user is gone.
+  const actorEmail = entry.actorUserId ? userEmailById.get(entry.actorUserId) : undefined;
+
   return (
     <TableRow>
       <TableCell className="whitespace-nowrap tabular-nums text-muted-foreground">
         <RelativeTime iso={entry.ts} />
       </TableCell>
-      <TableCell className="font-mono text-xs">
+      <TableCell>
         {entry.actorUserId ? (
-          <span title={entry.actorUserId}>{entry.actorUserId.slice(0, 8)}</span>
+          <span className="truncate" title={entry.actorUserId}>
+            {actorEmail ?? (
+              <span className="font-mono text-xs">{entry.actorUserId.slice(0, 8)}</span>
+            )}
+          </span>
         ) : (
           <span className="text-muted-foreground">system</span>
         )}
       </TableCell>
-      <TableCell className="font-medium">{entry.action}</TableCell>
+      <TableCell className="font-mono text-xs font-medium">{entry.action}</TableCell>
       <TableCell>
         {entry.resourceType}
         {entry.resourceId ? (
@@ -294,7 +310,15 @@ function AuditRow({ entry }: { entry: AuditEntryDto }) {
       </TableCell>
       <TableCell>
         {entry.decision === "allow" ? (
-          <Badge variant="secondary">allow</Badge>
+          <Badge
+            className="border-transparent"
+            style={{
+              backgroundColor: "var(--success)",
+              color: "var(--success-foreground)",
+            }}
+          >
+            allow
+          </Badge>
         ) : entry.decision === "deny" ? (
           <Badge variant="destructive">deny</Badge>
         ) : (
