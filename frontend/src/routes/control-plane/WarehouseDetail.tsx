@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -11,14 +11,15 @@ import {
   ChevronRight,
   Columns3,
   Copy,
+  Cpu,
   Database,
   FileText,
   HardDrive,
   History,
   KeyRound,
   Loader2,
+  Pencil,
   Plus,
-  Power,
   ListChecks,
   RotateCcw,
   Search,
@@ -72,6 +73,7 @@ import {
   revokeClient,
   revokeGrant,
 } from "@/api/controlPlane";
+import { useControlPlaneEnginesListEngines } from "@/api/generated/control-plane-engines/control-plane-engines";
 import { useMyWorkspaces } from "@/api/hooks";
 import { ApiError } from "@/api/client";
 import { CatalogTagDialog } from "@/components/access/CatalogTagEditor";
@@ -197,6 +199,10 @@ export default function WarehouseDetail() {
             <KeyRound className="h-4 w-4" />
             Catalog Clients
           </TabsTrigger>
+          <TabsTrigger value="engines">
+            <Cpu className="h-4 w-4" />
+            Engines
+          </TabsTrigger>
           <TabsTrigger value="browse">
             <Database className="h-4 w-4" />
             Browse
@@ -216,6 +222,9 @@ export default function WarehouseDetail() {
         <TabsContent value="clients" className="mt-4">
           <ClientsTab warehouseId={id} />
         </TabsContent>
+        <TabsContent value="engines" className="mt-4">
+          <EnginesTab warehouseId={id} />
+        </TabsContent>
         <TabsContent value="browse" className="mt-4">
           <BrowseTab warehouseId={id} />
         </TabsContent>
@@ -223,7 +232,7 @@ export default function WarehouseDetail() {
           <ConnectTab warehouse={warehouse.data} />
         </TabsContent>
         <TabsContent value="settings" className="mt-4">
-          <SettingsTab warehouseId={id} />
+          <SettingsTab warehouseId={id} storageConnId={warehouse.data?.storageConnId} />
         </TabsContent>
       </Tabs>
     </div>
@@ -271,6 +280,10 @@ function WarehouseSummary({
   const namespaces = useQuery({ queryKey: ["cp", "browse", warehouseId, "ns"], queryFn: () => listNamespaces(warehouseId), retry: false });
   const workspaces = useMyWorkspaces(true);
   const storage = useQuery({ queryKey: ["control-plane", "storage"], queryFn: listStorage, retry: false });
+  const enginesQ = useControlPlaneEnginesListEngines({ query: { retry: false } });
+  const engineCount = (enginesQ.data?.status === 200 ? enginesQ.data.data : []).filter(
+    (e) => e.warehouseId === warehouseId,
+  ).length;
 
   const wsName = workspaces.data?.find((w) => w.id === warehouse?.workspaceId)?.name;
   const storageName = storage.data?.find((s) => s.id === warehouse?.storageConnId)?.name;
@@ -278,40 +291,38 @@ function WarehouseSummary({
 
   if (isLoading && !warehouse) {
     return (
-      <Card className="overflow-hidden">
-        <div className="flex flex-col gap-5 p-6 sm:flex-row sm:items-start sm:justify-between">
-          <div className="min-w-0 space-y-3">
-            <div className="flex items-center gap-3">
-              <Skeleton className="h-11 w-11 shrink-0 rounded-lg" />
-              <div className="space-y-2">
-                <Skeleton className="h-7 w-48" />
-                <Skeleton className="h-5 w-24" />
-              </div>
-            </div>
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-              <Skeleton className="h-4 w-40" />
-              <Skeleton className="h-4 w-40" />
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 space-y-3">
+          <div className="flex items-center gap-3">
+            <Skeleton className="h-11 w-11 shrink-0 rounded-lg" />
+            <div className="space-y-2">
+              <Skeleton className="h-7 w-48" />
+              <Skeleton className="h-5 w-24" />
             </div>
           </div>
-          <div className="grid grid-cols-3 gap-2 sm:gap-3">
-            {[0, 1, 2].map((i) => (
-              <Skeleton key={i} className="h-[70px] w-[76px] rounded-lg" />
-            ))}
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+            <Skeleton className="h-4 w-40" />
+            <Skeleton className="h-4 w-40" />
           </div>
         </div>
-      </Card>
+        <div className="grid grid-cols-4 gap-2 sm:gap-3">
+          {[0, 1, 2, 3].map((i) => (
+            <Skeleton key={i} className="h-[70px] w-[76px] rounded-lg" />
+          ))}
+        </div>
+      </div>
     );
   }
 
   const stats = [
     { icon: ShieldCheck, label: "roles", value: roles.data?.length ?? 0 },
     { icon: KeyRound, label: "clients", value: clients.data?.length ?? 0 },
+    { icon: Cpu, label: "engines", value: engineCount },
     { icon: Database, label: "namespaces", value: namespaces.data?.length ?? 0 },
   ];
 
   return (
-    <Card className="overflow-hidden">
-      <div className="flex flex-col gap-5 p-6 sm:flex-row sm:items-start sm:justify-between">
+    <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-3">
           <div className="flex items-center gap-3">
             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
@@ -348,7 +359,7 @@ function WarehouseSummary({
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-2 sm:gap-3">
+        <div className="grid grid-cols-4 gap-2 sm:gap-3">
           {stats.map((s) => (
             <div
               key={s.label}
@@ -360,8 +371,7 @@ function WarehouseSummary({
             </div>
           ))}
         </div>
-      </div>
-    </Card>
+    </div>
   );
 }
 
@@ -403,34 +413,32 @@ function RolesTab({ warehouseId }: { warehouseId: string }) {
     (clients.data ?? []).filter((c) => c.catalogRoleId === roleId).length;
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <CardTitle aria-level={2} className="flex items-center gap-2 text-lg">
-              <ShieldCheck className="h-5 w-5 text-muted-foreground" />
-              Catalog roles
-            </CardTitle>
-            <CardDescription>
-              Keyed by consumer-type
-              <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-primary" />engine</span>
-              <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-success" />notebook</span>
-              <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-highlight" />external</span>
-              — their grants gate reads/writes on the warehouse.
-            </CardDescription>
-          </div>
-          <Button onClick={() => setAddOpen(true)}>
-            <Plus className="h-4 w-4" />
-            Add role
-          </Button>
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+            Catalog roles
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            Keyed by consumer-type
+            <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-primary" />engine</span>
+            <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-success" />notebook</span>
+            <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-highlight" />external</span>
+            — their grants gate reads/writes on the warehouse.
+          </p>
         </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {error && (
-          <Alert variant="destructive">
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
+        <Button className="shrink-0" onClick={() => setAddOpen(true)}>
+          <Plus className="h-4 w-4" />
+          Add role
+        </Button>
+      </div>
+      {error && (
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+      <div className="overflow-x-auto rounded-md border">
         <Table>
           <TableHeader>
             <TableRow>
@@ -471,10 +479,10 @@ function RolesTab({ warehouseId }: { warehouseId: string }) {
             )}
           </TableBody>
         </Table>
-      </CardContent>
+      </div>
 
       <AddRoleDialog warehouseId={warehouseId} open={addOpen} onOpenChange={setAddOpen} />
-    </Card>
+    </section>
   );
 }
 
@@ -888,30 +896,28 @@ function ClientsTab({ warehouseId }: { warehouseId: string }) {
   const roleName = (id: string) => roles.data?.find((r) => r.id === id)?.name ?? id.slice(0, 8);
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <CardTitle aria-level={2} className="flex items-center gap-2 text-lg">
-              <KeyRound className="h-5 w-5 text-muted-foreground" />
-              Catalog Clients
-            </CardTitle>
-            <CardDescription>
-              Machine credentials (client id + secret) an engine or notebook uses to authenticate.
-            </CardDescription>
-          </div>
-          <Button onClick={() => setAddOpen(true)} disabled={(roles.data ?? []).length === 0}>
-            <Plus className="h-4 w-4" />
-            Add client
-          </Button>
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <h2 className="flex items-center gap-2 text-base font-semibold">
+            <KeyRound className="h-4 w-4 text-muted-foreground" />
+            Catalog Clients
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            Machine credentials (client id + secret) an engine or notebook uses to authenticate.
+          </p>
         </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {error && (
-          <Alert variant="destructive">
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
+        <Button className="shrink-0" onClick={() => setAddOpen(true)} disabled={(roles.data ?? []).length === 0}>
+          <Plus className="h-4 w-4" />
+          Add client
+        </Button>
+      </div>
+      {error && (
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+      <div className="overflow-x-auto rounded-md border">
         <Table>
           <TableHeader>
             <TableRow>
@@ -967,7 +973,7 @@ function ClientsTab({ warehouseId }: { warehouseId: string }) {
             )}
           </TableBody>
         </Table>
-      </CardContent>
+      </div>
 
       <AddClientDialog
         warehouseId={warehouseId}
@@ -989,7 +995,7 @@ function ClientsTab({ warehouseId }: { warehouseId: string }) {
           setRevokeTarget(null);
         }}
       />
-    </Card>
+    </section>
   );
 }
 
@@ -1135,6 +1141,74 @@ function AddClientDialog({
 }
 
 // ── Browse (namespaces / tables / schema) ────────────────────────────────────
+
+/** Egret-provisioned engines wired to this warehouse (engine.warehouseId ==
+ * this warehouse). Read-only; engine lifecycle lives on the Engines page. */
+function EnginesTab({ warehouseId }: { warehouseId: string }) {
+  const enginesQ = useControlPlaneEnginesListEngines({ query: { retry: false } });
+  const all = enginesQ.data?.status === 200 ? enginesQ.data.data : [];
+  const engines = all.filter((e) => e.warehouseId === warehouseId);
+
+  return (
+    <section className="space-y-3">
+      <div className="space-y-1">
+        <h2 className="flex items-center gap-2 text-base font-semibold">
+          <Cpu className="h-4 w-4 text-muted-foreground" />
+          Connected engines
+        </h2>
+        <p className="text-sm text-muted-foreground">
+          Egret-provisioned query engines wired to this warehouse&apos;s catalog.
+        </p>
+      </div>
+      {enginesQ.isLoading ? (
+        <ListSkeleton rows={3} cols={3} />
+      ) : engines.length === 0 ? (
+        <p className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-muted-foreground">
+          No egret-provisioned engines are wired to this warehouse yet.
+        </p>
+      ) : (
+        <div className="overflow-x-auto rounded-md border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Engine</TableHead>
+                <TableHead>Type</TableHead>
+                <TableHead>Namespace</TableHead>
+                <TableHead>Status</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {engines.map((e) => (
+                <TableRow key={e.id}>
+                  <TableCell>
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      <Cpu className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <Link
+                        to={`/control-plane/engines/${e.id}`}
+                        className="truncate font-medium text-primary hover:underline"
+                      >
+                        {e.name}
+                      </Link>
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="secondary">{e.type}</Badge>
+                  </TableCell>
+                  <TableCell className="font-mono text-xs text-muted-foreground">
+                    {e.namespace}
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline">{e.status}</Badge>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </section>
+  );
+}
 
 function BrowseTab({ warehouseId }: { warehouseId: string }) {
   const [selectedNs, setSelectedNs] = useState<string | null>(null);
@@ -1822,13 +1896,28 @@ function BrowseEmpty({ icon: Icon, children }: { icon?: typeof Database; childre
   );
 }
 
-function SettingsTab({ warehouseId }: { warehouseId: string }) {
+function SettingsTab({
+  warehouseId,
+  storageConnId,
+}: {
+  warehouseId: string;
+  storageConnId?: string;
+}) {
   const queryClient = useQueryClient();
   const config = useQuery<WarehouseConfig, ApiError>({
     queryKey: ["cp", "warehouse-config", warehouseId],
     queryFn: () => getWarehouseConfig(warehouseId),
     retry: false,
   });
+  const storageQ = useQuery({
+    queryKey: ["control-plane", "storage"],
+    queryFn: listStorage,
+    retry: false,
+  });
+  const storageName = storageQ.data?.find((s) => s.id === storageConnId)?.name;
+  const storageLink = storageConnId
+    ? `/control-plane/storage?edit=${storageConnId}`
+    : "/control-plane/storage";
   const c = config.data;
   const invalidate = () =>
     queryClient.invalidateQueries({ queryKey: ["cp", "warehouse-config", warehouseId] });
@@ -1849,185 +1938,275 @@ function SettingsTab({ warehouseId }: { warehouseId: string }) {
   const [ttlDays, setTtlDays] = useState("");
   const [fmt, setFmt] = useState("1,2");
   const [hardDeleteOpen, setHardDeleteOpen] = useState(false);
+  // Which setting's edit form is open (null = table view only).
+  const [editKey, setEditKey] = useState<"status" | "retention" | "format" | null>(null);
 
   const currentDays =
     c?.deleteProfileSeconds != null ? Math.round(c.deleteProfileSeconds / 86400) : null;
+  const retentionValue = currentDays != null ? `${currentDays} day${currentDays === 1 ? "" : "s"}` : "Hard delete";
+  const fmtLabel =
+    fmt === "2" ? "Require v2" : fmt === "2,3" ? "Allow v2 and v3" : "Allow v1 and v2";
 
   return (
-    <div className="grid gap-4 md:grid-cols-2">
-      <Card>
-        <CardHeader>
-          <CardTitle aria-level={2} className="flex items-center gap-2 text-base">
-            <Power className="h-4 w-4 text-muted-foreground" />
-            Status &amp; statistics
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {config.isLoading ? (
-            <ListSkeleton rows={3} cols={2} />
-          ) : (
+    <div className="space-y-4">
+      {/* An unprovisioned warehouse 404s on config, so status/retention/format
+          writes fail until its catalog is live — say so instead of letting the
+          saves silently error. */}
+      {config.isError && (
+        <p className="rounded-md border bg-muted/40 px-4 py-2.5 text-sm text-muted-foreground">
+          This warehouse isn&apos;t provisioned yet — status and table policies take effect once its
+          catalog is live.
+        </p>
+      )}
+      {config.isLoading ? (
+        <ListSkeleton rows={4} cols={3} />
+      ) : (
+        <div className="overflow-x-auto rounded-md border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-48">Setting</TableHead>
+                <TableHead className="hidden md:table-cell">Details</TableHead>
+                <TableHead className="text-right">Value</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {/* Status — activation lifecycle. */}
+              <TableRow>
+                <TableCell className="align-middle font-medium">Status</TableCell>
+                <TableCell className="hidden align-middle text-muted-foreground md:table-cell">
+                  Whether the catalog is active and serving reads and writes.
+                </TableCell>
+                <TableCell className="align-middle">
+                  <ValueEdit ariaLabel="Edit status" onClick={() => setEditKey("status")}>
+                    <Badge
+                      variant="outline"
+                      className={
+                        c?.active
+                          ? "gap-1 border-primary/30 bg-primary/10 text-primary"
+                          : "gap-1 border-muted-foreground/30 bg-muted text-muted-foreground"
+                      }
+                    >
+                      <span className={`h-1.5 w-1.5 rounded-full ${c?.active ? "bg-primary" : "bg-muted-foreground"}`} />
+                      {c?.active ? "Active" : "Inactive"}
+                    </Badge>
+                  </ValueEdit>
+                </TableCell>
+              </TableRow>
+
+              {/* Soft-delete retention. */}
+              <TableRow>
+                <TableCell className="align-middle font-medium">Soft-delete retention</TableCell>
+                <TableCell className="hidden align-middle text-muted-foreground md:table-cell">
+                  How long dropped tables stay recoverable before they are purged.
+                </TableCell>
+                <TableCell className="align-middle">
+                  <ValueEdit ariaLabel="Edit retention" onClick={() => setEditKey("retention")}>
+                    {retentionValue}
+                  </ValueEdit>
+                </TableCell>
+              </TableRow>
+
+              {/* Format-version policy. */}
+              <TableRow>
+                <TableCell className="align-middle font-medium">Format version</TableCell>
+                <TableCell className="hidden align-middle text-muted-foreground md:table-cell">
+                  Which Iceberg table format versions clients may create.
+                </TableCell>
+                <TableCell className="align-middle">
+                  <ValueEdit ariaLabel="Edit format policy" onClick={() => setEditKey("format")}>
+                    {fmtLabel}
+                  </ValueEdit>
+                </TableCell>
+              </TableRow>
+
+              {/* Storage connection — editing lives on the Storage page. */}
+              <TableRow>
+                <TableCell className="align-middle font-medium">Storage connection</TableCell>
+                <TableCell className="hidden align-middle text-muted-foreground md:table-cell">
+                  The connection this warehouse&apos;s data lives on. Its S3 key is managed there.
+                </TableCell>
+                <TableCell className="align-middle">
+                  <div className="flex justify-end">
+                    <Link
+                      to={storageLink}
+                      className="inline-flex items-center gap-2 rounded-md px-2 py-1 text-sm text-primary hover:bg-muted hover:underline"
+                    >
+                      {storageName ?? "connection"}
+                      <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
+                    </Link>
+                  </div>
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+        </div>
+      )}
+
+      {/* One edit form, opened from a row's Value cell. */}
+      <Dialog open={editKey !== null} onOpenChange={(o) => !o && setEditKey(null)}>
+        <DialogContent>
+          {editKey === "status" && (
             <>
-              <div className="flex items-center gap-2">
-                <Badge
-                  variant="outline"
-                  className={
-                    c?.active
-                      ? "gap-1 border-primary/30 bg-primary/10 text-primary"
-                      : "gap-1 border-muted-foreground/30 bg-muted text-muted-foreground"
-                  }
-                >
-                  <span className={`h-1.5 w-1.5 rounded-full ${c?.active ? "bg-primary" : "bg-muted-foreground"}`} />
-                  {c?.active ? "Active" : "Inactive"}
-                </Badge>
+              <DialogHeader>
+                <DialogTitle>Warehouse status</DialogTitle>
+                <DialogDescription>
+                  The catalog is currently {c?.active ? "active and serving reads/writes" : "inactive"}.
+                </DialogDescription>
+              </DialogHeader>
+              {statusMut.isError && (
+                <Alert variant="destructive">
+                  <AlertDescription>
+                    {statusMut.error?.message ?? "Couldn't change status."}
+                  </AlertDescription>
+                </Alert>
+              )}
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setEditKey(null)}>
+                  Cancel
+                </Button>
                 <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={statusMut.isPending || !c}
-                  onClick={() => statusMut.mutate(!c?.active)}
+                  variant={c?.active ? "destructive" : "default"}
+                  disabled={statusMut.isPending}
+                  onClick={() =>
+                    statusMut.mutate(!c?.active, { onSuccess: () => setEditKey(null) })
+                  }
                 >
                   {c?.active ? "Deactivate" : "Activate"}
                 </Button>
-              </div>
-              <div className="flex gap-6 text-sm">
-                <div>
-                  <div className="text-xs uppercase tracking-wide text-muted-foreground">Tables</div>
-                  <div className="text-lg font-semibold tabular-nums">{c?.numTables ?? "—"}</div>
-                </div>
-                <div>
-                  <div className="text-xs uppercase tracking-wide text-muted-foreground">Views</div>
-                  <div className="text-lg font-semibold tabular-nums">{c?.numViews ?? "—"}</div>
-                </div>
-              </div>
-              {c?.statsUpdatedMs ? (
-                <p className="text-xs text-muted-foreground">
-                  Statistics as of {new Date(c.statsUpdatedMs).toLocaleString()}
-                </p>
-              ) : null}
+              </DialogFooter>
             </>
           )}
-        </CardContent>
-      </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle aria-level={2} className="flex items-center gap-2 text-base">
-            <Trash2 className="h-4 w-4 text-muted-foreground" />
-            Soft-delete retention
-          </CardTitle>
-          <CardDescription>
-            {currentDays != null
-              ? `Dropped tables are recoverable for ${currentDays} day${currentDays === 1 ? "" : "s"}.`
-              : "Hard delete — dropped tables are purged immediately (no recovery)."}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          <div className="flex items-end gap-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="ttl">Retention (days)</Label>
-              <Input
-                id="ttl"
-                type="number"
-                min={7}
-                className="w-32"
-                placeholder={currentDays != null ? String(currentDays) : "7"}
-                value={ttlDays}
-                onChange={(e) => setTtlDays(e.target.value)}
-              />
-            </div>
-            <Button
-              size="sm"
-              disabled={ttlMut.isPending}
-              onClick={() => {
-                const days = Number(ttlDays || currentDays || 7);
-                ttlMut.mutate(Math.max(7, days) * 86400);
-              }}
-            >
-              Save
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              disabled={ttlMut.isPending}
-              onClick={() => setHardDeleteOpen(true)}
-            >
-              Hard delete
-            </Button>
-          </div>
-          <p className="text-xs text-muted-foreground">Minimum ~7 days (enforced by the catalog).</p>
-          {ttlMut.isError && (
-            <p className="text-xs text-destructive">Retention rejected — try a longer window.</p>
+          {editKey === "retention" && (
+            <>
+              <DialogHeader>
+                <DialogTitle>Soft-delete retention</DialogTitle>
+                <DialogDescription>
+                  How long dropped tables stay recoverable before they are purged. Minimum ~7 days.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-1.5">
+                <Label htmlFor="ttl">Retention (days)</Label>
+                <Input
+                  id="ttl"
+                  type="number"
+                  min={7}
+                  className="w-32"
+                  placeholder={currentDays != null ? String(currentDays) : "7"}
+                  value={ttlDays}
+                  onChange={(e) => setTtlDays(e.target.value)}
+                />
+                {ttlMut.isError && (
+                  <p className="text-xs text-destructive">Retention rejected — try a longer window.</p>
+                )}
+              </div>
+              <DialogFooter className="sm:justify-between">
+                <Button
+                  variant="destructive"
+                  disabled={ttlMut.isPending}
+                  onClick={() => {
+                    setEditKey(null);
+                    setHardDeleteOpen(true);
+                  }}
+                >
+                  Switch to hard delete
+                </Button>
+                <div className="flex gap-2">
+                  <Button variant="outline" onClick={() => setEditKey(null)}>
+                    Cancel
+                  </Button>
+                  <Button
+                    disabled={ttlMut.isPending}
+                    onClick={() => {
+                      const days = Number(ttlDays || currentDays || 7);
+                      ttlMut.mutate(Math.max(7, days) * 86400, {
+                        onSuccess: () => setEditKey(null),
+                      });
+                    }}
+                  >
+                    Save
+                  </Button>
+                </div>
+              </DialogFooter>
+            </>
           )}
-          <ConfirmDeleteDialog
-            open={hardDeleteOpen}
-            onOpenChange={setHardDeleteOpen}
-            title="Switch to hard delete?"
-            description="Dropped tables will be purged immediately with no recovery window — the recycle bin will no longer hold them. This cannot be undone."
-            confirmText="hard delete"
-            onConfirm={() => ttlMut.mutate(null)}
-          />
-        </CardContent>
-      </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle aria-level={2} className="flex items-center gap-2 text-base">
-            <ShieldCheck className="h-4 w-4 text-muted-foreground" />
-            Format-version policy
-          </CardTitle>
-          <CardDescription>Which Iceberg table format versions clients may create.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-end gap-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="fmt">Allowed versions</Label>
-              <Select value={fmt} onValueChange={setFmt}>
-                <SelectTrigger id="fmt" className="w-56">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="1,2">Allow v1 and v2</SelectItem>
-                  <SelectItem value="2">Require v2</SelectItem>
-                  <SelectItem value="2,3">Allow v2 and v3</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <Button
-              size="sm"
-              disabled={fmtMut.isPending}
-              onClick={() => fmtMut.mutate(fmt.split(",").map(Number))}
-            >
-              Save
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+          {editKey === "format" && (
+            <>
+              <DialogHeader>
+                <DialogTitle>Format-version policy</DialogTitle>
+                <DialogDescription>
+                  Which Iceberg table format versions clients may create.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-1.5">
+                <Label htmlFor="fmt">Allowed versions</Label>
+                <Select value={fmt} onValueChange={setFmt}>
+                  <SelectTrigger id="fmt" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1,2">Allow v1 and v2</SelectItem>
+                    <SelectItem value="2">Require v2</SelectItem>
+                    <SelectItem value="2,3">Allow v2 and v3</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setEditKey(null)}>
+                  Cancel
+                </Button>
+                <Button
+                  disabled={fmtMut.isPending}
+                  onClick={() =>
+                    fmtMut.mutate(fmt.split(",").map(Number), { onSuccess: () => setEditKey(null) })
+                  }
+                >
+                  Save
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
 
-      <Card>
-        <CardHeader>
-          <CardTitle aria-level={2} className="flex items-center gap-2 text-base">
-            <HardDrive className="h-4 w-4 text-muted-foreground" />
-            Storage credential
-          </CardTitle>
-          <CardDescription>
-            The S3 access key comes from this warehouse&apos;s{" "}
-            <strong>storage connection</strong>. Rotate it by editing that connection in{" "}
-            <em>Control Plane → Storage</em> — the new key is pushed to every warehouse using it.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Link
-            to="/control-plane/storage"
-            className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
-          >
-            <HardDrive className="h-4 w-4" />
-            Manage storage connections
-          </Link>
-        </CardContent>
-      </Card>
+      <ConfirmDeleteDialog
+        open={hardDeleteOpen}
+        onOpenChange={setHardDeleteOpen}
+        title="Switch to hard delete?"
+        description="Dropped tables will be purged immediately with no recovery window — the recycle bin will no longer hold them. This cannot be undone."
+        confirmText="hard delete"
+        onConfirm={() => ttlMut.mutate(null)}
+      />
 
-      <div className="md:col-span-2">
-        <WarehouseTasksCard warehouseId={warehouseId} />
-      </div>
+      <WarehouseTasksCard warehouseId={warehouseId} />
+    </div>
+  );
+}
+
+/** A read-only setting value that acts as an edit trigger: shows the value with a
+ * pencil affordance, right-aligned in the table's Value column. */
+function ValueEdit({
+  ariaLabel,
+  onClick,
+  children,
+}: {
+  ariaLabel: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex justify-end">
+      <button
+        type="button"
+        aria-label={ariaLabel}
+        onClick={onClick}
+        className="inline-flex items-center gap-2 rounded-md px-2 py-1 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {children}
+        <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
+      </button>
     </div>
   );
 }
@@ -2040,27 +2219,29 @@ function WarehouseTasksCard({ warehouseId }: { warehouseId: string }) {
   });
   const rows = tasks.data ?? [];
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle aria-level={2} className="flex items-center gap-2 text-base">
+    <section className="space-y-3">
+      <div className="space-y-1">
+        <h2 className="flex items-center gap-2 text-base font-semibold">
           <ListChecks className="h-4 w-4 text-muted-foreground" />
           Background tasks
-        </CardTitle>
-        <CardDescription>
+        </h2>
+        <p className="text-sm text-muted-foreground">
           The catalog&apos;s GC queues (tabular expiry / purge / task-log cleanup) that reclaim
           storage from dropped tables.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        {tasks.isError ? (
-          <p className="py-4 text-center text-sm text-destructive">
-            {tasks.error?.message ?? "Couldn't load background tasks."}
-          </p>
-        ) : tasks.isLoading ? (
-          <ListSkeleton rows={3} cols={3} />
-        ) : rows.length === 0 ? (
-          <p className="py-4 text-center text-sm text-muted-foreground">No pending tasks.</p>
-        ) : (
+        </p>
+      </div>
+      {tasks.isError ? (
+        <p className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-destructive">
+          {tasks.error?.message ?? "Couldn't load background tasks."}
+        </p>
+      ) : tasks.isLoading ? (
+        <ListSkeleton rows={3} cols={3} />
+      ) : rows.length === 0 ? (
+        <p className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-muted-foreground">
+          No pending tasks.
+        </p>
+      ) : (
+        <div className="overflow-x-auto rounded-md border">
           <Table>
             <TableHeader>
               <TableRow>
@@ -2081,9 +2262,9 @@ function WarehouseTasksCard({ warehouseId }: { warehouseId: string }) {
               ))}
             </TableBody>
           </Table>
-        )}
-      </CardContent>
-    </Card>
+        </div>
+      )}
+    </section>
   );
 }
 

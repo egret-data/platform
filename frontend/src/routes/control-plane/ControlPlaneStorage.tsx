@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FolderOpen, HardDrive, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 
@@ -79,6 +79,27 @@ export default function ControlPlaneStorage() {
   const [deleteTarget, setDeleteTarget] = useState<Storage | null>(null);
 
   const rows = conns.data ?? [];
+
+  // Deep-link `?edit=<id>` (e.g. from a warehouse's Storage credential setting)
+  // auto-opens that connection's edit dialog once the list has loaded, then
+  // clears the param so a refresh doesn't re-open it.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const editId = searchParams.get("edit");
+  useEffect(() => {
+    if (!editId) return;
+    const conn = rows.find((c) => c.id === editId);
+    if (!conn) return;
+    setEditing(conn);
+    setAddOpen(true);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("edit");
+        return next;
+      },
+      { replace: true },
+    );
+  }, [editId, rows, setSearchParams]);
 
   return (
     <Card data-testid="storage-frame">

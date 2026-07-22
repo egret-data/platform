@@ -18,13 +18,6 @@ import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Dialog,
@@ -155,87 +148,80 @@ export default function Warehouses() {
   const rows = (warehouses.data ?? []).filter((w) => !wsFilter || w.workspaceId === wsFilter);
   const storageName = (id: string) => storage.data?.find((s) => s.id === id)?.name ?? id.slice(0, 8);
 
+  const total = rows.length;
+  const provisioned = rows.filter((w) => w.lakekeeperWarehouseId).length;
+  const storageCount = storage.data?.length ?? 0;
+
   return (
-    <Card data-testid="warehouses-frame">
-      <CardHeader>
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <CardTitle className="flex items-center gap-2 text-lg">
-              <Boxes className="h-5 w-5 text-muted-foreground" />
-              Warehouses
-            </CardTitle>
-            <CardDescription>
-              Embedded-catalog warehouses. Creating one provisions the lakekeeper
-              warehouse over a storage connection; open a warehouse to manage its
-              roles, grants, and Catalog Clients.
-            </CardDescription>
-          </div>
-          <Button onClick={() => setAddOpen(true)}>
-            <Plus className="h-4 w-4" />
-            Add warehouse
-          </Button>
+    <div className="space-y-4" data-testid="warehouses-frame">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="max-w-3xl">
+          <h1 className="text-2xl font-semibold leading-tight">Warehouses</h1>
+          <p className="text-sm text-muted-foreground">
+            Embedded-catalog warehouses. Creating one provisions the lakekeeper
+            warehouse over a storage connection; open a warehouse to manage its
+            roles, grants, and Catalog Clients.
+          </p>
         </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {(() => {
-          const all = rows;
-          const total = all.length;
-          const provisioned = all.filter((w) => w.lakekeeperWarehouseId).length;
-          const storageCount = storage.data?.length ?? 0;
-          return (
-            <SummaryStrip
-              items={[
-                { label: "warehouses", value: total },
-                { label: "provisioned", value: provisioned },
-                { label: "storage connections", value: storageCount },
-              ]}
-            />
-          );
-        })()}
-        {wsFilter && (
-          <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm">
-            <span className="text-muted-foreground">
-              Filtered to workspace <span className="font-medium text-foreground">{wsName(wsFilter)}</span>
-            </span>
-            <Link to="/control-plane/warehouses" className="ml-auto text-primary hover:underline">
-              Show all workspaces
-            </Link>
-          </div>
-        )}
-        {warehouses.isError ? (
-          <Alert variant="destructive">
-            <AlertDescription>Failed to load warehouses. Please try again.</AlertDescription>
-          </Alert>
-        ) : warehouses.isLoading ? (
-          <ListSkeleton rows={6} cols={5} />
-        ) : (
-          <FilterableTable
-            rows={rows}
-            columns={warehouseColumns(wsName, storageName, setDeleteTarget)}
-            getId={(wh) => wh.id}
-            searchPlaceholder="Search warehouses…"
-            initialSort={{ key: "name", dir: "asc" }}
-            pageSize={25}
-            emptyText={
-              wsFilter ? (
-                "No warehouses for this workspace."
-              ) : (
-                <EmptyState
-                  icon={Boxes}
-                  title="No warehouses yet"
-                  description="Provision an embedded-catalog warehouse over a storage connection."
-                  action={
-                    <Button size="sm" onClick={() => setAddOpen(true)}>
-                      <Plus className="mr-1 h-4 w-4" />
-                      Add warehouse
-                    </Button>
-                  }
-                />
-              )
-            }
-          />
-        )}
-      </CardContent>
+        <Button className="shrink-0" onClick={() => setAddOpen(true)}>
+          <Plus className="h-4 w-4" />
+          Add warehouse
+        </Button>
+      </div>
+
+      <SummaryStrip
+        items={[
+          { label: "warehouses", value: total },
+          { label: "provisioned", value: provisioned },
+          { label: "storage connections", value: storageCount },
+        ]}
+      />
+
+      {wsFilter && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm">
+          <span className="text-muted-foreground">
+            Filtered to workspace <span className="font-medium text-foreground">{wsName(wsFilter)}</span>
+          </span>
+          <Link to="/control-plane/warehouses" className="ml-auto text-primary hover:underline">
+            Show all workspaces
+          </Link>
+        </div>
+      )}
+
+      {warehouses.isError ? (
+        <Alert variant="destructive">
+          <AlertDescription>Failed to load warehouses. Please try again.</AlertDescription>
+        </Alert>
+      ) : warehouses.isLoading ? (
+        <ListSkeleton rows={6} cols={5} />
+      ) : (
+        <FilterableTable
+          rows={rows}
+          columns={warehouseColumns(wsName, storageName, setDeleteTarget)}
+          getId={(wh) => wh.id}
+          searchPlaceholder="Search warehouses…"
+          initialSort={{ key: "name", dir: "asc" }}
+          pageSize={25}
+          bordered
+          emptyText={
+            wsFilter ? (
+              "No warehouses for this workspace."
+            ) : (
+              <EmptyState
+                icon={Boxes}
+                title="No warehouses yet"
+                description="Provision an embedded-catalog warehouse over a storage connection."
+                action={
+                  <Button size="sm" onClick={() => setAddOpen(true)}>
+                    <Plus className="mr-1 h-4 w-4" />
+                    Add warehouse
+                  </Button>
+                }
+              />
+            )
+          }
+        />
+      )}
 
       <AddWarehouseDialog open={addOpen} onOpenChange={setAddOpen} />
 
@@ -251,7 +237,7 @@ export default function Warehouses() {
           if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
         }}
       />
-    </Card>
+    </div>
   );
 }
 
