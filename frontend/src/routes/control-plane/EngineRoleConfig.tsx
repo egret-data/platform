@@ -11,9 +11,10 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
 import { ConfigSection } from "./config/ConfigSection";
+import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
 import { FieldLabel } from "./config/FieldLabel";
 import { JvmFlagPicker } from "./config/JvmFlagPicker";
-import { QuantityInput } from "./config/QuantityInput";
+import { QuantityValue } from "./config/QuantityInput";
 import {
   type ProbeForm,
   type RoleForm,
@@ -124,54 +125,71 @@ function RoleConfigEditor({
         description="Pod count and the Kubernetes CPU/memory request and limit for each pod."
         docsUrl="https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/"
       >
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <div className="space-y-1.5">
-            <FieldLabel
-              fieldKey={`${keyPrefix}.replicas`}
-              label="Replicas"
-              htmlFor={`${idPrefix}-replicas`}
-            />
+        <ConfigTable>
+          <ConfigTableRow
+            label="Replicas"
+            fieldKey={`${keyPrefix}.replicas`}
+            htmlFor={`${idPrefix}-replicas`}
+          >
             <Input
               id={`${idPrefix}-replicas`}
+              className="w-full"
               type="number"
               min={0}
               value={value.replicas}
               placeholder="1"
               onChange={(e) => set("replicas", e.target.value)}
             />
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <QuantityInput
-            fieldKey={`${keyPrefix}.resources.cpu`}
+          </ConfigTableRow>
+          <ConfigTableRow
             label="CPU request"
-            value={value.cpuRequest}
-            placeholder="1"
-            onChange={(v) => set("cpuRequest", v)}
-          />
-          <QuantityInput
             fieldKey={`${keyPrefix}.resources.cpu`}
+            htmlFor={`${idPrefix}-cpu-request`}
+          >
+            <QuantityValue
+              id={`${idPrefix}-cpu-request`}
+              value={value.cpuRequest}
+              placeholder="1"
+              onChange={(v) => set("cpuRequest", v)}
+            />
+          </ConfigTableRow>
+          <ConfigTableRow
             label="CPU limit"
-            value={value.cpuLimit}
-            placeholder="2"
-            onChange={(v) => set("cpuLimit", v)}
-          />
-          <QuantityInput
-            fieldKey={`${keyPrefix}.resources.memory`}
+            fieldKey={`${keyPrefix}.resources.cpu`}
+            htmlFor={`${idPrefix}-cpu-limit`}
+          >
+            <QuantityValue
+              id={`${idPrefix}-cpu-limit`}
+              value={value.cpuLimit}
+              placeholder="2"
+              onChange={(v) => set("cpuLimit", v)}
+            />
+          </ConfigTableRow>
+          <ConfigTableRow
             label="Memory request"
-            value={value.memRequest}
-            placeholder="2Gi"
-            onChange={(v) => set("memRequest", v)}
-          />
-          <QuantityInput
             fieldKey={`${keyPrefix}.resources.memory`}
+            htmlFor={`${idPrefix}-mem-request`}
+          >
+            <QuantityValue
+              id={`${idPrefix}-mem-request`}
+              value={value.memRequest}
+              placeholder="2Gi"
+              onChange={(v) => set("memRequest", v)}
+            />
+          </ConfigTableRow>
+          <ConfigTableRow
             label="Memory limit"
-            value={value.memLimit}
-            placeholder="4Gi"
-            onChange={(v) => set("memLimit", v)}
-          />
-        </div>
+            fieldKey={`${keyPrefix}.resources.memory`}
+            htmlFor={`${idPrefix}-mem-limit`}
+          >
+            <QuantityValue
+              id={`${idPrefix}-mem-limit`}
+              value={value.memLimit}
+              placeholder="4Gi"
+              onChange={(v) => set("memLimit", v)}
+            />
+          </ConfigTableRow>
+        </ConfigTable>
       </ConfigSection>
 
       <ConfigSection
@@ -198,32 +216,42 @@ function RoleConfigEditor({
           </div>
         </RadioGroup>
         {value.heapMode === "fixed" ? (
-          <div className="grid grid-cols-2 gap-4">
-            <QuantityInput
-              fieldKey={`${keyPrefix}.heap.maxSize`}
+          <ConfigTable>
+            <ConfigTableRow
               label="Max size (-Xmx)"
-              value={value.maxSize}
-              placeholder="2G"
-              onChange={(v) => set("maxSize", v)}
-            />
-            <QuantityInput
-              fieldKey={`${keyPrefix}.heap.minSize`}
-              label="Min size (-Xms)"
-              value={value.minSize}
-              placeholder="2G"
-              onChange={(v) => set("minSize", v)}
-            />
-          </div>
-        ) : (
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-1.5">
-              <FieldLabel
-                fieldKey={`${keyPrefix}.heap.maxPercent`}
-                label="Max RAM percent"
-                htmlFor={`${idPrefix}-heap-maxpct`}
+              fieldKey={`${keyPrefix}.heap.maxSize`}
+              htmlFor={`${idPrefix}-heap-maxsize`}
+            >
+              <QuantityValue
+                id={`${idPrefix}-heap-maxsize`}
+                value={value.maxSize}
+                placeholder="2G"
+                onChange={(v) => set("maxSize", v)}
               />
+            </ConfigTableRow>
+            <ConfigTableRow
+              label="Min size (-Xms)"
+              fieldKey={`${keyPrefix}.heap.minSize`}
+              htmlFor={`${idPrefix}-heap-minsize`}
+            >
+              <QuantityValue
+                id={`${idPrefix}-heap-minsize`}
+                value={value.minSize}
+                placeholder="2G"
+                onChange={(v) => set("minSize", v)}
+              />
+            </ConfigTableRow>
+          </ConfigTable>
+        ) : (
+          <ConfigTable>
+            <ConfigTableRow
+              label="Max RAM percent"
+              fieldKey={`${keyPrefix}.heap.maxPercent`}
+              htmlFor={`${idPrefix}-heap-maxpct`}
+            >
               <Input
                 id={`${idPrefix}-heap-maxpct`}
+                className="w-full"
                 type="number"
                 min={0}
                 max={100}
@@ -231,15 +259,15 @@ function RoleConfigEditor({
                 placeholder="80"
                 onChange={(e) => set("maxPercent", e.target.value)}
               />
-            </div>
-            <div className="space-y-1.5">
-              <FieldLabel
-                fieldKey={`${keyPrefix}.heap.initialPercent`}
-                label="Initial RAM percent"
-                htmlFor={`${idPrefix}-heap-initpct`}
-              />
+            </ConfigTableRow>
+            <ConfigTableRow
+              label="Initial RAM percent"
+              fieldKey={`${keyPrefix}.heap.initialPercent`}
+              htmlFor={`${idPrefix}-heap-initpct`}
+            >
               <Input
                 id={`${idPrefix}-heap-initpct`}
+                className="w-full"
                 type="number"
                 min={0}
                 max={100}
@@ -247,8 +275,8 @@ function RoleConfigEditor({
                 placeholder="80"
                 onChange={(e) => set("initialPercent", e.target.value)}
               />
-            </div>
-          </div>
+            </ConfigTableRow>
+          </ConfigTable>
         )}
       </ConfigSection>
 
@@ -257,22 +285,32 @@ function RoleConfigEditor({
         description="Per-node query memory limits for this role."
         docsUrl="https://trino.io/docs/current/admin/properties-resource-management.html"
       >
-        <div className="grid grid-cols-2 gap-4">
-          <QuantityInput
-            fieldKey="queryMaxMemoryPerNode"
+        <ConfigTable>
+          <ConfigTableRow
             label="Query max memory / node"
-            value={value.queryMaxMemoryPerNode}
-            placeholder="1GB"
-            onChange={(v) => set("queryMaxMemoryPerNode", v)}
-          />
-          <QuantityInput
-            fieldKey="memoryHeapHeadroomPerNode"
+            fieldKey="queryMaxMemoryPerNode"
+            htmlFor={`${idPrefix}-qmmpn`}
+          >
+            <QuantityValue
+              id={`${idPrefix}-qmmpn`}
+              value={value.queryMaxMemoryPerNode}
+              placeholder="1GB"
+              onChange={(v) => set("queryMaxMemoryPerNode", v)}
+            />
+          </ConfigTableRow>
+          <ConfigTableRow
             label="Heap headroom / node"
-            value={value.heapHeadroomPerNode}
-            placeholder="2GB"
-            onChange={(v) => set("heapHeadroomPerNode", v)}
-          />
-        </div>
+            fieldKey="memoryHeapHeadroomPerNode"
+            htmlFor={`${idPrefix}-hhpn`}
+          >
+            <QuantityValue
+              id={`${idPrefix}-hhpn`}
+              value={value.heapHeadroomPerNode}
+              placeholder="2GB"
+              onChange={(v) => set("heapHeadroomPerNode", v)}
+            />
+          </ConfigTableRow>
+        </ConfigTable>
       </ConfigSection>
 
       <ConfigSection
@@ -373,35 +411,36 @@ export function EngineRoleConfig({
         description="Drain in-flight queries before a worker terminates."
         docsUrl="https://trino.io/docs/current/admin/graceful-shutdown.html"
       >
-        <div className="flex items-center justify-between gap-4">
-          <FieldLabel
-            fieldKey="worker.gracefulShutdown"
+        <ConfigTable>
+          <ConfigTableRow
             label="Enable graceful shutdown"
+            fieldKey="worker.gracefulShutdown"
             htmlFor="ced-gs-enabled"
-          />
-          <Switch
-            id="ced-gs-enabled"
-            checked={gsEnabled}
-            onCheckedChange={onGsEnabledChange}
-          />
-        </div>
-        {gsEnabled && (
-          <div className="space-y-1.5">
-            <FieldLabel
-              fieldKey="worker.gracePeriod"
+          >
+            <Switch
+              id="ced-gs-enabled"
+              checked={gsEnabled}
+              onCheckedChange={onGsEnabledChange}
+            />
+          </ConfigTableRow>
+          {gsEnabled && (
+            <ConfigTableRow
               label="Grace period (s)"
+              fieldKey="worker.gracePeriod"
               htmlFor="ced-gs-grace"
-            />
-            <Input
-              id="ced-gs-grace"
-              type="number"
-              min={0}
-              value={gracePeriod}
-              placeholder="120"
-              onChange={(e) => onGracePeriodChange?.(e.target.value)}
-            />
-          </div>
-        )}
+            >
+              <Input
+                id="ced-gs-grace"
+                className="w-full"
+                type="number"
+                min={0}
+                value={gracePeriod}
+                placeholder="120"
+                onChange={(e) => onGracePeriodChange?.(e.target.value)}
+              />
+            </ConfigTableRow>
+          )}
+        </ConfigTable>
       </ConfigSection>
     </div>
   );

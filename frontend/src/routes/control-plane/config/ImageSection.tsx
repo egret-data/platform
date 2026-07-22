@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/select";
 import type { EngineConfigForm } from "../useEngineConfigForm";
 import { ConfigSection } from "./ConfigSection";
+import { ConfigTable, ConfigTableRow } from "./ConfigTable";
 import { SELECT_NONE } from "./podEditors";
 
 /**
@@ -42,22 +43,25 @@ export function ImageSection({
         title="Image"
         description="Container image for the coordinator and worker. Leave blank to use the default."
       >
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <div className="space-y-1.5 sm:col-span-2">
-            <Label htmlFor="img-image">Image</Label>
+        <ConfigTable>
+          <ConfigTableRow
+            label="Image"
+            htmlFor="img-image"
+            details={`Full registry/repository:tag. Default: ${defaultImage}.`}
+          >
             <Input
               id="img-image"
+              className="w-full"
               value={image}
               placeholder={defaultImage}
               onChange={(e) => setImage(e.target.value)}
             />
-            <p className="text-xs text-muted-foreground">
-              Full <code>registry/repository:tag</code>. Default:{" "}
-              <code>{defaultImage}</code>.
-            </p>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="img-pullpolicy">Image pull policy</Label>
+          </ConfigTableRow>
+          <ConfigTableRow
+            label="Image pull policy"
+            htmlFor="img-pullpolicy"
+            details="When the kubelet re-pulls the image. Leave default unless you need Always/Never."
+          >
             <Select
               value={imagePullPolicy || SELECT_NONE}
               onValueChange={(v) => setImagePullPolicy(v === SELECT_NONE ? "" : v)}
@@ -72,8 +76,8 @@ export function ImageSection({
                 <SelectItem value="Never">Never</SelectItem>
               </SelectContent>
             </Select>
-          </div>
-        </div>
+          </ConfigTableRow>
+        </ConfigTable>
 
         <div className="space-y-2">
           <Label>Image pull secrets</Label>

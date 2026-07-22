@@ -17,7 +17,7 @@ import {
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
 import { ConfigSection } from "./config/ConfigSection";
-import { FieldLabel } from "./config/FieldLabel";
+import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
 import { type Kv, KeyValueEditor } from "./EngineResourceGroups";
 import type { DelegationMode, PasswordUserForm } from "./useEngineConfigForm";
 
@@ -197,48 +197,49 @@ export function EngineSecurity(props: {
         description="Also accept egret-issued JWTs (e.g. from notebooks) as client credentials."
         docsUrl="https://trino.io/docs/current/security/jwt.html"
       >
-        <div className="flex items-center justify-between gap-4">
-          <FieldLabel
-            fieldKey="jwtEnabled"
+        <ConfigTable>
+          <ConfigTableRow
             label="Accept egret JWT"
+            fieldKey="jwtEnabled"
             htmlFor="ced-jwt-enabled"
-          />
-          <Switch
-            id="ced-jwt-enabled"
-            checked={jwtEnabled}
-            onCheckedChange={setJwtEnabled}
-          />
-        </div>
-        {jwtEnabled && (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <FieldLabel
-                fieldKey="jwksUri"
+          >
+            <Switch
+              id="ced-jwt-enabled"
+              checked={jwtEnabled}
+              onCheckedChange={setJwtEnabled}
+            />
+          </ConfigTableRow>
+          {jwtEnabled && (
+            <>
+              <ConfigTableRow
                 label="JWKS URI"
+                fieldKey="jwksUri"
                 htmlFor="ced-jwt-jwks"
-              />
-              <Input
-                id="ced-jwt-jwks"
-                value={jwksUri}
-                placeholder="default IdP JWKS"
-                onChange={(e) => setJwksUri(e.target.value)}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <FieldLabel
-                fieldKey="requiredAudience"
+              >
+                <Input
+                  id="ced-jwt-jwks"
+                  className="w-full"
+                  value={jwksUri}
+                  placeholder="default IdP JWKS"
+                  onChange={(e) => setJwksUri(e.target.value)}
+                />
+              </ConfigTableRow>
+              <ConfigTableRow
                 label="Required audience"
+                fieldKey="requiredAudience"
                 htmlFor="ced-jwt-aud"
-              />
-              <Input
-                id="ced-jwt-aud"
-                value={requiredAudience}
-                placeholder="optional"
-                onChange={(e) => setRequiredAudience(e.target.value)}
-              />
-            </div>
-          </div>
-        )}
+              >
+                <Input
+                  id="ced-jwt-aud"
+                  className="w-full"
+                  value={requiredAudience}
+                  placeholder="optional"
+                  onChange={(e) => setRequiredAudience(e.target.value)}
+                />
+              </ConfigTableRow>
+            </>
+          )}
+        </ConfigTable>
       </ConfigSection>
 
       {/* Per-user delegation mode */}
@@ -339,79 +340,78 @@ export function EngineSecurity(props: {
         description="Create a Kubernetes Ingress for the coordinator. TLS terminates at the ingress."
         docsUrl="https://kubernetes.io/docs/concepts/services-networking/ingress/"
       >
-        <div className="flex items-center justify-between gap-4">
-          <FieldLabel
-            fieldKey="ingressEnabled"
+        <ConfigTable>
+          <ConfigTableRow
             label="Expose via ingress"
+            fieldKey="ingressEnabled"
             htmlFor="ced-ing-enabled"
-          />
-          <Switch
-            id="ced-ing-enabled"
-            checked={ingressEnabled}
-            onCheckedChange={setIngressEnabled}
-          />
-        </div>
-        {ingressEnabled && (
-          <div className="space-y-4">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <FieldLabel
-                  fieldKey="ingress.host"
-                  label="Host"
-                  htmlFor="ced-ing-host"
-                />
+          >
+            <Switch
+              id="ced-ing-enabled"
+              checked={ingressEnabled}
+              onCheckedChange={setIngressEnabled}
+            />
+          </ConfigTableRow>
+          {ingressEnabled && (
+            <>
+              <ConfigTableRow
+                label="Host"
+                fieldKey="ingress.host"
+                htmlFor="ced-ing-host"
+              >
                 <Input
                   id="ced-ing-host"
+                  className="w-full"
                   value={ingressHost}
                   placeholder="trino-demo.example.com"
                   onChange={(e) => setIngressHost(e.target.value)}
                 />
-              </div>
-              <div className="space-y-1.5">
-                <FieldLabel
-                  fieldKey="ingress.className"
-                  label="Ingress class"
-                  htmlFor="ced-ing-class"
-                />
+              </ConfigTableRow>
+              <ConfigTableRow
+                label="Ingress class"
+                fieldKey="ingress.className"
+                htmlFor="ced-ing-class"
+              >
                 <Input
                   id="ced-ing-class"
+                  className="w-full"
                   value={ingressClassName}
                   placeholder="nginx"
                   onChange={(e) => setIngressClassName(e.target.value)}
                 />
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <FieldLabel
-                fieldKey="ingress.tlsCertSecretRef"
+              </ConfigTableRow>
+              <ConfigTableRow
                 label="Ingress TLS cert"
+                fieldKey="ingress.tlsCertSecretRef"
                 htmlFor="es-ingress-tls-cert"
-              />
-              <Select
-                value={ingressTlsCertSecretRef || "__none__"}
-                onValueChange={(v) =>
-                  setIngressTlsCertSecretRef(v === "__none__" ? "" : v)
-                }
+                details="Pick a kubernetes.io/tls secret to back the ingress cert, or keep the default."
               >
-                <SelectTrigger id="es-ingress-tls-cert" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__none__">None (default)</SelectItem>
-                  {(secrets.data ?? [])
-                    .filter((s) => s.type === "kubernetes.io/tls")
-                    .map((s) => (
-                      <SelectItem key={s.id} value={s.id}>
-                        {s.name}
-                      </SelectItem>
-                    ))}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                Pick a kubernetes.io/tls secret to back the ingress cert, or keep
-                the default.
-              </p>
-            </div>
+                <Select
+                  value={ingressTlsCertSecretRef || "__none__"}
+                  onValueChange={(v) =>
+                    setIngressTlsCertSecretRef(v === "__none__" ? "" : v)
+                  }
+                >
+                  <SelectTrigger id="es-ingress-tls-cert" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">None (default)</SelectItem>
+                    {(secrets.data ?? [])
+                      .filter((s) => s.type === "kubernetes.io/tls")
+                      .map((s) => (
+                        <SelectItem key={s.id} value={s.id}>
+                          {s.name}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              </ConfigTableRow>
+            </>
+          )}
+        </ConfigTable>
+        {ingressEnabled && (
+          <div className="space-y-4">
             <div className="space-y-1.5">
               <Label>Annotations</Label>
               <p className="text-xs text-muted-foreground">

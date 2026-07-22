@@ -1,13 +1,6 @@
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -15,6 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { SaveBar } from "./EngineDetail";
 import { StarRocksSecuritySection } from "./StarRocksSecuritySection";
 import { type Kv, KeyValueEditor } from "./EngineResourceGroups";
+import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
 import { KeyedPropertyList } from "./config/KeyedPropertyList";
 import { RawJsonField } from "./config/RawJsonField";
 import { TolerationsEditor } from "./config/PlacementSection";
@@ -145,18 +139,15 @@ export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
   const countFor = (key: string): number => counts[key] ?? 0;
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="space-y-1.5">
-          <CardTitle className="text-lg">Settings</CardTitle>
-          <CardDescription>
-            FE/CN image, replicas, and compute resources plus per-user delegation
-            and transport security. Saving re-provisions the engine.
-          </CardDescription>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-4">
+    <section className="space-y-4">
+      <div className="space-y-1">
+        <h2 className="text-base font-semibold">Settings</h2>
+        <p className="text-sm text-muted-foreground">
+          FE/CN image, replicas, and compute resources plus per-user delegation
+          and transport security. Saving re-provisions the engine.
+        </p>
+      </div>
+      <div className="space-y-4">
           <div className="flex flex-col gap-4 md:flex-row">
             <nav className="shrink-0 space-y-1 md:w-48">
               {NAV_ITEMS.map((item) => {
@@ -206,39 +197,40 @@ export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
             disabled={cfg.autoscalingInvalid || podRawInvalid}
           />
         </div>
-      </CardContent>
-    </Card>
+    </section>
   );
 }
 
 function ImageSection({ cfg }: { cfg: StarRocksConfigForm }) {
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-      <div className="space-y-1.5">
-        <Label htmlFor="sr-fe-image">FE image</Label>
+    <ConfigTable>
+      <ConfigTableRow
+        label="FE image"
+        htmlFor="sr-fe-image"
+        details="Frontend (metadata) container image."
+      >
         <Input
           id="sr-fe-image"
+          className="w-full"
           value={cfg.feImage}
           onChange={(e) => cfg.setFeImage(e.target.value)}
           placeholder={DEFAULT_SR_FE_IMAGE}
         />
-        <p className="text-xs text-muted-foreground">
-          Frontend (metadata) container image.
-        </p>
-      </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="sr-cn-image">CN image</Label>
+      </ConfigTableRow>
+      <ConfigTableRow
+        label="CN image"
+        htmlFor="sr-cn-image"
+        details="Compute node container image."
+      >
         <Input
           id="sr-cn-image"
+          className="w-full"
           value={cfg.cnImage}
           onChange={(e) => cfg.setCnImage(e.target.value)}
           placeholder={DEFAULT_SR_CN_IMAGE}
         />
-        <p className="text-xs text-muted-foreground">
-          Compute node container image.
-        </p>
-      </div>
-    </div>
+      </ConfigTableRow>
+    </ConfigTable>
   );
 }
 
@@ -252,33 +244,53 @@ function ComputeSection({ cfg }: { cfg: StarRocksConfigForm }) {
           CN count).
         </p>
       </div>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <div className="space-y-1.5">
-          <Label htmlFor="sr-fe-replicas">FE replicas</Label>
+      <ConfigTable>
+        <ConfigTableRow
+          label="FE replicas"
+          htmlFor="sr-fe-replicas"
+          details="Frontend (metadata) pod count."
+        >
           <Input
             id="sr-fe-replicas"
+            className="w-full"
             type="number"
             min={1}
             value={cfg.feReplicas}
             onChange={(e) => cfg.setFeReplicas(e.target.value)}
           />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="sr-cn-replicas">CN replicas</Label>
+        </ConfigTableRow>
+        <ConfigTableRow
+          label="CN replicas"
+          htmlFor="sr-cn-replicas"
+          details="Compute node pod count (overridden by CN autoscaling when enabled)."
+        >
           <Input
             id="sr-cn-replicas"
+            className="w-full"
             type="number"
             min={1}
             value={cfg.cnReplicas}
             onChange={(e) => cfg.setCnReplicas(e.target.value)}
           />
-        </div>
-      </div>
+        </ConfigTableRow>
+      </ConfigTable>
     </div>
   );
 }
 
-/** One role's CPU/memory request+limit inputs. */
+const SR_RES_FIELDS: {
+  key: keyof RoleResourcesForm;
+  label: string;
+  placeholder: string;
+  details: string;
+}[] = [
+  { key: "cpuRequest", label: "CPU request", placeholder: "1", details: "Kubernetes CPU request." },
+  { key: "cpuLimit", label: "CPU limit", placeholder: "2", details: "Kubernetes CPU limit." },
+  { key: "memRequest", label: "memory request", placeholder: "4Gi", details: "Kubernetes memory request." },
+  { key: "memLimit", label: "memory limit", placeholder: "8Gi", details: "Kubernetes memory limit." },
+];
+
+/** One role's CPU/memory request+limit inputs, as a config table. */
 function ResourceFields({
   role,
   prefix,
@@ -290,30 +302,27 @@ function ResourceFields({
   value: RoleResourcesForm;
   onChange: (v: RoleResourcesForm) => void;
 }) {
-  const field = (
-    key: keyof RoleResourcesForm,
-    label: string,
-    placeholder: string,
-  ) => (
-    <div className="space-y-1.5">
-      <Label htmlFor={`${prefix}-${key}`}>{`${role} ${label}`}</Label>
-      <Input
-        id={`${prefix}-${key}`}
-        value={value[key]}
-        onChange={(e) => onChange({ ...value, [key]: e.target.value })}
-        placeholder={placeholder}
-      />
-    </div>
-  );
   return (
     <div className="space-y-3">
       <p className="text-sm font-medium">{role}</p>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        {field("cpuRequest", "CPU request", "1")}
-        {field("cpuLimit", "CPU limit", "2")}
-        {field("memRequest", "memory request", "4Gi")}
-        {field("memLimit", "memory limit", "8Gi")}
-      </div>
+      <ConfigTable>
+        {SR_RES_FIELDS.map((f) => (
+          <ConfigTableRow
+            key={f.key}
+            label={`${role} ${f.label}`}
+            htmlFor={`${prefix}-${f.key}`}
+            details={f.details}
+          >
+            <Input
+              id={`${prefix}-${f.key}`}
+              className="w-full"
+              value={value[f.key]}
+              onChange={(e) => onChange({ ...value, [f.key]: e.target.value })}
+              placeholder={f.placeholder}
+            />
+          </ConfigTableRow>
+        ))}
+      </ConfigTable>
     </div>
   );
 }
@@ -753,24 +762,30 @@ function StorageSection({ cfg }: { cfg: StarRocksConfigForm }) {
   const path = cfg.storedConfig?.storagePath;
   if (endpoint || path) {
     return (
-      <dl className="space-y-3 text-sm">
-        {endpoint && (
-          <div className="space-y-0.5">
-            <dt className="text-muted-foreground">Endpoint</dt>
-            <dd className="font-mono text-xs">{endpoint}</dd>
-          </div>
-        )}
-        {path && (
-          <div className="space-y-0.5">
-            <dt className="text-muted-foreground">Path</dt>
-            <dd className="font-mono text-xs">{path}</dd>
-          </div>
-        )}
+      <div className="space-y-3">
+        <ConfigTable>
+          {endpoint && (
+            <ConfigTableRow
+              label="Endpoint"
+              details="Object-store endpoint (from the warehouse; read-only)."
+            >
+              <span className="font-mono text-xs">{endpoint}</span>
+            </ConfigTableRow>
+          )}
+          {path && (
+            <ConfigTableRow
+              label="Path"
+              details="Object-store path prefix (from the warehouse; read-only)."
+            >
+              <span className="font-mono text-xs">{path}</span>
+            </ConfigTableRow>
+          )}
+        </ConfigTable>
         <p className="text-xs text-muted-foreground">
           Object storage is configured from the warehouse at creation and
           isn&apos;t editable here.
         </p>
-      </dl>
+      </div>
     );
   }
   return (

@@ -19,6 +19,43 @@ export function isValidQuantity(v: string): boolean {
 }
 
 /**
+ * The bare validated quantity control (no label) — the `Input` plus an inline
+ * advisory error when the value is a non-empty unrecognised quantity. Used in
+ * the Value cell of a {@link ConfigTable} row, where the label and unit hint
+ * live in the Setting/Details columns. Never blocks Save.
+ */
+export function QuantityValue({
+  value,
+  onChange,
+  placeholder,
+  id,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  id?: string;
+}) {
+  const invalid = value !== "" && !isValidQuantity(value);
+  return (
+    <div className="space-y-1">
+      <Input
+        id={id}
+        className="w-full"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        aria-invalid={invalid}
+      />
+      {invalid ? (
+        <p className="text-xs text-destructive">
+          Not a recognized quantity (e.g. 4Gi, 500m, 2GB).
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/**
  * A validated size/quantity input for CPU/memory/heap/size fields. Renders a
  * `FieldLabel` (with any `fieldHelp` tooltip), a shadcn `Input`, an optional
  * unit hint, and an inline advisory error when the current value is non-empty

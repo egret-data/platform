@@ -8,14 +8,14 @@ import {
 import { EngineConfigReliability } from "../EngineConfigReliability";
 import type { EngineConfigForm } from "../useEngineConfigForm";
 import { ConfigSection } from "./ConfigSection";
+import { ConfigTable, ConfigTableRow } from "./ConfigTable";
 import {
   eventListenerCatalog,
   eventListenerCatalogByKey,
 } from "./eventListenerCatalog";
-import { FieldLabel } from "./FieldLabel";
 import { KeyedPropertyList } from "./KeyedPropertyList";
 import { PropertyList } from "./PropertyList";
-import { QuantityInput } from "./QuantityInput";
+import { QuantityValue } from "./QuantityInput";
 
 const LOG_LEVELS = ["INFO", "DEBUG", "WARN", "ERROR"] as const;
 
@@ -54,16 +54,20 @@ export function ServerSection({ cfg }: { cfg: EngineConfigForm }) {
         description="Cluster-wide query memory ceiling and server log level."
         docsUrl="https://trino.io/docs/current/admin/properties-resource-management.html"
       >
-        <div className="grid grid-cols-2 gap-4">
-          <QuantityInput
-            fieldKey="queryMaxMemory"
+        <ConfigTable>
+          <ConfigTableRow
             label="Query max memory"
-            value={queryMaxMemory}
-            onChange={setQueryMaxMemory}
-            placeholder="4GB"
-          />
-          <div className="space-y-1.5">
-            <FieldLabel fieldKey="logLevel" label="Log level" htmlFor="ced-log-level" />
+            fieldKey="queryMaxMemory"
+            htmlFor="ced-query-max-memory"
+          >
+            <QuantityValue
+              id="ced-query-max-memory"
+              value={queryMaxMemory}
+              onChange={setQueryMaxMemory}
+              placeholder="4GB"
+            />
+          </ConfigTableRow>
+          <ConfigTableRow label="Log level" fieldKey="logLevel" htmlFor="ced-log-level">
             <Select value={logLevel} onValueChange={setLogLevel}>
               <SelectTrigger id="ced-log-level" className="w-full">
                 <SelectValue />
@@ -76,8 +80,8 @@ export function ServerSection({ cfg }: { cfg: EngineConfigForm }) {
                 ))}
               </SelectContent>
             </Select>
-          </div>
-        </div>
+          </ConfigTableRow>
+        </ConfigTable>
       </ConfigSection>
 
       <ConfigSection
