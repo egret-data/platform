@@ -130,10 +130,14 @@ export default function ProfileDetailPage() {
             )}
             Seed default policies
           </Button>
-          <Button size="sm" variant="outline" onClick={() => setConfigOpen(true)}>
-            <Download className="mr-1 h-4 w-4" />
-            Download Trino config
-          </Button>
+          {/* The downloadable config is the Trino coordinator's Ranger-plugin
+              config — only meaningful for Trino profiles. */}
+          {(profile?.type ?? "trino").startsWith("trino") && (
+            <Button size="sm" variant="outline" onClick={() => setConfigOpen(true)}>
+              <Download className="mr-1 h-4 w-4" />
+              Download Trino config
+            </Button>
+          )}
         </div>
       </div>
 

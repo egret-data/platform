@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { X } from "lucide-react";
+import { ChevronsUpDown, Loader2, X } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 export interface TagComboboxSuggestion {
@@ -109,6 +109,13 @@ export function TagCombobox({
               }
             }}
           />
+          {/* Affordance that this is a combobox with suggestions: a spinner while
+              the lookup is in flight, otherwise a chevron. */}
+          {open && suggestions.isFetching ? (
+            <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
+          ) : (
+            <ChevronsUpDown className="h-4 w-4 shrink-0 text-muted-foreground opacity-50" />
+          )}
         </div>
       </PopoverTrigger>
       <PopoverContent
@@ -129,7 +136,11 @@ export function TagCombobox({
         ))}
         {filtered.length === 0 && (
           <div className="px-2 py-1.5 text-sm text-muted-foreground">
-            {creatable ? "Type and press Enter." : "No matches."}
+            {suggestions.isFetching
+              ? "Searching…"
+              : creatable
+                ? "No matches — type a value and press Enter."
+                : "No matches."}
           </div>
         )}
       </PopoverContent>

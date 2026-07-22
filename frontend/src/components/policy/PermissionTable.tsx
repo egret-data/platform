@@ -49,7 +49,9 @@ export function PermissionTable({
               <TableHead>Groups</TableHead>
               <TableHead>Users</TableHead>
               <TableHead>Permissions</TableHead>
-              <TableHead>Delegate admin</TableHead>
+              <TableHead title="Let these principals grant this same access to others (Ranger delegate-admin).">
+                Delegate admin
+              </TableHead>
               <TableHead />
             </TableRow>
           </TableHeader>
@@ -99,11 +101,13 @@ export function PermissionTable({
                   />
                 </TableCell>
                 <TableCell>
-                  <Checkbox
-                    aria-label={`delegate admin ${i}`}
-                    checked={!!it.delegateAdmin}
-                    onCheckedChange={(c) => setItem(i, { delegateAdmin: c === true })}
-                  />
+                  <span title="Let these principals grant this same access to others (Ranger delegate-admin).">
+                    <Checkbox
+                      aria-label={`delegate admin ${i}`}
+                      checked={!!it.delegateAdmin}
+                      onCheckedChange={(c) => setItem(i, { delegateAdmin: c === true })}
+                    />
+                  </span>
                 </TableCell>
                 <TableCell>
                   <Button

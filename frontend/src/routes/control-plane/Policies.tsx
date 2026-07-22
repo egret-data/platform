@@ -141,6 +141,7 @@ export default function Policies() {
       key: "version",
       label: "Version",
       sortable: true,
+      className: "w-24",
       value: (p) => p.policy_version,
       cell: (p) => <span className="text-muted-foreground">v{p.policy_version}</span>,
     },
@@ -148,6 +149,7 @@ export default function Policies() {
       key: "policies",
       label: "Policies",
       sortable: true,
+      className: "w-24",
       value: (p) => p.policy_count,
       cell: (p) => (
         <Badge
@@ -172,11 +174,17 @@ export default function Policies() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem onClick={() => setConfigTarget(p.name)}>
-                <Download className="mr-2 h-4 w-4" />
-                Download config
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
+              {/* The config download is the Trino coordinator's Ranger-plugin
+                  config — only meaningful for Trino profiles. */}
+              {p.type.startsWith("trino") && (
+                <>
+                  <DropdownMenuItem onClick={() => setConfigTarget(p.name)}>
+                    <Download className="mr-2 h-4 w-4" />
+                    Download config
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                </>
+              )}
               <DropdownMenuItem
                 disabled={bound}
                 title={
