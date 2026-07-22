@@ -26,6 +26,12 @@ use uuid::Uuid;
 struct MockEngineReader {
     bindings: Vec<EngineBinding>,
     catalogs: HashMap<Uuid, Vec<String>>,
+    /// warehouse_id -> schema names.
+    schemas: HashMap<Uuid, Vec<String>>,
+    /// (warehouse_id, schema) -> table names.
+    tables: HashMap<(Uuid, String), Vec<String>>,
+    /// (warehouse_id, schema, table) -> column names.
+    columns: HashMap<(Uuid, String, String), Vec<String>>,
 }
 
 #[async_trait::async_trait]
@@ -35,6 +41,32 @@ impl EngineBindingReader for MockEngineReader {
     }
     async fn engine_catalog_names(&self, engine_id: Uuid) -> Result<Vec<String>, EngineReadError> {
         Ok(self.catalogs.get(&engine_id).cloned().unwrap_or_default())
+    }
+    async fn warehouse_schemas(&self, wh: Uuid) -> Result<Vec<String>, EngineReadError> {
+        Ok(self.schemas.get(&wh).cloned().unwrap_or_default())
+    }
+    async fn warehouse_tables(
+        &self,
+        wh: Uuid,
+        schema: &str,
+    ) -> Result<Vec<String>, EngineReadError> {
+        Ok(self
+            .tables
+            .get(&(wh, schema.to_string()))
+            .cloned()
+            .unwrap_or_default())
+    }
+    async fn warehouse_columns(
+        &self,
+        wh: Uuid,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<String>, EngineReadError> {
+        Ok(self
+            .columns
+            .get(&(wh, schema.to_string(), table.to_string()))
+            .cloned()
+            .unwrap_or_default())
     }
 }
 
@@ -668,8 +700,9 @@ async fn list_profiles_shows_bound_engines_from_reader() {
             name: "trino-prod".into(),
             status: "Running".into(),
             authz_service_id: Some(svc_id),
+            warehouse_id: None,
         }],
-        catalogs: HashMap::new(),
+        ..Default::default()
     });
 
     let (status, body) = into_json(
@@ -777,8 +810,9 @@ async fn delete_profile_refused_while_engine_bound() {
             name: "trino-prod".into(),
             status: "Running".into(),
             authz_service_id: Some(svc_id),
+            warehouse_id: None,
         }],
-        catalogs: HashMap::new(),
+        ..Default::default()
     });
 
     let (status, body) = into_json(
@@ -802,6 +836,80 @@ async fn delete_profile_refused_while_engine_bound() {
         f.store.get_service(&svc_name).await.is_ok(),
         "profile must survive a refused delete"
     );
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+/// resource-lookup surfaces LIVE catalog metadata (real schemas/tables from the
+/// bound engine's warehouse), not only values already used in existing policies.
+#[tokio::test]
+async fn resource_lookup_suggests_live_catalog_metadata() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "reslookup", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let wh = Uuid::new_v4();
+    let mut schemas = HashMap::new();
+    schemas.insert(wh, vec!["sales".to_string(), "hr".to_string()]);
+    let mut tables = HashMap::new();
+    tables.insert(
+        (wh, "sales".to_string()),
+        vec!["orders".to_string(), "customers".to_string()],
+    );
+    let reader = Arc::new(MockEngineReader {
+        bindings: vec![EngineBinding {
+            id: Uuid::new_v4(),
+            name: "trino-prod".into(),
+            status: "Running".into(),
+            authz_service_id: Some(svc_id),
+            warehouse_id: Some(wh),
+        }],
+        schemas,
+        tables,
+        ..Default::default()
+    });
+
+    // schema level → the warehouse's live namespaces.
+    let (status, body) = into_json(
+        f.app(reader.clone())
+            .oneshot(req(
+                "GET",
+                &format!("/policies/resource-lookup?service={svc_name}&level=schema"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "schema lookup; body={body}");
+    let vals: Vec<String> = serde_json::from_value(body.clone()).unwrap_or_default();
+    assert!(
+        vals.contains(&"sales".to_string()) && vals.contains(&"hr".to_string()),
+        "live schemas surfaced; body={body}"
+    );
+
+    // table level scoped to schema=sales → that namespace's live tables.
+    let (status, body) = into_json(
+        f.app(reader)
+            .oneshot(req(
+                "GET",
+                &format!("/policies/resource-lookup?service={svc_name}&level=table&schema=sales"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "table lookup; body={body}");
+    let vals: Vec<String> = serde_json::from_value(body.clone()).unwrap_or_default();
+    assert!(
+        vals.contains(&"orders".to_string()) && vals.contains(&"customers".to_string()),
+        "live tables surfaced; body={body}"
+    );
+
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
 

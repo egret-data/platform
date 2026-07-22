@@ -340,19 +340,55 @@ async fn resource_lookup(
     egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let svc = st.store.get_service(&qp.service).await?;
     let mut out: Vec<String> = Vec::new();
+    let push_unique = |out: &mut Vec<String>, v: String| {
+        if v != "*" && !out.contains(&v) {
+            out.push(v);
+        }
+    };
 
+    // Suggestions from the profile's bound engines: catalog names at the catalog
+    // level, and LIVE catalog metadata (real schemas/tables/columns from the
+    // engine's warehouse) at the deeper levels — so a fresh policy can pick from
+    // what actually exists, not only values already used in other policies.
+    let bindings = st.engines.list_engine_bindings().await.unwrap_or_default();
+    let bound = || {
+        bindings
+            .iter()
+            .filter(|e| e.authz_service_id == Some(svc.id))
+    };
     if qp.level == "catalog" {
-        if let Ok(engines) = st.engines.list_engine_bindings().await {
-            for e in engines
-                .iter()
-                .filter(|e| e.authz_service_id == Some(svc.id))
-            {
-                if let Ok(names) = st.engines.engine_catalog_names(e.id).await {
-                    for name in names {
-                        if !out.contains(&name) {
-                            out.push(name);
-                        }
-                    }
+        for e in bound() {
+            if let Ok(names) = st.engines.engine_catalog_names(e.id).await {
+                for name in names {
+                    push_unique(&mut out, name);
+                }
+            }
+        }
+    } else {
+        let mut warehouses: Vec<uuid::Uuid> = Vec::new();
+        for e in bound() {
+            if let Some(w) = e.warehouse_id {
+                if !warehouses.contains(&w) {
+                    warehouses.push(w);
+                }
+            }
+        }
+        for wh in warehouses {
+            let live = match qp.level.as_str() {
+                "schema" => st.engines.warehouse_schemas(wh).await,
+                "table" => match &qp.schema {
+                    Some(s) => st.engines.warehouse_tables(wh, s).await,
+                    None => Ok(Vec::new()),
+                },
+                "column" => match (&qp.schema, &qp.table) {
+                    (Some(s), Some(t)) => st.engines.warehouse_columns(wh, s, t).await,
+                    _ => Ok(Vec::new()),
+                },
+                _ => Ok(Vec::new()),
+            };
+            if let Ok(vals) = live {
+                for v in vals {
+                    push_unique(&mut out, v);
                 }
             }
         }

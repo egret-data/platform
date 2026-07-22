@@ -228,6 +228,29 @@ impl egret_kernel::engine_conn::EngineConnResolver for EngineConnResolverImpl {
 /// `egret-engine-mgmt`).
 struct EngineBindingReaderImpl {
     store: egret_engine_mgmt::EngineMgmtStore,
+    /// Resolves a warehouse's lakekeeper id + browses its catalog metadata
+    /// (schemas/tables/columns) for resource autocomplete. Both `None` when the
+    /// embedded catalog is disabled — the metadata methods then return empty.
+    catalog: Option<egret_catalog_engine::CatalogStore>,
+    browser: Option<std::sync::Arc<dyn egret_catalog_engine::WarehouseBrowser>>,
+}
+
+impl EngineBindingReaderImpl {
+    /// egret warehouse id → its lakekeeper warehouse id (the browse key), or
+    /// `None` if the catalog is disabled / the warehouse isn't catalog-backed.
+    async fn resolve_lk(
+        &self,
+        warehouse_id: uuid::Uuid,
+    ) -> Result<Option<String>, egret_policy::EngineReadError> {
+        let Some(cat) = &self.catalog else {
+            return Ok(None);
+        };
+        Ok(cat
+            .get_warehouse(warehouse_id)
+            .await
+            .map_err(|e| egret_policy::EngineReadError(e.to_string()))?
+            .and_then(|w| w.lakekeeper_warehouse_id))
+    }
 }
 
 #[async_trait::async_trait]
@@ -247,6 +270,7 @@ impl egret_policy::EngineBindingReader for EngineBindingReaderImpl {
                 name: e.name,
                 status: e.status,
                 authz_service_id: e.authz_service_id,
+                warehouse_id: Some(e.warehouse_id),
             })
             .collect())
     }
@@ -261,6 +285,56 @@ impl egret_policy::EngineBindingReader for EngineBindingReaderImpl {
             .await
             .map_err(|e| egret_policy::EngineReadError(e.to_string()))?;
         Ok(cats.into_iter().map(|c| c.name).collect())
+    }
+
+    async fn warehouse_schemas(
+        &self,
+        warehouse_id: uuid::Uuid,
+    ) -> Result<Vec<String>, egret_policy::EngineReadError> {
+        let (Some(lk), Some(browser)) = (self.resolve_lk(warehouse_id).await?, &self.browser)
+        else {
+            return Ok(Vec::new());
+        };
+        let ns = browser
+            .namespaces(&lk)
+            .await
+            .map_err(|e| egret_policy::EngineReadError(e.to_string()))?;
+        Ok(ns.into_iter().map(|n| n.parts.join(".")).collect())
+    }
+
+    async fn warehouse_tables(
+        &self,
+        warehouse_id: uuid::Uuid,
+        schema: &str,
+    ) -> Result<Vec<String>, egret_policy::EngineReadError> {
+        let (Some(lk), Some(browser)) = (self.resolve_lk(warehouse_id).await?, &self.browser)
+        else {
+            return Ok(Vec::new());
+        };
+        let ns: Vec<String> = schema.split('.').map(str::to_string).collect();
+        let tabs = browser
+            .tabulars(&lk, &ns)
+            .await
+            .map_err(|e| egret_policy::EngineReadError(e.to_string()))?;
+        Ok(tabs.into_iter().map(|t| t.name).collect())
+    }
+
+    async fn warehouse_columns(
+        &self,
+        warehouse_id: uuid::Uuid,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<String>, egret_policy::EngineReadError> {
+        let (Some(lk), Some(browser)) = (self.resolve_lk(warehouse_id).await?, &self.browser)
+        else {
+            return Ok(Vec::new());
+        };
+        let ns: Vec<String> = schema.split('.').map(str::to_string).collect();
+        let detail = browser
+            .schema(&lk, &ns, table)
+            .await
+            .map_err(|e| egret_policy::EngineReadError(e.to_string()))?;
+        Ok(detail.columns.into_iter().map(|c| c.name).collect())
     }
 }
 
@@ -1465,7 +1539,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         secrets: workspace_secrets.clone(),
         provisioner: catalog_provisioner,
-        browser: catalog_browser,
+        browser: catalog_browser.clone(),
         sessions: sessions.clone(),
         pdp: pdp.clone(),
     });
@@ -1477,6 +1551,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         store: egret_policy::PolicyStore::new(db.clone()),
         engines: std::sync::Arc::new(EngineBindingReaderImpl {
             store: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+            catalog: config
+                .catalog
+                .enabled
+                .then(|| egret_catalog_engine::CatalogStore::new(db.clone())),
+            browser: catalog_browser.clone(),
         }),
         users: egret_auth::users::UserRepo::new(db.clone()),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
