@@ -223,7 +223,7 @@ export default function WarehouseDetail() {
           <ConnectTab warehouse={warehouse.data} />
         </TabsContent>
         <TabsContent value="settings" className="mt-4">
-          <SettingsTab warehouseId={id} />
+          <SettingsTab warehouseId={id} storageConnId={warehouse.data?.storageConnId} />
         </TabsContent>
       </Tabs>
     </div>
@@ -1814,13 +1814,28 @@ function BrowseEmpty({ icon: Icon, children }: { icon?: typeof Database; childre
   );
 }
 
-function SettingsTab({ warehouseId }: { warehouseId: string }) {
+function SettingsTab({
+  warehouseId,
+  storageConnId,
+}: {
+  warehouseId: string;
+  storageConnId?: string;
+}) {
   const queryClient = useQueryClient();
   const config = useQuery<WarehouseConfig, ApiError>({
     queryKey: ["cp", "warehouse-config", warehouseId],
     queryFn: () => getWarehouseConfig(warehouseId),
     retry: false,
   });
+  const storageQ = useQuery({
+    queryKey: ["control-plane", "storage"],
+    queryFn: listStorage,
+    retry: false,
+  });
+  const storageName = storageQ.data?.find((s) => s.id === storageConnId)?.name;
+  const storageLink = storageConnId
+    ? `/control-plane/storage?edit=${storageConnId}`
+    : "/control-plane/storage";
   const c = config.data;
   const invalidate = () =>
     queryClient.invalidateQueries({ queryKey: ["cp", "warehouse-config", warehouseId] });
@@ -1984,19 +1999,23 @@ function SettingsTab({ warehouseId }: { warehouseId: string }) {
           title="Storage credential"
           description={
             <>
-              The S3 access key comes from this warehouse&apos;s{" "}
-              <strong>storage connection</strong>. Rotate it by editing that connection in{" "}
-              <em>Control Plane → Storage</em> — the new key is pushed to every warehouse using it.
+              The S3 access key comes from this warehouse&apos;s storage connection
+              {storageName ? (
+                <>
+                  {" "}
+                  <strong>{storageName}</strong>
+                </>
+              ) : null}
+              . Rotating the key there pushes it to every warehouse using the same connection.
             </>
           }
         >
-          <Link
-            to="/control-plane/storage"
-            className="inline-flex items-center gap-1 whitespace-nowrap text-sm text-primary hover:underline"
-          >
-            <HardDrive className="h-4 w-4" />
-            Manage storage connections
-          </Link>
+          <Button asChild variant="outline" size="sm">
+            <Link to={storageLink} className="whitespace-nowrap">
+              <HardDrive className="h-4 w-4" />
+              Edit storage connection
+            </Link>
+          </Button>
         </SettingRow>
       </div>
 
@@ -2019,9 +2038,9 @@ function SettingRow({
   children: ReactNode;
 }) {
   return (
-    <div className="flex flex-col gap-3 py-6 first:pt-0 last:pb-0 sm:flex-row sm:items-start sm:justify-between sm:gap-8">
+    <div className="flex flex-col gap-3 py-5 first:pt-0 last:pb-0 sm:flex-row sm:items-start sm:justify-between sm:gap-8">
       <div className="space-y-1 sm:max-w-sm">
-        <h2 className="flex items-center gap-2 text-base font-semibold">
+        <h2 className="flex items-center gap-2 text-sm font-medium">
           <Icon className="h-4 w-4 text-muted-foreground" />
           {title}
         </h2>
