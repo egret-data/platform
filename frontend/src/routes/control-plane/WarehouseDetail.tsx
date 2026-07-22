@@ -346,7 +346,16 @@ function WarehouseSummary({
 
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
             <Fact icon={Building2} label="Workspace" value={wsName ?? "—"} />
-            <Fact icon={HardDrive} label="Storage" value={storageName ?? "—"} />
+            <Fact
+              icon={HardDrive}
+              label="Storage"
+              value={storageName ?? "—"}
+              to={
+                warehouse?.storageConnId
+                  ? `/control-plane/storage/${warehouse.storageConnId}`
+                  : undefined
+              }
+            />
             {warehouse?.lakekeeperWarehouseId && (
               <div className="flex items-center gap-1.5 text-muted-foreground">
                 <span className="text-xs uppercase tracking-wide">Lakekeeper</span>
@@ -379,16 +388,24 @@ function Fact({
   icon: Icon,
   label,
   value,
+  to,
 }: {
   icon: typeof Building2;
   label: string;
   value: string;
+  to?: string;
 }) {
   return (
     <div className="flex items-center gap-1.5 text-muted-foreground">
       <Icon className="h-4 w-4" />
       <span className="text-xs uppercase tracking-wide">{label}</span>
-      <span className="text-foreground">{value}</span>
+      {to ? (
+        <Link to={to} className="text-foreground hover:text-primary hover:underline">
+          {value}
+        </Link>
+      ) : (
+        <span className="text-foreground">{value}</span>
+      )}
     </div>
   );
 }
@@ -1916,7 +1933,7 @@ function SettingsTab({
   });
   const storageName = storageQ.data?.find((s) => s.id === storageConnId)?.name;
   const storageLink = storageConnId
-    ? `/control-plane/storage?edit=${storageConnId}`
+    ? `/control-plane/storage/${storageConnId}`
     : "/control-plane/storage";
   const c = config.data;
   const invalidate = () =>
@@ -2099,7 +2116,7 @@ function SettingsTab({
                 </TableCell>
               </TableRow>
 
-              {/* Storage connection — editing lives on the Storage page (a link). */}
+              {/* Storage connection — links out to the connection's detail page. */}
               <TableRow>
                 <TableCell className="align-middle font-medium">Storage connection</TableCell>
                 <TableCell className="hidden align-middle text-muted-foreground md:table-cell">
@@ -2107,21 +2124,20 @@ function SettingsTab({
                 </TableCell>
                 <TableCell className="align-middle">
                   {editing ? (
-                    <Select value={storageConnId ?? "none"}>
-                      <SelectTrigger aria-label="Storage connection" className="h-8 w-72">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value={storageConnId ?? "none"}>
-                          {storageName ?? "connection"}
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
-                  ) : (
-                    <Link
-                      to={storageLink}
-                      className="text-sm hover:text-primary hover:underline"
+                    // Styled like the other Selects for a uniform row, but it opens
+                    // the connection's detail page rather than a dropdown.
+                    <Button
+                      asChild
+                      variant="outline"
+                      className="h-8 w-72 justify-between px-3 font-normal"
                     >
+                      <Link to={storageLink}>
+                        <span className="truncate">{storageName ?? "connection"}</span>
+                        <ChevronRight className="h-4 w-4 shrink-0 opacity-50" />
+                      </Link>
+                    </Button>
+                  ) : (
+                    <Link to={storageLink} className="text-sm hover:text-primary hover:underline">
                       {storageName ?? "connection"}
                     </Link>
                   )}
