@@ -15,10 +15,10 @@ import {
 import { useAuth } from "@/auth/useAuth";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
@@ -132,20 +132,30 @@ export default function Classifications() {
     {
       key: "clearance",
       label: "Clearance",
+      sortable: true,
       value: (t) => t.required_roles.length + t.required_groups.length,
+      // A tag can be gated by many roles/groups, so show a compact count with
+      // the full list on hover rather than a badge that grows without bound.
       cell: (t) => {
-        const gated = t.required_roles.length > 0 || t.required_groups.length > 0;
-        if (!gated) return <span className="text-muted-foreground">—</span>;
+        const nr = t.required_roles.length;
+        const ng = t.required_groups.length;
+        if (!nr && !ng) return <span className="text-muted-foreground">—</span>;
         const parts: string[] = [];
-        if (t.required_roles.length > 0) parts.push(t.required_roles.join(", "));
-        if (t.required_groups.length > 0) {
+        if (nr) parts.push(t.required_roles.join(", "));
+        if (ng) {
           const names = t.required_groups.map((id) => groupNameById.get(id) ?? id);
           parts.push(`groups: ${names.join(", ")}`);
         }
+        const count = [
+          nr ? `${nr} role${nr > 1 ? "s" : ""}` : null,
+          ng ? `${ng} group${ng > 1 ? "s" : ""}` : null,
+        ]
+          .filter(Boolean)
+          .join(", ");
         return (
-          <Badge variant="warning" className="gap-1">
+          <Badge variant="warning" className="gap-1" title={parts.join(" + ")}>
             <Lock className="h-3 w-3" />
-            Gated: {parts.join(" + ")}
+            Gated · {count}
           </Badge>
         );
       },
@@ -181,54 +191,65 @@ export default function Classifications() {
     },
   ];
 
+  const gatedCount = rows.filter(
+    (t) => t.required_roles.length > 0 || t.required_groups.length > 0,
+  ).length;
+  const totalObjects = rows.reduce((n, t) => n + t.assignment_count, 0);
+
   return (
     <div className="space-y-5">
-      <div>
-        <h1 className="text-2xl font-semibold leading-tight">Classifications</h1>
-        <p className="text-sm text-muted-foreground">
-          Define the tags used to classify data and BI objects.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold leading-tight">Classifications</h1>
+          <p className="text-sm text-muted-foreground">
+            Define the tags used to classify data and BI objects.
+          </p>
+        </div>
+        {isAdmin && (
+          <Button size="sm" onClick={() => setCreateOpen(true)}>
+            <Plus className="mr-1 h-4 w-4" />
+            New tag
+          </Button>
+        )}
       </div>
 
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between gap-2">
-            <CardTitle className="text-lg">All tags</CardTitle>
-            {isAdmin && (
-              <Button size="sm" onClick={() => setCreateOpen(true)}>
-                <Plus className="mr-1 h-4 w-4" />
-                New tag
-              </Button>
-            )}
-          </div>
-        </CardHeader>
-        <CardContent>
-          {tags.isLoading ? (
-            <ListSkeleton rows={6} cols={5} />
-          ) : forbidden ? (
-            <Alert variant="destructive">
-              <AlertDescription>
-                You need the <code>tag:read</code> permission.
-              </AlertDescription>
-            </Alert>
-          ) : tags.isError ? (
-            <Alert variant="destructive">
-              <AlertDescription>
-                {(tags.error as Error)?.message ?? "Failed to load tags."}
-              </AlertDescription>
-            </Alert>
-          ) : (
+      <div className="space-y-4">
+        {tags.isLoading ? (
+          <ListSkeleton rows={6} cols={5} />
+        ) : forbidden ? (
+          <Alert variant="destructive">
+            <AlertDescription>
+              You need the <code>tag:read</code> permission.
+            </AlertDescription>
+          </Alert>
+        ) : tags.isError ? (
+          <Alert variant="destructive">
+            <AlertDescription>
+              {(tags.error as Error)?.message ?? "Failed to load tags."}
+            </AlertDescription>
+          </Alert>
+        ) : (
+          <>
+            <SummaryStrip
+              items={[
+                { label: "tags", value: rows.length },
+                { label: "gated", value: gatedCount },
+                { label: "tagged objects", value: totalObjects },
+              ]}
+            />
             <FilterableTable
               rows={rows}
               columns={columns}
               getId={(t) => t.id}
               searchPlaceholder="Search tags…"
               initialSort={{ key: "name", dir: "asc" }}
+              pageSize={25}
+              bordered
               emptyText="No tags yet."
             />
-          )}
-        </CardContent>
-      </Card>
+          </>
+        )}
+      </div>
 
       <CreateTagDialog open={createOpen} onOpenChange={setCreateOpen} />
       <EditTagDialog
@@ -317,7 +338,12 @@ function CreateTagDialog({
             )}
 
             <div className="space-y-1.5">
-              <Label htmlFor="new-tag-key">Key</Label>
+              <div className="flex items-center gap-0.5">
+                <Label htmlFor="new-tag-key">Key</Label>
+                <span className="text-destructive" aria-hidden>
+                  *
+                </span>
+              </div>
               <Input
                 id="new-tag-key"
                 value={key}
@@ -325,10 +351,18 @@ function CreateTagDialog({
                 required
                 autoFocus
               />
+              <p className="text-xs text-muted-foreground">
+                The stable identifier — can&apos;t be changed once created.
+              </p>
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="new-tag-name">Name</Label>
+              <div className="flex items-center gap-0.5">
+                <Label htmlFor="new-tag-name">Name</Label>
+                <span className="text-destructive" aria-hidden>
+                  *
+                </span>
+              </div>
               <Input
                 id="new-tag-name"
                 value={name}
@@ -362,7 +396,7 @@ function CreateTagDialog({
             <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
               Cancel
             </Button>
-            <Button type="submit" disabled={createTag.isPending}>
+            <Button type="submit" disabled={createTag.isPending || !key.trim() || !name.trim()}>
               Create
             </Button>
           </DialogFooter>
@@ -399,6 +433,8 @@ function EditTagDialog({
   const [color, setColor] = useState(DEFAULT_COLOR);
   const [requiredRoles, setRequiredRoles] = useState<string[]>([]);
   const [requiredGroups, setRequiredGroups] = useState<string[]>([]);
+  const [roleFilter, setRoleFilter] = useState("");
+  const [groupFilter, setGroupFilter] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -408,9 +444,18 @@ function EditTagDialog({
       setColor(tag.color || DEFAULT_COLOR);
       setRequiredRoles(tag.required_roles);
       setRequiredGroups(tag.required_groups);
+      setRoleFilter("");
+      setGroupFilter("");
       setError(null);
     }
   }, [tag]);
+
+  const roleMatches = (roles.data ?? []).filter((r) =>
+    r.name.toLowerCase().includes(roleFilter.trim().toLowerCase()),
+  );
+  const groupMatches = (groups.data ?? []).filter((g) =>
+    g.name.toLowerCase().includes(groupFilter.trim().toLowerCase()),
+  );
 
   function handleOpenChange(next: boolean) {
     if (!next) setError(null);
@@ -512,12 +557,27 @@ function EditTagDialog({
             </div>
 
             <div className="space-y-1.5">
-              <Label>Required roles (clearance)</Label>
+              <Label>
+                Required roles (clearance){" "}
+                {requiredRoles.length > 0 && (
+                  <span className="font-normal text-muted-foreground">
+                    · {requiredRoles.length} selected
+                  </span>
+                )}
+              </Label>
+              {roles.data && roles.data.length > 8 && (
+                <Input
+                  className="h-8"
+                  placeholder="Filter roles…"
+                  value={roleFilter}
+                  onChange={(e) => setRoleFilter(e.target.value)}
+                />
+              )}
               <div className="max-h-40 space-y-2 overflow-y-auto rounded-md border p-3">
                 {roles.isLoading ? (
                   <p className="text-sm text-muted-foreground">Loading roles…</p>
-                ) : roles.data && roles.data.length > 0 ? (
-                  roles.data.map((r) => {
+                ) : roleMatches.length > 0 ? (
+                  roleMatches.map((r) => {
                     const id = `edit-tag-clearance-${r.id}`;
                     return (
                       <div key={r.id} className="flex items-center gap-2">
@@ -533,7 +593,9 @@ function EditTagDialog({
                     );
                   })
                 ) : (
-                  <p className="text-sm text-muted-foreground">No roles defined.</p>
+                  <p className="text-sm text-muted-foreground">
+                    {roles.data && roles.data.length > 0 ? "No roles match." : "No roles defined."}
+                  </p>
                 )}
               </div>
               <p className="text-xs text-muted-foreground">
@@ -543,12 +605,27 @@ function EditTagDialog({
             </div>
 
             <div className="space-y-1.5">
-              <Label>Required groups (clearance)</Label>
+              <Label>
+                Required groups (clearance){" "}
+                {requiredGroups.length > 0 && (
+                  <span className="font-normal text-muted-foreground">
+                    · {requiredGroups.length} selected
+                  </span>
+                )}
+              </Label>
+              {groups.data && groups.data.length > 8 && (
+                <Input
+                  className="h-8"
+                  placeholder="Filter groups…"
+                  value={groupFilter}
+                  onChange={(e) => setGroupFilter(e.target.value)}
+                />
+              )}
               <div className="max-h-40 space-y-2 overflow-y-auto rounded-md border p-3">
                 {groups.isLoading ? (
                   <p className="text-sm text-muted-foreground">Loading groups…</p>
-                ) : groups.data && groups.data.length > 0 ? (
-                  groups.data.map((g) => {
+                ) : groupMatches.length > 0 ? (
+                  groupMatches.map((g) => {
                     const id = `edit-tag-clearance-group-${g.id}`;
                     return (
                       <div key={g.id} className="flex items-center gap-2">
@@ -564,7 +641,11 @@ function EditTagDialog({
                     );
                   })
                 ) : (
-                  <p className="text-sm text-muted-foreground">No groups defined.</p>
+                  <p className="text-sm text-muted-foreground">
+                    {groups.data && groups.data.length > 0
+                      ? "No groups match."
+                      : "No groups defined."}
+                  </p>
                 )}
               </div>
               <p className="text-xs text-muted-foreground">
