@@ -913,6 +913,47 @@ async fn resource_lookup_suggests_live_catalog_metadata() {
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
 
+/// list_profiles surfaces a trino profile's `<name>_tag` policy service (drives
+/// the FE Tags tab), and only when that service actually exists.
+#[tokio::test]
+async fn list_profiles_surfaces_tag_service() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "tagsvc", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let tag_name = format!("{svc_name}_tag");
+    let tag_svc = f
+        .store
+        .create_service(&tag_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("create tag service");
+
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req("GET", "/policies/services", &token, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "list profiles; body={body}");
+    let profile = body
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|p| p["id"] == serde_json::json!(svc_id))
+        .unwrap_or_else(|| panic!("profile {svc_id} not found; body={body}"));
+    assert_eq!(
+        profile["tag_service"],
+        serde_json::json!(tag_name),
+        "tag_service surfaced; body={body}"
+    );
+
+    f.store.delete_service(tag_svc.id).await.ok();
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
 /// Policies: `policy:read` gates `GET /policies`, `policy:create` gates
 /// `POST /policies`. Proves the NEW `resource:action` gate: a scoped,
 /// non-admin principal holding the wrong (or no) permission is Forbidden, and

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Loader2, Plus, Trash2, X } from "lucide-react";
 
@@ -278,6 +278,7 @@ export default function PolicyEditorPage() {
   const service = params.service ?? "";
   const kind = (params.kind as PolicyKind) ?? "access";
   const id = params.id;
+  const [sp] = useSearchParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
@@ -292,8 +293,11 @@ export default function PolicyEditorPage() {
   // Policy scope: "resource" (the existing catalog/schema/table/column
   // picker) vs "tag" (a single classification tag — the BE resolves the tag
   // service from the chosen trino profile and dispatches on `kind:"tag-*"`).
-  // Defaults to "resource" so unmodified behavior is unchanged.
-  const [scope, setScope] = useState<"resource" | "tag">("resource");
+  // New policies default to "resource"; `?scope=tag` (from the profile's Tags
+  // tab "New" action) opens straight in tag mode.
+  const [scope, setScope] = useState<"resource" | "tag">(
+    sp.get("scope") === "tag" ? "tag" : "resource",
+  );
   const [tag, setTag] = useState("");
   const tagsQuery = useTags();
   const tagOptions = tagsQuery.data ?? [];
@@ -306,7 +310,18 @@ export default function PolicyEditorPage() {
   });
 
   useEffect(() => {
-    if (id && policyQuery.data) setForm(toFormState(kind, service, policyQuery.data));
+    if (id && policyQuery.data) {
+      const state = toFormState(kind, service, policyQuery.data);
+      setForm(state);
+      // A loaded policy whose resource is a single `tag` is a tag policy — open
+      // it in By-tag mode so the Tags-tab edit round-trips instead of showing an
+      // empty resource picker.
+      const tagVal = (state.resources as Record<string, ResourceLevel>)?.tag?.values?.[0];
+      if (tagVal) {
+        setScope("tag");
+        setTag(tagVal);
+      }
+    }
   }, [id, policyQuery.data, kind, service]);
 
   const def = useQuery<ServiceDef>({
