@@ -143,7 +143,7 @@ export function ResourceSelector({ resourceDefs, service, value, onChange, onLea
   const canExtend = leafChildren.length > 0 && (leafDef?.isValidLeaf ?? true);
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-2">
       {chain.map((name, index) => {
         const validOptions = index === 0 ? roots : childrenOfName(chain[index - 1]);
         const parentDef = index > 0 ? byName.get(chain[index - 1]) : undefined;
@@ -153,30 +153,35 @@ export function ResourceSelector({ resourceDefs, service, value, onChange, onLea
         // Never offered at the root — a policy needs at least one resource.
         const showNone = index > 0 && parentDef?.isValidLeaf === true;
         const def = byName.get(name) ?? { name };
+        // One compact row per level: the Type (a select when the level admits
+        // more than one type, else a static label) + the value control inline,
+        // so a full catalog→schema→table→column chain (and any additional
+        // resources) stays short instead of a stack of tall bordered blocks.
         return (
-          <div key={`${index}-${name}`} className="space-y-1.5 rounded-md border p-3">
+          <div key={`${index}-${name}`} className="flex items-center gap-2">
             {validOptions.length > 1 || showNone ? (
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-muted-foreground">Type</span>
-                <Select
-                  value={name}
-                  onValueChange={(v) => (v === NONE ? truncateAt(index) : switchTypeAt(index, v))}
+              <Select
+                value={name}
+                onValueChange={(v) => (v === NONE ? truncateAt(index) : switchTypeAt(index, v))}
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="h-9 w-32 shrink-0"
+                  aria-label={`Resource type at level ${index + 1}`}
                 >
-                  <SelectTrigger size="sm" className="h-7 w-44" aria-label={`Resource type at level ${index + 1}`}>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {validOptions.map((o) => (
-                      <SelectItem key={o.name} value={o.name}>
-                        {labelFor(o.name)}
-                      </SelectItem>
-                    ))}
-                    {showNone && <SelectItem value={NONE}>— none —</SelectItem>}
-                  </SelectContent>
-                </Select>
-              </div>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {validOptions.map((o) => (
+                    <SelectItem key={o.name} value={o.name}>
+                      {labelFor(o.name)}
+                    </SelectItem>
+                  ))}
+                  {showNone && <SelectItem value={NONE}>— none —</SelectItem>}
+                </SelectContent>
+              </Select>
             ) : (
-              <span className="text-xs text-muted-foreground">{labelFor(name)}</span>
+              <span className="w-32 shrink-0 text-sm font-medium">{labelFor(name)}</span>
             )}
             <ResourceLevelEditor
               label={labelFor(name)}
@@ -195,22 +200,23 @@ export function ResourceSelector({ resourceDefs, service, value, onChange, onLea
       })}
 
       {canExtend && (
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground">Add level</span>
-          <Select value={NONE} onValueChange={(v) => v !== NONE && extendChain(v)}>
-            <SelectTrigger size="sm" className="h-7 w-44" aria-label="Add resource level">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={NONE}>None (stop here)</SelectItem>
-              {leafChildren.map((c) => (
-                <SelectItem key={c.name} value={c.name}>
-                  {labelFor(c.name)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+        <Select value={NONE} onValueChange={(v) => v !== NONE && extendChain(v)}>
+          <SelectTrigger
+            size="sm"
+            className="h-8 w-40 border-dashed text-muted-foreground"
+            aria-label="Add resource level"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={NONE}>+ Add level…</SelectItem>
+            {leafChildren.map((c) => (
+              <SelectItem key={c.name} value={c.name}>
+                {labelFor(c.name)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       )}
     </div>
   );
