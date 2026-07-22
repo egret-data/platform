@@ -236,47 +236,59 @@ export default function TagDetail() {
       {/* Details */}
       <section className="space-y-3">
         <h2 className="text-base font-semibold">Details</h2>
-        <div className="grid gap-4">
-          <div className="space-y-1.5">
-            <Label htmlFor="tag-key">Key</Label>
-            <Input id="tag-key" value={tag.key} readOnly disabled />
-            <p className="text-xs text-muted-foreground">
-              The stable identifier — can&apos;t be changed once created.
-            </p>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="tag-name">Name</Label>
-            <Input
-              id="tag-name"
-              value={name}
-              disabled={!isAdmin}
-              onChange={(e) => setName(e.target.value)}
-              onBlur={saveDetails}
-            />
+        <div className="space-y-4">
+          {/* Name + color share a row — the primary editable fields up top. */}
+          <div className="flex items-end gap-3">
+            <div className="flex-1 space-y-1.5">
+              <Label htmlFor="tag-name">Name</Label>
+              <Input
+                id="tag-name"
+                value={name}
+                disabled={!isAdmin}
+                onChange={(e) => setName(e.target.value)}
+                onBlur={saveDetails}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="tag-color">Color</Label>
+              <Input
+                id="tag-color"
+                type="color"
+                className="h-9 w-12 p-1"
+                value={color}
+                disabled={!isAdmin}
+                onChange={(e) => setColor(e.target.value)}
+                onBlur={saveDetails}
+              />
+            </div>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="tag-description">Description</Label>
             <Textarea
               id="tag-description"
+              rows={3}
+              placeholder="What this tag means…"
               value={description}
               disabled={!isAdmin}
               onChange={(e) => setDescription(e.target.value)}
               onBlur={saveDetails}
             />
           </div>
+          {/* Key is immutable — keep it as compact, secondary metadata. */}
           <div className="space-y-1.5">
-            <Label htmlFor="tag-color">Color</Label>
+            <Label htmlFor="tag-key">Key</Label>
             <Input
-              id="tag-color"
-              type="color"
-              className="h-9 w-16 p-1"
-              value={color}
-              disabled={!isAdmin}
-              onChange={(e) => setColor(e.target.value)}
-              onBlur={saveDetails}
+              id="tag-key"
+              value={tag.key}
+              readOnly
+              disabled
+              className="font-mono text-xs"
             />
+            <p className="text-xs text-muted-foreground">
+              Immutable identifier — set once at creation.
+              {isAdmin ? " Other changes save automatically." : ""}
+            </p>
           </div>
-          {isAdmin && <p className="text-xs text-muted-foreground">Changes save automatically.</p>}
         </div>
       </section>
 
