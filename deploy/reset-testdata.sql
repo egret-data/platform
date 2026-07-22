@@ -68,7 +68,6 @@ DELETE FROM public.workspace_secrets WHERE workspace_id IS NULL;
 DELETE FROM public.secrets WHERE id NOT IN (
         SELECT secret_id  FROM query.databases            WHERE secret_id IS NOT NULL
   UNION SELECT secret_ref FROM public.workspace_secrets   WHERE secret_ref IS NOT NULL
-  UNION SELECT secret_id  FROM public.oidc_refresh_tokens WHERE secret_id IS NOT NULL
 );
 
 -- Drop lakekeeper's catalog metadata wholesale; serve re-creates it on boot.

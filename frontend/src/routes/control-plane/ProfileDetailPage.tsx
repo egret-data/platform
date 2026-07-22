@@ -1,16 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  ArrowLeft,
-  Download,
-  Loader2,
-  Pencil,
-  Plus,
-  ShieldCheck,
-  Sprout,
-  Trash2,
-} from "lucide-react";
+import { ArrowLeft, Download, Loader2, Plus, ShieldCheck, Sprout, Trash2 } from "lucide-react";
 import {
   type Profile,
   type PolicySummary,
@@ -24,26 +15,12 @@ import { ApiError } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { TrinoConfigDialog } from "@/components/policy/TrinoConfigDialog";
 
 const TYPES = [
@@ -54,22 +31,13 @@ const TYPES = [
 
 type PolicyType = (typeof TYPES)[number]["key"];
 
-const COLUMNS = [
-  "Name",
-  "Resource",
-  "Principals",
-  "Permissions",
-  "Labels",
-  "Enabled",
-  "",
-];
-
 /**
  * Control Plane → Policy profile detail (drill-down L2).
  *
- * Header identifies the profile (name, engine bindings, Ranger policy
- * version) and offers the Trino-config download; the tabs below hold one
- * policy table per Ranger policy type (access / masking / row-filter).
+ * A card-less identity header (name, type, policy version, engine bindings)
+ * with the seed / config actions, then one searchable, paginated policy table
+ * per Ranger policy type (access / masking / row-filter) — matching the other
+ * control-plane detail pages.
  */
 export default function ProfileDetailPage() {
   const { service = "" } = useParams();
@@ -113,64 +81,65 @@ export default function ProfileDetailPage() {
         Policies
       </Link>
 
-      <Card className="overflow-hidden">
-        <div className="flex items-center gap-3 border-b bg-muted/30 p-5">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="grid h-11 w-11 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
             <ShieldCheck className="h-6 w-6" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h1 className="truncate text-2xl font-semibold leading-tight">
-              {service || "Profile"}
-            </h1>
-            <p className="text-xs text-muted-foreground">
-              {profile ? `policy version ${profile.policy_version}` : ""}
-            </p>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {profiles.isLoading && !profile ? (
-              <Skeleton className="h-5 w-16" />
-            ) : (
-              <Badge variant="secondary">{profile?.type ?? "trino"}</Badge>
-            )}
+          </span>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="truncate text-2xl font-semibold leading-tight">
+                {service || "Profile"}
+              </h1>
+              {profiles.isLoading && !profile ? (
+                <Skeleton className="h-5 w-16" />
+              ) : (
+                <Badge variant="secondary">{profile?.type ?? "trino"}</Badge>
+              )}
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
+              {profile && <span>policy version {profile.policy_version}</span>}
+              <span className="flex flex-wrap items-center gap-1.5">
+                Engines:
+                {profiles.isLoading && !profile ? (
+                  <Skeleton className="h-5 w-24" />
+                ) : profile && profile.engines.length > 0 ? (
+                  profile.engines.map((e) => (
+                    <Badge key={e.id} variant="outline" className="font-normal">
+                      {e.name}
+                    </Badge>
+                  ))
+                ) : (
+                  <span>no engine</span>
+                )}
+              </span>
+            </div>
           </div>
         </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-3 p-5">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm text-muted-foreground">Engines:</span>
-            {profiles.isLoading && !profile ? (
-              <Skeleton className="h-5 w-24" />
-            ) : profile && profile.engines.length > 0 ? (
-              profile.engines.map((e) => (
-                <Badge key={e.id} variant="outline">
-                  {e.name}
-                </Badge>
-              ))
+        <div className="flex shrink-0 items-center gap-2">
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={seedDefaults.isPending || !service}
+            onClick={() => seedDefaults.mutate()}
+          >
+            {seedDefaults.isPending ? (
+              <Loader2 className="mr-1 h-4 w-4 animate-spin" />
             ) : (
-              <span className="text-sm text-muted-foreground">no engine</span>
+              <Sprout className="mr-1 h-4 w-4" />
             )}
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={seedDefaults.isPending || !service}
-              onClick={() => seedDefaults.mutate()}
-            >
-              {seedDefaults.isPending ? (
-                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-              ) : (
-                <Sprout className="mr-1 h-4 w-4" />
-              )}
-              Seed default policies
-            </Button>
+            Seed default policies
+          </Button>
+          {/* The downloadable config is the Trino coordinator's Ranger-plugin
+              config — only meaningful for Trino profiles. */}
+          {(profile?.type ?? "trino").startsWith("trino") && (
             <Button size="sm" variant="outline" onClick={() => setConfigOpen(true)}>
               <Download className="mr-1 h-4 w-4" />
               Download Trino config
             </Button>
-          </div>
+          )}
         </div>
-      </Card>
+      </div>
 
       {profiles.isError && (
         <Alert variant="destructive">
@@ -275,147 +244,142 @@ function PolicyTypeTable({
 
   const goToNew = () =>
     navigate(`/control-plane/policies/${encodeURIComponent(service)}/${type}/new`);
-  const goToEdit = (id: number) =>
-    navigate(`/control-plane/policies/${encodeURIComponent(service)}/${type}/${id}`);
   const editPath = (id: number) =>
     `/control-plane/policies/${encodeURIComponent(service)}/${type}/${id}`;
 
-  return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between gap-2">
-          <div className="space-y-1.5">
-            <CardTitle className="text-lg">{label} policies</CardTitle>
-            <CardDescription>
-              Ranger {label.toLowerCase()} policies enforced for this profile.
-            </CardDescription>
-          </div>
-          <Button size="sm" onClick={goToNew}>
-            <Plus className="mr-1 h-4 w-4" />
-            New policy
-          </Button>
+  // The policy name links to the editor, so there's no separate Edit action —
+  // Delete is the only per-row button (mirrors the other list pages).
+  const columns: Column<PolicySummary>[] = [
+    {
+      key: "name",
+      label: "Name",
+      sortable: true,
+      value: (r) => r.name,
+      cell: (r) => (
+        <div className="min-w-0">
+          <Link to={editPath(r.id)} className="font-medium text-primary hover:underline">
+            {r.name}
+          </Link>
+          {r.description && (
+            <div className="truncate text-xs text-muted-foreground">{r.description}</div>
+          )}
         </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {error && (
-          <Alert variant="destructive">
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
-        <Table>
-          <TableHeader>
-            <TableRow>
-              {COLUMNS.map((col) => (
-                <TableHead
-                  key={col || "actions"}
-                  className={col === "" ? "text-right" : undefined}
-                >
-                  {col || <span className="sr-only">Actions</span>}
-                </TableHead>
-              ))}
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((r) => (
-              <TableRow key={r.id}>
-                <TableCell className="font-medium">
-                  <Link
-                    to={editPath(r.id)}
-                    className="text-primary hover:underline"
-                  >
-                    {r.name}
-                  </Link>
-                  {r.description && (
-                    <div className="text-xs font-normal text-muted-foreground">
-                      {r.description}
-                    </div>
-                  )}
-                </TableCell>
-                <TableCell className="font-mono text-xs">
-                  {r.resource_path}
-                </TableCell>
-                <TableCell>
-                  <div
-                    className="max-w-[180px] truncate"
-                    title={r.principals.join(", ")}
-                  >
-                    {r.principals.join(", ")}
-                  </div>
-                </TableCell>
-                <TableCell>
-                  <div
-                    className="max-w-[280px] truncate"
-                    title={r.permissions.join(", ")}
-                  >
-                    {r.permissions.join(", ")}
-                  </div>
-                </TableCell>
-                <TableCell>
-                  {r.labels && r.labels.length > 0 ? (
-                    <div className="flex flex-wrap gap-1">
-                      {r.labels.map((l) => (
-                        <Badge key={l} variant="secondary">
-                          {l}
-                        </Badge>
-                      ))}
-                    </div>
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
-                  )}
-                </TableCell>
-                <TableCell>
-                  <Switch
-                    aria-label={`toggle ${r.name}`}
-                    checked={r.is_enabled}
-                    disabled={toggleEnabled.isPending && togglingId === r.id}
-                    onCheckedChange={(c) =>
-                      toggleEnabled.mutate({ id: r.id, enabled: c })
-                    }
-                  />
-                </TableCell>
-                <TableCell className="text-right">
-                  <div className="flex justify-end gap-1">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      aria-label={`Edit ${r.name}`}
-                      onClick={() => goToEdit(r.id)}
-                    >
-                      <Pencil className="h-4 w-4" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      aria-label={`Delete ${r.name}`}
-                      onClick={() => setDeleteTarget(r)}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </TableCell>
-              </TableRow>
+      ),
+    },
+    {
+      key: "resource",
+      label: "Resource",
+      sortable: true,
+      value: (r) => r.resource_path,
+      cell: (r) => <span className="font-mono text-xs">{r.resource_path}</span>,
+    },
+    {
+      key: "principals",
+      label: "Principals",
+      value: (r) => r.principals.join(", "),
+      cell: (r) => (
+        <div className="max-w-[180px] truncate" title={r.principals.join(", ")}>
+          {r.principals.join(", ") || <span className="text-muted-foreground">—</span>}
+        </div>
+      ),
+    },
+    {
+      key: "permissions",
+      label: "Permissions",
+      value: (r) => r.permissions.join(", "),
+      cell: (r) => (
+        <div className="max-w-[280px] truncate" title={r.permissions.join(", ")}>
+          {r.permissions.join(", ") || <span className="text-muted-foreground">—</span>}
+        </div>
+      ),
+    },
+    {
+      key: "labels",
+      label: "Labels",
+      cell: (r) =>
+        r.labels && r.labels.length > 0 ? (
+          <div className="flex flex-wrap gap-1">
+            {r.labels.map((l) => (
+              <Badge key={l} variant="secondary">
+                {l}
+              </Badge>
             ))}
-            {rows.length === 0 && (
-              <TableRow className="hover:bg-transparent">
-                <TableCell
-                  colSpan={COLUMNS.length}
-                  className="text-center text-muted-foreground"
-                >
-                  {policies.isError ? (
-                    <span className="text-destructive">
-                      {policies.error?.message ?? "Failed to load policies."}
-                    </span>
-                  ) : policies.isLoading ? (
-                    <ListSkeleton rows={4} cols={COLUMNS.length} />
-                  ) : (
-                    `No ${label.toLowerCase()} policies for this profile.`
-                  )}
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </CardContent>
+          </div>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        ),
+    },
+    {
+      key: "enabled",
+      label: "Enabled",
+      sortable: true,
+      value: (r) => (r.is_enabled ? 1 : 0),
+      cell: (r) => (
+        <Switch
+          aria-label={`toggle ${r.name}`}
+          checked={r.is_enabled}
+          disabled={toggleEnabled.isPending && togglingId === r.id}
+          onCheckedChange={(c) => toggleEnabled.mutate({ id: r.id, enabled: c })}
+        />
+      ),
+    },
+    {
+      key: "actions",
+      label: "",
+      className: "text-right",
+      cell: (r) => (
+        <Button
+          variant="ghost"
+          size="icon"
+          title="Delete policy"
+          aria-label={`Delete ${r.name}`}
+          onClick={() => setDeleteTarget(r)}
+        >
+          <Trash2 className="h-4 w-4" />
+        </Button>
+      ),
+    },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h2 className="text-base font-semibold">{label} policies</h2>
+          <p className="text-sm text-muted-foreground">
+            Ranger {label.toLowerCase()} policies enforced for this profile.
+          </p>
+        </div>
+        <Button size="sm" onClick={goToNew}>
+          <Plus className="mr-1 h-4 w-4" />
+          New policy
+        </Button>
+      </div>
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {policies.isLoading ? (
+        <ListSkeleton rows={4} cols={7} />
+      ) : (
+        <FilterableTable
+          rows={rows}
+          columns={columns}
+          getId={(r) => String(r.id)}
+          searchPlaceholder="Search policies…"
+          initialSort={{ key: "name", dir: "asc" }}
+          pageSize={25}
+          bordered
+          emptyText={
+            policies.isError
+              ? (policies.error?.message ?? "Failed to load policies.")
+              : `No ${label.toLowerCase()} policies for this profile.`
+          }
+        />
+      )}
 
       <ConfirmDeleteDialog
         open={deleteTarget !== null}
@@ -430,6 +394,6 @@ function PolicyTypeTable({
           setDeleteTarget(null);
         }}
       />
-    </Card>
+    </div>
   );
 }

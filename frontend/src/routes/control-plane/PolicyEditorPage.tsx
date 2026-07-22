@@ -27,7 +27,6 @@ import {
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -414,20 +413,23 @@ export default function PolicyEditorPage() {
   // for a catalog/schema/table/column chain, or `role: *` / `trinouser: *`
   // for a single non-table resource. In Tag mode it's just `tag: <name>`,
   // matching the BE's `summarize_policy` output for tag policies.
+  // Empty levels fall back to their own name (e.g. an unfilled catalog shows
+  // "catalog") so a fresh policy reads "catalog.schema.table.column" rather than
+  // a cryptic "….*.*", and self-documents which level to fill.
   const resourcePreview = (() => {
-    if (scope === "tag") return tag ? `tag: ${tag}` : "…";
+    if (scope === "tag") return tag ? `tag: ${tag}` : "tag: …";
     const keys = Object.keys(form.resources);
-    if (keys.length === 0) return "…";
+    if (keys.length === 0) return "catalog.schema.table.column";
     if (keys.every((k) => TABLE_LEVELS.includes(k))) {
       return TABLE_LEVELS.filter((l) => keys.includes(l))
-        .map((l) => form.resources[l]?.values[0] || "…")
+        .map((l) => form.resources[l]?.values[0] || l)
         .join(".");
     }
     if (keys.length === 1) {
       const k = keys[0];
       return `${k}: ${form.resources[k].values[0] || "…"}`;
     }
-    return keys.map((k) => form.resources[k].values[0] || "…").join(".");
+    return keys.map((k) => form.resources[k].values[0] || k).join(".");
   })();
 
   // Left-nav sections (vertical layout — mirrors EngineDetail's
@@ -518,80 +520,79 @@ export default function PolicyEditorPage() {
     <div className="space-y-5">
       {backLink}
 
-      <Card className="overflow-hidden">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/30 p-5">
-          <div className="flex min-w-0 flex-wrap items-center gap-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="policy-name">Policy name</Label>
-              <Input
-                id="policy-name"
-                aria-label="Policy name"
-                value={form.name}
-                placeholder="Policy name"
-                onChange={(e) => setForm((f: any) => ({ ...f, name: e.target.value }))}
-                className="h-9 max-w-sm text-base font-semibold"
-              />
-            </div>
-            <Badge variant="secondary">{kind}</Badge>
-            <div className="flex items-center gap-2">
-              <Switch
-                aria-label="Enabled"
-                checked={form.isEnabled}
-                onCheckedChange={(c) => setForm((f: any) => ({ ...f, isEnabled: c }))}
-              />
-              <span className="text-sm text-muted-foreground">Enabled</span>
-            </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {id && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="text-muted-foreground"
-                onClick={() => setDeleteOpen(true)}
-              >
-                <Trash2 className="h-4 w-4" />
-                Delete
-              </Button>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="flex min-w-0 flex-wrap items-end gap-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="policy-name">Policy name</Label>
+            <Input
+              id="policy-name"
+              aria-label="Policy name"
+              value={form.name}
+              placeholder="Policy name"
+              onChange={(e) => setForm((f: any) => ({ ...f, name: e.target.value }))}
+              className="h-9 max-w-sm text-base font-semibold"
+            />
+            {!form.name.trim() && (
+              <p className="text-xs text-muted-foreground">Required to save.</p>
             )}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => navigate(profileUrl)}
-            >
-              Cancel
-            </Button>
-            {!save.isPending &&
-              (() => {
-                const reason = !form.name.trim()
-                  ? "Enter a policy name"
-                  : missingRequired
-                    ? "Fill the required resource levels"
-                    : null;
-                return reason ? (
-                  <span className="text-xs text-muted-foreground">{reason}</span>
-                ) : null;
-              })()}
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => save.mutate()}
-              disabled={
-                save.isPending ||
-                !form.name.trim() ||
-                missingRequired ||
-                (!!id && !policyQuery.data) ||
-                !def.data
-              }
-            >
-              {save.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-              Save
-            </Button>
+          </div>
+          <Badge variant="secondary" className="mb-2.5">
+            {kind}
+          </Badge>
+          <div className="mb-2 flex items-center gap-2">
+            <Switch
+              aria-label="Enabled"
+              checked={form.isEnabled}
+              onCheckedChange={(c) => setForm((f: any) => ({ ...f, isEnabled: c }))}
+            />
+            <span className="text-sm text-muted-foreground">Enabled</span>
           </div>
         </div>
-      </Card>
+        <div className="mb-0.5 flex shrink-0 items-center gap-2">
+          {id && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground"
+              onClick={() => setDeleteOpen(true)}
+            >
+              <Trash2 className="h-4 w-4" />
+              Delete
+            </Button>
+          )}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => navigate(profileUrl)}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => save.mutate()}
+            title={
+              !form.name.trim()
+                ? "Enter a policy name"
+                : missingRequired
+                  ? "Fill the required resource levels"
+                  : undefined
+            }
+            disabled={
+              save.isPending ||
+              !form.name.trim() ||
+              missingRequired ||
+              (!!id && !policyQuery.data) ||
+              !def.data
+            }
+          >
+            {save.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+            Save
+          </Button>
+        </div>
+      </div>
 
       {save.isError && (
         <Alert variant="destructive">
@@ -599,8 +600,7 @@ export default function PolicyEditorPage() {
         </Alert>
       )}
 
-      <Card>
-        <CardContent className="pt-6">
+      <div className="rounded-lg border p-4 md:p-6">
           <div className="flex flex-col gap-4 md:flex-row">
             <nav className="shrink-0 space-y-1 md:w-48">
               {NAV_ITEMS.map((item) => {
@@ -633,7 +633,7 @@ export default function PolicyEditorPage() {
                   description={
                     scope === "tag"
                       ? "The classification tag this policy applies to. Ranger resolves the tag service from this profile automatically."
-                      : "The Trino resource this policy applies to. Use * for wildcards."
+                      : "The resource this policy applies to. Use * for wildcards."
                   }
                 >
                   <div className="flex items-center gap-2" role="group" aria-label="Policy scope">
@@ -924,8 +924,7 @@ export default function PolicyEditorPage() {
               )}
             </div>
           </div>
-        </CardContent>
-      </Card>
+      </div>
 
       <ConfirmDeleteDialog
         open={deleteOpen}

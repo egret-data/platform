@@ -43,6 +43,7 @@ import type {
   ProfileDto,
   ProfileEngine,
 } from "./generated/model";
+import { apiFetch } from "./client";
 
 // ── Policies (Ranger-backed / control-plane) ─────────────────────────────────
 
@@ -75,6 +76,18 @@ export async function listPolicies(service: string, type?: string): Promise<Poli
 /** Create a new Ranger service (policy profile) — the manual analogue of Trino's auto-bind. */
 export async function createProfile(name: string, type: "trino" | "starrocks"): Promise<CreatedProfile> {
   return (await policyAdminCreateProfile({ name, type })).data as CreatedProfile;
+}
+
+/**
+ * Delete a policy profile (Ranger service) and, via `ON DELETE CASCADE`, its
+ * policies. The backend refuses (409) while an engine still enforces the
+ * profile. Uses `apiFetch` directly — the orval client isn't regenerated for
+ * this route yet.
+ */
+export async function deleteProfile(name: string): Promise<void> {
+  await apiFetch(`/control-plane/policies/services/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
 }
 
 // ── Policy editor (Task 4) ────────────────────────────────────────────────

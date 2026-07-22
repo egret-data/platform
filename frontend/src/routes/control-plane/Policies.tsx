@@ -1,9 +1,15 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Download, Loader2, Plus, Server } from "lucide-react";
+import { Download, Loader2, MoreHorizontal, Plus, Server, Trash2 } from "lucide-react";
 
-import { type CreatedProfile, type Profile, createProfile, listProfiles } from "@/api/policies";
+import {
+  type CreatedProfile,
+  type Profile,
+  createProfile,
+  deleteProfile,
+  listProfiles,
+} from "@/api/policies";
 import { ApiError } from "@/api/client";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
@@ -12,13 +18,7 @@ import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Dialog,
   DialogContent,
@@ -27,6 +27,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -43,15 +50,19 @@ export const profilesQueryKey = ["control-plane", "profiles"] as const;
 /**
  * Control Plane → Data governance → Policies (drill-down L1: profiles landing).
  *
- * Lists Ranger policy profiles on the shared list scaffold used across the
- * Control Plane (header → Card → SummaryStrip → FilterableTable + facet). Each
- * row links into the per-profile detail page where access / masking /
- * row-filter policies are managed.
+ * Lists Ranger policy profiles on the shared card-less list scaffold used across
+ * the Control Plane (header → SummaryStrip → bordered FilterableTable + facet).
+ * Each row links into the per-profile detail page where access / masking /
+ * row-filter policies are managed, and its actions menu can download the engine
+ * config or delete the profile (only when no engine still enforces it).
  */
 export default function Policies() {
+  const queryClient = useQueryClient();
   const [configTarget, setConfigTarget] = useState<string | null>(null);
   const [typeFacet, setTypeFacet] = useState(FACET_ALL);
   const [addOpen, setAddOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Profile | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const profiles = useQuery<Profile[], ApiError>({
     queryKey: profilesQueryKey,
@@ -59,6 +70,15 @@ export default function Policies() {
     retry: false,
   });
   const rows = profiles.data ?? [];
+
+  const deleteMutation = useMutation<void, ApiError, string>({
+    mutationFn: (name) => deleteProfile(name),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: profilesQueryKey });
+      setDeleteError(null);
+    },
+    onError: (err) => setDeleteError(err.message ?? "Failed to delete profile."),
+  });
 
   const filtered = rows.filter((p) => typeFacet === FACET_ALL || p.type === typeFacet);
   const totalPolicies = rows.reduce((n, p) => n + p.policy_count, 0);
@@ -96,7 +116,15 @@ export default function Policies() {
       label: "Type",
       sortable: true,
       value: (p) => p.type,
-      cell: (p) => <Badge variant="secondary">{p.type}</Badge>,
+      // A profile's type can be a long Ranger service-instance name; cap it so
+      // the column stays tidy (clean ellipsis, full value on hover). The inner
+      // span carries the truncation because a bare `truncate` on the inline-flex
+      // Badge clips mid-string instead of showing an ellipsis.
+      cell: (p) => (
+        <Badge variant="secondary" className="max-w-[16rem]" title={p.type}>
+          <span className="min-w-0 truncate">{p.type}</span>
+        </Badge>
+      ),
     },
     {
       key: "engines",
@@ -113,6 +141,7 @@ export default function Policies() {
       key: "version",
       label: "Version",
       sortable: true,
+      className: "w-24",
       value: (p) => p.policy_version,
       cell: (p) => <span className="text-muted-foreground">v{p.policy_version}</span>,
     },
@@ -120,6 +149,7 @@ export default function Policies() {
       key: "policies",
       label: "Policies",
       sortable: true,
+      className: "w-24",
       value: (p) => p.policy_count,
       cell: (p) => (
         <Badge
@@ -134,92 +164,121 @@ export default function Policies() {
       key: "actions",
       label: "",
       className: "text-right",
-      cell: (p) => (
-        <Button
-          size="icon"
-          variant="ghost"
-          title="Download config"
-          aria-label={`Download config for ${p.name}`}
-          onClick={() => setConfigTarget(p.name)}
-        >
-          <Download className="h-4 w-4" />
-        </Button>
-      ),
+      cell: (p) => {
+        const bound = p.engines.length > 0;
+        return (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" aria-label={`Actions for ${p.name}`}>
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {/* The config download is the Trino coordinator's Ranger-plugin
+                  config — only meaningful for Trino profiles. */}
+              {p.type.startsWith("trino") && (
+                <>
+                  <DropdownMenuItem onClick={() => setConfigTarget(p.name)}>
+                    <Download className="mr-2 h-4 w-4" />
+                    Download config
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                </>
+              )}
+              <DropdownMenuItem
+                disabled={bound}
+                title={
+                  bound
+                    ? "Enforced by an engine — unbind or delete the engine first."
+                    : undefined
+                }
+                className="text-destructive focus:text-destructive"
+                onClick={() => {
+                  setDeleteError(null);
+                  setDeleteTarget(p);
+                }}
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                Delete profile
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        );
+      },
     },
   ];
 
   return (
     <div className="space-y-5">
-      <div>
-        <h1 className="text-2xl font-semibold leading-tight">Policies</h1>
-        <p className="text-sm text-muted-foreground">
-          Ranger policy profiles — each engine enforces one profile. Open a profile to
-          manage its access, masking, and row-filter policies.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold leading-tight">Policies</h1>
+          <p className="text-sm text-muted-foreground">
+            Ranger policy profiles — each engine enforces one profile. Open a profile to
+            manage its access, masking, and row-filter policies.
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setAddOpen(true)}
+            title="For an engine egret doesn't provision itself (e.g. an existing StarRocks cluster). Provisioning an engine creates its profile automatically."
+          >
+            <Plus className="mr-1.5 h-4 w-4" />
+            New profile
+          </Button>
+          <Button asChild variant="outline" size="sm">
+            <Link to="/control-plane/engines">
+              <Server className="mr-1.5 h-4 w-4" />
+              Provision an engine
+            </Link>
+          </Button>
+        </div>
       </div>
 
-      <Card>
-        <CardHeader>
-          <div className="flex items-start justify-between gap-3">
-            <div className="space-y-1.5">
-              <CardTitle className="text-lg">Policy profiles</CardTitle>
-              <CardDescription>
-                Each engine enforces one profile; tag profiles carry classification-based
-                masking &amp; row-filters. Provisioning an engine creates its profile
-                automatically — use &ldquo;New profile&rdquo; for an engine egret doesn&apos;t
-                provision itself (e.g. an existing StarRocks cluster).
-              </CardDescription>
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => setAddOpen(true)}>
-                <Plus className="mr-1.5 h-4 w-4" />
-                New profile
-              </Button>
-              <Button asChild variant="outline" size="sm">
-                <Link to="/control-plane/engines">
-                  <Server className="mr-1.5 h-4 w-4" />
-                  Provision an engine
-                </Link>
-              </Button>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <SummaryStrip
-            items={[
-              { label: "profiles", value: rows.length },
-              { label: "policies", value: totalPolicies },
-              { label: "bound engines", value: boundEngines },
-            ]}
+      <div className="space-y-4">
+        {deleteError && (
+          <Alert variant="destructive">
+            <AlertDescription>{deleteError}</AlertDescription>
+          </Alert>
+        )}
+        <SummaryStrip
+          items={[
+            { label: "profiles", value: rows.length },
+            { label: "policies", value: totalPolicies },
+            { label: "bound engines", value: boundEngines },
+          ]}
+        />
+        {profiles.isLoading ? (
+          <ListSkeleton rows={5} cols={6} />
+        ) : (
+          <FilterableTable
+            rows={filtered}
+            columns={columns}
+            getId={(p) => String(p.id)}
+            searchPlaceholder="Search profiles…"
+            initialSort={{ key: "name", dir: "asc" }}
+            pageSize={25}
+            bordered
+            emptyText={
+              profiles.isError
+                ? (profiles.error?.message ?? "Failed to load profiles.")
+                : "No profiles yet — provision an engine to create one."
+            }
+            filters={
+              typeOptions.length > 1 ? (
+                <FacetSelect
+                  label="Type"
+                  value={typeFacet}
+                  onChange={setTypeFacet}
+                  options={typeOptions}
+                />
+              ) : undefined
+            }
           />
-          {profiles.isLoading ? (
-            <ListSkeleton rows={5} cols={6} />
-          ) : (
-            <FilterableTable
-              rows={filtered}
-              columns={columns}
-              getId={(p) => String(p.id)}
-              searchPlaceholder="Search profiles…"
-              initialSort={{ key: "name", dir: "asc" }}
-              emptyText={
-                profiles.isError
-                  ? (profiles.error?.message ?? "Failed to load profiles.")
-                  : "No profiles yet — provision an engine to create one."
-              }
-              filters={
-                typeOptions.length > 1 ? (
-                  <FacetSelect
-                    label="Type"
-                    value={typeFacet}
-                    onChange={setTypeFacet}
-                    options={typeOptions}
-                  />
-                ) : undefined
-              }
-            />
-          )}
-        </CardContent>
-      </Card>
+        )}
+      </div>
 
       {configTarget && (
         <TrinoConfigDialog
@@ -230,6 +289,20 @@ export default function Policies() {
       )}
 
       <AddProfileDialog open={addOpen} onOpenChange={setAddOpen} />
+
+      <ConfirmDeleteDialog
+        open={deleteTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) setDeleteTarget(null);
+        }}
+        title={deleteTarget ? `Delete "${deleteTarget.name}"?` : "Delete profile?"}
+        description="This profile and all of its access, masking, and row-filter policies will be permanently removed from Ranger."
+        confirmText="delete"
+        onConfirm={() => {
+          if (deleteTarget) deleteMutation.mutate(deleteTarget.name);
+          setDeleteTarget(null);
+        }}
+      />
     </div>
   );
 }

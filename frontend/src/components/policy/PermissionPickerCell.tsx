@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, Pencil, X } from "lucide-react";
+import { Check, Pencil, Plus, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -43,9 +43,14 @@ export function PermissionPickerCell({ value, options, onChange }: PermissionPic
   return (
     <Popover open={open} onOpenChange={openWith}>
       <PopoverTrigger asChild>
-        <button type="button" className="flex min-h-8 flex-wrap items-center gap-1 text-left">
+        <button
+          type="button"
+          aria-label={value.length === 0 ? "Add permissions" : "Edit permissions"}
+          className="flex min-h-8 flex-wrap items-center gap-1 text-left"
+        >
           {value.length === 0 ? (
-            <span className="text-sm italic text-muted-foreground underline decoration-dashed underline-offset-4">
+            <span className="inline-flex items-center gap-1 rounded-md border border-dashed px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground">
+              <Plus className="h-3.5 w-3.5" />
               Add permissions
             </span>
           ) : (
