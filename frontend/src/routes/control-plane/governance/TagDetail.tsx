@@ -217,10 +217,11 @@ export default function TagDetail() {
         )}
       </div>
 
+      <div className="grid items-start gap-8 lg:grid-cols-2">
       {/* Details */}
       <section className="space-y-3">
         <h2 className="text-base font-semibold">Details</h2>
-        <div className="grid gap-4 sm:max-w-md">
+        <div className="grid gap-4">
           <div className="space-y-1.5">
             <Label htmlFor="tag-key">Key</Label>
             <Input id="tag-key" value={tag.key} readOnly disabled />
@@ -276,6 +277,7 @@ export default function TagDetail() {
         </div>
 
         <ClearancePicker
+          title="Required roles"
           columnHeader="Role"
           itemNoun="role"
           available={availableRoles}
@@ -286,6 +288,7 @@ export default function TagDetail() {
           emptyText="No required roles — not gated by role."
         />
         <ClearancePicker
+          title="Required groups"
           columnHeader="Group"
           itemNoun="group"
           available={availableGroups}
@@ -296,6 +299,7 @@ export default function TagDetail() {
           emptyText="No required groups — not gated by group."
         />
       </section>
+      </div>
 
       <ConfirmDeleteDialog
         open={deleteOpen}
@@ -339,6 +343,7 @@ type Option = { value: string; label: string };
  * wall.
  */
 function ClearancePicker({
+  title,
   columnHeader,
   itemNoun,
   available,
@@ -348,6 +353,7 @@ function ClearancePicker({
   onRemove,
   emptyText,
 }: {
+  title: string;
   columnHeader: string;
   itemNoun: string;
   available: Option[];
@@ -368,54 +374,57 @@ function ClearancePicker({
 
   return (
     <div className="space-y-3">
+      <h3 className="text-sm font-medium">
+        {title}
+        {selected.length > 0 && (
+          <span className="font-normal text-muted-foreground"> · {selected.length}</span>
+        )}
+      </h3>
       {canEdit && (
-        <div className="flex flex-wrap items-end gap-2">
-          <div className="space-y-1">
-            <Label className="text-xs text-muted-foreground">Add {itemNoun}</Label>
-            <Popover open={open} onOpenChange={setOpen}>
-              <PopoverTrigger asChild>
-                <Button
-                  variant="outline"
-                  role="combobox"
-                  aria-label={`${columnHeader} to add`}
-                  className="w-64 justify-between font-normal"
-                >
-                  <span className="truncate">{pending ? pending.label : `Select a ${itemNoun}…`}</span>
-                  <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-64 p-0" align="start">
-                <div className="border-b p-2">
-                  <Input
-                    autoFocus
-                    placeholder={`Search ${itemNoun}s…`}
-                    value={q}
-                    onChange={(e) => setQ(e.target.value)}
-                  />
-                </div>
-                <div className="max-h-64 overflow-y-auto py-1">
-                  {matches.length === 0 ? (
-                    <p className="px-3 py-2 text-sm text-muted-foreground">No {itemNoun}s found.</p>
-                  ) : (
-                    matches.map((o) => (
-                      <button
-                        key={o.value}
-                        type="button"
-                        className="block w-full px-3 py-1.5 text-left text-sm hover:bg-accent"
-                        onClick={() => {
-                          setPending(o);
-                          setOpen(false);
-                          setQ("");
-                        }}
-                      >
-                        {o.label}
-                      </button>
-                    ))
-                  )}
-                </div>
-              </PopoverContent>
-            </Popover>
-          </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Popover open={open} onOpenChange={setOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                role="combobox"
+                aria-label={`${columnHeader} to add`}
+                className="w-64 justify-between font-normal"
+              >
+                <span className="truncate">{pending ? pending.label : `Add a ${itemNoun}…`}</span>
+                <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-64 p-0" align="start">
+              <div className="border-b p-2">
+                <Input
+                  autoFocus
+                  placeholder={`Search ${itemNoun}s…`}
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                />
+              </div>
+              <div className="max-h-64 overflow-y-auto py-1">
+                {matches.length === 0 ? (
+                  <p className="px-3 py-2 text-sm text-muted-foreground">No {itemNoun}s found.</p>
+                ) : (
+                  matches.map((o) => (
+                    <button
+                      key={o.value}
+                      type="button"
+                      className="block w-full px-3 py-1.5 text-left text-sm hover:bg-accent"
+                      onClick={() => {
+                        setPending(o);
+                        setOpen(false);
+                        setQ("");
+                      }}
+                    >
+                      {o.label}
+                    </button>
+                  ))
+                )}
+              </div>
+            </PopoverContent>
+          </Popover>
           <Button
             aria-label={`Add ${itemNoun}`}
             disabled={!pending}
@@ -452,7 +461,11 @@ function ClearancePicker({
             ) : (
               selected.map((s) => (
                 <TableRow key={s.value}>
-                  <TableCell className="font-medium">{s.label}</TableCell>
+                  <TableCell className="max-w-0 font-medium">
+                    <span className="block truncate" title={s.label}>
+                      {s.label}
+                    </span>
+                  </TableCell>
                   <TableCell className="text-right">
                     {canEdit && (
                       <Button
