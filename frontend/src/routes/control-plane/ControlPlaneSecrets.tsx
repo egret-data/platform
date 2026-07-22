@@ -10,17 +10,13 @@ import {
   listSecrets,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
+import { EmptyState } from "@/components/explore/EmptyState";
+import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Dialog,
@@ -39,17 +35,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-
-const COLUMNS = ["Name", "Type", "Description", "Used by", "Created", ""];
 
 /** Selectable k8s-style secret types. */
 const SECRET_TYPES = [
@@ -85,117 +71,139 @@ export default function ControlPlaneSecrets() {
 
   const rows = secrets.data ?? [];
 
-  return (
-    <Card data-testid="secrets-frame">
-      <CardHeader>
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <CardTitle className="flex items-center gap-2 text-lg">
-              <KeyRound className="h-5 w-5 text-muted-foreground" />
-              Secrets
-            </CardTitle>
-            <CardDescription>
-              Global named secrets that storage and database connections across
-              the platform can reference. Values are never displayed.
-            </CardDescription>
-          </div>
-          <Button onClick={() => setAddOpen(true)}>
-            <Plus className="h-4 w-4" />
-            Add secret
-          </Button>
+  const columns: Column<Secret>[] = [
+    {
+      key: "name",
+      label: "Name",
+      sortable: true,
+      className: "font-medium",
+      value: (s) => `${s.name} ${s.keys.join(" ")}`,
+      cell: (s) => (
+        <div>
+          <div>{s.name}</div>
+          {s.keys.length > 0 && (
+            <div className="font-mono text-xs font-normal text-muted-foreground">
+              {s.keys.join(", ")}
+            </div>
+          )}
         </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <SummaryStrip items={[{ label: "secrets", value: rows.length }]} />
-        {secrets.isError ? (
-          <Alert variant="destructive">
-            <AlertDescription>
-              Failed to load secrets. Please try again.
-            </AlertDescription>
-          </Alert>
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                {COLUMNS.map((col) => (
-                  <TableHead
-                    key={col || "actions"}
-                    className={col === "" ? "text-right" : undefined}
-                  >
-                    {col || <span className="sr-only">Actions</span>}
-                  </TableHead>
-                ))}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.length === 0 ? (
-                <TableRow className="hover:bg-transparent">
-                  <TableCell
-                    colSpan={COLUMNS.length}
-                    className="py-10 text-center text-muted-foreground"
-                  >
-                    {secrets.isLoading
-                      ? "Loading…"
-                      : "No secrets yet — add one to get started."}
-                  </TableCell>
-                </TableRow>
-              ) : (
-                rows.map((secret) => {
-                  const inUse = secret.used_by > 0;
-                  return (
-                    <TableRow key={secret.id}>
-                      <TableCell className="font-medium">
-                        <div>{secret.name}</div>
-                        {secret.keys.length > 0 && (
-                          <div className="text-xs font-normal text-muted-foreground">
-                            {secret.keys.join(", ")}
-                          </div>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="outline" className="font-mono text-xs">
-                          {secret.type}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {secret.description ?? "—"}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant={inUse ? "secondary" : "outline"}>
-                          {secret.used_by}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {new Date(secret.created_at).toLocaleDateString()}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-muted-foreground hover:text-destructive"
-                          onClick={() => setDeleteTarget(secret)}
-                          disabled={inUse}
-                          title={
-                            inUse
-                              ? `In use by ${secret.used_by} connection${
-                                  secret.used_by === 1 ? "" : "s"
-                                }`
-                              : undefined
-                          }
-                          aria-label={`Delete ${secret.name}`}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                          Delete
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })
-              )}
-            </TableBody>
-          </Table>
-        )}
-      </CardContent>
+      ),
+    },
+    {
+      key: "type",
+      label: "Type",
+      sortable: true,
+      value: (s) => s.type,
+      cell: (s) => (
+        <Badge variant="outline" className="font-mono text-xs">
+          {s.type}
+        </Badge>
+      ),
+    },
+    {
+      key: "description",
+      label: "Description",
+      value: (s) => s.description ?? "",
+      cell: (s) => <span className="text-muted-foreground">{s.description ?? "—"}</span>,
+    },
+    {
+      key: "used_by",
+      label: "Used by",
+      sortable: true,
+      value: (s) => s.used_by,
+      cell: (s) => (
+        <Badge variant={s.used_by > 0 ? "secondary" : "outline"}>{s.used_by}</Badge>
+      ),
+    },
+    {
+      key: "created",
+      label: "Created",
+      sortable: true,
+      value: (s) => s.created_at,
+      cell: (s) => (
+        <span className="text-muted-foreground">
+          {new Date(s.created_at).toLocaleDateString()}
+        </span>
+      ),
+    },
+    {
+      key: "actions",
+      label: "",
+      className: "w-10 text-right",
+      cell: (s) => {
+        const inUse = s.used_by > 0;
+        return (
+          <div className="flex justify-end">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground hover:text-destructive"
+              onClick={() => setDeleteTarget(s)}
+              disabled={inUse}
+              title={
+                inUse
+                  ? `In use by ${s.used_by} connection${s.used_by === 1 ? "" : "s"}`
+                  : undefined
+              }
+              aria-label={`Delete ${s.name}`}
+            >
+              <Trash2 className="h-4 w-4" />
+              Delete
+            </Button>
+          </div>
+        );
+      },
+    },
+  ];
+
+  return (
+    <div className="space-y-4" data-testid="secrets-frame">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="max-w-3xl">
+          <h1 className="text-2xl font-semibold leading-tight">Secrets</h1>
+          <p className="text-sm text-muted-foreground">
+            Global named secrets that storage and database connections across the platform can
+            reference. Values are never displayed.
+          </p>
+        </div>
+        <Button className="shrink-0" onClick={() => setAddOpen(true)}>
+          <Plus className="h-4 w-4" />
+          Add secret
+        </Button>
+      </div>
+
+      <SummaryStrip items={[{ label: "secrets", value: rows.length }]} />
+
+      {secrets.isError ? (
+        <Alert variant="destructive">
+          <AlertDescription>Failed to load secrets. Please try again.</AlertDescription>
+        </Alert>
+      ) : secrets.isLoading ? (
+        <ListSkeleton rows={5} cols={6} />
+      ) : (
+        <FilterableTable
+          rows={rows}
+          columns={columns}
+          getId={(s) => s.id}
+          searchPlaceholder="Search secrets…"
+          initialSort={{ key: "name", dir: "asc" }}
+          pageSize={25}
+          bordered
+          emptyText={
+            <EmptyState
+              icon={KeyRound}
+              title="No secrets yet"
+              description="Add a global named secret that storage and database connections can reference."
+              action={
+                <Button size="sm" onClick={() => setAddOpen(true)}>
+                  <Plus className="mr-1 h-4 w-4" />
+                  Add secret
+                </Button>
+              }
+            />
+          }
+        />
+      )}
 
       <AddSecretDialog open={addOpen} onOpenChange={setAddOpen} />
 
@@ -211,7 +219,7 @@ export default function ControlPlaneSecrets() {
           if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
         }}
       />
-    </Card>
+    </div>
   );
 }
 
