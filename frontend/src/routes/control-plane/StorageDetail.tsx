@@ -202,10 +202,21 @@ function Fact({
   );
 }
 
-function ConfigRow({ label, children }: { label: string; children: ReactNode }) {
+function ConfigRow({
+  label,
+  details,
+  children,
+}: {
+  label: string;
+  details: string;
+  children: ReactNode;
+}) {
   return (
     <TableRow>
-      <TableCell className="w-48 align-middle font-medium">{label}</TableCell>
+      <TableCell className="w-44 align-middle font-medium">{label}</TableCell>
+      <TableCell className="hidden align-middle text-muted-foreground md:table-cell">
+        {details}
+      </TableCell>
       <TableCell className="align-middle">{children}</TableCell>
     </TableRow>
   );
@@ -283,6 +294,8 @@ function OverviewTab({ conn, loading }: { conn: Storage | undefined; loading: bo
   const secrets = secretsQ.data ?? [];
   const ro = "text-muted-foreground";
   const roMono = "font-mono text-xs text-muted-foreground";
+  // Uniform width for every edit control so the Value column reads evenly.
+  const ctl = "h-8 w-72";
 
   return (
     <section className="space-y-3">
@@ -319,15 +332,16 @@ function OverviewTab({ conn, loading }: { conn: Storage | undefined; loading: bo
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead className="w-48">Setting</TableHead>
+              <TableHead className="w-44">Setting</TableHead>
+              <TableHead className="hidden md:table-cell">Details</TableHead>
               <TableHead>Value</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            <ConfigRow label="Provider">
+            <ConfigRow label="Provider" details="The object-store API this connection speaks.">
               {editing ? (
                 <Select value={form.provider} onValueChange={(v) => set({ provider: v })}>
-                  <SelectTrigger aria-label="Provider" className="h-8 w-64">
+                  <SelectTrigger aria-label="Provider" className={ctl}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -345,11 +359,11 @@ function OverviewTab({ conn, loading }: { conn: Storage | undefined; loading: bo
               )}
             </ConfigRow>
 
-            <ConfigRow label="Bucket">
+            <ConfigRow label="Bucket" details="The bucket that stores this connection's objects.">
               {editing ? (
                 <Input
                   aria-label="Bucket"
-                  className="h-8 w-64"
+                  className={ctl}
                   value={form.bucket}
                   onChange={(e) => set({ bucket: e.target.value })}
                 />
@@ -358,11 +372,11 @@ function OverviewTab({ conn, loading }: { conn: Storage | undefined; loading: bo
               )}
             </ConfigRow>
 
-            <ConfigRow label="Region">
+            <ConfigRow label="Region" details="The region the bucket lives in.">
               {editing ? (
                 <Input
                   aria-label="Region"
-                  className="h-8 w-64"
+                  className={ctl}
                   value={form.region}
                   onChange={(e) => set({ region: e.target.value })}
                 />
@@ -371,11 +385,11 @@ function OverviewTab({ conn, loading }: { conn: Storage | undefined; loading: bo
               )}
             </ConfigRow>
 
-            <ConfigRow label="Endpoint">
+            <ConfigRow label="Endpoint" details="Custom S3 endpoint URL; blank uses AWS.">
               {editing ? (
                 <Input
                   aria-label="Endpoint"
-                  className="h-8 w-80"
+                  className={ctl}
                   placeholder="Leave blank for AWS"
                   value={form.endpoint}
                   onChange={(e) => set({ endpoint: e.target.value })}
@@ -385,11 +399,11 @@ function OverviewTab({ conn, loading }: { conn: Storage | undefined; loading: bo
               )}
             </ConfigRow>
 
-            <ConfigRow label="Key prefix">
+            <ConfigRow label="Key prefix" details="Optional path prefix scoping objects within the bucket.">
               {editing ? (
                 <Input
                   aria-label="Key prefix"
-                  className="h-8 w-64"
+                  className={ctl}
                   placeholder="Optional"
                   value={form.keyPrefix}
                   onChange={(e) => set({ keyPrefix: e.target.value })}
@@ -399,11 +413,11 @@ function OverviewTab({ conn, loading }: { conn: Storage | undefined; loading: bo
               )}
             </ConfigRow>
 
-            <ConfigRow label="Access key">
+            <ConfigRow label="Access key" details="The S3 access key ID used to authenticate.">
               {editing ? (
                 <Input
                   aria-label="Access key"
-                  className="h-8 w-64"
+                  className={ctl}
                   value={form.accessKey}
                   onChange={(e) => set({ accessKey: e.target.value })}
                 />
@@ -412,13 +426,16 @@ function OverviewTab({ conn, loading }: { conn: Storage | undefined; loading: bo
               )}
             </ConfigRow>
 
-            <ConfigRow label="Path-style URL">
+            <ConfigRow
+              label="Path-style URL"
+              details="Address the bucket as endpoint/bucket instead of a subdomain."
+            >
               {editing ? (
                 <Select
                   value={form.pathStyle ? "on" : "off"}
                   onValueChange={(v) => set({ pathStyle: v === "on" })}
                 >
-                  <SelectTrigger aria-label="Path-style URL" className="h-8 w-40">
+                  <SelectTrigger aria-label="Path-style URL" className={ctl}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -431,11 +448,11 @@ function OverviewTab({ conn, loading }: { conn: Storage | undefined; loading: bo
               )}
             </ConfigRow>
 
-            <ConfigRow label="Purpose">
+            <ConfigRow label="Purpose" details="Free-text label for what this connection is used for.">
               {editing ? (
                 <Input
                   aria-label="Purpose"
-                  className="h-8 w-64"
+                  className={ctl}
                   placeholder="Optional"
                   value={form.purpose}
                   onChange={(e) => set({ purpose: e.target.value })}
@@ -445,10 +462,10 @@ function OverviewTab({ conn, loading }: { conn: Storage | undefined; loading: bo
               )}
             </ConfigRow>
 
-            <ConfigRow label="Secret">
+            <ConfigRow label="Secret" details="The stored secret holding the S3 secret access key.">
               {editing ? (
                 <Select value={form.secretChoice} onValueChange={(v) => set({ secretChoice: v })}>
-                  <SelectTrigger aria-label="Secret" className="h-8 w-64">
+                  <SelectTrigger aria-label="Secret" className={ctl}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
