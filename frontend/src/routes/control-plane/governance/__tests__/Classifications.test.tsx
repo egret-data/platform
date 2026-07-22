@@ -212,6 +212,24 @@ describe("Classifications", () => {
     );
   });
 
+  test("the New-tag key auto-fills (slugified) from the name until edited by hand", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("PII");
+
+    await user.click(screen.getByRole("button", { name: /New tag/i }));
+    await screen.findByRole("heading", { name: /New tag/i });
+
+    await user.type(screen.getByLabelText("Name"), "Personally Identifiable Info");
+    expect(screen.getByLabelText("Key")).toHaveValue("personally-identifiable-info");
+
+    // Editing the key by hand stops the auto-derive.
+    await user.clear(screen.getByLabelText("Key"));
+    await user.type(screen.getByLabelText("Key"), "pii");
+    await user.type(screen.getByLabelText("Name"), "!");
+    expect(screen.getByLabelText("Key")).toHaveValue("pii");
+  });
+
   test("deleting a tag via ConfirmDeleteDialog calls useDeleteTag", async () => {
     const user = userEvent.setup();
     const mutate = vi.fn();

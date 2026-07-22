@@ -37,6 +37,16 @@ const groupsQueryKey = ["control-plane", "access", "groups"] as const;
 
 const DEFAULT_COLOR = "#6366f1";
 
+/** Derive a valid tag key from a name: lowercase, non-`[a-z0-9:_-]` → `-`. */
+function slugifyTagKey(s: string): string {
+  return s
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9:_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
 /** Small rounded color swatch used next to a tag's name. */
 function TagSwatch({ color }: { color: string }) {
   return (
@@ -275,13 +285,21 @@ function CreateTagDialog({
 }) {
   const createTag = useCreateTag();
   const [key, setKey] = useState("");
+  // Once the user edits the key by hand, stop auto-deriving it from the name.
+  const [keyEdited, setKeyEdited] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [color, setColor] = useState(DEFAULT_COLOR);
   const [error, setError] = useState<string | null>(null);
 
+  function onNameChange(v: string) {
+    setName(v);
+    if (!keyEdited) setKey(slugifyTagKey(v));
+  }
+
   function reset() {
     setKey("");
+    setKeyEdited(false);
     setName("");
     setDescription("");
     setColor(DEFAULT_COLOR);
@@ -327,6 +345,35 @@ function CreateTagDialog({
               </Alert>
             )}
 
+            {/* Name + color share a row — matches the tag detail page. */}
+            <div className="flex items-end gap-3">
+              <div className="flex-1 space-y-1.5">
+                <div className="flex items-center gap-0.5">
+                  <Label htmlFor="new-tag-name">Name</Label>
+                  <span className="text-destructive" aria-hidden>
+                    *
+                  </span>
+                </div>
+                <Input
+                  id="new-tag-name"
+                  value={name}
+                  onChange={(e) => onNameChange(e.target.value)}
+                  required
+                  autoFocus
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="new-tag-color">Color</Label>
+                <Input
+                  id="new-tag-color"
+                  type="color"
+                  className="h-9 w-12 p-1"
+                  value={color}
+                  onChange={(e) => setColor(e.target.value)}
+                />
+              </div>
+            </div>
+
             <div className="space-y-1.5">
               <div className="flex items-center gap-0.5">
                 <Label htmlFor="new-tag-key">Key</Label>
@@ -337,47 +384,27 @@ function CreateTagDialog({
               <Input
                 id="new-tag-key"
                 value={key}
-                onChange={(e) => setKey(e.target.value)}
+                onChange={(e) => {
+                  setKey(e.target.value);
+                  setKeyEdited(true);
+                }}
                 required
-                autoFocus
+                className="font-mono text-xs"
               />
               <p className="text-xs text-muted-foreground">
-                The stable identifier — can&apos;t be changed once created.
+                Immutable identifier — auto-filled from the name; edit if you like. Lowercase
+                letters, numbers, <code>-</code>, <code>_</code>, <code>:</code>.
               </p>
-            </div>
-
-            <div className="space-y-1.5">
-              <div className="flex items-center gap-0.5">
-                <Label htmlFor="new-tag-name">Name</Label>
-                <span className="text-destructive" aria-hidden>
-                  *
-                </span>
-              </div>
-              <Input
-                id="new-tag-name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-              />
             </div>
 
             <div className="space-y-1.5">
               <Label htmlFor="new-tag-description">Description</Label>
               <Textarea
                 id="new-tag-description"
+                rows={3}
+                placeholder="What this tag means…"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="new-tag-color">Color</Label>
-              <Input
-                id="new-tag-color"
-                type="color"
-                className="h-9 w-16 p-1"
-                value={color}
-                onChange={(e) => setColor(e.target.value)}
               />
             </div>
           </div>
