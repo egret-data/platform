@@ -11,6 +11,7 @@ import {
   ChevronRight,
   Columns3,
   Copy,
+  Cpu,
   Database,
   FileText,
   HardDrive,
@@ -72,6 +73,7 @@ import {
   revokeClient,
   revokeGrant,
 } from "@/api/controlPlane";
+import { useControlPlaneEnginesListEngines } from "@/api/generated/control-plane-engines/control-plane-engines";
 import { useMyWorkspaces } from "@/api/hooks";
 import { ApiError } from "@/api/client";
 import { CatalogTagDialog } from "@/components/access/CatalogTagEditor";
@@ -197,6 +199,10 @@ export default function WarehouseDetail() {
             <KeyRound className="h-4 w-4" />
             Catalog Clients
           </TabsTrigger>
+          <TabsTrigger value="engines">
+            <Cpu className="h-4 w-4" />
+            Engines
+          </TabsTrigger>
           <TabsTrigger value="browse">
             <Database className="h-4 w-4" />
             Browse
@@ -215,6 +221,9 @@ export default function WarehouseDetail() {
         </TabsContent>
         <TabsContent value="clients" className="mt-4">
           <ClientsTab warehouseId={id} />
+        </TabsContent>
+        <TabsContent value="engines" className="mt-4">
+          <EnginesTab warehouseId={id} />
         </TabsContent>
         <TabsContent value="browse" className="mt-4">
           <BrowseTab warehouseId={id} />
@@ -271,6 +280,10 @@ function WarehouseSummary({
   const namespaces = useQuery({ queryKey: ["cp", "browse", warehouseId, "ns"], queryFn: () => listNamespaces(warehouseId), retry: false });
   const workspaces = useMyWorkspaces(true);
   const storage = useQuery({ queryKey: ["control-plane", "storage"], queryFn: listStorage, retry: false });
+  const enginesQ = useControlPlaneEnginesListEngines({ query: { retry: false } });
+  const engineCount = (enginesQ.data?.status === 200 ? enginesQ.data.data : []).filter(
+    (e) => e.warehouseId === warehouseId,
+  ).length;
 
   const wsName = workspaces.data?.find((w) => w.id === warehouse?.workspaceId)?.name;
   const storageName = storage.data?.find((s) => s.id === warehouse?.storageConnId)?.name;
@@ -292,8 +305,8 @@ function WarehouseSummary({
             <Skeleton className="h-4 w-40" />
           </div>
         </div>
-        <div className="grid grid-cols-3 gap-2 sm:gap-3">
-          {[0, 1, 2].map((i) => (
+        <div className="grid grid-cols-4 gap-2 sm:gap-3">
+          {[0, 1, 2, 3].map((i) => (
             <Skeleton key={i} className="h-[70px] w-[76px] rounded-lg" />
           ))}
         </div>
@@ -304,6 +317,7 @@ function WarehouseSummary({
   const stats = [
     { icon: ShieldCheck, label: "roles", value: roles.data?.length ?? 0 },
     { icon: KeyRound, label: "clients", value: clients.data?.length ?? 0 },
+    { icon: Cpu, label: "engines", value: engineCount },
     { icon: Database, label: "namespaces", value: namespaces.data?.length ?? 0 },
   ];
 
@@ -345,7 +359,7 @@ function WarehouseSummary({
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-2 sm:gap-3">
+        <div className="grid grid-cols-4 gap-2 sm:gap-3">
           {stats.map((s) => (
             <div
               key={s.label}
@@ -1127,6 +1141,74 @@ function AddClientDialog({
 }
 
 // ── Browse (namespaces / tables / schema) ────────────────────────────────────
+
+/** Egret-provisioned engines wired to this warehouse (engine.warehouseId ==
+ * this warehouse). Read-only; engine lifecycle lives on the Engines page. */
+function EnginesTab({ warehouseId }: { warehouseId: string }) {
+  const enginesQ = useControlPlaneEnginesListEngines({ query: { retry: false } });
+  const all = enginesQ.data?.status === 200 ? enginesQ.data.data : [];
+  const engines = all.filter((e) => e.warehouseId === warehouseId);
+
+  return (
+    <section className="space-y-3">
+      <div className="space-y-1">
+        <h2 className="flex items-center gap-2 text-base font-semibold">
+          <Cpu className="h-4 w-4 text-muted-foreground" />
+          Connected engines
+        </h2>
+        <p className="text-sm text-muted-foreground">
+          Egret-provisioned query engines wired to this warehouse&apos;s catalog.
+        </p>
+      </div>
+      {enginesQ.isLoading ? (
+        <ListSkeleton rows={3} cols={3} />
+      ) : engines.length === 0 ? (
+        <p className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-muted-foreground">
+          No egret-provisioned engines are wired to this warehouse yet.
+        </p>
+      ) : (
+        <div className="overflow-x-auto rounded-md border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Engine</TableHead>
+                <TableHead>Type</TableHead>
+                <TableHead>Namespace</TableHead>
+                <TableHead>Status</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {engines.map((e) => (
+                <TableRow key={e.id}>
+                  <TableCell>
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      <Cpu className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      <Link
+                        to={`/control-plane/engines/${e.id}`}
+                        className="truncate font-medium text-primary hover:underline"
+                      >
+                        {e.name}
+                      </Link>
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="secondary">{e.type}</Badge>
+                  </TableCell>
+                  <TableCell className="font-mono text-xs text-muted-foreground">
+                    {e.namespace}
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline">{e.status}</Badge>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </section>
+  );
+}
 
 function BrowseTab({ warehouseId }: { warehouseId: string }) {
   const [selectedNs, setSelectedNs] = useState<string | null>(null);
