@@ -1,15 +1,7 @@
 import { useEffect, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  FolderOpen,
-  HardDrive,
-  Loader2,
-  MoreHorizontal,
-  Pencil,
-  Plus,
-  Trash2,
-} from "lucide-react";
+import { HardDrive, Loader2, Plus, Trash2 } from "lucide-react";
 
 import {
   type Storage,
@@ -29,12 +21,6 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import {
   Dialog,
   DialogContent,
@@ -75,36 +61,9 @@ export default function ControlPlaneStorage() {
   });
 
   const [addOpen, setAddOpen] = useState(false);
-  const [editing, setEditing] = useState<Storage | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Storage | null>(null);
 
   const rows = conns.data ?? [];
-
-  // Deep-link `?edit=<id>` (e.g. from a warehouse's Storage credential setting)
-  // auto-opens that connection's edit dialog once the list has loaded, then
-  // clears the param so a refresh doesn't re-open it.
-  const [searchParams, setSearchParams] = useSearchParams();
-  const editId = searchParams.get("edit");
-  useEffect(() => {
-    if (!editId) return;
-    const conn = rows.find((c) => c.id === editId);
-    if (!conn) return;
-    setEditing(conn);
-    setAddOpen(true);
-    setSearchParams(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        next.delete("edit");
-        return next;
-      },
-      { replace: true },
-    );
-  }, [editId, rows, setSearchParams]);
-
-  const openEdit = (conn: Storage) => {
-    setEditing(conn);
-    setAddOpen(true);
-  };
 
   const columns: Column<Storage>[] = [
     {
@@ -165,32 +124,18 @@ export default function ControlPlaneStorage() {
       label: "",
       className: "w-10 text-right",
       cell: (c) => (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" aria-label={`Actions for ${c.name}`}>
-              <MoreHorizontal className="h-4 w-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem asChild>
-              <Link to={`/control-plane/storage/${c.id}?tab=browse`}>
-                <FolderOpen className="mr-2 h-4 w-4" />
-                Browse
-              </Link>
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => openEdit(c)}>
-              <Pencil className="mr-2 h-4 w-4" />
-              Edit
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              className="text-destructive focus:text-destructive"
-              onClick={() => setDeleteTarget(c)}
-            >
-              <Trash2 className="mr-2 h-4 w-4" />
-              Delete
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <div className="flex justify-end">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground hover:text-destructive"
+            onClick={() => setDeleteTarget(c)}
+            aria-label={`Delete ${c.name}`}
+          >
+            <Trash2 className="h-4 w-4" />
+            Delete
+          </Button>
+        </div>
       ),
     },
   ];
@@ -205,13 +150,7 @@ export default function ControlPlaneStorage() {
             workspaces across the platform.
           </p>
         </div>
-        <Button
-          className="shrink-0"
-          onClick={() => {
-            setEditing(null);
-            setAddOpen(true);
-          }}
-        >
+        <Button className="shrink-0" onClick={() => setAddOpen(true)}>
           <Plus className="h-4 w-4" />
           Add connection
         </Button>
@@ -240,13 +179,7 @@ export default function ControlPlaneStorage() {
               title="No storage connections yet"
               description="Register an S3-compatible object store so catalogs and workspaces can use it."
               action={
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    setEditing(null);
-                    setAddOpen(true);
-                  }}
-                >
+                <Button size="sm" onClick={() => setAddOpen(true)}>
                   <Plus className="mr-1 h-4 w-4" />
                   Add connection
                 </Button>
@@ -256,7 +189,7 @@ export default function ControlPlaneStorage() {
         />
       )}
 
-      <AddStorageDialog open={addOpen} onOpenChange={setAddOpen} editing={editing} />
+      <AddStorageDialog open={addOpen} onOpenChange={setAddOpen} editing={null} />
 
       <ConfirmDeleteDialog
         open={deleteTarget !== null}
