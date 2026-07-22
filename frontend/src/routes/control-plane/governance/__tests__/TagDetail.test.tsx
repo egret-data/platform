@@ -91,7 +91,7 @@ describe("TagDetail", () => {
 
     await user.click(screen.getByRole("combobox", { name: "Role to add" }));
     await user.click(await screen.findByText("finance_cleared"));
-    await user.click(screen.getByRole("button", { name: "Add role" }));
+    await user.click(screen.getByRole("button", { name: "Add clearance" }));
 
     expect(setMutate).toHaveBeenCalledWith(
       { id: "t1", required_roles: ["finance_cleared"], required_groups: [] },

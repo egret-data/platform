@@ -22,6 +22,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Table,
   TableBody,
   TableCell,
@@ -72,6 +79,7 @@ export default function TagDetail() {
   const [color, setColor] = useState(DEFAULT_COLOR);
   const [requiredRoles, setRequiredRoles] = useState<string[]>([]);
   const [requiredGroups, setRequiredGroups] = useState<string[]>([]);
+  const [clearanceError, setClearanceError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
   useEffect(() => {
@@ -121,21 +129,24 @@ export default function TagDetail() {
   // required_roles/required_groups, and clears the policy when both are empty.
   function persistClearance(roles: string[], groups: string[]) {
     const onError = (e: unknown) => {
-      toast.error((e as Error).message ?? "Failed to update clearance.");
+      const msg = (e as Error).message ?? "Failed to update clearance.";
+      setClearanceError(msg);
+      toast.error(msg);
       // Snap back to the server's truth.
       setRequiredRoles(tag?.required_roles ?? []);
       setRequiredGroups(tag?.required_groups ?? []);
     };
+    const onSuccess = (label: string) => () => {
+      setClearanceError(null);
+      toast.success(label);
+    };
     if (roles.length > 0 || groups.length > 0) {
       setAccessPolicy.mutate(
         { id, required_roles: roles, required_groups: groups },
-        { onSuccess: () => toast.success("Clearance updated"), onError },
+        { onSuccess: onSuccess("Clearance updated"), onError },
       );
     } else {
-      clearAccessPolicy.mutate(id, {
-        onSuccess: () => toast.success("Clearance cleared"),
-        onError,
-      });
+      clearAccessPolicy.mutate(id, { onSuccess: onSuccess("Clearance cleared"), onError });
     }
   }
 
@@ -163,14 +174,18 @@ export default function TagDetail() {
   const availableRoles = allRoles
     .filter((r) => !requiredRoles.includes(r.name))
     .map((r) => ({ value: r.name, label: r.name }));
-  const selectedRoles = requiredRoles.map((n) => ({ value: n, label: n }));
   const availableGroups = allGroups
     .filter((g) => !requiredGroups.includes(g.id))
     .map((g) => ({ value: g.id, label: g.name }));
-  const selectedGroups = requiredGroups.map((gid) => ({
-    value: gid,
-    label: groupNameById.get(gid) ?? gid,
-  }));
+  // One combined list feeding a single clearance table (Type + Name).
+  const clearanceRows: ClearanceRow[] = [
+    ...requiredRoles.map((n) => ({ type: "role" as const, value: n, label: n })),
+    ...requiredGroups.map((gid) => ({
+      type: "group" as const,
+      value: gid,
+      label: groupNameById.get(gid) ?? gid,
+    })),
+  ];
 
   const gated = requiredRoles.length > 0 || requiredGroups.length > 0;
 
@@ -271,32 +286,23 @@ export default function TagDetail() {
           <h2 className="text-base font-semibold">Clearance</h2>
           <p className="text-sm text-muted-foreground">
             Objects tagged this can only be opened by principals holding one of the required roles
-            <em> or</em> belonging to one of the required groups. Leave both empty for no
-            restriction.
+            <em> or</em> belonging to one of the required groups. Leave it empty for no restriction.
           </p>
         </div>
 
-        <ClearancePicker
-          title="Required roles"
-          columnHeader="Role"
-          itemNoun="role"
-          available={availableRoles}
-          selected={selectedRoles}
+        {clearanceError && (
+          <Alert variant="destructive">
+            <AlertDescription>{clearanceError}</AlertDescription>
+          </Alert>
+        )}
+
+        <ClearanceTable
+          availableRoles={availableRoles}
+          availableGroups={availableGroups}
+          rows={clearanceRows}
           canEdit={isAdmin}
-          onAdd={addRole}
-          onRemove={removeRole}
-          emptyText="No required roles — not gated by role."
-        />
-        <ClearancePicker
-          title="Required groups"
-          columnHeader="Group"
-          itemNoun="group"
-          available={availableGroups}
-          selected={selectedGroups}
-          canEdit={isAdmin}
-          onAdd={addGroup}
-          onRemove={removeGroup}
-          emptyText="No required groups — not gated by group."
+          onAdd={(type, value) => (type === "role" ? addRole(value) : addGroup(value))}
+          onRemove={(type, value) => (type === "role" ? removeRole(value) : removeGroup(value))}
         />
       </section>
       </div>
@@ -335,38 +341,42 @@ function BackLink() {
 }
 
 type Option = { value: string; label: string };
+type ClearanceType = "role" | "group";
+type ClearanceRow = { type: ClearanceType; value: string; label: string };
 
 /**
- * One clearance list: a searchable combobox to pick an available item + an
- * explicit Add, then a table of the selected items each with a remove ×. The
- * combobox (search over hundreds of roles/groups) replaces the old checkbox
- * wall.
+ * The tag's clearance as ONE table: a Type (role / group) selector + a
+ * searchable combobox to pick the item + an explicit Add, over a single table
+ * listing every required role and group with its type. Replaces the old split
+ * lists / checkbox wall.
  */
-function ClearancePicker({
-  title,
-  columnHeader,
-  itemNoun,
-  available,
-  selected,
+function ClearanceTable({
+  availableRoles,
+  availableGroups,
+  rows,
   canEdit,
   onAdd,
   onRemove,
-  emptyText,
 }: {
-  title: string;
-  columnHeader: string;
-  itemNoun: string;
-  available: Option[];
-  selected: Option[];
+  availableRoles: Option[];
+  availableGroups: Option[];
+  rows: ClearanceRow[];
   canEdit: boolean;
-  onAdd: (value: string) => void;
-  onRemove: (value: string) => void;
-  emptyText: string;
+  onAdd: (type: ClearanceType, value: string) => void;
+  onRemove: (type: ClearanceType, value: string) => void;
 }) {
+  const [type, setType] = useState<ClearanceType>("role");
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const [pending, setPending] = useState<Option | null>(null);
 
+  // Reset the pending pick when the type switches.
+  useEffect(() => {
+    setPending(null);
+    setQ("");
+  }, [type]);
+
+  const available = type === "role" ? availableRoles : availableGroups;
   const needle = q.trim().toLowerCase();
   const matches = available
     .filter((o) => needle === "" || o.label.toLowerCase().includes(needle))
@@ -374,38 +384,41 @@ function ClearancePicker({
 
   return (
     <div className="space-y-3">
-      <h3 className="text-sm font-medium">
-        {title}
-        {selected.length > 0 && (
-          <span className="font-normal text-muted-foreground"> · {selected.length}</span>
-        )}
-      </h3>
       {canEdit && (
         <div className="flex flex-wrap items-center gap-2">
+          <Select value={type} onValueChange={(v) => setType(v as ClearanceType)}>
+            <SelectTrigger className="w-28" aria-label="Clearance type">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="role">Role</SelectItem>
+              <SelectItem value="group">Group</SelectItem>
+            </SelectContent>
+          </Select>
           <Popover open={open} onOpenChange={setOpen}>
             <PopoverTrigger asChild>
               <Button
                 variant="outline"
                 role="combobox"
-                aria-label={`${columnHeader} to add`}
-                className="w-64 justify-between font-normal"
+                aria-label={`${type === "role" ? "Role" : "Group"} to add`}
+                className="w-56 justify-between font-normal"
               >
-                <span className="truncate">{pending ? pending.label : `Add a ${itemNoun}…`}</span>
+                <span className="truncate">{pending ? pending.label : `Select a ${type}…`}</span>
                 <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
               </Button>
             </PopoverTrigger>
-            <PopoverContent className="w-64 p-0" align="start">
+            <PopoverContent className="w-56 p-0" align="start">
               <div className="border-b p-2">
                 <Input
                   autoFocus
-                  placeholder={`Search ${itemNoun}s…`}
+                  placeholder={`Search ${type}s…`}
                   value={q}
                   onChange={(e) => setQ(e.target.value)}
                 />
               </div>
               <div className="max-h-64 overflow-y-auto py-1">
                 {matches.length === 0 ? (
-                  <p className="px-3 py-2 text-sm text-muted-foreground">No {itemNoun}s found.</p>
+                  <p className="px-3 py-2 text-sm text-muted-foreground">No {type}s found.</p>
                 ) : (
                   matches.map((o) => (
                     <button
@@ -426,11 +439,11 @@ function ClearancePicker({
             </PopoverContent>
           </Popover>
           <Button
-            aria-label={`Add ${itemNoun}`}
+            aria-label="Add clearance"
             disabled={!pending}
             onClick={() => {
               if (pending) {
-                onAdd(pending.value);
+                onAdd(type, pending.value);
                 setPending(null);
               }
             }}
@@ -445,25 +458,31 @@ function ClearancePicker({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>{columnHeader}</TableHead>
+              <TableHead className="w-24">Type</TableHead>
+              <TableHead>Name</TableHead>
               <TableHead className="w-10 text-right">
                 <span className="sr-only">Actions</span>
               </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {selected.length === 0 ? (
+            {rows.length === 0 ? (
               <TableRow className="hover:bg-transparent">
-                <TableCell colSpan={2} className="py-8 text-center text-muted-foreground">
-                  {emptyText}
+                <TableCell colSpan={3} className="py-8 text-center text-muted-foreground">
+                  Not gated — anyone can open objects with this tag.
                 </TableCell>
               </TableRow>
             ) : (
-              selected.map((s) => (
-                <TableRow key={s.value}>
+              rows.map((r) => (
+                <TableRow key={`${r.type}:${r.value}`}>
+                  <TableCell>
+                    <Badge variant="outline" className="font-normal capitalize">
+                      {r.type}
+                    </Badge>
+                  </TableCell>
                   <TableCell className="max-w-0 font-medium">
-                    <span className="block truncate" title={s.label}>
-                      {s.label}
+                    <span className="block truncate" title={r.label}>
+                      {r.label}
                     </span>
                   </TableCell>
                   <TableCell className="text-right">
@@ -472,8 +491,8 @@ function ClearancePicker({
                         variant="ghost"
                         size="icon"
                         className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                        aria-label={`Remove ${s.label}`}
-                        onClick={() => onRemove(s.value)}
+                        aria-label={`Remove ${r.label}`}
+                        onClick={() => onRemove(r.type, r.value)}
                       >
                         <X className="h-4 w-4" />
                       </Button>
