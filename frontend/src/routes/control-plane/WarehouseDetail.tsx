@@ -1867,6 +1867,15 @@ function SettingsTab({
 
   return (
     <div className="space-y-4">
+      {/* An unprovisioned warehouse 404s on config, so status/retention/format
+          writes fail until its catalog is live — say so instead of letting the
+          saves silently error. */}
+      {config.isError && (
+        <p className="rounded-md border bg-muted/40 px-4 py-2.5 text-sm text-muted-foreground">
+          This warehouse isn&apos;t provisioned yet — status and table policies take effect once its
+          catalog is live.
+        </p>
+      )}
       {config.isLoading ? (
         <ListSkeleton rows={4} cols={3} />
       ) : (
