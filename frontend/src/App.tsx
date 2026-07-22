@@ -41,6 +41,7 @@ import ControlPlaneStorage from "@/routes/control-plane/ControlPlaneStorage";
 import StorageDetail from "@/routes/control-plane/StorageDetail";
 import StorageBrowser from "@/routes/control-plane/StorageBrowser";
 import ControlPlaneSecrets from "@/routes/control-plane/ControlPlaneSecrets";
+import SecretDetail from "@/routes/control-plane/SecretDetail";
 import Policies from "@/routes/control-plane/Policies";
 import ProfileDetailPage from "@/routes/control-plane/ProfileDetailPage";
 import PolicyEditorPage from "@/routes/control-plane/PolicyEditorPage";
@@ -150,6 +151,7 @@ function ControlPlaneRoutes() {
           <Route path="storage/:id" element={<RequirePermission perm="storage:read"><StorageDetail /></RequirePermission>} />
           <Route path="storage/:id/browse" element={<RequirePermission perm="storage:read"><StorageBrowser /></RequirePermission>} />
           <Route path="secrets" element={<RequirePermission perm="secret:read"><ControlPlaneSecrets /></RequirePermission>} />
+          <Route path="secrets/:id" element={<RequirePermission perm="secret:read"><SecretDetail /></RequirePermission>} />
           <Route path="policies" element={<RequirePermission perm="policy:read"><Policies /></RequirePermission>} />
           <Route path="policies/:service" element={<RequirePermission perm="policy:read"><ProfileDetailPage /></RequirePermission>} />
           <Route path="policies/:service/:kind/new" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
