@@ -20,13 +20,6 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -137,77 +130,64 @@ export default function ControlPlaneEngines() {
   const activeLabel =
     ENGINE_TYPES.find((t) => t.value === activeType)?.label ?? activeType;
 
+  const all = engines.data ?? [];
+  const total = all.length;
+  const running = all.filter((e) => (e.status ?? "").toLowerCase() === "running").length;
+
   return (
-    <Card data-testid="engines-frame">
-      <CardHeader>
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <CardTitle className="flex items-center gap-2 text-lg">
-              <Server className="h-5 w-5 text-muted-foreground" />
-              Engines
-            </CardTitle>
-            <CardDescription>
-              Platform query engines. Provision a Trino or StarRocks cluster
-              against a catalog warehouse and monitor its health. RisingWave
-              arrives in a later phase.
-            </CardDescription>
-          </div>
-          <Button
-            onClick={() => setAddOpen(true)}
-            disabled={!canProvision}
-            title={canProvision ? undefined : "Coming soon"}
-          >
-            <Plus className="h-4 w-4" />
-            Add engine
-          </Button>
+    <div className="space-y-4" data-testid="engines-frame">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="max-w-3xl">
+          <h1 className="text-2xl font-semibold leading-tight">Engines</h1>
+          <p className="text-sm text-muted-foreground">
+            Platform query engines. Provision a Trino or StarRocks cluster against a catalog
+            warehouse and monitor its health. RisingWave arrives in a later phase.
+          </p>
         </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {(() => {
-          const all = engines.data ?? [];
-          const total = all.length;
-          const running = all.filter((e) => (e.status ?? "").toLowerCase() === "running").length;
-          const down = total - running;
-          return (
-            <SummaryStrip
-              items={[
-                { label: "engines", value: total },
-                { label: "running", value: running },
-                { label: "not running", value: down },
-              ]}
-            />
-          );
-        })()}
-        {engines.isError ? (
-          <Alert variant="destructive">
-            <AlertDescription>
-              Failed to load engines. Please try again.
-            </AlertDescription>
-          </Alert>
-        ) : (
-          <Tabs value={activeType} onValueChange={setActiveType}>
-            <TabsList>
-              {ENGINE_TYPES.map((type) => (
-                <TabsTrigger key={type.value} value={type.value}>
-                  {type.label}
-                </TabsTrigger>
-              ))}
-            </TabsList>
+        <Button
+          className="shrink-0"
+          onClick={() => setAddOpen(true)}
+          disabled={!canProvision}
+          title={canProvision ? undefined : "Coming soon"}
+        >
+          <Plus className="h-4 w-4" />
+          Add engine
+        </Button>
+      </div>
+
+      <SummaryStrip
+        items={[
+          { label: "engines", value: total },
+          { label: "running", value: running },
+          { label: "not running", value: total - running },
+        ]}
+      />
+
+      {engines.isError ? (
+        <Alert variant="destructive">
+          <AlertDescription>Failed to load engines. Please try again.</AlertDescription>
+        </Alert>
+      ) : (
+        <Tabs value={activeType} onValueChange={setActiveType}>
+          <TabsList>
             {ENGINE_TYPES.map((type) => (
-              <TabsContent key={type.value} value={type.value}>
-                <EngineTable
-                  label={type.label}
-                  rows={(engines.data ?? []).filter((e) => e.type === type.value)}
-                  loading={engines.isLoading}
-                  onAdd={
-                    PROVISIONABLE.has(type.value) ? () => setAddOpen(true) : undefined
-                  }
-                />
-              </TabsContent>
+              <TabsTrigger key={type.value} value={type.value}>
+                {type.label}
+              </TabsTrigger>
             ))}
-          </Tabs>
-        )}
-      </CardContent>
+          </TabsList>
+          {ENGINE_TYPES.map((type) => (
+            <TabsContent key={type.value} value={type.value} className="mt-4">
+              <EngineTable
+                label={type.label}
+                rows={(engines.data ?? []).filter((e) => e.type === type.value)}
+                loading={engines.isLoading}
+                onAdd={PROVISIONABLE.has(type.value) ? () => setAddOpen(true) : undefined}
+              />
+            </TabsContent>
+          ))}
+        </Tabs>
+      )}
 
       <AddEngineDialog
         open={addOpen}
@@ -215,7 +195,7 @@ export default function ControlPlaneEngines() {
         engineType={activeType}
         engineLabel={activeLabel}
       />
-    </Card>
+    </div>
   );
 }
 

@@ -58,13 +58,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import type { WorkspaceDto } from "@/api/generated/model/workspaceDto";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   DropdownMenu,
@@ -352,31 +345,27 @@ export default function EngineDetail() {
         Engines
       </Link>
 
-      <Card className="overflow-hidden">
-        <div className="flex flex-wrap items-start gap-3 border-b bg-muted/30 p-5">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-            <Server className="h-6 w-6" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h1 className="truncate text-2xl font-semibold leading-tight">
-              {data?.name ?? "Engine"}
-            </h1>
-            <p className="font-mono text-xs text-muted-foreground">
-              {data ? `${data.namespace}` : ""}
-            </p>
-            {data && <EngineHeaderMeta engine={data} />}
-          </div>
-          {data && (
-            <div className="flex shrink-0 items-center gap-2">
-              <Badge variant="secondary">{data.type}</Badge>
-              <Badge variant={phaseVariant(data.status.phase)}>
-                {data.status.phase}
-              </Badge>
-              <EngineActions engine={data} engineId={id} />
-            </div>
-          )}
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+          <Server className="h-6 w-6" />
         </div>
-      </Card>
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate text-2xl font-semibold leading-tight">
+            {data?.name ?? "Engine"}
+          </h1>
+          <p className="font-mono text-xs text-muted-foreground">
+            {data ? `${data.namespace}` : ""}
+          </p>
+          {data && <EngineHeaderMeta engine={data} />}
+        </div>
+        {data && (
+          <div className="flex shrink-0 items-center gap-2">
+            <Badge variant="secondary">{data.type}</Badge>
+            <Badge variant={phaseVariant(data.status.phase)}>{data.status.phase}</Badge>
+            <EngineActions engine={data} engineId={id} />
+          </div>
+        )}
+      </div>
 
       {engine.isError ? (
         <Alert variant="destructive">
@@ -701,6 +690,7 @@ function PodHealthTable({
 
   return (
     <>
+      <div className="overflow-x-auto rounded-md border">
       <Table>
         <TableHeader>
           <TableRow>
@@ -749,6 +739,7 @@ function PodHealthTable({
           ))}
         </TableBody>
       </Table>
+      </div>
 
       <PodLogsDialog
         engineId={engineId}
@@ -799,25 +790,21 @@ function StatusCard({
   status: EngineStatus;
   engineId: string;
 }) {
+  const d = statusDescription(status.phase, status.message);
   return (
-    <Card>
-      <CardHeader>
-        <div className="space-y-1.5">
-          <CardTitle className="text-lg">Status</CardTitle>
-          {(() => {
-            const d = statusDescription(status.phase, status.message);
-            return <CardDescription title={d.title}>{d.text}</CardDescription>;
-          })()}
-        </div>
-      </CardHeader>
-      <CardContent>
-        {status.pods.length === 0 ? (
-          <StatusEmptyState phase={status.phase} message={status.message} />
-        ) : (
-          <PodHealthTable pods={status.pods} engineId={engineId} />
-        )}
-      </CardContent>
-    </Card>
+    <section className="space-y-3">
+      <div className="space-y-1">
+        <h2 className="text-base font-semibold">Status</h2>
+        <p className="text-sm text-muted-foreground" title={d.title}>
+          {d.text}
+        </p>
+      </div>
+      {status.pods.length === 0 ? (
+        <StatusEmptyState phase={status.phase} message={status.message} />
+      ) : (
+        <PodHealthTable pods={status.pods} engineId={engineId} />
+      )}
+    </section>
   );
 }
 
@@ -879,24 +866,24 @@ function StarRocksMonitor({
         )}
       </div>
 
-      <Card>
-        <CardHeader>
-          <div className="space-y-1.5">
-            <CardTitle className="text-lg">Pods</CardTitle>
-            {(() => {
-              const d = statusDescription(status.phase, status.message);
-              return <CardDescription title={d.title}>{d.text}</CardDescription>;
-            })()}
-          </div>
-        </CardHeader>
-        <CardContent>
-          {status.pods.length === 0 ? (
-            <StatusEmptyState phase={status.phase} message={status.message} />
-          ) : (
-            <PodHealthTable pods={status.pods} engineId={engineId} />
-          )}
-        </CardContent>
-      </Card>
+      <section className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="text-base font-semibold">Pods</h2>
+          {(() => {
+            const d = statusDescription(status.phase, status.message);
+            return (
+              <p className="text-sm text-muted-foreground" title={d.title}>
+                {d.text}
+              </p>
+            );
+          })()}
+        </div>
+        {status.pods.length === 0 ? (
+          <StatusEmptyState phase={status.phase} message={status.message} />
+        ) : (
+          <PodHealthTable pods={status.pods} engineId={engineId} />
+        )}
+      </section>
 
       <p className="text-xs text-muted-foreground">
         Query-level monitoring for StarRocks is coming soon.
@@ -964,18 +951,15 @@ function ConfigurationTab({
   const countFor = (key: string): number => sectionCounts[key] ?? 0;
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="space-y-1.5">
-          <CardTitle className="text-lg">Settings</CardTitle>
-          <CardDescription>
-            Cluster-wide, coordinator, and worker Trino config plus security and
-            exposure. Saving re-provisions the engine.
-          </CardDescription>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-4">
+    <section className="space-y-4">
+      <div className="space-y-1">
+        <h2 className="text-base font-semibold">Settings</h2>
+        <p className="text-sm text-muted-foreground">
+          Cluster-wide, coordinator, and worker Trino config plus security and exposure. Saving
+          re-provisions the engine.
+        </p>
+      </div>
+      <div className="space-y-4">
           <div className="flex flex-col gap-4 md:flex-row">
             <nav className="shrink-0 space-y-1 md:w-48">
               {NAV_ITEMS.map((item) => {
@@ -1069,9 +1053,8 @@ function ConfigurationTab({
           </div>
 
           <SaveBar cfg={cfg} disabled={rawInvalid} review />
-        </div>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
   );
 }
 
@@ -1279,15 +1262,15 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
   });
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-lg">Catalogs</CardTitle>
-        <CardDescription>
-          Data sources this engine can query. Adding, editing, or removing a
-          catalog rolls the pods to reload.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
+    <section className="space-y-3">
+      <div className="space-y-1">
+        <h2 className="text-base font-semibold">Catalogs</h2>
+        <p className="text-sm text-muted-foreground">
+          Data sources this engine can query. Adding, editing, or removing a catalog rolls the pods
+          to reload.
+        </p>
+      </div>
+      <div>
         {catalogs.isError ? (
           <Alert variant="destructive">
             <AlertDescription>
@@ -1384,7 +1367,7 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
             </div>
           </div>
         )}
-      </CardContent>
+      </div>
 
       <ConfirmDeleteDialog
         open={removeOpen}
@@ -1396,7 +1379,7 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
           if (selected !== ADD_CATALOG) removeMutation.mutate(selected);
         }}
       />
-    </Card>
+    </section>
   );
 }
 
@@ -1444,30 +1427,28 @@ function WorkspacesCard({ engine }: { engine: EngineWithStatus }) {
     );
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0 space-y-1.5">
-            <CardTitle className="text-lg">Workspaces</CardTitle>
-            <CardDescription>
-              Workspaces assigned to this engine can query it with per-user
-              delegation.{" "}
-              {jwtEnabled
-                ? ""
-                : "Enable JWT authentication on the Security & Exposure tab before assigning."}
-            </CardDescription>
-          </div>
-          <Button
-            size="sm"
-            disabled={!jwtEnabled}
-            title={jwtEnabled ? undefined : "Engine needs JWT authentication to be assignable"}
-            onClick={() => setAddOpen(true)}
-          >
-            <Plus className="mr-1 h-4 w-4" /> Add workspace
-          </Button>
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 space-y-1">
+          <h2 className="text-base font-semibold">Workspaces</h2>
+          <p className="text-sm text-muted-foreground">
+            Workspaces assigned to this engine can query it with per-user delegation.{" "}
+            {jwtEnabled
+              ? ""
+              : "Enable JWT authentication on the Security & Exposure tab before assigning."}
+          </p>
         </div>
-      </CardHeader>
-      <CardContent>
+        <Button
+          className="shrink-0"
+          size="sm"
+          disabled={!jwtEnabled}
+          title={jwtEnabled ? undefined : "Engine needs JWT authentication to be assignable"}
+          onClick={() => setAddOpen(true)}
+        >
+          <Plus className="mr-1 h-4 w-4" /> Add workspace
+        </Button>
+      </div>
+      <div>
         {assignedQ.isError ? (
           <Alert variant="destructive">
             <AlertDescription>Failed to load workspace assignments.</AlertDescription>
@@ -1502,7 +1483,7 @@ function WorkspacesCard({ engine }: { engine: EngineWithStatus }) {
             ))}
           </div>
         )}
-      </CardContent>
+      </div>
 
       <AddWorkspaceDialog
         open={addOpen}
@@ -1515,7 +1496,7 @@ function WorkspacesCard({ engine }: { engine: EngineWithStatus }) {
           setAddOpen(false);
         }}
       />
-    </Card>
+    </section>
   );
 }
 

@@ -36,13 +36,6 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import {
@@ -210,39 +203,37 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
         </Alert>
       )}
 
-      <Card>
-        <CardHeader>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <div className="space-y-1.5">
-              <CardTitle className="text-lg">Queries</CardTitle>
-              <CardDescription>
-                Live queries on the coordinator, refreshed every 3s.
-              </CardDescription>
-            </div>
-            <div className="flex items-center gap-2">
-              <Select value={stateFilter} onValueChange={setStateFilter}>
-                <SelectTrigger className="w-[140px]" aria-label="State filter">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {STATE_FILTERS.map((s) => (
-                    <SelectItem key={s} value={s}>
-                      {s === "ALL" ? "All states" : s}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search user or SQL…"
-                className="w-[220px]"
-                aria-label="Search queries"
-              />
-            </div>
+      <section className="space-y-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div className="space-y-1">
+            <h2 className="text-base font-semibold">Queries</h2>
+            <p className="text-sm text-muted-foreground">
+              Live queries on the coordinator, refreshed every 3s.
+            </p>
           </div>
-        </CardHeader>
-        <CardContent>
+          <div className="flex items-center gap-2">
+            <Select value={stateFilter} onValueChange={setStateFilter}>
+              <SelectTrigger className="w-[140px]" aria-label="State filter">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {STATE_FILTERS.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {s === "ALL" ? "All states" : s}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search user or SQL…"
+              className="w-[220px]"
+              aria-label="Search queries"
+            />
+          </div>
+        </div>
+        <div className="overflow-x-auto rounded-md border">
           <Table>
             <TableHeader>
               <TableRow>
@@ -343,8 +334,8 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
               )}
             </TableBody>
           </Table>
-        </CardContent>
-      </Card>
+        </div>
+      </section>
 
       <Dialog
         open={selectedQid !== null}
