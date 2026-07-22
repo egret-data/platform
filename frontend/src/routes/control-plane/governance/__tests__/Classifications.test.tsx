@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -120,7 +121,9 @@ function renderPage() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <Classifications />
+      <MemoryRouter>
+        <Classifications />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -170,7 +173,9 @@ describe("Classifications", () => {
     expect(await screen.findByText("PII")).toBeInTheDocument();
     expect(screen.getByText("pii")).toBeInTheDocument();
     expect(screen.getByText("Personally identifiable information")).toBeInTheDocument();
-    expect(screen.getByText("3")).toBeInTheDocument();
+    // Assignment count in PII's row (scoped — the SummaryStrip also shows totals).
+    const piiRow = screen.getByText("PII").closest("tr");
+    expect(piiRow).toHaveTextContent("3");
 
     expect(screen.getByText("Internal")).toBeInTheDocument();
     expect(screen.getByText("internal")).toBeInTheDocument();
@@ -205,6 +210,24 @@ describe("Classifications", () => {
         }),
       ),
     );
+  });
+
+  test("the New-tag key auto-fills (slugified) from the name until edited by hand", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("PII");
+
+    await user.click(screen.getByRole("button", { name: /New tag/i }));
+    await screen.findByRole("heading", { name: /New tag/i });
+
+    await user.type(screen.getByLabelText("Name"), "Personally Identifiable Info");
+    expect(screen.getByLabelText("Key")).toHaveValue("personally-identifiable-info");
+
+    // Editing the key by hand stops the auto-derive.
+    await user.clear(screen.getByLabelText("Key"));
+    await user.type(screen.getByLabelText("Key"), "pii");
+    await user.type(screen.getByLabelText("Name"), "!");
+    expect(screen.getByLabelText("Key")).toHaveValue("pii");
   });
 
   test("deleting a tag via ConfirmDeleteDialog calls useDeleteTag", async () => {
@@ -288,7 +311,11 @@ describe("Classifications", () => {
     renderPage();
 
     expect(await screen.findByText("Finance")).toBeInTheDocument();
-    expect(screen.getByText(/Gated.*finance_cleared/i)).toBeInTheDocument();
+    // Concise badge ("Gated · 1 role") with the full names in its tooltip.
+    // Match the capital-G badge (not the lowercase "gated" summary label).
+    const badge = screen.getByText(/Gated/);
+    expect(badge).toHaveTextContent("1 role");
+    expect(badge.getAttribute("title")).toContain("finance_cleared");
   });
 
   test("a tag with empty required_roles shows no gated badge", async () => {
@@ -298,36 +325,7 @@ describe("Classifications", () => {
     // "PII" and "Internal" both have required_roles: [] — no gated badge
     // anywhere in their row. Only the "Finance" row (required_roles: [...])
     // should render one.
-    expect(screen.queryAllByText(/Gated/i)).toHaveLength(1);
-  });
-
-  test("editing a tag, selecting a role, and saving calls useSetTagAccessPolicy with the selected roles", async () => {
-    const user = userEvent.setup();
-    const mutateAsync = vi.fn().mockResolvedValue(undefined);
-    vi.mocked(tagsApi.useSetTagAccessPolicy).mockReturnValue({
-      mutateAsync,
-      isPending: false,
-    } as unknown as ReturnType<typeof tagsApi.useSetTagAccessPolicy>);
-
-    renderPage();
-    await screen.findByText("PII");
-
-    await user.click(screen.getByRole("button", { name: /Actions for PII/i }));
-    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
-    await screen.findByRole("heading", { name: /Edit tag — PII/i });
-
-    const roleCheckbox = await screen.findByRole("checkbox", { name: "finance_cleared" });
-    await user.click(roleCheckbox);
-
-    await user.click(screen.getByRole("button", { name: /^Save$/i }));
-
-    await waitFor(() =>
-      expect(mutateAsync).toHaveBeenCalledWith({
-        id: "t1",
-        required_roles: ["finance_cleared"],
-        required_groups: [],
-      }),
-    );
+    expect(screen.queryAllByText(/Gated/)).toHaveLength(1);
   });
 
   test("a tag with required_groups (and no required_roles) shows a gated badge with the group name", async () => {
@@ -335,7 +333,9 @@ describe("Classifications", () => {
     renderPage();
 
     expect(await screen.findByText("Security")).toBeInTheDocument();
-    expect(await screen.findByText(/Gated.*Security Team/i)).toBeInTheDocument();
+    const badge = await screen.findByText(/Gated/);
+    expect(badge).toHaveTextContent("1 group");
+    expect(badge.getAttribute("title")).toContain("Security Team");
   });
 
   test("a tag gated by both a role and a group shows both in the badge", async () => {
@@ -343,37 +343,11 @@ describe("Classifications", () => {
     renderPage();
 
     expect(await screen.findByText("BothGated")).toBeInTheDocument();
-    const badge = await screen.findByText(/Gated.*Security Team/i);
-    expect(badge).toHaveTextContent("finance_cleared");
-    expect(badge).toHaveTextContent("Security Team");
+    // Match the badge (middle-dot) — this tag's description also contains "Gated".
+    const badge = await screen.findByText(/Gated ·/);
+    expect(badge).toHaveTextContent("1 role, 1 group");
+    expect(badge.getAttribute("title")).toContain("finance_cleared");
+    expect(badge.getAttribute("title")).toContain("Security Team");
   });
 
-  test("editing a tag, selecting a group, and saving calls useSetTagAccessPolicy with the selected roles and groups", async () => {
-    const user = userEvent.setup();
-    const mutateAsync = vi.fn().mockResolvedValue(undefined);
-    vi.mocked(tagsApi.useSetTagAccessPolicy).mockReturnValue({
-      mutateAsync,
-      isPending: false,
-    } as unknown as ReturnType<typeof tagsApi.useSetTagAccessPolicy>);
-
-    renderPage();
-    await screen.findByText("PII");
-
-    await user.click(screen.getByRole("button", { name: /Actions for PII/i }));
-    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
-    await screen.findByRole("heading", { name: /Edit tag — PII/i });
-
-    const groupCheckbox = await screen.findByRole("checkbox", { name: "Security Team" });
-    await user.click(groupCheckbox);
-
-    await user.click(screen.getByRole("button", { name: /^Save$/i }));
-
-    await waitFor(() =>
-      expect(mutateAsync).toHaveBeenCalledWith({
-        id: "t1",
-        required_roles: [],
-        required_groups: ["g1"],
-      }),
-    );
-  });
 });

@@ -57,6 +57,7 @@ import AccessExplorer from "@/routes/control-plane/access/AccessExplorer";
 import AccessOverview from "@/routes/control-plane/access/AccessOverview";
 import WhoCanAccess from "@/routes/control-plane/access/WhoCanAccess";
 import Classifications from "@/routes/control-plane/governance/Classifications";
+import TagDetail from "@/routes/control-plane/governance/TagDetail";
 
 const qc = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1, staleTime: 30000 } } });
 
@@ -152,6 +153,7 @@ function ControlPlaneRoutes() {
           <Route path="policies/:service/:kind/new" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
           <Route path="policies/:service/:kind/:id" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
           <Route path="classifications" element={<RequirePermission perm="tag:read"><Classifications /></RequirePermission>} />
+          <Route path="classifications/:id" element={<RequirePermission perm="tag:read"><TagDetail /></RequirePermission>} />
           <Route path="data-lineage" element={<RequireGlobalAdmin><Placeholder title="Data Lineage" /></RequireGlobalAdmin>} />
           <Route path="users" element={<RequirePermission perm="user:read"><UsersPage /></RequirePermission>} />
           <Route path="users/:id" element={<RequirePermission perm="user:read"><UserDetail /></RequirePermission>} />
