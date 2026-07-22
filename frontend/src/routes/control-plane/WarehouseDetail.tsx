@@ -1861,189 +1861,206 @@ function SettingsTab({
     c?.deleteProfileSeconds != null ? Math.round(c.deleteProfileSeconds / 86400) : null;
 
   return (
-    <div className="space-y-8">
-      <div className="max-w-4xl divide-y">
-        <SettingRow icon={Power} title="Status & statistics">
-          {config.isLoading ? (
-            <ListSkeleton rows={2} cols={2} />
-          ) : (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2">
-                <Badge
-                  variant="outline"
-                  className={
-                    c?.active
-                      ? "gap-1 border-primary/30 bg-primary/10 text-primary"
-                      : "gap-1 border-muted-foreground/30 bg-muted text-muted-foreground"
-                  }
-                >
-                  <span className={`h-1.5 w-1.5 rounded-full ${c?.active ? "bg-primary" : "bg-muted-foreground"}`} />
-                  {c?.active ? "Active" : "Inactive"}
-                </Badge>
+    <div className="max-w-4xl space-y-10">
+      {/* General — lifecycle state + object counts. */}
+      <SettingGroup icon={Power} title="General">
+        {config.isLoading ? (
+          <ListSkeleton rows={1} cols={2} />
+        ) : (
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-2">
+              <Badge
+                variant="outline"
+                className={
+                  c?.active
+                    ? "gap-1 border-primary/30 bg-primary/10 text-primary"
+                    : "gap-1 border-muted-foreground/30 bg-muted text-muted-foreground"
+                }
+              >
+                <span className={`h-1.5 w-1.5 rounded-full ${c?.active ? "bg-primary" : "bg-muted-foreground"}`} />
+                {c?.active ? "Active" : "Inactive"}
+              </Badge>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={statusMut.isPending || !c}
+                onClick={() => statusMut.mutate(!c?.active)}
+              >
+                {c?.active ? "Deactivate" : "Activate"}
+              </Button>
+            </div>
+            <div className="flex gap-6">
+              <div>
+                <div className="text-xs uppercase tracking-wide text-muted-foreground">Tables</div>
+                <div className="text-lg font-semibold tabular-nums">{c?.numTables ?? "—"}</div>
+              </div>
+              <div>
+                <div className="text-xs uppercase tracking-wide text-muted-foreground">Views</div>
+                <div className="text-lg font-semibold tabular-nums">{c?.numViews ?? "—"}</div>
+              </div>
+            </div>
+          </div>
+        )}
+        {c?.statsUpdatedMs ? (
+          <p className="text-xs text-muted-foreground">
+            Statistics as of {new Date(c.statsUpdatedMs).toLocaleString()}
+          </p>
+        ) : null}
+      </SettingGroup>
+
+      {/* Table policies — how tables behave: recovery window + allowed formats. */}
+      <SettingGroup icon={Database} title="Table policies">
+        <div className="divide-y">
+          <SettingRow
+            title="Soft-delete retention"
+            description={
+              currentDays != null
+                ? `Dropped tables are recoverable for ${currentDays} day${currentDays === 1 ? "" : "s"}.`
+                : "Hard delete — dropped tables are purged immediately (no recovery)."
+            }
+          >
+            <div className="space-y-2">
+              <div className="flex items-end gap-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="ttl">Retention (days)</Label>
+                  <Input
+                    id="ttl"
+                    type="number"
+                    min={7}
+                    className="w-32"
+                    placeholder={currentDays != null ? String(currentDays) : "7"}
+                    value={ttlDays}
+                    onChange={(e) => setTtlDays(e.target.value)}
+                  />
+                </div>
                 <Button
-                  variant="outline"
                   size="sm"
-                  disabled={statusMut.isPending || !c}
-                  onClick={() => statusMut.mutate(!c?.active)}
+                  disabled={ttlMut.isPending}
+                  onClick={() => {
+                    const days = Number(ttlDays || currentDays || 7);
+                    ttlMut.mutate(Math.max(7, days) * 86400);
+                  }}
                 >
-                  {c?.active ? "Deactivate" : "Activate"}
+                  Save
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  disabled={ttlMut.isPending}
+                  onClick={() => setHardDeleteOpen(true)}
+                >
+                  Hard delete
                 </Button>
               </div>
-              <div className="flex gap-6 text-sm">
-                <div>
-                  <div className="text-xs uppercase tracking-wide text-muted-foreground">Tables</div>
-                  <div className="text-lg font-semibold tabular-nums">{c?.numTables ?? "—"}</div>
-                </div>
-                <div>
-                  <div className="text-xs uppercase tracking-wide text-muted-foreground">Views</div>
-                  <div className="text-lg font-semibold tabular-nums">{c?.numViews ?? "—"}</div>
-                </div>
-              </div>
-              {c?.statsUpdatedMs ? (
-                <p className="text-xs text-muted-foreground">
-                  Statistics as of {new Date(c.statsUpdatedMs).toLocaleString()}
-                </p>
-              ) : null}
+              <p className="text-xs text-muted-foreground">Minimum ~7 days (enforced by the catalog).</p>
+              {ttlMut.isError && (
+                <p className="text-xs text-destructive">Retention rejected — try a longer window.</p>
+              )}
+              <ConfirmDeleteDialog
+                open={hardDeleteOpen}
+                onOpenChange={setHardDeleteOpen}
+                title="Switch to hard delete?"
+                description="Dropped tables will be purged immediately with no recovery window — the recycle bin will no longer hold them. This cannot be undone."
+                confirmText="hard delete"
+                onConfirm={() => ttlMut.mutate(null)}
+              />
             </div>
-          )}
-        </SettingRow>
+          </SettingRow>
 
-        <SettingRow
-          icon={Trash2}
-          title="Soft-delete retention"
-          description={
-            currentDays != null
-              ? `Dropped tables are recoverable for ${currentDays} day${currentDays === 1 ? "" : "s"}.`
-              : "Hard delete — dropped tables are purged immediately (no recovery)."
-          }
-        >
-          <div className="space-y-2">
+          <SettingRow
+            title="Format-version policy"
+            description="Which Iceberg table format versions clients may create."
+          >
             <div className="flex items-end gap-2">
               <div className="space-y-1.5">
-                <Label htmlFor="ttl">Retention (days)</Label>
-                <Input
-                  id="ttl"
-                  type="number"
-                  min={7}
-                  className="w-32"
-                  placeholder={currentDays != null ? String(currentDays) : "7"}
-                  value={ttlDays}
-                  onChange={(e) => setTtlDays(e.target.value)}
-                />
+                <Label htmlFor="fmt">Allowed versions</Label>
+                <Select value={fmt} onValueChange={setFmt}>
+                  <SelectTrigger id="fmt" className="w-56">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1,2">Allow v1 and v2</SelectItem>
+                    <SelectItem value="2">Require v2</SelectItem>
+                    <SelectItem value="2,3">Allow v2 and v3</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <Button
                 size="sm"
-                disabled={ttlMut.isPending}
-                onClick={() => {
-                  const days = Number(ttlDays || currentDays || 7);
-                  ttlMut.mutate(Math.max(7, days) * 86400);
-                }}
+                disabled={fmtMut.isPending}
+                onClick={() => fmtMut.mutate(fmt.split(",").map(Number))}
               >
                 Save
               </Button>
-              <Button
-                variant="destructive"
-                size="sm"
-                disabled={ttlMut.isPending}
-                onClick={() => setHardDeleteOpen(true)}
-              >
-                Hard delete
-              </Button>
             </div>
-            <p className="text-xs text-muted-foreground">Minimum ~7 days (enforced by the catalog).</p>
-            {ttlMut.isError && (
-              <p className="text-xs text-destructive">Retention rejected — try a longer window.</p>
-            )}
-            <ConfirmDeleteDialog
-              open={hardDeleteOpen}
-              onOpenChange={setHardDeleteOpen}
-              title="Switch to hard delete?"
-              description="Dropped tables will be purged immediately with no recovery window — the recycle bin will no longer hold them. This cannot be undone."
-              confirmText="hard delete"
-              onConfirm={() => ttlMut.mutate(null)}
-            />
-          </div>
-        </SettingRow>
+          </SettingRow>
+        </div>
+      </SettingGroup>
 
-        <SettingRow
-          icon={ShieldCheck}
-          title="Format-version policy"
-          description="Which Iceberg table format versions clients may create."
-        >
-          <div className="flex items-end gap-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="fmt">Allowed versions</Label>
-              <Select value={fmt} onValueChange={setFmt}>
-                <SelectTrigger id="fmt" className="w-56">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="1,2">Allow v1 and v2</SelectItem>
-                  <SelectItem value="2">Require v2</SelectItem>
-                  <SelectItem value="2,3">Allow v2 and v3</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <Button
-              size="sm"
-              disabled={fmtMut.isPending}
-              onClick={() => fmtMut.mutate(fmt.split(",").map(Number))}
-            >
-              Save
-            </Button>
-          </div>
-        </SettingRow>
-
-        <SettingRow
-          icon={HardDrive}
-          title="Storage credential"
-          description={
-            <>
-              The S3 access key comes from this warehouse&apos;s storage connection
-              {storageName ? (
-                <>
-                  {" "}
-                  <strong>{storageName}</strong>
-                </>
-              ) : null}
-              . Rotating the key there pushes it to every warehouse using the same connection.
-            </>
-          }
-        >
-          <Button asChild variant="outline" size="sm">
+      {/* Storage — the single connection this warehouse's data lives on. */}
+      <SettingGroup icon={HardDrive} title="Storage">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-8">
+          <p className="text-sm text-muted-foreground sm:max-w-md">
+            This warehouse&apos;s data lives on the connection
+            {storageName ? (
+              <>
+                {" "}
+                <strong className="text-foreground">{storageName}</strong>
+              </>
+            ) : null}
+            . Its S3 access key is managed there — rotating the key pushes it to every warehouse
+            using the same connection.
+          </p>
+          <Button asChild variant="outline" size="sm" className="sm:shrink-0">
             <Link to={storageLink} className="whitespace-nowrap">
               <HardDrive className="h-4 w-4" />
-              Edit storage connection
+              Edit connection
             </Link>
           </Button>
-        </SettingRow>
-      </div>
+        </div>
+      </SettingGroup>
 
       <WarehouseTasksCard warehouseId={warehouseId} />
     </div>
   );
 }
 
-/** A single card-less settings row: label + description on the left, its control
- * on the right (stacking on mobile). Rows are separated by the parent's divide-y. */
-function SettingRow({
+/** A settings group: an icon + title heading over its rows/controls. */
+function SettingGroup({
   icon: Icon,
+  title,
+  children,
+}: {
+  icon: typeof Power;
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="space-y-4">
+      <h2 className="flex items-center gap-2 text-base font-semibold">
+        <Icon className="h-4 w-4 text-muted-foreground" />
+        {title}
+      </h2>
+      {children}
+    </section>
+  );
+}
+
+/** One setting within a group: label + description on the left, its control on
+ * the right (stacking on mobile). Rows are separated by the parent's divide-y. */
+function SettingRow({
   title,
   description,
   children,
 }: {
-  icon: typeof Power;
   title: string;
   description?: ReactNode;
   children: ReactNode;
 }) {
   return (
-    <div className="flex flex-col gap-3 py-5 first:pt-0 last:pb-0 sm:flex-row sm:items-start sm:justify-between sm:gap-8">
-      <div className="space-y-1 sm:max-w-sm">
-        <h2 className="flex items-center gap-2 text-sm font-medium">
-          <Icon className="h-4 w-4 text-muted-foreground" />
-          {title}
-        </h2>
+    <div className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-start sm:justify-between sm:gap-8">
+      <div className="space-y-0.5 sm:max-w-sm">
+        <h3 className="text-sm font-medium">{title}</h3>
         {description && <p className="text-sm text-muted-foreground">{description}</p>}
       </div>
       <div className="sm:shrink-0">{children}</div>
