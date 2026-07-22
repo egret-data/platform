@@ -392,7 +392,7 @@ function WarehousesSection({ workspaceId }: { workspaceId: string }) {
                 <TableRow key={w.id}>
                   <TableCell>
                     <div className="flex min-w-0 items-center gap-2.5">
-                      <Boxes className="h-4 w-4 shrink-0 text-primary" />
+                      <Boxes className="h-4 w-4 shrink-0 text-muted-foreground" />
                       <Link
                         to={`/control-plane/warehouses/${w.id}`}
                         className="truncate font-mono font-medium text-primary hover:underline"
