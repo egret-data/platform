@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -1846,19 +1846,13 @@ function SettingsTab({ warehouseId }: { warehouseId: string }) {
     c?.deleteProfileSeconds != null ? Math.round(c.deleteProfileSeconds / 86400) : null;
 
   return (
-    <div className="grid gap-4 md:grid-cols-2">
-      <Card>
-        <CardHeader>
-          <CardTitle aria-level={2} className="flex items-center gap-2 text-base">
-            <Power className="h-4 w-4 text-muted-foreground" />
-            Status &amp; statistics
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
+    <div className="space-y-8">
+      <div className="max-w-4xl divide-y">
+        <SettingRow icon={Power} title="Status & statistics">
           {config.isLoading ? (
-            <ListSkeleton rows={3} cols={2} />
+            <ListSkeleton rows={2} cols={2} />
           ) : (
-            <>
+            <div className="space-y-3">
               <div className="flex items-center gap-2">
                 <Badge
                   variant="outline"
@@ -1895,80 +1889,72 @@ function SettingsTab({ warehouseId }: { warehouseId: string }) {
                   Statistics as of {new Date(c.statsUpdatedMs).toLocaleString()}
                 </p>
               ) : null}
-            </>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle aria-level={2} className="flex items-center gap-2 text-base">
-            <Trash2 className="h-4 w-4 text-muted-foreground" />
-            Soft-delete retention
-          </CardTitle>
-          <CardDescription>
-            {currentDays != null
-              ? `Dropped tables are recoverable for ${currentDays} day${currentDays === 1 ? "" : "s"}.`
-              : "Hard delete — dropped tables are purged immediately (no recovery)."}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          <div className="flex items-end gap-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="ttl">Retention (days)</Label>
-              <Input
-                id="ttl"
-                type="number"
-                min={7}
-                className="w-32"
-                placeholder={currentDays != null ? String(currentDays) : "7"}
-                value={ttlDays}
-                onChange={(e) => setTtlDays(e.target.value)}
-              />
             </div>
-            <Button
-              size="sm"
-              disabled={ttlMut.isPending}
-              onClick={() => {
-                const days = Number(ttlDays || currentDays || 7);
-                ttlMut.mutate(Math.max(7, days) * 86400);
-              }}
-            >
-              Save
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              disabled={ttlMut.isPending}
-              onClick={() => setHardDeleteOpen(true)}
-            >
-              Hard delete
-            </Button>
-          </div>
-          <p className="text-xs text-muted-foreground">Minimum ~7 days (enforced by the catalog).</p>
-          {ttlMut.isError && (
-            <p className="text-xs text-destructive">Retention rejected — try a longer window.</p>
           )}
-          <ConfirmDeleteDialog
-            open={hardDeleteOpen}
-            onOpenChange={setHardDeleteOpen}
-            title="Switch to hard delete?"
-            description="Dropped tables will be purged immediately with no recovery window — the recycle bin will no longer hold them. This cannot be undone."
-            confirmText="hard delete"
-            onConfirm={() => ttlMut.mutate(null)}
-          />
-        </CardContent>
-      </Card>
+        </SettingRow>
 
-      <Card>
-        <CardHeader>
-          <CardTitle aria-level={2} className="flex items-center gap-2 text-base">
-            <ShieldCheck className="h-4 w-4 text-muted-foreground" />
-            Format-version policy
-          </CardTitle>
-          <CardDescription>Which Iceberg table format versions clients may create.</CardDescription>
-        </CardHeader>
-        <CardContent>
+        <SettingRow
+          icon={Trash2}
+          title="Soft-delete retention"
+          description={
+            currentDays != null
+              ? `Dropped tables are recoverable for ${currentDays} day${currentDays === 1 ? "" : "s"}.`
+              : "Hard delete — dropped tables are purged immediately (no recovery)."
+          }
+        >
+          <div className="space-y-2">
+            <div className="flex items-end gap-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="ttl">Retention (days)</Label>
+                <Input
+                  id="ttl"
+                  type="number"
+                  min={7}
+                  className="w-32"
+                  placeholder={currentDays != null ? String(currentDays) : "7"}
+                  value={ttlDays}
+                  onChange={(e) => setTtlDays(e.target.value)}
+                />
+              </div>
+              <Button
+                size="sm"
+                disabled={ttlMut.isPending}
+                onClick={() => {
+                  const days = Number(ttlDays || currentDays || 7);
+                  ttlMut.mutate(Math.max(7, days) * 86400);
+                }}
+              >
+                Save
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                disabled={ttlMut.isPending}
+                onClick={() => setHardDeleteOpen(true)}
+              >
+                Hard delete
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">Minimum ~7 days (enforced by the catalog).</p>
+            {ttlMut.isError && (
+              <p className="text-xs text-destructive">Retention rejected — try a longer window.</p>
+            )}
+            <ConfirmDeleteDialog
+              open={hardDeleteOpen}
+              onOpenChange={setHardDeleteOpen}
+              title="Switch to hard delete?"
+              description="Dropped tables will be purged immediately with no recovery window — the recycle bin will no longer hold them. This cannot be undone."
+              confirmText="hard delete"
+              onConfirm={() => ttlMut.mutate(null)}
+            />
+          </div>
+        </SettingRow>
+
+        <SettingRow
+          icon={ShieldCheck}
+          title="Format-version policy"
+          description="Which Iceberg table format versions clients may create."
+        >
           <div className="flex items-end gap-2">
             <div className="space-y-1.5">
               <Label htmlFor="fmt">Allowed versions</Label>
@@ -1991,35 +1977,57 @@ function SettingsTab({ warehouseId }: { warehouseId: string }) {
               Save
             </Button>
           </div>
-        </CardContent>
-      </Card>
+        </SettingRow>
 
-      <Card>
-        <CardHeader>
-          <CardTitle aria-level={2} className="flex items-center gap-2 text-base">
-            <HardDrive className="h-4 w-4 text-muted-foreground" />
-            Storage credential
-          </CardTitle>
-          <CardDescription>
-            The S3 access key comes from this warehouse&apos;s{" "}
-            <strong>storage connection</strong>. Rotate it by editing that connection in{" "}
-            <em>Control Plane → Storage</em> — the new key is pushed to every warehouse using it.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
+        <SettingRow
+          icon={HardDrive}
+          title="Storage credential"
+          description={
+            <>
+              The S3 access key comes from this warehouse&apos;s{" "}
+              <strong>storage connection</strong>. Rotate it by editing that connection in{" "}
+              <em>Control Plane → Storage</em> — the new key is pushed to every warehouse using it.
+            </>
+          }
+        >
           <Link
             to="/control-plane/storage"
-            className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+            className="inline-flex items-center gap-1 whitespace-nowrap text-sm text-primary hover:underline"
           >
             <HardDrive className="h-4 w-4" />
             Manage storage connections
           </Link>
-        </CardContent>
-      </Card>
-
-      <div className="md:col-span-2">
-        <WarehouseTasksCard warehouseId={warehouseId} />
+        </SettingRow>
       </div>
+
+      <WarehouseTasksCard warehouseId={warehouseId} />
+    </div>
+  );
+}
+
+/** A single card-less settings row: label + description on the left, its control
+ * on the right (stacking on mobile). Rows are separated by the parent's divide-y. */
+function SettingRow({
+  icon: Icon,
+  title,
+  description,
+  children,
+}: {
+  icon: typeof Power;
+  title: string;
+  description?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-3 py-6 first:pt-0 last:pb-0 sm:flex-row sm:items-start sm:justify-between sm:gap-8">
+      <div className="space-y-1 sm:max-w-sm">
+        <h2 className="flex items-center gap-2 text-base font-semibold">
+          <Icon className="h-4 w-4 text-muted-foreground" />
+          {title}
+        </h2>
+        {description && <p className="text-sm text-muted-foreground">{description}</p>}
+      </div>
+      <div className="sm:shrink-0">{children}</div>
     </div>
   );
 }
@@ -2032,27 +2040,29 @@ function WarehouseTasksCard({ warehouseId }: { warehouseId: string }) {
   });
   const rows = tasks.data ?? [];
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle aria-level={2} className="flex items-center gap-2 text-base">
+    <section className="space-y-3">
+      <div className="space-y-1">
+        <h2 className="flex items-center gap-2 text-base font-semibold">
           <ListChecks className="h-4 w-4 text-muted-foreground" />
           Background tasks
-        </CardTitle>
-        <CardDescription>
+        </h2>
+        <p className="text-sm text-muted-foreground">
           The catalog&apos;s GC queues (tabular expiry / purge / task-log cleanup) that reclaim
           storage from dropped tables.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        {tasks.isError ? (
-          <p className="py-4 text-center text-sm text-destructive">
-            {tasks.error?.message ?? "Couldn't load background tasks."}
-          </p>
-        ) : tasks.isLoading ? (
-          <ListSkeleton rows={3} cols={3} />
-        ) : rows.length === 0 ? (
-          <p className="py-4 text-center text-sm text-muted-foreground">No pending tasks.</p>
-        ) : (
+        </p>
+      </div>
+      {tasks.isError ? (
+        <p className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-destructive">
+          {tasks.error?.message ?? "Couldn't load background tasks."}
+        </p>
+      ) : tasks.isLoading ? (
+        <ListSkeleton rows={3} cols={3} />
+      ) : rows.length === 0 ? (
+        <p className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-muted-foreground">
+          No pending tasks.
+        </p>
+      ) : (
+        <div className="overflow-x-auto rounded-md border">
           <Table>
             <TableHeader>
               <TableRow>
@@ -2073,9 +2083,9 @@ function WarehouseTasksCard({ warehouseId }: { warehouseId: string }) {
               ))}
             </TableBody>
           </Table>
-        )}
-      </CardContent>
-    </Card>
+        </div>
+      )}
+    </section>
   );
 }
 
