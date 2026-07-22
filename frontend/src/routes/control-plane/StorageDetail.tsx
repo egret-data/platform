@@ -1,23 +1,34 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Boxes, Database, HardDrive, Pencil, Trash2 } from "lucide-react";
 
 import {
   type Storage,
+  type StorageInput,
   deleteStorage,
   getStorage,
+  listSecrets,
   listWarehouses,
+  updateStorage,
 } from "@/api/controlPlane";
 import { useMyWorkspaces } from "@/api/hooks";
 import { ApiError } from "@/api/client";
-import { AddStorageDialog, storageQueryKey } from "@/routes/control-plane/ControlPlaneStorage";
+import { secretsQueryKey, storageQueryKey } from "@/routes/control-plane/ControlPlaneStorage";
 import { StorageObjectBrowser } from "@/routes/control-plane/StorageBrowser";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -27,6 +38,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+
+const NO_SECRET = "__none__";
 
 const TABS = ["overview", "warehouses", "browse"] as const;
 
@@ -54,7 +67,6 @@ export default function StorageDetail() {
       { replace: true },
     );
 
-  const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
   const connQ = useQuery<Storage, ApiError>({
@@ -121,19 +133,14 @@ export default function StorageDetail() {
             <Fact icon={HardDrive} label="Endpoint" value={conn?.endpoint ?? "AWS default"} />
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" onClick={() => setEditOpen(true)}>
-            <Pencil className="mr-1 h-4 w-4" /> Edit
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="text-destructive hover:text-destructive"
-            onClick={() => setDeleteOpen(true)}
-          >
-            <Trash2 className="mr-1 h-4 w-4" /> Delete
-          </Button>
-        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          className="text-destructive hover:text-destructive"
+          onClick={() => setDeleteOpen(true)}
+        >
+          <Trash2 className="mr-1 h-4 w-4" /> Delete
+        </Button>
       </div>
 
       <Tabs value={tab} onValueChange={setTab}>
@@ -153,7 +160,7 @@ export default function StorageDetail() {
         </TabsList>
 
         <TabsContent value="overview" className="mt-4">
-          <OverviewTab conn={conn} loading={connQ.isLoading} onEdit={() => setEditOpen(true)} />
+          <OverviewTab conn={conn} loading={connQ.isLoading} />
         </TabsContent>
         <TabsContent value="warehouses" className="mt-4">
           <WarehousesTab storageId={id} />
@@ -163,7 +170,6 @@ export default function StorageDetail() {
         </TabsContent>
       </Tabs>
 
-      <AddStorageDialog open={editOpen} onOpenChange={setEditOpen} editing={conn ?? null} />
       <ConfirmDeleteDialog
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
@@ -196,28 +202,87 @@ function Fact({
   );
 }
 
-function OverviewTab({
-  conn,
-  loading,
-  onEdit,
-}: {
-  conn: Storage | undefined;
-  loading: boolean;
-  onEdit: () => void;
-}) {
+function ConfigRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <TableRow>
+      <TableCell className="w-48 align-middle font-medium">{label}</TableCell>
+      <TableCell className="align-middle">{children}</TableCell>
+    </TableRow>
+  );
+}
+
+/** Read/edit config for one connection. "Edit" flips the Value cells into inputs
+ * so the table is edited in place, rather than opening a full form dialog. */
+function OverviewTab({ conn, loading }: { conn: Storage | undefined; loading: boolean }) {
+  const qc = useQueryClient();
+  const secretsQ = useQuery({ queryKey: secretsQueryKey, queryFn: listSecrets, retry: false });
+
+  const [editing, setEditing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [form, setForm] = useState({
+    purpose: "",
+    provider: "s3",
+    endpoint: "",
+    region: "",
+    bucket: "",
+    keyPrefix: "",
+    accessKey: "",
+    pathStyle: true,
+    secretChoice: NO_SECRET,
+  });
+  const set = (patch: Partial<typeof form>) => setForm((f) => ({ ...f, ...patch }));
+
+  const updateMut = useMutation<Storage, ApiError, StorageInput>({
+    mutationFn: (input) => updateStorage(conn!.id, input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["control-plane", "storage", conn!.id] });
+      qc.invalidateQueries({ queryKey: storageQueryKey });
+      setEditing(false);
+    },
+    onError: (e) => setError(e.message ?? "Failed to save the connection."),
+  });
+
+  const startEdit = () => {
+    if (!conn) return;
+    setForm({
+      purpose: conn.purpose ?? "",
+      provider: conn.provider,
+      endpoint: conn.endpoint ?? "",
+      region: conn.region,
+      bucket: conn.bucket,
+      keyPrefix: conn.key_prefix ?? "",
+      accessKey: conn.access_key,
+      pathStyle: conn.path_style,
+      secretChoice: conn.secret_ref ?? NO_SECRET,
+    });
+    setError(null);
+    setEditing(true);
+  };
+
+  const save = () => {
+    if (!conn) return;
+    const input: StorageInput = {
+      name: conn.name,
+      purpose: form.purpose.trim() || null,
+      provider: form.provider,
+      endpoint: form.endpoint.trim() || null,
+      region: form.region.trim(),
+      bucket: form.bucket.trim(),
+      key_prefix: form.keyPrefix.trim() || null,
+      access_key: form.accessKey.trim(),
+      path_style: form.pathStyle,
+    };
+    if (form.secretChoice !== NO_SECRET) input.secret_ref = form.secretChoice;
+    setError(null);
+    updateMut.mutate(input);
+  };
+
   if (loading) return <ListSkeleton rows={6} cols={2} />;
   if (!conn) return null;
 
-  const rows: { k: string; v: string; mono?: boolean }[] = [
-    { k: "Provider", v: conn.provider },
-    { k: "Bucket", v: conn.bucket, mono: true },
-    { k: "Region", v: conn.region || "—" },
-    { k: "Endpoint", v: conn.endpoint ?? "AWS default" },
-    { k: "Key prefix", v: conn.key_prefix || "—", mono: true },
-    { k: "Access key", v: conn.access_key, mono: true },
-    { k: "Path-style URL", v: conn.path_style ? "Enabled" : "Disabled" },
-    { k: "Purpose", v: conn.purpose || "—" },
-  ];
+  const secrets = secretsQ.data ?? [];
+  const ro = "text-muted-foreground";
+  const roMono = "font-mono text-xs text-muted-foreground";
 
   return (
     <section className="space-y-3">
@@ -228,10 +293,28 @@ function OverviewTab({
             Connection settings for this S3-compatible object store.
           </p>
         </div>
-        <Button size="sm" variant="outline" className="shrink-0" onClick={onEdit}>
-          <Pencil className="mr-1 h-4 w-4" /> Edit
-        </Button>
+        {editing ? (
+          <div className="flex shrink-0 gap-2">
+            <Button size="sm" variant="outline" disabled={updateMut.isPending} onClick={() => setEditing(false)}>
+              Cancel
+            </Button>
+            <Button size="sm" disabled={updateMut.isPending} onClick={save}>
+              Save
+            </Button>
+          </div>
+        ) : (
+          <Button size="sm" variant="outline" className="shrink-0" onClick={startEdit}>
+            <Pencil className="mr-1 h-4 w-4" /> Edit
+          </Button>
+        )}
       </div>
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
       <div className="overflow-x-auto rounded-md border">
         <Table>
           <TableHeader>
@@ -241,31 +324,157 @@ function OverviewTab({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {rows.map((r) => (
-              <TableRow key={r.k}>
-                <TableCell className="align-middle font-medium">{r.k}</TableCell>
-                <TableCell
-                  className={
-                    r.mono
-                      ? "align-middle font-mono text-xs text-muted-foreground"
-                      : "align-middle text-muted-foreground"
-                  }
+            <ConfigRow label="Provider">
+              {editing ? (
+                <Select value={form.provider} onValueChange={(v) => set({ provider: v })}>
+                  <SelectTrigger aria-label="Provider" className="h-8 w-64">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="s3">S3 / MinIO</SelectItem>
+                    <SelectItem value="gcs" disabled>
+                      Google Cloud Storage — coming soon
+                    </SelectItem>
+                    <SelectItem value="azure" disabled>
+                      Azure Blob — coming soon
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              ) : (
+                <span className={ro}>{conn.provider}</span>
+              )}
+            </ConfigRow>
+
+            <ConfigRow label="Bucket">
+              {editing ? (
+                <Input
+                  aria-label="Bucket"
+                  className="h-8 w-64"
+                  value={form.bucket}
+                  onChange={(e) => set({ bucket: e.target.value })}
+                />
+              ) : (
+                <span className={roMono}>{conn.bucket}</span>
+              )}
+            </ConfigRow>
+
+            <ConfigRow label="Region">
+              {editing ? (
+                <Input
+                  aria-label="Region"
+                  className="h-8 w-64"
+                  value={form.region}
+                  onChange={(e) => set({ region: e.target.value })}
+                />
+              ) : (
+                <span className={ro}>{conn.region || "—"}</span>
+              )}
+            </ConfigRow>
+
+            <ConfigRow label="Endpoint">
+              {editing ? (
+                <Input
+                  aria-label="Endpoint"
+                  className="h-8 w-80"
+                  placeholder="Leave blank for AWS"
+                  value={form.endpoint}
+                  onChange={(e) => set({ endpoint: e.target.value })}
+                />
+              ) : (
+                <span className={ro}>{conn.endpoint ?? "AWS default"}</span>
+              )}
+            </ConfigRow>
+
+            <ConfigRow label="Key prefix">
+              {editing ? (
+                <Input
+                  aria-label="Key prefix"
+                  className="h-8 w-64"
+                  placeholder="Optional"
+                  value={form.keyPrefix}
+                  onChange={(e) => set({ keyPrefix: e.target.value })}
+                />
+              ) : (
+                <span className={roMono}>{conn.key_prefix || "—"}</span>
+              )}
+            </ConfigRow>
+
+            <ConfigRow label="Access key">
+              {editing ? (
+                <Input
+                  aria-label="Access key"
+                  className="h-8 w-64"
+                  value={form.accessKey}
+                  onChange={(e) => set({ accessKey: e.target.value })}
+                />
+              ) : (
+                <span className={roMono}>{conn.access_key}</span>
+              )}
+            </ConfigRow>
+
+            <ConfigRow label="Path-style URL">
+              {editing ? (
+                <Select
+                  value={form.pathStyle ? "on" : "off"}
+                  onValueChange={(v) => set({ pathStyle: v === "on" })}
                 >
-                  {r.v}
-                </TableCell>
-              </TableRow>
-            ))}
-            <TableRow>
-              <TableCell className="align-middle font-medium">Secret</TableCell>
-              <TableCell className="align-middle">
+                  <SelectTrigger aria-label="Path-style URL" className="h-8 w-40">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="on">Enabled</SelectItem>
+                    <SelectItem value="off">Disabled</SelectItem>
+                  </SelectContent>
+                </Select>
+              ) : (
+                <span className={ro}>{conn.path_style ? "Enabled" : "Disabled"}</span>
+              )}
+            </ConfigRow>
+
+            <ConfigRow label="Purpose">
+              {editing ? (
+                <Input
+                  aria-label="Purpose"
+                  className="h-8 w-64"
+                  placeholder="Optional"
+                  value={form.purpose}
+                  onChange={(e) => set({ purpose: e.target.value })}
+                />
+              ) : (
+                <span className={ro}>{conn.purpose || "—"}</span>
+              )}
+            </ConfigRow>
+
+            <ConfigRow label="Secret">
+              {editing ? (
+                <Select value={form.secretChoice} onValueChange={(v) => set({ secretChoice: v })}>
+                  <SelectTrigger aria-label="Secret" className="h-8 w-64">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NO_SECRET}>No secret</SelectItem>
+                    {secrets.map((s) => (
+                      <SelectItem key={s.id} value={s.id}>
+                        {s.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
                 <Badge variant={conn.secret_ref ? "secondary" : "outline"}>
                   {conn.secret_ref ? "Configured" : "Not set"}
                 </Badge>
-              </TableCell>
-            </TableRow>
+              )}
+            </ConfigRow>
           </TableBody>
         </Table>
       </div>
+
+      {editing && (
+        <p className="text-xs text-muted-foreground">
+          To rename the connection or mint a new secret, use Edit on the Storage list.
+        </p>
+      )}
     </section>
   );
 }
