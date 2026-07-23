@@ -74,8 +74,9 @@ export function EngineConfigReliability(props: {
         {ftEnabled && (
           <>
             <ConfigTableRow
-              label="Retry policy"
-              fieldKey="retryPolicy"
+              label="retry-policy"
+              mono
+              details="How failures are retried: QUERY (whole query) or TASK (individual tasks). Set in config.properties."
               htmlFor="ced-ft-retry"
             >
               <Select

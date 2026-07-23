@@ -218,7 +218,8 @@ function RoleConfigEditor({
         {value.heapMode === "fixed" ? (
           <ConfigTable>
             <ConfigTableRow
-              label="Max size (-Xmx)"
+              label="-Xmx"
+              mono
               fieldKey={`${keyPrefix}.heap.maxSize`}
               htmlFor={`${idPrefix}-heap-maxsize`}
             >
@@ -230,7 +231,8 @@ function RoleConfigEditor({
               />
             </ConfigTableRow>
             <ConfigTableRow
-              label="Min size (-Xms)"
+              label="-Xms"
+              mono
               fieldKey={`${keyPrefix}.heap.minSize`}
               htmlFor={`${idPrefix}-heap-minsize`}
             >
@@ -245,7 +247,8 @@ function RoleConfigEditor({
         ) : (
           <ConfigTable>
             <ConfigTableRow
-              label="Max RAM percent"
+              label="-XX:MaxRAMPercentage"
+              mono
               fieldKey={`${keyPrefix}.heap.maxPercent`}
               htmlFor={`${idPrefix}-heap-maxpct`}
             >
@@ -261,7 +264,8 @@ function RoleConfigEditor({
               />
             </ConfigTableRow>
             <ConfigTableRow
-              label="Initial RAM percent"
+              label="-XX:InitialRAMPercentage"
+              mono
               fieldKey={`${keyPrefix}.heap.initialPercent`}
               htmlFor={`${idPrefix}-heap-initpct`}
             >

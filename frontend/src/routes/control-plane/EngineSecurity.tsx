@@ -199,8 +199,9 @@ export function EngineSecurity(props: {
       >
         <ConfigTable>
           <ConfigTableRow
-            label="Accept egret JWT"
-            fieldKey="jwtEnabled"
+            label="http-server.authentication.type"
+            mono
+            details="Add JWT to the coordinator authentication types so egret-issued JWTs are accepted."
             htmlFor="ced-jwt-enabled"
           >
             <Switch
@@ -212,8 +213,9 @@ export function EngineSecurity(props: {
           {jwtEnabled && (
             <>
               <ConfigTableRow
-                label="JWKS URI"
-                fieldKey="jwksUri"
+                label="http-server.authentication.jwt.key-file"
+                mono
+                details="JWKS endpoint whose public keys verify incoming JWTs (blank = egret's default IdP)."
                 htmlFor="ced-jwt-jwks"
               >
                 <Input
@@ -225,8 +227,9 @@ export function EngineSecurity(props: {
                 />
               </ConfigTableRow>
               <ConfigTableRow
-                label="Required audience"
-                fieldKey="requiredAudience"
+                label="http-server.authentication.jwt.required-audience"
+                mono
+                details="If set, only JWTs whose aud claim matches this value are accepted."
                 htmlFor="ced-jwt-aud"
               >
                 <Input
