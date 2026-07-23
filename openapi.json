@@ -10014,6 +10014,7 @@
           "kernel-callback"
         ],
         "summary": "`POST /kernel/engine-token` — mint a fresh per-user engine JWT and return the\nengine's connection coordinates so the Daft kernel can open a direct\nconnection. Auth = `EGRET_KERNEL_TOKEN` bearer; identity + workspace come ONLY\nfrom `KernelIdentity`. The engine must be enabled for notebooks in the token's\nworkspace; unknown/disabled engines → 404.",
+        "description": "Feature entitlement is enforced HERE, by hand, for the same reason as in\n`notebook_runtime_token`: this is a kernel-subprocess callback carrying a\nbearer token and no browser session, so it never constructs a `WsContext`\nand the gate that lives there never runs. Letting an in-flight kernel finish\nits work is deliberate; minting it a FRESH engine credential for a module\nthe workspace no longer has is not.",
         "operationId": "engine_token",
         "requestBody": {
           "content": {
@@ -10038,6 +10039,16 @@
           },
           "401": {
             "description": "Missing/invalid EGRET_KERNEL_TOKEN bearer, or the user has no stored refresh token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The notebooks module is switched off for this workspace",
             "content": {
               "application/json": {
                 "schema": {

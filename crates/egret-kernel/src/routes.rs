@@ -740,6 +740,13 @@ struct EngineTokenResp {
 /// connection. Auth = `EGRET_KERNEL_TOKEN` bearer; identity + workspace come ONLY
 /// from `KernelIdentity`. The engine must be enabled for notebooks in the token's
 /// workspace; unknown/disabled engines → 404.
+///
+/// Feature entitlement is enforced HERE, by hand, for the same reason as in
+/// `notebook_runtime_token`: this is a kernel-subprocess callback carrying a
+/// bearer token and no browser session, so it never constructs a `WsContext`
+/// and the gate that lives there never runs. Letting an in-flight kernel finish
+/// its work is deliberate; minting it a FRESH engine credential for a module
+/// the workspace no longer has is not.
 #[utoipa::path(
     post,
     path = "/api/kernel/engine-token",
@@ -748,6 +755,7 @@ struct EngineTokenResp {
     responses(
         (status = 200, description = "Fresh per-user engine JWT + the engine's connection coordinates", body = EngineTokenResp),
         (status = 401, description = "Missing/invalid EGRET_KERNEL_TOKEN bearer, or the user has no stored refresh token", body = ErrorBody),
+        (status = 403, description = "The notebooks module is switched off for this workspace", body = ErrorBody),
         (status = 404, description = "Engine not enabled for notebooks in the token's workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -757,6 +765,23 @@ async fn engine_token(
     id: KernelIdentity,
     Json(req): Json<EngineTokenReq>,
 ) -> Result<Json<EngineTokenResp>, KernelApiError> {
+    // The feature catalog is keyed by request path, and this route is not
+    // workspace-scoped by URL (`/api/kernel/engine-token`), so `gated_feature`
+    // has nothing to match on and the key is named directly. The workspace is
+    // the one the KERNEL TOKEN is bound to — never a URL segment. This callback
+    // exists to serve notebook kernels, so `notebooks` is the module that owns
+    // it.
+    if st
+        .workspaces
+        .disabled_features(egret_core::WorkspaceId(id.workspace_id))
+        .await
+        .map_err(KernelApiError)?
+        .contains("notebooks")
+    {
+        return Err(KernelApiError(egret_core::Error::FeatureDisabled(
+            "notebooks",
+        )));
+    }
     let engines = st
         .notebook_docs
         .list_engine_options(id.workspace_id)

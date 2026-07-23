@@ -5,6 +5,22 @@
 //! An **absent row means enabled**. Only explicit `enabled = false` rows turn a
 //! module off, so a fresh install and every pre-existing workspace behave
 //! exactly as they did before this feature existed.
+//!
+//! # What this catalog does NOT cover
+//!
+//! The gate in `WsContext` matches on the request path, so it reaches a route
+//! only if that route builds a `WsContext`. Two kernel-subprocess callbacks
+//! never do — they are authenticated by an `EGRET_KERNEL_TOKEN` bearer with no
+//! browser session — and so assert the entitlement by hand instead, against the
+//! workspace their kernel token is bound to:
+//!
+//! - `notebook_runtime_token` (`POST /api/ws/{workspace}/notebook-runtime/token`)
+//! - `engine_token` (`POST /api/kernel/engine-token`, not workspace-scoped by
+//!   URL at all, so no catalog rule could match it)
+//!
+//! Both live in `egret-kernel`'s `routes.rs`. Auditing this feature by reading
+//! the catalog alone would miss them, which is why they are named here. Anything
+//! else that mints a capability without a `WsContext` belongs on this list.
 
 use std::collections::HashSet;
 
