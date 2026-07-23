@@ -29,7 +29,6 @@ import {
   recordToKv,
   sessionRulesToForm,
 } from "./EngineResourceGroups";
-import { knownProperties } from "./config/knownProperties";
 import { diffConfig } from "./config/configDiff";
 
 // Re-exported so config sub-tab components (Tasks 2-5) can import from the hook.
@@ -143,6 +142,12 @@ export type RoleForm = {
   affinity: AffinityForm;
   terminationGraceSeconds: string;
   additionalExposedPorts: ContainerPortForm[];
+  // Per-role pod shape (chart coordinator.* / worker.*).
+  initContainers: MiniContainer[];
+  sidecarContainers: MiniContainer[];
+  configMounts: ObjectMount[];
+  secretMounts: ObjectMount[];
+  shareProcessNamespace: boolean;
 };
 
 /** Stringify a parsed raw-override object back to editable JSON text (or ""). */
@@ -161,7 +166,47 @@ function textToRaw(s: string): unknown {
   }
 }
 
-function roleToForm(rc: RoleConfig | undefined): RoleForm {
+/** Drop container rows with neither a name nor a raw override. */
+function cleanContainers(list: MiniContainer[]): MiniContainer[] {
+  return list.filter((c) => c.name.trim() || c.rawOverride !== undefined);
+}
+
+/** Trim + drop object-mount rows missing a name or mount path. */
+function cleanMounts(list: ObjectMount[]): ObjectMount[] {
+  return list
+    .map((m) => {
+      const out: ObjectMount = { name: m.name.trim(), mountPath: m.mountPath.trim() };
+      if (m.subPath?.trim()) out.subPath = m.subPath.trim();
+      if (m.defaultMode !== undefined) out.defaultMode = m.defaultMode;
+      return out;
+    })
+    .filter((m) => m.name && m.mountPath);
+}
+
+// The dedicated `queryMaxMemory` / `logLevel` fields were folded into the
+// config.properties / log.properties tables (chart `server.config.query.maxMemory`
+// = a `query.max-memory` entry; `server.log.trino.level` = an `io.trino` entry).
+// Migrate a legacy engine's structured values into the maps on seed; an existing
+// map entry wins over the legacy value.
+function seedConfigProps(tc: TrinoConfig | undefined): Kv[] {
+  return recordToKv({
+    ...(tc?.queryMaxMemory ? { "query.max-memory": tc.queryMaxMemory } : {}),
+    ...tc?.configProperties,
+  });
+}
+function seedLogProps(tc: TrinoConfig | undefined): Kv[] {
+  return recordToKv({
+    ...(tc?.logLevel && tc.logLevel !== "INFO" ? { "io.trino": tc.logLevel } : {}),
+    ...tc?.additionalLogProperties,
+  });
+}
+
+function roleToForm(
+  rc: RoleConfig | undefined,
+  // Cluster-wide legacy fallback (old engines carried the pod-shape fields at the
+  // top level of trinoConfig; apply them to a role when it has none of its own).
+  tc?: TrinoConfig,
+): RoleForm {
   const heap = rc?.heap;
   // Prefer percent mode only when a percent is set and no fixed size is present.
   const heapMode: RoleForm["heapMode"] =
@@ -211,6 +256,16 @@ function roleToForm(rc: RoleConfig | undefined): RoleForm {
       name: p.name,
       containerPort: p.containerPort?.toString() ?? "",
     })),
+    initContainers: (rc?.initContainers ?? tc?.initContainers ?? []).map((c) => ({
+      ...c,
+    })),
+    sidecarContainers: (rc?.sidecarContainers ?? tc?.sidecarContainers ?? []).map(
+      (c) => ({ ...c }),
+    ),
+    configMounts: (rc?.configMounts ?? tc?.configMounts ?? []).map((m) => ({ ...m })),
+    secretMounts: (rc?.secretMounts ?? tc?.secretMounts ?? []).map((m) => ({ ...m })),
+    shareProcessNamespace:
+      rc?.shareProcessNamespace ?? tc?.shareProcessNamespace ?? false,
   };
 }
 
@@ -322,6 +377,17 @@ function formToRole(f: RoleForm): RoleConfig {
     }))
     .filter((p) => p.name);
   if (ports.length) rc.additionalExposedPorts = ports;
+
+  // Per-role pod shape.
+  const inits = cleanContainers(f.initContainers);
+  if (inits.length) rc.initContainers = inits;
+  const sidecars = cleanContainers(f.sidecarContainers);
+  if (sidecars.length) rc.sidecarContainers = sidecars;
+  const cfgMounts = cleanMounts(f.configMounts);
+  if (cfgMounts.length) rc.configMounts = cfgMounts;
+  const secMounts = cleanMounts(f.secretMounts);
+  if (secMounts.length) rc.secretMounts = secMounts;
+  if (f.shareProcessNamespace) rc.shareProcessNamespace = true;
 
   return rc;
 }
@@ -563,14 +629,6 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
   const coordinator: RoleConfig | undefined = cfg.coordinator;
   const worker = cfg.worker;
 
-  // Guided known-property sections: count how many of a section's known keys
-  // are set (non-empty) in the raw config.properties map.
-  const props = cfg.configProperties ?? {};
-  const knownSectionCount = (section: string): number =>
-    knownProperties.filter(
-      (p) => p.section === section && (props[p.key] ?? "").trim() !== "",
-    ).length;
-
   const keyCount = (r: Record<string, string> | undefined): number =>
     r ? Object.keys(r).length : 0;
 
@@ -581,11 +639,10 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
     keyCount(cfg.configProperties) +
     keyCount(cfg.additionalNodeProperties) +
     keyCount(cfg.additionalLogProperties) +
-    (present(cfg.queryMaxMemory) ? 1 : 0) +
-    (cfg.logLevel !== undefined && cfg.logLevel !== "INFO" ? 1 : 0) +
     (keyCount(cfg.eventListener) > 0 ? 1 : 0);
 
-  // Pod-level (cluster-wide) scheduling field-groups.
+  // Pod-level (cluster-wide) field-groups. init/sidecar containers, mounts and
+  // shareProcessNamespace are per-role now (counted under coordinator/worker).
   const podCount = [
     cfg.serviceAccount,
     cfg.podSecurityContext,
@@ -594,36 +651,48 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
     cfg.deploymentAnnotations,
     cfg.revisionHistoryLimit,
     cfg.progressDeadlineSeconds,
-    cfg.shareProcessNamespace,
   ].filter(present).length;
 
-  const containersMountsCount = [
-    cfg.initContainers,
-    cfg.sidecarContainers,
-    cfg.envFrom,
-    cfg.configMounts,
-    cfg.secretMounts,
-  ].filter(present).length;
+  // Per-role pod shape (chart coordinator.* / worker.*).
+  const rolePodShapeCount = (rc: RoleConfig | undefined): number =>
+    rc
+      ? [
+          rc.initContainers,
+          rc.sidecarContainers,
+          rc.configMounts,
+          rc.secretMounts,
+          rc.shareProcessNamespace,
+        ].filter(present).length
+      : 0;
 
   return {
     image:
       (present(cfg.image) ? 1 : 0) +
       (present(cfg.imagePullPolicy) ? 1 : 0) +
       ((cfg.imagePullSecrets?.length ?? 0) > 0 ? 1 : 0),
-    server: propertiesCount + (present(cfg.faultTolerant) ? 1 : 0) + knownSectionCount("reliability"),
-    coordinator: roleCoreCount(coordinator) + rolePlacementCount(coordinator),
+    // The reliability retry-attempt caps live in configProperties, so they are
+    // already counted by keyCount(configProperties) inside propertiesCount —
+    // don't add them again here.
+    server: propertiesCount + (present(cfg.faultTolerant) ? 1 : 0),
+    coordinator:
+      roleCoreCount(coordinator) +
+      rolePlacementCount(coordinator) +
+      rolePodShapeCount(coordinator),
     worker:
       roleCoreCount(worker) +
       rolePlacementCount(worker) +
+      rolePodShapeCount(worker) +
       (present(worker?.gracefulShutdown) ? 1 : 0),
     workload: [cfg.resourceGroups, cfg.sessionProperties].filter(present).length,
-    pod: podCount + (present(cfg.env) ? 1 : 0) + containersMountsCount,
+    pod: podCount + (present(cfg.env) ? 1 : 0) + (present(cfg.envFrom) ? 1 : 0),
     autoscaling: [cfg.autoscaling].filter(present).length,
     // Security & Exposure field-groups: password users, egret-JWT acceptance,
-    // and coordinator ingress. Mirrors the StarRocks security nav badge.
+    // a non-default per-user delegation mode, and coordinator ingress. Mirrors
+    // the StarRocks security nav badge.
     security:
       ((cfg.auth?.passwordUsers?.length ?? 0) > 0 ? 1 : 0) +
       (cfg.auth?.jwt != null ? 1 : 0) +
+      (present(cfg.delegationMode) ? 1 : 0) +
       (present(cfg.ingress) ? 1 : 0),
   };
 }
@@ -632,10 +701,6 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
 
 export interface EngineConfigForm {
   // cluster-wide
-  queryMaxMemory: string;
-  setQueryMaxMemory: (v: string) => void;
-  logLevel: string;
-  setLogLevel: (v: string) => void;
   configProps: Kv[];
   setConfigProps: Dispatch<SetStateAction<Kv[]>>;
   // Guided read/write over a raw property map, routed by config file.
@@ -720,16 +785,8 @@ export interface EngineConfigForm {
   setPodSecurityContext: Dispatch<SetStateAction<SecurityContext>>;
   containerSecurityContext: SecurityContext;
   setContainerSecurityContext: Dispatch<SetStateAction<SecurityContext>>;
-  initContainers: MiniContainer[];
-  setInitContainers: Dispatch<SetStateAction<MiniContainer[]>>;
-  sidecarContainers: MiniContainer[];
-  setSidecarContainers: Dispatch<SetStateAction<MiniContainer[]>>;
   envFrom: EnvFromSource[];
   setEnvFrom: Dispatch<SetStateAction<EnvFromSource[]>>;
-  configMounts: ObjectMount[];
-  setConfigMounts: Dispatch<SetStateAction<ObjectMount[]>>;
-  secretMounts: ObjectMount[];
-  setSecretMounts: Dispatch<SetStateAction<ObjectMount[]>>;
   deploymentStrategy: DeploymentStrategy;
   setDeploymentStrategy: Dispatch<SetStateAction<DeploymentStrategy>>;
   deploymentAnnotations: Kv[];
@@ -738,8 +795,6 @@ export interface EngineConfigForm {
   setRevisionHistoryLimit: (v: string) => void;
   progressDeadlineSeconds: string;
   setProgressDeadlineSeconds: (v: string) => void;
-  shareProcessNamespace: boolean;
-  setShareProcessNamespace: (v: boolean) => void;
   // autoscaling
   autoscaleMode: AutoscaleMode;
   setAutoscaleMode: (v: AutoscaleMode) => void;
@@ -778,12 +833,10 @@ export function useEngineConfigForm(
   const queryClient = useQueryClient();
   const tc = engine.spec.trinoConfig;
 
-  // Cluster-wide config.
-  const [queryMaxMemory, setQueryMaxMemory] = useState(tc?.queryMaxMemory ?? "");
-  const [logLevel, setLogLevel] = useState(tc?.logLevel ?? "INFO");
-  const [configProps, setConfigProps] = useState<Kv[]>(
-    recordToKv(tc?.configProperties),
-  );
+  // Cluster-wide config. query.max-memory + the io.trino log level live in the
+  // config.properties / log.properties tables (legacy structured values migrated
+  // in via seedConfigProps / seedLogProps).
+  const [configProps, setConfigProps] = useState<Kv[]>(seedConfigProps(tc));
   const [env, setEnv] = useState<Kv[]>(recordToKv(tc?.env));
 
   // Raw property maps (config-file surface).
@@ -793,9 +846,7 @@ export function useEngineConfigForm(
   const [nodeProps, setNodeProps] = useState<Kv[]>(
     recordToKv(tc?.additionalNodeProperties),
   );
-  const [logProps, setLogProps] = useState<Kv[]>(
-    recordToKv(tc?.additionalLogProperties),
-  );
+  const [logProps, setLogProps] = useState<Kv[]>(seedLogProps(tc));
 
   // Fault-tolerant execution.
   const [ftEnabled, setFtEnabled] = useState(tc?.faultTolerant != null);
@@ -810,8 +861,10 @@ export function useEngineConfigForm(
   );
 
   // Per-role config.
-  const [coordinator, setCoordinator] = useState<RoleForm>(roleToForm(tc?.coordinator));
-  const [worker, setWorker] = useState<RoleForm>(roleToForm(tc?.worker));
+  const [coordinator, setCoordinator] = useState<RoleForm>(
+    roleToForm(tc?.coordinator, tc),
+  );
+  const [worker, setWorker] = useState<RoleForm>(roleToForm(tc?.worker, tc));
   const [gsEnabled, setGsEnabled] = useState(
     tc?.worker?.gracefulShutdown?.enabled ?? false,
   );
@@ -872,20 +925,10 @@ export function useEngineConfigForm(
         ? { ...tc.containerSecurityContext }
         : emptySecurityContext(),
     );
-  const [initContainers, setInitContainers] = useState<MiniContainer[]>(
-    tc?.initContainers ? tc.initContainers.map((c) => ({ ...c })) : [],
-  );
-  const [sidecarContainers, setSidecarContainers] = useState<MiniContainer[]>(
-    tc?.sidecarContainers ? tc.sidecarContainers.map((c) => ({ ...c })) : [],
-  );
+  // init/sidecar containers, config/secret mounts and shareProcessNamespace are
+  // per-role now — they live on the coordinator/worker RoleForm state above.
   const [envFrom, setEnvFrom] = useState<EnvFromSource[]>(
     tc?.envFrom ? tc.envFrom.map((e) => ({ ...e })) : [],
-  );
-  const [configMounts, setConfigMounts] = useState<ObjectMount[]>(
-    tc?.configMounts ? tc.configMounts.map((m) => ({ ...m })) : [],
-  );
-  const [secretMounts, setSecretMounts] = useState<ObjectMount[]>(
-    tc?.secretMounts ? tc.secretMounts.map((m) => ({ ...m })) : [],
   );
   const [deploymentStrategy, setDeploymentStrategy] = useState<DeploymentStrategy>(
     tc?.deploymentStrategy
@@ -900,9 +943,6 @@ export function useEngineConfigForm(
   );
   const [progressDeadlineSeconds, setProgressDeadlineSeconds] = useState(
     tc?.progressDeadlineSeconds?.toString() ?? "",
-  );
-  const [shareProcessNamespace, setShareProcessNamespace] = useState(
-    tc?.shareProcessNamespace ?? false,
   );
 
   // Autoscaling (HPA / KEDA on the worker Deployment).
@@ -959,19 +999,17 @@ export function useEngineConfigForm(
     const specChanged =
       loadedSpecRef.current === undefined ||
       diffConfig(loadedSpecRef.current, next ?? {}).length > 0;
-    setQueryMaxMemory(next?.queryMaxMemory ?? "");
-    setLogLevel(next?.logLevel ?? "INFO");
-    setConfigProps(recordToKv(next?.configProperties));
+    setConfigProps(seedConfigProps(next));
     setEnv(recordToKv(next?.env));
     setEventListener(recordToKv(next?.eventListener));
     setNodeProps(recordToKv(next?.additionalNodeProperties));
-    setLogProps(recordToKv(next?.additionalLogProperties));
+    setLogProps(seedLogProps(next));
     setFtEnabled(next?.faultTolerant != null);
     setRetryPolicy(next?.faultTolerant?.retryPolicy ?? "TASK");
     setExchangeStorageConnId(next?.faultTolerant?.exchangeStorageConnId ?? "");
     setExchangePrefix(next?.faultTolerant?.exchangePrefix ?? "exchange");
-    setCoordinator(roleToForm(next?.coordinator));
-    setWorker(roleToForm(next?.worker));
+    setCoordinator(roleToForm(next?.coordinator, next));
+    setWorker(roleToForm(next?.worker, next));
     setGsEnabled(next?.worker?.gracefulShutdown?.enabled ?? false);
     setGracePeriod(
       next?.worker?.gracefulShutdown?.gracePeriodSeconds?.toString() ?? "",
@@ -1003,19 +1041,7 @@ export function useEngineConfigForm(
         ? { ...next.containerSecurityContext }
         : emptySecurityContext(),
     );
-    setInitContainers(
-      next?.initContainers ? next.initContainers.map((c) => ({ ...c })) : [],
-    );
-    setSidecarContainers(
-      next?.sidecarContainers ? next.sidecarContainers.map((c) => ({ ...c })) : [],
-    );
     setEnvFrom(next?.envFrom ? next.envFrom.map((e) => ({ ...e })) : []);
-    setConfigMounts(
-      next?.configMounts ? next.configMounts.map((m) => ({ ...m })) : [],
-    );
-    setSecretMounts(
-      next?.secretMounts ? next.secretMounts.map((m) => ({ ...m })) : [],
-    );
     setDeploymentStrategy(
       next?.deploymentStrategy
         ? { ...next.deploymentStrategy }
@@ -1024,7 +1050,6 @@ export function useEngineConfigForm(
     setDeploymentAnnotations(recordToKv(next?.deploymentAnnotations));
     setRevisionHistoryLimit(next?.revisionHistoryLimit?.toString() ?? "");
     setProgressDeadlineSeconds(next?.progressDeadlineSeconds?.toString() ?? "");
-    setShareProcessNamespace(next?.shareProcessNamespace ?? false);
     setAutoscaleMode(next?.autoscaling?.mode ?? "");
     setAutoscaleHpa(hpaToForm(next?.autoscaling?.hpa));
     setAutoscaleKeda(kedaToForm(next?.autoscaling?.keda));
@@ -1050,8 +1075,8 @@ export function useEngineConfigForm(
       coordinator: formToRole(coordinator),
       worker: formToRole(worker),
     };
-    if (queryMaxMemory.trim()) trinoConfig.queryMaxMemory = queryMaxMemory.trim();
-    if (logLevel) trinoConfig.logLevel = logLevel;
+    // query.max-memory + the io.trino log level are serialized as entries in
+    // configProperties / additionalLogProperties (below) — no structured fields.
     const cp = kvToRecord(configProps);
     if (Object.keys(cp).length) trinoConfig.configProperties = cp;
     const ev = kvToRecord(env);
@@ -1145,13 +1170,9 @@ export function useEngineConfigForm(
     const ctrSc = cleanSecurityContext(containerSecurityContext);
     if (ctrSc) trinoConfig.containerSecurityContext = ctrSc;
 
-    const cleanContainers = (list: MiniContainer[]): MiniContainer[] =>
-      list.filter((c) => c.name.trim() || c.rawOverride !== undefined);
-    const inits = cleanContainers(initContainers);
-    if (inits.length) trinoConfig.initContainers = inits;
-    const sidecars = cleanContainers(sidecarContainers);
-    if (sidecars.length) trinoConfig.sidecarContainers = sidecars;
-
+    // envFrom stays cluster-wide (chart top-level `envFrom`). init/sidecar
+    // containers, config/secret mounts and shareProcessNamespace are now
+    // per-role — serialized under coordinator/worker via formToRole.
     const cleanEnvFrom = envFrom
       .map((e) => {
         const out: EnvFromSource = {};
@@ -1161,20 +1182,6 @@ export function useEngineConfigForm(
       })
       .filter((e) => Object.keys(e).length);
     if (cleanEnvFrom.length) trinoConfig.envFrom = cleanEnvFrom;
-
-    const cleanMounts = (list: ObjectMount[]): ObjectMount[] =>
-      list
-        .map((m) => {
-          const out: ObjectMount = { name: m.name.trim(), mountPath: m.mountPath.trim() };
-          if (m.subPath?.trim()) out.subPath = m.subPath.trim();
-          if (m.defaultMode !== undefined) out.defaultMode = m.defaultMode;
-          return out;
-        })
-        .filter((m) => m.name && m.mountPath);
-    const cfgMounts = cleanMounts(configMounts);
-    if (cfgMounts.length) trinoConfig.configMounts = cfgMounts;
-    const secMounts = cleanMounts(secretMounts);
-    if (secMounts.length) trinoConfig.secretMounts = secMounts;
 
     if (deploymentStrategy.kind) {
       const ds: DeploymentStrategy = { kind: deploymentStrategy.kind };
@@ -1193,7 +1200,6 @@ export function useEngineConfigForm(
     const progDeadline = numOrUndef(progressDeadlineSeconds);
     if (progDeadline !== undefined)
       trinoConfig.progressDeadlineSeconds = progDeadline;
-    if (shareProcessNamespace) trinoConfig.shareProcessNamespace = true;
 
     // Autoscaling — dropped entirely when the mode is off.
     const autoscaling = formToAutoscaling(autoscaleMode, autoscaleHpa, autoscaleKeda);
@@ -1203,8 +1209,6 @@ export function useEngineConfigForm(
   }, [
     coordinator,
     worker,
-    queryMaxMemory,
-    logLevel,
     configProps,
     env,
     eventListener,
@@ -1235,16 +1239,11 @@ export function useEngineConfigForm(
     imagePullPolicy,
     podSecurityContext,
     containerSecurityContext,
-    initContainers,
-    sidecarContainers,
     envFrom,
-    configMounts,
-    secretMounts,
     deploymentStrategy,
     deploymentAnnotations,
     revisionHistoryLimit,
     progressDeadlineSeconds,
-    shareProcessNamespace,
     autoscaleMode,
     autoscaleHpa,
     autoscaleKeda,
@@ -1324,10 +1323,6 @@ export function useEngineConfigForm(
     diffConfig(editBaselineRef.current, builtTrinoConfig).length > 0;
 
   return {
-    queryMaxMemory,
-    setQueryMaxMemory,
-    logLevel,
-    setLogLevel,
     configProps,
     setConfigProps,
     getProp,
@@ -1400,16 +1395,8 @@ export function useEngineConfigForm(
     setPodSecurityContext,
     containerSecurityContext,
     setContainerSecurityContext,
-    initContainers,
-    setInitContainers,
-    sidecarContainers,
-    setSidecarContainers,
     envFrom,
     setEnvFrom,
-    configMounts,
-    setConfigMounts,
-    secretMounts,
-    setSecretMounts,
     deploymentStrategy,
     setDeploymentStrategy,
     deploymentAnnotations,
@@ -1418,8 +1405,6 @@ export function useEngineConfigForm(
     setRevisionHistoryLimit,
     progressDeadlineSeconds,
     setProgressDeadlineSeconds,
-    shareProcessNamespace,
-    setShareProcessNamespace,
     autoscaleMode,
     setAutoscaleMode,
     autoscaleHpa,

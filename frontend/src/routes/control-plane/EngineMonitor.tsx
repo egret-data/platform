@@ -36,13 +36,6 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import {
@@ -117,9 +110,9 @@ function truncate(s: string, max: number): string {
  * Control Plane → Engine → Monitor tab.
  *
  * A live (3s-polled) view of the coordinator's queries + cluster stats, served
- * by egret proxying the Trino REST API. Supports client-side state/text filter
- * and killing a running query. The per-query detail panel + stage visualizer is
- * Task 7 — a `selectedQid` seam is left here for it to consume.
+ * by egret proxying the Trino REST API. Supports client-side state/text filter,
+ * killing a running query, and a per-query detail panel (with a stage tree)
+ * opened from the query-id cell.
  */
 export default function EngineMonitor({ engineId }: { engineId: string }) {
   const queryClient = useQueryClient();
@@ -138,7 +131,7 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
     retry: false,
   });
 
-  // ── The selected query id drives the detail panel (Task 7). ──
+  // ── The selected query id drives the detail panel. ──
   // Lives in the URL (`?qid=`) so an open query is deep-linkable and survives a
   // refresh. Merged alongside EngineDetail's `?tab=`. Default preserved: none.
   const [sp, setSp] = useSearchParams();
@@ -174,6 +167,9 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
     mutationFn: (qid) => killQuery(engineId, qid),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["queries", engineId] });
+      // Also refresh the per-query detail so an open detail dialog reflects the
+      // kill instead of showing a stale RUNNING state.
+      queryClient.invalidateQueries({ queryKey: ["query", engineId] });
       setKillTarget(null);
     },
   });
@@ -200,7 +196,7 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
 
   return (
     <div className="space-y-5">
-      <ClusterStrip cluster={cluster.data} />
+      <ClusterStrip cluster={cluster.data} unreachable={unreachable} />
 
       {unreachable && (
         <Alert variant="destructive">
@@ -210,39 +206,37 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
         </Alert>
       )}
 
-      <Card>
-        <CardHeader>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <div className="space-y-1.5">
-              <CardTitle className="text-lg">Queries</CardTitle>
-              <CardDescription>
-                Live queries on the coordinator, refreshed every 3s.
-              </CardDescription>
-            </div>
-            <div className="flex items-center gap-2">
-              <Select value={stateFilter} onValueChange={setStateFilter}>
-                <SelectTrigger className="w-[140px]" aria-label="State filter">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {STATE_FILTERS.map((s) => (
-                    <SelectItem key={s} value={s}>
-                      {s === "ALL" ? "All states" : s}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search user or SQL…"
-                className="w-[220px]"
-                aria-label="Search queries"
-              />
-            </div>
+      <section className="space-y-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div className="space-y-1">
+            <h2 className="text-base font-semibold">Queries</h2>
+            <p className="text-sm text-muted-foreground">
+              Live queries on the coordinator, refreshed every 3s.
+            </p>
           </div>
-        </CardHeader>
-        <CardContent>
+          <div className="flex items-center gap-2">
+            <Select value={stateFilter} onValueChange={setStateFilter}>
+              <SelectTrigger className="w-[140px]" aria-label="State filter">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {STATE_FILTERS.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {s === "ALL" ? "All states" : s}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search user or SQL…"
+              className="w-[220px]"
+              aria-label="Search queries"
+            />
+          </div>
+        </div>
+        <div className="overflow-x-auto rounded-md border">
           <Table>
             <TableHeader>
               <TableRow>
@@ -276,21 +270,16 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
                 </TableRow>
               ) : (
                 rows.map((q) => (
-                  <TableRow
-                    key={q.id}
-                    className="cursor-pointer"
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => setSelectedQid(q.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        setSelectedQid(q.id);
-                      }
-                    }}
-                  >
+                  <TableRow key={q.id} className="hover:bg-muted/50">
                     <TableCell className="font-mono text-xs">
-                      {truncate(q.id, 20)}
+                      <button
+                        type="button"
+                        title={q.id}
+                        className="text-left hover:underline focus-visible:underline focus-visible:outline-none"
+                        onClick={() => setSelectedQid(q.id)}
+                      >
+                        {truncate(q.id, 20)}
+                      </button>
                     </TableCell>
                     <TableCell>{q.user}</TableCell>
                     <TableCell>
@@ -328,10 +317,7 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
                           variant="ghost"
                           size="sm"
                           className="text-destructive hover:text-destructive"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setKillTarget(q);
-                          }}
+                          onClick={() => setKillTarget(q)}
                         >
                           <Ban className="h-4 w-4" />
                           Kill
@@ -343,8 +329,8 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
               )}
             </TableBody>
           </Table>
-        </CardContent>
-      </Card>
+        </div>
+      </section>
 
       <Dialog
         open={selectedQid !== null}
@@ -452,7 +438,10 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
       <AlertDialog
         open={killTarget !== null}
         onOpenChange={(o) => {
-          if (!o) setKillTarget(null);
+          if (!o) {
+            setKillTarget(null);
+            killMutation.reset();
+          }
         }}
       >
         <AlertDialogContent>
@@ -464,6 +453,11 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
               cancelled on the coordinator. This cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {killMutation.isError && (
+            <p className="text-sm text-destructive">
+              {killMutation.error?.message ?? "Failed to kill the query."}
+            </p>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
@@ -486,15 +480,23 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
   );
 }
 
-/** A compact strip of cluster-wide counters + node count. */
-function ClusterStrip({ cluster }: { cluster: ClusterInfo | undefined }) {
+/** A compact strip of cluster-wide counters + node count. Shows em-dashes when
+ *  the coordinator is unreachable so it doesn't read as a healthy idle cluster. */
+function ClusterStrip({
+  cluster,
+  unreachable,
+}: {
+  cluster: ClusterInfo | undefined;
+  unreachable?: boolean;
+}) {
+  const v = (n: number | undefined) => (unreachable ? "—" : (n ?? 0));
   return (
     <SummaryStrip
       items={[
-        { label: "running", value: cluster?.running ?? 0 },
-        { label: "queued", value: cluster?.queued ?? 0 },
-        { label: "blocked", value: cluster?.blocked ?? 0 },
-        { label: "nodes", value: cluster?.nodes.length ?? 0 },
+        { label: "running", value: v(cluster?.running) },
+        { label: "queued", value: v(cluster?.queued) },
+        { label: "blocked", value: v(cluster?.blocked) },
+        { label: "nodes", value: v(cluster?.nodes.length) },
       ]}
     />
   );

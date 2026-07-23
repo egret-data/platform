@@ -691,6 +691,12 @@ export interface RoleConfig {
   affinity?: Affinity;
   terminationGraceSeconds?: number;
   additionalExposedPorts?: ContainerPort[];
+  // Per-role pod shape (chart coordinator.* / worker.*).
+  initContainers?: MiniContainer[];
+  sidecarContainers?: MiniContainer[];
+  configMounts?: ObjectMount[];
+  secretMounts?: ObjectMount[];
+  shareProcessNamespace?: boolean;
 }
 
 /** A Trino file resource-group node (recursive tree). */
@@ -775,15 +781,18 @@ export interface TrinoConfig {
   serviceAccount?: string;
   podSecurityContext?: SecurityContext;
   containerSecurityContext?: SecurityContext;
-  initContainers?: MiniContainer[];
-  sidecarContainers?: MiniContainer[];
   envFrom?: EnvFromSource[];
-  configMounts?: ObjectMount[];
-  secretMounts?: ObjectMount[];
   deploymentStrategy?: DeploymentStrategy;
   deploymentAnnotations?: Record<string, string>;
   revisionHistoryLimit?: number;
   progressDeadlineSeconds?: number;
+  // LEGACY (read-only): engines stored before per-role pod shape carried these
+  // at the top level. Still read when seeding old engines (falls back onto both
+  // roles); new saves write them under coordinator/worker (RoleConfig) instead.
+  initContainers?: MiniContainer[];
+  sidecarContainers?: MiniContainer[];
+  configMounts?: ObjectMount[];
+  secretMounts?: ObjectMount[];
   shareProcessNamespace?: boolean;
   // Autoscaling (Phase 1.5.4): either a native HorizontalPodAutoscaler or a
   // KEDA ScaledObject on the worker Deployment. Omitted entirely when off.

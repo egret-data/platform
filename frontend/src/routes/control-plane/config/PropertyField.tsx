@@ -10,7 +10,79 @@ import { Switch } from "@/components/ui/switch";
 import { FieldLabel } from "./FieldLabel";
 import type { KnownProperty } from "./knownProperties";
 import { SELECT_NONE } from "./podEditors";
-import { QuantityInput } from "./QuantityInput";
+import { QuantityInput, QuantityValue } from "./QuantityInput";
+
+/**
+ * The bare control for a single `KnownProperty` — the widget only, no label
+ * (the key + help live in the Setting/Details columns of a {@link ConfigTable}).
+ * Mirrors {@link PropertyField}'s type switch. Used in property-map table rows.
+ */
+export function PropertyValue({
+  prop,
+  value,
+  onChange,
+  ariaLabel,
+}: {
+  prop: KnownProperty;
+  value: string;
+  onChange: (v: string) => void;
+  /** Accessible name for the control (the property key), since these rows have
+   *  no visible <label htmlFor> association. */
+  ariaLabel?: string;
+}) {
+  if (prop.type === "size") {
+    return (
+      <QuantityValue
+        value={value}
+        onChange={onChange}
+        placeholder={prop.default}
+        ariaLabel={ariaLabel}
+      />
+    );
+  }
+  if (prop.type === "enum") {
+    return (
+      <Select
+        value={value || SELECT_NONE}
+        onValueChange={(v) => onChange(v === SELECT_NONE ? "" : v)}
+      >
+        <SelectTrigger className="w-full" aria-label={ariaLabel}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={SELECT_NONE}>(default)</SelectItem>
+          {(prop.enumOptions ?? []).map((opt) => (
+            <SelectItem key={opt} value={opt}>
+              {opt}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    );
+  }
+  if (prop.type === "boolean") {
+    // Off writes an explicit "false" (not ""), so a server-present boolean can
+    // be set false without the blank-value → delete-key rule dropping the row.
+    // Removing the property entirely is done via the row's Remove button.
+    return (
+      <Switch
+        aria-label={ariaLabel}
+        checked={value === "true"}
+        onCheckedChange={(v) => onChange(v ? "true" : "false")}
+      />
+    );
+  }
+  // number | duration | string
+  return (
+    <Input
+      className="w-full"
+      aria-label={ariaLabel}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={prop.default}
+    />
+  );
+}
 
 /**
  * Renders the appropriate input widget for a single `KnownProperty` by its

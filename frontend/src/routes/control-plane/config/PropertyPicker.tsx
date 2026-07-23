@@ -24,10 +24,14 @@ function Chip({ children }: { children: React.ReactNode }) {
  */
 export function PropertyPicker({
   catalog,
+  excludeKeys,
   onAddCatalog,
   onAddCustom,
 }: {
   catalog: TrinoProp[];
+  /** Keys already present in the list — hidden from the picker so a property
+   *  can't be added twice. */
+  excludeKeys?: Set<string>;
   onAddCatalog: (prop: TrinoProp) => void;
   onAddCustom: (key: string) => void;
 }) {
@@ -35,14 +39,17 @@ export function PropertyPicker({
   const [query, setQuery] = useState("");
 
   const q = query.trim().toLowerCase();
-  const matches = q
-    ? catalog
-        .filter(
-          (p) =>
-            p.key.toLowerCase().includes(q) || p.help.toLowerCase().includes(q),
-        )
-        .slice(0, MAX_ADD_RESULTS)
-    : catalog.slice(0, MAX_ADD_RESULTS);
+  const available = excludeKeys
+    ? catalog.filter((p) => !excludeKeys.has(p.key))
+    : catalog;
+  const filtered = q
+    ? available.filter(
+        (p) =>
+          p.key.toLowerCase().includes(q) || p.help.toLowerCase().includes(q),
+      )
+    : available;
+  const matches = filtered.slice(0, MAX_ADD_RESULTS);
+  const truncated = filtered.length - matches.length;
 
   const close = () => {
     setOpen(false);
@@ -57,6 +64,11 @@ export function PropertyPicker({
   const addCustom = () => {
     const key = query.trim();
     if (!key) return;
+    // Already in the list — nothing to add.
+    if (excludeKeys?.has(key)) {
+      close();
+      return;
+    }
     const existing = catalog.find((p) => p.key === key);
     if (existing) selectProp(existing);
     else {
@@ -87,7 +99,11 @@ export function PropertyPicker({
           if (e.key === "Escape") close();
           else if (e.key === "Enter") {
             e.preventDefault();
-            addCustom();
+            // Prefer the top catalog match (autocomplete); only add a custom
+            // key when the query matches nothing — otherwise a partial search
+            // like "memory" would create a bogus "memory" key.
+            if (matches.length > 0) selectProp(matches[0]);
+            else addCustom();
           }
         }}
         className="pl-8"
@@ -112,7 +128,7 @@ export function PropertyPicker({
             </button>
           </li>
         ))}
-        {q && !matches.some((p) => p.key === q) && (
+        {q && !matches.some((p) => p.key === q) && !excludeKeys?.has(query.trim()) && (
           <li>
             <button
               type="button"
@@ -123,6 +139,11 @@ export function PropertyPicker({
               <span className="text-muted-foreground">+ Add custom key</span>
               <span className="font-mono text-xs">{query.trim()}</span>
             </button>
+          </li>
+        )}
+        {truncated > 0 && (
+          <li className="px-2 py-1.5 text-xs text-muted-foreground">
+            +{truncated} more — refine your search
           </li>
         )}
       </ul>

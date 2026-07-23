@@ -1,4 +1,3 @@
-import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -7,6 +6,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
 import { DELEGATION_HELP } from "./ControlPlaneEngines";
 import {
   type StarRocksConfigForm,
@@ -59,63 +59,61 @@ export function StarRocksSecuritySection({
     cfg.storedConfig?.delegation?.mode === "jwt" ||
     cfg.storedConfig?.delegation?.mode === "impersonate";
 
+  const showTls =
+    cfg.delegationMode === "jwt" || cfg.delegationMode === "impersonate";
+
   return (
     <div className="space-y-4">
-      <div className="space-y-1.5">
-        <Label htmlFor="sr-sec-delegation">Per-user delegation</Label>
-        <Select
-          value={cfg.delegationMode || "auto"}
-          onValueChange={(v) =>
-            cfg.setDelegationMode(
-              v === "auto" ? "" : (v as StarRocksDelegationOption),
-            )
-          }
+      <ConfigTable>
+        <ConfigTableRow
+          label="Per-user delegation"
+          htmlFor="sr-sec-delegation"
+          details={DELEGATION_HELP[cfg.delegationMode]}
         >
-          <SelectTrigger id="sr-sec-delegation" className="w-full">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="auto">
-              Auto — JWT, else impersonate (recommended)
-            </SelectItem>
-            <SelectItem value="jwt">JWT (per-user)</SelectItem>
-            <SelectItem value="impersonate">Impersonate (service user)</SelectItem>
-            <SelectItem value="none" disabled={hasDelegation}>
-              None (open engine)
-            </SelectItem>
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">
-          {DELEGATION_HELP[cfg.delegationMode]}
-        </p>
-        {hasDelegation && (
-          <p className="text-xs text-muted-foreground">
-            Removing delegation from a running engine isn&apos;t supported yet —
-            recreate the engine to make it open. You can still switch between JWT
-            and Impersonate.
-          </p>
-        )}
-      </div>
-
-      {(cfg.delegationMode === "jwt" || cfg.delegationMode === "impersonate") && (
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between gap-4">
-            <Label htmlFor="sr-sec-tls" className="font-normal">
-              Enable TLS
-            </Label>
+          <Select
+            value={cfg.delegationMode || "auto"}
+            onValueChange={(v) =>
+              cfg.setDelegationMode(
+                v === "auto" ? "" : (v as StarRocksDelegationOption),
+              )
+            }
+          >
+            <SelectTrigger id="sr-sec-delegation" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="auto">
+                Auto — JWT, else impersonate (recommended)
+              </SelectItem>
+              <SelectItem value="jwt">JWT (per-user)</SelectItem>
+              <SelectItem value="impersonate">Impersonate (service user)</SelectItem>
+              <SelectItem value="none" disabled={hasDelegation}>
+                None (open engine)
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </ConfigTableRow>
+        {showTls && (
+          <ConfigTableRow
+            label="Enable TLS"
+            htmlFor="sr-sec-tls"
+            details="FE SSL on the MySQL-protocol port. Needs a StarRocks image ≥ 3.4.1 (default 3.4 works). Recommended for both delegation modes."
+          >
             <Switch
               id="sr-sec-tls"
               checked={cfg.tlsEnabled}
               onCheckedChange={cfg.setTlsEnabled}
               aria-label="Enable TLS"
             />
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Enables FE SSL on the MySQL-protocol port. Requires a StarRocks image
-            &ge; 3.4.1 (the default 3.4 line works); an older FE can&apos;t serve
-            the SSL listener. Recommended for both delegation modes.
-          </p>
-        </div>
+          </ConfigTableRow>
+        )}
+      </ConfigTable>
+      {hasDelegation && (
+        <p className="text-xs text-muted-foreground">
+          Removing delegation from a running engine isn&apos;t supported yet —
+          recreate the engine to make it open. You can still switch between JWT
+          and Impersonate.
+        </p>
       )}
 
       <p className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">

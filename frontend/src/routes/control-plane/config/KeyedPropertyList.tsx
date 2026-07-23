@@ -3,17 +3,21 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { PropertyField } from "./PropertyField";
+import { ConfigTable, ConfigTableRow } from "./ConfigTable";
+import { PropertyValue } from "./PropertyField";
 import { PropertyPicker } from "./PropertyPicker";
 import { type TrinoProp } from "./trinoCatalog";
 
 /**
- * A generic keyed-property editor: the union of `presentKeys` and any
- * locally-added key not yet present, each rendered via `PropertyField` (typed by
- * `catalogByKey`) or a plain input for custom keys, plus a scoped "+ Add
- * property" picker. Values are read/written through `getValue`/`setValue`
- * (blank `setValue` removes). Decoupled from any specific config file — callers
- * bind it to config/node/log, event-listener, or a connector's props.
+ * A generic keyed-property editor rendered as a `Property | Details | Value`
+ * table (matching the scalar config tables): the union of `presentKeys` and any
+ * locally-added key, each row showing the key (monospace) with its group, the
+ * catalog help + docs link, and the typed value control (or a plain input for
+ * custom keys) plus a remove button. Values are read/written through
+ * `getValue`/`setValue` (blank `setValue` removes). A scoped "+ Add property"
+ * picker and, past a few rows, a filter box bracket the table. Decoupled from
+ * any specific config file — callers bind it to config/node/log, event-listener,
+ * or a connector's props.
  */
 export function KeyedPropertyList({
   catalog,
@@ -70,60 +74,64 @@ export function KeyedPropertyList({
           No properties match “{search}”.
         </p>
       ) : (
-        <div className="divide-y">
+        <ConfigTable settingLabel="Property">
           {filtered.map((k) => {
             const cat = catalogByKey[k];
             return (
-              <div key={k} className="flex items-start gap-3 py-2">
-                <div className="flex w-56 shrink-0 flex-col gap-1 pt-1.5">
-                  <span className="break-all font-mono text-xs">{k}</span>
-                  <div>
-                    <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                      {cat?.group ?? "custom"}
-                    </span>
+              <ConfigTableRow
+                key={k}
+                mono
+                label={k}
+                details={cat?.help ?? "Custom property — not in the catalog."}
+                docsUrl={cat?.docsUrl}
+              >
+                <div className="flex items-start gap-1">
+                  <div className="min-w-0 flex-1">
+                    {cat ? (
+                      <PropertyValue
+                        prop={{
+                          key: k,
+                          section: cat.group,
+                          label: k,
+                          type: cat.type,
+                          help: cat.help,
+                          docsUrl: cat.docsUrl,
+                          enumOptions: cat.enumOptions,
+                          default: cat.default,
+                        }}
+                        value={getValue(k)}
+                        onChange={(v) => setValue(k, v)}
+                        ariaLabel={k}
+                      />
+                    ) : (
+                      <Input
+                        className="w-full"
+                        aria-label={k}
+                        value={getValue(k)}
+                        placeholder="value"
+                        onChange={(e) => setValue(k, e.target.value)}
+                      />
+                    )}
                   </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-9 w-9 shrink-0 text-muted-foreground"
+                    onClick={() => removeRow(k)}
+                    aria-label={`Remove ${k}`}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
                 </div>
-                <div className="min-w-0 flex-1">
-                  {cat ? (
-                    <PropertyField
-                      prop={{
-                        key: k,
-                        section: cat.group,
-                        label: k,
-                        type: cat.type,
-                        help: cat.help,
-                        docsUrl: cat.docsUrl,
-                        enumOptions: cat.enumOptions,
-                        default: cat.default,
-                      }}
-                      value={getValue(k)}
-                      onChange={(v) => setValue(k, v)}
-                    />
-                  ) : (
-                    <Input
-                      value={getValue(k)}
-                      placeholder="value"
-                      onChange={(e) => setValue(k, e.target.value)}
-                    />
-                  )}
-                </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="mt-1 shrink-0 text-muted-foreground"
-                  onClick={() => removeRow(k)}
-                  aria-label={`Remove ${k}`}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </div>
+              </ConfigTableRow>
             );
           })}
-        </div>
+        </ConfigTable>
       )}
       <PropertyPicker
         catalog={catalog}
+        excludeKeys={new Set(keys)}
         onAddCatalog={addCatalog}
         onAddCustom={(key) => addKey(key)}
       />

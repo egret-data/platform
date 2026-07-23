@@ -1,13 +1,6 @@
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -15,6 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { SaveBar } from "./EngineDetail";
 import { StarRocksSecuritySection } from "./StarRocksSecuritySection";
 import { type Kv, KeyValueEditor } from "./EngineResourceGroups";
+import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
 import { KeyedPropertyList } from "./config/KeyedPropertyList";
 import { RawJsonField } from "./config/RawJsonField";
 import { TolerationsEditor } from "./config/PlacementSection";
@@ -112,9 +106,10 @@ function srSectionCounts(cfg: StarRocksConfigForm): Record<string, number> {
 /**
  * Control Plane → Engine detail → Settings (StarRocks).
  *
- * StarRocks-shaped mirror of the Trino `ConfigurationTab` shell: a `Card` with a
- * left-nav of sections + a content pane + the shared `SaveBar`. Edits FE/CN
- * image, replicas, and per-role resources; storage is read-only; the
+ * StarRocks-shaped mirror of the Trino `ConfigurationTab` shell: a card-less
+ * `<section>` with a left-nav of sections + a content pane + the shared
+ * `SaveBar`. Edits FE/CN image, replicas, and per-role resources; storage is
+ * read-only; the
  * `StarRocksSecuritySection` (delegation + TLS) is folded in as the last nav
  * item. Takes the `useStarRocksConfigForm` instance from `EngineTabs`, so the
  * single Save covers config + security.
@@ -128,8 +123,11 @@ export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
   const [sp, setSp] = useSearchParams();
   // "resources" was folded into "compute" (one "Compute & Resources" section);
   // alias the legacy deep-link so old ?section=resources URLs still resolve.
-  const rawSection = sp.get("section");
-  const section = rawSection === "resources" ? "compute" : (rawSection ?? "image");
+  // Unknown/stale values normalize to "image" (no blank pane).
+  const rawSection = sp.get("section") === "resources" ? "compute" : sp.get("section");
+  const section = NAV_ITEMS.some((i) => i.key === rawSection)
+    ? (rawSection as string)
+    : "image";
   const setSection = (v: string) =>
     setSp(
       (prev) => {
@@ -145,18 +143,15 @@ export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
   const countFor = (key: string): number => counts[key] ?? 0;
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="space-y-1.5">
-          <CardTitle className="text-lg">Settings</CardTitle>
-          <CardDescription>
-            FE/CN image, replicas, and compute resources plus per-user delegation
-            and transport security. Saving re-provisions the engine.
-          </CardDescription>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-4">
+    <section className="space-y-4">
+      <div className="space-y-1">
+        <h2 className="text-base font-semibold">Settings</h2>
+        <p className="text-sm text-muted-foreground">
+          FE/CN image, replicas, and compute resources plus per-user delegation
+          and transport security. Saving re-provisions the engine.
+        </p>
+      </div>
+      <div className="space-y-4">
           <div className="flex flex-col gap-4 md:flex-row">
             <nav className="shrink-0 space-y-1 md:w-48">
               {NAV_ITEMS.map((item) => {
@@ -206,39 +201,40 @@ export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
             disabled={cfg.autoscalingInvalid || podRawInvalid}
           />
         </div>
-      </CardContent>
-    </Card>
+    </section>
   );
 }
 
 function ImageSection({ cfg }: { cfg: StarRocksConfigForm }) {
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-      <div className="space-y-1.5">
-        <Label htmlFor="sr-fe-image">FE image</Label>
+    <ConfigTable>
+      <ConfigTableRow
+        label="FE image"
+        htmlFor="sr-fe-image"
+        details="Frontend (metadata) container image."
+      >
         <Input
           id="sr-fe-image"
+          className="w-full"
           value={cfg.feImage}
           onChange={(e) => cfg.setFeImage(e.target.value)}
           placeholder={DEFAULT_SR_FE_IMAGE}
         />
-        <p className="text-xs text-muted-foreground">
-          Frontend (metadata) container image.
-        </p>
-      </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="sr-cn-image">CN image</Label>
+      </ConfigTableRow>
+      <ConfigTableRow
+        label="CN image"
+        htmlFor="sr-cn-image"
+        details="Compute node container image."
+      >
         <Input
           id="sr-cn-image"
+          className="w-full"
           value={cfg.cnImage}
           onChange={(e) => cfg.setCnImage(e.target.value)}
           placeholder={DEFAULT_SR_CN_IMAGE}
         />
-        <p className="text-xs text-muted-foreground">
-          Compute node container image.
-        </p>
-      </div>
-    </div>
+      </ConfigTableRow>
+    </ConfigTable>
   );
 }
 
@@ -252,33 +248,53 @@ function ComputeSection({ cfg }: { cfg: StarRocksConfigForm }) {
           CN count).
         </p>
       </div>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <div className="space-y-1.5">
-          <Label htmlFor="sr-fe-replicas">FE replicas</Label>
+      <ConfigTable>
+        <ConfigTableRow
+          label="FE replicas"
+          htmlFor="sr-fe-replicas"
+          details="Frontend (metadata) pod count."
+        >
           <Input
             id="sr-fe-replicas"
+            className="w-full"
             type="number"
             min={1}
             value={cfg.feReplicas}
             onChange={(e) => cfg.setFeReplicas(e.target.value)}
           />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="sr-cn-replicas">CN replicas</Label>
+        </ConfigTableRow>
+        <ConfigTableRow
+          label="CN replicas"
+          htmlFor="sr-cn-replicas"
+          details="Compute node pod count (overridden by CN autoscaling when enabled)."
+        >
           <Input
             id="sr-cn-replicas"
+            className="w-full"
             type="number"
             min={1}
             value={cfg.cnReplicas}
             onChange={(e) => cfg.setCnReplicas(e.target.value)}
           />
-        </div>
-      </div>
+        </ConfigTableRow>
+      </ConfigTable>
     </div>
   );
 }
 
-/** One role's CPU/memory request+limit inputs. */
+const SR_RES_FIELDS: {
+  key: keyof RoleResourcesForm;
+  label: string;
+  placeholder: string;
+  details: string;
+}[] = [
+  { key: "cpuRequest", label: "CPU request", placeholder: "1", details: "Kubernetes CPU request." },
+  { key: "cpuLimit", label: "CPU limit", placeholder: "2", details: "Kubernetes CPU limit." },
+  { key: "memRequest", label: "memory request", placeholder: "4Gi", details: "Kubernetes memory request." },
+  { key: "memLimit", label: "memory limit", placeholder: "8Gi", details: "Kubernetes memory limit." },
+];
+
+/** One role's CPU/memory request+limit inputs, as a config table. */
 function ResourceFields({
   role,
   prefix,
@@ -290,30 +306,27 @@ function ResourceFields({
   value: RoleResourcesForm;
   onChange: (v: RoleResourcesForm) => void;
 }) {
-  const field = (
-    key: keyof RoleResourcesForm,
-    label: string,
-    placeholder: string,
-  ) => (
-    <div className="space-y-1.5">
-      <Label htmlFor={`${prefix}-${key}`}>{`${role} ${label}`}</Label>
-      <Input
-        id={`${prefix}-${key}`}
-        value={value[key]}
-        onChange={(e) => onChange({ ...value, [key]: e.target.value })}
-        placeholder={placeholder}
-      />
-    </div>
-  );
   return (
     <div className="space-y-3">
       <p className="text-sm font-medium">{role}</p>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        {field("cpuRequest", "CPU request", "1")}
-        {field("cpuLimit", "CPU limit", "2")}
-        {field("memRequest", "memory request", "4Gi")}
-        {field("memLimit", "memory limit", "8Gi")}
-      </div>
+      <ConfigTable>
+        {SR_RES_FIELDS.map((f) => (
+          <ConfigTableRow
+            key={f.key}
+            label={`${role} ${f.label}`}
+            htmlFor={`${prefix}-${f.key}`}
+            details={f.details}
+          >
+            <Input
+              id={`${prefix}-${f.key}`}
+              className="w-full"
+              value={value[f.key]}
+              onChange={(e) => onChange({ ...value, [f.key]: e.target.value })}
+              placeholder={f.placeholder}
+            />
+          </ConfigTableRow>
+        ))}
+      </ConfigTable>
     </div>
   );
 }
@@ -415,45 +428,59 @@ function AutoscalingSection({ cfg }: { cfg: StarRocksConfigForm }) {
         <Label htmlFor="sr-autoscaling-enabled">Enable CN autoscaling</Label>
       </div>
       {a.enabled && (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="sr-as-min">Min replicas</Label>
+        <ConfigTable>
+          <ConfigTableRow
+            label="Min replicas"
+            htmlFor="sr-as-min"
+            details="Fewest CN pods to keep (optional)."
+          >
             <Input
               id="sr-as-min"
+              className="w-full"
               type="number"
               min={1}
               value={a.minReplicas}
               onChange={(e) => set({ minReplicas: e.target.value })}
               placeholder="optional"
             />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="sr-as-max">Max replicas</Label>
+          </ConfigTableRow>
+          <ConfigTableRow
+            label="Max replicas"
+            htmlFor="sr-as-max"
+            details="Most CN pods the HPA may scale to (required)."
+          >
             <Input
               id="sr-as-max"
+              className="w-full"
               type="number"
               min={1}
               value={a.maxReplicas}
               onChange={(e) => set({ maxReplicas: e.target.value })}
+              aria-invalid={maxMissing}
             />
             {maxMissing && (
-              <p className="text-xs text-destructive">Max replicas is required.</p>
+              <p className="mt-1 text-xs text-destructive">Max replicas is required.</p>
             )}
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="sr-as-cpu">Target CPU %</Label>
+          </ConfigTableRow>
+          <ConfigTableRow
+            label="Target CPU %"
+            htmlFor="sr-as-cpu"
+            details="Target average CPU utilization that drives scaling (required)."
+          >
             <Input
               id="sr-as-cpu"
+              className="w-full"
               type="number"
               min={1}
               value={a.targetCpuPercent}
               onChange={(e) => set({ targetCpuPercent: e.target.value })}
+              aria-invalid={cpuMissing}
             />
             {cpuMissing && (
-              <p className="text-xs text-destructive">Target CPU % is required.</p>
+              <p className="mt-1 text-xs text-destructive">Target CPU % is required.</p>
             )}
-          </div>
-        </div>
+          </ConfigTableRow>
+        </ConfigTable>
       )}
       <p className="text-xs text-muted-foreground">
         Enabling hands the CN replica count to a Kubernetes HorizontalPodAutoscaler
@@ -627,7 +654,7 @@ function PodContainersSection({ cfg }: { cfg: StarRocksConfigForm }) {
         </div>
 
         <div className="space-y-2">
-          <Label>Node selector</Label>
+          <p className="text-sm font-medium">Node selector</p>
           <ConfigMapEditor
             value={pod.nodeSelector ?? {}}
             onChange={(v) => patch({ nodeSelector: v })}
@@ -638,7 +665,7 @@ function PodContainersSection({ cfg }: { cfg: StarRocksConfigForm }) {
         </div>
 
         <div className="space-y-2">
-          <Label>Tolerations</Label>
+          <p className="text-sm font-medium">Tolerations</p>
           <PodTolerationsEditor pod={pod} patch={patch} />
         </div>
 
@@ -665,7 +692,7 @@ function PodContainersSection({ cfg }: { cfg: StarRocksConfigForm }) {
         </div>
 
         <div className="space-y-2">
-          <Label>Init containers</Label>
+          <p className="text-sm font-medium">Init containers</p>
           <p className="text-xs text-muted-foreground">
             Run to completion before the StarRocks container starts (both roles).
           </p>
@@ -678,7 +705,7 @@ function PodContainersSection({ cfg }: { cfg: StarRocksConfigForm }) {
         </div>
 
         <div className="space-y-2">
-          <Label>Sidecars</Label>
+          <p className="text-sm font-medium">Sidecars</p>
           <p className="text-xs text-muted-foreground">
             Extra containers that run alongside StarRocks (both roles).
           </p>
@@ -700,36 +727,38 @@ function PodContainersSection({ cfg }: { cfg: StarRocksConfigForm }) {
           </p>
         </div>
 
-        <div className="space-y-1.5">
-          <Label htmlFor="sr-pod-sa">Service account</Label>
-          <Input
-            id="sr-pod-sa"
-            value={pod.serviceAccount ?? ""}
-            onChange={(e) =>
-              patch({ serviceAccount: e.target.value || undefined })
-            }
-            placeholder="default"
-          />
-          <p className="text-xs text-muted-foreground">
-            ServiceAccount both the FE and CN pods run as.
-          </p>
-        </div>
-
-        <div className="space-y-1.5">
-          <Label htmlFor="sr-pod-pull-secrets">Image pull secrets</Label>
-          <CommaListInput
-            id="sr-pod-pull-secrets"
-            value={pod.imagePullSecrets}
-            onChange={(v) => patch({ imagePullSecrets: v })}
-            placeholder="regcred, other-secret"
-          />
-          <p className="text-xs text-muted-foreground">
-            Comma-separated Secret names used to pull private images.
-          </p>
-        </div>
+        <ConfigTable>
+          <ConfigTableRow
+            label="Service account"
+            htmlFor="sr-pod-sa"
+            details="ServiceAccount both the FE and CN pods run as."
+          >
+            <Input
+              id="sr-pod-sa"
+              className="w-full"
+              value={pod.serviceAccount ?? ""}
+              onChange={(e) =>
+                patch({ serviceAccount: e.target.value || undefined })
+              }
+              placeholder="default"
+            />
+          </ConfigTableRow>
+          <ConfigTableRow
+            label="Image pull secrets"
+            htmlFor="sr-pod-pull-secrets"
+            details="Comma-separated Secret names used to pull private images."
+          >
+            <CommaListInput
+              id="sr-pod-pull-secrets"
+              value={pod.imagePullSecrets}
+              onChange={(v) => patch({ imagePullSecrets: v })}
+              placeholder="regcred, other-secret"
+            />
+          </ConfigTableRow>
+        </ConfigTable>
 
         <div className="space-y-2">
-          <Label>Pod labels</Label>
+          <p className="text-sm font-medium">Pod labels</p>
           <ConfigMapEditor
             value={pod.podLabels ?? {}}
             onChange={(v) => patch({ podLabels: v })}
@@ -737,7 +766,7 @@ function PodContainersSection({ cfg }: { cfg: StarRocksConfigForm }) {
         </div>
 
         <div className="space-y-2">
-          <Label>Annotations</Label>
+          <p className="text-sm font-medium">Annotations</p>
           <ConfigMapEditor
             value={pod.annotations ?? {}}
             onChange={(v) => patch({ annotations: v })}
@@ -753,24 +782,30 @@ function StorageSection({ cfg }: { cfg: StarRocksConfigForm }) {
   const path = cfg.storedConfig?.storagePath;
   if (endpoint || path) {
     return (
-      <dl className="space-y-3 text-sm">
-        {endpoint && (
-          <div className="space-y-0.5">
-            <dt className="text-muted-foreground">Endpoint</dt>
-            <dd className="font-mono text-xs">{endpoint}</dd>
-          </div>
-        )}
-        {path && (
-          <div className="space-y-0.5">
-            <dt className="text-muted-foreground">Path</dt>
-            <dd className="font-mono text-xs">{path}</dd>
-          </div>
-        )}
+      <div className="space-y-3">
+        <ConfigTable>
+          {endpoint && (
+            <ConfigTableRow
+              label="Endpoint"
+              details="Object-store endpoint (from the warehouse; read-only)."
+            >
+              <span className="font-mono text-xs">{endpoint}</span>
+            </ConfigTableRow>
+          )}
+          {path && (
+            <ConfigTableRow
+              label="Path"
+              details="Object-store path prefix (from the warehouse; read-only)."
+            >
+              <span className="font-mono text-xs">{path}</span>
+            </ConfigTableRow>
+          )}
+        </ConfigTable>
         <p className="text-xs text-muted-foreground">
           Object storage is configured from the warehouse at creation and
           isn&apos;t editable here.
         </p>
-      </dl>
+      </div>
     );
   }
   return (

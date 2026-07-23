@@ -156,6 +156,14 @@ pub struct RoleConfig {
     pub affinity: Option<Affinity>,
     pub termination_grace_seconds: Option<u32>,
     pub additional_exposed_ports: Vec<ContainerPort>,
+    // Per-role pod shape (mirrors the Trino chart's `coordinator.*` / `worker.*`
+    // maps). Populated per role; for back-compat a legacy cluster-wide value is
+    // applied to both roles at parse time.
+    pub init_containers: Vec<MiniContainer>,
+    pub sidecar_containers: Vec<MiniContainer>,
+    pub config_mounts: Vec<ObjectMount>,
+    pub secret_mounts: Vec<ObjectMount>,
+    pub share_process_namespace: Option<bool>,
 }
 
 /// One resource group in the file-based resource-group manager tree.
@@ -361,16 +369,14 @@ pub struct TrinoConfig {
     pub service_account: Option<String>,
     pub pod_security_context: Option<SecurityContext>,
     pub container_security_context: Option<SecurityContext>,
-    pub init_containers: Vec<MiniContainer>,
-    pub sidecar_containers: Vec<MiniContainer>,
+    // Cluster-wide extra env sources (the chart's top-level `envFrom`). Plain env
+    // vars live in `env` above. Per-role init/sidecar containers and config/secret
+    // mounts now live on `RoleConfig` (coordinator/worker), matching the chart.
     pub env_from: Vec<EnvFromSource>,
-    pub config_mounts: Vec<ObjectMount>,
-    pub secret_mounts: Vec<ObjectMount>,
     pub deployment_strategy: Option<DeploymentStrategy>,
     pub deployment_annotations: BTreeMap<String, String>,
     pub revision_history_limit: Option<u32>,
     pub progress_deadline_seconds: Option<u32>,
-    pub share_process_namespace: Option<bool>,
     pub autoscaling: Option<Autoscaling>,
 }
 

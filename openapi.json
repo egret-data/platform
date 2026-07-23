@@ -5406,6 +5406,82 @@
         }
       }
     },
+    "/api/control-plane/policies/services/{service}": {
+      "delete": {
+        "tags": [
+          "policy-admin"
+        ],
+        "summary": "DELETE /policies/services/{service} — delete a policy profile (Ranger\nservice) and, via `ON DELETE CASCADE`, every policy under it.",
+        "description": "GUARD: refused (409) while an engine still enforces the profile — deleting\nit out from under a bound engine would silently strip that engine's access\ncontrol. The admin must unbind (or delete) the engine first. A paired tag\nservice (`<name>_tag`), if any, is a separate profile and is deleted on its\nown.",
+        "operationId": "delete_profile",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "path",
+            "description": "Policy profile (Ranger service) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Profile deleted"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:delete permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Profile is still enforced by an engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/policies/services/{service}/seed-defaults": {
       "post": {
         "tags": [
@@ -24413,6 +24489,13 @@
             "items": {
               "$ref": "#/components/schemas/ProfileEngine"
             }
+          },
+          "tag_service": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The classification-tag policy service this Trino profile carries its\ntag-based masking/row-filters in (the configured `tagService` or the\n`<name>_tag` convention), if such a service exists. `None` otherwise — the\nFE shows a \"Tags\" tab only when this is set."
           }
         }
       },

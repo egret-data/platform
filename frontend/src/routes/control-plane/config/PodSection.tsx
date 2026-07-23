@@ -13,17 +13,17 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { type Kv, KeyValueEditor } from "../EngineResourceGroups";
 import { ConfigSection } from "./ConfigSection";
+import { ConfigTable, ConfigTableRow } from "./ConfigTable";
 import { RawJsonField } from "./RawJsonField";
 import { SELECT_NONE, numOrUndef } from "./podEditors";
 
 // ── security-context editor (pod + container) ────────────────────────────────
 
-const SC_NUM_FIELDS: { key: "runAsUser" | "runAsGroup" | "fsGroup"; label: string }[] =
-  [
-    { key: "runAsUser", label: "runAsUser" },
-    { key: "runAsGroup", label: "runAsGroup" },
-    { key: "fsGroup", label: "fsGroup" },
-  ];
+const SC_NUM_FIELDS: { key: "runAsUser" | "runAsGroup" | "fsGroup" }[] = [
+  { key: "runAsUser" },
+  { key: "runAsGroup" },
+  { key: "fsGroup" },
+];
 
 function SecurityContextEditor({
   idPrefix,
@@ -42,34 +42,40 @@ function SecurityContextEditor({
     onChange((prev) => ({ ...prev, [k]: v }));
 
   return (
-    <div className="space-y-3 rounded-md border p-3">
+    <div className="space-y-3">
       <Label className="text-xs font-medium">{title}</Label>
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <ConfigTable>
         {SC_NUM_FIELDS.map((f) => (
-          <div key={f.key} className="space-y-1.5">
-            <Label htmlFor={`${idPrefix}-${f.key}`} className="text-xs">
-              {f.label}
-            </Label>
+          <ConfigTableRow
+            key={f.key}
+            label={f.key}
+            mono
+            details={null}
+            htmlFor={`${idPrefix}-${f.key}`}
+          >
             <Input
               id={`${idPrefix}-${f.key}`}
+              className="w-full"
               type="number"
               value={value[f.key]?.toString() ?? ""}
               placeholder="1000"
               onChange={(e) => setField(f.key, numOrUndef(e.target.value))}
             />
-          </div>
+          </ConfigTableRow>
         ))}
-      </div>
-      <div className="flex items-center justify-between gap-4">
-        <Label htmlFor={`${idPrefix}-nonroot`} className="text-xs">
-          runAsNonRoot
-        </Label>
-        <Switch
-          id={`${idPrefix}-nonroot`}
-          checked={value.runAsNonRoot ?? false}
-          onCheckedChange={(v) => setField("runAsNonRoot", v)}
-        />
-      </div>
+        <ConfigTableRow
+          label="runAsNonRoot"
+          mono
+          details={null}
+          htmlFor={`${idPrefix}-nonroot`}
+        >
+          <Switch
+            id={`${idPrefix}-nonroot`}
+            checked={value.runAsNonRoot ?? false}
+            onCheckedChange={(v) => setField("runAsNonRoot", v)}
+          />
+        </ConfigTableRow>
+      </ConfigTable>
       <RawJsonField
         id={rawId}
         label="Raw override (merged on top)"
@@ -100,8 +106,6 @@ export interface PodSectionProps {
   setRevisionHistoryLimit: (v: string) => void;
   progressDeadlineSeconds: string;
   setProgressDeadlineSeconds: (v: string) => void;
-  shareProcessNamespace: boolean;
-  setShareProcessNamespace: (v: boolean) => void;
 }
 
 /**
@@ -126,8 +130,6 @@ export function PodSection({
   setRevisionHistoryLimit,
   progressDeadlineSeconds,
   setProgressDeadlineSeconds,
-  shareProcessNamespace,
-  setShareProcessNamespace,
 }: PodSectionProps) {
   return (
     <div className="space-y-5">
@@ -135,15 +137,21 @@ export function PodSection({
         title="Service account & environment"
         description="Applied to both the coordinator and worker pods."
       >
-        <div className="space-y-1.5">
-          <Label htmlFor="ps-sa">Service account</Label>
-          <Input
-            id="ps-sa"
-            value={serviceAccount}
-            placeholder="default"
-            onChange={(e) => setServiceAccount(e.target.value)}
-          />
-        </div>
+        <ConfigTable>
+          <ConfigTableRow
+            label="Service account"
+            htmlFor="ps-sa"
+            details="Kubernetes ServiceAccount for both the coordinator and worker pods."
+          >
+            <Input
+              id="ps-sa"
+              className="w-full"
+              value={serviceAccount}
+              placeholder="default"
+              onChange={(e) => setServiceAccount(e.target.value)}
+            />
+          </ConfigTableRow>
+        </ConfigTable>
         <div className="space-y-2">
           <Label>Environment variables</Label>
           <p className="text-xs text-muted-foreground">
@@ -163,7 +171,7 @@ export function PodSection({
         title="Security contexts"
         description="Pod- and container-level securityContext, with a raw override merged on top."
       >
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="space-y-6">
           <SecurityContextEditor
             idPrefix="ps-podsc"
             rawId="pod.podSecurityContext.raw"
@@ -185,95 +193,100 @@ export function PodSection({
         title="Deployment"
         description="Rollout strategy and Deployment-level metadata for both roles."
       >
-        <div className="space-y-3 rounded-md border p-3">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="ps-strategy" className="text-xs">
-                Strategy
-              </Label>
-              <Select
-                value={deploymentStrategy.kind || SELECT_NONE}
-                onValueChange={(v) =>
-                  setDeploymentStrategy((prev) => ({
-                    ...prev,
-                    kind: v === SELECT_NONE ? "" : v,
-                  }))
-                }
+        <ConfigTable>
+          <ConfigTableRow
+            label="Strategy"
+            htmlFor="ps-strategy"
+            details="Deployment rollout strategy for both roles."
+          >
+            <Select
+              value={deploymentStrategy.kind || SELECT_NONE}
+              onValueChange={(v) =>
+                setDeploymentStrategy((prev) => ({
+                  ...prev,
+                  kind: v === SELECT_NONE ? "" : v,
+                }))
+              }
+            >
+              <SelectTrigger id="ps-strategy" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={SELECT_NONE}>(default)</SelectItem>
+                <SelectItem value="RollingUpdate">RollingUpdate</SelectItem>
+                <SelectItem value="Recreate">Recreate</SelectItem>
+              </SelectContent>
+            </Select>
+          </ConfigTableRow>
+          {deploymentStrategy.kind === "RollingUpdate" && (
+            <>
+              <ConfigTableRow
+                label="maxSurge"
+                htmlFor="ps-maxsurge"
+                details="Extra pods allowed above the desired count during a rollout."
               >
-                <SelectTrigger id="ps-strategy" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={SELECT_NONE}>(default)</SelectItem>
-                  <SelectItem value="RollingUpdate">RollingUpdate</SelectItem>
-                  <SelectItem value="Recreate">Recreate</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            {deploymentStrategy.kind === "RollingUpdate" && (
-              <>
-                <div className="space-y-1.5">
-                  <Label htmlFor="ps-maxsurge" className="text-xs">
-                    maxSurge
-                  </Label>
-                  <Input
-                    id="ps-maxsurge"
-                    value={deploymentStrategy.maxSurge ?? ""}
-                    placeholder="25%"
-                    onChange={(e) =>
-                      setDeploymentStrategy((prev) => ({
-                        ...prev,
-                        maxSurge: e.target.value || undefined,
-                      }))
-                    }
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="ps-maxunavail" className="text-xs">
-                    maxUnavailable
-                  </Label>
-                  <Input
-                    id="ps-maxunavail"
-                    value={deploymentStrategy.maxUnavailable ?? ""}
-                    placeholder="25%"
-                    onChange={(e) =>
-                      setDeploymentStrategy((prev) => ({
-                        ...prev,
-                        maxUnavailable: e.target.value || undefined,
-                      }))
-                    }
-                  />
-                </div>
-              </>
-            )}
-          </div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="ps-revlimit" className="text-xs">
-                revisionHistoryLimit
-              </Label>
-              <Input
-                id="ps-revlimit"
-                type="number"
-                value={revisionHistoryLimit}
-                placeholder="10"
-                onChange={(e) => setRevisionHistoryLimit(e.target.value)}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="ps-progress" className="text-xs">
-                progressDeadlineSeconds
-              </Label>
-              <Input
-                id="ps-progress"
-                type="number"
-                value={progressDeadlineSeconds}
-                placeholder="600"
-                onChange={(e) => setProgressDeadlineSeconds(e.target.value)}
-              />
-            </div>
-          </div>
-        </div>
+                <Input
+                  id="ps-maxsurge"
+                  className="w-full"
+                  value={deploymentStrategy.maxSurge ?? ""}
+                  placeholder="25%"
+                  onChange={(e) =>
+                    setDeploymentStrategy((prev) => ({
+                      ...prev,
+                      maxSurge: e.target.value || undefined,
+                    }))
+                  }
+                />
+              </ConfigTableRow>
+              <ConfigTableRow
+                label="maxUnavailable"
+                htmlFor="ps-maxunavail"
+                details="Pods that may be unavailable during a rollout."
+              >
+                <Input
+                  id="ps-maxunavail"
+                  className="w-full"
+                  value={deploymentStrategy.maxUnavailable ?? ""}
+                  placeholder="25%"
+                  onChange={(e) =>
+                    setDeploymentStrategy((prev) => ({
+                      ...prev,
+                      maxUnavailable: e.target.value || undefined,
+                    }))
+                  }
+                />
+              </ConfigTableRow>
+            </>
+          )}
+          <ConfigTableRow
+            label="revisionHistoryLimit"
+            htmlFor="ps-revlimit"
+            details="Old ReplicaSets retained for rollback."
+          >
+            <Input
+              id="ps-revlimit"
+              className="w-full"
+              type="number"
+              value={revisionHistoryLimit}
+              placeholder="10"
+              onChange={(e) => setRevisionHistoryLimit(e.target.value)}
+            />
+          </ConfigTableRow>
+          <ConfigTableRow
+            label="progressDeadlineSeconds"
+            htmlFor="ps-progress"
+            details="Seconds before a stalled rollout is marked failed."
+          >
+            <Input
+              id="ps-progress"
+              className="w-full"
+              type="number"
+              value={progressDeadlineSeconds}
+              placeholder="600"
+              onChange={(e) => setProgressDeadlineSeconds(e.target.value)}
+            />
+          </ConfigTableRow>
+        </ConfigTable>
 
         <div className="space-y-2">
           <Label>Deployment annotations</Label>
@@ -283,22 +296,6 @@ export function PodSection({
             keyPlaceholder="team"
             valuePlaceholder="data"
             addLabel="Add annotation"
-          />
-        </div>
-      </ConfigSection>
-
-      <ConfigSection title="Pod options">
-        <div className="flex items-center justify-between gap-4">
-          <div className="space-y-0.5">
-            <Label htmlFor="ps-sharepid">Share process namespace</Label>
-            <p className="text-xs text-muted-foreground">
-              Let containers in the pod share a single PID namespace.
-            </p>
-          </div>
-          <Switch
-            id="ps-sharepid"
-            checked={shareProcessNamespace}
-            onCheckedChange={setShareProcessNamespace}
           />
         </div>
       </ConfigSection>

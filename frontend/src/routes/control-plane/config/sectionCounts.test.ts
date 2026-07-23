@@ -64,25 +64,44 @@ test("per-role sizing and placement fields both count under that role's own sect
   expect(counts.worker).toBe(0);
 });
 
-test("logLevel INFO is default and not counted; other levels count under server", () => {
+test("log level and query.max-memory count as ordinary map entries under server", () => {
   const base: TrinoConfig = { coordinator: {}, worker: {} };
-  expect(sectionCounts({ ...base, logLevel: "INFO" }).server).toBe(0);
-  expect(sectionCounts({ ...base, logLevel: "DEBUG" }).server).toBe(1);
+  // Server card removed: the log level is an io.trino entry in log.properties,
+  // and query.max-memory a config.properties entry — each counts once via its map.
+  expect(sectionCounts(base).server).toBe(0);
+  expect(
+    sectionCounts({ ...base, additionalLogProperties: { "io.trino": "DEBUG" } })
+      .server,
+  ).toBe(1);
+  expect(
+    sectionCounts({ ...base, configProperties: { "query.max-memory": "8GB" } })
+      .server,
+  ).toBe(1);
 });
 
-test("raw property maps + queryMaxMemory + eventListener count under server", () => {
+test("raw property maps + eventListener count under server", () => {
   const cfg: TrinoConfig = {
     coordinator: {},
     worker: {},
-    queryMaxMemory: "8GB",
-    configProperties: { "spill-enabled": "true", "query.max-run-time": "1h" },
+    configProperties: { "query.max-memory": "8GB", "query.max-run-time": "1h" },
     additionalNodeProperties: { "node.environment": "prod" },
     additionalLogProperties: { "io.trino": "DEBUG" },
     eventListener: { "event-listener.name": "http" },
   };
   const counts = sectionCounts(cfg);
-  // 2 config + 1 node + 1 log map keys + queryMaxMemory + eventListener = 6.
-  expect(counts.server).toBe(6);
+  // 2 config + 1 node + 1 log map keys + eventListener = 5.
+  expect(counts.server).toBe(5);
+});
+
+test("reliability retry-attempt caps count once under server (not doubled)", () => {
+  const cfg: TrinoConfig = {
+    coordinator: {},
+    worker: {},
+    // query-retry-attempts is a reliability known-prop stored in configProperties;
+    // it must be counted once via the map, not a second time via a section scan.
+    configProperties: { "query-retry-attempts": "4", "spill-enabled": "true" },
+  };
+  expect(sectionCounts(cfg).server).toBe(2);
 });
 
 it("counts image fields under the image section", () => {

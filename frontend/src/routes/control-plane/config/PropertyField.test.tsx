@@ -1,7 +1,8 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { vi } from "vitest";
 import type { ReactElement } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { PropertyField } from "./PropertyField";
+import { PropertyField, PropertyValue } from "./PropertyField";
 
 // FieldLabel's help tooltip relies on the app-wide TooltipProvider (AppShell).
 const renderWithProviders = (ui: ReactElement) =>
@@ -34,4 +35,17 @@ test("boolean renders a switch", () => {
     />,
   );
   expect(screen.getByRole("switch")).toBeTruthy();
+});
+
+test("PropertyValue boolean off writes explicit \"false\" (not \"\")", () => {
+  const onChange = vi.fn();
+  renderWithProviders(
+    <PropertyValue
+      prop={{ key: "b", section: "s", label: "B", type: "boolean", help: "h" }}
+      value="true"
+      onChange={onChange}
+    />,
+  );
+  fireEvent.click(screen.getByRole("switch"));
+  expect(onChange).toHaveBeenCalledWith("false");
 });

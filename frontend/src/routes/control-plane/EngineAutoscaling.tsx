@@ -1,4 +1,4 @@
-import type { Dispatch, SetStateAction } from "react";
+import { type Dispatch, type SetStateAction, useEffect } from "react";
 import { Plus, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -12,8 +12,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ConfigSection } from "./config/ConfigSection";
+import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
 import { FieldLabel } from "./config/FieldLabel";
 import { RawJsonField } from "./config/RawJsonField";
+import { useValidity } from "./config/validityRegistry";
 import {
   type AutoscaleMode,
   type AutoscaleTriggerForm,
@@ -62,50 +64,57 @@ function HpaEditor({
       description="Scale the worker Deployment on CPU/memory targets via a native Kubernetes HPA."
       docsUrl="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/"
     >
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <div className="space-y-1.5">
-          <FieldLabel
-            htmlFor="as-hpa-max"
-            label="Max replicas"
-            help="Upper bound on worker pods the HPA may scale to."
-          />
+      <ConfigTable>
+        <ConfigTableRow
+          label="Max replicas"
+          htmlFor="as-hpa-max"
+          details="Upper bound on worker pods the HPA may scale to (required)."
+        >
           <Input
             id="as-hpa-max"
+            className="w-full"
             type="number"
+            min={1}
             value={value.maxReplicas}
             placeholder="10"
+            aria-invalid={!value.maxReplicas.trim()}
             onChange={(e) => set("maxReplicas", e.target.value)}
           />
-        </div>
-        <div className="space-y-1.5">
-          <FieldLabel
-            htmlFor="as-hpa-cpu"
-            label="Target CPU %"
-            help="Target average CPU utilization; the HPA adds pods above this."
-          />
+          {!value.maxReplicas.trim() && (
+            <p className="mt-1 text-xs text-destructive">Max replicas is required.</p>
+          )}
+        </ConfigTableRow>
+        <ConfigTableRow
+          label="Target CPU %"
+          htmlFor="as-hpa-cpu"
+          details="Target average CPU utilization; the HPA adds pods above this."
+        >
           <Input
             id="as-hpa-cpu"
+            className="w-full"
             type="number"
+            min={0}
             value={value.targetCpuPercent}
             placeholder="70"
             onChange={(e) => set("targetCpuPercent", e.target.value)}
           />
-        </div>
-        <div className="space-y-1.5">
-          <FieldLabel
-            htmlFor="as-hpa-mem"
-            label="Target memory %"
-            help="Target average memory utilization; the HPA adds pods above this."
-          />
+        </ConfigTableRow>
+        <ConfigTableRow
+          label="Target memory %"
+          htmlFor="as-hpa-mem"
+          details="Target average memory utilization; the HPA adds pods above this."
+        >
           <Input
             id="as-hpa-mem"
+            className="w-full"
             type="number"
+            min={0}
             value={value.targetMemoryPercent}
             placeholder="80"
             onChange={(e) => set("targetMemoryPercent", e.target.value)}
           />
-        </div>
-      </div>
+        </ConfigTableRow>
+      </ConfigTable>
       <RawJsonField
         id="autoscaling.hpa.behavior"
         label="Scaling behavior (raw JSON, merged into spec.behavior)"
@@ -324,64 +333,72 @@ function KedaEditor({
       description="Event-driven autoscaling (cron / Prometheus / raw triggers). Requires the KEDA operator installed in the cluster."
       docsUrl="https://keda.sh/docs/latest/concepts/scaling-deployments/"
     >
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
-        <div className="space-y-1.5">
-          <FieldLabel
-            htmlFor="as-keda-min"
-            label="Min replicas"
-            help="Fewest worker pods to keep; KEDA can scale to zero when 0."
-          />
+      <ConfigTable>
+        <ConfigTableRow
+          label="Min replicas"
+          htmlFor="as-keda-min"
+          details="Fewest worker pods to keep; KEDA can scale to zero when 0."
+        >
           <Input
             id="as-keda-min"
+            className="w-full"
             type="number"
+            min={0}
             value={value.minReplicaCount}
             placeholder="1"
             onChange={(e) => set("minReplicaCount", e.target.value)}
           />
-        </div>
-        <div className="space-y-1.5">
-          <FieldLabel
-            htmlFor="as-keda-max"
-            label="Max replicas"
-            help="Most worker pods KEDA may scale to."
-          />
+        </ConfigTableRow>
+        <ConfigTableRow
+          label="Max replicas"
+          htmlFor="as-keda-max"
+          details="Most worker pods KEDA may scale to (required)."
+        >
           <Input
             id="as-keda-max"
+            className="w-full"
             type="number"
+            min={1}
             value={value.maxReplicaCount}
             placeholder="10"
+            aria-invalid={!value.maxReplicaCount.trim()}
             onChange={(e) => set("maxReplicaCount", e.target.value)}
           />
-        </div>
-        <div className="space-y-1.5">
-          <FieldLabel
-            htmlFor="as-keda-poll"
-            label="Polling interval (s)"
-            help="How often KEDA evaluates the triggers, in seconds."
-          />
+          {!value.maxReplicaCount.trim() && (
+            <p className="mt-1 text-xs text-destructive">Max replicas is required.</p>
+          )}
+        </ConfigTableRow>
+        <ConfigTableRow
+          label="Polling interval (s)"
+          htmlFor="as-keda-poll"
+          details="How often KEDA evaluates the triggers, in seconds."
+        >
           <Input
             id="as-keda-poll"
+            className="w-full"
             type="number"
+            min={0}
             value={value.pollingInterval}
             placeholder="30"
             onChange={(e) => set("pollingInterval", e.target.value)}
           />
-        </div>
-        <div className="space-y-1.5">
-          <FieldLabel
-            htmlFor="as-keda-cooldown"
-            label="Cooldown (s)"
-            help="Seconds to wait after the last trigger before scaling back down."
-          />
+        </ConfigTableRow>
+        <ConfigTableRow
+          label="Cooldown (s)"
+          htmlFor="as-keda-cooldown"
+          details="Seconds to wait after the last trigger before scaling back down."
+        >
           <Input
             id="as-keda-cooldown"
+            className="w-full"
             type="number"
+            min={0}
             value={value.cooldownPeriod}
             placeholder="300"
             onChange={(e) => set("cooldownPeriod", e.target.value)}
           />
-        </div>
-      </div>
+        </ConfigTableRow>
+      </ConfigTable>
 
       <div className="space-y-2">
         <Label className="text-sm font-medium">Triggers</Label>
@@ -454,6 +471,18 @@ export function EngineAutoscaling({
   keda,
   setKeda,
 }: EngineAutoscalingProps) {
+  // "Max replicas" is required whenever a mode is active (an HPA/ScaledObject
+  // with maxReplicas 0 is invalid). Register in the shared ValidityProvider so
+  // Save is blocked; cleared on unmount / mode off.
+  const maxMissing =
+    (mode === "hpa" && !hpa.maxReplicas.trim()) ||
+    (mode === "keda" && !keda.maxReplicaCount.trim());
+  const validity = useValidity();
+  useEffect(() => {
+    validity?.setInvalid("autoscaling.maxReplicas", maxMissing);
+    return () => validity?.setInvalid("autoscaling.maxReplicas", false);
+  }, [validity, maxMissing]);
+
   return (
     <div className="space-y-4">
       <div className="max-w-xs space-y-1.5">

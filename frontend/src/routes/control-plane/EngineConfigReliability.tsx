@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
 import { Link } from "react-router-dom";
 
 import { type Storage, listStorage } from "@/api/controlPlane";
@@ -13,9 +14,10 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { ConfigSection } from "./config/ConfigSection";
-import { FieldLabel } from "./config/FieldLabel";
-import { PropertyField } from "./config/PropertyField";
+import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
+import { PropertyValue } from "./config/PropertyField";
 import { knownProperties } from "./config/knownProperties";
+import { useValidity } from "./config/validityRegistry";
 
 /**
  * Cluster-wide "Reliability" config: fault-tolerant execution — retry policy,
@@ -52,121 +54,135 @@ export function EngineConfigReliability(props: {
     retry: false,
   });
 
+  // Fault-tolerant execution needs an exchange storage connection to spool to;
+  // the backend drops FTE entirely without one. Block Save (and show a message)
+  // so the toggle isn't silently inert. Cleared on unmount by the registry.
+  const missingExchangeStorage = ftEnabled && !exchangeStorageConnId;
+  const validity = useValidity();
+  useEffect(() => {
+    validity?.setInvalid("faultTolerant.exchangeStorage", missingExchangeStorage);
+    return () => validity?.setInvalid("faultTolerant.exchangeStorage", false);
+  }, [validity, missingExchangeStorage]);
+
   return (
-    <div className="space-y-5">
     <ConfigSection
       title="Fault-tolerant execution"
-      description="Retry failed tasks/queries, spooling exchange data to an S3 storage connection."
+      description="Retry failed tasks/queries (spooling exchange data to S3) plus the per-policy retry attempt caps."
       docsUrl="https://trino.io/docs/current/admin/fault-tolerant-execution.html"
     >
-      <div className="flex items-center justify-between gap-4">
-        <FieldLabel
-          fieldKey="faultTolerantEnabled"
+      <ConfigTable>
+        <ConfigTableRow
           label="Enable fault-tolerant execution"
+          fieldKey="faultTolerantEnabled"
           htmlFor="ced-ft-enabled"
-        />
-        <Switch
-          id="ced-ft-enabled"
-          checked={ftEnabled}
-          onCheckedChange={setFtEnabled}
-        />
-      </div>
-      {ftEnabled && (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <div className="space-y-1.5">
-            <FieldLabel
-              fieldKey="retryPolicy"
-              label="Retry policy"
+        >
+          <Switch
+            id="ced-ft-enabled"
+            checked={ftEnabled}
+            onCheckedChange={setFtEnabled}
+          />
+        </ConfigTableRow>
+        {ftEnabled && (
+          <>
+            <ConfigTableRow
+              label="retry-policy"
+              mono
+              details="How failures are retried: QUERY (whole query) or TASK (individual tasks). Set in config.properties."
               htmlFor="ced-ft-retry"
-            />
-            <Select
-              value={retryPolicy}
-              onValueChange={(v) => setRetryPolicy(v as "TASK" | "QUERY")}
             >
-              <SelectTrigger id="ced-ft-retry" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="TASK">TASK</SelectItem>
-                <SelectItem value="QUERY">QUERY</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1.5">
-            <FieldLabel
-              fieldKey="exchangeStorage"
+              <Select
+                value={retryPolicy}
+                onValueChange={(v) => setRetryPolicy(v as "TASK" | "QUERY")}
+              >
+                <SelectTrigger id="ced-ft-retry" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="TASK">TASK</SelectItem>
+                  <SelectItem value="QUERY">QUERY</SelectItem>
+                </SelectContent>
+              </Select>
+            </ConfigTableRow>
+            <ConfigTableRow
               label="Exchange storage"
+              fieldKey="exchangeStorage"
               htmlFor="ced-ft-storage"
-            />
-            <Select
-              value={exchangeStorageConnId}
-              onValueChange={setExchangeStorageConnId}
             >
-              <SelectTrigger id="ced-ft-storage" className="w-full">
-                <SelectValue placeholder="Select a connection" />
-              </SelectTrigger>
-              <SelectContent>
-                {(storage.data ?? []).length === 0 ? (
-                  <SelectItem value="__none__" disabled>
-                    No storage connections
-                  </SelectItem>
-                ) : (
-                  (storage.data ?? []).map((s) => (
-                    <SelectItem key={s.id} value={s.id}>
-                      {s.name}
+              <Select
+                value={exchangeStorageConnId}
+                onValueChange={setExchangeStorageConnId}
+              >
+                <SelectTrigger id="ced-ft-storage" className="w-full">
+                  <SelectValue placeholder="Select a connection" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(storage.data ?? []).length === 0 ? (
+                    <SelectItem value="__none__" disabled>
+                      No storage connections
                     </SelectItem>
-                  ))
-                )}
-              </SelectContent>
-            </Select>
-            {(storage.data ?? []).length === 0 && (
-              <p className="text-xs text-muted-foreground">
-                No storage connections yet.{" "}
-                <Link
-                  to="/control-plane/storage"
-                  className="text-primary hover:underline"
-                >
-                  Add a storage connection
-                </Link>
-                .
-              </p>
-            )}
-          </div>
-          <div className="space-y-1.5">
-            <FieldLabel
-              fieldKey="exchangePrefix"
+                  ) : (
+                    (storage.data ?? []).map((s) => (
+                      <SelectItem key={s.id} value={s.id}>
+                        {s.name}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+            </ConfigTableRow>
+            <ConfigTableRow
               label="Exchange prefix"
+              fieldKey="exchangePrefix"
               htmlFor="ced-ft-prefix"
-            />
-            <Input
-              id="ced-ft-prefix"
-              value={exchangePrefix}
-              placeholder="exchange"
-              onChange={(e) => setExchangePrefix(e.target.value)}
-            />
-          </div>
-        </div>
+            >
+              <Input
+                id="ced-ft-prefix"
+                className="w-full"
+                value={exchangePrefix}
+                placeholder="exchange"
+                onChange={(e) => setExchangePrefix(e.target.value)}
+              />
+            </ConfigTableRow>
+            {/* Per-policy retry attempt caps — only relevant once FTE is on,
+                so they live in the same table, right below retry-policy. */}
+            {knownProperties
+              .filter((p) => p.section === "reliability")
+              .map((prop) => (
+                <ConfigTableRow
+                  key={prop.key}
+                  mono
+                  label={prop.key}
+                  details={prop.help ?? null}
+                  docsUrl={prop.docsUrl}
+                >
+                  <PropertyValue
+                    prop={prop}
+                    value={getProp("config", prop.key)}
+                    onChange={(v) => setProp("config", prop.key, v)}
+                  />
+                </ConfigTableRow>
+              ))}
+          </>
+        )}
+      </ConfigTable>
+      {ftEnabled && (storage.data ?? []).length === 0 && (
+        <p className="text-xs text-muted-foreground">
+          No storage connections yet.{" "}
+          <Link
+            to="/control-plane/storage"
+            className="text-primary hover:underline"
+          >
+            Add a storage connection
+          </Link>
+          .
+        </p>
+      )}
+      {missingExchangeStorage && (storage.data ?? []).length > 0 && (
+        <p className="text-xs text-destructive">
+          Select an exchange storage connection — fault-tolerant execution has no
+          effect without one.
+        </p>
       )}
     </ConfigSection>
-
-      <ConfigSection
-        title="Retry limits"
-        description="Per-policy retry attempt caps applied when fault-tolerant execution is enabled."
-        docsUrl="https://trino.io/docs/current/admin/fault-tolerant-execution.html"
-      >
-        <div className="space-y-4">
-          {knownProperties
-            .filter((p) => p.section === "reliability")
-            .map((prop) => (
-              <PropertyField
-                key={prop.key}
-                prop={prop}
-                value={getProp("config", prop.key)}
-                onChange={(v) => setProp("config", prop.key, v)}
-              />
-            ))}
-        </div>
-      </ConfigSection>
-    </div>
   );
 }
