@@ -194,8 +194,8 @@ function RoleConfigEditor({
       </ConfigSection>
 
       <ConfigSection
-        title="JVM heap"
-        description="Size the JVM heap as a fixed value (-Xmx/-Xms) or as a percentage of the pod memory limit."
+        title="JVM"
+        description="JVM heap sizing (-Xmx/-Xms, or a percent of the pod memory limit) plus extra jvm.config lines."
         docsUrl="https://trino.io/docs/current/installation/deployment.html#jvm-config"
       >
         <RadioGroup
@@ -283,10 +283,31 @@ function RoleConfigEditor({
             </ConfigTableRow>
           </ConfigTable>
         )}
+
+        <div className="space-y-2 pt-2">
+          <div className="space-y-0.5">
+            <p className="text-sm font-medium">Additional jvm.config</p>
+            <p className="text-xs text-muted-foreground">
+              Extra lines appended to jvm.config.
+            </p>
+          </div>
+          <StringListEditor
+            rows={value.additionalJvmConfig}
+            onChange={(rows) => set("additionalJvmConfig", rows)}
+            placeholder="-XX:MaxHeapFreeRatio=100"
+            addControl={
+              <JvmFlagPicker
+                onAdd={(flag) =>
+                  set("additionalJvmConfig", [...value.additionalJvmConfig, flag])
+                }
+              />
+            }
+          />
+        </div>
       </ConfigSection>
 
       <ConfigSection
-        title="Query memory"
+        title="Per-node memory"
         description="Per-node query memory limits for this role."
         docsUrl="https://trino.io/docs/current/admin/properties-resource-management.html"
       >
@@ -318,25 +339,6 @@ function RoleConfigEditor({
             />
           </ConfigTableRow>
         </ConfigTable>
-      </ConfigSection>
-
-      <ConfigSection
-        title="Additional JVM config"
-        description="Extra lines appended to jvm.config."
-        docsUrl="https://trino.io/docs/current/installation/deployment.html#jvm-config"
-      >
-        <StringListEditor
-          rows={value.additionalJvmConfig}
-          onChange={(rows) => set("additionalJvmConfig", rows)}
-          placeholder="-XX:MaxHeapFreeRatio=100"
-          addControl={
-            <JvmFlagPicker
-              onAdd={(flag) =>
-                set("additionalJvmConfig", [...value.additionalJvmConfig, flag])
-              }
-            />
-          }
-        />
       </ConfigSection>
 
       <ConfigSection

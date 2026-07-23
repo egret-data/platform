@@ -8,7 +8,7 @@ import { useEngineConfigForm } from "../useEngineConfigForm";
 // A minimal engine whose spec mirrors what the 5s status poll returns. Each call
 // builds FRESH object/array references with identical content — exactly what the
 // polled `getEngine` query produces every tick.
-function makeEngine(logLevel = "INFO") {
+function makeEngine(serviceAccount?: string) {
   return {
     id: "e1",
     name: "eng",
@@ -23,7 +23,7 @@ function makeEngine(logLevel = "INFO") {
       trinoConfig: {
         coordinator: {},
         worker: {},
-        logLevel,
+        ...(serviceAccount ? { serviceAccount } : {}),
         configProperties: { "query.max-memory": "1GB" },
         env: { FOO: "bar" },
       },
@@ -58,21 +58,21 @@ describe("useEngineConfigForm dirty tracking", () => {
     });
     expect(result.current.dirty).toBe(false);
 
-    act(() => result.current.setLogLevel("DEBUG"));
+    act(() => result.current.setServiceAccount("sa-x"));
     expect(result.current.dirty).toBe(true);
 
-    act(() => result.current.setLogLevel("INFO"));
+    act(() => result.current.setServiceAccount(""));
     expect(result.current.dirty).toBe(false);
   });
 
   it("re-prefills (still clean) when the spec content actually changes", () => {
     const { result, rerender } = renderHook(
       ({ e }) => useEngineConfigForm(e),
-      { initialProps: { e: makeEngine("INFO") }, wrapper },
+      { initialProps: { e: makeEngine("sa-a") }, wrapper },
     );
-    rerender({ e: makeEngine("DEBUG") });
+    rerender({ e: makeEngine("sa-b") });
     expect(result.current.dirty).toBe(false);
-    expect(result.current.logLevel).toBe("DEBUG");
+    expect(result.current.serviceAccount).toBe("sa-b");
   });
 });
 
@@ -111,10 +111,10 @@ describe("useEngineConfigForm editedSinceLoad (beforeunload guard)", () => {
     });
     expect(result.current.editedSinceLoad).toBe(false);
 
-    act(() => result.current.setLogLevel("DEBUG"));
+    act(() => result.current.setServiceAccount("sa-x"));
     expect(result.current.editedSinceLoad).toBe(true);
 
-    act(() => result.current.setLogLevel("INFO"));
+    act(() => result.current.setServiceAccount(""));
     expect(result.current.editedSinceLoad).toBe(false);
   });
 

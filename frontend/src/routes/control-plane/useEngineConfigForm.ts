@@ -183,6 +183,24 @@ function cleanMounts(list: ObjectMount[]): ObjectMount[] {
     .filter((m) => m.name && m.mountPath);
 }
 
+// The dedicated `queryMaxMemory` / `logLevel` fields were folded into the
+// config.properties / log.properties tables (chart `server.config.query.maxMemory`
+// = a `query.max-memory` entry; `server.log.trino.level` = an `io.trino` entry).
+// Migrate a legacy engine's structured values into the maps on seed; an existing
+// map entry wins over the legacy value.
+function seedConfigProps(tc: TrinoConfig | undefined): Kv[] {
+  return recordToKv({
+    ...(tc?.queryMaxMemory ? { "query.max-memory": tc.queryMaxMemory } : {}),
+    ...tc?.configProperties,
+  });
+}
+function seedLogProps(tc: TrinoConfig | undefined): Kv[] {
+  return recordToKv({
+    ...(tc?.logLevel && tc.logLevel !== "INFO" ? { "io.trino": tc.logLevel } : {}),
+    ...tc?.additionalLogProperties,
+  });
+}
+
 function roleToForm(
   rc: RoleConfig | undefined,
   // Cluster-wide legacy fallback (old engines carried the pod-shape fields at the
@@ -621,8 +639,6 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
     keyCount(cfg.configProperties) +
     keyCount(cfg.additionalNodeProperties) +
     keyCount(cfg.additionalLogProperties) +
-    (present(cfg.queryMaxMemory) ? 1 : 0) +
-    (cfg.logLevel !== undefined && cfg.logLevel !== "INFO" ? 1 : 0) +
     (keyCount(cfg.eventListener) > 0 ? 1 : 0);
 
   // Pod-level (cluster-wide) field-groups. init/sidecar containers, mounts and
@@ -685,10 +701,6 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
 
 export interface EngineConfigForm {
   // cluster-wide
-  queryMaxMemory: string;
-  setQueryMaxMemory: (v: string) => void;
-  logLevel: string;
-  setLogLevel: (v: string) => void;
   configProps: Kv[];
   setConfigProps: Dispatch<SetStateAction<Kv[]>>;
   // Guided read/write over a raw property map, routed by config file.
@@ -821,12 +833,10 @@ export function useEngineConfigForm(
   const queryClient = useQueryClient();
   const tc = engine.spec.trinoConfig;
 
-  // Cluster-wide config.
-  const [queryMaxMemory, setQueryMaxMemory] = useState(tc?.queryMaxMemory ?? "");
-  const [logLevel, setLogLevel] = useState(tc?.logLevel ?? "INFO");
-  const [configProps, setConfigProps] = useState<Kv[]>(
-    recordToKv(tc?.configProperties),
-  );
+  // Cluster-wide config. query.max-memory + the io.trino log level live in the
+  // config.properties / log.properties tables (legacy structured values migrated
+  // in via seedConfigProps / seedLogProps).
+  const [configProps, setConfigProps] = useState<Kv[]>(seedConfigProps(tc));
   const [env, setEnv] = useState<Kv[]>(recordToKv(tc?.env));
 
   // Raw property maps (config-file surface).
@@ -836,9 +846,7 @@ export function useEngineConfigForm(
   const [nodeProps, setNodeProps] = useState<Kv[]>(
     recordToKv(tc?.additionalNodeProperties),
   );
-  const [logProps, setLogProps] = useState<Kv[]>(
-    recordToKv(tc?.additionalLogProperties),
-  );
+  const [logProps, setLogProps] = useState<Kv[]>(seedLogProps(tc));
 
   // Fault-tolerant execution.
   const [ftEnabled, setFtEnabled] = useState(tc?.faultTolerant != null);
@@ -991,13 +999,11 @@ export function useEngineConfigForm(
     const specChanged =
       loadedSpecRef.current === undefined ||
       diffConfig(loadedSpecRef.current, next ?? {}).length > 0;
-    setQueryMaxMemory(next?.queryMaxMemory ?? "");
-    setLogLevel(next?.logLevel ?? "INFO");
-    setConfigProps(recordToKv(next?.configProperties));
+    setConfigProps(seedConfigProps(next));
     setEnv(recordToKv(next?.env));
     setEventListener(recordToKv(next?.eventListener));
     setNodeProps(recordToKv(next?.additionalNodeProperties));
-    setLogProps(recordToKv(next?.additionalLogProperties));
+    setLogProps(seedLogProps(next));
     setFtEnabled(next?.faultTolerant != null);
     setRetryPolicy(next?.faultTolerant?.retryPolicy ?? "TASK");
     setExchangeStorageConnId(next?.faultTolerant?.exchangeStorageConnId ?? "");
@@ -1069,8 +1075,8 @@ export function useEngineConfigForm(
       coordinator: formToRole(coordinator),
       worker: formToRole(worker),
     };
-    if (queryMaxMemory.trim()) trinoConfig.queryMaxMemory = queryMaxMemory.trim();
-    if (logLevel) trinoConfig.logLevel = logLevel;
+    // query.max-memory + the io.trino log level are serialized as entries in
+    // configProperties / additionalLogProperties (below) — no structured fields.
     const cp = kvToRecord(configProps);
     if (Object.keys(cp).length) trinoConfig.configProperties = cp;
     const ev = kvToRecord(env);
@@ -1203,8 +1209,6 @@ export function useEngineConfigForm(
   }, [
     coordinator,
     worker,
-    queryMaxMemory,
-    logLevel,
     configProps,
     env,
     eventListener,
@@ -1319,10 +1323,6 @@ export function useEngineConfigForm(
     diffConfig(editBaselineRef.current, builtTrinoConfig).length > 0;
 
   return {
-    queryMaxMemory,
-    setQueryMaxMemory,
-    logLevel,
-    setLogLevel,
     configProps,
     setConfigProps,
     getProp,

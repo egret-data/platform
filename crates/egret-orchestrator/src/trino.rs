@@ -187,13 +187,14 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
 }
 
 fn log_properties(spec: &EngineSpec) -> String {
-    let mut out = format!(
-        "io.trino={}\n",
-        spec.config
-            .log_level
-            .clone()
-            .unwrap_or_else(|| "INFO".into())
-    );
+    let mut out = String::new();
+    // Legacy structured log level → `io.trino=<level>`. New engines carry the
+    // level as an `io.trino` entry in additionalLogProperties instead, so only
+    // emit the structured line when set (Trino defaults the root logger to INFO
+    // when absent) — avoiding a duplicate `io.trino` line.
+    if let Some(level) = &spec.config.log_level {
+        out.push_str(&format!("io.trino={level}\n"));
+    }
     for (k, v) in &spec.config.additional_log_properties {
         out.push_str(&format!("{k}={v}\n"));
     }
@@ -1901,6 +1902,21 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("io.trino=DEBUG"));
+    }
+
+    #[test]
+    fn log_level_from_additional_log_properties_has_no_duplicate() {
+        // New engines carry the level as an io.trino entry (no structured
+        // log_level) — must not emit a second default io.trino line.
+        let mut s = sample_spec();
+        s.config.log_level = None;
+        s.config
+            .additional_log_properties
+            .insert("io.trino".into(), "WARN".into());
+        let cm = trino_config_map(&s);
+        let lp = cm["data"]["log.properties"].as_str().unwrap().to_string();
+        assert!(lp.contains("io.trino=WARN"));
+        assert_eq!(lp.matches("io.trino=").count(), 1);
     }
 
     #[test]
