@@ -8,6 +8,7 @@ use egret_auth::principal::{Auth, AuthError};
 use egret_auth::session::SessionService;
 use egret_core::{Error, WorkspaceContext};
 
+use crate::features;
 use crate::model::workspace_role_rank;
 use crate::rbac::Authorizer;
 use crate::workspaces::WorkspaceRepo;
@@ -43,6 +44,27 @@ where
             .map_err(AuthError)?
             .filter(|w| w.status == "active")
             .ok_or_else(|| AuthError(Error::NotFound(format!("workspace: {slug}"))))?;
+
+        // 3.5 Feature entitlement. Whether the workspace has this module at all
+        //     is a property of the WORKSPACE, so it is checked before — and
+        //     independently of — who the caller is: a platform admin gets the
+        //     same 403 as anyone else, and a non-member cannot tell membership
+        //     from the response. The DB is only touched when the path actually
+        //     belongs to a gated module.
+        //
+        //     `parts.uri.path()` is the inner router's view, which axum's
+        //     `nest` has already stripped: a request to
+        //     `/api/ws/sales/notebooks` arrives here as `/ws/sales/notebooks`,
+        //     because every gated router is nested at exactly `/api`.
+        //     `ws_path_suffix` accepts both spellings.
+        if let Some(suffix) = features::ws_path_suffix(parts.uri.path()) {
+            if let Some(key) = features::gated_feature(suffix, parts.method.as_str()) {
+                let disabled = repo.disabled_features(ws.id).await.map_err(AuthError)?;
+                if disabled.contains(key) {
+                    return Err(AuthError(Error::FeatureDisabled(key)));
+                }
+            }
+        }
 
         // 4. Membership: platform_admin bypass, else a workspace role, else an
         //    object-guest. An object-guest is a NON-member who holds an
