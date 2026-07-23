@@ -21,7 +21,7 @@ tảng có governance thống nhất và cùng một design system.
 |---|---|
 | Mỗi team tự chạy BI, catalog, warehouse riêng → silo & trùng lặp dữ liệu | **Single source of truth** — chung một Iceberg catalog + engine, chung một governance plane |
 | Các team dẫm chân nhau lên dashboard, dataset, connection | **Cô lập theo workspace** — mỗi dự án/phòng ban có sandbox riêng |
-| Access control rải rác, khó audit | **Security-first** — authorization thống nhất (Cedar PDP), OIDC/SSO, enforcement bằng Ranger, masking theo tag, audit log đầy đủ |
+| Access control rải rác, khó audit | **Security-first** — authorization thống nhất (Cedar PDP), OIDC/SSO với danh tính máy do egret tự sở hữu (không dùng credential engine dùng chung), enforcement bằng Ranger, masking theo tag, audit log đầy đủ |
 | Dữ liệu nằm ở nhiều hệ thống (lake **và** RDBMS, NoSQL, stream) | **Query federation** — Trino đọc Iceberg-on-S3 *và* 30+ nguồn ngoài qua một mặt SQL có governance |
 | Thêm team mới = phải dựng hạ tầng mới | Thêm workspace = vài cú click, không cần stack mới |
 
@@ -30,37 +30,35 @@ tảng có governance thống nhất và cùng một design system.
 ## Bức tranh tổng thể — một nền tảng, nhiều team
 
 ```mermaid
-flowchart TB
-    subgraph TEAMS[" "]
-        direction LR
+flowchart LR
+    subgraph TEAMS["Các team"]
         A["Team A · Phân tích"]
         B["Team B · Kỹ thuật"]
         C["Team C · Tài chính"]
     end
 
     subgraph EGRET["EGRET — một nền tảng thống nhất (một binary Rust)"]
-        direction TB
-        subgraph WS["Workspace cô lập — mỗi team một sandbox"]
-            direction LR
+        subgraph WS["Workspace cô lập · mỗi team một sandbox"]
             WA["Workspace A"]
             WB["Workspace B"]
             WC["Workspace C"]
         end
-        GOV["Tầng governance · AuthN (OIDC/SSO) · AuthZ (Cedar) · Ranger · Audit"]
-        WS --- GOV
+        GOV["Tầng governance<br/>OIDC/SSO · Cedar authz<br/>Ranger · Audit"]
+        WA --- GOV
+        WB --- GOV
+        WC --- GOV
     end
 
     subgraph SOT["Nguồn sự thật duy nhất"]
-        direction LR
-        ENG["Query engine · Trino / StarRocks"]
-        LAKE["Iceberg lakehouse — CHÍNH<br/>S3 / MinIO · + nguồn federated"]
-        ENG --> LAKE
+        ENG["Query engine<br/>Trino · StarRocks"]
+        LAKE["Iceberg lakehouse — CHÍNH<br/>S3 / MinIO<br/>+ nguồn federated"]
     end
 
     A --> WA
     B --> WB
     C --> WC
     GOV ==>|"truy cập có governance"| ENG
+    ENG --> LAKE
 ```
 
 Mọi team đăng nhập vào **cùng một nền tảng** và đọc từ **cùng một tập dữ liệu có governance** — nhưng
@@ -258,20 +256,48 @@ flowchart TB
   cho các object BI.
 - **Có thể audit** — audit log thật ghi lại ai truy cập gì, khi nào, và có được phép hay không.
 
+### Danh tính, secret & cô lập
+
+Security-first còn nghĩa là **tự sở hữu danh tính đầu-cuối** và **không bao giờ tin vào credential dùng chung**:
+
+- **Token broker Machine-IdP** — Egret tự cấp **token engine ngắn hạn theo từng người dùng** từ
+  identity provider nhúng của chính nó (`aud: engine`, ký bằng JWKS của Egret). Engine tin thẳng issuer
+  của Egret, nên **không có mật khẩu engine dài hạn**, và ngay cả **người dùng local / non-OIDC** cũng
+  có được quyền truy cập được scope và delegated. SSO chỉ còn làm authentication + JIT provisioning.
+- **SSO back-channel logout** — một logout token OIDC từ Keycloak (RS256, xác thực bằng JWKS) thu hồi
+  **toàn bộ** session của người dùng đó ở phía server, nên đăng xuất tập trung thực sự chấm dứt truy
+  cập ở mọi nơi.
+- **Vòng đời session & tài khoản** — admin reset password, khóa tức thì bằng **thu hồi session**,
+  hard-delete kèm **gán lại nội dung** (không để dashboard mồ côi), và **last-admin guard** ngăn nền
+  tảng tự khóa chính mình ra ngoài.
+- **Vault secret có kiểu** — secret đa-trường, có kiểu theo phong cách Kubernetes (`Opaque` /
+  `kubernetes.io/tls` / `basic-auth`) đứng sau mọi credential của connector, storage và TLS. Secret
+  được inject vào pod dưới dạng env reference — **plaintext không bao giờ nằm trong ConfigMap** — và
+  TLS ở ingress được phục vụ từ chứng chỉ do operator cung cấp.
+- **Cô lập runtime** — mỗi notebook chạy trong một **pod được gia cố, riêng theo người-dùng × workspace**
+  (non-root `uid 1000`, drop toàn bộ Linux capability, `NetworkPolicy` siết chặt, RBAC tối thiểu) và
+  ghi vào một **namespace Iceberg riêng tư** qua token scoped theo namespace — không bao giờ dùng kernel
+  chung.
+
 ---
 
-## Năng lực cốt lõi
+## Năng lực cốt lõi — mỗi thứ đều là điều tối thiểu của một data platform
 
-- 🏢 **Đa workspace** — sandbox cô lập cho từng team/dự án trên dữ liệu dùng chung
-- 🔐 **Bảo mật thống nhất** — OIDC/SSO, authorization Cedar, enforcement Ranger, masking theo tag, audit
-- 🧊 **Iceberg REST Catalog** — nhúng, tích hợp engine, đa-tenant theo workspace (single source of truth)
-- 🔌 **Query federation** — Trino đọc Iceberg-on-S3 **và** 30+ nguồn ngoài (RDBMS, NoSQL, stream, cloud) qua một mặt SQL có governance
-- ⚙️ **Provision engine** — provision & quản lý cluster **Trino** trên Kubernetes (coordinator + worker, autoscale HPA/KEDA, plugin Ranger đi kèm); **StarRocks** hỗ trợ như một query engine (giao thức MySQL)
-- 🕵️ **Delegation theo người dùng** — query chạy dưới danh tính người gọi (`impersonate` / `jwt` qua TLS), theo policy dữ liệu của chính người đó
-- 📊 **BI / Explorer** — SQL Lab, dataset, chart, dashboard (đa tab, filter, click behaviour) với độ tương đồng Metabase cao
-- 📓 **Notebook** — notebook theo workspace với kernel Daft
-- 🔌 **Data API Builder** — expose HTTP API từ SQL (dynamic SQL kiểu MyBatis)
-- ⚙️ **Workflow Automation** — automation kiểu n8n (schedule, email, gọi API)
+Một data platform doanh nghiệp không thể ship nửa vời. Mỗi năng lực dưới đây bịt một khoảng trống cụ
+thể mà nếu thiếu sẽ buộc phải dùng thêm một công cụ riêng, một lần đăng nhập riêng, hoặc một lần review
+bảo mật riêng:
+
+- 🏢 **Đa workspace** — sandbox cô lập cho từng team/dự án trên dữ liệu dùng chung *(không dẫm chân, không silo)*
+- 🔐 **Bảo mật thống nhất** — OIDC/SSO, authorization Cedar, enforcement Ranger, masking theo tag, audit *(một authorizer, không phải năm)*
+- 🪪 **Tự sở hữu danh tính & secret** — token engine theo người dùng từ machine-IdP, back-channel logout, thu hồi session, vault secret có kiểu *(không credential dài hạn hay dùng chung)*
+- 🧊 **Iceberg REST Catalog** — nhúng, tích hợp engine, đa-tenant theo workspace *(nguồn sự thật duy nhất)*
+- 🔌 **Query federation** — Trino & StarRocks đọc Iceberg-on-S3 **và** 30+ nguồn ngoài (RDBMS, NoSQL, stream, cloud) qua một mặt SQL có governance *(query ngay tại nơi dữ liệu nằm — không copy)*
+- ⚙️ **Provision engine** — provision & quản lý cluster **Trino** *và* **StarRocks** trên Kubernetes (autoscale HPA/KEDA, plugin Ranger đi kèm) *(compute co giãn, self-service)*
+- 🕵️ **Delegation theo người dùng** — query chạy dưới danh tính người gọi (`impersonate` / `jwt` qua TLS), theo policy dữ liệu của chính người đó *(truy vết trách nhiệm ở mức dòng/cột)*
+- 📊 **BI / Explorer** — SQL Lab, dataset, chart, dashboard (đa tab, filter, click behaviour) với độ tương đồng Metabase cao *(analyst tự phục vụ)*
+- 📓 **Notebook** — notebook theo workspace trên kernel Daft **được cô lập**, kèm viz Python ngay trong notebook (plotly / matplotlib) *(data science, ngay trong nền tảng)*
+- 🔌 **Data API Builder** — expose HTTP API có governance từ SQL (dynamic SQL kiểu MyBatis) *(phục vụ ứng dụng, không chỉ dashboard)*
+- ⚙️ **Workflow Automation** — automation kiểu n8n: schedule, email, gọi API *(vận hành hóa dữ liệu)*
 
 ---
 
@@ -339,15 +365,17 @@ flowchart TB
 
 ## Trạng thái
 
-**Nền tảng, governance và analytics đã dựng xong và đang dùng:** authentication/SSO, đa workspace,
-authorization Cedar thống nhất trên mọi enforcement site, console RBAC & access-control, enforcement
-Ranger ở data plane với masking theo tag, và audit log đầy đủ. **BI/Explorer** đạt độ tương đồng
-Metabase cao (dataset, chart, dashboard) — đã kiểm chứng end-to-end trên một engine Trino đã provision.
-**Iceberg catalog nhúng** chạy live end-to-end (provision → auth → data plane), **provision engine**
-(Trino trên Kubernetes) đã ship kèm **catalog federation** (30+ connector) và **delegation theo người
-dùng bảo mật** (`impersonate` + `jwt` qua TLS, đã kiểm chứng live), và **notebook** chạy cell thật
-end-to-end. Đang làm tiếp: hardening catalog (storage profile, GC), delegation notebook/Daft, và các
-mặt Data API + Workflow.
+**Nền tảng, governance và analytics đã dựng xong và đang dùng:** authentication/SSO với **token broker
+machine-IdP** (token engine theo người dùng, không có credential engine dài hạn) và **SSO back-channel
+logout**, đa workspace, authorization Cedar thống nhất trên mọi enforcement site, console RBAC &
+access-control, enforcement Ranger ở data plane với masking theo tag, một **vault secret có kiểu**, và
+audit log đầy đủ. **BI/Explorer** đạt độ tương đồng Metabase cao (dataset, chart, dashboard) — đã kiểm
+chứng end-to-end trên một engine Trino đã provision. **Iceberg catalog nhúng** chạy live end-to-end
+(provision → auth → data plane); **provision engine** đã bao phủ **cả Trino và StarRocks trên
+Kubernetes** kèm **catalog federation** (30+ connector) và **delegation theo người dùng bảo mật**
+(`impersonate` + `jwt` qua TLS, đã kiểm chứng live); và **notebook** chạy cell thật trong **pod kernel
+cô lập theo từng người dùng** kèm viz Python ngay trong notebook. Đang làm tiếp: hardening catalog
+(storage profile, GC), delegation notebook/Daft, và các mặt Data API + Workflow.
 
 Xem [Roadmap & trạng thái](docs/en/architecture/2026-06-17-egret-architecture-design.md#16-roadmap--status).
 
