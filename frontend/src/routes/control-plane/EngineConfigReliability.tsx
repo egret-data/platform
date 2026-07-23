@@ -53,10 +53,9 @@ export function EngineConfigReliability(props: {
   });
 
   return (
-    <div className="space-y-5">
     <ConfigSection
       title="Fault-tolerant execution"
-      description="Retry failed tasks/queries, spooling exchange data to an S3 storage connection."
+      description="Retry failed tasks/queries (spooling exchange data to S3) plus the per-policy retry attempt caps."
       docsUrl="https://trino.io/docs/current/admin/fault-tolerant-execution.html"
     >
       <ConfigTable>
@@ -132,6 +131,25 @@ export function EngineConfigReliability(props: {
                 onChange={(e) => setExchangePrefix(e.target.value)}
               />
             </ConfigTableRow>
+            {/* Per-policy retry attempt caps — only relevant once FTE is on,
+                so they live in the same table, right below retry-policy. */}
+            {knownProperties
+              .filter((p) => p.section === "reliability")
+              .map((prop) => (
+                <ConfigTableRow
+                  key={prop.key}
+                  mono
+                  label={prop.key}
+                  details={prop.help ?? null}
+                  docsUrl={prop.docsUrl}
+                >
+                  <PropertyValue
+                    prop={prop}
+                    value={getProp("config", prop.key)}
+                    onChange={(v) => setProp("config", prop.key, v)}
+                  />
+                </ConfigTableRow>
+              ))}
           </>
         )}
       </ConfigTable>
@@ -148,32 +166,5 @@ export function EngineConfigReliability(props: {
         </p>
       )}
     </ConfigSection>
-
-      <ConfigSection
-        title="Retry limits"
-        description="Per-policy retry attempt caps applied when fault-tolerant execution is enabled."
-        docsUrl="https://trino.io/docs/current/admin/fault-tolerant-execution.html"
-      >
-        <ConfigTable>
-          {knownProperties
-            .filter((p) => p.section === "reliability")
-            .map((prop) => (
-              <ConfigTableRow
-                key={prop.key}
-                mono
-                label={prop.key}
-                details={prop.help ?? null}
-                docsUrl={prop.docsUrl}
-              >
-                <PropertyValue
-                  prop={prop}
-                  value={getProp("config", prop.key)}
-                  onChange={(v) => setProp("config", prop.key, v)}
-                />
-              </ConfigTableRow>
-            ))}
-        </ConfigTable>
-      </ConfigSection>
-    </div>
   );
 }
