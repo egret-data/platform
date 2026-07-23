@@ -175,6 +175,37 @@ Mọi route ws-scoped đều đã dùng `WsContext` — đã xác minh trên `eg
 Cái giá là `WsContext` giờ làm hai việc. Chấp nhận được: cả hai đều là "request này
 có được chạm vào workspace này không", và phương án còn lại tệ hơn.
 
+### 5.1.1 Chỗ "do cấu trúc" hết đúng
+
+Tính chất 1 đúng với mọi route mà một **phiên trình duyệt** chạm tới — đó mới là
+điều lập luận trên thực sự nói. Nó không đúng với các callback dùng bearer token
+của kernel, và thiết kế chỉ trung thực khi nói ra điều đó:
+
+| Handler | Vì sao lọt |
+| --- | --- |
+| `POST /api/ws/{workspace}/notebook-runtime/token` | xác thực bằng kernel token chứ không phải session, nên không bao giờ dựng `WsContext` — dù URL có `{workspace}` |
+| `POST /api/kernel/engine-token` | cũng vậy, và URL còn không ws-scoped, nên catalog không có path nào để khớp |
+
+Cả hai đều trao cho một kernel **đang chạy** một capability **mới** — đúng thứ
+entitlement sinh ra để chặn; còn để kernel đang chạy làm nốt việc của nó là một
+non-goal riêng, đã ghi rõ (§2.1). Nên cả hai tự khẳng định entitlement `notebooks`
+**bằng tay**, gate theo `workspace_id` tin cậy trong `KernelIdentity` — không bao
+giờ theo segment `{workspace}` trên URL, vì chính kernel subprocess dựng URL đó và
+có thể trỏ vào workspace mà module còn bật.
+
+Hai chỗ kiểm tra bằng tay là một *pattern*, không phải ngoại lệ đơn lẻ, nên module
+doc của `features.rs` nêu tên cả hai. Người đi audit tính năng này sẽ bắt đầu từ
+catalog, và catalog phải nói thật về giới hạn của chính nó.
+
+Còn hai bất biến vẫn là quy ước chứ không phải cấu trúc, và mỗi cái được ghim bằng
+một test trong `crates/egret-server/tests/feature_route_coverage.rs` thay vì trông
+vào sự cẩn thận của con người:
+
+- mọi route ws-scoped phải mount dưới `/api/ws/` — `ws_path_suffix` không nhận
+  dạng nào khác, nên router ở `/api/v2` sẽ fail open trong khi catalog vẫn phân
+  loại segment của nó hoàn hảo;
+- mọi segment path ws-scoped phải được catalog biết đến (§8.1).
+
 ### 5.2 Khớp path
 
 Lấy phần đuôi sau `/api/ws/{slug}/`, khớp prefix **dài nhất** với catalog (để

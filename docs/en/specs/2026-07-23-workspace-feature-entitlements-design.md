@@ -182,6 +182,38 @@ That gives two properties a separate layer cannot:
 The cost is that `WsContext` now does two things. That is acceptable: both are
 "can this request touch this workspace at all", and the alternative is worse.
 
+### 5.1.1 Where "by construction" stops being true
+
+Property 1 holds for every route a **browser session** reaches, which is what the
+argument above is really about. It does not hold for the kernel's bearer-token
+callbacks, and the design is only honest if it says so:
+
+| Handler | Why it escapes |
+| --- | --- |
+| `POST /api/ws/{workspace}/notebook-runtime/token` | authenticated by a kernel token, not a session, so it never constructs `WsContext` — despite being workspace-scoped by URL |
+| `POST /api/kernel/engine-token` | same, and not workspace-scoped by URL at all, so the catalog has no path to match on |
+
+Both hand a **running** kernel a *fresh* capability, which is the thing the
+entitlement is meant to stop; letting an in-flight kernel finish its current work
+is a separate, explicit non-goal (§2.1). Both therefore assert the `notebooks`
+entitlement **by hand**, gating on the trusted `workspace_id` carried in
+`KernelIdentity` — never on a `{workspace}` URL segment, which the kernel
+subprocess composes itself and could point at a workspace where the module is
+still on.
+
+Two hand-written checks is a pattern, not a one-off, so `features.rs`'s module
+doc names both. Someone auditing this feature starts at the catalog, and the
+catalog should tell them the truth about its own limits.
+
+Two invariants remain convention rather than construction, and each is pinned by
+a test in `crates/egret-server/tests/feature_route_coverage.rs` rather than left
+to vigilance:
+
+- every workspace-scoped route must be mounted under `/api/ws/` — `ws_path_suffix`
+  recognises nothing else, so a router at `/api/v2` would fail open while the
+  catalog still classified its segment perfectly;
+- every workspace-scoped path segment must be known to the catalog (§8.1).
+
 ### 5.2 Matching
 
 Take the path suffix after `/api/ws/{slug}/`, match its **longest** prefix
