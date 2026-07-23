@@ -5,21 +5,23 @@
 //!
 //! The app below is composed exactly the way `egret-server` composes the real
 //! one — `nest("/api", notebook_router())` alongside
-//! `nest("/api/ws", ws_member_router())` — because axum's `nest` rewrites the
-//! inner router's view of the URI, and the gate reads that view. Mounting the
-//! notebook router bare would test a path shape production never produces.
+//! `nest("/api/ws", ws_member_router())` — so the gate is exercised against the
+//! mount shapes production actually produces, plus one that it does not yet
+//! (see `deeply_nested_router_is_still_gated`).
 
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
 use axum::response::Response;
+use axum::routing::get;
 use axum::Router;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
 use egret_core::ids::{UserId, WorkspaceId};
 use egret_metastore::Db;
 use egret_notebook::{notebook_router, NotebookState, NotebookStore};
+use egret_workspace::context::WsContext;
 use egret_workspace::members::MemberRepo;
 use egret_workspace::rbac::Authorizer;
 use egret_workspace::routes::{ws_member_router, WorkspaceState};
@@ -102,6 +104,24 @@ impl Fixture {
     }
 }
 
+/// A workspace-scoped route shaped like `ws_member_router`'s: its own path
+/// carries no `/ws` literal, because it is meant to be mounted at `/api/ws`.
+/// The handler does nothing but prove the extractor let the request through.
+///
+/// Nothing gated is mounted that way in production today, which is exactly why
+/// this exists: the gate must not depend on a router happening to be nested at
+/// the one depth that leaves `/ws/{slug}/…` intact in `parts.uri`.
+async fn deep_probe(_ctx: WsContext) -> StatusCode {
+    StatusCode::OK
+}
+
+/// `kernel` is one of the `notebooks` module's gated prefixes, and no router in
+/// this test app already claims `/api/ws/{workspace}/kernel`, so the probe can
+/// occupy it without colliding with the real notebook routes.
+fn deep_probe_router() -> Router<WorkspaceState> {
+    Router::new().route("/{workspace}/kernel", get(deep_probe))
+}
+
 async fn build_pdp(db: &Db) -> Arc<dyn egret_core::authz::Pdp> {
     Arc::new(
         egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
@@ -179,7 +199,7 @@ async fn setup(pool: sqlx::PgPool, caller: Caller) -> Fixture {
             idp_issuer: "http://localhost:8080".into(),
         });
     let workspace_admin = Router::new()
-        .nest("/api/ws", ws_member_router())
+        .nest("/api/ws", ws_member_router().merge(deep_probe_router()))
         .with_state(WorkspaceState {
             workspaces,
             members: MemberRepo::new(db.clone()),
@@ -239,9 +259,9 @@ async fn an_enabled_module_is_untouched(pool: sqlx::PgPool) {
 
     // Same workspace, an UNGATED surface: the gate must not leak across.
     // `members` is workspace administration — it belongs to no module and so
-    // must survive every module being switched off. Note this router is nested
-    // at `/api/ws`, so the gate sees `/{slug}/members` and short-circuits before
-    // any DB lookup; that is the production shape, not an artefact of the test.
+    // must survive every module being switched off. The gate does parse this
+    // path as workspace-scoped; it lets it through because `members` is in the
+    // catalog's UNGATED list, which is also what makes it skip the DB lookup.
     let resp = f.get(&format!("/api/ws/{}/members", f.slug)).await;
 
     assert_eq!(resp.status(), StatusCode::OK);
@@ -323,5 +343,40 @@ async fn the_gate_precedes_membership_resolution(pool: sqlx::PgPool) {
 
     let resp = f.get(&format!("/api/ws/{}/notebooks", f.slug)).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(f.json(resp).await["code"], "feature_disabled");
+}
+
+/// The gate must key off the path the CLIENT sent, not the one `nest` left
+/// behind. `deep_probe_router` is mounted the way `ws_member_router` is — at
+/// `/api/ws`, with its own paths starting at `/{workspace}` — so `parts.uri`
+/// arrives here as `/{slug}/kernel`, with the `/ws/` marker eaten by the mount
+/// prefix. Reading `parts.uri` the gate sees nothing workspace-scoped and fails
+/// OPEN; reading `OriginalUri` it sees `/api/ws/{slug}/kernel` — a path the
+/// `notebooks` module claims — and gates correctly.
+///
+/// Nothing gated is mounted at that depth in production today, so this is the
+/// regression test for a fail-open that a future contributor would otherwise
+/// introduce silently — the catalog and its coverage test would both still
+/// look correct.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_deeper_mount_prefix_does_not_open_the_gate(pool: sqlx::PgPool) {
+    let f = setup(pool, Caller::WorkspaceAdmin).await;
+
+    // Control: the probe is reachable while the module is on, so a 403 below
+    // can only be the gate and not a routing or membership accident.
+    assert_eq!(
+        f.get(&format!("/api/ws/{}/kernel", f.slug)).await.status(),
+        StatusCode::OK,
+        "the probe route is reachable while notebooks is on"
+    );
+
+    disable(&f.db, f.ws, "notebooks").await;
+
+    let resp = f.get(&format!("/api/ws/{}/kernel", f.slug)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a gated module must stay gated however deeply its router is nested"
+    );
     assert_eq!(f.json(resp).await["code"], "feature_disabled");
 }

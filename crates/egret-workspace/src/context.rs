@@ -52,17 +52,25 @@ where
         //     from the response. The DB is only touched when the path actually
         //     belongs to a gated module.
         //
-        //     `parts.uri.path()` is the inner router's view, which axum's
-        //     `nest` has already stripped: a request to
-        //     `/api/ws/sales/notebooks` arrives here as `/ws/sales/notebooks`,
-        //     because every gated router is nested at exactly `/api`.
-        //     `ws_path_suffix` accepts both spellings.
-        if let Some(suffix) = features::ws_path_suffix(parts.uri.path()) {
-            if let Some(key) = features::gated_feature(suffix, parts.method.as_str()) {
-                let disabled = repo.disabled_features(ws.id).await.map_err(AuthError)?;
-                if disabled.contains(key) {
-                    return Err(AuthError(Error::FeatureDisabled(key)));
-                }
+        //     `nest()` rewrites the inner router's view of the URI, so
+        //     `parts.uri` is the path with the mount prefix already stripped —
+        //     and by how much depends on where the router happened to be
+        //     mounted. `OriginalUri` is the full path as the client sent it,
+        //     which is the only thing that makes this gate correct no matter
+        //     how deeply a future router is nested. Falls back to `parts.uri`
+        //     for routers that were never nested at all.
+        let gated = {
+            let full_path = parts
+                .extensions
+                .get::<axum::extract::OriginalUri>()
+                .map_or_else(|| parts.uri.path(), |o| o.0.path());
+            features::ws_path_suffix(full_path)
+                .and_then(|suffix| features::gated_feature(suffix, parts.method.as_str()))
+        };
+        if let Some(key) = gated {
+            let disabled = repo.disabled_features(ws.id).await.map_err(AuthError)?;
+            if disabled.contains(key) {
+                return Err(AuthError(Error::FeatureDisabled(key)));
             }
         }
 
