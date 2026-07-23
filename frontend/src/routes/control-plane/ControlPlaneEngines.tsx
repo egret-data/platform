@@ -1,42 +1,14 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, Loader2, Plus, Server } from "lucide-react";
+import { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { ExternalLink, Plus, Server } from "lucide-react";
 
-import {
-  type CreateEngineInput,
-  type Engine,
-  type Secret,
-  type Warehouse,
-  createEngine,
-  getEngine,
-  listEngines,
-  listSecrets,
-  listWarehouses,
-} from "@/api/controlPlane";
+import { type Engine, getEngine, listEngines } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   FilterableTable,
@@ -114,7 +86,6 @@ export const DELEGATION_HELP: Record<StarRocksDelegationOption, string> = {
 };
 
 export const enginesQueryKey = ["cp", "engines"] as const;
-const warehousesQueryKey = ["cp", "warehouses"] as const;
 
 export default function ControlPlaneEngines() {
   const engines = useQuery<Engine[], ApiError>({
@@ -123,12 +94,12 @@ export default function ControlPlaneEngines() {
     retry: false,
   });
 
+  const navigate = useNavigate();
   const [activeType, setActiveType] = useState(ENGINE_TYPES[0].value);
-  const [addOpen, setAddOpen] = useState(false);
 
   const canProvision = PROVISIONABLE.has(activeType);
-  const activeLabel =
-    ENGINE_TYPES.find((t) => t.value === activeType)?.label ?? activeType;
+  const goCreate = (type: string) =>
+    navigate(`/control-plane/engines/new?type=${type}`);
 
   const all = engines.data ?? [];
   const total = all.length;
@@ -146,7 +117,7 @@ export default function ControlPlaneEngines() {
         </div>
         <Button
           className="shrink-0"
-          onClick={() => setAddOpen(true)}
+          onClick={() => goCreate(activeType)}
           disabled={!canProvision}
           title={canProvision ? undefined : "Coming soon"}
         >
@@ -182,19 +153,16 @@ export default function ControlPlaneEngines() {
                 label={type.label}
                 rows={(engines.data ?? []).filter((e) => e.type === type.value)}
                 loading={engines.isLoading}
-                onAdd={PROVISIONABLE.has(type.value) ? () => setAddOpen(true) : undefined}
+                onAdd={
+                  PROVISIONABLE.has(type.value)
+                    ? () => goCreate(type.value)
+                    : undefined
+                }
               />
             </TabsContent>
           ))}
         </Tabs>
       )}
-
-      <AddEngineDialog
-        open={addOpen}
-        onOpenChange={setAddOpen}
-        engineType={activeType}
-        engineLabel={activeLabel}
-      />
     </div>
   );
 }
@@ -332,409 +300,4 @@ function EngineStatusBadge({ id, fallback }: { id: string; fallback: string }) {
 
   const phase = detail.data?.status.phase ?? fallback;
   return <Badge variant={phaseVariant(phase)}>{phase}</Badge>;
-}
-
-function AddEngineDialog({
-  open,
-  onOpenChange,
-  engineType,
-  engineLabel,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  engineType: string;
-  engineLabel: string;
-}) {
-  const queryClient = useQueryClient();
-  const warehouses = useQuery<Warehouse[], ApiError>({
-    queryKey: warehousesQueryKey,
-    queryFn: listWarehouses,
-    retry: false,
-    enabled: open,
-  });
-  const secrets = useQuery<Secret[], ApiError>({
-    queryKey: ["control-plane", "secrets"],
-    queryFn: listSecrets,
-    retry: false,
-    enabled: open,
-  });
-  const createMutation = useMutation<Engine, ApiError, CreateEngineInput>({
-    mutationFn: createEngine,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: enginesQueryKey }),
-  });
-
-  const [name, setName] = useState("");
-  const [warehouseId, setWarehouseId] = useState("");
-  const [coordinatorReplicas, setCoordinatorReplicas] = useState(1);
-  const [workerReplicas, setWorkerReplicas] = useState(2);
-  const [cpuMin, setCpuMin] = useState("1");
-  const [cpuMax, setCpuMax] = useState("2");
-  const [memory, setMemory] = useState("4Gi");
-  // StarRocks-only fields (shown instead of the Trino resource fields above).
-  const [feImage, setFeImage] = useState(DEFAULT_SR_FE_IMAGE);
-  const [cnImage, setCnImage] = useState(DEFAULT_SR_CN_IMAGE);
-  const [feReplicas, setFeReplicas] = useState(1);
-  const [cnReplicas, setCnReplicas] = useState(1);
-  const [delegationMode, setDelegationMode] =
-    useState<StarRocksDelegationOption>("");
-  const [tlsEnabled, setTlsEnabled] = useState(true);
-  // Optional coordinator TLS cert: "" = self-signed (default); otherwise the id
-  // of a kubernetes.io/tls named secret.
-  const [tlsCertSecretRef, setTlsCertSecretRef] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  const isStarRocks = engineType === "starrocks";
-
-  useEffect(() => {
-    if (open) reset();
-  }, [open]);
-
-  function reset() {
-    setName("");
-    setWarehouseId("");
-    setCoordinatorReplicas(1);
-    setWorkerReplicas(2);
-    setCpuMin("1");
-    setCpuMax("2");
-    setMemory("4Gi");
-    setFeImage(DEFAULT_SR_FE_IMAGE);
-    setCnImage(DEFAULT_SR_CN_IMAGE);
-    setFeReplicas(1);
-    setCnReplicas(1);
-    setDelegationMode("");
-    setTlsEnabled(true);
-    setTlsCertSecretRef("");
-    setError(null);
-    createMutation.reset();
-  }
-
-  function handleOpenChange(next: boolean) {
-    if (!next) reset();
-    onOpenChange(next);
-  }
-
-  // Only provisioned warehouses (embedded catalog id resolved) can back an engine.
-  const provisioned = (warehouses.data ?? []).filter(
-    (w) => w.lakekeeperWarehouseId,
-  );
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-
-    const input: CreateEngineInput = isStarRocks
-      ? {
-          name: name.trim(),
-          warehouseId,
-          kind: "starrocks",
-          starrocks: {
-            feImage: feImage.trim(),
-            cnImage: cnImage.trim(),
-            feReplicas,
-            cnReplicas,
-            // Omit entirely for Auto ("") — the backend resolves an absent
-            // delegationMode to jwt, degrading to impersonate. An explicit
-            // "none" is sent LITERALLY so the backend provisions an open
-            // engine instead of applying the Auto default.
-            ...(delegationMode !== ""
-              ? { delegationMode, tlsEnabled }
-              : {}),
-          },
-          // Required by the body but ignored server-side for StarRocks —
-          // send the same defaults the Trino wizard uses.
-          ...TRINO_FIELD_DEFAULTS,
-        }
-      : {
-          name: name.trim(),
-          warehouseId,
-          coordinatorReplicas,
-          workerReplicas,
-          cpuMin: cpuMin.trim(),
-          cpuMax: cpuMax.trim(),
-          memory: memory.trim(),
-          ...(tlsCertSecretRef ? { tlsCertSecretRef } : {}),
-        };
-
-    try {
-      await createMutation.mutateAsync(input);
-      handleOpenChange(false);
-    } catch (err) {
-      setError((err as ApiError).message ?? "Failed to provision engine.");
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent>
-        <form onSubmit={handleSubmit}>
-          <DialogHeader>
-            <DialogTitle>Add {engineLabel} engine</DialogTitle>
-            <DialogDescription>
-              Provision a {engineLabel} cluster against a catalog warehouse.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="my-4 space-y-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="cpe-name">Name</Label>
-              <Input
-                id="cpe-name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. analytics-trino"
-                required
-                autoFocus
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="cpe-warehouse">Warehouse</Label>
-              <Select value={warehouseId} onValueChange={setWarehouseId}>
-                <SelectTrigger id="cpe-warehouse" className="w-full">
-                  <SelectValue placeholder="Select a warehouse" />
-                </SelectTrigger>
-                <SelectContent>
-                  {provisioned.length === 0 ? (
-                    <SelectItem value="__none__" disabled>
-                      No provisioned warehouses
-                    </SelectItem>
-                  ) : (
-                    provisioned.map((w) => (
-                      <SelectItem key={w.id} value={w.id}>
-                        {w.name}
-                      </SelectItem>
-                    ))
-                  )}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {isStarRocks ? (
-              <>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="cpe-sr-fe-image">FE image</Label>
-                    <Input
-                      id="cpe-sr-fe-image"
-                      value={feImage}
-                      onChange={(e) => setFeImage(e.target.value)}
-                      placeholder={DEFAULT_SR_FE_IMAGE}
-                      required
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="cpe-sr-cn-image">CN image</Label>
-                    <Input
-                      id="cpe-sr-cn-image"
-                      value={cnImage}
-                      onChange={(e) => setCnImage(e.target.value)}
-                      placeholder={DEFAULT_SR_CN_IMAGE}
-                      required
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="cpe-sr-fe-replicas">FE replicas</Label>
-                    <Input
-                      id="cpe-sr-fe-replicas"
-                      type="number"
-                      min={1}
-                      value={feReplicas}
-                      onChange={(e) => setFeReplicas(Number(e.target.value))}
-                      required
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="cpe-sr-cn-replicas">CN replicas</Label>
-                    <Input
-                      id="cpe-sr-cn-replicas"
-                      type="number"
-                      min={1}
-                      value={cnReplicas}
-                      onChange={(e) => setCnReplicas(Number(e.target.value))}
-                      required
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-1.5">
-                  <Label htmlFor="cpe-sr-delegation">Per-user delegation</Label>
-                  <Select
-                    value={delegationMode || "auto"}
-                    onValueChange={(v) =>
-                      setDelegationMode(
-                        v === "auto" ? "" : (v as StarRocksDelegationOption),
-                      )
-                    }
-                  >
-                    <SelectTrigger id="cpe-sr-delegation" className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="auto">
-                        Auto — JWT, else impersonate (recommended)
-                      </SelectItem>
-                      <SelectItem value="jwt">JWT (per-user)</SelectItem>
-                      <SelectItem value="impersonate">
-                        Impersonate (service user)
-                      </SelectItem>
-                      <SelectItem value="none">None (open engine)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    {DELEGATION_HELP[delegationMode]}
-                  </p>
-                </div>
-
-                {(delegationMode === "jwt" ||
-                  delegationMode === "impersonate") && (
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-4">
-                      <Label htmlFor="cpe-sr-tls" className="font-normal">
-                        Enable TLS
-                      </Label>
-                      <Switch
-                        id="cpe-sr-tls"
-                        checked={tlsEnabled}
-                        onCheckedChange={setTlsEnabled}
-                        aria-label="Enable TLS"
-                      />
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      Enables FE SSL on the MySQL-protocol port. Requires a
-                      StarRocks image &ge; 3.4.1 (the default 3.4 line works);
-                      an older FE can&apos;t serve the SSL listener. Recommended
-                      for both delegation modes.
-                    </p>
-                  </div>
-                )}
-              </>
-            ) : (
-              <>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="cpe-coordinators">Coordinator replicas</Label>
-                    <Input
-                      id="cpe-coordinators"
-                      type="number"
-                      min={1}
-                      value={coordinatorReplicas}
-                      onChange={(e) => setCoordinatorReplicas(Number(e.target.value))}
-                      required
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="cpe-workers">Worker replicas</Label>
-                    <Input
-                      id="cpe-workers"
-                      type="number"
-                      min={0}
-                      value={workerReplicas}
-                      onChange={(e) => setWorkerReplicas(Number(e.target.value))}
-                      required
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-3 gap-4">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="cpe-cpu-min">CPU min</Label>
-                    <Input
-                      id="cpe-cpu-min"
-                      value={cpuMin}
-                      onChange={(e) => setCpuMin(e.target.value)}
-                      placeholder="1"
-                      required
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="cpe-cpu-max">CPU max</Label>
-                    <Input
-                      id="cpe-cpu-max"
-                      value={cpuMax}
-                      onChange={(e) => setCpuMax(e.target.value)}
-                      placeholder="2"
-                      required
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="cpe-memory">Memory</Label>
-                    <Input
-                      id="cpe-memory"
-                      value={memory}
-                      onChange={(e) => setMemory(e.target.value)}
-                      placeholder="4Gi"
-                      required
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-1.5">
-                  <Label htmlFor="cpe-tls-cert">Coordinator TLS cert</Label>
-                  <Select
-                    value={tlsCertSecretRef || "__self_signed__"}
-                    onValueChange={(v) =>
-                      setTlsCertSecretRef(v === "__self_signed__" ? "" : v)
-                    }
-                  >
-                    <SelectTrigger id="cpe-tls-cert" className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__self_signed__">
-                        Self-signed (default)
-                      </SelectItem>
-                      {(secrets.data ?? [])
-                        .filter((s) => s.type === "kubernetes.io/tls")
-                        .map((s) => (
-                          <SelectItem key={s.id} value={s.id}>
-                            {s.name}
-                          </SelectItem>
-                        ))}
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    Only used for JWT/TLS engines. Pick a kubernetes.io/tls
-                    secret to back the coordinator cert, or keep self-signed.
-                  </p>
-                </div>
-              </>
-            )}
-
-            {error && (
-              <Alert variant="destructive">
-                <AlertDescription>{error}</AlertDescription>
-              </Alert>
-            )}
-          </div>
-
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => handleOpenChange(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              disabled={
-                createMutation.isPending ||
-                !name.trim() ||
-                !warehouseId ||
-                !PROVISIONABLE.has(engineType)
-              }
-            >
-              {createMutation.isPending && (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              )}
-              Add engine
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
 }

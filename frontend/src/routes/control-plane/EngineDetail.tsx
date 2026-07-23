@@ -913,12 +913,20 @@ const NAV_ITEMS: { key: string; label: string }[] = [
   { key: "security", label: "Security & Exposure" },
 ];
 
-function ConfigurationTab({
+/**
+ * The Trino config editor: a left-nav of sections + the section panes, wrapped
+ * in a single `ValidityProvider`. Shared by the detail Settings tab and the
+ * create-engine wizard. Carries NO header or Save/Create button — the consumer
+ * supplies those (and reads `onInvalidChange` to gate its action button).
+ */
+export function TrinoConfigEditor({
   cfg,
   imageVersion,
+  onInvalidChange,
 }: {
   cfg: EngineConfigForm;
   imageVersion: string;
+  onInvalidChange?: (invalid: boolean) => void;
 }) {
   const {
     autoscaleMode,
@@ -930,14 +938,8 @@ function ConfigurationTab({
     sectionCounts,
   } = cfg;
 
-  // Goes true when any raw-JSON override (any section) fails to parse; blocks
-  // Save. Every `RawJsonField` under the single `ValidityProvider` below reports
-  // into this one registry — no per-section validity gates.
-  const [rawInvalid, setRawInvalid] = useState(false);
-
-  // Active left-nav section lives in the URL (`?section=`), merged alongside the
-  // top-level `?tab=`. Normalize unknown/stale values to "image" so a bad
-  // deep-link can't render a blank pane with no nav item highlighted.
+  // Active left-nav section lives in the URL (`?section=`). Normalize unknown/
+  // stale values to "image" so a bad deep-link can't render a blank pane.
   const [sp, setSp] = useSearchParams();
   const rawSection = sp.get("section");
   const section = NAV_ITEMS.some((i) => i.key === rawSection)
@@ -953,8 +955,95 @@ function ConfigurationTab({
       { replace: true },
     );
 
-  // Non-default field count per nav item (drives the badges).
   const countFor = (key: string): number => sectionCounts[key] ?? 0;
+
+  return (
+    <div className="flex flex-col gap-4 md:flex-row">
+      <nav className="shrink-0 space-y-1 md:w-48">
+        {NAV_ITEMS.map((item) => {
+          const count = countFor(item.key);
+          const active = section === item.key;
+          return (
+            <button
+              key={item.key}
+              type="button"
+              onClick={() => setSection(item.key)}
+              className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-muted ${
+                active ? "bg-muted font-medium" : "text-muted-foreground"
+              }`}
+            >
+              <span>{item.label}</span>
+              {count > 0 && (
+                <Badge variant="secondary" className="ml-2">
+                  {count}
+                </Badge>
+              )}
+            </button>
+          );
+        })}
+      </nav>
+
+      <ValidityProvider onAnyInvalidChange={onInvalidChange ?? (() => {})}>
+        <div className="min-w-0 flex-1">
+          {section === "image" && (
+            <ImageSection
+              cfg={cfg}
+              defaultImage={`trinodb/trino:${imageVersion}`}
+            />
+          )}
+          {section === "server" && <ServerSection cfg={cfg} />}
+          {section === "coordinator" && <CoordinatorSection cfg={cfg} />}
+          {section === "worker" && <WorkerSection cfg={cfg} />}
+          {section === "workload" && <WorkloadSection cfg={cfg} />}
+          {section === "pod" && (
+            <div className="space-y-5">
+              <PodSection
+                serviceAccount={cfg.serviceAccount}
+                setServiceAccount={cfg.setServiceAccount}
+                podSecurityContext={cfg.podSecurityContext}
+                setPodSecurityContext={cfg.setPodSecurityContext}
+                containerSecurityContext={cfg.containerSecurityContext}
+                setContainerSecurityContext={cfg.setContainerSecurityContext}
+                deploymentStrategy={cfg.deploymentStrategy}
+                setDeploymentStrategy={cfg.setDeploymentStrategy}
+                deploymentAnnotations={cfg.deploymentAnnotations}
+                setDeploymentAnnotations={cfg.setDeploymentAnnotations}
+                revisionHistoryLimit={cfg.revisionHistoryLimit}
+                setRevisionHistoryLimit={cfg.setRevisionHistoryLimit}
+                progressDeadlineSeconds={cfg.progressDeadlineSeconds}
+                setProgressDeadlineSeconds={cfg.setProgressDeadlineSeconds}
+                env={cfg.env}
+                setEnv={cfg.setEnv}
+              />
+              <EnvFromSection envFrom={cfg.envFrom} setEnvFrom={cfg.setEnvFrom} />
+            </div>
+          )}
+          {section === "autoscaling" && (
+            <EngineAutoscaling
+              mode={autoscaleMode}
+              setMode={setAutoscaleMode}
+              hpa={autoscaleHpa}
+              setHpa={setAutoscaleHpa}
+              keda={autoscaleKeda}
+              setKeda={setAutoscaleKeda}
+            />
+          )}
+          {section === "security" && <SecuritySection cfg={cfg} />}
+        </div>
+      </ValidityProvider>
+    </div>
+  );
+}
+
+function ConfigurationTab({
+  cfg,
+  imageVersion,
+}: {
+  cfg: EngineConfigForm;
+  imageVersion: string;
+}) {
+  // Goes true when any raw-JSON override fails to parse; blocks Save.
+  const [rawInvalid, setRawInvalid] = useState(false);
 
   return (
     <section className="space-y-4">
@@ -966,89 +1055,12 @@ function ConfigurationTab({
         </p>
       </div>
       <div className="space-y-4">
-          <div className="flex flex-col gap-4 md:flex-row">
-            <nav className="shrink-0 space-y-1 md:w-48">
-              {NAV_ITEMS.map((item) => {
-                const count = countFor(item.key);
-                const active = section === item.key;
-                return (
-                  <button
-                    key={item.key}
-                    type="button"
-                    onClick={() => setSection(item.key)}
-                    className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-muted ${
-                      active ? "bg-muted font-medium" : "text-muted-foreground"
-                    }`}
-                  >
-                    <span>{item.label}</span>
-                    {count > 0 && (
-                      <Badge variant="secondary" className="ml-2">
-                        {count}
-                      </Badge>
-                    )}
-                  </button>
-                );
-              })}
-            </nav>
-
-            <ValidityProvider onAnyInvalidChange={setRawInvalid}>
-              <div className="min-w-0 flex-1">
-                {section === "image" && (
-                  <ImageSection
-                    cfg={cfg}
-                    defaultImage={`trinodb/trino:${imageVersion}`}
-                  />
-                )}
-                {section === "server" && <ServerSection cfg={cfg} />}
-                {section === "coordinator" && <CoordinatorSection cfg={cfg} />}
-                {section === "worker" && <WorkerSection cfg={cfg} />}
-                {section === "workload" && <WorkloadSection cfg={cfg} />}
-                {section === "pod" && (
-                  <div className="space-y-5">
-                    <PodSection
-                      serviceAccount={cfg.serviceAccount}
-                      setServiceAccount={cfg.setServiceAccount}
-                      podSecurityContext={cfg.podSecurityContext}
-                      setPodSecurityContext={cfg.setPodSecurityContext}
-                      containerSecurityContext={cfg.containerSecurityContext}
-                      setContainerSecurityContext={
-                        cfg.setContainerSecurityContext
-                      }
-                      deploymentStrategy={cfg.deploymentStrategy}
-                      setDeploymentStrategy={cfg.setDeploymentStrategy}
-                      deploymentAnnotations={cfg.deploymentAnnotations}
-                      setDeploymentAnnotations={cfg.setDeploymentAnnotations}
-                      revisionHistoryLimit={cfg.revisionHistoryLimit}
-                      setRevisionHistoryLimit={cfg.setRevisionHistoryLimit}
-                      progressDeadlineSeconds={cfg.progressDeadlineSeconds}
-                      setProgressDeadlineSeconds={
-                        cfg.setProgressDeadlineSeconds
-                      }
-                      env={cfg.env}
-                      setEnv={cfg.setEnv}
-                    />
-                    <EnvFromSection
-                      envFrom={cfg.envFrom}
-                      setEnvFrom={cfg.setEnvFrom}
-                    />
-                  </div>
-                )}
-                {section === "autoscaling" && (
-                  <EngineAutoscaling
-                    mode={autoscaleMode}
-                    setMode={setAutoscaleMode}
-                    hpa={autoscaleHpa}
-                    setHpa={setAutoscaleHpa}
-                    keda={autoscaleKeda}
-                    setKeda={setAutoscaleKeda}
-                  />
-                )}
-                {section === "security" && <SecuritySection cfg={cfg} />}
-              </div>
-            </ValidityProvider>
-          </div>
-
-          <SaveBar cfg={cfg} disabled={rawInvalid} review />
+        <TrinoConfigEditor
+          cfg={cfg}
+          imageVersion={imageVersion}
+          onInvalidChange={setRawInvalid}
+        />
+        <SaveBar cfg={cfg} disabled={rawInvalid} review />
       </div>
     </section>
   );
