@@ -297,10 +297,21 @@ danh sách, không phải mỗi workspace một query.
 
 ### 8.1 Test phủ route (quan trọng nhất)
 
-Một test Rust đọc `openapi.json` sinh ra, gom mọi path prefix khác nhau dưới
-`/api/ws/{workspace}/`, và khẳng định mỗi prefix hoặc thuộc một `Feature` hoặc nằm
-trong `UNGATED`. Thêm route module mới mà không khai báo thì CI đỏ — đây chính là
-đảm bảo mà cách kiểm tra trong từng handler phải làm thủ công mới có.
+Một test Rust đọc tài liệu OpenAPI trong tiến trình (`egret_server::openapi_doc()`,
+không đọc file `openapi.json` đã commit — file cũ sẽ pass trong khi route thật đã
+trôi đi), gom mọi **segment đầu tiên** khác nhau dưới `/api/ws/{workspace}/`, và
+khẳng định mỗi segment hoặc thuộc một `Feature` hoặc nằm trong `UNGATED`. Mount
+một module mới mà không khai báo thì CI đỏ — đây chính là đảm bảo mà cách kiểm tra
+trong từng handler phải làm thủ công mới có.
+
+Phân loại theo segment chứ không theo từng path, và ranh giới đó là cố ý. Rủi ro
+cần chống là cả một module lên mà không ai gate — Pipelines hay Alerts ở
+`/api/ws/{workspace}/pipelines/…` — đó là sự kiện ở mức segment. Bản theo-từng-path
+sẽ phải coi `queries/{id}/results` là chưa phân loại dù nó cố ý để mở (§4.1), nên
+sẽ cần một danh sách ngoại lệ ở mức suffix cho đúng một segment duy nhất trong cả
+ứng dụng. Thay vào đó, ngữ nghĩa theo method của rule đó được ghim bởi một unit test
+trong `features.rs`: hai test, hai nhiệm vụ. Cái giá chấp nhận: một sub-path mới
+dưới segment đã phân loại sẽ không làm CI đỏ.
 
 ### 8.2 Test tích hợp (sqlx, trên database test)
 

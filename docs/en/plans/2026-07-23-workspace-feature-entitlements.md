@@ -654,52 +654,81 @@ This is the safety net. It is what makes a single central gate as trustworthy as
 
 Create `crates/egret-server/tests/feature_route_coverage.rs`:
 
+The unit of classification is the **first path segment**, not the whole path. Add `is_classified_segment` to `crates/egret-workspace/src/features.rs` so that knowledge lives with the catalog:
+
 ```rust
-//! Every workspace-scoped route must be classified by the feature catalog:
-//! either a module owns it, or it is explicitly listed as ungated.
+/// True if `segment` — the first path segment under `/api/ws/{workspace}/` — is
+/// something the catalog knows about: either a module claims it, or it is
+/// explicitly ungated.
+///
+/// Note this is deliberately coarser than `gated_feature`. A segment can be
+/// *known* while only some of its paths are *gated* — `queries` is claimed by
+/// `sql_lab` for POST only, because submitting free-form SQL is the privileged
+/// act while reading back or cancelling your own query is not. The method-level
+/// semantics of such a rule are pinned by this module's own unit tests; this
+/// function exists for the route-coverage test in `egret-server`, whose job is
+/// to catch a whole module being mounted with nobody classifying it.
+pub fn is_classified_segment(segment: &str) -> bool {
+    UNGATED.contains(&segment)
+        || FEATURES.iter().any(|f| {
+            f.rules
+                .iter()
+                .any(|r| r.path.split('/').next() == Some(segment))
+        })
+}
+```
+
+Then the test:
+
+```rust
+//! Every workspace-scoped path segment must be known to the feature catalog:
+//! either a module claims it, or it is explicitly listed as ungated.
 //!
 //! The gate lives in one place (`WsContext`), which only works if the catalog
-//! knows about every route. This test is what keeps that true — add a route
+//! knows about every route. This test is what keeps that true — mount a module
 //! under `/api/ws/{workspace}/` without declaring it and this fails.
 //!
 //! No database and no network: it reads the in-process OpenAPI document.
 
 use std::collections::BTreeSet;
 
-use egret_workspace::features::{gated_feature, ws_path_suffix, UNGATED};
+use egret_workspace::features::{is_classified_segment, ws_path_suffix};
 
 #[test]
 fn every_workspace_scoped_route_is_classified() {
     let doc = egret_server::openapi_doc();
 
+    // Non-vacuousness floor. A bug that made `ws_path_suffix` return `None` for
+    // every path would leave `unclassified` empty and pass while proving
+    // nothing. There are ~79 workspace-scoped paths today.
+    let mut seen = 0usize;
     let mut unclassified = BTreeSet::new();
     for path in doc.paths.paths.keys() {
         let Some(suffix) = ws_path_suffix(path) else {
             continue;
         };
+        seen += 1;
         let first = suffix.split('/').next().unwrap();
-        if UNGATED.contains(&first) {
-            continue;
-        }
-        // A route counts as claimed if ANY method is gated on it: `queries` is
-        // gated for POST only, and that is a deliberate classification, not an
-        // omission.
-        let claimed = ["GET", "POST", "PUT", "PATCH", "DELETE"]
-            .iter()
-            .any(|m| gated_feature(suffix, m).is_some());
-        if !claimed {
+        if !is_classified_segment(first) {
             unclassified.insert(first.to_string());
         }
     }
 
+    assert!(seen >= 50, "only saw {seen} workspace-scoped paths; extraction is probably broken");
     assert!(
         unclassified.is_empty(),
-        "these workspace-scoped path segments are in neither a Feature nor UNGATED: {unclassified:?}\n\
+        "these workspace-scoped path segments are unknown to the feature catalog: {unclassified:?}\n\
          Add them to crates/egret-workspace/src/features.rs — either to the module that owns them, \
          or to UNGATED if they must stay reachable when every module is off."
     );
 }
 ```
+
+**Why first-segment granularity rather than per-path.** The risk this defends against is a whole module being mounted with nobody gating it — someone builds Pipelines or Alerts (placeholder nav items today) at `/api/ws/{workspace}/pipelines/…` without touching the catalog. That is a first-segment event.
+
+Sub-path drift *within* an already-classified segment is a smaller risk with its own guard: `features.rs`'s `sql_lab_gates_its_own_surface_and_only_free_form_submits` pins exactly which `queries` paths are and are not gated. Two tests, two jobs. A per-path version of this test would have to treat `queries/{id}/results` as unclassified — it is deliberately open — so making one test do both jobs would need a suffix-level exception list for exactly one segment in the whole app. Not worth the machinery.
+
+The accepted cost: a hypothetical new `POST /ws/{w}/queries/{id}/rerun` would not trip CI. The alternative is enumerating every route in the catalog, which defeats the point of prefix rules.
 
 - [ ] **Step 2: Make sure the test can see both crates**
 

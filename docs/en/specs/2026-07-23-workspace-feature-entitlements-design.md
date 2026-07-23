@@ -312,11 +312,22 @@ for the whole list, not one per workspace.
 
 ### 8.1 Route-coverage test (the important one)
 
-A Rust test reads the generated `openapi.json`, collects every distinct path
-prefix under `/api/ws/{workspace}/`, and asserts each one is either claimed by a
-`Feature` or listed in `UNGATED`. Adding a new module route without declaring it
-fails CI, which is the guarantee that per-handler checks would otherwise have to
-provide by hand.
+A Rust test reads the in-process OpenAPI document (`egret_server::openapi_doc()`,
+not the committed `openapi.json` — a stale file would pass while the real routes
+drifted), collects every distinct **first path segment** under
+`/api/ws/{workspace}/`, and asserts each is either claimed by a `Feature` or
+listed in `UNGATED`. Mounting a new module without declaring it fails CI, which
+is the guarantee that per-handler checks would otherwise have to provide by hand.
+
+Classification is per-segment, not per-path, and that boundary is deliberate. The
+risk being defended against is a whole module going up ungated — Pipelines or
+Alerts at `/api/ws/{workspace}/pipelines/…` — which is a first-segment event. A
+per-path version would have to treat `queries/{id}/results` as unclassified even
+though it is deliberately open (§4.1), so it would need a suffix-level exception
+list for the one segment in the app that carries a partial rule. Instead the
+method-level semantics of that rule are pinned by a unit test in `features.rs`:
+two tests, two jobs. The accepted cost is that a new sub-path under an
+already-classified segment would not trip CI.
 
 ### 8.2 Integration tests (sqlx, against the test database)
 
