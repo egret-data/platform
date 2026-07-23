@@ -211,20 +211,41 @@ invalidate khi ghi nếu đo thấy cần.
 
 ## 6. Tách đường chạy chart khỏi SQL tự do
 
-`ChartExplore.tsx` hiện build SQL từ `query_spec` của chart rồi submit qua endpoint
-chung `POST /api/ws/{workspace}/queries`. Nên gate endpoint đó theo `sql_lab` sẽ
-giết luôn chart builder — một module chẳng liên quan.
+Có ba chỗ ở frontend build SQL từ `query_spec` rồi submit qua endpoint chung
+`POST /api/ws/{workspace}/queries` — gọi `POST /charts/data` (build) rồi
+submit-và-poll:
+
+| Chỗ gọi | Mục đích |
+| --- | --- |
+| `routes/explore/ChartExplore.tsx` | xem trước chart chưa lưu khi đang soạn |
+| `api/useChartData.ts` | xem trước card ở **chế độ sửa** dashboard |
+| `api/useColumnValues.ts` | lấy giá trị distinct của cột cho dropdown filter |
+
+Nên gate `POST /queries` theo `sql_lab` sẽ làm hỏng cả soạn chart, sửa dashboard,
+lẫn dropdown filter — ba thứ chẳng liên quan gì tới SQL Lab.
+
+Backend vốn đã có sẵn đúng hình dạng cần thiết: `ch_run`
+(`POST /charts/{id}/data`) biên dịch spec của chart **đã lưu** qua
+`compile_chart_sql`, chạy **đồng bộ ở server** bằng
+`egret_query::execution::run_query`, và trả `{columns, rows}`.
 
 Cách sửa, nằm trong module `charts`:
 
-- **Mới** `POST /api/ws/{workspace}/charts/run`, body `{dataset_id, query_spec,
-  limit}`. Nó thực hiện bước build sẵn có **ở server** rồi submit SQL kết quả cho
-  executor, trả về đúng ack `{id, status}`. SQL thô không bao giờ đi qua dây khi
-  tác giả chart.
-- Trạng thái và kết quả vẫn dùng `GET /queries/{id}` và `GET /queries/{id}/results`,
-  vốn không bị gate (§4.1).
+- **Mới** `POST /api/ws/{workspace}/charts/run`, body `{dataset_id, query_spec}`,
+  response `{columns, rows}`. Nó chính là `ch_run` nhưng nhận spec từ client thay
+  vì từ chart đã lưu: cùng chuỗi `compile_chart_sql` → `resolve_delegation` →
+  `run_query`, cùng `chart_run_limits()`, `row_limit` lấy từ spec. Phân quyền là
+  `CH_READ` ở mức workspace, đúng như `ch_data` mà nó thay thế.
+- Ba chỗ gọi ở trên hội tụ về nó, bỏ hẳn build-rồi-poll. `useBuildChartData` /
+  `useSubmitQuery` / `useQueryStatus` / `useResults` từ đó chỉ còn SQL Lab dùng.
 - Nhờ đó `POST /queries` trở thành SQL tự do và chỉ vậy, và gate nó theo `sql_lab`
   là trung thực.
+
+Xem chart đã lưu không bị đụng tới: đường đó vốn đã đi qua `ch_run` /
+`useDashboardCardData`, và giữ nguyên object-scoped nên người được chia sẻ vẫn dùng
+được. `/charts/run` cố ý *không* object-scoped — nó nhận dataset + spec chứ không
+nhận chart id, nên phải yêu cầu quyền đọc chart ở mức workspace, đúng như `ch_data`
+đang yêu cầu hôm nay.
 
 Việc này cũng bịt một lỗ có sẵn: hôm nay ai tạo được chart là submit được SQL tuỳ ý
 qua chính endpoint đó.
@@ -264,8 +285,8 @@ danh sách, không phải mỗi workspace một query.
   `<RequireFeature name="…">`, render route `Forbidden` sẵn có. Redirect
   `<Route index>` phải trỏ tới **module bật đầu tiên** thay vì hard-code `sql-lab`,
   nếu không workspace tắt SQL Lab sẽ rơi vào trang bị chặn.
-- **`ChartExplore.tsx`** — `run()` gọi `/charts/run` thay cho `useSubmitQuery`;
-  poll trạng thái/kết quả giữ nguyên.
+- **`ChartExplore.tsx`, `api/useChartData.ts`, `api/useColumnValues.ts`** — cả ba
+  chuyển sang `/charts/run` đồng bộ (§6) và bỏ máy trạng thái submit/poll.
 - **Control Plane → Workspaces → chi tiết → tab Features** — năm hàng `Switch` kèm
   label + mô tả, nút Save, toast, theo pattern bảng cấu hình đã lập ở `#328`.
 - **API client** — `403` mang `code: "feature_disabled"` thì render trang Forbidden

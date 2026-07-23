@@ -220,21 +220,43 @@ it matters.
 
 ## 6. Separating chart execution from free-form SQL
 
-`ChartExplore.tsx` currently builds SQL from the chart's `query_spec` and submits
-it through the generic `POST /api/ws/{workspace}/queries` endpoint. So gating
-that endpoint on `sql_lab` would also kill the chart builder — an unrelated
-module.
+Three frontend call sites build SQL from a `query_spec` and then submit it through
+the generic `POST /api/ws/{workspace}/queries` endpoint — `POST /charts/data`
+(build) followed by submit-and-poll:
+
+| Call site | Purpose |
+| --- | --- |
+| `routes/explore/ChartExplore.tsx` | preview an unsaved chart while authoring |
+| `api/useChartData.ts` | dashboard **edit-mode** card preview |
+| `api/useColumnValues.ts` | distinct column values for filter dropdowns |
+
+So gating `POST /queries` on `sql_lab` would break chart authoring, dashboard
+editing, and filter dropdowns — three things that have nothing to do with SQL Lab.
+
+The backend already has the right shape for the fix: `ch_run`
+(`POST /charts/{id}/data`) compiles a **saved** chart's spec via
+`compile_chart_sql`, runs it **synchronously server-side** through
+`egret_query::execution::run_query`, and returns `{columns, rows}`.
 
 Fix, in the `charts` module:
 
-- **New** `POST /api/ws/{workspace}/charts/run`, body `{dataset_id, query_spec,
-  limit}`. It performs the existing build step **server-side** and submits the
-  resulting SQL to the executor, returning the same `{id, status}` ack. Raw SQL
-  never crosses the wire when authoring a chart.
-- Status and results keep using `GET /queries/{id}` and
-  `GET /queries/{id}/results`, which are ungated (§4.1).
+- **New** `POST /api/ws/{workspace}/charts/run`, body `{dataset_id, query_spec}`,
+  response `{columns, rows}`. It is `ch_run` with a client-supplied spec instead
+  of a saved chart's: same `compile_chart_sql` → `resolve_delegation` →
+  `run_query` chain, same `chart_run_limits()`, `row_limit` taken from the spec.
+  Authorization is workspace-scoped `CH_READ`, exactly like the existing
+  `ch_data` it replaces.
+- The three call sites above converge on it, dropping build-then-poll entirely.
+  `useBuildChartData` / `useSubmitQuery` / `useQueryStatus` / `useResults` are
+  then used by SQL Lab only.
 - `POST /queries` therefore becomes free-form SQL and nothing else, and gating it
   on `sql_lab` is honest.
+
+Saved-chart viewing is untouched: it already goes through `ch_run` /
+`useDashboardCardData`, which stay object-scoped so share recipients keep working.
+`/charts/run` is deliberately *not* object-scoped — it takes a dataset and a spec
+rather than a chart id, so it must require workspace-level chart read, which is
+what `ch_data` requires today.
 
 This also closes a pre-existing hole: today anyone who can author a chart can
 submit arbitrary SQL through the same endpoint.
@@ -276,8 +298,9 @@ for the whole list, not one per workspace.
   The `<Route index>` redirect must target the **first enabled module** rather
   than the hard-coded `sql-lab`, otherwise a workspace with SQL Lab disabled
   lands on a blocked page.
-- **`ChartExplore.tsx`** — `run()` calls `/charts/run` instead of
-  `useSubmitQuery`; status/results polling is unchanged.
+- **`ChartExplore.tsx`, `api/useChartData.ts`, `api/useColumnValues.ts`** — all
+  three switch to the synchronous `/charts/run` (§6) and drop their submit/poll
+  state machines.
 - **Control Plane → Workspaces → detail → Features tab** — five `Switch` rows
   with label + description, a Save button, and a toast, following the config-table
   pattern established in `#328`.
