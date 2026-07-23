@@ -467,7 +467,11 @@ pub struct FeatureDto {
 pub struct SetFeatures {
     /// Feature key -> enabled. Unknown keys are rejected with 400 and nothing
     /// is written (`WorkspaceRepo::set_features` validates the whole batch
-    /// before opening its transaction).
+    /// before opening its transaction). The *resulting* state — this batch
+    /// merged onto what is already stored — is also validated against
+    /// cross-module dependencies (currently: `dashboards` requires `charts`),
+    /// so a body that never mentions `dashboards` can still be rejected if it
+    /// would leave `dashboards` on and `charts` off.
     pub features: std::collections::BTreeMap<String, bool>,
 }
 
@@ -518,8 +522,8 @@ async fn ws_features(
     params(("id" = Uuid, Path, description = "Workspace id")),
     request_body = SetFeatures,
     responses(
-        (status = 200, description = "Features replaced; the catalog with the new on/off state", body = Vec<FeatureDto>),
-        (status = 400, description = "An unknown feature key; nothing was written", body = ErrorBody),
+        (status = 200, description = "The named keys were merged onto this workspace's state; the catalog with the resulting on/off state", body = Vec<FeatureDto>),
+        (status = 400, description = "An unknown feature key, or a resulting state that violates a cross-module dependency (e.g. dashboards enabled with charts disabled); nothing was written", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing platform permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),

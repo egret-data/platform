@@ -1142,7 +1142,7 @@
         },
         "responses": {
           "200": {
-            "description": "Features replaced; the catalog with the new on/off state",
+            "description": "The named keys were merged onto this workspace's state; the catalog with the resulting on/off state",
             "content": {
               "application/json": {
                 "schema": {
@@ -1155,7 +1155,7 @@
             }
           },
           "400": {
-            "description": "An unknown feature key; nothing was written",
+            "description": "An unknown feature key, or a resulting state that violates a cross-module dependency (e.g. dashboards enabled with charts disabled); nothing was written",
             "content": {
               "application/json": {
                 "schema": {
@@ -25832,7 +25832,7 @@
         "properties": {
           "features": {
             "type": "object",
-            "description": "Feature key -> enabled. Unknown keys are rejected with 400 and nothing\nis written (`WorkspaceRepo::set_features` validates the whole batch\nbefore opening its transaction).",
+            "description": "Feature key -> enabled. Unknown keys are rejected with 400 and nothing\nis written (`WorkspaceRepo::set_features` validates the whole batch\nbefore opening its transaction). The *resulting* state — this batch\nmerged onto what is already stored — is also validated against\ncross-module dependencies (currently: `dashboards` requires `charts`),\nso a body that never mentions `dashboards` can still be rejected if it\nwould leave `dashboards` on and `charts` off.",
             "additionalProperties": {
               "type": "boolean"
             },

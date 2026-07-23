@@ -254,11 +254,16 @@ async fn put_rejects_an_unknown_key_and_writes_nothing() {
 }
 
 /// `PUT` is a merge, not a full replacement, despite the verb: a body naming
-/// only `notebooks` must leave a previously-disabled `charts` disabled. This
+/// only `notebooks` must leave a previously-disabled `datasets` disabled. This
 /// pins the behaviour deliberately (see `SetFeatures`'s doc comment for the
 /// forward-compatibility reasoning) — without this test a future refactor
 /// that "fixed" `set_features` into resetting omitted keys would silently
 /// flip the semantics back.
+///
+/// Uses `datasets`/`notebooks` rather than `charts` deliberately: neither
+/// participates in the `dashboards`-requires-`charts` dependency, so this
+/// test stays about merge semantics and not about that rule (which has its
+/// own dedicated tests below).
 #[tokio::test]
 async fn put_merges_leaving_omitted_keys_untouched() {
     let Some(f) = Fixture::new().await else {
@@ -266,13 +271,13 @@ async fn put_merges_leaving_omitted_keys_untouched() {
         return;
     };
 
-    let disable_charts = f
+    let disable_datasets = f
         .put(
             &format!("/admin/workspaces/{}/features", f.ws_id),
-            r#"{"features":{"charts":false}}"#,
+            r#"{"features":{"datasets":false}}"#,
         )
         .await;
-    assert_eq!(disable_charts.status(), StatusCode::OK);
+    assert_eq!(disable_datasets.status(), StatusCode::OK);
 
     // A second PUT naming only a DIFFERENT key.
     let disable_notebooks = f
@@ -290,15 +295,154 @@ async fn put_merges_leaving_omitted_keys_untouched() {
         )
         .await;
     let arr = json.as_array().unwrap();
-    let charts = arr.iter().find(|x| x["key"] == "charts").unwrap();
+    let datasets = arr.iter().find(|x| x["key"] == "datasets").unwrap();
     let notebooks = arr.iter().find(|x| x["key"] == "notebooks").unwrap();
     assert_eq!(
-        charts["enabled"], false,
-        "charts must remain disabled: it was never mentioned in the second PUT"
+        datasets["enabled"], false,
+        "datasets must remain disabled: it was never mentioned in the second PUT"
     );
     assert_eq!(
         notebooks["enabled"], false,
         "notebooks was disabled by the second PUT"
+    );
+}
+
+/// `dashboards` requires `charts`: turning both off together in one `PUT` is a
+/// fine, consistent resulting state.
+#[tokio::test]
+async fn put_turning_off_both_dashboards_and_charts_together_is_ok() {
+    let Some(f) = Fixture::new().await else {
+        eprintln!("skip");
+        return;
+    };
+
+    let put = f
+        .put(
+            &format!("/admin/workspaces/{}/features", f.ws_id),
+            r#"{"features":{"dashboards":false,"charts":false}}"#,
+        )
+        .await;
+
+    assert_eq!(put.status(), StatusCode::OK);
+    let json = f
+        .json(
+            f.get(&format!("/admin/workspaces/{}/features", f.ws_id))
+                .await,
+        )
+        .await;
+    let arr = json.as_array().unwrap();
+    assert_eq!(
+        arr.iter().find(|x| x["key"] == "dashboards").unwrap()["enabled"],
+        false
+    );
+    assert_eq!(
+        arr.iter().find(|x| x["key"] == "charts").unwrap()["enabled"],
+        false
+    );
+}
+
+/// The straightforward violation: naming both keys in one body, with
+/// `dashboards` on and `charts` off.
+#[tokio::test]
+async fn put_rejects_dashboards_on_with_charts_off_and_writes_nothing() {
+    let Some(f) = Fixture::new().await else {
+        eprintln!("skip");
+        return;
+    };
+
+    let put = f
+        .put(
+            &format!("/admin/workspaces/{}/features", f.ws_id),
+            r#"{"features":{"dashboards":true,"charts":false}}"#,
+        )
+        .await;
+
+    assert_eq!(put.status(), StatusCode::BAD_REQUEST);
+    let json = f
+        .json(
+            f.get(&format!("/admin/workspaces/{}/features", f.ws_id))
+                .await,
+        )
+        .await;
+    // Both are enabled by default, and default is untouched by the rejected
+    // write.
+    assert!(json
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|x| x["enabled"] == true));
+}
+
+/// The merge trap: `dashboards` is currently ON (the default). A `PUT` naming
+/// only `charts` — never mentioning `dashboards` at all — must still be
+/// rejected, because the *resulting* state (dashboards on, charts off) is the
+/// broken one. This is the case a body-only validation would miss.
+#[tokio::test]
+async fn put_rejects_charts_off_alone_when_dashboards_is_currently_on() {
+    let Some(f) = Fixture::new().await else {
+        eprintln!("skip");
+        return;
+    };
+
+    let put = f
+        .put(
+            &format!("/admin/workspaces/{}/features", f.ws_id),
+            r#"{"features":{"charts":false}}"#,
+        )
+        .await;
+
+    assert_eq!(put.status(), StatusCode::BAD_REQUEST);
+    let json = f
+        .json(
+            f.get(&format!("/admin/workspaces/{}/features", f.ws_id))
+                .await,
+        )
+        .await;
+    // Nothing was written: charts remains enabled (the prior state), not the
+    // rejected `false`.
+    assert_eq!(
+        json.as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["key"] == "charts")
+            .unwrap()["enabled"],
+        true,
+        "the rejected write must not have landed"
+    );
+}
+
+/// Same workspace, same starting state (`dashboards` on) as the merge-trap
+/// test above, but this time both keys are named together, turning both off:
+/// the resulting state is consistent, so it must succeed.
+#[tokio::test]
+async fn put_turning_off_charts_and_dashboards_together_succeeds_from_dashboards_on_state() {
+    let Some(f) = Fixture::new().await else {
+        eprintln!("skip");
+        return;
+    };
+
+    let put = f
+        .put(
+            &format!("/admin/workspaces/{}/features", f.ws_id),
+            r#"{"features":{"charts":false,"dashboards":false}}"#,
+        )
+        .await;
+
+    assert_eq!(put.status(), StatusCode::OK);
+    let json = f
+        .json(
+            f.get(&format!("/admin/workspaces/{}/features", f.ws_id))
+                .await,
+        )
+        .await;
+    let arr = json.as_array().unwrap();
+    assert_eq!(
+        arr.iter().find(|x| x["key"] == "charts").unwrap()["enabled"],
+        false
+    );
+    assert_eq!(
+        arr.iter().find(|x| x["key"] == "dashboards").unwrap()["enabled"],
+        false
     );
 }
 
@@ -414,6 +558,11 @@ async fn my_workspaces_reports_enabled_features() {
 /// this fixture) — it proves correctness of the batched per-workspace
 /// grouping, which is the part that would silently break if the batching were
 /// done wrong (e.g. accidentally unioning all workspaces' disabled sets).
+///
+/// Uses `datasets` (not `charts`) as ws2's disabled feature deliberately: with
+/// `dashboards` on by default, disabling `charts` alone would trip the
+/// `dashboards`-requires-`charts` dependency, which is out of scope for this
+/// test.
 #[tokio::test]
 async fn my_workspaces_reports_each_workspaces_own_disabled_set_when_batched() {
     let Some(f) = Fixture::new().await else {
@@ -445,7 +594,7 @@ async fn my_workspaces_reports_each_workspaces_own_disabled_set_when_batched() {
     let put2 = f
         .put(
             &format!("/admin/workspaces/{ws2_id}/features"),
-            r#"{"features":{"charts":false}}"#,
+            r#"{"features":{"datasets":false}}"#,
         )
         .await;
     assert_eq!(put2.status(), StatusCode::OK);
@@ -461,7 +610,7 @@ async fn my_workspaces_reports_each_workspaces_own_disabled_set_when_batched() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert!(!ws1_features.contains(&"notebooks"));
-    assert!(ws1_features.contains(&"charts"));
+    assert!(ws1_features.contains(&"datasets"));
 
     let ws2 = arr.iter().find(|w| w["id"] == ws2_id).unwrap();
     let ws2_features: Vec<&str> = ws2["features"]
@@ -470,6 +619,6 @@ async fn my_workspaces_reports_each_workspaces_own_disabled_set_when_batched() {
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    assert!(!ws2_features.contains(&"charts"));
+    assert!(!ws2_features.contains(&"datasets"));
     assert!(ws2_features.contains(&"notebooks"));
 }

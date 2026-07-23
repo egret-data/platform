@@ -36,6 +36,41 @@ pub fn is_known(key: &str) -> bool {
     FEATURES.iter().any(|f| f.key == key)
 }
 
+/// Cross-module dependencies: `(dependent, requires, message)`. `dependent`
+/// cannot be enabled while `requires` is disabled.
+///
+/// A dashboard still renders its saved cards through the `dashboards`-gated
+/// surface, but its interactive filter dropdowns and edit-mode card previews
+/// both run through `POST /charts/run`, which is `charts`-gated. `dashboards`
+/// ON with `charts` OFF is therefore a broken configuration, not just an
+/// unusual one, so it is rejected rather than merely discouraged.
+///
+/// Expressed as data so a future second dependency is a one-line addition to
+/// this list, not new control flow in `violates_dependencies`.
+const DEPENDENCIES: &[(&str, &str, &str)] = &[(
+    "dashboards",
+    "charts",
+    "dashboards requires charts to be enabled",
+)];
+
+/// The message for the first violated dependency in `disabled` — the set of
+/// feature keys that would be OFF in the resulting state — or `None` if none
+/// are violated.
+///
+/// Takes the *resulting* disabled set, not a request body: callers must merge
+/// their change onto the current state first, since a body naming only
+/// `charts` can still produce a `dashboards`-on/`charts`-off result if
+/// `dashboards` was already on.
+pub fn violates_dependencies(disabled: &HashSet<String>) -> Option<&'static str> {
+    DEPENDENCIES
+        .iter()
+        .find_map(|(dependent, requires, message)| {
+            let dependent_enabled = !disabled.contains(*dependent);
+            let requires_disabled = disabled.contains(*requires);
+            (dependent_enabled && requires_disabled).then_some(*message)
+        })
+}
+
 /// How a rule's `path` is compared against a request's path suffix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Match {
@@ -262,8 +297,11 @@ impl WorkspaceRepo {
         Ok(out)
     }
 
-    /// Upsert `updates` for `ws` in one transaction. Rejects unknown keys before
-    /// writing anything, so a batch containing a typo changes nothing.
+    /// Upsert `updates` for `ws` in one transaction. Rejects unknown keys, and
+    /// a resulting state that violates a cross-module dependency (see
+    /// [`violates_dependencies`]), before writing anything, so a batch
+    /// containing a typo — or one that merges onto the current state into a
+    /// broken combination — changes nothing.
     pub async fn set_features(
         &self,
         ws: WorkspaceId,
@@ -275,6 +313,25 @@ impl WorkspaceRepo {
                 return Err(Error::InvalidInput(format!("unknown feature: {key}")));
             }
         }
+
+        // `PUT` merges: the body may name only a subset of keys, so the
+        // dependency rule must be checked against the state that would
+        // *result* from applying `updates` onto what is currently stored, not
+        // against `updates` in isolation. Read this before opening the
+        // transaction so a violation is rejected before any write, mirroring
+        // the unknown-key check above.
+        let mut resulting = self.disabled_features(ws).await?;
+        for (key, enabled) in updates {
+            if *enabled {
+                resulting.remove(key);
+            } else {
+                resulting.insert(key.clone());
+            }
+        }
+        if let Some(message) = violates_dependencies(&resulting) {
+            return Err(Error::InvalidInput(message.to_string()));
+        }
+
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         for (key, enabled) in updates {
             sqlx::query(
@@ -416,6 +473,27 @@ mod tests {
         }
         // Nobody has declared this segment at all.
         assert!(!is_classified_segment("pipelines"));
+    }
+
+    #[test]
+    fn dependency_rule_covers_all_four_charts_dashboards_combinations() {
+        let disabled =
+            |keys: &[&str]| -> HashSet<String> { keys.iter().map(|k| k.to_string()).collect() };
+
+        // charts on, dashboards on: fine.
+        assert_eq!(violates_dependencies(&disabled(&[])), None);
+        // charts on, dashboards off: fine (dashboards may be off regardless).
+        assert_eq!(violates_dependencies(&disabled(&["dashboards"])), None);
+        // charts off, dashboards off: fine (turning both off together).
+        assert_eq!(
+            violates_dependencies(&disabled(&["charts", "dashboards"])),
+            None
+        );
+        // charts off, dashboards on: the broken combination.
+        assert_eq!(
+            violates_dependencies(&disabled(&["charts"])),
+            Some("dashboards requires charts to be enabled")
+        );
     }
 
     #[test]
