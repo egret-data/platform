@@ -35,6 +35,7 @@ import type {
   NotebookSummary,
   NotebooksListParams,
   ReorderCells,
+  SetNotebookWarehouse,
   UpdateCell,
   UpdateNotebook,
   UpdateNotebookSettings
@@ -415,6 +416,105 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getNotebooksUpdateSettingsMutationOptions(options), queryClient);
+    }
+    export type notebooksSetNotebookWarehouseResponse200 = {
+  data: NotebookSettings
+  status: 200
+}
+
+export type notebooksSetNotebookWarehouseResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type notebooksSetNotebookWarehouseResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type notebooksSetNotebookWarehouseResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type notebooksSetNotebookWarehouseResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type notebooksSetNotebookWarehouseResponseSuccess = (notebooksSetNotebookWarehouseResponse200) & {
+  headers: Headers;
+};
+export type notebooksSetNotebookWarehouseResponseError = (notebooksSetNotebookWarehouseResponse400 | notebooksSetNotebookWarehouseResponse401 | notebooksSetNotebookWarehouseResponse403 | notebooksSetNotebookWarehouseResponse500) & {
+  headers: Headers;
+};
+
+export type notebooksSetNotebookWarehouseResponse = (notebooksSetNotebookWarehouseResponseSuccess | notebooksSetNotebookWarehouseResponseError)
+
+export const getNotebooksSetNotebookWarehouseUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/notebook-settings/warehouse`
+}
+
+export const notebooksSetNotebookWarehouse = async (workspace: string,
+    setNotebookWarehouse: SetNotebookWarehouse, options?: RequestInit): Promise<notebooksSetNotebookWarehouseResponse> => {
+
+  return customInstance<notebooksSetNotebookWarehouseResponse>(getNotebooksSetNotebookWarehouseUrl(workspace),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setNotebookWarehouse)
+  }
+);}
+
+
+
+
+
+export const getNotebooksSetNotebookWarehouseMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof notebooksSetNotebookWarehouse>>, TError,{workspace: string;data: SetNotebookWarehouse}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof notebooksSetNotebookWarehouse>>, TError,{workspace: string;data: SetNotebookWarehouse}, TContext> => {
+
+const mutationKey = ['notebooksSetNotebookWarehouse'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof notebooksSetNotebookWarehouse>>, {workspace: string;data: SetNotebookWarehouse}> = (props) => {
+          const {workspace,data} = props ?? {};
+
+          return  notebooksSetNotebookWarehouse(workspace,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type NotebooksSetNotebookWarehouseMutationResult = NonNullable<Awaited<ReturnType<typeof notebooksSetNotebookWarehouse>>>
+    export type NotebooksSetNotebookWarehouseMutationBody = SetNotebookWarehouse
+    export type NotebooksSetNotebookWarehouseMutationError = ErrorBody
+
+    export const useNotebooksSetNotebookWarehouse = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof notebooksSetNotebookWarehouse>>, TError,{workspace: string;data: SetNotebookWarehouse}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof notebooksSetNotebookWarehouse>>,
+        TError,
+        {workspace: string;data: SetNotebookWarehouse},
+        TContext
+      > => {
+      return useMutation(getNotebooksSetNotebookWarehouseMutationOptions(options), queryClient);
     }
     export type notebooksListResponse200 = {
   data: NotebookSummary[]
