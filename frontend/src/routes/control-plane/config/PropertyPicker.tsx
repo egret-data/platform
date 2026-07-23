@@ -99,7 +99,11 @@ export function PropertyPicker({
           if (e.key === "Escape") close();
           else if (e.key === "Enter") {
             e.preventDefault();
-            addCustom();
+            // Prefer the top catalog match (autocomplete); only add a custom
+            // key when the query matches nothing — otherwise a partial search
+            // like "memory" would create a bogus "memory" key.
+            if (matches.length > 0) selectProp(matches[0]);
+            else addCustom();
           }
         }}
         className="pl-8"

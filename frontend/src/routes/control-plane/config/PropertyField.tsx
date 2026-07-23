@@ -21,14 +21,23 @@ export function PropertyValue({
   prop,
   value,
   onChange,
+  ariaLabel,
 }: {
   prop: KnownProperty;
   value: string;
   onChange: (v: string) => void;
+  /** Accessible name for the control (the property key), since these rows have
+   *  no visible <label htmlFor> association. */
+  ariaLabel?: string;
 }) {
   if (prop.type === "size") {
     return (
-      <QuantityValue value={value} onChange={onChange} placeholder={prop.default} />
+      <QuantityValue
+        value={value}
+        onChange={onChange}
+        placeholder={prop.default}
+        ariaLabel={ariaLabel}
+      />
     );
   }
   if (prop.type === "enum") {
@@ -37,7 +46,7 @@ export function PropertyValue({
         value={value || SELECT_NONE}
         onValueChange={(v) => onChange(v === SELECT_NONE ? "" : v)}
       >
-        <SelectTrigger className="w-full">
+        <SelectTrigger className="w-full" aria-label={ariaLabel}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -54,6 +63,7 @@ export function PropertyValue({
   if (prop.type === "boolean") {
     return (
       <Switch
+        aria-label={ariaLabel}
         checked={value === "true"}
         onCheckedChange={(v) => onChange(v ? "true" : "")}
       />
@@ -63,6 +73,7 @@ export function PropertyValue({
   return (
     <Input
       className="w-full"
+      aria-label={ariaLabel}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={prop.default}

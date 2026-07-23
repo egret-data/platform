@@ -231,11 +231,13 @@ function EngineActions({
       queryClient.invalidateQueries({ queryKey: ["cp", "engine", engineId] });
       setRestartOpen(false);
     },
+    onError: (e) => toast.error(e.message ?? "Failed to restart the engine."),
   });
 
   const deleteMutation = useMutation<void, ApiError, string>({
     mutationFn: deleteEngine,
     onSuccess: () => navigate("/control-plane/engines"),
+    onError: (e) => toast.error(e.message ?? "Failed to delete the engine."),
   });
 
   return (
@@ -367,7 +369,7 @@ export default function EngineDetail() {
         )}
       </div>
 
-      {engine.isError ? (
+      {engine.isError && !data ? (
         <Alert variant="destructive">
           <AlertDescription>
             {engine.error?.message ?? "Failed to load engine."}
@@ -934,9 +936,13 @@ function ConfigurationTab({
   const [rawInvalid, setRawInvalid] = useState(false);
 
   // Active left-nav section lives in the URL (`?section=`), merged alongside the
-  // top-level `?tab=`. Default preserved: "image".
+  // top-level `?tab=`. Normalize unknown/stale values to "image" so a bad
+  // deep-link can't render a blank pane with no nav item highlighted.
   const [sp, setSp] = useSearchParams();
-  const section = sp.get("section") ?? "image";
+  const rawSection = sp.get("section");
+  const section = NAV_ITEMS.some((i) => i.key === rawSection)
+    ? (rawSection as string)
+    : "image";
   const setSection = (v: string) =>
     setSp(
       (prev) => {
@@ -1259,6 +1265,7 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
       invalidateList();
       setRemoveOpen(false);
     },
+    onError: (e) => toast.error(e.message ?? "Failed to remove the catalog."),
   });
 
   return (
@@ -1356,7 +1363,7 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
                   />
                   {!detail.data.isPrimary && (
                     <CatalogTestSection
-                      key={selected}
+                      key={`test-${selected}`}
                       engineId={engine.id}
                       cid={selected}
                       onRemove={() => setRemoveOpen(true)}

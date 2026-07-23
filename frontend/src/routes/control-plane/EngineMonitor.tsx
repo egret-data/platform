@@ -443,7 +443,10 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
       <AlertDialog
         open={killTarget !== null}
         onOpenChange={(o) => {
-          if (!o) setKillTarget(null);
+          if (!o) {
+            setKillTarget(null);
+            killMutation.reset();
+          }
         }}
       >
         <AlertDialogContent>
@@ -455,6 +458,11 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
               cancelled on the coordinator. This cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {killMutation.isError && (
+            <p className="text-sm text-destructive">
+              {killMutation.error?.message ?? "Failed to kill the query."}
+            </p>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction

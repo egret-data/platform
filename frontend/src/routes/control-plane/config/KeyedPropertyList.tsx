@@ -101,10 +101,12 @@ export function KeyedPropertyList({
                         }}
                         value={getValue(k)}
                         onChange={(v) => setValue(k, v)}
+                        ariaLabel={k}
                       />
                     ) : (
                       <Input
                         className="w-full"
+                        aria-label={k}
                         value={getValue(k)}
                         placeholder="value"
                         onChange={(e) => setValue(k, e.target.value)}

@@ -29,11 +29,13 @@ export function QuantityValue({
   onChange,
   placeholder,
   id,
+  ariaLabel,
 }: {
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   id?: string;
+  ariaLabel?: string;
 }) {
   const invalid = value !== "" && !isValidQuantity(value);
   return (
@@ -41,6 +43,7 @@ export function QuantityValue({
       <Input
         id={id}
         className="w-full"
+        aria-label={ariaLabel}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}

@@ -122,8 +122,11 @@ export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
   const [sp, setSp] = useSearchParams();
   // "resources" was folded into "compute" (one "Compute & Resources" section);
   // alias the legacy deep-link so old ?section=resources URLs still resolve.
-  const rawSection = sp.get("section");
-  const section = rawSection === "resources" ? "compute" : (rawSection ?? "image");
+  // Unknown/stale values normalize to "image" (no blank pane).
+  const rawSection = sp.get("section") === "resources" ? "compute" : sp.get("section");
+  const section = NAV_ITEMS.some((i) => i.key === rawSection)
+    ? (rawSection as string)
+    : "image";
   const setSection = (v: string) =>
     setSp(
       (prev) => {
