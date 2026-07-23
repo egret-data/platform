@@ -205,14 +205,12 @@ function ImageSection({ cfg }: { cfg: StarRocksConfigForm }) {
   return (
     <ConfigTable>
       <ConfigTableRow
-        label="starrocksFESpec.image.repository"
-        mono
+        label="FE image"
         htmlFor="sr-fe-image"
         details="Frontend (metadata) container image."
       >
         <Input
           id="sr-fe-image"
-          aria-label="FE image"
           className="w-full"
           value={cfg.feImage}
           onChange={(e) => cfg.setFeImage(e.target.value)}
@@ -220,14 +218,12 @@ function ImageSection({ cfg }: { cfg: StarRocksConfigForm }) {
         />
       </ConfigTableRow>
       <ConfigTableRow
-        label="starrocksCnSpec.image.repository"
-        mono
+        label="CN image"
         htmlFor="sr-cn-image"
         details="Compute node container image."
       >
         <Input
           id="sr-cn-image"
-          aria-label="CN image"
           className="w-full"
           value={cfg.cnImage}
           onChange={(e) => cfg.setCnImage(e.target.value)}
@@ -250,14 +246,12 @@ function ComputeSection({ cfg }: { cfg: StarRocksConfigForm }) {
       </div>
       <ConfigTable>
         <ConfigTableRow
-          label="starrocksFESpec.replicas"
-          mono
+          label="FE replicas"
           htmlFor="sr-fe-replicas"
           details="Frontend (metadata) pod count."
         >
           <Input
             id="sr-fe-replicas"
-            aria-label="FE replicas"
             className="w-full"
             type="number"
             min={1}
@@ -266,14 +260,12 @@ function ComputeSection({ cfg }: { cfg: StarRocksConfigForm }) {
           />
         </ConfigTableRow>
         <ConfigTableRow
-          label="starrocksCnSpec.replicas"
-          mono
+          label="CN replicas"
           htmlFor="sr-cn-replicas"
           details="Compute node pod count (overridden by CN autoscaling when enabled)."
         >
           <Input
             id="sr-cn-replicas"
-            aria-label="CN replicas"
             className="w-full"
             type="number"
             min={1}
@@ -288,29 +280,24 @@ function ComputeSection({ cfg }: { cfg: StarRocksConfigForm }) {
 
 const SR_RES_FIELDS: {
   key: keyof RoleResourcesForm;
-  /** Chart values sub-path under `${specKey}.resources`. */
-  path: string;
-  ariaLabel: string;
+  label: string;
   placeholder: string;
   details: string;
 }[] = [
-  { key: "cpuRequest", path: "resources.requests.cpu", ariaLabel: "CPU request", placeholder: "1", details: "Kubernetes CPU request." },
-  { key: "cpuLimit", path: "resources.limits.cpu", ariaLabel: "CPU limit", placeholder: "2", details: "Kubernetes CPU limit." },
-  { key: "memRequest", path: "resources.requests.memory", ariaLabel: "memory request", placeholder: "4Gi", details: "Kubernetes memory request." },
-  { key: "memLimit", path: "resources.limits.memory", ariaLabel: "memory limit", placeholder: "8Gi", details: "Kubernetes memory limit." },
+  { key: "cpuRequest", label: "CPU request", placeholder: "1", details: "Kubernetes CPU request." },
+  { key: "cpuLimit", label: "CPU limit", placeholder: "2", details: "Kubernetes CPU limit." },
+  { key: "memRequest", label: "memory request", placeholder: "4Gi", details: "Kubernetes memory request." },
+  { key: "memLimit", label: "memory limit", placeholder: "8Gi", details: "Kubernetes memory limit." },
 ];
 
-/** One role's CPU/memory request+limit inputs, as a config table keyed by the
- *  kube-starrocks chart spec (`starrocksFESpec` / `starrocksCnSpec`). */
+/** One role's CPU/memory request+limit inputs, as a config table. */
 function ResourceFields({
   role,
-  specKey,
   prefix,
   value,
   onChange,
 }: {
   role: string;
-  specKey: string;
   prefix: string;
   value: RoleResourcesForm;
   onChange: (v: RoleResourcesForm) => void;
@@ -322,14 +309,12 @@ function ResourceFields({
         {SR_RES_FIELDS.map((f) => (
           <ConfigTableRow
             key={f.key}
-            label={`${specKey}.${f.path}`}
-            mono
+            label={`${role} ${f.label}`}
             htmlFor={`${prefix}-${f.key}`}
             details={f.details}
           >
             <Input
               id={`${prefix}-${f.key}`}
-              aria-label={`${role} ${f.ariaLabel}`}
               className="w-full"
               value={value[f.key]}
               onChange={(e) => onChange({ ...value, [f.key]: e.target.value })}
@@ -348,14 +333,12 @@ function ResourcesSection({ cfg }: { cfg: StarRocksConfigForm }) {
       <p className="text-sm font-medium">Resources</p>
       <ResourceFields
         role="FE"
-        specKey="starrocksFESpec"
         prefix="sr-fe-res"
         value={cfg.feResources}
         onChange={cfg.setFeResources}
       />
       <ResourceFields
         role="CN"
-        specKey="starrocksCnSpec"
         prefix="sr-cn-res"
         value={cfg.cnResources}
         onChange={cfg.setCnResources}

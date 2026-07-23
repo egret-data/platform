@@ -30,15 +30,12 @@ function SecurityContextEditor({
   idPrefix,
   rawId,
   title,
-  keyPrefix,
   value,
   onChange,
 }: {
   idPrefix: string;
   rawId: string;
   title: string;
-  /** Chart values prefix — `securityContext` (pod) or `containerSecurityContext`. */
-  keyPrefix: string;
   value: SecurityContext;
   onChange: Dispatch<SetStateAction<SecurityContext>>;
 }) {
@@ -46,40 +43,34 @@ function SecurityContextEditor({
     onChange((prev) => ({ ...prev, [k]: v }));
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-3 rounded-md border p-3">
       <Label className="text-xs font-medium">{title}</Label>
-      <ConfigTable>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         {SC_NUM_FIELDS.map((f) => (
-          <ConfigTableRow
-            key={f.key}
-            label={`${keyPrefix}.${f.key}`}
-            mono
-            details={null}
-            htmlFor={`${idPrefix}-${f.key}`}
-          >
+          <div key={f.key} className="space-y-1.5">
+            <Label htmlFor={`${idPrefix}-${f.key}`} className="text-xs">
+              {f.label}
+            </Label>
             <Input
               id={`${idPrefix}-${f.key}`}
-              className="w-full"
               type="number"
               value={value[f.key]?.toString() ?? ""}
               placeholder="1000"
               onChange={(e) => setField(f.key, numOrUndef(e.target.value))}
             />
-          </ConfigTableRow>
+          </div>
         ))}
-        <ConfigTableRow
-          label={`${keyPrefix}.runAsNonRoot`}
-          mono
-          details={null}
-          htmlFor={`${idPrefix}-nonroot`}
-        >
-          <Switch
-            id={`${idPrefix}-nonroot`}
-            checked={value.runAsNonRoot ?? false}
-            onCheckedChange={(v) => setField("runAsNonRoot", v)}
-          />
-        </ConfigTableRow>
-      </ConfigTable>
+      </div>
+      <div className="flex items-center justify-between gap-4">
+        <Label htmlFor={`${idPrefix}-nonroot`} className="text-xs">
+          runAsNonRoot
+        </Label>
+        <Switch
+          id={`${idPrefix}-nonroot`}
+          checked={value.runAsNonRoot ?? false}
+          onCheckedChange={(v) => setField("runAsNonRoot", v)}
+        />
+      </div>
       <RawJsonField
         id={rawId}
         label="Raw override (merged on top)"
@@ -147,8 +138,7 @@ export function PodSection({
       >
         <ConfigTable>
           <ConfigTableRow
-            label="serviceAccount.name"
-            mono
+            label="Service account"
             htmlFor="ps-sa"
             details="Kubernetes ServiceAccount for both the coordinator and worker pods."
           >
@@ -162,9 +152,9 @@ export function PodSection({
           </ConfigTableRow>
         </ConfigTable>
         <div className="space-y-2">
-          <Label className="font-mono text-xs">env</Label>
+          <Label>Environment variables</Label>
           <p className="text-xs text-muted-foreground">
-            Extra environment variables applied to both coordinator and worker pods.
+            Extra env applied to both coordinator and worker pods.
           </p>
           <KeyValueEditor
             rows={env}
@@ -180,12 +170,11 @@ export function PodSection({
         title="Security contexts"
         description="Pod- and container-level securityContext, with a raw override merged on top."
       >
-        <div className="space-y-6">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <SecurityContextEditor
             idPrefix="ps-podsc"
             rawId="pod.podSecurityContext.raw"
             title="Pod security context"
-            keyPrefix="securityContext"
             value={podSecurityContext}
             onChange={setPodSecurityContext}
           />
@@ -193,7 +182,6 @@ export function PodSection({
             idPrefix="ps-ctrsc"
             rawId="pod.containerSecurityContext.raw"
             title="Container security context"
-            keyPrefix="containerSecurityContext"
             value={containerSecurityContext}
             onChange={setContainerSecurityContext}
           />
@@ -206,10 +194,9 @@ export function PodSection({
       >
         <ConfigTable>
           <ConfigTableRow
-            label="deployment.strategy.type"
-            mono
+            label="Strategy"
             htmlFor="ps-strategy"
-            details="Deployment rollout strategy, applied to the coordinator and worker."
+            details="Deployment rollout strategy for both roles."
           >
             <Select
               value={deploymentStrategy.kind || SELECT_NONE}
@@ -233,8 +220,7 @@ export function PodSection({
           {deploymentStrategy.kind === "RollingUpdate" && (
             <>
               <ConfigTableRow
-                label="deployment.strategy.rollingUpdate.maxSurge"
-                mono
+                label="maxSurge"
                 htmlFor="ps-maxsurge"
                 details="Extra pods allowed above the desired count during a rollout."
               >
@@ -252,8 +238,7 @@ export function PodSection({
                 />
               </ConfigTableRow>
               <ConfigTableRow
-                label="deployment.strategy.rollingUpdate.maxUnavailable"
-                mono
+                label="maxUnavailable"
                 htmlFor="ps-maxunavail"
                 details="Pods that may be unavailable during a rollout."
               >
@@ -273,8 +258,7 @@ export function PodSection({
             </>
           )}
           <ConfigTableRow
-            label="deployment.revisionHistoryLimit"
-            mono
+            label="revisionHistoryLimit"
             htmlFor="ps-revlimit"
             details="Old ReplicaSets retained for rollback."
           >
@@ -288,8 +272,7 @@ export function PodSection({
             />
           </ConfigTableRow>
           <ConfigTableRow
-            label="deployment.progressDeadlineSeconds"
-            mono
+            label="progressDeadlineSeconds"
             htmlFor="ps-progress"
             details="Seconds before a stalled rollout is marked failed."
           >
@@ -305,7 +288,7 @@ export function PodSection({
         </ConfigTable>
 
         <div className="space-y-2">
-          <Label className="font-mono text-xs">deployment.annotations</Label>
+          <Label>Deployment annotations</Label>
           <KeyValueEditor
             rows={deploymentAnnotations}
             onChange={setDeploymentAnnotations}
@@ -319,8 +302,7 @@ export function PodSection({
       <ConfigSection title="Pod options">
         <ConfigTable>
           <ConfigTableRow
-            label="shareProcessNamespace"
-            mono
+            label="Share process namespace"
             htmlFor="ps-sharepid"
             details="Let containers in the pod share a single PID namespace."
           >

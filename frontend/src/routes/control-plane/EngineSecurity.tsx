@@ -100,8 +100,8 @@ export function EngineSecurity(props: {
     <div className="space-y-5">
       {/* Password users */}
       <ConfigSection
-        title="auth.passwordAuth"
-        description="Password-file users: each signs in with a username and the password held in the selected egret secret (hashed server-side)."
+        title="Password users"
+        description="Each user signs in with a username and the password held in the selected egret secret (hashed server-side)."
         docsUrl="https://trino.io/docs/current/security/password-file.html"
       >
         <div className="space-y-2">
@@ -199,9 +199,8 @@ export function EngineSecurity(props: {
       >
         <ConfigTable>
           <ConfigTableRow
-            label="server.config.authenticationType"
-            mono
-            details="Add JWT to the coordinator authentication types so egret-issued JWTs are accepted."
+            label="Accept egret JWT"
+            fieldKey="jwtEnabled"
             htmlFor="ced-jwt-enabled"
           >
             <Switch
@@ -213,9 +212,8 @@ export function EngineSecurity(props: {
           {jwtEnabled && (
             <>
               <ConfigTableRow
-                label="http-server.authentication.jwt.key-file"
-                mono
-                details="JWKS endpoint whose public keys verify incoming JWTs (blank = egret's default IdP)."
+                label="JWKS URI"
+                fieldKey="jwksUri"
                 htmlFor="ced-jwt-jwks"
               >
                 <Input
@@ -227,9 +225,8 @@ export function EngineSecurity(props: {
                 />
               </ConfigTableRow>
               <ConfigTableRow
-                label="http-server.authentication.jwt.required-audience"
-                mono
-                details="If set, only JWTs whose aud claim matches are accepted."
+                label="Required audience"
+                fieldKey="requiredAudience"
                 htmlFor="ced-jwt-aud"
               >
                 <Input
@@ -345,9 +342,8 @@ export function EngineSecurity(props: {
       >
         <ConfigTable>
           <ConfigTableRow
-            label="ingress.enabled"
-            mono
-            details="Create a Kubernetes Ingress for the coordinator."
+            label="Expose via ingress"
+            fieldKey="ingressEnabled"
             htmlFor="ced-ing-enabled"
           >
             <Switch
@@ -359,9 +355,8 @@ export function EngineSecurity(props: {
           {ingressEnabled && (
             <>
               <ConfigTableRow
-                label="ingress.hosts[0].host"
-                mono
-                details="Hostname clients use to reach the coordinator."
+                label="Host"
+                fieldKey="ingress.host"
                 htmlFor="ced-ing-host"
               >
                 <Input
@@ -373,9 +368,8 @@ export function EngineSecurity(props: {
                 />
               </ConfigTableRow>
               <ConfigTableRow
-                label="ingress.className"
-                mono
-                details="IngressClass that serves this Ingress (e.g. nginx)."
+                label="Ingress class"
+                fieldKey="ingress.className"
                 htmlFor="ced-ing-class"
               >
                 <Input
@@ -387,8 +381,8 @@ export function EngineSecurity(props: {
                 />
               </ConfigTableRow>
               <ConfigTableRow
-                label="ingress.tls[0].secretName"
-                mono
+                label="Ingress TLS cert"
+                fieldKey="ingress.tlsCertSecretRef"
                 htmlFor="es-ingress-tls-cert"
                 details="Pick a kubernetes.io/tls secret to back the ingress cert, or keep the default."
               >
@@ -419,7 +413,7 @@ export function EngineSecurity(props: {
         {ingressEnabled && (
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label className="font-mono text-xs">ingress.annotations</Label>
+              <Label>Annotations</Label>
               <p className="text-xs text-muted-foreground">
                 Extra ingress annotations (e.g. controller tuning).
               </p>

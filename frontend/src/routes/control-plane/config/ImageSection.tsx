@@ -45,10 +45,9 @@ export function ImageSection({
       >
         <ConfigTable>
           <ConfigTableRow
-            label="image.repository"
-            mono
+            label="Image"
             htmlFor="img-image"
-            details={`Full registry/repository:tag (chart: image.repository + image.tag). Default: ${defaultImage}.`}
+            details={`Full registry/repository:tag. Default: ${defaultImage}.`}
           >
             <Input
               id="img-image"
@@ -59,8 +58,7 @@ export function ImageSection({
             />
           </ConfigTableRow>
           <ConfigTableRow
-            label="image.pullPolicy"
-            mono
+            label="Image pull policy"
             htmlFor="img-pullpolicy"
             details="When the kubelet re-pulls the image. Leave default unless you need Always/Never."
           >
@@ -82,7 +80,7 @@ export function ImageSection({
         </ConfigTable>
 
         <div className="space-y-2">
-          <Label className="font-mono text-xs">imagePullSecrets</Label>
+          <Label>Image pull secrets</Label>
           <p className="text-xs text-muted-foreground">
             Names of Kubernetes <code>docker-registry</code> secrets in the engine
             namespace.

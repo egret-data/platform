@@ -56,9 +56,9 @@ export function ServerSection({ cfg }: { cfg: EngineConfigForm }) {
       >
         <ConfigTable>
           <ConfigTableRow
-            label="server.config.query.maxMemory"
+            label="query.max-memory"
             mono
-            details="Cluster-wide user memory a single query may use, summed across all workers (Trino query.max-memory)."
+            fieldKey="queryMaxMemory"
             htmlFor="ced-query-max-memory"
           >
             <QuantityValue
@@ -68,12 +68,7 @@ export function ServerSection({ cfg }: { cfg: EngineConfigForm }) {
               placeholder="4GB"
             />
           </ConfigTableRow>
-          <ConfigTableRow
-            label="server.log.trino.level"
-            mono
-            details="Root logger level applied to the Trino server (INFO, DEBUG, WARN, ERROR)."
-            htmlFor="ced-log-level"
-          >
+          <ConfigTableRow label="Log level" fieldKey="logLevel" htmlFor="ced-log-level">
             <Select value={logLevel} onValueChange={setLogLevel}>
               <SelectTrigger id="ced-log-level" className="w-full">
                 <SelectValue />
@@ -91,29 +86,29 @@ export function ServerSection({ cfg }: { cfg: EngineConfigForm }) {
       </ConfigSection>
 
       <ConfigSection
-        title="additionalConfigProperties"
-        description="Cluster-wide entries appended to Trino config.properties. Pick from the catalog or add a custom key."
+        title="config.properties"
+        description="Cluster-wide Trino config.properties. Pick from the catalog or add a custom key."
       >
         <PropertyList cfg={cfg} file="config" rows={configProps} />
       </ConfigSection>
 
       <ConfigSection
-        title="additionalNodeProperties"
-        description="Per-node identity and paths appended to node.properties."
+        title="node.properties"
+        description="Per-node identity and paths (node.properties)."
       >
         <PropertyList cfg={cfg} file="node" rows={nodeProps} />
       </ConfigSection>
 
       <ConfigSection
-        title="additionalLogProperties"
-        description="Logger levels and log output appended to log.properties."
+        title="log.properties"
+        description="Logger levels and log output (log.properties)."
       >
         <PropertyList cfg={cfg} file="log" rows={logProps} />
       </ConfigSection>
 
       <ConfigSection
-        title="eventListenerProperties"
-        description="Raw event-listener.properties entries."
+        title="Event listener"
+        description="Raw event-listener.properties."
       >
         <KeyedPropertyList
           catalog={eventListenerCatalog}

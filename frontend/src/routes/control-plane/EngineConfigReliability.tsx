@@ -61,9 +61,8 @@ export function EngineConfigReliability(props: {
     >
       <ConfigTable>
         <ConfigTableRow
-          label="server.exchangeManager"
-          mono
-          details="Enable fault-tolerant execution — configures the exchange manager and sets retry-policy."
+          label="Enable fault-tolerant execution"
+          fieldKey="faultTolerantEnabled"
           htmlFor="ced-ft-enabled"
         >
           <Switch
@@ -75,9 +74,8 @@ export function EngineConfigReliability(props: {
         {ftEnabled && (
           <>
             <ConfigTableRow
-              label="retry-policy"
-              mono
-              details="How failures are retried: QUERY (whole query) or TASK (individual tasks). Set in additionalConfigProperties."
+              label="Retry policy"
+              fieldKey="retryPolicy"
               htmlFor="ced-ft-retry"
             >
               <Select
@@ -94,9 +92,8 @@ export function EngineConfigReliability(props: {
               </Select>
             </ConfigTableRow>
             <ConfigTableRow
-              label="additionalExchangeManagerProperties"
-              mono
-              details="S3 storage connection used to spool exchange data between stages (exchange.s3.* properties)."
+              label="Exchange storage"
+              fieldKey="exchangeStorage"
               htmlFor="ced-ft-storage"
             >
               <Select
@@ -122,9 +119,8 @@ export function EngineConfigReliability(props: {
               </Select>
             </ConfigTableRow>
             <ConfigTableRow
-              label="server.exchangeManager.baseDir"
-              mono
-              details="Key prefix (directory) within the exchange storage bucket where spooled data is written."
+              label="Exchange prefix"
+              fieldKey="exchangePrefix"
               htmlFor="ced-ft-prefix"
             >
               <Input

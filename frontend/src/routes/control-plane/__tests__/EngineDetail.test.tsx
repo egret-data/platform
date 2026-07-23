@@ -314,7 +314,7 @@ describe("EngineDetail — Trino Settings tab (merged Configuration + Security)"
     await user.click(
       within(nav).getByRole("button", { name: /Security & Exposure/ }),
     );
-    expect(await screen.findByText("auth.passwordAuth")).toBeInTheDocument();
+    expect(await screen.findByText("Password users")).toBeInTheDocument();
 
     // ONE Save button covers config + security.
     expect(
@@ -328,7 +328,7 @@ describe("EngineDetail — Trino Settings tab (merged Configuration + Security)"
     );
     await screen.findByRole("heading", { name: "analytics-trino" });
 
-    expect(await screen.findByText("auth.passwordAuth")).toBeInTheDocument();
+    expect(await screen.findByText("Password users")).toBeInTheDocument();
   });
 
   test("legacy ?tab=security bookmark resolves to the merged Settings tab", async () => {
