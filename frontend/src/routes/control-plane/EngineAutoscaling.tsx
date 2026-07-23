@@ -1,4 +1,4 @@
-import type { Dispatch, SetStateAction } from "react";
+import { type Dispatch, type SetStateAction, useEffect } from "react";
 import { Plus, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import { ConfigSection } from "./config/ConfigSection";
 import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
 import { FieldLabel } from "./config/FieldLabel";
 import { RawJsonField } from "./config/RawJsonField";
+import { useValidity } from "./config/validityRegistry";
 import {
   type AutoscaleMode,
   type AutoscaleTriggerForm,
@@ -67,16 +68,21 @@ function HpaEditor({
         <ConfigTableRow
           label="Max replicas"
           htmlFor="as-hpa-max"
-          details="Upper bound on worker pods the HPA may scale to."
+          details="Upper bound on worker pods the HPA may scale to (required)."
         >
           <Input
             id="as-hpa-max"
             className="w-full"
             type="number"
+            min={1}
             value={value.maxReplicas}
             placeholder="10"
+            aria-invalid={!value.maxReplicas.trim()}
             onChange={(e) => set("maxReplicas", e.target.value)}
           />
+          {!value.maxReplicas.trim() && (
+            <p className="mt-1 text-xs text-destructive">Max replicas is required.</p>
+          )}
         </ConfigTableRow>
         <ConfigTableRow
           label="Target CPU %"
@@ -87,6 +93,7 @@ function HpaEditor({
             id="as-hpa-cpu"
             className="w-full"
             type="number"
+            min={0}
             value={value.targetCpuPercent}
             placeholder="70"
             onChange={(e) => set("targetCpuPercent", e.target.value)}
@@ -101,6 +108,7 @@ function HpaEditor({
             id="as-hpa-mem"
             className="w-full"
             type="number"
+            min={0}
             value={value.targetMemoryPercent}
             placeholder="80"
             onChange={(e) => set("targetMemoryPercent", e.target.value)}
@@ -335,6 +343,7 @@ function KedaEditor({
             id="as-keda-min"
             className="w-full"
             type="number"
+            min={0}
             value={value.minReplicaCount}
             placeholder="1"
             onChange={(e) => set("minReplicaCount", e.target.value)}
@@ -343,16 +352,21 @@ function KedaEditor({
         <ConfigTableRow
           label="Max replicas"
           htmlFor="as-keda-max"
-          details="Most worker pods KEDA may scale to."
+          details="Most worker pods KEDA may scale to (required)."
         >
           <Input
             id="as-keda-max"
             className="w-full"
             type="number"
+            min={1}
             value={value.maxReplicaCount}
             placeholder="10"
+            aria-invalid={!value.maxReplicaCount.trim()}
             onChange={(e) => set("maxReplicaCount", e.target.value)}
           />
+          {!value.maxReplicaCount.trim() && (
+            <p className="mt-1 text-xs text-destructive">Max replicas is required.</p>
+          )}
         </ConfigTableRow>
         <ConfigTableRow
           label="Polling interval (s)"
@@ -363,6 +377,7 @@ function KedaEditor({
             id="as-keda-poll"
             className="w-full"
             type="number"
+            min={0}
             value={value.pollingInterval}
             placeholder="30"
             onChange={(e) => set("pollingInterval", e.target.value)}
@@ -377,6 +392,7 @@ function KedaEditor({
             id="as-keda-cooldown"
             className="w-full"
             type="number"
+            min={0}
             value={value.cooldownPeriod}
             placeholder="300"
             onChange={(e) => set("cooldownPeriod", e.target.value)}
@@ -455,6 +471,18 @@ export function EngineAutoscaling({
   keda,
   setKeda,
 }: EngineAutoscalingProps) {
+  // "Max replicas" is required whenever a mode is active (an HPA/ScaledObject
+  // with maxReplicas 0 is invalid). Register in the shared ValidityProvider so
+  // Save is blocked; cleared on unmount / mode off.
+  const maxMissing =
+    (mode === "hpa" && !hpa.maxReplicas.trim()) ||
+    (mode === "keda" && !keda.maxReplicaCount.trim());
+  const validity = useValidity();
+  useEffect(() => {
+    validity?.setInvalid("autoscaling.maxReplicas", maxMissing);
+    return () => validity?.setInvalid("autoscaling.maxReplicas", false);
+  }, [validity, maxMissing]);
+
   return (
     <div className="space-y-4">
       <div className="max-w-xs space-y-1.5">

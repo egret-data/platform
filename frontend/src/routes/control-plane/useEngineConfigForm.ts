@@ -29,7 +29,6 @@ import {
   recordToKv,
   sessionRulesToForm,
 } from "./EngineResourceGroups";
-import { knownProperties } from "./config/knownProperties";
 import { diffConfig } from "./config/configDiff";
 
 // Re-exported so config sub-tab components (Tasks 2-5) can import from the hook.
@@ -563,14 +562,6 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
   const coordinator: RoleConfig | undefined = cfg.coordinator;
   const worker = cfg.worker;
 
-  // Guided known-property sections: count how many of a section's known keys
-  // are set (non-empty) in the raw config.properties map.
-  const props = cfg.configProperties ?? {};
-  const knownSectionCount = (section: string): number =>
-    knownProperties.filter(
-      (p) => p.section === section && (props[p.key] ?? "").trim() !== "",
-    ).length;
-
   const keyCount = (r: Record<string, string> | undefined): number =>
     r ? Object.keys(r).length : 0;
 
@@ -610,7 +601,10 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
       (present(cfg.image) ? 1 : 0) +
       (present(cfg.imagePullPolicy) ? 1 : 0) +
       ((cfg.imagePullSecrets?.length ?? 0) > 0 ? 1 : 0),
-    server: propertiesCount + (present(cfg.faultTolerant) ? 1 : 0) + knownSectionCount("reliability"),
+    // The reliability retry-attempt caps live in configProperties, so they are
+    // already counted by keyCount(configProperties) inside propertiesCount —
+    // don't add them again here.
+    server: propertiesCount + (present(cfg.faultTolerant) ? 1 : 0),
     coordinator: roleCoreCount(coordinator) + rolePlacementCount(coordinator),
     worker:
       roleCoreCount(worker) +

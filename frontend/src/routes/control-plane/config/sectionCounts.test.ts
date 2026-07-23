@@ -85,6 +85,17 @@ test("raw property maps + queryMaxMemory + eventListener count under server", ()
   expect(counts.server).toBe(6);
 });
 
+test("reliability retry-attempt caps count once under server (not doubled)", () => {
+  const cfg: TrinoConfig = {
+    coordinator: {},
+    worker: {},
+    // query-retry-attempts is a reliability known-prop stored in configProperties;
+    // it must be counted once via the map, not a second time via a section scan.
+    configProperties: { "query-retry-attempts": "4", "spill-enabled": "true" },
+  };
+  expect(sectionCounts(cfg).server).toBe(2);
+});
+
 it("counts image fields under the image section", () => {
   const cfg: TrinoConfig = {
     coordinator: {},

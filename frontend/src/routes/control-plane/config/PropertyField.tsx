@@ -61,11 +61,14 @@ export function PropertyValue({
     );
   }
   if (prop.type === "boolean") {
+    // Off writes an explicit "false" (not ""), so a server-present boolean can
+    // be set false without the blank-value → delete-key rule dropping the row.
+    // Removing the property entirely is done via the row's Remove button.
     return (
       <Switch
         aria-label={ariaLabel}
         checked={value === "true"}
-        onCheckedChange={(v) => onChange(v ? "true" : "")}
+        onCheckedChange={(v) => onChange(v ? "true" : "false")}
       />
     );
   }

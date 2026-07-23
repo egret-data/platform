@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
 import { Link } from "react-router-dom";
 
 import { type Storage, listStorage } from "@/api/controlPlane";
@@ -16,6 +17,7 @@ import { ConfigSection } from "./config/ConfigSection";
 import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
 import { PropertyValue } from "./config/PropertyField";
 import { knownProperties } from "./config/knownProperties";
+import { useValidity } from "./config/validityRegistry";
 
 /**
  * Cluster-wide "Reliability" config: fault-tolerant execution — retry policy,
@@ -51,6 +53,16 @@ export function EngineConfigReliability(props: {
     queryFn: listStorage,
     retry: false,
   });
+
+  // Fault-tolerant execution needs an exchange storage connection to spool to;
+  // the backend drops FTE entirely without one. Block Save (and show a message)
+  // so the toggle isn't silently inert. Cleared on unmount by the registry.
+  const missingExchangeStorage = ftEnabled && !exchangeStorageConnId;
+  const validity = useValidity();
+  useEffect(() => {
+    validity?.setInvalid("faultTolerant.exchangeStorage", missingExchangeStorage);
+    return () => validity?.setInvalid("faultTolerant.exchangeStorage", false);
+  }, [validity, missingExchangeStorage]);
 
   return (
     <ConfigSection
@@ -163,6 +175,12 @@ export function EngineConfigReliability(props: {
             Add a storage connection
           </Link>
           .
+        </p>
+      )}
+      {missingExchangeStorage && (storage.data ?? []).length > 0 && (
+        <p className="text-xs text-destructive">
+          Select an exchange storage connection — fault-tolerant execution has no
+          effect without one.
         </p>
       )}
     </ConfigSection>

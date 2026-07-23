@@ -29,10 +29,12 @@ export function RawJsonField({
   placeholder?: string;
 }) {
   const validity = useValidity();
-  const [text, setText] = useState(() =>
-    value == null ? "" : JSON.stringify(value, null, 2),
-  );
+  const serialize = (v: unknown) => (v == null ? "" : JSON.stringify(v, null, 2));
+  const [text, setText] = useState(() => serialize(value));
   const [error, setError] = useState<string | null>(null);
+  // Whether the textarea is focused — never re-seed from `value` while the user
+  // is typing (that would stomp the cursor/text).
+  const focusedRef = useRef(false);
 
   // Latest callbacks/id via refs so the debounce timer never captures a stale
   // closure and the unmount cleanup can clear the right flag.
@@ -75,6 +77,20 @@ export function RawJsonField({
     return () => setInvalidRef.current?.(idRef.current, false);
   }, []);
 
+  // Re-seed the textarea when `value` genuinely changes from OUTSIDE (a discard/
+  // reset, or a background poll re-seeding the form) — but not while focused
+  // (don't stomp active typing) and not from our own debounced onChange echo
+  // (`incoming` only changes when the external value actually differs).
+  const incoming = serialize(value);
+  const lastIncomingRef = useRef(incoming);
+  useEffect(() => {
+    const changed = incoming !== lastIncomingRef.current;
+    lastIncomingRef.current = incoming;
+    if (!changed || focusedRef.current) return;
+    setText(incoming);
+    setError(null);
+  }, [incoming]);
+
   return (
     <div className="space-y-1.5">
       <FieldLabel fieldKey={fieldKey} label={label} htmlFor={id} />
@@ -84,6 +100,12 @@ export function RawJsonField({
         rows={4}
         className="font-mono text-xs"
         placeholder={placeholder}
+        onFocus={() => {
+          focusedRef.current = true;
+        }}
+        onBlur={() => {
+          focusedRef.current = false;
+        }}
         onChange={(e) => handleText(e.target.value)}
       />
       {error && <p className="text-xs text-destructive">Invalid JSON: {error}</p>}
