@@ -127,8 +127,13 @@ function RoleConfigEditor({
       >
         <ConfigTable>
           <ConfigTableRow
-            label="Replicas"
-            fieldKey={`${keyPrefix}.replicas`}
+            label={keyPrefix === "worker" ? "server.workers" : "coordinator.replicas"}
+            mono
+            details={
+              keyPrefix === "worker"
+                ? "Number of worker pods."
+                : "Number of coordinator pods (Trino runs a single active coordinator)."
+            }
             htmlFor={`${idPrefix}-replicas`}
           >
             <Input
@@ -142,8 +147,9 @@ function RoleConfigEditor({
             />
           </ConfigTableRow>
           <ConfigTableRow
-            label="CPU request"
-            fieldKey={`${keyPrefix}.resources.cpu`}
+            label={`${keyPrefix}.resources.requests.cpu`}
+            mono
+            details="Kubernetes CPU request for each pod."
             htmlFor={`${idPrefix}-cpu-request`}
           >
             <QuantityValue
@@ -154,8 +160,9 @@ function RoleConfigEditor({
             />
           </ConfigTableRow>
           <ConfigTableRow
-            label="CPU limit"
-            fieldKey={`${keyPrefix}.resources.cpu`}
+            label={`${keyPrefix}.resources.limits.cpu`}
+            mono
+            details="Kubernetes CPU limit for each pod."
             htmlFor={`${idPrefix}-cpu-limit`}
           >
             <QuantityValue
@@ -166,8 +173,9 @@ function RoleConfigEditor({
             />
           </ConfigTableRow>
           <ConfigTableRow
-            label="Memory request"
-            fieldKey={`${keyPrefix}.resources.memory`}
+            label={`${keyPrefix}.resources.requests.memory`}
+            mono
+            details="Kubernetes memory request for each pod."
             htmlFor={`${idPrefix}-mem-request`}
           >
             <QuantityValue
@@ -178,8 +186,9 @@ function RoleConfigEditor({
             />
           </ConfigTableRow>
           <ConfigTableRow
-            label="Memory limit"
-            fieldKey={`${keyPrefix}.resources.memory`}
+            label={`${keyPrefix}.resources.limits.memory`}
+            mono
+            details="Kubernetes memory limit for each pod."
             htmlFor={`${idPrefix}-mem-limit`}
           >
             <QuantityValue
@@ -218,8 +227,9 @@ function RoleConfigEditor({
         {value.heapMode === "fixed" ? (
           <ConfigTable>
             <ConfigTableRow
-              label="Max size (-Xmx)"
-              fieldKey={`${keyPrefix}.heap.maxSize`}
+              label={`${keyPrefix}.jvm.maxHeapSize`}
+              mono
+              details="Fixed JVM max heap (-Xmx)."
               htmlFor={`${idPrefix}-heap-maxsize`}
             >
               <QuantityValue
@@ -230,8 +240,9 @@ function RoleConfigEditor({
               />
             </ConfigTableRow>
             <ConfigTableRow
-              label="Min size (-Xms)"
-              fieldKey={`${keyPrefix}.heap.minSize`}
+              label={`${keyPrefix}.jvm.minHeapSize`}
+              mono
+              details="Fixed JVM min heap (-Xms)."
               htmlFor={`${idPrefix}-heap-minsize`}
             >
               <QuantityValue
@@ -245,8 +256,9 @@ function RoleConfigEditor({
         ) : (
           <ConfigTable>
             <ConfigTableRow
-              label="Max RAM percent"
-              fieldKey={`${keyPrefix}.heap.maxPercent`}
+              label={`${keyPrefix}.jvm.maxHeapPercent`}
+              mono
+              details="JVM max heap as a percent of the container memory limit (maxHeapSize must be unset)."
               htmlFor={`${idPrefix}-heap-maxpct`}
             >
               <Input
@@ -261,8 +273,9 @@ function RoleConfigEditor({
               />
             </ConfigTableRow>
             <ConfigTableRow
-              label="Initial RAM percent"
-              fieldKey={`${keyPrefix}.heap.initialPercent`}
+              label={`${keyPrefix}.jvm.initialHeapPercent`}
+              mono
+              details="Starting JVM heap as a percent of the container memory limit."
               htmlFor={`${idPrefix}-heap-initpct`}
             >
               <Input
@@ -287,9 +300,9 @@ function RoleConfigEditor({
       >
         <ConfigTable>
           <ConfigTableRow
-            label="query.max-memory-per-node"
+            label={`${keyPrefix}.config.query.maxMemoryPerNode`}
             mono
-            fieldKey="queryMaxMemoryPerNode"
+            details="Max user memory a query may use on a single node (Trino query.max-memory-per-node)."
             htmlFor={`${idPrefix}-qmmpn`}
           >
             <QuantityValue
@@ -300,9 +313,9 @@ function RoleConfigEditor({
             />
           </ConfigTableRow>
           <ConfigTableRow
-            label="memory.heap-headroom-per-node"
+            label={`${keyPrefix}.config.memory.heapHeadroomPerNode`}
             mono
-            fieldKey="memoryHeapHeadroomPerNode"
+            details="JVM heap set aside as headroom for allocations Trino does not track."
             htmlFor={`${idPrefix}-hhpn`}
           >
             <QuantityValue
@@ -415,8 +428,9 @@ export function EngineRoleConfig({
       >
         <ConfigTable>
           <ConfigTableRow
-            label="Enable graceful shutdown"
-            fieldKey="worker.gracefulShutdown"
+            label="worker.gracefulShutdown.enabled"
+            mono
+            details="Drain in-flight queries before a worker terminates."
             htmlFor="ced-gs-enabled"
           >
             <Switch
@@ -427,8 +441,9 @@ export function EngineRoleConfig({
           </ConfigTableRow>
           {gsEnabled && (
             <ConfigTableRow
-              label="Grace period (s)"
-              fieldKey="worker.gracePeriod"
+              label="worker.gracefulShutdown.gracePeriodSeconds"
+              mono
+              details="Grace period (seconds) allowed for draining before termination."
               htmlFor="ced-gs-grace"
             >
               <Input

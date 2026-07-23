@@ -34,9 +34,9 @@ export function ConfigTable({
     <Table className="w-full table-fixed">
       <TableHeader>
         <TableRow>
-          <TableHead className="w-48">{settingLabel}</TableHead>
+          <TableHead className="w-72">{settingLabel}</TableHead>
           <TableHead className="hidden lg:table-cell">Details</TableHead>
-          <TableHead className="w-64">Value</TableHead>
+          <TableHead className="w-52">Value</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>{children}</TableBody>
