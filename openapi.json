@@ -25825,7 +25825,7 @@
       },
       "SetFeatures": {
         "type": "object",
-        "description": "Full replacement of a workspace's feature switches.",
+        "description": "The feature keys to change; any key this workspace's catalog entry already\nhas is left exactly as it is. This is a merge, not a full replacement,\ndespite arriving over `PUT`: `PUT` is still the right verb because the\noperation is idempotent (sending the same body twice yields the same\nstate) — it is not required to mention every field of the resource. A\nmerge is also forward-safe: when a sixth module joins the catalog, a\ncaller that still only sends today's five keys leaves it untouched\ninstead of implicitly switching it on, which is what a true full\nreplacement (write/delete a row for every key, mentioned or not) would do.",
         "required": [
           "features"
         ],
@@ -26956,7 +26956,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Module keys this workspace has switched on. Empty for the admin list\nendpoints, which do not need it; populated by `/api/me/workspaces`."
+            "description": "Module keys this workspace currently has switched on. Populated\nwherever a caller reads a workspace's entitlements back (`list_ws`,\n`get_ws`, `/api/me/workspaces`) via [`dto_with_features`]; left empty\nby the create/lifecycle handlers, which echo the resource they just\nmutated rather than reading entitlement state."
           }
         }
       },

@@ -31,3 +31,8 @@ utoipa.workspace = true
 tokio.workspace = true
 tower.workspace = true
 http-body-util = "0.1"
+# Router-mount reachability test: builds a `WorkspaceState` by hand (lazy DB
+# pool, stub Pdp) without a live Postgres.
+egret-audit.workspace = true
+async-trait.workspace = true
+chrono.workspace = true

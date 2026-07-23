@@ -253,6 +253,55 @@ async fn put_rejects_an_unknown_key_and_writes_nothing() {
         .all(|x| x["enabled"] == true));
 }
 
+/// `PUT` is a merge, not a full replacement, despite the verb: a body naming
+/// only `notebooks` must leave a previously-disabled `charts` disabled. This
+/// pins the behaviour deliberately (see `SetFeatures`'s doc comment for the
+/// forward-compatibility reasoning) — without this test a future refactor
+/// that "fixed" `set_features` into resetting omitted keys would silently
+/// flip the semantics back.
+#[tokio::test]
+async fn put_merges_leaving_omitted_keys_untouched() {
+    let Some(f) = Fixture::new().await else {
+        eprintln!("skip");
+        return;
+    };
+
+    let disable_charts = f
+        .put(
+            &format!("/admin/workspaces/{}/features", f.ws_id),
+            r#"{"features":{"charts":false}}"#,
+        )
+        .await;
+    assert_eq!(disable_charts.status(), StatusCode::OK);
+
+    // A second PUT naming only a DIFFERENT key.
+    let disable_notebooks = f
+        .put(
+            &format!("/admin/workspaces/{}/features", f.ws_id),
+            r#"{"features":{"notebooks":false}}"#,
+        )
+        .await;
+    assert_eq!(disable_notebooks.status(), StatusCode::OK);
+
+    let json = f
+        .json(
+            f.get(&format!("/admin/workspaces/{}/features", f.ws_id))
+                .await,
+        )
+        .await;
+    let arr = json.as_array().unwrap();
+    let charts = arr.iter().find(|x| x["key"] == "charts").unwrap();
+    let notebooks = arr.iter().find(|x| x["key"] == "notebooks").unwrap();
+    assert_eq!(
+        charts["enabled"], false,
+        "charts must remain disabled: it was never mentioned in the second PUT"
+    );
+    assert_eq!(
+        notebooks["enabled"], false,
+        "notebooks was disabled by the second PUT"
+    );
+}
+
 #[tokio::test]
 async fn a_user_without_workspace_update_cannot_toggle() {
     let Some(f) = Fixture::new_as_plain_user().await else {

@@ -61,8 +61,11 @@ pub struct WorkspaceDto {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub created_by: Option<String>,
     pub owner_name: Option<String>,
-    /// Module keys this workspace has switched on. Empty for the admin list
-    /// endpoints, which do not need it; populated by `/api/me/workspaces`.
+    /// Module keys this workspace currently has switched on. Populated
+    /// wherever a caller reads a workspace's entitlements back (`list_ws`,
+    /// `get_ws`, `/api/me/workspaces`) via [`dto_with_features`]; left empty
+    /// by the create/lifecycle handlers, which echo the resource they just
+    /// mutated rather than reading entitlement state.
     #[serde(default)]
     pub features: Vec<String>,
 }
@@ -79,6 +82,24 @@ impl From<crate::model::Workspace> for WorkspaceDto {
             features: Vec::new(),
         }
     }
+}
+
+/// Attach `features` — the module keys currently switched ON — to a fresh
+/// `WorkspaceDto`. Shared by every handler that reads back a workspace's
+/// current entitlements (`list_ws`, `get_ws`, `list_my_workspaces`), so the
+/// field means the same thing everywhere it is populated: there is no
+/// "wasn't computed" state that could be confused with "every module is off".
+fn dto_with_features(
+    w: crate::model::Workspace,
+    off: Option<&std::collections::HashSet<String>>,
+) -> WorkspaceDto {
+    let mut dto = WorkspaceDto::from(w);
+    dto.features = crate::features::FEATURE_KEYS
+        .iter()
+        .filter(|k| !off.is_some_and(|s| s.contains(**k)))
+        .map(|k| k.to_string())
+        .collect();
+    dto
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -184,7 +205,20 @@ async fn list_ws(
         per_page: q.per_page.unwrap_or(50),
     };
     let list = st.workspaces.list(page).await.map_err(AuthError)?;
-    Ok(Json(list.into_iter().map(Into::into).collect()))
+    let ids: Vec<uuid::Uuid> = list.iter().map(|w| w.id.0).collect();
+    let disabled = st
+        .workspaces
+        .disabled_features_for(&ids)
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(
+        list.into_iter()
+            .map(|w| {
+                let off = disabled.get(&w.id.0);
+                dto_with_features(w, off)
+            })
+            .collect(),
+    ))
 }
 
 #[utoipa::path(
@@ -214,7 +248,14 @@ async fn get_ws(
         .await
         .map_err(AuthError)?
         .ok_or(AuthError(Error::NotFound("workspace".into())))?;
-    Ok(Json(ws.into()))
+    // A batch of one would be silly here — `get_ws` already has the single
+    // workspace id it needs, so it reads the disabled set directly.
+    let disabled = st
+        .workspaces
+        .disabled_features(WorkspaceId(id))
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(dto_with_features(ws, Some(&disabled))))
 }
 
 #[utoipa::path(
@@ -413,7 +454,15 @@ pub struct FeatureDto {
     pub enabled: bool,
 }
 
-/// Full replacement of a workspace's feature switches.
+/// The feature keys to change; any key this workspace's catalog entry already
+/// has is left exactly as it is. This is a merge, not a full replacement,
+/// despite arriving over `PUT`: `PUT` is still the right verb because the
+/// operation is idempotent (sending the same body twice yields the same
+/// state) — it is not required to mention every field of the resource. A
+/// merge is also forward-safe: when a sixth module joins the catalog, a
+/// caller that still only sends today's five keys leaves it untouched
+/// instead of implicitly switching it on, which is what a true full
+/// replacement (write/delete a row for every key, mentioned or not) would do.
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct SetFeatures {
     /// Feature key -> enabled. Unknown keys are rejected with 400 and nothing
@@ -556,13 +605,7 @@ async fn list_my_workspaces(
         list.into_iter()
             .map(|w| {
                 let off = disabled.get(&w.id.0);
-                let mut dto = WorkspaceDto::from(w);
-                dto.features = crate::features::FEATURE_KEYS
-                    .iter()
-                    .filter(|k| !off.is_some_and(|s| s.contains(**k)))
-                    .map(|k| k.to_string())
-                    .collect();
-                dto
+                dto_with_features(w, off)
             })
             .collect(),
     ))

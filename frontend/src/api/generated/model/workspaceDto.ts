@@ -17,8 +17,11 @@ export interface WorkspaceDto {
   /** @nullable */
   owner_name?: string | null;
   /**
-     * Module keys this workspace has switched on. Empty for the admin list
-     * endpoints, which do not need it; populated by `/api/me/workspaces`.
+     * Module keys this workspace currently has switched on. Populated
+     * wherever a caller reads a workspace's entitlements back (`list_ws`,
+     * `get_ws`, `/api/me/workspaces`) via [`dto_with_features`]; left empty
+     * by the create/lifecycle handlers, which echo the resource they just
+     * mutated rather than reading entitlement state.
      */
   features?: string[];
 }

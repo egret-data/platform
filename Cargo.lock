@@ -3112,7 +3112,10 @@ dependencies = [
 name = "egret-server"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
+ "chrono",
+ "egret-audit",
  "egret-auth",
  "egret-bi",
  "egret-catalog-engine",

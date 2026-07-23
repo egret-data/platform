@@ -8,7 +8,15 @@
 import type { SetFeaturesFeatures } from './setFeaturesFeatures';
 
 /**
- * Full replacement of a workspace's feature switches.
+ * The feature keys to change; any key this workspace's catalog entry already
+ * has is left exactly as it is. This is a merge, not a full replacement,
+ * despite arriving over `PUT`: `PUT` is still the right verb because the
+ * operation is idempotent (sending the same body twice yields the same
+ * state) — it is not required to mention every field of the resource. A
+ * merge is also forward-safe: when a sixth module joins the catalog, a
+ * caller that still only sends today's five keys leaves it untouched
+ * instead of implicitly switching it on, which is what a true full
+ * replacement (write/delete a row for every key, mentioned or not) would do.
  */
 export interface SetFeatures {
   /**
