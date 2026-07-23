@@ -24,10 +24,14 @@ function Chip({ children }: { children: React.ReactNode }) {
  */
 export function PropertyPicker({
   catalog,
+  excludeKeys,
   onAddCatalog,
   onAddCustom,
 }: {
   catalog: TrinoProp[];
+  /** Keys already present in the list — hidden from the picker so a property
+   *  can't be added twice. */
+  excludeKeys?: Set<string>;
   onAddCatalog: (prop: TrinoProp) => void;
   onAddCustom: (key: string) => void;
 }) {
@@ -35,14 +39,17 @@ export function PropertyPicker({
   const [query, setQuery] = useState("");
 
   const q = query.trim().toLowerCase();
+  const available = excludeKeys
+    ? catalog.filter((p) => !excludeKeys.has(p.key))
+    : catalog;
   const matches = q
-    ? catalog
+    ? available
         .filter(
           (p) =>
             p.key.toLowerCase().includes(q) || p.help.toLowerCase().includes(q),
         )
         .slice(0, MAX_ADD_RESULTS)
-    : catalog.slice(0, MAX_ADD_RESULTS);
+    : available.slice(0, MAX_ADD_RESULTS);
 
   const close = () => {
     setOpen(false);
@@ -57,6 +64,11 @@ export function PropertyPicker({
   const addCustom = () => {
     const key = query.trim();
     if (!key) return;
+    // Already in the list — nothing to add.
+    if (excludeKeys?.has(key)) {
+      close();
+      return;
+    }
     const existing = catalog.find((p) => p.key === key);
     if (existing) selectProp(existing);
     else {
@@ -112,7 +124,7 @@ export function PropertyPicker({
             </button>
           </li>
         ))}
-        {q && !matches.some((p) => p.key === q) && (
+        {q && !matches.some((p) => p.key === q) && !excludeKeys?.has(query.trim()) && (
           <li>
             <button
               type="button"

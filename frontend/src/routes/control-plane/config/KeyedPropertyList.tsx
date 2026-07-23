@@ -129,6 +129,7 @@ export function KeyedPropertyList({
       )}
       <PropertyPicker
         catalog={catalog}
+        excludeKeys={new Set(keys)}
         onAddCatalog={addCatalog}
         onAddCustom={(key) => addKey(key)}
       />
