@@ -79,6 +79,90 @@ describe("WorkspaceFeaturesTab", () => {
     );
   });
 
+  test("toggling Charts off forces Dashboards off and disables its switch", async () => {
+    // Start from a consistent on/on state so turning Charts off is the thing
+    // under test, not the starting fixture's dashboards:false.
+    vi.mocked(featuresApi.useWorkspaceFeaturesList).mockReturnValue(
+      stubList(FEATURES.map((f) => (f.key === "dashboards" ? { ...f, enabled: true } : f))),
+    );
+    const user = userEvent.setup();
+    render(<WorkspaceFeaturesTab workspaceId={WORKSPACE_ID} />);
+
+    expect(screen.getByRole("switch", { name: "Dashboards" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.getByRole("switch", { name: "Dashboards" })).toBeEnabled();
+
+    await user.click(screen.getByRole("switch", { name: "Charts" }));
+
+    const dashboardsSwitch = screen.getByRole("switch", { name: "Dashboards" });
+    expect(dashboardsSwitch).toHaveAttribute("aria-checked", "false");
+    expect(dashboardsSwitch).toBeDisabled();
+    // Requirement is surfaced inline, not just a disabled control with no
+    // explanation. (Rendered twice — narrow-screen and Details-column
+    // copies of the same help text — so assert at least one is present.)
+    expect(screen.getAllByText(/requires charts/i).length).toBeGreaterThan(0);
+  });
+
+  test("Dashboards cannot be switched on while Charts is off, and turning Charts back on re-enables it", async () => {
+    vi.mocked(featuresApi.useWorkspaceFeaturesList).mockReturnValue(
+      stubList(FEATURES.map((f) => (f.key === "charts" ? { ...f, enabled: false } : f))),
+    );
+    const user = userEvent.setup();
+    render(<WorkspaceFeaturesTab workspaceId={WORKSPACE_ID} />);
+
+    const dashboardsSwitch = screen.getByRole("switch", { name: "Dashboards" });
+    expect(dashboardsSwitch).toBeDisabled();
+
+    // A click on a disabled switch is a no-op: it stays off.
+    await user.click(dashboardsSwitch);
+    expect(screen.getByRole("switch", { name: "Dashboards" })).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+
+    await user.click(screen.getByRole("switch", { name: "Charts" }));
+    expect(screen.getByRole("switch", { name: "Dashboards" })).toBeEnabled();
+  });
+
+  test("toggling Dashboards on also turns Charts on", async () => {
+    const user = userEvent.setup();
+    render(<WorkspaceFeaturesTab workspaceId={WORKSPACE_ID} />);
+
+    await user.click(screen.getByRole("switch", { name: "Dashboards" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(mutate).toHaveBeenCalledWith(
+      {
+        id: WORKSPACE_ID,
+        data: {
+          features: expect.objectContaining({ charts: true, dashboards: true }),
+        },
+      },
+      expect.anything(),
+    );
+  });
+
+  test("Save never posts dashboards:true with charts:false", async () => {
+    // Start from dashboards:true, charts:true; turning Charts off must carry
+    // Dashboards off with it into the posted map, not just on screen.
+    vi.mocked(featuresApi.useWorkspaceFeaturesList).mockReturnValue(
+      stubList(FEATURES.map((f) => (f.key === "dashboards" ? { ...f, enabled: true } : f))),
+    );
+    const user = userEvent.setup();
+    render(<WorkspaceFeaturesTab workspaceId={WORKSPACE_ID} />);
+
+    await user.click(screen.getByRole("switch", { name: "Charts" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    const call = mutate.mock.calls[0][0];
+    const posted = call.data.features as Record<string, boolean>;
+    expect(posted.charts).toBe(false);
+    expect(posted.dashboards).toBe(false);
+    expect(posted.dashboards && !posted.charts).toBe(false);
+  });
+
   test("explains this is an entitlement affecting everyone, admins included", () => {
     render(<WorkspaceFeaturesTab workspaceId={WORKSPACE_ID} />);
     expect(

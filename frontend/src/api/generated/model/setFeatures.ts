@@ -22,7 +22,11 @@ export interface SetFeatures {
   /**
      * Feature key -> enabled. Unknown keys are rejected with 400 and nothing
      * is written (`WorkspaceRepo::set_features` validates the whole batch
-     * before opening its transaction).
+     * before opening its transaction). The *resulting* state — this batch
+     * merged onto what is already stored — is also validated against
+     * cross-module dependencies (currently: `dashboards` requires `charts`),
+     * so a body that never mentions `dashboards` can still be rejected if it
+     * would leave `dashboards` on and `charts` off.
      */
   features: SetFeaturesFeatures;
 }

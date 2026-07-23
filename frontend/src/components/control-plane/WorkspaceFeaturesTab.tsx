@@ -23,6 +23,16 @@ import { Switch } from "@/components/ui/switch";
  * The API itself merges (a key omitted from the body is left as-is), but this
  * UI shows and edits all five, so it should own all five — sending the full
  * map keeps the saved state exactly matching what the switches display.
+ *
+ * `dashboards` depends on `charts`: a dashboard's saved cards render through
+ * the `dashboards`-gated surface, but its interactive filter dropdowns and
+ * edit-mode card previews both run through the `charts`-gated
+ * `POST /charts/run`, so `dashboards` on with `charts` off is a broken
+ * configuration, not just an unusual one (the backend rejects it too — see
+ * `violates_dependencies` in `egret-workspace`). This component keeps the
+ * draft unable to represent that combination at all: toggling Charts off
+ * also turns Dashboards off and disables its switch, and toggling Dashboards
+ * on also turns Charts on.
  */
 export function WorkspaceFeaturesTab({ workspaceId }: { workspaceId: string }) {
   const { features, isLoading } = useWorkspaceFeaturesList(workspaceId);
@@ -39,6 +49,19 @@ export function WorkspaceFeaturesTab({ workspaceId }: { workspaceId: string }) {
   }
 
   const dirty = features.some((f) => draft[f.key] !== f.enabled);
+  const chartsOn = draft.charts ?? true;
+
+  function setFeature(key: string, checked: boolean) {
+    setDraft((d) => {
+      const next = { ...(d ?? {}), [key]: checked };
+      // Keep the dependency true by construction, in whichever direction
+      // caused the change: turning Charts off takes Dashboards with it, and
+      // turning Dashboards on brings Charts along.
+      if (key === "charts" && !checked) next.dashboards = false;
+      if (key === "dashboards" && checked) next.charts = true;
+      return next;
+    });
+  }
 
   function handleSave() {
     if (!draft) return;
@@ -63,16 +86,24 @@ export function WorkspaceFeaturesTab({ workspaceId }: { workspaceId: string }) {
       </p>
 
       <ConfigTable settingLabel="Module">
-        {features.map((f) => (
-          <ConfigTableRow key={f.key} label={f.label} details={f.description} htmlFor={`feature-${f.key}`}>
-            <Switch
-              id={`feature-${f.key}`}
-              aria-label={f.label}
-              checked={draft[f.key] ?? f.enabled}
-              onCheckedChange={(checked) => setDraft((d) => ({ ...(d ?? {}), [f.key]: checked }))}
-            />
-          </ConfigTableRow>
-        ))}
+        {features.map((f) => {
+          const isDashboards = f.key === "dashboards";
+          const disabled = isDashboards && !chartsOn;
+          const details = disabled
+            ? `${f.description} Requires Charts to be enabled.`
+            : f.description;
+          return (
+            <ConfigTableRow key={f.key} label={f.label} details={details} htmlFor={`feature-${f.key}`}>
+              <Switch
+                id={`feature-${f.key}`}
+                aria-label={f.label}
+                checked={draft[f.key] ?? f.enabled}
+                disabled={disabled}
+                onCheckedChange={(checked) => setFeature(f.key, checked)}
+              />
+            </ConfigTableRow>
+          );
+        })}
       </ConfigTable>
 
       <div className="flex justify-end">
