@@ -1417,6 +1417,7 @@ pub fn chart_router() -> Router<BiState> {
     Router::new()
         .route("/ws/{workspace}/charts", post(ch_create).get(ch_list))
         .route("/ws/{workspace}/charts/data", post(ch_data))
+        .route("/ws/{workspace}/charts/run", post(ch_run_spec))
         .route("/ws/{workspace}/charts/{id}/data", post(ch_run))
         .route(
             "/ws/{workspace}/charts/{id}",
@@ -1883,6 +1884,66 @@ async fn ch_run(
         database_id,
         &sql,
         Some(spec.row_limit.max(0) as usize),
+        session_user,
+        bearer,
+        &chart_run_limits(),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .map_err(|e| BiApiError::from(crate::BiError::from(e)))?;
+
+    Ok(Json(ChartRunResponse {
+        columns: result.columns,
+        rows: result.rows,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/charts/run",
+    tag = "charts",
+    params(WorkspacePath),
+    request_body = ChartDataBody,
+    responses(
+        (status = 200, description = "The client-supplied spec, compiled + executed: columns + rows", body = ChartRunResponse),
+        (status = 400, description = "Invalid query spec (unknown column/metric, bad filter, …)", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing chart:read permission, or the charts module is disabled", body = ErrorBody),
+        (status = 404, description = "Referenced dataset not in this workspace", body = ErrorBody),
+        (status = 502, description = "Query engine error", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+/// Run a client-supplied `QuerySpec` against a dataset and return the rows.
+///
+/// This is `ch_run` for a spec that is not (yet) a saved chart: the chart
+/// builder's preview, dashboard edit-mode cards, and filter-value dropdowns. It
+/// exists so those three do not have to go through the free-form SQL endpoint —
+/// which lets `POST /queries` be gated on the SQL Lab entitlement without
+/// breaking chart authoring, and stops raw SQL crossing the wire when a user is
+/// only building a chart.
+///
+/// Authorization is workspace-scoped `CH_READ`, exactly like the `ch_data`
+/// build-only endpoint it replaces. It is deliberately NOT object-scoped: there
+/// is no chart id to resolve, so an object guest cannot reach it — guests keep
+/// using `ch_run` (`/charts/{id}/data`), which is object-scoped.
+async fn ch_run_spec(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Json(b): Json<ChartDataBody>,
+) -> Result<Json<ChartRunResponse>, BiApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, CH_READ)
+        .await
+        .map_err(BiApiError::from)?;
+
+    let (sql, database_id) = compile_chart_sql(&st, &ctx, b.dataset_id, &b.query_spec).await?;
+    let (session_user, bearer) = resolve_delegation(&st, &ctx, database_id).await?;
+    let result = egret_query::execution::run_query(
+        &st.databases,
+        &egret_query::execution::connector::DefaultConnectorFactory,
+        database_id,
+        &sql,
+        Some(b.query_spec.row_limit.max(0) as usize),
         session_user,
         bearer,
         &chart_run_limits(),
@@ -2884,6 +2945,7 @@ pub struct BiDatasetApi;
         ch_remove,
         ch_data,
         ch_run,
+        ch_run_spec,
         ch_set_folder,
         ch_duplicate,
         ch_trash,

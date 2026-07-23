@@ -400,6 +400,132 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getChartsChDataMutationOptions(options), queryClient);
     }
+    export type chartsChRunSpecResponse200 = {
+  data: ChartRunResponse
+  status: 200
+}
+
+export type chartsChRunSpecResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type chartsChRunSpecResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type chartsChRunSpecResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type chartsChRunSpecResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type chartsChRunSpecResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type chartsChRunSpecResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
+export type chartsChRunSpecResponseSuccess = (chartsChRunSpecResponse200) & {
+  headers: Headers;
+};
+export type chartsChRunSpecResponseError = (chartsChRunSpecResponse400 | chartsChRunSpecResponse401 | chartsChRunSpecResponse403 | chartsChRunSpecResponse404 | chartsChRunSpecResponse500 | chartsChRunSpecResponse502) & {
+  headers: Headers;
+};
+
+export type chartsChRunSpecResponse = (chartsChRunSpecResponseSuccess | chartsChRunSpecResponseError)
+
+export const getChartsChRunSpecUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/charts/run`
+}
+
+/**
+ * This is `ch_run` for a spec that is not (yet) a saved chart: the chart
+ * builder's preview, dashboard edit-mode cards, and filter-value dropdowns. It
+ * exists so those three do not have to go through the free-form SQL endpoint —
+ * which lets `POST /queries` be gated on the SQL Lab entitlement without
+ * breaking chart authoring, and stops raw SQL crossing the wire when a user is
+ * only building a chart.
+ *
+ * Authorization is workspace-scoped `CH_READ`, exactly like the `ch_data`
+ * build-only endpoint it replaces. It is deliberately NOT object-scoped: there
+ * is no chart id to resolve, so an object guest cannot reach it — guests keep
+ * using `ch_run` (`/charts/{id}/data`), which is object-scoped.
+ * @summary Run a client-supplied `QuerySpec` against a dataset and return the rows.
+ */
+export const chartsChRunSpec = async (workspace: string,
+    chartDataBody: ChartDataBody, options?: RequestInit): Promise<chartsChRunSpecResponse> => {
+
+  return customInstance<chartsChRunSpecResponse>(getChartsChRunSpecUrl(workspace),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(chartDataBody)
+  }
+);}
+
+
+
+
+
+export const getChartsChRunSpecMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof chartsChRunSpec>>, TError,{workspace: string;data: ChartDataBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof chartsChRunSpec>>, TError,{workspace: string;data: ChartDataBody}, TContext> => {
+
+const mutationKey = ['chartsChRunSpec'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof chartsChRunSpec>>, {workspace: string;data: ChartDataBody}> = (props) => {
+          const {workspace,data} = props ?? {};
+
+          return  chartsChRunSpec(workspace,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ChartsChRunSpecMutationResult = NonNullable<Awaited<ReturnType<typeof chartsChRunSpec>>>
+    export type ChartsChRunSpecMutationBody = ChartDataBody
+    export type ChartsChRunSpecMutationError = ErrorBody
+
+    /**
+ * @summary Run a client-supplied `QuerySpec` against a dataset and return the rows.
+ */
+export const useChartsChRunSpec = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof chartsChRunSpec>>, TError,{workspace: string;data: ChartDataBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof chartsChRunSpec>>,
+        TError,
+        {workspace: string;data: ChartDataBody},
+        TContext
+      > => {
+      return useMutation(getChartsChRunSpecMutationOptions(options), queryClient);
+    }
     export type chartsChGetResponse200 = {
   data: ChartDto
   status: 200

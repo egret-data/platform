@@ -10639,6 +10639,109 @@
         }
       }
     },
+    "/api/ws/{workspace}/charts/run": {
+      "post": {
+        "tags": [
+          "charts"
+        ],
+        "summary": "Run a client-supplied `QuerySpec` against a dataset and return the rows.",
+        "description": "This is `ch_run` for a spec that is not (yet) a saved chart: the chart\nbuilder's preview, dashboard edit-mode cards, and filter-value dropdowns. It\nexists so those three do not have to go through the free-form SQL endpoint —\nwhich lets `POST /queries` be gated on the SQL Lab entitlement without\nbreaking chart authoring, and stops raw SQL crossing the wire when a user is\nonly building a chart.\n\nAuthorization is workspace-scoped `CH_READ`, exactly like the `ch_data`\nbuild-only endpoint it replaces. It is deliberately NOT object-scoped: there\nis no chart id to resolve, so an object guest cannot reach it — guests keep\nusing `ch_run` (`/charts/{id}/data`), which is object-scoped.",
+        "operationId": "ch_run_spec",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChartDataBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The client-supplied spec, compiled + executed: columns + rows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChartRunResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query spec (unknown column/metric, bad filter, …)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing chart:read permission, or the charts module is disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Referenced dataset not in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Query engine error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/charts/{id}": {
       "get": {
         "tags": [
