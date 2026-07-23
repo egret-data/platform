@@ -102,8 +102,9 @@ impl From<egret_core::Error> for EngineHttpError {
             egret_core::Error::Unauthorized | egret_core::Error::Forbidden => {
                 EngineHttpError::Forbidden
             }
-            // Same 403 as `Forbidden` here: this seam's HTTP error has no
-            // machine-readable `code` field to carry the distinction through.
+            // Exhaustiveness only: this seam serves `/api/control-plane/*`
+            // engine routes, none of which go through `WsContext`, so the gate
+            // that produces `FeatureDisabled` can never actually reach here.
             egret_core::Error::FeatureDisabled(_) => EngineHttpError::Forbidden,
             egret_core::Error::TooManyRequests => {
                 EngineHttpError::BadRequest("too many requests".to_string())

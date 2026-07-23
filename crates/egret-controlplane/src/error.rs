@@ -98,8 +98,9 @@ impl From<egret_core::Error> for CpError {
             egret_core::Error::Conflict(s) => CpError::Conflict(s),
             egret_core::Error::InvalidInput(s) => CpError::BadRequest(s),
             egret_core::Error::Unauthorized | egret_core::Error::Forbidden => CpError::Forbidden,
-            // Same 403 as `Forbidden` here: this seam's HTTP error has no
-            // machine-readable `code` field to carry the distinction through.
+            // Exhaustiveness only: this seam serves `/api/control-plane/*`
+            // routes, none of which go through `WsContext`, so the gate that
+            // produces `FeatureDisabled` can never actually reach here.
             egret_core::Error::FeatureDisabled(_) => CpError::Forbidden,
             egret_core::Error::TooManyRequests => {
                 CpError::BadRequest("too many requests".to_string())

@@ -50,15 +50,17 @@ impl IntoResponse for Error {
         let status = self.status_code();
         // Public-safe message: expose the specific message for client-facing
         // errors; hide internals for 5xx.
-        let msg = match &self {
+        let error = match &self {
             Error::Internal(_) => "internal error".to_string(),
             other => other.to_string(),
         };
-        let mut body = serde_json::json!({ "error": msg });
-        if let Error::FeatureDisabled(_) = &self {
-            body["code"] = serde_json::Value::String("feature_disabled".into());
-        }
-        (status, Json(body)).into_response()
+        let code = match &self {
+            Error::FeatureDisabled(_) => Some("feature_disabled".to_string()),
+            _ => None,
+        };
+        // Built from `ErrorBody` rather than an ad-hoc `json!` so the declared
+        // OpenAPI schema and the bytes actually sent cannot drift apart.
+        (status, Json(ErrorBody { error, code })).into_response()
     }
 }
 
