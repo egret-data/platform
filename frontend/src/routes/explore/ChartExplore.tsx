@@ -3,11 +3,11 @@ import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom"
 import { toast } from "sonner";
 import { useDatasets, useDataset } from "@/api/datasets";
 import {
-  useBuildChartData, useChart, useChartMutations,
+  useChart, useChartMutations,
   type QuerySpec, type VizType, type ChartParams, type TableState, type ChartFilter,
   type CartesianConfig, type PieConfig, type ScalarConfig, type ProgressConfig, type GaugeConfig, type FunnelConfig, type WaterfallConfig, type SmartScalarConfig, type BoxplotConfig, type SankeyConfig, isCartesianViz,
 } from "@/api/charts";
-import { useSubmitQuery, useQueryStatus, useResults } from "@/api/sqllab";
+import { useSpecData } from "@/api/useSpecData";
 import { ChartTable } from "@/components/chart/ChartTable";
 import { PivotTable } from "@/components/chart/pivot/PivotTable";
 import { FilterChips } from "@/components/chart/FilterChips";
@@ -274,17 +274,15 @@ export default function ChartExplore() {
     });
   }, [activeDims.join("|"), columns]);
 
-  const build = useBuildChartData(ws);
-  const submit = useSubmitQuery(ws);
-  const [queryId, setQueryId] = useState<string | null>(null);
-  const status = useQueryStatus(ws, queryId);
-  const finished = status.data?.status === "finished";
-  const results = useResults(ws, queryId, 0, finished);
-  const resultColumns = (results.data?.columns ?? []).filter((c) => !c.name.startsWith("__grp_"));
+  const [ranSpec, setRanSpec] = useState<QuerySpec | null>(null);
+  const [runNonce, setRunNonce] = useState(0);
+  const data = useSpecData(ws, datasetId, ranSpec, !!ranSpec, runNonce);
+  const finished = !data.isLoading && !data.error && !!ranSpec;
+  const resultColumns = data.columns.filter((c) => !c.name.startsWith("__grp_"));
   const metricTypes = Object.fromEntries((detail.data?.metrics ?? []).map((m) => [m.metric_name, m.data_type ?? "double"]));
 
-  async function run() {
-    setQueryId(null);
+  function run() {
+    setRanSpec(null);
     if (!datasetId) { toast.error("Pick a dataset first"); return; }
     if (viz === "pivot_table" && (pRows.length === 0 || pVals.length === 0)) {
       toast.error("Pivot needs at least one row dimension and one value"); return;
@@ -321,18 +319,15 @@ export default function ChartExplore() {
     }
     if (viz === "map" && (!mapCfg.region || !mapCfg.metric)) { toast.error("Map needs a region and a metric"); return; }
     if (viz === "object" && tableCols.length === 0) { toast.error("Object detail needs at least one column"); return; }
-    try {
-      const { sql, database_id } = await build.mutateAsync({ dataset_id: datasetId, query_spec: specForRun() });
-      const ack = await submit.mutateAsync({ database_id, sql, limit: rowLimit });
-      setQueryId(ack.id);
-    } catch (e) { toast.error(String(e)); }
+    setRanSpec(specForRun());
+    setRunNonce((n) => n + 1);
   }
 
   function addFilter(f: ChartFilter) {
     setFilters((prev) => [...prev.filter((x) => x.col !== f.col), f]);
   }
   // Re-run whenever filters change, but only if a query is already in flight/done
-  useEffect(() => { if (queryId) void run(); }, [filters]); // intentionally omits run/queryId to avoid infinite loop
+  useEffect(() => { if (ranSpec) void run(); }, [filters]); // intentionally omits run/ranSpec to avoid infinite loop
 
   const mutations = useChartMutations(ws);
   const [saveOpen, setSaveOpen] = useState(false);
@@ -402,7 +397,7 @@ export default function ChartExplore() {
 
   function changeViz(v: VizType) {
     setViz(v);
-    setQueryId(null);
+    setRanSpec(null);
     if (!id) setSearchParams({ type: v });
   }
 
@@ -415,7 +410,7 @@ export default function ChartExplore() {
 
   function resetControls() {
     setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]);
-    setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setFilters([]); setQueryId(null);
+    setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setFilters([]); setRanSpec(null);
     setCartesian({ yMetrics: [] }); setPie({}); setScalar({}); setProgress({}); setGauge({}); setFunnel({}); setWaterfall({}); setSmart({}); setBox({}); setSankey({});
     setTemporalUnits({});
   }
@@ -443,7 +438,7 @@ export default function ChartExplore() {
       return next;
     }, { replace: true });
 
-  const isRunning = status.data?.status === "queued" || status.data?.status === "running";
+  const isRunning = data.isLoading;
   const vizMeta = CHART_TYPES.find((t) => t.key === viz);
   const previewRef = useRef<HTMLDivElement>(null);
 
@@ -900,7 +895,7 @@ export default function ChartExplore() {
               vizType={viz}
               params={paramsForSave()}
               columns={resultColumns}
-              rows={results.data?.rows}
+              rows={data.rows}
               onChange={applyParamsBack}
             />
           </TabsContent>
@@ -911,39 +906,33 @@ export default function ChartExplore() {
       <div className="flex-1 overflow-auto p-4 space-y-3">
         <h1 className="sr-only">{saveName || "New chart"}</h1>
         <div className="flex items-center gap-2">
-          <Button onClick={run} disabled={build.isPending || submit.isPending} size="sm">
-            {(build.isPending || submit.isPending) ? "Building…" : "Run"}
+          <Button onClick={run} disabled={data.isLoading} size="sm">
+            {data.isLoading ? "Running…" : "Run"}
           </Button>
           <Button variant="outline" size="sm" onClick={() => setSaveOpen(true)}>{id ? "Update" : "Save"}</Button>
           <ChartExportMenu
             title={saveName || undefined}
             columns={resultColumns}
-            rows={results.data?.rows ?? []}
+            rows={data.rows}
             containerRef={previewRef}
             disabled={!finished || resultColumns.length === 0}
           />
-          {build.data?.sql && (
-            <details className="ml-auto text-xs text-muted-foreground">
-              <summary className="cursor-pointer select-none hover:text-foreground">View SQL</summary>
-              <pre className="mt-1 max-h-40 overflow-auto rounded bg-muted p-2 text-xs">{build.data.sql}</pre>
-            </details>
-          )}
         </div>
 
         {filters.length > 0 && (
           <FilterChips filters={filters} onRemove={(i) => setFilters((prev) => prev.filter((_, j) => j !== i))} />
         )}
-        {status.data?.status === "failed" && (
-          <p className="rounded bg-destructive/10 p-3 text-sm text-destructive">{status.data.error}</p>
+        {data.error && (
+          <p className="rounded bg-destructive/10 p-3 text-sm text-destructive">{data.error}</p>
         )}
         {isRunning && <p className="text-sm text-muted-foreground">Running…</p>}
 
         <div ref={previewRef} className="contents">
-        {finished && results.data && viz === "pivot_table" && (
+        {finished && viz === "pivot_table" && (
           <PivotTable
             input={{
-              columns: results.data.columns.map((c) => c.name),
-              rows: results.data.rows,
+              columns: data.columns.map((c) => c.name),
+              rows: data.rows,
               rowDims: pRows, colDims: pCols, metrics: pVals,
               showRowTotals, showColTotals, condense, collapsed,
               sortDims: pivotSort,
@@ -971,30 +960,30 @@ export default function ChartExplore() {
             onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })}
           />
         )}
-        {finished && results.data && viz === "table" && (
-          <ChartTable columns={results.data.columns} rows={results.data.rows}
+        {finished && viz === "table" && (
+          <ChartTable columns={data.columns} rows={data.rows}
             columnSettings={columnSettings} conditionalFormatting={conditionalFormatting}
             tableState={tableState} onTableStateChange={setTableState}
             dimensionColumns={tableMetrics.length > 0 ? tableCols : []}
             onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })} />
         )}
-        {finished && results.data && viz !== "table" && viz !== "pivot_table" && (
-          <ChartErrorBoundary resetKey={`${viz}:${results.data.columns.length}:${results.data.rows.length}`}>
+        {finished && viz !== "table" && viz !== "pivot_table" && (
+          <ChartErrorBoundary resetKey={`${viz}:${data.columns.length}:${data.rows.length}`}>
             {/* ChartRenderer fills its parent; the preview owns the height + frame
                 (dashboard cards size it to the grid cell instead). */}
             <div className="h-[70vh] rounded-md border p-2">
               <ChartRenderer
                 vizType={viz}
                 params={paramsForSave()}
-                columns={results.data.columns}
-                rows={results.data.rows}
+                columns={data.columns}
+                rows={data.rows}
                 metricTypes={metricTypes}
               />
             </div>
           </ChartErrorBoundary>
         )}
         </div>
-        {!queryId && !build.isPending && !submit.isPending && (
+        {!ranSpec && !data.isLoading && (
           <p className="text-sm text-muted-foreground">Configure the controls on the left and click Run.</p>
         )}
       </div>

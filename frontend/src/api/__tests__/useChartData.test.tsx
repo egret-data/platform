@@ -3,22 +3,14 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import React from "react";
 
-// The BI modules now route through the orval-generated client → the mutator →
-// `apiFetch` (which returns a raw `Response`). We stub `apiFetch` and assert on
-// its calls; the mutator builds the `{ status, data, headers }` envelope.
-const apiFetch = vi.fn();
-vi.mock("@/api/client", () => ({
-  apiJson: vi.fn(),
-  apiFetch: (...a: unknown[]) => apiFetch(...a),
-  ApiError: class ApiError extends Error {},
-  UnauthorizedError: class UnauthorizedError extends Error {},
+// `useChartData` now runs through `useSpecData` -> `chartsChRunSpec` (`POST
+// /charts/run`), a single request that compiles and executes the spec
+// server-side — no more build -> submit -> poll through the free-form SQL
+// endpoint.
+const chartsChRunSpec = vi.fn();
+vi.mock("@/api/generated/charts/charts", () => ({
+  chartsChRunSpec: (...a: unknown[]) => chartsChRunSpec(...a),
 }));
-
-const jsonRes = (body: unknown) => ({
-  status: 200,
-  headers: new Headers({ "content-type": "application/json" }),
-  json: () => Promise.resolve(body),
-});
 
 import { useChartData } from "../useChartData";
 import type { Chart } from "@/api/charts";
@@ -35,35 +27,28 @@ function wrapper({ children }: { children: React.ReactNode }) {
 }
 
 beforeEach(() => {
-  apiFetch.mockReset();
-  apiFetch.mockImplementation((url: string, opts?: { method?: string }) => {
-    if (url.endsWith("/charts/data")) return Promise.resolve(jsonRes({ sql: "SELECT 1", database_id: "db1" }));
-    if (url.endsWith("/queries") && opts?.method === "POST") return Promise.resolve(jsonRes({ id: "q1", status: "finished" }));
-    if (url.includes("/queries/q1/results")) return Promise.resolve(jsonRes({ columns: [{ name: "rev", type: "double" }], rows: [[5]], page: 0, page_size: 100, row_count: 1, truncated: false }));
-    if (url.includes("/queries/q1")) return Promise.resolve(jsonRes({ id: "q1", database_id: "db1", status: "finished", columns: null, preview: null, row_count: 1, truncated: false, error: null }));
-    return Promise.reject(new Error("unexpected " + url));
-  });
+  chartsChRunSpec.mockReset();
+  chartsChRunSpec.mockResolvedValue({ data: { columns: [{ name: "rev", type: "double" }], rows: [[5]] } });
 });
 
 describe("useChartData", () => {
-  it("builds, submits, polls, and returns the result rows", async () => {
+  it("runs the chart's spec in a single request and returns the result rows", async () => {
     const { result } = renderHook(() => useChartData("eng", chart), { wrapper });
     await waitFor(() => expect(result.current.columns.length).toBe(1));
     expect(result.current.rows).toEqual([[5]]);
     expect(result.current.isLoading).toBe(false);
     expect(result.current.error).toBeNull();
+    expect(chartsChRunSpec).toHaveBeenCalledTimes(1);
+    expect(chartsChRunSpec).toHaveBeenCalledWith("eng", { dataset_id: "ds1", query_spec: chart.params.spec });
   });
 
   it("refetches when the nonce changes", async () => {
     let nonce = 0;
     const { result, rerender } = renderHook(() => useChartData("eng", chart, nonce), { wrapper });
     await waitFor(() => expect(result.current.rows).toEqual([[5]]));
-    const buildCalls = apiFetch.mock.calls.filter((c: unknown[]) => String(c[0]).endsWith("/charts/data")).length;
+    const before = chartsChRunSpec.mock.calls.length;
     nonce = 1;
     rerender();
-    await waitFor(() => {
-      const after = apiFetch.mock.calls.filter((c: unknown[]) => String(c[0]).endsWith("/charts/data")).length;
-      expect(after).toBe(buildCalls + 1);
-    });
+    await waitFor(() => expect(chartsChRunSpec.mock.calls.length).toBe(before + 1));
   });
 });
