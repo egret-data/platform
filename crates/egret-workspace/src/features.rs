@@ -120,6 +120,26 @@ pub const UNGATED: &[&str] = &[
     "shares",
 ];
 
+/// True if `segment` — the first path segment under `/api/ws/{workspace}/` — is
+/// something the catalog knows about: either a module claims it, or it is
+/// explicitly ungated.
+///
+/// Note this is deliberately coarser than `gated_feature`. A segment can be
+/// *known* while only some of its paths are *gated* — `queries` is claimed by
+/// `sql_lab` for POST only, because submitting free-form SQL is the privileged
+/// act while reading back or cancelling your own query is not. The method-level
+/// semantics of such a rule are pinned by this module's own unit tests; this
+/// function exists for the route-coverage test in `egret-server`, whose job is
+/// to catch a whole module being mounted with nobody classifying it.
+pub fn is_classified_segment(segment: &str) -> bool {
+    UNGATED.contains(&segment)
+        || FEATURES.iter().any(|f| {
+            f.rules
+                .iter()
+                .any(|r| r.path.split('/').next() == Some(segment))
+        })
+}
+
 /// The part of a request path after `/api/ws/{slug}/`, or `None` if the path is
 /// not workspace-scoped.
 ///
@@ -342,6 +362,20 @@ mod tests {
         // catches the omission, at CI time rather than at request time.
         assert_eq!(gated_feature("something-nobody-declared", "GET"), None);
         assert_eq!(gated_feature("something-nobody-declared/sub", "POST"), None);
+    }
+
+    #[test]
+    fn is_classified_segment_covers_module_and_ungated_segments_but_not_the_unknown() {
+        // Claimed by a Feature (via its rules' first path segment).
+        for seg in ["queries", "sqllab", "notebooks", "kernel"] {
+            assert!(is_classified_segment(seg), "{seg} should be classified");
+        }
+        // Explicitly listed as ungated.
+        for seg in ["members", "folders"] {
+            assert!(is_classified_segment(seg), "{seg} should be classified");
+        }
+        // Nobody has declared this segment at all.
+        assert!(!is_classified_segment("pipelines"));
     }
 
     #[test]
