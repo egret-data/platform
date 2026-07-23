@@ -287,7 +287,8 @@ function RoleConfigEditor({
       >
         <ConfigTable>
           <ConfigTableRow
-            label="Query max memory / node"
+            label="query.max-memory-per-node"
+            mono
             fieldKey="queryMaxMemoryPerNode"
             htmlFor={`${idPrefix}-qmmpn`}
           >
@@ -299,7 +300,8 @@ function RoleConfigEditor({
             />
           </ConfigTableRow>
           <ConfigTableRow
-            label="Heap headroom / node"
+            label="memory.heap-headroom-per-node"
+            mono
             fieldKey="memoryHeapHeadroomPerNode"
             htmlFor={`${idPrefix}-hhpn`}
           >

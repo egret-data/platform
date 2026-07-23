@@ -13,8 +13,8 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { ConfigSection } from "./config/ConfigSection";
-import { FieldLabel } from "./config/FieldLabel";
-import { PropertyField } from "./config/PropertyField";
+import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
+import { PropertyValue } from "./config/PropertyField";
 import { knownProperties } from "./config/knownProperties";
 
 /**
@@ -59,93 +59,92 @@ export function EngineConfigReliability(props: {
       description="Retry failed tasks/queries, spooling exchange data to an S3 storage connection."
       docsUrl="https://trino.io/docs/current/admin/fault-tolerant-execution.html"
     >
-      <div className="flex items-center justify-between gap-4">
-        <FieldLabel
-          fieldKey="faultTolerantEnabled"
+      <ConfigTable>
+        <ConfigTableRow
           label="Enable fault-tolerant execution"
+          fieldKey="faultTolerantEnabled"
           htmlFor="ced-ft-enabled"
-        />
-        <Switch
-          id="ced-ft-enabled"
-          checked={ftEnabled}
-          onCheckedChange={setFtEnabled}
-        />
-      </div>
-      {ftEnabled && (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <div className="space-y-1.5">
-            <FieldLabel
-              fieldKey="retryPolicy"
+        >
+          <Switch
+            id="ced-ft-enabled"
+            checked={ftEnabled}
+            onCheckedChange={setFtEnabled}
+          />
+        </ConfigTableRow>
+        {ftEnabled && (
+          <>
+            <ConfigTableRow
               label="Retry policy"
+              fieldKey="retryPolicy"
               htmlFor="ced-ft-retry"
-            />
-            <Select
-              value={retryPolicy}
-              onValueChange={(v) => setRetryPolicy(v as "TASK" | "QUERY")}
             >
-              <SelectTrigger id="ced-ft-retry" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="TASK">TASK</SelectItem>
-                <SelectItem value="QUERY">QUERY</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-1.5">
-            <FieldLabel
-              fieldKey="exchangeStorage"
+              <Select
+                value={retryPolicy}
+                onValueChange={(v) => setRetryPolicy(v as "TASK" | "QUERY")}
+              >
+                <SelectTrigger id="ced-ft-retry" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="TASK">TASK</SelectItem>
+                  <SelectItem value="QUERY">QUERY</SelectItem>
+                </SelectContent>
+              </Select>
+            </ConfigTableRow>
+            <ConfigTableRow
               label="Exchange storage"
+              fieldKey="exchangeStorage"
               htmlFor="ced-ft-storage"
-            />
-            <Select
-              value={exchangeStorageConnId}
-              onValueChange={setExchangeStorageConnId}
             >
-              <SelectTrigger id="ced-ft-storage" className="w-full">
-                <SelectValue placeholder="Select a connection" />
-              </SelectTrigger>
-              <SelectContent>
-                {(storage.data ?? []).length === 0 ? (
-                  <SelectItem value="__none__" disabled>
-                    No storage connections
-                  </SelectItem>
-                ) : (
-                  (storage.data ?? []).map((s) => (
-                    <SelectItem key={s.id} value={s.id}>
-                      {s.name}
+              <Select
+                value={exchangeStorageConnId}
+                onValueChange={setExchangeStorageConnId}
+              >
+                <SelectTrigger id="ced-ft-storage" className="w-full">
+                  <SelectValue placeholder="Select a connection" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(storage.data ?? []).length === 0 ? (
+                    <SelectItem value="__none__" disabled>
+                      No storage connections
                     </SelectItem>
-                  ))
-                )}
-              </SelectContent>
-            </Select>
-            {(storage.data ?? []).length === 0 && (
-              <p className="text-xs text-muted-foreground">
-                No storage connections yet.{" "}
-                <Link
-                  to="/control-plane/storage"
-                  className="text-primary hover:underline"
-                >
-                  Add a storage connection
-                </Link>
-                .
-              </p>
-            )}
-          </div>
-          <div className="space-y-1.5">
-            <FieldLabel
-              fieldKey="exchangePrefix"
+                  ) : (
+                    (storage.data ?? []).map((s) => (
+                      <SelectItem key={s.id} value={s.id}>
+                        {s.name}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+            </ConfigTableRow>
+            <ConfigTableRow
               label="Exchange prefix"
+              fieldKey="exchangePrefix"
               htmlFor="ced-ft-prefix"
-            />
-            <Input
-              id="ced-ft-prefix"
-              value={exchangePrefix}
-              placeholder="exchange"
-              onChange={(e) => setExchangePrefix(e.target.value)}
-            />
-          </div>
-        </div>
+            >
+              <Input
+                id="ced-ft-prefix"
+                className="w-full"
+                value={exchangePrefix}
+                placeholder="exchange"
+                onChange={(e) => setExchangePrefix(e.target.value)}
+              />
+            </ConfigTableRow>
+          </>
+        )}
+      </ConfigTable>
+      {ftEnabled && (storage.data ?? []).length === 0 && (
+        <p className="text-xs text-muted-foreground">
+          No storage connections yet.{" "}
+          <Link
+            to="/control-plane/storage"
+            className="text-primary hover:underline"
+          >
+            Add a storage connection
+          </Link>
+          .
+        </p>
       )}
     </ConfigSection>
 
@@ -154,18 +153,25 @@ export function EngineConfigReliability(props: {
         description="Per-policy retry attempt caps applied when fault-tolerant execution is enabled."
         docsUrl="https://trino.io/docs/current/admin/fault-tolerant-execution.html"
       >
-        <div className="space-y-4">
+        <ConfigTable>
           {knownProperties
             .filter((p) => p.section === "reliability")
             .map((prop) => (
-              <PropertyField
+              <ConfigTableRow
                 key={prop.key}
-                prop={prop}
-                value={getProp("config", prop.key)}
-                onChange={(v) => setProp("config", prop.key, v)}
-              />
+                mono
+                label={prop.key}
+                details={prop.help ?? null}
+                docsUrl={prop.docsUrl}
+              >
+                <PropertyValue
+                  prop={prop}
+                  value={getProp("config", prop.key)}
+                  onChange={(v) => setProp("config", prop.key, v)}
+                />
+              </ConfigTableRow>
             ))}
-        </div>
+        </ConfigTable>
       </ConfigSection>
     </div>
   );

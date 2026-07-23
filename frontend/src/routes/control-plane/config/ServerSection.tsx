@@ -56,7 +56,8 @@ export function ServerSection({ cfg }: { cfg: EngineConfigForm }) {
       >
         <ConfigTable>
           <ConfigTableRow
-            label="Query max memory"
+            label="query.max-memory"
+            mono
             fieldKey="queryMaxMemory"
             htmlFor="ced-query-max-memory"
           >

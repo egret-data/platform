@@ -10,7 +10,65 @@ import { Switch } from "@/components/ui/switch";
 import { FieldLabel } from "./FieldLabel";
 import type { KnownProperty } from "./knownProperties";
 import { SELECT_NONE } from "./podEditors";
-import { QuantityInput } from "./QuantityInput";
+import { QuantityInput, QuantityValue } from "./QuantityInput";
+
+/**
+ * The bare control for a single `KnownProperty` — the widget only, no label
+ * (the key + help live in the Setting/Details columns of a {@link ConfigTable}).
+ * Mirrors {@link PropertyField}'s type switch. Used in property-map table rows.
+ */
+export function PropertyValue({
+  prop,
+  value,
+  onChange,
+}: {
+  prop: KnownProperty;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  if (prop.type === "size") {
+    return (
+      <QuantityValue value={value} onChange={onChange} placeholder={prop.default} />
+    );
+  }
+  if (prop.type === "enum") {
+    return (
+      <Select
+        value={value || SELECT_NONE}
+        onValueChange={(v) => onChange(v === SELECT_NONE ? "" : v)}
+      >
+        <SelectTrigger className="w-full">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={SELECT_NONE}>(default)</SelectItem>
+          {(prop.enumOptions ?? []).map((opt) => (
+            <SelectItem key={opt} value={opt}>
+              {opt}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    );
+  }
+  if (prop.type === "boolean") {
+    return (
+      <Switch
+        checked={value === "true"}
+        onCheckedChange={(v) => onChange(v ? "true" : "")}
+      />
+    );
+  }
+  // number | duration | string
+  return (
+    <Input
+      className="w-full"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={prop.default}
+    />
+  );
+}
 
 /**
  * Renders the appropriate input widget for a single `KnownProperty` by its
