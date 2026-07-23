@@ -1229,6 +1229,53 @@ async fn notebook_runtime_token_returns_minted_token(pool: sqlx::PgPool) {
     );
 }
 
+/// Feature entitlement, on the one workspace-scoped path the `WsContext` gate
+/// cannot cover: this is a bearer-token kernel callback, so no `WsContext` is
+/// ever constructed and the handler must check for itself.
+///
+/// With `notebooks` switched off, an already-running kernel is refused a FRESH
+/// engine token. Killing the running kernel is explicitly out of scope; not
+/// re-arming it is not.
+#[sqlx::test(migrations = "../../migrations")]
+async fn notebook_runtime_token_is_refused_when_notebooks_is_disabled(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    let token = mint_kernel_token(&f.db, f.ws, f.owner).await;
+    let uri = format!("/ws/{}/notebook-runtime/token", f.slug);
+
+    // Control: the very same token mints successfully while the module is on,
+    // so the 403 below can only be the entitlement check.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(bearer_post(&uri, &token, serde_json::json!({})))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "control: module on → 200");
+
+    sqlx::query(
+        "INSERT INTO workspace_features (workspace_id, feature, enabled) VALUES ($1, $2, false)",
+    )
+    .bind(f.ws.0)
+    .bind("notebooks")
+    .execute(&f.db.pool)
+    .await
+    .expect("disable notebooks");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(bearer_post(&uri, &token, serde_json::json!({})))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a disabled module must not hand out fresh engine tokens; body={json}"
+    );
+    assert_eq!(json["code"], "feature_disabled", "body={json}");
+}
+
 /// No Authorization header → 401.
 #[sqlx::test(migrations = "../../migrations")]
 async fn notebook_runtime_token_requires_auth(pool: sqlx::PgPool) {

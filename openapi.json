@@ -16108,6 +16108,7 @@
           "kernel-callback"
         ],
         "summary": "`POST /ws/{workspace}/notebook-runtime/token` — mint a fresh short-lived engine\nJWT for the kernel-token's user. Auth = `EGRET_KERNEL_TOKEN` bearer; identity\ncomes ONLY from `KernelIdentity` — the `{workspace}` path segment is accepted\nfor URL symmetry but never trusted for auth. Returns ONLY the caller's token.",
+        "description": "Feature entitlement is enforced HERE rather than by the gate in `WsContext`,\nbecause this is a kernel-subprocess callback carrying a bearer token and no\nbrowser session: it never constructs a `WsContext`, so it is the one\nworkspace-scoped path the gate there does not cover. Letting an in-flight\nkernel finish its work is deliberate; handing it a FRESH capability after\nthe module was switched off is not.",
         "operationId": "notebook_runtime_token",
         "parameters": [
           {
@@ -16133,6 +16134,16 @@
           },
           "401": {
             "description": "Missing/invalid EGRET_KERNEL_TOKEN bearer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The notebooks module is switched off for this workspace",
             "content": {
               "application/json": {
                 "schema": {

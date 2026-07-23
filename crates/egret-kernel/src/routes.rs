@@ -811,6 +811,13 @@ async fn engine_token(
 /// JWT for the kernel-token's user. Auth = `EGRET_KERNEL_TOKEN` bearer; identity
 /// comes ONLY from `KernelIdentity` — the `{workspace}` path segment is accepted
 /// for URL symmetry but never trusted for auth. Returns ONLY the caller's token.
+///
+/// Feature entitlement is enforced HERE rather than by the gate in `WsContext`,
+/// because this is a kernel-subprocess callback carrying a bearer token and no
+/// browser session: it never constructs a `WsContext`, so it is the one
+/// workspace-scoped path the gate there does not cover. Letting an in-flight
+/// kernel finish its work is deliberate; handing it a FRESH capability after
+/// the module was switched off is not.
 #[utoipa::path(
     post,
     path = "/api/ws/{workspace}/notebook-runtime/token",
@@ -819,6 +826,7 @@ async fn engine_token(
     responses(
         (status = 200, description = "Fresh short-lived engine JWT for the kernel-token's user", body = egret_analytics_api::EngineToken),
         (status = 401, description = "Missing/invalid EGRET_KERNEL_TOKEN bearer", body = ErrorBody),
+        (status = 403, description = "The notebooks module is switched off for this workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -826,6 +834,20 @@ async fn notebook_runtime_token(
     id: KernelIdentity,
     State(st): State<KernelState>,
 ) -> Result<Json<egret_analytics_api::EngineToken>, KernelApiError> {
+    // Which module owns this path is read from the same catalog the gate uses,
+    // so the two cannot drift. The workspace is the one the KERNEL TOKEN is
+    // bound to — never the `{workspace}` path segment, which this handler
+    // trusts for nothing.
+    if let Some(key) = egret_workspace::features::gated_feature("notebook-runtime/token", "POST") {
+        let disabled = st
+            .workspaces
+            .disabled_features(egret_core::WorkspaceId(id.workspace_id))
+            .await
+            .map_err(KernelApiError)?;
+        if disabled.contains(key) {
+            return Err(KernelApiError(egret_core::Error::FeatureDisabled(key)));
+        }
+    }
     let tok = st
         .engine_minter
         .mint(id.user_id)
