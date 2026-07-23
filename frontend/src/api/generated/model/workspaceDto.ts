@@ -16,4 +16,9 @@ export interface WorkspaceDto {
   created_by?: string | null;
   /** @nullable */
   owner_name?: string | null;
+  /**
+     * Module keys this workspace has switched on. Empty for the admin list
+     * endpoints, which do not need it; populated by `/api/me/workspaces`.
+     */
+  features?: string[];
 }

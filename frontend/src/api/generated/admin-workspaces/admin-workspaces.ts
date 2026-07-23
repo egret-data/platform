@@ -29,6 +29,8 @@ import type {
   AdminWorkspacesListWsParams,
   CreateWorkspace,
   ErrorBody,
+  FeatureDto,
+  SetFeatures,
   TransferOwner,
   UpdateWorkspace,
   WorkspaceDto,
@@ -594,6 +596,228 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getAdminWorkspacesArchiveWsMutationOptions(options), queryClient);
+    }
+    export type adminWorkspacesWsFeaturesResponse200 = {
+  data: FeatureDto[]
+  status: 200
+}
+
+export type adminWorkspacesWsFeaturesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type adminWorkspacesWsFeaturesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type adminWorkspacesWsFeaturesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type adminWorkspacesWsFeaturesResponseSuccess = (adminWorkspacesWsFeaturesResponse200) & {
+  headers: Headers;
+};
+export type adminWorkspacesWsFeaturesResponseError = (adminWorkspacesWsFeaturesResponse401 | adminWorkspacesWsFeaturesResponse403 | adminWorkspacesWsFeaturesResponse500) & {
+  headers: Headers;
+};
+
+export type adminWorkspacesWsFeaturesResponse = (adminWorkspacesWsFeaturesResponseSuccess | adminWorkspacesWsFeaturesResponseError)
+
+export const getAdminWorkspacesWsFeaturesUrl = (id: string,) => {
+
+
+
+
+  return `/api/admin/workspaces/${encodeURIComponent(id)}/features`
+}
+
+export const adminWorkspacesWsFeatures = async (id: string, options?: RequestInit): Promise<adminWorkspacesWsFeaturesResponse> => {
+
+  return customInstance<adminWorkspacesWsFeaturesResponse>(getAdminWorkspacesWsFeaturesUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getAdminWorkspacesWsFeaturesQueryKey = (id: string,) => {
+    return [
+    `/api/admin/workspaces/${encodeURIComponent(id)}/features`
+    ] as const;
+    }
+
+
+export const getAdminWorkspacesWsFeaturesQueryOptions = <TData = Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getAdminWorkspacesWsFeaturesQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>> = ({ signal }) => adminWorkspacesWsFeatures(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type AdminWorkspacesWsFeaturesQueryResult = NonNullable<Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>>
+export type AdminWorkspacesWsFeaturesQueryError = ErrorBody
+
+
+export function useAdminWorkspacesWsFeatures<TData = Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>,
+          TError,
+          Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useAdminWorkspacesWsFeatures<TData = Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>,
+          TError,
+          Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useAdminWorkspacesWsFeatures<TData = Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useAdminWorkspacesWsFeatures<TData = Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminWorkspacesWsFeatures>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getAdminWorkspacesWsFeaturesQueryOptions(id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type adminWorkspacesSetWsFeaturesResponse200 = {
+  data: FeatureDto[]
+  status: 200
+}
+
+export type adminWorkspacesSetWsFeaturesResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type adminWorkspacesSetWsFeaturesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type adminWorkspacesSetWsFeaturesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type adminWorkspacesSetWsFeaturesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type adminWorkspacesSetWsFeaturesResponseSuccess = (adminWorkspacesSetWsFeaturesResponse200) & {
+  headers: Headers;
+};
+export type adminWorkspacesSetWsFeaturesResponseError = (adminWorkspacesSetWsFeaturesResponse400 | adminWorkspacesSetWsFeaturesResponse401 | adminWorkspacesSetWsFeaturesResponse403 | adminWorkspacesSetWsFeaturesResponse500) & {
+  headers: Headers;
+};
+
+export type adminWorkspacesSetWsFeaturesResponse = (adminWorkspacesSetWsFeaturesResponseSuccess | adminWorkspacesSetWsFeaturesResponseError)
+
+export const getAdminWorkspacesSetWsFeaturesUrl = (id: string,) => {
+
+
+
+
+  return `/api/admin/workspaces/${encodeURIComponent(id)}/features`
+}
+
+export const adminWorkspacesSetWsFeatures = async (id: string,
+    setFeatures: SetFeatures, options?: RequestInit): Promise<adminWorkspacesSetWsFeaturesResponse> => {
+
+  return customInstance<adminWorkspacesSetWsFeaturesResponse>(getAdminWorkspacesSetWsFeaturesUrl(id),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setFeatures)
+  }
+);}
+
+
+
+
+
+export const getAdminWorkspacesSetWsFeaturesMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof adminWorkspacesSetWsFeatures>>, TError,{id: string;data: SetFeatures}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof adminWorkspacesSetWsFeatures>>, TError,{id: string;data: SetFeatures}, TContext> => {
+
+const mutationKey = ['adminWorkspacesSetWsFeatures'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof adminWorkspacesSetWsFeatures>>, {id: string;data: SetFeatures}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  adminWorkspacesSetWsFeatures(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AdminWorkspacesSetWsFeaturesMutationResult = NonNullable<Awaited<ReturnType<typeof adminWorkspacesSetWsFeatures>>>
+    export type AdminWorkspacesSetWsFeaturesMutationBody = SetFeatures
+    export type AdminWorkspacesSetWsFeaturesMutationError = ErrorBody
+
+    export const useAdminWorkspacesSetWsFeatures = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof adminWorkspacesSetWsFeatures>>, TError,{id: string;data: SetFeatures}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof adminWorkspacesSetWsFeatures>>,
+        TError,
+        {id: string;data: SetFeatures},
+        TContext
+      > => {
+      return useMutation(getAdminWorkspacesSetWsFeaturesMutationOptions(options), queryClient);
     }
     export type adminWorkspacesRestoreWsResponse200 = {
   data: Ack
