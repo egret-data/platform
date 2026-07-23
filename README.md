@@ -20,7 +20,7 @@ automation) — into one governed platform with a shared design system.
 |---|---|
 | Every team runs its own BI tool, catalog, and warehouse → data silos & duplication | **Single source of truth** — one shared Iceberg catalog + engines, one governance plane |
 | Teams step on each other's dashboards, datasets, and connections | **Multi-workspace isolation** — each project/department gets its own sandbox |
-| Access control is scattered and hard to audit | **Security-first** — unified authorization (Cedar PDP), OIDC/SSO, Ranger data-plane enforcement, tag-based masking, full audit log |
+| Access control is scattered and hard to audit | **Security-first** — unified authorization (Cedar PDP), OIDC/SSO with an owned machine identity (no shared engine creds), Ranger data-plane enforcement, tag-based masking, full audit log |
 | Data lives in many systems (lake **and** RDBMS, NoSQL, streams) | **Query federation** — Trino reads Iceberg-on-S3 *and* 30+ external sources through one governed SQL surface |
 | Onboarding a new team means new infrastructure | New workspace = a few clicks, no new stack |
 
@@ -29,37 +29,33 @@ automation) — into one governed platform with a shared design system.
 ## The big picture — one platform, many teams
 
 ```mermaid
-flowchart TB
-    subgraph TEAMS[" "]
-        direction LR
+flowchart LR
+    subgraph TEAMS["Teams"]
         A["Team A · Analytics"]
         B["Team B · Engineering"]
         C["Team C · Finance"]
     end
 
     subgraph EGRET["EGRET — one unified platform (single Rust binary)"]
-        direction TB
-        subgraph WS["Isolated workspaces — one sandbox per team"]
-            direction LR
-            WA["Workspace A"]
-            WB["Workspace B"]
-            WC["Workspace C"]
-        end
-        GOV["Governance plane · AuthN (OIDC/SSO) · AuthZ (Cedar) · Ranger · Audit"]
-        WS --- GOV
+        WA["Workspace A<br/><i>isolated sandbox</i>"]
+        WB["Workspace B<br/><i>isolated sandbox</i>"]
+        WC["Workspace C<br/><i>isolated sandbox</i>"]
+        GOV["Governance plane<br/>OIDC/SSO · Cedar authz<br/>Ranger · Audit"]
+        WA --- GOV
+        WB --- GOV
+        WC --- GOV
     end
 
     subgraph SOT["Single source of truth"]
-        direction LR
-        ENG["Query engines · Trino / StarRocks"]
-        LAKE["Iceberg lakehouse — PRIMARY<br/>S3 / MinIO · + federated sources"]
-        ENG --> LAKE
+        ENG["Query engines<br/>Trino · StarRocks"]
+        LAKE["Iceberg lakehouse — PRIMARY<br/>S3 / MinIO<br/>+ federated sources"]
     end
 
     A --> WA
     B --> WB
     C --> WC
     GOV ==>|"governed access"| ENG
+    ENG --> LAKE
 ```
 
 Every team logs into the **same platform** and reads from the **same governed data** — but works in a
@@ -257,20 +253,45 @@ flowchart TB
   (Cedar) for BI objects.
 - **Auditable** — a real audit log captures who accessed what, when, and whether it was allowed.
 
+### Identity, secrets & isolation
+
+Security-first also means **owning identity end-to-end** and **never trusting a shared credential**:
+
+- **Machine-IdP token broker** — Egret mints **per-user, short-lived engine tokens** from its own
+  embedded identity provider (`aud: engine`, signed by Egret's JWKS). Engines trust Egret's issuer
+  directly, so there are **no long-lived engine passwords**, and even **local / non-OIDC users** get
+  scoped, delegated access. SSO stays authentication-only + JIT provisioning.
+- **SSO back-channel logout** — an OIDC logout token from Keycloak (RS256, JWKS-verified) revokes
+  **all** of that user's sessions server-side, so a central sign-out really ends access everywhere.
+- **Session & account lifecycle** — admin password reset, immediate lockout via **session
+  revocation**, hard-delete with **content re-assignment** (no orphaned dashboards), and a
+  **last-admin guard** that stops the platform from being locked out of itself.
+- **Typed secrets vault** — Kubernetes-style typed, multi-field secrets (`Opaque` / `kubernetes.io/tls`
+  / `basic-auth`) back every connector, storage and TLS credential. Secrets are injected into pods as
+  env references — **plaintext never lands in a ConfigMap** — and ingress TLS is served from
+  operator-provided certificates.
+- **Runtime isolation** — each notebook runs in a **hardened, per-user × per-workspace pod** (non-root
+  `uid 1000`, all Linux capabilities dropped, a locked-down `NetworkPolicy`, minimal RBAC) and writes
+  to a **private Iceberg namespace** via a namespace-scoped token — never a shared kernel.
+
 ---
 
-## Core capabilities
+## Core capabilities — every one is table-stakes for a data platform
 
-- 🏢 **Multi-workspace** — isolated sandbox per team/project over shared data
-- 🔐 **Unified security** — OIDC/SSO, Cedar authorization, Ranger enforcement, tag masking, audit
-- 🧊 **Iceberg REST Catalog** — embedded, engine-integrated, per-workspace tenancy (single source of truth)
-- 🔌 **Query federation** — Trino reads Iceberg-on-S3 **and** 30+ external sources (RDBMS, NoSQL, streams, cloud) through one governed SQL surface
-- ⚙️ **Engine provisioning** — provision & manage **Trino** clusters on Kubernetes (coordinator + workers, HPA/KEDA autoscaling, bundled Ranger plugin); **StarRocks** supported as a query engine (MySQL wire)
-- 🕵️ **Per-user delegation** — queries run as the calling user (`impersonate` / `jwt` over TLS), governed by that user's data policies
-- 📊 **BI / Explorer** — SQL Lab, datasets, charts, dashboards (multi-tab, filters, click behaviour) with deep Metabase parity
-- 📓 **Notebook** — per-workspace notebooks with a Daft kernel
-- 🔌 **Data API Builder** — expose HTTP APIs from SQL (MyBatis-style dynamic SQL)
-- ⚙️ **Workflow Automation** — n8n-style automation (schedule, email, call APIs)
+An enterprise data platform can't ship half of these. Each capability below closes a specific gap that
+would otherwise force a separate tool, a separate login, or a separate security review:
+
+- 🏢 **Multi-workspace** — isolated sandbox per team/project over shared data *(no collisions, no silos)*
+- 🔐 **Unified security** — OIDC/SSO, Cedar authorization, Ranger enforcement, tag masking, audit *(one authorizer, not five)*
+- 🪪 **Owned identity & secrets** — machine-IdP per-user engine tokens, back-channel logout, session revocation, typed secrets vault *(no long-lived or shared credentials)*
+- 🧊 **Iceberg REST Catalog** — embedded, engine-integrated, per-workspace tenancy *(the single source of truth)*
+- 🔌 **Query federation** — Trino & StarRocks read Iceberg-on-S3 **and** 30+ external sources (RDBMS, NoSQL, streams, cloud) through one governed SQL surface *(query data where it already lives — no copies)*
+- ⚙️ **Engine provisioning** — provision & manage **Trino** *and* **StarRocks** clusters on Kubernetes (HPA/KEDA autoscaling, bundled Ranger plugin) *(elastic, self-service compute)*
+- 🕵️ **Per-user delegation** — queries run as the calling user (`impersonate` / `jwt` over TLS), governed by that user's data policies *(accountability at the row/column level)*
+- 📊 **BI / Explorer** — SQL Lab, datasets, charts, dashboards (multi-tab, filters, click behaviour) with deep Metabase parity *(analysts self-serve)*
+- 📓 **Notebook** — per-workspace notebooks on an **isolated** Daft kernel, with in-notebook Python viz (plotly / matplotlib) *(data science, in-platform)*
+- 🔌 **Data API Builder** — expose governed HTTP APIs from SQL (MyBatis-style dynamic SQL) *(serve applications, not just dashboards)*
+- ⚙️ **Workflow Automation** — n8n-style automation: schedule, email, call APIs *(operationalize the data)*
 
 ---
 
@@ -338,15 +359,17 @@ flowchart TB
 
 ## Status
 
-**Foundation, governance and analytics are built and in use:** authentication/SSO, multi-workspace,
-unified Cedar authorization across all enforcement sites, RBAC & access-control console, Ranger
-data-plane enforcement with tag-based masking, and a full audit log. **BI/Explorer** ships with deep
-Metabase parity (datasets, charts, dashboards) — verified end-to-end against a provisioned Trino
-engine. The **embedded Iceberg catalog** runs live end-to-end (provision → auth → data plane),
-**engine provisioning** (Trino on Kubernetes) is shipped with **catalog federation** (30+
-connectors) and **secure per-user delegation** (`impersonate` + `jwt` over TLS, live-verified), and
-**notebooks** run real cells end-to-end. Ongoing: catalog hardening (storage profiles, GC),
-notebook/Daft delegation, and the Data API + Workflow surfaces.
+**Foundation, governance and analytics are built and in use:** authentication/SSO with a
+**machine-IdP token broker** (per-user engine tokens, no long-lived engine creds) and **SSO
+back-channel logout**, multi-workspace, unified Cedar authorization across all enforcement sites,
+RBAC & access-control console, Ranger data-plane enforcement with tag-based masking, a **typed
+secrets vault**, and a full audit log. **BI/Explorer** ships with deep Metabase parity (datasets,
+charts, dashboards) — verified end-to-end against a provisioned Trino engine. The **embedded Iceberg
+catalog** runs live end-to-end (provision → auth → data plane); **engine provisioning** covers **both
+Trino and StarRocks on Kubernetes** with **catalog federation** (30+ connectors) and **secure
+per-user delegation** (`impersonate` + `jwt` over TLS, live-verified); and **notebooks** run real
+cells in **isolated per-user kernel pods** with in-notebook Python viz. Ongoing: catalog hardening
+(storage profiles, GC), notebook/Daft delegation, and the Data API + Workflow surfaces.
 
 See the [Roadmap & status](docs/en/architecture/2026-06-17-egret-architecture-design.md#16-roadmap--status).
 
