@@ -24,16 +24,30 @@ export async function loginViaOidc(page: Page): Promise<void> {
 
 /** Break-glass: expand the local form and sign in as the platform admin. */
 export async function loginLocalAdmin(page: Page): Promise<void> {
+  // `LoginPage` renders the local email/password form on first paint (before
+  // the `/auth/config` fetch resolves, `oidc_enabled` defaults falsy while
+  // loading), then — if OIDC turns out to be on — swaps to showing only the
+  // break-glass toggle, unmounting that first form for good (it doesn't come
+  // back until the toggle is clicked). Checking the DOM before that fetch
+  // settles can find the SOON-TO-BE-UNMOUNTED first-paint form and treat it
+  // as "already there, no need to click the toggle" — then the swap happens
+  // out from under the next action and it hangs forever waiting on a node
+  // that will never return. Wait for the real signal (the config response
+  // itself) before inspecting the DOM at all, so which branch we're in is
+  // never ambiguous.
+  const cfgLoaded = page.waitForResponse(
+    (r) => r.url().includes("/api/auth/config") && r.ok(),
+    { timeout: 15_000 },
+  );
   await page.goto("/login");
-  // Wait for the auth-config to resolve (it flips OIDC on and hides the local
-  // form behind the break-glass toggle). Reveal the form if the toggle is shown.
+  await cfgLoaded;
   const adminToggle = page.getByRole("button", { name: "Admin sign-in (break-glass)" });
-  await adminToggle.or(page.getByPlaceholder("Email")).first().waitFor({ timeout: 15_000 });
+  const emailField = page.getByPlaceholder("Email");
   if (await adminToggle.isVisible().catch(() => false)) {
     await adminToggle.click();
   }
-  await page.getByPlaceholder("Email").waitFor({ timeout: 10_000 });
-  await page.getByPlaceholder("Email").fill(ADMIN_EMAIL);
+  await expect(emailField).toBeVisible({ timeout: 10_000 });
+  await emailField.fill(ADMIN_EMAIL);
   await page.getByPlaceholder("Password").fill(ADMIN_PASSWORD);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.waitForURL(/\/explore\/[^/]+\//, { timeout: 20_000 });
