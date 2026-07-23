@@ -106,9 +106,10 @@ function srSectionCounts(cfg: StarRocksConfigForm): Record<string, number> {
 /**
  * Control Plane → Engine detail → Settings (StarRocks).
  *
- * StarRocks-shaped mirror of the Trino `ConfigurationTab` shell: a `Card` with a
- * left-nav of sections + a content pane + the shared `SaveBar`. Edits FE/CN
- * image, replicas, and per-role resources; storage is read-only; the
+ * StarRocks-shaped mirror of the Trino `ConfigurationTab` shell: a card-less
+ * `<section>` with a left-nav of sections + a content pane + the shared
+ * `SaveBar`. Edits FE/CN image, replicas, and per-role resources; storage is
+ * read-only; the
  * `StarRocksSecuritySection` (delegation + TLS) is folded in as the last nav
  * item. Takes the `useStarRocksConfigForm` instance from `EngineTabs`, so the
  * single Save covers config + security.
@@ -653,7 +654,7 @@ function PodContainersSection({ cfg }: { cfg: StarRocksConfigForm }) {
         </div>
 
         <div className="space-y-2">
-          <Label>Node selector</Label>
+          <p className="text-sm font-medium">Node selector</p>
           <ConfigMapEditor
             value={pod.nodeSelector ?? {}}
             onChange={(v) => patch({ nodeSelector: v })}
@@ -664,7 +665,7 @@ function PodContainersSection({ cfg }: { cfg: StarRocksConfigForm }) {
         </div>
 
         <div className="space-y-2">
-          <Label>Tolerations</Label>
+          <p className="text-sm font-medium">Tolerations</p>
           <PodTolerationsEditor pod={pod} patch={patch} />
         </div>
 
@@ -691,7 +692,7 @@ function PodContainersSection({ cfg }: { cfg: StarRocksConfigForm }) {
         </div>
 
         <div className="space-y-2">
-          <Label>Init containers</Label>
+          <p className="text-sm font-medium">Init containers</p>
           <p className="text-xs text-muted-foreground">
             Run to completion before the StarRocks container starts (both roles).
           </p>
@@ -704,7 +705,7 @@ function PodContainersSection({ cfg }: { cfg: StarRocksConfigForm }) {
         </div>
 
         <div className="space-y-2">
-          <Label>Sidecars</Label>
+          <p className="text-sm font-medium">Sidecars</p>
           <p className="text-xs text-muted-foreground">
             Extra containers that run alongside StarRocks (both roles).
           </p>
@@ -757,7 +758,7 @@ function PodContainersSection({ cfg }: { cfg: StarRocksConfigForm }) {
         </ConfigTable>
 
         <div className="space-y-2">
-          <Label>Pod labels</Label>
+          <p className="text-sm font-medium">Pod labels</p>
           <ConfigMapEditor
             value={pod.podLabels ?? {}}
             onChange={(v) => patch({ podLabels: v })}
@@ -765,7 +766,7 @@ function PodContainersSection({ cfg }: { cfg: StarRocksConfigForm }) {
         </div>
 
         <div className="space-y-2">
-          <Label>Annotations</Label>
+          <p className="text-sm font-medium">Annotations</p>
           <ConfigMapEditor
             value={pod.annotations ?? {}}
             onChange={(v) => patch({ annotations: v })}

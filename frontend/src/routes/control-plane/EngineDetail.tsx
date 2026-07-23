@@ -1418,7 +1418,10 @@ function WorkspacesCard({ engine }: { engine: EngineWithStatus }) {
           queryKey: getControlPlaneEnginesListEngineWorkspacesQueryKey(engineId),
         });
       },
-      onError: (e) => toast.error(String(e)),
+      onError: (e) =>
+        toast.error(
+          (e as { message?: string })?.message ?? "Failed to update workspaces.",
+        ),
     },
   });
 

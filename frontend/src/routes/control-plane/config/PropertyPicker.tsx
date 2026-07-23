@@ -42,14 +42,14 @@ export function PropertyPicker({
   const available = excludeKeys
     ? catalog.filter((p) => !excludeKeys.has(p.key))
     : catalog;
-  const matches = q
-    ? available
-        .filter(
-          (p) =>
-            p.key.toLowerCase().includes(q) || p.help.toLowerCase().includes(q),
-        )
-        .slice(0, MAX_ADD_RESULTS)
-    : available.slice(0, MAX_ADD_RESULTS);
+  const filtered = q
+    ? available.filter(
+        (p) =>
+          p.key.toLowerCase().includes(q) || p.help.toLowerCase().includes(q),
+      )
+    : available;
+  const matches = filtered.slice(0, MAX_ADD_RESULTS);
+  const truncated = filtered.length - matches.length;
 
   const close = () => {
     setOpen(false);
@@ -139,6 +139,11 @@ export function PropertyPicker({
               <span className="text-muted-foreground">+ Add custom key</span>
               <span className="font-mono text-xs">{query.trim()}</span>
             </button>
+          </li>
+        )}
+        {truncated > 0 && (
+          <li className="px-2 py-1.5 text-xs text-muted-foreground">
+            +{truncated} more — refine your search
           </li>
         )}
       </ul>

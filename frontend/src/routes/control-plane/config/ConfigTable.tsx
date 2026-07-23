@@ -83,12 +83,12 @@ export function ConfigTableRow({
       label
     );
 
-  return (
-    <TableRow>
-      <TableCell className="align-top font-medium whitespace-normal break-words">
-        {htmlFor ? <label htmlFor={htmlFor}>{labelInner}</label> : labelInner}
-      </TableCell>
-      <TableCell className="hidden align-top whitespace-normal break-words text-sm text-muted-foreground lg:table-cell">
+  // Help text + unit + docs link. Shown in the Details column at lg+, and
+  // (below lg, where the Details column is hidden) inline under the Setting
+  // label — so the help and the docs link are never lost on narrow screens.
+  const helpNode =
+    detailText || unit || link ? (
+      <>
         {detailText}
         {unit ? <span className="text-muted-foreground/70"> ({unit})</span> : null}
         {link ? (
@@ -102,6 +102,21 @@ export function ConfigTableRow({
             <ExternalLink className="size-3.5" />
           </a>
         ) : null}
+      </>
+    ) : null;
+
+  return (
+    <TableRow>
+      <TableCell className="align-top font-medium whitespace-normal break-words">
+        {htmlFor ? <label htmlFor={htmlFor}>{labelInner}</label> : labelInner}
+        {helpNode ? (
+          <div className="mt-1 text-xs font-normal text-muted-foreground lg:hidden">
+            {helpNode}
+          </div>
+        ) : null}
+      </TableCell>
+      <TableCell className="hidden align-top whitespace-normal break-words text-sm text-muted-foreground lg:table-cell">
+        {helpNode}
       </TableCell>
       <TableCell className="align-top">{children}</TableCell>
     </TableRow>
