@@ -65,6 +65,43 @@ The escape hatch is to re-enable the feature, which is a two-click, audited
 action. Silently exempting admins would make the toggle mean "hidden from most
 people", which is not what it claims.
 
+### 2.3 Cross-module dependency: `dashboards` requires `charts`
+
+The five toggles are presented as independent, but they are not quite: a
+dashboard still renders its saved cards through the `dashboards`-gated surface
+(`ch_run` / `useDashboardCardData`, object-scoped, §6), but its **interactive
+filter dropdowns** and **edit-mode card previews** both run through
+`POST /charts/run`, which is gated on `charts` (§6). `dashboards` **ON** with
+`charts` **OFF** is therefore a broken configuration, not merely an unusual
+one: the dashboard loads, but every filter and every card edit 403s.
+
+The dependency is enforced in both layers, not just documented as a UI
+convention:
+
+- **API** (`crates/egret-workspace/src/features.rs`,
+  `violates_dependencies`) — `WorkspaceRepo::set_features` computes the
+  **resulting** disabled-set (the workspace's current state, with the PUT
+  body's changes merged on top) and rejects it with `400` if that result has
+  `dashboards` enabled and `charts` disabled, before writing anything. This
+  is deliberately checked against the merged result rather than the request
+  body alone: because `PUT` merges (§7.1), a body naming only `charts` can
+  still produce the broken combination if `dashboards` was already on — the
+  rule must catch that case too, not just a body that names both keys.
+- **Features tab** (`WorkspaceFeaturesTab.tsx`) — the draft cannot represent
+  the broken combination at all: turning Charts off also turns Dashboards off
+  and disables its switch (with an inline "Requires Charts" hint), and turning
+  Dashboards on also turns Charts on. Save always sends a consistent five-key
+  map, so the backend rule exists for non-FE callers, not because the FE ever
+  triggers it.
+
+**Tradeoff, on the record:** this deliberately removes the configuration
+"dashboards on, charts off" — i.e. "members may view existing dashboards but
+may not build new charts." That configuration was never fully usable (filters
+and edit-mode previews were already broken under it), so closing it is a
+correctness fix, not a new restriction on a working setup. A workspace that
+wants dashboards without chart *authoring* is not expressible today; that
+would need `charts` split into "view" and "author" — out of scope here (§2.1).
+
 ## 3. Data model
 
 Migration `0094_workspace_features.sql`:

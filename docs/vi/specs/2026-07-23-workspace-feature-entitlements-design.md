@@ -62,6 +62,40 @@ notebook thì platform admin vào workspace B cũng không thấy notebook.
 Lối thoát là bật lại — hai cú click, có audit. Miễn trừ ngầm cho admin sẽ khiến
 công tắc chỉ có nghĩa "ẩn với phần lớn mọi người", không đúng như nó tuyên bố.
 
+### 2.3 Phụ thuộc chéo module: `dashboards` cần `charts`
+
+Năm công tắc được trình bày như độc lập, nhưng thực ra không hẳn: một dashboard
+vẫn render các card đã lưu qua bề mặt gate bởi `dashboards` (`ch_run` /
+`useDashboardCardData`, scope theo object, §6), nhưng **dropdown filter tương
+tác** và **preview card ở chế độ edit** đều chạy qua `POST /charts/run`, vốn
+gate bởi `charts` (§6). `dashboards` **BẬT** với `charts` **TẮT** vì vậy là một
+cấu hình hỏng, không chỉ là bất thường: dashboard vẫn tải được, nhưng mọi filter
+và mọi thao tác sửa card đều 403.
+
+Phụ thuộc này được thực thi ở cả hai tầng, không chỉ là quy ước ở UI:
+
+- **API** (`crates/egret-workspace/src/features.rs`, `violates_dependencies`)
+  — `WorkspaceRepo::set_features` tính **trạng thái kết quả** (trạng thái hiện
+  tại của workspace, hợp nhất với thay đổi trong body của `PUT`) và từ chối với
+  `400` nếu kết quả đó có `dashboards` bật và `charts` tắt, trước khi ghi bất cứ
+  gì. Việc kiểm tra cố ý dựa trên trạng thái đã hợp nhất chứ không phải chỉ body
+  của request: vì `PUT` là hợp nhất (§7.1), một body chỉ nêu `charts` vẫn có thể
+  tạo ra tổ hợp hỏng nếu `dashboards` đã bật từ trước — quy tắc phải bắt được cả
+  trường hợp này, không chỉ khi body nêu cả hai key.
+- **Tab Features** (`WorkspaceFeaturesTab.tsx`) — draft không thể biểu diễn tổ
+  hợp hỏng này: tắt Charts sẽ kéo Dashboards tắt theo và vô hiệu hoá công tắc
+  của nó (kèm gợi ý "Requires Charts" ngay trong dòng), còn bật Dashboards sẽ
+  kéo Charts bật theo. Save luôn gửi một map năm-key nhất quán, nên quy tắc ở
+  backend tồn tại là để phòng caller không qua FE, chứ FE không bao giờ kích nó.
+
+**Đánh đổi, ghi nhận rõ:** điều này cố ý loại bỏ cấu hình "dashboards bật,
+charts tắt" — tức "thành viên được xem dashboard có sẵn nhưng không được tạo
+chart mới." Cấu hình đó chưa bao giờ dùng được trọn vẹn (filter và preview
+edit-mode đã hỏng sẵn dưới cấu hình đó), nên đóng nó lại là sửa lỗi đúng, không
+phải thêm hạn chế mới cho một cấu hình đang chạy tốt. Một workspace muốn có
+dashboard mà không có *quyền tạo* chart thì chưa biểu diễn được hôm nay; muốn
+vậy cần tách `charts` thành "xem" và "tạo" — ngoài phạm vi ở đây (§2.1).
+
 ## 3. Mô hình dữ liệu
 
 Migration `0094_workspace_features.sql`:
