@@ -8,7 +8,7 @@ use crate::model::{is_valid_slug, Workspace};
 
 #[derive(Clone)]
 pub struct WorkspaceRepo {
-    db: Db,
+    pub(crate) db: Db,
 }
 
 impl WorkspaceRepo {

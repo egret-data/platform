@@ -3,6 +3,7 @@
 pub mod access_requests;
 pub mod access_views;
 pub mod context;
+pub mod features;
 pub mod mapping;
 pub mod members;
 pub mod model;
