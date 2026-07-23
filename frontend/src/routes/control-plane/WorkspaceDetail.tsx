@@ -36,6 +36,7 @@ import { listUsers } from "@/api/access";
 import { listStorage, listWarehouses } from "@/api/controlPlane";
 import { useApproveRequest, useDenyRequest, useWorkspaceRequests } from "@/api/accessRequests";
 import { MembersPanel } from "@/components/access/MembersPanel";
+import { WorkspaceFeaturesTab } from "@/components/control-plane/WorkspaceFeaturesTab";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { fullTimestamp, timeAgo } from "@/lib/relativeTime";
 import { Badge } from "@/components/ui/badge";
@@ -77,7 +78,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
-const TABS = ["overview", "members", "resources", "requests", "activity"] as const;
+const TABS = ["overview", "members", "resources", "features", "requests", "activity"] as const;
 type TabKey = (typeof TABS)[number];
 
 /**
@@ -214,6 +215,7 @@ export default function WorkspaceDetail() {
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="members">Members</TabsTrigger>
           <TabsTrigger value="resources">Resources</TabsTrigger>
+          <TabsTrigger value="features">Features</TabsTrigger>
           <TabsTrigger value="requests">Access requests</TabsTrigger>
           <TabsTrigger value="activity">Activity</TabsTrigger>
         </TabsList>
@@ -234,6 +236,10 @@ export default function WorkspaceDetail() {
 
         <TabsContent value="resources" className="mt-4">
           <ResourcesTab workspaceId={id} />
+        </TabsContent>
+
+        <TabsContent value="features" className="mt-4">
+          <WorkspaceFeaturesTab workspaceId={id} />
         </TabsContent>
 
         <TabsContent value="requests" className="mt-4">
