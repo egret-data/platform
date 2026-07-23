@@ -238,6 +238,30 @@ impl WorkspaceRepo {
         Ok(rows.into_iter().map(|(f,)| f).collect())
     }
 
+    /// Disabled feature keys for several workspaces at once, keyed by workspace
+    /// id. One query for a whole list — the workspace switcher must not issue a
+    /// query per workspace.
+    pub async fn disabled_features_for(
+        &self,
+        ws_ids: &[uuid::Uuid],
+    ) -> Result<std::collections::HashMap<uuid::Uuid, HashSet<String>>> {
+        let rows: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+            "SELECT workspace_id, feature FROM workspace_features \
+             WHERE enabled = false AND workspace_id = ANY($1)",
+        )
+        .bind(ws_ids)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+
+        let mut out: std::collections::HashMap<uuid::Uuid, HashSet<String>> =
+            std::collections::HashMap::new();
+        for (ws, feature) in rows {
+            out.entry(ws).or_default().insert(feature);
+        }
+        Ok(out)
+    }
+
     /// Upsert `updates` for `ws` in one transaction. Rejects unknown keys before
     /// writing anything, so a batch containing a typo changes nothing.
     pub async fn set_features(

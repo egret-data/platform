@@ -61,6 +61,10 @@ pub struct WorkspaceDto {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub created_by: Option<String>,
     pub owner_name: Option<String>,
+    /// Module keys this workspace has switched on. Empty for the admin list
+    /// endpoints, which do not need it; populated by `/api/me/workspaces`.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 impl From<crate::model::Workspace> for WorkspaceDto {
     fn from(w: crate::model::Workspace) -> Self {
@@ -72,6 +76,7 @@ impl From<crate::model::Workspace> for WorkspaceDto {
             created_at: w.created_at,
             created_by: w.created_by.map(|u| u.to_string()),
             owner_name: w.owner_name,
+            features: Vec::new(),
         }
     }
 }
@@ -537,7 +542,30 @@ async fn list_my_workspaces(
         .list_for_principal(p.user_id, is_admin)
         .await
         .map_err(AuthError)?;
-    Ok(Json(list.into_iter().map(Into::into).collect()))
+
+    // One batched query for the whole list — the workspace switcher must not
+    // issue a query per workspace.
+    let ids: Vec<uuid::Uuid> = list.iter().map(|w| w.id.0).collect();
+    let disabled = st
+        .workspaces
+        .disabled_features_for(&ids)
+        .await
+        .map_err(AuthError)?;
+
+    Ok(Json(
+        list.into_iter()
+            .map(|w| {
+                let off = disabled.get(&w.id.0);
+                let mut dto = WorkspaceDto::from(w);
+                dto.features = crate::features::FEATURE_KEYS
+                    .iter()
+                    .filter(|k| !off.is_some_and(|s| s.contains(**k)))
+                    .map(|k| k.to_string())
+                    .collect();
+                dto
+            })
+            .collect(),
+    ))
 }
 
 pub fn me_router() -> Router<WorkspaceState> {

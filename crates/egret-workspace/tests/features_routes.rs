@@ -164,6 +164,10 @@ impl Fixture {
         self.request("PUT", path, Some(body)).await
     }
 
+    async fn post(&self, path: &str, body: &str) -> axum::response::Response {
+        self.request("POST", path, Some(body)).await
+    }
+
     async fn json(&self, resp: axum::response::Response) -> serde_json::Value {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
@@ -322,4 +326,101 @@ async fn put_features_emits_an_audit_event_naming_the_actor() {
         }
         other => panic!("expected a Mutation event, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn my_workspaces_reports_enabled_features() {
+    let Some(f) = Fixture::new().await else {
+        eprintln!("skip");
+        return;
+    };
+    f.put(
+        &format!("/admin/workspaces/{}/features", f.ws_id),
+        r#"{"features":{"notebooks":false}}"#,
+    )
+    .await;
+
+    let json = f.json(f.get("/me/workspaces").await).await;
+    let ws = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["id"] == f.ws_id.to_string())
+        .unwrap();
+
+    let features: Vec<&str> = ws["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(features.contains(&"charts"));
+    assert!(!features.contains(&"notebooks"));
+}
+
+/// Two workspaces with different disabled sets: `/me/workspaces` must report
+/// each one's own `features` correctly, which the batched
+/// `disabled_features_for` lookup keys by workspace id. This does not
+/// directly observe query *count* (no query-log instrumentation is wired into
+/// this fixture) — it proves correctness of the batched per-workspace
+/// grouping, which is the part that would silently break if the batching were
+/// done wrong (e.g. accidentally unioning all workspaces' disabled sets).
+#[tokio::test]
+async fn my_workspaces_reports_each_workspaces_own_disabled_set_when_batched() {
+    let Some(f) = Fixture::new().await else {
+        eprintln!("skip");
+        return;
+    };
+
+    // Disable `notebooks` on the first (fixture) workspace.
+    let put1 = f
+        .put(
+            &format!("/admin/workspaces/{}/features", f.ws_id),
+            r#"{"features":{"notebooks":false}}"#,
+        )
+        .await;
+    assert_eq!(put1.status(), StatusCode::OK);
+
+    // A second workspace with a DIFFERENT feature disabled.
+    let slug2 = uniq("feat-ws2");
+    let created = f
+        .json(
+            f.post(
+                "/admin/workspaces",
+                &format!(r#"{{"slug":"{slug2}","name":"Feature WS 2"}}"#),
+            )
+            .await,
+        )
+        .await;
+    let ws2_id = created["id"].as_str().unwrap().to_string();
+    let put2 = f
+        .put(
+            &format!("/admin/workspaces/{ws2_id}/features"),
+            r#"{"features":{"charts":false}}"#,
+        )
+        .await;
+    assert_eq!(put2.status(), StatusCode::OK);
+
+    let json = f.json(f.get("/me/workspaces").await).await;
+    let arr = json.as_array().unwrap();
+
+    let ws1 = arr.iter().find(|w| w["id"] == f.ws_id.to_string()).unwrap();
+    let ws1_features: Vec<&str> = ws1["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(!ws1_features.contains(&"notebooks"));
+    assert!(ws1_features.contains(&"charts"));
+
+    let ws2 = arr.iter().find(|w| w["id"] == ws2_id).unwrap();
+    let ws2_features: Vec<&str> = ws2["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(!ws2_features.contains(&"charts"));
+    assert!(ws2_features.contains(&"notebooks"));
 }
