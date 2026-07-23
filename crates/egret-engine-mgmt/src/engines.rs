@@ -808,6 +808,33 @@ fn parse_role(v: &serde_json::Value, default_replicas: u32) -> RoleConfigReq {
         affinity: parse_affinity(&v["affinity"]),
         termination_grace_seconds: v["terminationGraceSeconds"].as_u64().map(|n| n as u32),
         additional_exposed_ports: parse_container_ports(&v["additionalExposedPorts"]),
+        // Per-role pod shape (chart `coordinator.*` / `worker.*`).
+        init_containers: parse_mini_containers(&v["initContainers"]),
+        sidecar_containers: parse_mini_containers(&v["sidecarContainers"]),
+        config_mounts: parse_object_mounts(&v["configMounts"]),
+        secret_mounts: parse_object_mounts(&v["secretMounts"]),
+        share_process_namespace: v["shareProcessNamespace"].as_bool(),
+    }
+}
+
+/// Back-compat: an engine stored before per-role pod shape carries these fields
+/// at the TOP level of `trinoConfig`. Apply a legacy cluster-wide value to a role
+/// only when that role has no per-role value of its own.
+fn apply_legacy_pod_shape(role: &mut RoleConfigReq, v: &serde_json::Value) {
+    if role.init_containers.is_empty() {
+        role.init_containers = parse_mini_containers(&v["initContainers"]);
+    }
+    if role.sidecar_containers.is_empty() {
+        role.sidecar_containers = parse_mini_containers(&v["sidecarContainers"]);
+    }
+    if role.config_mounts.is_empty() {
+        role.config_mounts = parse_object_mounts(&v["configMounts"]);
+    }
+    if role.secret_mounts.is_empty() {
+        role.secret_mounts = parse_object_mounts(&v["secretMounts"]);
+    }
+    if role.share_process_namespace.is_none() {
+        role.share_process_namespace = v["shareProcessNamespace"].as_bool();
     }
 }
 
@@ -1170,14 +1197,20 @@ fn trino_config_from_json(v: &serde_json::Value) -> TrinoConfigReq {
             grace_period_seconds: g["gracePeriodSeconds"].as_u64().unwrap_or(0) as u32,
         })
     };
+    // Per-role pod shape; legacy top-level values fall back onto both roles.
+    let mut coordinator = parse_role(&v["coordinator"], 1);
+    apply_legacy_pod_shape(&mut coordinator, v);
+    let mut worker_base = parse_role(worker_v, 1);
+    apply_legacy_pod_shape(&mut worker_base, v);
+
     TrinoConfigReq {
         query_max_memory: v["queryMaxMemory"].as_str().map(Into::into),
         log_level: v["logLevel"].as_str().map(Into::into),
         config_properties: str_map(&v["configProperties"]),
         env: str_map(&v["env"]),
-        coordinator: parse_role(&v["coordinator"], 1),
+        coordinator,
         worker: WorkerRoleConfigReq {
-            base: parse_role(worker_v, 1),
+            base: worker_base,
             graceful_shutdown,
         },
         additional_node_properties: str_map(&v["additionalNodeProperties"]),
@@ -1215,16 +1248,11 @@ fn trino_config_from_json(v: &serde_json::Value) -> TrinoConfigReq {
         service_account: v["serviceAccount"].as_str().map(Into::into),
         pod_security_context: parse_security_context(&v["podSecurityContext"]),
         container_security_context: parse_security_context(&v["containerSecurityContext"]),
-        init_containers: parse_mini_containers(&v["initContainers"]),
-        sidecar_containers: parse_mini_containers(&v["sidecarContainers"]),
         env_from: parse_env_from(&v["envFrom"]),
-        config_mounts: parse_object_mounts(&v["configMounts"]),
-        secret_mounts: parse_object_mounts(&v["secretMounts"]),
         deployment_strategy: parse_deployment_strategy(&v["deploymentStrategy"]),
         deployment_annotations: str_map(&v["deploymentAnnotations"]),
         revision_history_limit: v["revisionHistoryLimit"].as_u64().map(|n| n as u32),
         progress_deadline_seconds: v["progressDeadlineSeconds"].as_u64().map(|n| n as u32),
-        share_process_namespace: v["shareProcessNamespace"].as_bool(),
     }
 }
 
@@ -5016,6 +5044,29 @@ pub struct EngineMgmtApi;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_role_pod_shape_parses_and_legacy_falls_back_to_both_roles() {
+        // New per-role shape: each role carries its own init containers.
+        let tc = serde_json::json!({
+            "coordinator": { "initContainers": [{ "name": "coord-init", "image": "busybox" }] },
+            "worker": { "initContainers": [{ "name": "worker-init", "image": "busybox" }] },
+        });
+        let cfg = trino_config_from_json(&tc);
+        assert_eq!(cfg.coordinator.init_containers[0].name, "coord-init");
+        assert_eq!(cfg.worker.base.init_containers[0].name, "worker-init");
+
+        // Legacy shape: a top-level `initContainers` applies to BOTH roles.
+        let legacy = serde_json::json!({
+            "initContainers": [{ "name": "legacy-init", "image": "busybox" }],
+            "shareProcessNamespace": true,
+        });
+        let cfg = trino_config_from_json(&legacy);
+        assert_eq!(cfg.coordinator.init_containers[0].name, "legacy-init");
+        assert_eq!(cfg.worker.base.init_containers[0].name, "legacy-init");
+        assert_eq!(cfg.coordinator.share_process_namespace, Some(true));
+        assert_eq!(cfg.worker.base.share_process_namespace, Some(true));
+    }
 
     /// Allow-all PDP for these unit tests: they exercise catalog rendering /
     /// provisioning-request building, not the authz gate, so the decision point

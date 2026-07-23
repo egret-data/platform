@@ -748,14 +748,9 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
         }
         container["envFrom"] = Value::Array(sources);
     }
-    // Cluster-wide config/secret file mounts: a volumeMount per entry on the main
+    // Per-role config/secret file mounts: a volumeMount per entry on the main
     // container (the matching volume is added to the pod spec below).
-    for m in spec
-        .config
-        .config_mounts
-        .iter()
-        .chain(&spec.config.secret_mounts)
-    {
+    for m in rc.config_mounts.iter().chain(&rc.secret_mounts) {
         let mut o = serde_json::Map::new();
         o.insert("name".into(), json!(m.name));
         o.insert("mountPath".into(), json!(m.mount_path));
@@ -871,30 +866,25 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
                 .collect(),
         );
     }
-    if let Some(b) = spec.config.share_process_namespace {
+    if let Some(b) = rc.share_process_namespace {
         pod_spec["shareProcessNamespace"] = json!(b);
     }
     if let Some(sc) = &spec.config.pod_security_context {
         pod_spec["securityContext"] = security_context_json(sc);
     }
 
-    // Cluster-wide init/sidecar containers + config/secret volumes.
-    if !spec.config.init_containers.is_empty() {
-        pod_spec["initContainers"] = Value::Array(
-            spec.config
-                .init_containers
-                .iter()
-                .map(container_json)
-                .collect(),
-        );
+    // Per-role init/sidecar containers + config/secret volumes.
+    if !rc.init_containers.is_empty() {
+        pod_spec["initContainers"] =
+            Value::Array(rc.init_containers.iter().map(container_json).collect());
     }
-    for sc in &spec.config.sidecar_containers {
+    for sc in &rc.sidecar_containers {
         pod_spec["containers"]
             .as_array_mut()
             .unwrap()
             .push(container_json(sc));
     }
-    for m in &spec.config.config_mounts {
+    for m in &rc.config_mounts {
         let mut inner = serde_json::Map::new();
         inner.insert("name".into(), json!(m.name));
         if let Some(dm) = m.default_mode {
@@ -905,7 +895,7 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
             .unwrap()
             .push(json!({ "name": m.name, "configMap": Value::Object(inner) }));
     }
-    for m in &spec.config.secret_mounts {
+    for m in &rc.secret_mounts {
         let mut inner = serde_json::Map::new();
         inner.insert("secretName".into(), json!(m.name));
         if let Some(dm) = m.default_mode {
@@ -2408,7 +2398,7 @@ mod tests {
         s.config.service_account = Some("trino-sa".into());
         s.config.image_pull_secrets = vec!["regcred".into()];
         s.config.image_pull_policy = Some("Always".into());
-        s.config.share_process_namespace = Some(true);
+        s.config.coordinator.share_process_namespace = Some(true);
         s.config.pod_security_context = Some(SecurityContext {
             run_as_user: Some(1000),
             fs_group: Some(1000),
@@ -2470,14 +2460,14 @@ mod tests {
             enabled: true,
             grace_period_seconds: 240,
         });
-        s.config.init_containers = vec![MiniContainer {
+        s.config.worker.base.init_containers = vec![MiniContainer {
             name: "wait".into(),
             image: "busybox".into(),
             command: vec!["sh".into(), "-c".into()],
             args: vec!["echo hi".into()],
             ..Default::default()
         }];
-        s.config.sidecar_containers = vec![MiniContainer {
+        s.config.worker.base.sidecar_containers = vec![MiniContainer {
             name: "raw-side".into(),
             image: "".into(),
             raw_override: Some(json!({"name":"exporter","image":"prom/exporter"})),
@@ -2487,13 +2477,13 @@ mod tests {
             config_map_ref: Some("shared-env".into()),
             secret_ref: None,
         }];
-        s.config.config_mounts = vec![ObjectMount {
+        s.config.worker.base.config_mounts = vec![ObjectMount {
             name: "extra-cm".into(),
             mount_path: "/etc/extra".into(),
             sub_path: None,
             default_mode: None,
         }];
-        s.config.secret_mounts = vec![ObjectMount {
+        s.config.worker.base.secret_mounts = vec![ObjectMount {
             name: "kt".into(),
             mount_path: "/etc/krb".into(),
             sub_path: Some("krb5.keytab".into()),
@@ -2529,6 +2519,37 @@ mod tests {
             .any(|m| m["mountPath"] == "/etc/krb" && m["subPath"] == "krb5.keytab"));
         // graceful shutdown grace period preserved (worker GS uses its own value, not 30):
         assert_ne!(ps["terminationGracePeriodSeconds"], 30);
+    }
+
+    #[test]
+    fn init_containers_are_per_role() {
+        let mut s = sample_spec();
+        s.config.coordinator.init_containers = vec![MiniContainer {
+            name: "coord-init".into(),
+            image: "busybox".into(),
+            ..Default::default()
+        }];
+        s.config.worker.base.init_containers = vec![MiniContainer {
+            name: "worker-init".into(),
+            image: "busybox".into(),
+            ..Default::default()
+        }];
+        let coord = trino_deployment(&s, Role::Coordinator);
+        let worker = trino_deployment(&s, Role::Worker);
+        assert_eq!(
+            coord["spec"]["template"]["spec"]["initContainers"][0]["name"],
+            "coord-init"
+        );
+        assert_eq!(
+            worker["spec"]["template"]["spec"]["initContainers"][0]["name"],
+            "worker-init"
+        );
+        // Coordinator must NOT carry the worker's init container.
+        assert!(coord["spec"]["template"]["spec"]["initContainers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["name"] != "worker-init"));
     }
 
     #[tokio::test]
