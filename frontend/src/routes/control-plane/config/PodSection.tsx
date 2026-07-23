@@ -19,12 +19,11 @@ import { SELECT_NONE, numOrUndef } from "./podEditors";
 
 // ── security-context editor (pod + container) ────────────────────────────────
 
-const SC_NUM_FIELDS: { key: "runAsUser" | "runAsGroup" | "fsGroup"; label: string }[] =
-  [
-    { key: "runAsUser", label: "runAsUser" },
-    { key: "runAsGroup", label: "runAsGroup" },
-    { key: "fsGroup", label: "fsGroup" },
-  ];
+const SC_NUM_FIELDS: { key: "runAsUser" | "runAsGroup" | "fsGroup" }[] = [
+  { key: "runAsUser" },
+  { key: "runAsGroup" },
+  { key: "fsGroup" },
+];
 
 function SecurityContextEditor({
   idPrefix,
@@ -43,34 +42,40 @@ function SecurityContextEditor({
     onChange((prev) => ({ ...prev, [k]: v }));
 
   return (
-    <div className="space-y-3 rounded-md border p-3">
+    <div className="space-y-3">
       <Label className="text-xs font-medium">{title}</Label>
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <ConfigTable>
         {SC_NUM_FIELDS.map((f) => (
-          <div key={f.key} className="space-y-1.5">
-            <Label htmlFor={`${idPrefix}-${f.key}`} className="text-xs">
-              {f.label}
-            </Label>
+          <ConfigTableRow
+            key={f.key}
+            label={f.key}
+            mono
+            details={null}
+            htmlFor={`${idPrefix}-${f.key}`}
+          >
             <Input
               id={`${idPrefix}-${f.key}`}
+              className="w-full"
               type="number"
               value={value[f.key]?.toString() ?? ""}
               placeholder="1000"
               onChange={(e) => setField(f.key, numOrUndef(e.target.value))}
             />
-          </div>
+          </ConfigTableRow>
         ))}
-      </div>
-      <div className="flex items-center justify-between gap-4">
-        <Label htmlFor={`${idPrefix}-nonroot`} className="text-xs">
-          runAsNonRoot
-        </Label>
-        <Switch
-          id={`${idPrefix}-nonroot`}
-          checked={value.runAsNonRoot ?? false}
-          onCheckedChange={(v) => setField("runAsNonRoot", v)}
-        />
-      </div>
+        <ConfigTableRow
+          label="runAsNonRoot"
+          mono
+          details={null}
+          htmlFor={`${idPrefix}-nonroot`}
+        >
+          <Switch
+            id={`${idPrefix}-nonroot`}
+            checked={value.runAsNonRoot ?? false}
+            onCheckedChange={(v) => setField("runAsNonRoot", v)}
+          />
+        </ConfigTableRow>
+      </ConfigTable>
       <RawJsonField
         id={rawId}
         label="Raw override (merged on top)"
@@ -170,7 +175,7 @@ export function PodSection({
         title="Security contexts"
         description="Pod- and container-level securityContext, with a raw override merged on top."
       >
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="space-y-6">
           <SecurityContextEditor
             idPrefix="ps-podsc"
             rawId="pod.podSecurityContext.raw"

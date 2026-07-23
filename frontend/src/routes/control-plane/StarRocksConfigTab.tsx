@@ -424,45 +424,59 @@ function AutoscalingSection({ cfg }: { cfg: StarRocksConfigForm }) {
         <Label htmlFor="sr-autoscaling-enabled">Enable CN autoscaling</Label>
       </div>
       {a.enabled && (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="sr-as-min">Min replicas</Label>
+        <ConfigTable>
+          <ConfigTableRow
+            label="Min replicas"
+            htmlFor="sr-as-min"
+            details="Fewest CN pods to keep (optional)."
+          >
             <Input
               id="sr-as-min"
+              className="w-full"
               type="number"
               min={1}
               value={a.minReplicas}
               onChange={(e) => set({ minReplicas: e.target.value })}
               placeholder="optional"
             />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="sr-as-max">Max replicas</Label>
+          </ConfigTableRow>
+          <ConfigTableRow
+            label="Max replicas"
+            htmlFor="sr-as-max"
+            details="Most CN pods the HPA may scale to (required)."
+          >
             <Input
               id="sr-as-max"
+              className="w-full"
               type="number"
               min={1}
               value={a.maxReplicas}
               onChange={(e) => set({ maxReplicas: e.target.value })}
+              aria-invalid={maxMissing}
             />
             {maxMissing && (
-              <p className="text-xs text-destructive">Max replicas is required.</p>
+              <p className="mt-1 text-xs text-destructive">Max replicas is required.</p>
             )}
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="sr-as-cpu">Target CPU %</Label>
+          </ConfigTableRow>
+          <ConfigTableRow
+            label="Target CPU %"
+            htmlFor="sr-as-cpu"
+            details="Target average CPU utilization that drives scaling (required)."
+          >
             <Input
               id="sr-as-cpu"
+              className="w-full"
               type="number"
               min={1}
               value={a.targetCpuPercent}
               onChange={(e) => set({ targetCpuPercent: e.target.value })}
+              aria-invalid={cpuMissing}
             />
             {cpuMissing && (
-              <p className="text-xs text-destructive">Target CPU % is required.</p>
+              <p className="mt-1 text-xs text-destructive">Target CPU % is required.</p>
             )}
-          </div>
-        </div>
+          </ConfigTableRow>
+        </ConfigTable>
       )}
       <p className="text-xs text-muted-foreground">
         Enabling hands the CN replica count to a Kubernetes HorizontalPodAutoscaler
@@ -709,33 +723,35 @@ function PodContainersSection({ cfg }: { cfg: StarRocksConfigForm }) {
           </p>
         </div>
 
-        <div className="space-y-1.5">
-          <Label htmlFor="sr-pod-sa">Service account</Label>
-          <Input
-            id="sr-pod-sa"
-            value={pod.serviceAccount ?? ""}
-            onChange={(e) =>
-              patch({ serviceAccount: e.target.value || undefined })
-            }
-            placeholder="default"
-          />
-          <p className="text-xs text-muted-foreground">
-            ServiceAccount both the FE and CN pods run as.
-          </p>
-        </div>
-
-        <div className="space-y-1.5">
-          <Label htmlFor="sr-pod-pull-secrets">Image pull secrets</Label>
-          <CommaListInput
-            id="sr-pod-pull-secrets"
-            value={pod.imagePullSecrets}
-            onChange={(v) => patch({ imagePullSecrets: v })}
-            placeholder="regcred, other-secret"
-          />
-          <p className="text-xs text-muted-foreground">
-            Comma-separated Secret names used to pull private images.
-          </p>
-        </div>
+        <ConfigTable>
+          <ConfigTableRow
+            label="Service account"
+            htmlFor="sr-pod-sa"
+            details="ServiceAccount both the FE and CN pods run as."
+          >
+            <Input
+              id="sr-pod-sa"
+              className="w-full"
+              value={pod.serviceAccount ?? ""}
+              onChange={(e) =>
+                patch({ serviceAccount: e.target.value || undefined })
+              }
+              placeholder="default"
+            />
+          </ConfigTableRow>
+          <ConfigTableRow
+            label="Image pull secrets"
+            htmlFor="sr-pod-pull-secrets"
+            details="Comma-separated Secret names used to pull private images."
+          >
+            <CommaListInput
+              id="sr-pod-pull-secrets"
+              value={pod.imagePullSecrets}
+              onChange={(v) => patch({ imagePullSecrets: v })}
+              placeholder="regcred, other-secret"
+            />
+          </ConfigTableRow>
+        </ConfigTable>
 
         <div className="space-y-2">
           <Label>Pod labels</Label>
