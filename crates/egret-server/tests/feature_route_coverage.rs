@@ -38,7 +38,7 @@ fn every_workspace_scoped_route_is_classified() {
     // Guard against a vacuous pass: if `ws_path_suffix` regressed to matching
     // nothing (or the OpenAPI document shrank), `unclassified` would be empty
     // for the wrong reason and this test would prove nothing. There are
-    // roughly 75 workspace-scoped paths in the document today; a floor of 50
+    // 79 workspace-scoped paths in the document today; a floor of 50
     // is conservative enough to tolerate normal route churn while still
     // failing loudly if extraction silently breaks.
     assert!(
