@@ -29,8 +29,13 @@ export function DrillRecordsDialog({
         <DialogHeader><DialogTitle>Records where {summary}</DialogTitle></DialogHeader>
         <div className="max-h-[70vh] overflow-auto">
           {data.error && <p className="rounded bg-destructive/10 p-3 text-sm text-destructive">{data.error}</p>}
-          {!data.error && data.isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
-          {!data.isLoading && !data.error && (
+          {/* Gate on `hasResult`, not `!isLoading`: while the dialog is open but
+              `columns` hasn't arrived yet (the dataset-detail race this component
+              exists to handle), the query is disabled, so `isLoading` is false
+              without a result ever having landed — `!isLoading` alone would flash
+              "No matching records." before the real query has even fired. */}
+          {!data.error && !data.hasResult && <p className="text-sm text-muted-foreground">Loading…</p>}
+          {!data.error && data.hasResult && (
             data.rows.length === 0
               ? <p className="text-sm text-muted-foreground">No matching records.</p>
               : <ChartTable columns={data.columns} rows={data.rows} />

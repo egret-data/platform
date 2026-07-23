@@ -35,10 +35,10 @@ function ChartCardTileView(props: ChartCardTileProps) {
 }
 
 /**
- * Edit-mode chart tile: keeps the build->submit editor pipeline (`useChartData`)
- * so unsaved draft cards (non-persisted ids) and live dashboard-parameter
- * injection still render while editing — the card-data endpoint only knows the
- * persisted card + its saved query.
+ * Edit-mode chart tile: runs the live draft spec via `useChartData` (a single
+ * `POST /charts/run` request) so unsaved draft cards (non-persisted ids) and
+ * live dashboard-parameter injection still render while editing — the
+ * card-data endpoint only knows the persisted card + its saved query.
  */
 function ChartCardTileEdit(props: ChartCardTileProps) {
   const { ws, chart, refreshNonce, blocked } = props;
@@ -99,7 +99,7 @@ export function DashboardCardView({ ws, dashboardId, card, chart, refreshNonce, 
   }
   if (card.card_type === "link") return wrap(<LinkCard url={asString(card.options.url)} label={asString(card.options.label)} editing={editing} />);
   const tileProps = { ws, dashboardId, card, chart, refreshNonce, paramFilters, paramTemporal, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight };
-  // View mode reads through the object-scoped card-data endpoint; edit mode keeps the
-  // build->submit editor pipeline so unsaved draft cards + param injection still render.
+  // View mode reads through the object-scoped card-data endpoint; edit mode runs
+  // the live draft spec directly so unsaved draft cards + param injection still render.
   return editing ? <ChartCardTileEdit {...tileProps} /> : <ChartCardTileView {...tileProps} />;
 }

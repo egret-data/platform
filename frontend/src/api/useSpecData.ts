@@ -8,6 +8,15 @@ export interface SpecData {
   rows: unknown[][];
   isLoading: boolean;
   error: string | null;
+  /**
+   * True once a run has actually completed successfully at least once for the
+   * current query key — as distinct from `!isLoading`, which is also true
+   * while the query is simply disabled (e.g. `enabled: false`, or a
+   * precondition like "columns haven't arrived yet" hasn't been met). A
+   * caller that wants to tell "no rows came back" apart from "we haven't
+   * asked yet" should gate on this, not on `!isLoading && !error`.
+   */
+  hasResult: boolean;
 }
 
 /**
@@ -35,11 +44,14 @@ export function useSpecData(
       // The FE `QuerySpec` (discriminated `ChartFilter[]`) is stricter than the
       // generated `ChartDataBody.query_spec`; cast the body to the generated
       // shape, same as `useBuildChartData` in `@/api/charts` (this endpoint
-      // shares that exact request body type). The response type also casts:
+      // shares that exact request body type). A direct cast compiles cleanly
+      // (no `unknown` hop needed), so the rest of the shape stays checked —
+      // only the known-safe `ChartFilter.value: unknown` vs `Filter.value:
+      // FilterValue` mismatch is being bridged. The response type also casts:
       // orval unions in the error variants (`ErrorBody`) because the spec
       // documents 4xx/5xx bodies, but `apiFetch`/the mutator throws on
       // non-2xx, so `.data` is always the success shape at runtime.
-      return (await chartsChRunSpec(ws, body as unknown as ChartDataBody)).data as ChartRunResponse;
+      return (await chartsChRunSpec(ws, body as ChartDataBody)).data as ChartRunResponse;
     },
   });
 
@@ -48,5 +60,6 @@ export function useSpecData(
     rows: q.data?.rows ?? [],
     isLoading: q.isFetching,
     error: q.error ? String(q.error) : null,
+    hasResult: q.data !== undefined,
   };
 }

@@ -325,6 +325,13 @@ export default function ChartExplore() {
     }
     if (viz === "map" && (!mapCfg.region || !mapCfg.metric)) { toast.error("Map needs a region and a metric"); return; }
     if (viz === "object" && tableCols.length === 0) { toast.error("Object detail needs at least one column"); return; }
+    // No try/catch here (unlike the validation guards above, which are
+    // synchronous toasts): the actual request now runs inside useSpecData's
+    // useQuery, and its failure surfaces through `data.error` (rendered as the
+    // destructive banner below), deliberately, as the single error surface for
+    // request-level failures. Don't reintroduce a toast here — the old
+    // build->submit pipeline's catch is gone on purpose, not by oversight, and
+    // restoring it would just double-report the same failure.
     setRanSpec(specForRun());
     setRunNonce((n) => n + 1);
   }

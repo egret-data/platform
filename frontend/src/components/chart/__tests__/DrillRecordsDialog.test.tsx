@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { DrillRecordsDialog } from "../DrillRecordsDialog";
 import type { ResultColumn } from "../ChartTable";
@@ -55,6 +55,24 @@ describe("DrillRecordsDialog", () => {
     expect(body).toEqual({
       dataset_id: "ds1",
       query_spec: expect.objectContaining({ columns: ["region", "revenue"] }),
+    });
+  });
+
+  it("does not show 'No matching records.' before columns have arrived (the query is disabled, not empty)", () => {
+    render(<DrillRecordsDialog {...baseProps} open columns={[]} />, { wrapper });
+
+    // Disabled ≠ completed-and-empty: the query never fired for this render,
+    // so the empty-state message must not appear — only the loading state may.
+    expect(screen.queryByText("No matching records.")).not.toBeInTheDocument();
+    expect(screen.getByText("Loading…")).toBeInTheDocument();
+  });
+
+  it("shows the real empty state once a completed query actually returns no rows", async () => {
+    const columns: ResultColumn[] = [{ name: "region", type: "varchar" }];
+    render(<DrillRecordsDialog {...baseProps} open columns={columns} />, { wrapper });
+
+    await vi.waitFor(() => {
+      expect(screen.getByText("No matching records.")).toBeInTheDocument();
     });
   });
 
