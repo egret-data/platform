@@ -98,6 +98,9 @@ impl From<egret_core::Error> for CpError {
             egret_core::Error::Conflict(s) => CpError::Conflict(s),
             egret_core::Error::InvalidInput(s) => CpError::BadRequest(s),
             egret_core::Error::Unauthorized | egret_core::Error::Forbidden => CpError::Forbidden,
+            // Same 403 as `Forbidden` here: this seam's HTTP error has no
+            // machine-readable `code` field to carry the distinction through.
+            egret_core::Error::FeatureDisabled(_) => CpError::Forbidden,
             egret_core::Error::TooManyRequests => {
                 CpError::BadRequest("too many requests".to_string())
             }

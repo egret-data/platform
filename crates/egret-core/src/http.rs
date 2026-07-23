@@ -17,6 +17,7 @@ impl Error {
             Error::InvalidInput(_) => StatusCode::BAD_REQUEST,
             Error::Unauthorized => StatusCode::UNAUTHORIZED,
             Error::Forbidden => StatusCode::FORBIDDEN,
+            Error::FeatureDisabled(_) => StatusCode::FORBIDDEN,
             Error::Conflict(_) => StatusCode::CONFLICT,
             Error::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -36,6 +37,12 @@ pub struct ErrorBody {
     /// Public-safe error message.
     #[schema(example = "not found: user")]
     pub error: String,
+    /// Machine-readable discriminant, present only where clients must branch on
+    /// the reason. Currently only `"feature_disabled"`. Omitted otherwise, so
+    /// no existing response changes shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "feature_disabled")]
+    pub code: Option<String>,
 }
 
 impl IntoResponse for Error {
@@ -47,7 +54,11 @@ impl IntoResponse for Error {
             Error::Internal(_) => "internal error".to_string(),
             other => other.to_string(),
         };
-        (status, Json(serde_json::json!({ "error": msg }))).into_response()
+        let mut body = serde_json::json!({ "error": msg });
+        if let Error::FeatureDisabled(_) = &self {
+            body["code"] = serde_json::Value::String("feature_disabled".into());
+        }
+        (status, Json(body)).into_response()
     }
 }
 
@@ -146,5 +157,34 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["error"], "not found: user");
+    }
+}
+
+#[cfg(test)]
+mod feature_disabled_tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn feature_disabled_is_403_with_a_machine_readable_code() {
+        let resp = Error::FeatureDisabled("notebooks").into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "feature disabled: notebooks");
+        assert_eq!(json["code"], "feature_disabled");
+    }
+
+    #[tokio::test]
+    async fn other_errors_carry_no_code_field() {
+        let resp = Error::Forbidden.into_response();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "forbidden");
+        assert!(
+            json.get("code").is_none(),
+            "existing responses must not change shape"
+        );
     }
 }

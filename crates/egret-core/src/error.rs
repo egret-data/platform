@@ -17,6 +17,11 @@ pub enum Error {
     #[error("forbidden")]
     Forbidden,
 
+    /// The workspace this request targets does not have the module it belongs
+    /// to switched on. Distinct from `Forbidden`, which is about the caller.
+    #[error("feature disabled: {0}")]
+    FeatureDisabled(&'static str),
+
     #[error("conflict: {0}")]
     Conflict(String),
 

@@ -46,6 +46,9 @@ impl From<egret_core::Error> for PolicyHttpError {
             egret_core::Error::Unauthorized | egret_core::Error::Forbidden => {
                 PolicyHttpError::Forbidden
             }
+            // Same 403 as `Forbidden` here: this seam's HTTP error has no
+            // machine-readable `code` field to carry the distinction through.
+            egret_core::Error::FeatureDisabled(_) => PolicyHttpError::Forbidden,
             egret_core::Error::TooManyRequests => {
                 PolicyHttpError::BadRequest("too many requests".to_string())
             }
