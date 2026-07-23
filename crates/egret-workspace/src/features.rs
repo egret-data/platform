@@ -17,7 +17,160 @@ pub const FEATURE_KEYS: &[&str] = &["sql_lab", "datasets", "charts", "dashboards
 
 /// True if `key` names a module in the catalog.
 pub fn is_known(key: &str) -> bool {
-    FEATURE_KEYS.contains(&key)
+    FEATURES.iter().any(|f| f.key == key)
+}
+
+/// How a rule's `path` is compared against a request's path suffix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Match {
+    /// The suffix equals `path`, or starts with `path` followed by `/`.
+    Prefix,
+    /// The suffix equals `path` exactly.
+    Exact,
+}
+
+/// One gated HTTP surface under `/api/ws/{workspace}/`.
+#[derive(Debug, Clone, Copy)]
+pub struct GateRule {
+    pub path: &'static str,
+    pub kind: Match,
+    /// Uppercase HTTP methods this rule covers; `None` = every method.
+    pub methods: Option<&'static [&'static str]>,
+}
+
+/// A module a workspace can be entitled to.
+#[derive(Debug, Clone, Copy)]
+pub struct Feature {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub rules: &'static [GateRule],
+}
+
+const fn prefix(path: &'static str) -> GateRule {
+    GateRule {
+        path,
+        kind: Match::Prefix,
+        methods: None,
+    }
+}
+
+pub const FEATURES: &[Feature] = &[
+    Feature {
+        key: "sql_lab",
+        label: "SQL Lab",
+        description: "Write and run free-form SQL, browse engine schemas, and save queries.",
+        rules: &[
+            prefix("sqllab"),
+            // Submitting free-form SQL. Reading back, listing, and cancelling
+            // stay open: the chart builder runs through those same paths.
+            GateRule {
+                path: "queries",
+                kind: Match::Exact,
+                methods: Some(&["POST"]),
+            },
+        ],
+    },
+    Feature {
+        key: "datasets",
+        label: "Datasets",
+        description: "Model physical tables and SQL into reusable datasets with metrics.",
+        rules: &[prefix("datasets")],
+    },
+    Feature {
+        key: "charts",
+        label: "Charts",
+        description: "Build and view charts on top of datasets.",
+        rules: &[prefix("charts")],
+    },
+    Feature {
+        key: "dashboards",
+        label: "Dashboards",
+        description: "Arrange charts into dashboards with filters and tabs.",
+        rules: &[prefix("dashboards")],
+    },
+    Feature {
+        key: "notebooks",
+        label: "Notebooks",
+        description: "Python and SQL notebooks backed by a per-user kernel.",
+        rules: &[
+            prefix("notebooks"),
+            prefix("kernel"),
+            prefix("notebook-runtime"),
+            prefix("notebook-settings"),
+        ],
+    },
+];
+
+/// Workspace-scoped first path segments that are deliberately never gated.
+///
+/// `folders` and `objects` are content-type-neutral (a folder holds charts *and*
+/// notebooks; `objects` is the sharing surface) and are already authorized
+/// per-object by the PDP. The rest are workspace administration, which must keep
+/// working no matter which modules are switched off — otherwise an admin could
+/// lock themselves out of the settings that turn a module back on.
+pub const UNGATED: &[&str] = &[
+    "access-requests",
+    "databases",
+    "engines",
+    "folders",
+    "members",
+    "objects",
+    "roles",
+    "shares",
+];
+
+/// The part of a request path after `/api/ws/{slug}/`, or `None` if the path is
+/// not workspace-scoped.
+///
+/// Accepts the path with or without the leading `/api`: axum's `nest("/api", …)`
+/// strips the prefix from the inner router's view of the URI, and we want the
+/// same answer either way.
+pub fn ws_path_suffix(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/api").unwrap_or(path);
+    let rest = rest.strip_prefix("/ws/")?;
+    let (_slug, suffix) = rest.split_once('/')?;
+    if suffix.is_empty() {
+        return None;
+    }
+    Some(suffix)
+}
+
+/// The feature key gating `suffix` for `method`, or `None` when the surface is
+/// ungated. `method` is the uppercase HTTP method (`parts.method.as_str()`).
+///
+/// When several rules match, the one with the longest `path` wins, so a specific
+/// sub-path can override a broader prefix without reordering the catalog.
+pub fn gated_feature(suffix: &str, method: &str) -> Option<&'static str> {
+    let mut best: Option<(usize, &'static str)> = None;
+    for feature in FEATURES {
+        for rule in feature.rules {
+            let path_matches = match rule.kind {
+                Match::Exact => suffix == rule.path,
+                Match::Prefix => {
+                    suffix == rule.path
+                        || (suffix.len() > rule.path.len()
+                            && suffix.starts_with(rule.path)
+                            && suffix.as_bytes()[rule.path.len()] == b'/')
+                }
+            };
+            if !path_matches {
+                continue;
+            }
+            if let Some(methods) = rule.methods {
+                if !methods.contains(&method) {
+                    continue;
+                }
+            }
+            // Written as a match rather than `map_or` so clippy's pedantic
+            // lints (CI runs with `-D warnings`) have nothing to say.
+            match best {
+                Some((len, _)) if rule.path.len() <= len => {}
+                _ => best = Some((rule.path.len(), feature.key)),
+            }
+        }
+    }
+    best.map(|(_, key)| key)
 }
 
 impl WorkspaceRepo {
@@ -68,5 +221,103 @@ impl WorkspaceRepo {
         }
         tx.commit().await.map_err(db_err)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suffix_is_extracted_with_and_without_the_api_prefix() {
+        // axum's `nest("/api", …)` strips the prefix from the inner router's
+        // view of the URI, so the gate must accept both spellings.
+        assert_eq!(ws_path_suffix("/api/ws/sales/notebooks"), Some("notebooks"));
+        assert_eq!(
+            ws_path_suffix("/ws/sales/notebooks/abc"),
+            Some("notebooks/abc")
+        );
+        assert_eq!(ws_path_suffix("/api/auth/login"), None);
+        assert_eq!(ws_path_suffix("/ws/sales"), None);
+    }
+
+    #[test]
+    fn module_prefixes_map_to_their_feature() {
+        assert_eq!(gated_feature("notebooks", "GET"), Some("notebooks"));
+        assert_eq!(
+            gated_feature("notebooks/abc/cells", "POST"),
+            Some("notebooks")
+        );
+        assert_eq!(gated_feature("kernel", "POST"), Some("notebooks"));
+        assert_eq!(
+            gated_feature("notebook-runtime/token", "POST"),
+            Some("notebooks")
+        );
+        assert_eq!(gated_feature("charts/abc/data", "POST"), Some("charts"));
+        assert_eq!(gated_feature("dashboards", "GET"), Some("dashboards"));
+        assert_eq!(
+            gated_feature("datasets/abc/columns", "GET"),
+            Some("datasets")
+        );
+    }
+
+    #[test]
+    fn sql_lab_gates_its_own_surface_and_only_free_form_submits() {
+        assert_eq!(gated_feature("sqllab/queries", "GET"), Some("sql_lab"));
+        assert_eq!(
+            gated_feature("sqllab/databases/x/tables", "GET"),
+            Some("sql_lab")
+        );
+        // Submitting free-form SQL is the privileged act...
+        assert_eq!(gated_feature("queries", "POST"), Some("sql_lab"));
+        // ...reading back or cancelling a query you already own is not, and
+        // charts depend on those paths.
+        assert_eq!(gated_feature("queries", "GET"), None);
+        assert_eq!(gated_feature("queries/abc", "GET"), None);
+        assert_eq!(gated_feature("queries/abc/results", "GET"), None);
+        assert_eq!(gated_feature("queries/abc/cancel", "POST"), None);
+    }
+
+    #[test]
+    fn content_neutral_and_admin_surfaces_are_never_gated() {
+        for suffix in [
+            "members",
+            "roles",
+            "shares",
+            "objects",
+            "folders/abc",
+            "engines",
+            "databases",
+            "access-requests",
+        ] {
+            assert_eq!(
+                gated_feature(suffix, "GET"),
+                None,
+                "{suffix} must not be gated"
+            );
+        }
+    }
+
+    #[test]
+    fn every_first_segment_is_classified_exactly_once() {
+        // A segment claimed by a Feature must not also be listed as ungated,
+        // or the coverage test in egret-server would pass while the runtime
+        // behaviour is ambiguous.
+        for f in FEATURES {
+            for rule in f.rules {
+                let seg = rule.path.split('/').next().unwrap();
+                assert!(
+                    !UNGATED.contains(&seg),
+                    "{seg} is claimed by {} and also listed as ungated",
+                    f.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn catalog_keys_match_the_key_list() {
+        let from_catalog: Vec<&str> = FEATURES.iter().map(|f| f.key).collect();
+        assert_eq!(from_catalog, FEATURE_KEYS);
     }
 }
