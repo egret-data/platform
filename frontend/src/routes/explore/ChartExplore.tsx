@@ -3,7 +3,7 @@ import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom"
 import { toast } from "sonner";
 import { useDatasets, useDataset } from "@/api/datasets";
 import {
-  useChart, useChartMutations,
+  useBuildChartData, useChart, useChartMutations,
   type QuerySpec, type VizType, type ChartParams, type TableState, type ChartFilter,
   type CartesianConfig, type PieConfig, type ScalarConfig, type ProgressConfig, type GaugeConfig, type FunnelConfig, type WaterfallConfig, type SmartScalarConfig, type BoxplotConfig, type SankeyConfig, isCartesianViz,
 } from "@/api/charts";
@@ -280,6 +280,12 @@ export default function ChartExplore() {
   const finished = !data.isLoading && !data.error && !!ranSpec;
   const resultColumns = data.columns.filter((c) => !c.name.startsWith("__grp_"));
   const metricTypes = Object.fromEntries((detail.data?.metrics ?? []).map((m) => [m.metric_name, m.data_type ?? "double"]));
+
+  // "View SQL" disclosure: build-only, fetched lazily (only while the
+  // disclosure is open) via the `charts`-gated ch_data endpoint — independent
+  // of the sql_lab entitlement that gates ch_run_spec above.
+  const [sqlOpen, setSqlOpen] = useState(false);
+  const chartSql = useBuildChartData(ws, datasetId, ranSpec, sqlOpen);
 
   function run() {
     setRanSpec(null);
@@ -917,6 +923,22 @@ export default function ChartExplore() {
             containerRef={previewRef}
             disabled={!finished || resultColumns.length === 0}
           />
+          {ranSpec && (
+            <details
+              className="ml-auto text-xs text-muted-foreground"
+              open={sqlOpen}
+              onToggle={(e) => setSqlOpen(e.currentTarget.open)}
+            >
+              <summary className="cursor-pointer select-none hover:text-foreground">View SQL</summary>
+              {sqlOpen && chartSql.isLoading && <p className="mt-1 text-xs">Loading…</p>}
+              {sqlOpen && chartSql.error && (
+                <p className="mt-1 text-xs text-destructive">{String(chartSql.error)}</p>
+              )}
+              {chartSql.data?.sql && (
+                <pre className="mt-1 max-h-40 overflow-auto rounded bg-muted p-2 text-xs">{chartSql.data.sql}</pre>
+              )}
+            </details>
+          )}
         </div>
 
         {filters.length > 0 && (

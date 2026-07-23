@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { ApiError } from "./client";
 import {
@@ -237,12 +237,26 @@ export function useChartMutations(ws: string) {
   return { create, update, remove, duplicate, trash, restore, addBookmark, removeBookmark };
 }
 
-/** Build-only: returns the SQL + database_id; the caller submits via useSubmitQuery and polls. */
-export function useBuildChartData(ws: string) {
-  return useMutation<{ sql: string; database_id: string }, ApiError, { dataset_id: string; query_spec: QuerySpec }>({
+/**
+ * The SQL a `QuerySpec` compiles to, for on-demand display — e.g. the chart
+ * builder's "View SQL" disclosure. Build-only (`ch_data`): it never submits
+ * or runs the query, so it stays available even when a workspace has SQL Lab
+ * switched off. Gated by the `charts` entitlement, not `sql_lab` — a chart
+ * author can always see what SQL their own chart compiles to; what's gated
+ * is the free-form SQL *tool*, not the ability to read compiled SQL.
+ *
+ * Lazy via `enabled`: scope it to whichever UI affordance reveals the SQL
+ * (e.g. the disclosure being open), not to the chart's run lifecycle, so a
+ * workspace that never opens it never fetches.
+ */
+export function useBuildChartData(ws: string, datasetId: string | null, spec: QuerySpec | null, enabled: boolean) {
+  const key = datasetId && spec ? JSON.stringify(spec) : "";
+  return useQuery<{ sql: string; database_id: string }, ApiError>({
+    queryKey: ["chartsChData", ws, datasetId, key],
+    enabled: enabled && !!datasetId && !!spec,
     // The FE `QuerySpec` (discriminated `ChartFilter[]`) is stricter than the spec's
     // loosely-typed `query_spec`; cast the body to the generated shape.
-    mutationFn: async (b) =>
-      (await chartsChData(ws, b as unknown as ChartDataBody)).data as { sql: string; database_id: string },
+    queryFn: async () =>
+      (await chartsChData(ws, { dataset_id: datasetId!, query_spec: spec! } as unknown as ChartDataBody)).data as { sql: string; database_id: string },
   });
 }
