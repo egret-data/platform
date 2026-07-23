@@ -39,13 +39,34 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
     // Race: an admin can switch a module off while a user still has it open.
     // The Sidebar/`RequireFeature` gate is an optimistic read of
     // `["my-workspaces"]` (see useWorkspaceFeatures); this 403/code pair is
-    // the backend's real, un-bypassable enforcement firing. Invalidating that
+    // the backend's real, un-bypassable enforcement firing. Refetching that
     // one query here — the single source both read from — makes the route
     // guard notice the module is gone and swap to Forbidden, rather than
     // leaving the page to show whatever generic error its own failed query
     // produces.
+    //
+    // `client.ts` (transport) reaching into the query cache like this is a
+    // layering inversion in principle. It's deliberate here, not incidental:
+    // this is the ONE choke point every request (hand-written hooks and the
+    // generated client, via mutator.ts) already passes through, so it is the
+    // only place that can react to this specific error for every call site
+    // without adding a query-layer error handler that each of those ~40
+    // call sites would need to opt into individually. `queryClient` is
+    // exported as a singleton from `./queryClient` for exactly this reason.
+    //
+    // We `await` (rather than fire-and-forget) and force `refetchType: "all"`
+    // so the refetch isn't deferred as inactive — this doesn't close the gap
+    // (the caller's own catch/toast can still run before RequireFeature's
+    // next render), but it shrinks it to this one round-trip instead of an
+    // arbitrary background refetch. Closing it fully would mean either
+    // touching every page's own `onError`/`.catch` (out of proportion for
+    // this race) or reaching into react-query's Mutation internals to
+    // silence a per-call onError after the fact (fragile, and only covers
+    // mutations wired through the `onError` option — not the many call
+    // sites that `.catch()` a `mutateAsync()` directly) — so a brief flash
+    // of the page's own generic error remains possible.
     if (err.status === 403 && err.code === "feature_disabled") {
-      void queryClient.invalidateQueries({ queryKey: ["my-workspaces"] });
+      await queryClient.invalidateQueries({ queryKey: ["my-workspaces"], refetchType: "all" });
     }
     throw err;
   }

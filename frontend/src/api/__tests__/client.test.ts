@@ -43,7 +43,7 @@ test("ApiError carries the response body's code", async () => {
   });
 });
 
-test("a feature_disabled 403 invalidates my-workspaces so the nav/guard can catch up", async () => {
+test("a feature_disabled 403 invalidates+refetches my-workspaces (awaited) so the nav/guard can catch up", async () => {
   vi.spyOn(globalThis, "fetch").mockResolvedValue(
     new Response(JSON.stringify({ error: "feature disabled: notebooks", code: "feature_disabled" }), {
       status: 403,
@@ -51,7 +51,24 @@ test("a feature_disabled 403 invalidates my-workspaces so the nav/guard can catc
   );
   const spy = vi.spyOn(queryClient, "invalidateQueries");
   await expect(apiFetch("/x")).rejects.toBeInstanceOf(ApiError);
-  expect(spy).toHaveBeenCalledWith({ queryKey: ["my-workspaces"] });
+  // refetchType: "all" so an inactive my-workspaces query still refetches
+  // immediately rather than only being marked stale.
+  expect(spy).toHaveBeenCalledWith({ queryKey: ["my-workspaces"], refetchType: "all" });
+});
+
+test("the feature_disabled invalidation is awaited before the 403 rejects", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify({ error: "feature disabled: notebooks", code: "feature_disabled" }), {
+      status: 403,
+    }),
+  );
+  let invalidateResolved = false;
+  vi.spyOn(queryClient, "invalidateQueries").mockImplementation(async () => {
+    await Promise.resolve();
+    invalidateResolved = true;
+  });
+  await expect(apiFetch("/x")).rejects.toBeInstanceOf(ApiError);
+  expect(invalidateResolved).toBe(true);
 });
 
 test("a generic 403 does not invalidate my-workspaces", async () => {

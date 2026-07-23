@@ -1,9 +1,10 @@
 import { useParams } from "react-router-dom";
 import { useMyWorkspaces } from "@/api/hooks";
+import { EXPLORE_MODULES } from "@/lib/exploreModules";
 
-/** The five modules a workspace can be entitled to, in nav order. */
-export const ALL_FEATURE_KEYS = ["sql_lab", "datasets", "charts", "dashboards", "notebooks"] as const;
-export type FeatureKey = (typeof ALL_FEATURE_KEYS)[number];
+/** The five module keys a workspace can be entitled to, in nav order — derived
+ * from `EXPLORE_MODULES`, the single source of truth shared with Sidebar.tsx. */
+export const ALL_FEATURE_KEYS: string[] = EXPLORE_MODULES.map((m) => m.key);
 
 /**
  * The module keys the *current route's* workspace has switched on — the
@@ -29,24 +30,16 @@ export function useWorkspaceFeatures(): string[] {
   return data.find((w) => w.slug === workspace)?.features ?? [];
 }
 
-/** `path` within `/explore/:workspace/` for each feature, in nav order. */
-const FEATURE_PATHS: { feature: FeatureKey; path: string }[] = [
-  { feature: "sql_lab", path: "sql-lab" },
-  { feature: "datasets", path: "datasets" },
-  { feature: "charts", path: "charts" },
-  { feature: "dashboards", path: "dashboards" },
-  { feature: "notebooks", path: "notebooks" },
-];
-
 /**
  * The route to send a user to when they land on the workspace root (or an
- * unknown path): the first enabled module in nav order, or Workspace settings
- * → Members when every module is switched off (so a workspace with e.g. SQL
- * Lab disabled doesn't redirect straight into a page `RequireFeature` will
- * immediately bounce off).
+ * unknown path): the first enabled module in nav order (per `EXPLORE_MODULES`
+ * — the same order Sidebar renders), or Workspace settings → Members when
+ * every module is switched off (so a workspace with e.g. SQL Lab disabled
+ * doesn't redirect straight into a page `RequireFeature` will immediately
+ * bounce off).
  */
 export function useDefaultExplorePath(): string {
   const enabled = useWorkspaceFeatures();
-  const first = FEATURE_PATHS.find((f) => enabled.includes(f.feature));
+  const first = EXPLORE_MODULES.find((m) => enabled.includes(m.key));
   return first ? first.path : "settings/members";
 }

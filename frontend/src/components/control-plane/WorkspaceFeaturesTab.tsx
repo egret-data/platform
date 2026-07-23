@@ -19,8 +19,10 @@ import { Switch } from "@/components/ui/switch";
  *
  * One editing surface + one Save, mirroring the engine/StarRocks config tabs:
  * local `draft` state seeded from the loaded features, Save disabled until it
- * differs from what's stored, and the PUT always sends the full map (the API
- * is a full replacement, not a per-key patch).
+ * differs from what's stored, and the PUT always sends the full five-key map.
+ * The API itself merges (a key omitted from the body is left as-is), but this
+ * UI shows and edits all five, so it should own all five — sending the full
+ * map keeps the saved state exactly matching what the switches display.
  */
 export function WorkspaceFeaturesTab({ workspaceId }: { workspaceId: string }) {
   const { features, isLoading } = useWorkspaceFeaturesList(workspaceId);
