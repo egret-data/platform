@@ -55,10 +55,16 @@ where
         //     `nest()` rewrites the inner router's view of the URI, so
         //     `parts.uri` is the path with the mount prefix already stripped —
         //     and by how much depends on where the router happened to be
-        //     mounted. `OriginalUri` is the full path as the client sent it,
-        //     which is the only thing that makes this gate correct no matter
-        //     how deeply a future router is nested. Falls back to `parts.uri`
-        //     for routers that were never nested at all.
+        //     mounted. `OriginalUri` is the path as the client sent it, so the
+        //     answer no longer depends on mount depth. It falls back to
+        //     `parts.uri` for routers that were never nested at all.
+        //
+        //     One invariant remains, and it is convention rather than
+        //     construction: `ws_path_suffix` recognises a path only if it
+        //     begins `/api/ws/` or `/ws/`. A gated router mounted at, say,
+        //     `/api/v2` would yield `/api/v2/ws/{slug}/…`, match neither, and
+        //     fail OPEN. `every_workspace_scoped_route_is_mounted_under_api_ws`
+        //     in egret-server holds that invariant to CI.
         let gated = {
             let full_path = parts
                 .extensions

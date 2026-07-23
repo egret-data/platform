@@ -7,7 +7,7 @@
 //! one — `nest("/api", notebook_router())` alongside
 //! `nest("/api/ws", ws_member_router())` — so the gate is exercised against the
 //! mount shapes production actually produces, plus one that it does not yet
-//! (see `deeply_nested_router_is_still_gated`).
+//! (see `a_deeper_mount_prefix_does_not_open_the_gate`).
 
 use std::sync::Arc;
 
@@ -253,18 +253,37 @@ async fn disabled_module_returns_403_with_the_feature_disabled_code(pool: sqlx::
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn an_enabled_module_is_untouched(pool: sqlx::PgPool) {
+async fn an_ungated_surface_survives_the_module_being_off(pool: sqlx::PgPool) {
     let f = setup(pool, Caller::WorkspaceAdmin).await;
     disable(&f.db, f.ws, "notebooks").await;
 
-    // Same workspace, an UNGATED surface: the gate must not leak across.
+    // Same workspace, an ungated surface: the gate must not leak across.
     // `members` is workspace administration — it belongs to no module and so
     // must survive every module being switched off. The gate does parse this
-    // path as workspace-scoped; it lets it through because `members` is in the
-    // catalog's UNGATED list, which is also what makes it skip the DB lookup.
+    // path as workspace-scoped; it lets it through because no `GateRule` claims
+    // `members`, which is also what makes it skip the DB lookup. (`UNGATED` in
+    // the catalog is documentation for the CI coverage test, not a runtime
+    // allowlist — nothing consults it on this path.)
     let resp = f.get(&format!("/api/ws/{}/members", f.slug)).await;
 
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// One module being off must not gate another. Without this, an implementation
+/// that ignored the feature key entirely — "any disabled module gates
+/// everything" — would satisfy every other test in this file.
+#[sqlx::test(migrations = "../../migrations")]
+async fn disabling_one_module_does_not_gate_another(pool: sqlx::PgPool) {
+    let f = setup(pool, Caller::WorkspaceAdmin).await;
+    disable(&f.db, f.ws, "charts").await;
+
+    let resp = f.get(&format!("/api/ws/{}/notebooks", f.slug)).await;
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "notebooks is on; disabling charts must not touch it"
+    );
 }
 
 #[sqlx::test(migrations = "../../migrations")]

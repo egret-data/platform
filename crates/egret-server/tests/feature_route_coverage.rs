@@ -54,3 +54,50 @@ fn every_workspace_scoped_route_is_classified() {
          or to UNGATED if they must stay reachable when every module is off."
     );
 }
+
+/// The gate's other, quieter precondition: it can only recognise a path that
+/// begins `/api/ws/`.
+///
+/// `WsContext` reads `OriginalUri`, so the answer no longer depends on how
+/// deeply a router is nested — but `ws_path_suffix` still accepts only
+/// `/api/ws/{slug}/…` (or the bare `/ws/{slug}/…` an unnested router produces).
+/// A workspace-scoped route mounted anywhere else — `/api/v2/ws/{workspace}/…`,
+/// say — parses as nothing, is matched by no `GateRule`, and fails OPEN, while
+/// `every_workspace_scoped_route_is_classified` above keeps passing because the
+/// catalog still classifies the segment. That combination is exactly how a
+/// silent hole would get in, so the convention is asserted rather than assumed.
+#[test]
+fn every_workspace_scoped_route_is_mounted_under_api_ws() {
+    let doc = egret_server::openapi_doc();
+
+    let mut misplaced = BTreeSet::new();
+    let mut seen = 0usize;
+    for path in doc.paths.paths.keys() {
+        if !path.contains("{workspace}") {
+            continue;
+        }
+        seen += 1;
+        if !path.starts_with("/api/ws/") {
+            misplaced.insert(path.clone());
+        }
+    }
+
+    // Same anti-vacuity floor as the test above: if the document shrank or the
+    // `{workspace}` parameter were renamed, `misplaced` would be empty for the
+    // wrong reason.
+    assert!(
+        seen >= 50,
+        "only saw {seen} paths carrying a {{workspace}} parameter, expected at least 50 — \
+         either the OpenAPI document shrank or the parameter was renamed"
+    );
+
+    assert!(
+        misplaced.is_empty(),
+        "these workspace-scoped paths are not mounted under /api/ws/: {misplaced:?}\n\
+         The feature gate in WsContext recognises a workspace-scoped path only by its \
+         /api/ws/ (or /ws/) prefix, so a route mounted elsewhere is NOT gated — it fails open \
+         no matter what the feature catalog says about it. Either mount it under /api/ws/, \
+         or widen ws_path_suffix in crates/egret-workspace/src/features.rs to accept the new \
+         shape and add a case to its unit tests."
+    );
+}
