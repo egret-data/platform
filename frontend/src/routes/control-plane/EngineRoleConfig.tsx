@@ -12,6 +12,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
 import { ConfigSection } from "./config/ConfigSection";
 import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
+import { RolePodShapeSection } from "./config/ContainersMountsSection";
 import { FieldLabel } from "./config/FieldLabel";
 import { JvmFlagPicker } from "./config/JvmFlagPicker";
 import { QuantityValue } from "./config/QuantityInput";
@@ -364,6 +365,8 @@ function RoleConfigEditor({
           />
         </div>
       </ConfigSection>
+
+      <RolePodShapeSection role={keyPrefix} value={value} onChange={onChange} />
     </div>
   );
 }

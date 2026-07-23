@@ -11,13 +11,16 @@ import type {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   type Kv,
   KeyValueEditor,
   kvToRecord,
   recordToKv,
 } from "../EngineResourceGroups";
+import type { RoleForm } from "../useEngineConfigForm";
 import { ConfigSection } from "./ConfigSection";
+import { ConfigTable, ConfigTableRow } from "./ConfigTable";
 import { RawJsonField } from "./RawJsonField";
 import { numOrUndef } from "./podEditors";
 
@@ -400,137 +403,164 @@ function MiniContainerList({
 export { MiniContainerList as ContainerListEditor };
 export type { MiniContainer as ContainerForm } from "@/api/controlPlane";
 
-// ── section props ────────────────────────────────────────────────────────────
+// ── envFrom (cluster-wide) ───────────────────────────────────────────────────
 
-export interface ContainersMountsSectionProps {
-  initContainers: MiniContainer[];
-  setInitContainers: Dispatch<SetStateAction<MiniContainer[]>>;
-  sidecarContainers: MiniContainer[];
-  setSidecarContainers: Dispatch<SetStateAction<MiniContainer[]>>;
-  envFrom: EnvFromSource[];
-  setEnvFrom: Dispatch<SetStateAction<EnvFromSource[]>>;
-  configMounts: ObjectMount[];
-  setConfigMounts: Dispatch<SetStateAction<ObjectMount[]>>;
-  secretMounts: ObjectMount[];
-  setSecretMounts: Dispatch<SetStateAction<ObjectMount[]>>;
-}
-
-/**
- * "Containers & Mounts" config: cluster-wide init & sidecar containers, envFrom
- * sources, and ConfigMap / Secret volume mounts — applied to both roles.
- */
-export function ContainersMountsSection({
-  initContainers,
-  setInitContainers,
-  sidecarContainers,
-  setSidecarContainers,
+/** Cluster-wide `envFrom` sources (chart top-level `envFrom`). Applied to all
+ *  pods, so it lives in the Pod tab (not per role). */
+export function EnvFromSection({
   envFrom,
   setEnvFrom,
-  configMounts,
-  setConfigMounts,
-  secretMounts,
-  setSecretMounts,
-}: ContainersMountsSectionProps) {
+}: {
+  envFrom: EnvFromSource[];
+  setEnvFrom: Dispatch<SetStateAction<EnvFromSource[]>>;
+}) {
   const setEnvFromRow = (i: number, next: EnvFromSource) =>
     setEnvFrom(envFrom.map((r, j) => (j === i ? next : r)));
 
   return (
+    <ConfigSection
+      title="Environment from sources"
+      description="Bulk-import environment variables from a ConfigMap or Secret (all pods)."
+    >
+      <div className="space-y-2">
+        {envFrom.map((e, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <Input
+              value={e.configMapRef ?? ""}
+              placeholder="configMapRef"
+              onChange={(ev) =>
+                setEnvFromRow(i, { ...e, configMapRef: ev.target.value || undefined })
+              }
+            />
+            <Input
+              value={e.secretRef ?? ""}
+              placeholder="secretRef"
+              onChange={(ev) =>
+                setEnvFromRow(i, { ...e, secretRef: ev.target.value || undefined })
+              }
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="shrink-0 text-muted-foreground"
+              onClick={() => setEnvFrom(envFrom.filter((_, j) => j !== i))}
+              aria-label="Remove envFrom"
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </div>
+        ))}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => setEnvFrom([...envFrom, {}])}
+        >
+          <Plus className="h-4 w-4" />
+          Add envFrom
+        </Button>
+      </div>
+    </ConfigSection>
+  );
+}
+
+// ── per-role pod shape (containers + mounts + shareProcessNamespace) ──────────
+
+/**
+ * Per-role init/sidecar containers, ConfigMap/Secret volume mounts, and the
+ * shareProcessNamespace toggle — chart `coordinator.*` / `worker.*`. Edits a
+ * {@link RoleForm} in place via `onChange`.
+ */
+export function RolePodShapeSection({
+  role,
+  value,
+  onChange,
+}: {
+  role: "coordinator" | "worker";
+  value: RoleForm;
+  onChange: (next: RoleForm) => void;
+}) {
+  // Adapt a plain field update to the SetStateAction the list editors expect.
+  const setter =
+    <K extends "initContainers" | "sidecarContainers" | "configMounts" | "secretMounts">(
+      key: K,
+    ): Dispatch<SetStateAction<RoleForm[K]>> =>
+    (u) =>
+      onChange({
+        ...value,
+        [key]: typeof u === "function" ? (u as (p: RoleForm[K]) => RoleForm[K])(value[key]) : u,
+      });
+
+  return (
     <div className="space-y-5">
       <ConfigSection
-        title="Environment from sources"
-        description="Bulk-import environment variables from a ConfigMap or Secret."
-      >
-        <div className="space-y-2">
-          {envFrom.map((e, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <Input
-                value={e.configMapRef ?? ""}
-                placeholder="configMapRef"
-                onChange={(ev) =>
-                  setEnvFromRow(i, { ...e, configMapRef: ev.target.value || undefined })
-                }
-              />
-              <Input
-                value={e.secretRef ?? ""}
-                placeholder="secretRef"
-                onChange={(ev) =>
-                  setEnvFromRow(i, { ...e, secretRef: ev.target.value || undefined })
-                }
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="shrink-0 text-muted-foreground"
-                onClick={() => setEnvFrom(envFrom.filter((_, j) => j !== i))}
-                aria-label="Remove envFrom"
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
-            </div>
-          ))}
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => setEnvFrom([...envFrom, {}])}
-          >
-            <Plus className="h-4 w-4" />
-            Add envFrom
-          </Button>
-        </div>
-      </ConfigSection>
-
-      <ConfigSection
-        title="Volume mounts"
-        description="Mount ConfigMaps and Secrets into the Trino container."
-      >
-        <div className="space-y-2">
-          <Label>ConfigMap mounts</Label>
-          <ObjectMountRows
-            rows={configMounts}
-            onChange={setConfigMounts}
-            namePlaceholder="configMap name"
-          />
-        </div>
-        <div className="space-y-2">
-          <Label>Secret mounts</Label>
-          <ObjectMountRows
-            rows={secretMounts}
-            onChange={setSecretMounts}
-            namePlaceholder="secret name"
-          />
-        </div>
-      </ConfigSection>
-
-      <ConfigSection
         title="Init & sidecar containers"
-        description="Extra containers added to both the coordinator and worker pods."
+        description={`Extra containers added to the ${role} pods.`}
       >
         <div className="space-y-2">
           <Label>Init containers</Label>
           <p className="text-xs text-muted-foreground">
-            Run to completion before the Trino container starts (both roles).
+            Run to completion before the Trino container starts.
           </p>
           <MiniContainerList
-            idPrefix="init"
-            rows={initContainers}
-            onChange={setInitContainers}
+            idPrefix={`${role}-init`}
+            rows={value.initContainers}
+            onChange={setter("initContainers")}
             addLabel="Add init container"
           />
         </div>
         <div className="space-y-2">
           <Label>Sidecar containers</Label>
           <p className="text-xs text-muted-foreground">
-            Extra containers that run alongside Trino (both roles).
+            Extra containers that run alongside Trino.
           </p>
           <MiniContainerList
-            idPrefix="sidecar"
-            rows={sidecarContainers}
-            onChange={setSidecarContainers}
+            idPrefix={`${role}-sidecar`}
+            rows={value.sidecarContainers}
+            onChange={setter("sidecarContainers")}
             addLabel="Add sidecar container"
           />
         </div>
+      </ConfigSection>
+
+      <ConfigSection
+        title="Volume mounts"
+        description={`Mount ConfigMaps and Secrets into the ${role} container.`}
+      >
+        <div className="space-y-2">
+          <Label>ConfigMap mounts</Label>
+          <ObjectMountRows
+            rows={value.configMounts}
+            onChange={setter("configMounts")}
+            namePlaceholder="configMap name"
+          />
+        </div>
+        <div className="space-y-2">
+          <Label>Secret mounts</Label>
+          <ObjectMountRows
+            rows={value.secretMounts}
+            onChange={setter("secretMounts")}
+            namePlaceholder="secret name"
+          />
+        </div>
+      </ConfigSection>
+
+      <ConfigSection title="Pod options">
+        <ConfigTable>
+          <ConfigTableRow
+            label="shareProcessNamespace"
+            mono
+            htmlFor={`${role}-sharepid`}
+            details="Let containers in the pod share a single PID namespace."
+          >
+            <Switch
+              id={`${role}-sharepid`}
+              checked={value.shareProcessNamespace}
+              onCheckedChange={(v) => onChange({ ...value, shareProcessNamespace: v })}
+            />
+          </ConfigTableRow>
+        </ConfigTable>
       </ConfigSection>
     </div>
   );

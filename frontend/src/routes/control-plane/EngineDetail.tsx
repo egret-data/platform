@@ -87,7 +87,7 @@ import { CoordinatorSection } from "./config/CoordinatorSection";
 import { WorkerSection } from "./config/WorkerSection";
 import { WorkloadSection } from "./config/WorkloadSection";
 import { PodSection } from "./config/PodSection";
-import { ContainersMountsSection } from "./config/ContainersMountsSection";
+import { EnvFromSection } from "./config/ContainersMountsSection";
 import { ValidityProvider } from "./config/validityRegistry";
 import { ReviewChangesDialog } from "./config/ReviewChangesDialog";
 import { EngineAutoscaling } from "./EngineAutoscaling";
@@ -1024,22 +1024,12 @@ function ConfigurationTab({
                       setProgressDeadlineSeconds={
                         cfg.setProgressDeadlineSeconds
                       }
-                      shareProcessNamespace={cfg.shareProcessNamespace}
-                      setShareProcessNamespace={cfg.setShareProcessNamespace}
                       env={cfg.env}
                       setEnv={cfg.setEnv}
                     />
-                    <ContainersMountsSection
-                      initContainers={cfg.initContainers}
-                      setInitContainers={cfg.setInitContainers}
-                      sidecarContainers={cfg.sidecarContainers}
-                      setSidecarContainers={cfg.setSidecarContainers}
+                    <EnvFromSection
                       envFrom={cfg.envFrom}
                       setEnvFrom={cfg.setEnvFrom}
-                      configMounts={cfg.configMounts}
-                      setConfigMounts={cfg.setConfigMounts}
-                      secretMounts={cfg.secretMounts}
-                      setSecretMounts={cfg.setSecretMounts}
                     />
                   </div>
                 )}

@@ -106,8 +106,6 @@ export interface PodSectionProps {
   setRevisionHistoryLimit: (v: string) => void;
   progressDeadlineSeconds: string;
   setProgressDeadlineSeconds: (v: string) => void;
-  shareProcessNamespace: boolean;
-  setShareProcessNamespace: (v: boolean) => void;
 }
 
 /**
@@ -132,8 +130,6 @@ export function PodSection({
   setRevisionHistoryLimit,
   progressDeadlineSeconds,
   setProgressDeadlineSeconds,
-  shareProcessNamespace,
-  setShareProcessNamespace,
 }: PodSectionProps) {
   return (
     <div className="space-y-5">
@@ -302,22 +298,6 @@ export function PodSection({
             addLabel="Add annotation"
           />
         </div>
-      </ConfigSection>
-
-      <ConfigSection title="Pod options">
-        <ConfigTable>
-          <ConfigTableRow
-            label="Share process namespace"
-            htmlFor="ps-sharepid"
-            details="Let containers in the pod share a single PID namespace."
-          >
-            <Switch
-              id="ps-sharepid"
-              checked={shareProcessNamespace}
-              onCheckedChange={setShareProcessNamespace}
-            />
-          </ConfigTableRow>
-        </ConfigTable>
       </ConfigSection>
     </div>
   );
