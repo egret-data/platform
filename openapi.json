@@ -23303,6 +23303,14 @@
             "type": "string",
             "description": "Public-safe error message.",
             "example": "not found: user"
+          },
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Machine-readable discriminant, present only where clients must branch on\nthe reason. Currently only `\"feature_disabled\"`. Omitted otherwise, so\nno existing response changes shape.",
+            "example": "feature_disabled"
           }
         }
       },
