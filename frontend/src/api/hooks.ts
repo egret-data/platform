@@ -2,7 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, apiJson } from "./client";
 
 export interface Me { user_id: string; email: string; platform_roles: string[]; permissions: string[]; }
-export interface WorkspaceSummary { id: string; slug: string; name: string; }
+/** `features` = the module keys (`sql_lab`/`datasets`/`charts`/`dashboards`/
+ * `notebooks`) this workspace currently has switched on — drives both the
+ * Sidebar's per-item visibility and `RequireFeature`'s route gate. */
+export interface WorkspaceSummary { id: string; slug: string; name: string; features: string[]; }
 
 export function useMe() {
   return useQuery<Me | null>({

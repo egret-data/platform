@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { ThemeProvider } from "@/components/theme-provider";
 import { AuthProvider } from "@/auth/AuthProvider";
@@ -8,6 +8,9 @@ import { LoginPage } from "@/auth/LoginPage";
 import { NotFound } from "@/routes/NotFound";
 import { useAuth } from "@/auth/useAuth";
 import { useMyWorkspaces } from "@/api/hooks";
+import { queryClient } from "@/api/queryClient";
+import { RequireFeature } from "@/components/explore/RequireFeature";
+import { useDefaultExplorePath } from "@/hooks/useWorkspaceFeatures";
 
 function LoginRoute() {
   const { me, isLoading } = useAuth();
@@ -62,8 +65,6 @@ import WhoCanAccess from "@/routes/control-plane/access/WhoCanAccess";
 import Classifications from "@/routes/control-plane/governance/Classifications";
 import TagDetail from "@/routes/control-plane/governance/TagDetail";
 
-const qc = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1, staleTime: 30000 } } });
-
 function HomeRedirect() {
   const { me, isLoading } = useAuth();
   const { data } = useMyWorkspaces(!!me);
@@ -73,22 +74,28 @@ function HomeRedirect() {
 }
 
 function ExploreRoutes() {
+  // Picks the first explore module (in nav order) this workspace has switched
+  // on, falling back to Workspace settings when every module is off — so the
+  // index/catch-all redirects never land a user on a route `RequireFeature`
+  // will immediately bounce off. `ExploreRoutes` is a component, so calling
+  // the hook here (unconditionally, on every render) is legal.
+  const defaultPath = useDefaultExplorePath();
   return (
     <RequireWorkspace>
       <AppShell>
         <Routes>
-          <Route index element={<Navigate to="sql-lab" replace />} />
-          <Route path="sql-lab" element={<SqlLab />} />
-          <Route path="datasets" element={<Datasets />} />
-          <Route path="datasets/:id" element={<DatasetDetail />} />
-          <Route path="charts" element={<Charts />} />
-          <Route path="charts/new" element={<ChartExplore />} />
-          <Route path="charts/:id" element={<ChartExplore />} />
-          <Route path="dashboards" element={<Dashboards />} />
-          <Route path="dashboards/:id" element={<DashboardView />} />
-          <Route path="notebooks" element={<Notebooks />} />
-          <Route path="notebooks/:id" element={<NotebookPage />} />
-          <Route path="notebook-settings" element={<NotebookSettings />} />
+          <Route index element={<Navigate to={defaultPath} replace />} />
+          <Route path="sql-lab" element={<RequireFeature feature="sql_lab"><SqlLab /></RequireFeature>} />
+          <Route path="datasets" element={<RequireFeature feature="datasets"><Datasets /></RequireFeature>} />
+          <Route path="datasets/:id" element={<RequireFeature feature="datasets"><DatasetDetail /></RequireFeature>} />
+          <Route path="charts" element={<RequireFeature feature="charts"><Charts /></RequireFeature>} />
+          <Route path="charts/new" element={<RequireFeature feature="charts"><ChartExplore /></RequireFeature>} />
+          <Route path="charts/:id" element={<RequireFeature feature="charts"><ChartExplore /></RequireFeature>} />
+          <Route path="dashboards" element={<RequireFeature feature="dashboards"><Dashboards /></RequireFeature>} />
+          <Route path="dashboards/:id" element={<RequireFeature feature="dashboards"><DashboardView /></RequireFeature>} />
+          <Route path="notebooks" element={<RequireFeature feature="notebooks"><Notebooks /></RequireFeature>} />
+          <Route path="notebooks/:id" element={<RequireFeature feature="notebooks"><NotebookPage /></RequireFeature>} />
+          <Route path="notebook-settings" element={<RequireFeature feature="notebooks"><NotebookSettings /></RequireFeature>} />
           {/* Engine connections now live under Workspace settings; keep the old
               path working by redirecting into that tab. */}
           <Route path="engines" element={<Navigate to="../settings/engines" replace />} />
@@ -105,7 +112,7 @@ function ExploreRoutes() {
             <Route path="engines" element={<DatabasesPage />} />
             <Route path="general" element={<WorkspaceGeneral />} />
           </Route>
-          <Route path="*" element={<Navigate to="sql-lab" replace />} />
+          <Route path="*" element={<Navigate to={defaultPath} replace />} />
         </Routes>
       </AppShell>
     </RequireWorkspace>
@@ -181,7 +188,7 @@ function ControlPlaneRoutes() {
 
 export default function App() {
   return (
-    <QueryClientProvider client={qc}>
+    <QueryClientProvider client={queryClient}>
       <ThemeProvider defaultTheme="system" storageKey="egret-theme">
         <BrowserRouter>
           <AuthProvider>

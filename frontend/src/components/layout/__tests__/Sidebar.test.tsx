@@ -8,12 +8,14 @@
  * Sidebar requires:
  *   - MemoryRouter (uses useLocation + useParams)
  *   - TooltipProvider (renders Radix Tooltip in collapsed mode)
+ *   - QueryClientProvider (useWorkspaceFeatures reads useMyWorkspaces)
  *   - collapsed: boolean + onToggle: () => void props
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthContext } from "@/auth/useAuth";
@@ -24,27 +26,44 @@ import type { Me } from "@/api/hooks";
 // call site; tests that care about permission filtering pass their own `me`.
 const ADMIN_ME: Me = { user_id: "1", email: "admin@example.com", platform_roles: ["platform_admin"], permissions: [] };
 
-function renderSidebar(initialPath: string, me: Me | null = ADMIN_ME) {
+/**
+ * `/me/workspaces` never resolves synchronously in these tests, so
+ * `useWorkspaceFeatures` sees it as "still loading" (`data === undefined`) and
+ * returns every feature key — matching the pre-entitlements behaviour the
+ * existing assertions below assume. Tests that care about feature filtering
+ * pass their own `fetchImpl` and `await waitFor(...)` for it to resolve.
+ */
+function renderSidebar(
+  initialPath: string,
+  me: Me | null = ADMIN_ME,
+  fetchImpl: () => Promise<Response> = () => new Promise(() => {}),
+) {
+  vi.spyOn(globalThis, "fetch").mockImplementation(fetchImpl);
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   // Mount Sidebar under routes that expose the :workspace param (mirroring the
   // app), so its `base` resolves to /explore/:ws or /control-plane.
   const sidebar = <Sidebar collapsed={false} onToggle={vi.fn()} />;
   return render(
-    <AuthContext.Provider value={{ me, isLoading: false }}>
-      <TooltipProvider>
-        <MemoryRouter initialEntries={[initialPath]}>
-          <Routes>
-            <Route path="/explore/:workspace/*" element={sidebar} />
-            <Route path="*" element={sidebar} />
-          </Routes>
-        </MemoryRouter>
-      </TooltipProvider>
-    </AuthContext.Provider>,
+    <QueryClientProvider client={qc}>
+      <AuthContext.Provider value={{ me, isLoading: false }}>
+        <TooltipProvider>
+          <MemoryRouter initialEntries={[initialPath]}>
+            <Routes>
+              <Route path="/explore/:workspace/*" element={sidebar} />
+              <Route path="*" element={sidebar} />
+            </Routes>
+          </MemoryRouter>
+        </TooltipProvider>
+      </AuthContext.Provider>
+    </QueryClientProvider>,
   );
 }
 
 beforeEach(() => {
   localStorage.clear(); // groups default to expanded
 });
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("Sidebar – workspace zones", () => {
   test("renders the four zone headings", () => {
@@ -271,5 +290,52 @@ describe("Sidebar – permission-based filtering", () => {
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
+  });
+});
+
+describe("Sidebar – workspace feature entitlements", () => {
+  const wsResponse = (features: string[]) =>
+    Promise.resolve(
+      new Response(
+        JSON.stringify([{ id: "1", slug: "eng", name: "Engineering", features }]),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+  test("while /me/workspaces is still loading, every Explore item shows (no flash)", () => {
+    // fetchImpl never resolves — the query stays pending for the whole test.
+    renderSidebar("/explore/eng/sql-lab");
+    for (const label of ["SQL Lab", "Datasets", "Charts", "Dashboards", "Notebooks"]) {
+      expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
+    }
+  });
+
+  test("hides a disabled item once the workspace's features load", async () => {
+    renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () => wsResponse(["sql_lab", "datasets", "charts", "dashboards"]));
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "Notebooks" })).not.toBeInTheDocument(),
+    );
+    for (const label of ["SQL Lab", "Datasets", "Charts", "Dashboards"]) {
+      expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
+    }
+  });
+
+  test("drops the Explore group entirely when every module is disabled", async () => {
+    renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () => wsResponse([]));
+    await waitFor(() => expect(screen.queryByText("Explore")).not.toBeInTheDocument());
+    for (const label of ["SQL Lab", "Datasets", "Charts", "Dashboards", "Notebooks"]) {
+      expect(screen.queryByRole("link", { name: label })).not.toBeInTheDocument();
+    }
+    // Unaffected groups (no `feature` on their items) still render.
+    expect(screen.getByText("Automate")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Workspace settings" })).toBeInTheDocument();
+  });
+
+  test("applies even to a platform_admin — entitlements have no bypass", async () => {
+    renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () => wsResponse(["sql_lab"]));
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "Notebooks" })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("link", { name: "SQL Lab" })).toBeInTheDocument();
   });
 });
