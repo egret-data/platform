@@ -220,6 +220,7 @@ submit-và-poll:
 | `routes/explore/ChartExplore.tsx` | xem trước chart chưa lưu khi đang soạn |
 | `api/useChartData.ts` | xem trước card ở **chế độ sửa** dashboard |
 | `api/useColumnValues.ts` | lấy giá trị distinct của cột cho dropdown filter |
+| `components/chart/DrillRecordsDialog.tsx` | drill từ chart xuống bản ghi gốc |
 
 Nên gate `POST /queries` theo `sql_lab` sẽ làm hỏng cả soạn chart, sửa dashboard,
 lẫn dropdown filter — ba thứ chẳng liên quan gì tới SQL Lab.
@@ -236,8 +237,13 @@ Cách sửa, nằm trong module `charts`:
   vì từ chart đã lưu: cùng chuỗi `compile_chart_sql` → `resolve_delegation` →
   `run_query`, cùng `chart_run_limits()`, `row_limit` lấy từ spec. Phân quyền là
   `CH_READ` ở mức workspace, đúng như `ch_data` mà nó thay thế.
-- Ba chỗ gọi ở trên hội tụ về nó, bỏ hẳn build-rồi-poll. `useBuildChartData` /
-  `useSubmitQuery` / `useQueryStatus` / `useResults` từ đó chỉ còn SQL Lab dùng.
+- Bốn chỗ gọi ở trên hội tụ về nó, bỏ hẳn build-rồi-poll. `useSubmitQuery` /
+  `useQueryStatus` / `useResults` từ đó chỉ còn SQL Lab dùng.
+- `ch_data` (`POST /charts/data`, chỉ build, trả `{sql, database_id}`) được giữ
+  lại. Nút "View SQL" của chart builder đọc từ đó, theo kiểu lazy. Nó thuộc quyền
+  `charts` chứ không phải `sql_lab` — đó mới là ranh giới đúng: thứ workspace mất
+  khi tắt SQL Lab là *công cụ* SQL tự do, không phải khả năng đọc SQL mà chính
+  chart của họ biên dịch ra.
 - Nhờ đó `POST /queries` trở thành SQL tự do và chỉ vậy, và gate nó theo `sql_lab`
   là trung thực.
 

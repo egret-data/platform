@@ -229,6 +229,7 @@ the generic `POST /api/ws/{workspace}/queries` endpoint — `POST /charts/data`
 | `routes/explore/ChartExplore.tsx` | preview an unsaved chart while authoring |
 | `api/useChartData.ts` | dashboard **edit-mode** card preview |
 | `api/useColumnValues.ts` | distinct column values for filter dropdowns |
+| `components/chart/DrillRecordsDialog.tsx` | drill from a chart to the underlying records |
 
 So gating `POST /queries` on `sql_lab` would break chart authoring, dashboard
 editing, and filter dropdowns — three things that have nothing to do with SQL Lab.
@@ -246,9 +247,14 @@ Fix, in the `charts` module:
   `run_query` chain, same `chart_run_limits()`, `row_limit` taken from the spec.
   Authorization is workspace-scoped `CH_READ`, exactly like the existing
   `ch_data` it replaces.
-- The three call sites above converge on it, dropping build-then-poll entirely.
-  `useBuildChartData` / `useSubmitQuery` / `useQueryStatus` / `useResults` are
-  then used by SQL Lab only.
+- The four call sites above converge on it, dropping build-then-poll entirely.
+  `useSubmitQuery` / `useQueryStatus` / `useResults` are then used by SQL Lab
+  only.
+- `ch_data` (`POST /charts/data`, build-only, returns `{sql, database_id}`)
+  stays. The chart builder's "View SQL" disclosure reads from it, lazily. It is
+  governed by the `charts` entitlement rather than `sql_lab`, which is the right
+  boundary: what a workspace loses with SQL Lab is the free-form SQL *tool*, not
+  the ability to read the SQL its own chart compiles to.
 - `POST /queries` therefore becomes free-form SQL and nothing else, and gating it
   on `sql_lab` is honest.
 
