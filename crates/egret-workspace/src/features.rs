@@ -106,9 +106,9 @@ pub const FEATURES: &[Feature] = &[
 ///
 /// `folders` and `objects` are content-type-neutral (a folder holds charts *and*
 /// notebooks; `objects` is the sharing surface) and are already authorized
-/// per-object by the PDP. The rest are workspace administration, which must keep
-/// working no matter which modules are switched off — otherwise an admin could
-/// lock themselves out of the settings that turn a module back on.
+/// per-object by the PDP. The rest are core workspace-management surfaces that
+/// belong to no single module, and so must not be held hostage to any module's
+/// on/off state.
 pub const UNGATED: &[&str] = &[
     "access-requests",
     "databases",
@@ -141,9 +141,23 @@ pub fn ws_path_suffix(path: &str) -> Option<&str> {
 ///
 /// When several rules match, the one with the longest `path` wins, so a specific
 /// sub-path can override a broader prefix without reordering the catalog.
+///
+/// An unmatched path deliberately returns `None` (fail-open): a route nobody
+/// classified must not be blocked in production. Task 3's OpenAPI coverage
+/// test is what catches a catalog omission, at CI time rather than at request
+/// time.
 pub fn gated_feature(suffix: &str, method: &str) -> Option<&'static str> {
+    gated_feature_in(FEATURES, suffix, method)
+}
+
+/// Same as [`gated_feature`], but over a caller-supplied catalog. Split out
+/// purely so tests can exercise the matching logic (in particular the
+/// longest-prefix tie-break) against small, deliberately overlapping
+/// catalogs, without the production `FEATURES` list needing an overlap of
+/// its own just to get coverage.
+fn gated_feature_in(features: &[Feature], suffix: &str, method: &str) -> Option<&'static str> {
     let mut best: Option<(usize, &'static str)> = None;
-    for feature in FEATURES {
+    for feature in features {
         for rule in feature.rules {
             let path_matches = match rule.kind {
                 Match::Exact => suffix == rule.path,
@@ -319,5 +333,40 @@ mod tests {
     fn catalog_keys_match_the_key_list() {
         let from_catalog: Vec<&str> = FEATURES.iter().map(|f| f.key).collect();
         assert_eq!(from_catalog, FEATURE_KEYS);
+    }
+
+    #[test]
+    fn an_unclassified_path_is_allowed_not_denied() {
+        // Deliberate fail-OPEN: a route nobody classified must not 403 in
+        // production. Task 3's coverage test over the OpenAPI document is what
+        // catches the omission, at CI time rather than at request time.
+        assert_eq!(gated_feature("something-nobody-declared", "GET"), None);
+        assert_eq!(gated_feature("something-nobody-declared/sub", "POST"), None);
+    }
+
+    #[test]
+    fn longest_matching_prefix_wins() {
+        // The production catalog has no two rules sharing a first segment, so
+        // this exercises the tie-break against a small local catalog that
+        // deliberately overlaps: "a/b" is more specific than "a" and must win.
+        const OVERLAPPING: &[Feature] = &[
+            Feature {
+                key: "broad",
+                label: "Broad",
+                description: "",
+                rules: &[prefix("a")],
+            },
+            Feature {
+                key: "narrow",
+                label: "Narrow",
+                description: "",
+                rules: &[prefix("a/b")],
+            },
+        ];
+        assert_eq!(
+            gated_feature_in(OVERLAPPING, "a/b/c", "GET"),
+            Some("narrow")
+        );
+        assert_eq!(gated_feature_in(OVERLAPPING, "a/x", "GET"), Some("broad"));
     }
 }
