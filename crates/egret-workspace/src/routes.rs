@@ -561,7 +561,7 @@ async fn set_ws_features(
 
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(p.user_id.0),
-        impersonator: None,
+        impersonator: p.impersonator.as_ref().map(|i| i.user_id.0),
         workspace_id: Some(id),
         action: "workspace.features.update".into(),
         resource_type: "workspace".into(),

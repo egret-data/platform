@@ -27,6 +27,28 @@ pub enum AuditEvent {
     },
 }
 
+/// Build a `Mutation` event from a request principal, stamping the impersonator
+/// automatically when the request is an impersonation. Handlers should build
+/// mutation audit events through this rather than the struct literal, so the
+/// both-parties rule holds everywhere by construction.
+pub fn mutation_for(
+    principal: &egret_core::Principal,
+    action: impl Into<String>,
+    resource_type: impl Into<String>,
+    resource_id: Option<String>,
+    detail: serde_json::Value,
+) -> AuditEvent {
+    AuditEvent::Mutation {
+        actor: Some(principal.user_id.0),
+        impersonator: principal.impersonator.as_ref().map(|i| i.user_id.0),
+        workspace_id: None,
+        action: action.into(),
+        resource_type: resource_type.into(),
+        resource_id,
+        detail,
+    }
+}
+
 /// Non-blocking best-effort sink. `emit` never awaits or fails the caller.
 #[derive(Clone)]
 pub struct AuditSink {
