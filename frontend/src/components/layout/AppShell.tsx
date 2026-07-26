@@ -1,6 +1,7 @@
 import { useState, useEffect, type ReactNode } from "react";
 import { Header } from "./Header";
 import { Sidebar } from "./Sidebar";
+import { ImpersonationBanner } from "./ImpersonationBanner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 const STORAGE_KEY = "egret:sidebar-collapsed";
@@ -21,6 +22,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <TooltipProvider delayDuration={300}>
       <div className="flex h-screen flex-col bg-background">
+        <ImpersonationBanner />
         <Header />
         <div className="flex min-h-0 flex-1">
           <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
