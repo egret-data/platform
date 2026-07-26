@@ -165,6 +165,9 @@ pub const UNGATED: &[&str] = &[
     "databases",
     "engines",
     "folders",
+    // Starting an impersonation is a ws_admin support action, not a data module —
+    // it stays reachable regardless of which feature modules a workspace has.
+    "impersonate",
     "members",
     "objects",
     "roles",
