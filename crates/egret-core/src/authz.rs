@@ -202,6 +202,7 @@ mod require_tests {
             platform_roles: vec![],
             permissions: vec![],
             group_ids: vec![crate::ids::GroupId::new()],
+            impersonator: None,
         }
     }
 

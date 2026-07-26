@@ -108,6 +108,7 @@ impl SessionService {
             platform_roles,
             permissions,
             group_ids,
+            impersonator: None,
         }))
     }
 
