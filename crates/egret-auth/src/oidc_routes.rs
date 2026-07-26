@@ -228,16 +228,23 @@ async fn oidc_callback(
 /// 1. require it to equal the admin who INITIATED the step-up (sealed in
 ///    `intent.impersonator_id`) — a *different* IdP login must not complete
 ///    someone else's impersonation intent;
-/// 2. re-run the shared target guards (not-self / reason / target-exists /
-///    target-not-admin), identical to the platform start endpoint;
-/// 3. mint a fresh session for the admin and attach the overlay to it (binding the
+/// 2. re-verify the authenticated admin STILL holds the authority the scope
+///    requires — the start-time check is baked into the sealed `impersonator_id`,
+///    but the role could have been revoked between start and this callback (TOCTOU);
+/// 3. re-run the shared target guards (not-self / target-exists / target-not-admin),
+///    identical to the platform start endpoint;
+/// 4. mint a fresh session for the admin and attach the overlay to it (binding the
 ///    overlay to a session we KNOW belongs to the just-authenticated admin, rather
 ///    than trusting a pre-existing session cookie);
-/// 4. audit; and
-/// 5. redirect into the app carrying that (now-overlaid) session.
+/// 5. audit; and
+/// 6. redirect into the app carrying that (now-overlaid) session.
 ///
-/// Any failure clears the state cookie and writes NO overlay.
-async fn complete_impersonation_step_up(
+/// Any failure clears the state cookie and writes NO overlay (and no session).
+///
+/// `pub` so the callback security paths (same-admin + authority re-check) can be
+/// tested at this boundary without a full mock token-exchange; the HTTP callback
+/// calls it with the user id `provision_and_sync` resolved from the verified token.
+pub async fn complete_impersonation_step_up(
     st: &OidcRoutesState,
     jar: PrivateCookieJar,
     authenticated: UserId,
@@ -251,9 +258,36 @@ async fn complete_impersonation_step_up(
         )
             .into_response();
     }
+    // (2) TOCTOU authority re-check: the authority proven at START time is baked
+    //     into the sealed `impersonator_id`, but the admin's grant could have been
+    //     revoked in the seconds between start and this callback. Re-verify the
+    //     authenticated admin STILL holds the authority the scope requires. Fails
+    //     closed, identical to the same-admin-mismatch path above.
+    let authority_ok = match intent.workspace_id {
+        // Platform scope: must still be a platform_admin.
+        None => match st.sessions.platform_roles_of(authenticated).await {
+            Ok(roles) => roles.iter().any(|r| r == "platform_admin"),
+            Err(_) => false,
+        },
+        // Workspace scope (Task 9's path, which also completes through this
+        // callback). The `ws_admin`-on-workspace authority check lives in
+        // egret-workspace and isn't cleanly reachable from egret-auth yet, so this
+        // branch FAILS CLOSED for now: no workspace-scoped step-up can complete
+        // until Task 9 wires the ws start endpoint and replaces this with a real
+        // `ws_admin`-on-`ws` re-check. (Nothing sets `workspace_id` today, so this
+        // branch is currently unreachable in production.)
+        // TODO(task-9): enforce `ws_admin` on `intent.workspace_id` here.
+        Some(_ws) => false,
+    };
+    if !authority_ok {
+        return (
+            jar.remove(clear_state_cookie()),
+            (StatusCode::FORBIDDEN, "step-up authority revoked"),
+        )
+            .into_response();
+    }
     let target = UserId(intent.target_user_id);
-    // (2) Re-run the shared target guards. The initiator is already known to be a
-    //     platform admin (checked at start time); here we re-validate the target.
+    // (3) Re-run the shared target guards (not-self / target-exists / not-admin).
     if let Err(e) = validate_impersonation_target(
         &st.users,
         &st.sessions,
@@ -269,7 +303,7 @@ async fn complete_impersonation_step_up(
         )
             .into_response();
     }
-    // (3) Mint a fresh admin session and attach the overlay to it.
+    // (4) Mint a fresh admin session and attach the overlay to it.
     let issued = match st.sessions.create(authenticated, "", "").await {
         Ok(i) => i,
         Err(_) => {
@@ -310,7 +344,7 @@ async fn complete_impersonation_step_up(
         )
             .into_response();
     }
-    // (4) Audit.
+    // (5) Audit.
     st.audit.emit(AuditEvent::Mutation {
         actor: Some(authenticated.0),
         impersonator: Some(authenticated.0),
@@ -327,7 +361,7 @@ async fn complete_impersonation_step_up(
             "step_up": "oidc",
         }),
     });
-    // (5) Redirect into the app carrying the new admin session (now overlaid).
+    // (6) Redirect into the app carrying the new admin session (now overlaid).
     let secure = st.config.session.secure;
     let max_age = st.config.session.absolute_ttl_hours as i64 * 3600;
     let csrf = generate_token();

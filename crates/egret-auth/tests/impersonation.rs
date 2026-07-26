@@ -946,12 +946,16 @@ mod http {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["code"], "oidc_step_up");
+        let authorize_url = body["authorize_url"].as_str().unwrap_or("");
         assert!(
-            body["authorize_url"]
-                .as_str()
-                .map(|s| !s.is_empty())
-                .unwrap_or(false),
+            !authorize_url.is_empty(),
             "authorize_url must be present and non-empty, got {body:?}"
+        );
+        // The step-up must force a fresh IdP credential prompt, not reuse an
+        // existing SSO session — otherwise it isn't a re-authentication at all.
+        assert!(
+            authorize_url.contains("prompt=login"),
+            "authorize_url must carry prompt=login, got {authorize_url}"
         );
 
         // No overlay was written — the overlay is created only by the callback.
@@ -959,6 +963,193 @@ mod http {
             active_overlay_count(&db, admin).await,
             0,
             "the 409 step-up must not write an overlay"
+        );
+    }
+
+    // ── Task 8: OIDC callback security paths ─────────────────────────────────
+    //
+    // These exercise `complete_impersonation_step_up` — the callback's core — at
+    // its boundary, passing the *already-resolved* authenticated user id (what the
+    // real callback obtains from `provision_and_sync` after verifying the token).
+    // This faithfully tests the same-admin check and the TOCTOU authority re-check
+    // without standing up a full mock token-exchange (a signed id_token that lines
+    // up nonce/PKCE/aud through `oidc.finish` needs a real IdP — see
+    // `oidc_keycloak.rs`). The end-to-end code→token→finish round-trip is covered
+    // by the Task-12 e2e.
+
+    /// Build an `OidcRoutesState` sharing `db` (with a throwaway mock OIDC service;
+    /// `complete_impersonation_step_up` never touches `oidc`, but the field is
+    /// required to construct the state).
+    async fn oidc_routes_state(db: &Db) -> egret_auth::oidc_routes::OidcRoutesState {
+        egret_auth::oidc_routes::OidcRoutesState {
+            oidc: discover_mock_oidc().await,
+            users: UserRepo::new(db.clone()),
+            groups: egret_auth::groups::GroupRepo::new(db.clone()),
+            sessions: SessionService::new(
+                db.clone(),
+                chrono::Duration::hours(24),
+                chrono::Duration::minutes(60),
+            ),
+            config: Config::default(),
+            cookie_key: axum_extra::extract::cookie::Key::generate(),
+            impersonations: ImpersonationRepo::new(db.clone()),
+            audit: egret_audit::AuditSink::new(16).0,
+        }
+    }
+
+    /// Seed an OIDC user (unique sub + email); return its id.
+    async fn seed_oidc_user(db: &Db, tag: &str) -> UserId {
+        UserRepo::new(db.clone())
+            .insert_oidc(
+                &format!("{tag}-sub-{}", uuid::Uuid::new_v4()),
+                &unique_email(tag),
+                "O",
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn call_step_up(
+        st: &egret_auth::oidc_routes::OidcRoutesState,
+        authenticated: UserId,
+        intent: egret_auth::oidc_cookie::ImpersonateIntent,
+    ) -> axum::response::Response {
+        let jar = axum_extra::extract::cookie::PrivateCookieJar::new(
+            axum_extra::extract::cookie::Key::generate(),
+        );
+        egret_auth::oidc_routes::complete_impersonation_step_up(st, jar, authenticated, intent)
+            .await
+    }
+
+    /// The single most important property: a DIFFERENT admin completing the
+    /// step-up (fresh auth resolves to B, but the sealed intent named A) is
+    /// rejected — 403, and NO overlay for either party.
+    #[tokio::test]
+    async fn oidc_callback_rejects_different_admin_and_writes_nothing() {
+        let Some(db) = connect().await else {
+            eprintln!("DATABASE_URL unset — skipping");
+            return;
+        };
+        let st = oidc_routes_state(&db).await;
+        let a = seed_oidc_user(&db, "adminA").await;
+        grant_platform_admin(&db, a).await;
+        let b = seed_oidc_user(&db, "adminB").await;
+        let (target, _te) = seed_local(&db).await;
+
+        let intent = egret_auth::oidc_cookie::ImpersonateIntent {
+            impersonator_id: a.0, // sealed initiator = A
+            target_user_id: target.0,
+            reason: "support ticket".into(),
+            workspace_id: None,
+        };
+        // Complete as B — must be rejected.
+        let resp = call_step_up(&st, b, intent).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a different admin must not complete A's intent"
+        );
+        assert_eq!(active_overlay_count(&db, a).await, 0);
+        assert_eq!(active_overlay_count(&db, b).await, 0);
+    }
+
+    /// TOCTOU: the same admin completes the step-up, but their `platform_admin`
+    /// grant was revoked between start and callback — 403, no overlay.
+    #[tokio::test]
+    async fn oidc_callback_rejects_revoked_platform_admin() {
+        let Some(db) = connect().await else {
+            eprintln!("DATABASE_URL unset — skipping");
+            return;
+        };
+        let st = oidc_routes_state(&db).await;
+        // `a` is the initiator AND the authenticated user (same admin), but is NOT
+        // (or no longer) a platform_admin — the callback re-check must fail closed.
+        let a = seed_oidc_user(&db, "revoked").await;
+        let (target, _te) = seed_local(&db).await;
+
+        let intent = egret_auth::oidc_cookie::ImpersonateIntent {
+            impersonator_id: a.0,
+            target_user_id: target.0,
+            reason: "support ticket".into(),
+            workspace_id: None,
+        };
+        let resp = call_step_up(&st, a, intent).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a revoked platform_admin must not complete the step-up"
+        );
+        assert_eq!(active_overlay_count(&db, a).await, 0);
+    }
+
+    /// Extract the (plaintext) `egret_session` value from a response's Set-Cookie.
+    fn session_token_from_response(resp: &axum::response::Response) -> String {
+        for v in resp.headers().get_all("set-cookie").iter() {
+            let s = v.to_str().unwrap();
+            let kv = s.split(';').next().unwrap();
+            if let Some(rest) = kv.strip_prefix("egret_session=") {
+                return rest.to_string();
+            }
+        }
+        panic!("no egret_session set-cookie in response");
+    }
+
+    /// Happy path: the same admin, still a platform_admin, with a valid target →
+    /// overlay created on a fresh admin session, and `/me` over that session
+    /// resolves to the target with `impersonating` populated.
+    #[tokio::test]
+    async fn oidc_callback_same_admin_creates_overlay_and_me_shows_it() {
+        let Some(db) = connect().await else {
+            eprintln!("DATABASE_URL unset — skipping");
+            return;
+        };
+        let st = oidc_routes_state(&db).await;
+        let a = seed_oidc_user(&db, "adminOk").await;
+        grant_platform_admin(&db, a).await;
+        let (target, target_email) = seed_local(&db).await;
+
+        let intent = egret_auth::oidc_cookie::ImpersonateIntent {
+            impersonator_id: a.0,
+            target_user_id: target.0,
+            reason: "support ticket".into(),
+            workspace_id: None,
+        };
+        let resp = call_step_up(&st, a, intent).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::SEE_OTHER,
+            "a completed step-up redirects into the app"
+        );
+        // Exactly one overlay for A, pointed at the target.
+        assert_eq!(active_overlay_count(&db, a).await, 1);
+        let overlay_target: uuid::Uuid = sqlx::query_scalar(
+            "SELECT target_user_id FROM impersonations WHERE impersonator_id = $1",
+        )
+        .bind(a.0)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(overlay_target, target.0);
+
+        // The fresh admin session (carried by the redirect) now resolves to the
+        // target under an overlay: `/me` shows impersonating.
+        let token = session_token_from_response(&resp);
+        let cookie = format!("egret_session={token}");
+        let m = me(&app(&db), &cookie).await;
+        assert_eq!(
+            m["email"].as_str().unwrap().to_lowercase(),
+            target_email.to_lowercase(),
+            "me resolves to the target under the overlay"
+        );
+        assert!(
+            !m["impersonating"].is_null(),
+            "me must report the active impersonation"
+        );
+        assert_eq!(
+            m["impersonating"]["impersonator"]["user_id"]
+                .as_str()
+                .unwrap(),
+            a.0.to_string()
         );
     }
 }
