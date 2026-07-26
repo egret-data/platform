@@ -12,6 +12,7 @@ pub struct SessionService {
     db: Db,
     absolute_ttl: Duration,
     idle_ttl: Duration,
+    impersonations: crate::impersonation::ImpersonationRepo,
 }
 
 /// What `create` returns: the raw token (for the cookie) plus expiry timestamps.
@@ -23,10 +24,12 @@ pub struct IssuedSession {
 
 impl SessionService {
     pub fn new(db: Db, absolute_ttl: Duration, idle_ttl: Duration) -> Self {
+        let impersonations = crate::impersonation::ImpersonationRepo::new(db.clone());
         Self {
             db,
             absolute_ttl,
             idle_ttl,
+            impersonations,
         }
     }
 
@@ -72,7 +75,7 @@ impl SessionService {
         let now = Utc::now();
 
         let row = sqlx::query_as::<_, ValidateRow>(
-            "SELECT s.user_id, u.email, u.status \
+            "SELECT s.id AS session_id, s.user_id, u.email, u.status \
              FROM sessions s JOIN users u ON u.id = s.user_id \
              WHERE s.token_hash = $1 AND s.absolute_expires_at > $2 AND s.idle_expires_at > $2",
         )
@@ -98,6 +101,49 @@ impl SessionService {
         .execute(&self.db.pool)
         .await
         .map_err(db_err)?;
+
+        // Impersonation overlay: if this admin session is currently impersonating,
+        // resolve to the TARGET's principal and carry the admin as `impersonator`.
+        // Only ever consult the overlay for THIS admin session's own row
+        // (`row.session_id`) — never the target's. Expired overlays are ignored by
+        // `active_for_session` (auto-return to admin), so this branch only runs for a
+        // live overlay. If the target user is not active (disabled since the overlay
+        // was started), the overlay is treated as inert and we fall through to the
+        // admin principal — impersonating a disabled user must not resolve.
+        if let Some(ov) = self
+            .impersonations
+            .active_for_session(row.session_id)
+            .await?
+        {
+            let target = UserId(ov.target_user_id);
+            let target_row: Option<(String, String)> =
+                sqlx::query_as("SELECT email, status FROM users WHERE id = $1")
+                    .bind(ov.target_user_id)
+                    .fetch_optional(&self.db.pool)
+                    .await
+                    .map_err(db_err)?;
+            if let Some((target_email, target_status)) = target_row {
+                if target_status == "active" {
+                    // `impersonator_id` == the session owner (`row.user_id`), by
+                    // construction — the overlay is always attached to the admin's own
+                    // session — so `row.email` is the impersonator's email and no extra
+                    // query is needed.
+                    return Ok(Some(Principal {
+                        user_id: target,
+                        email: target_email,
+                        platform_roles: self.platform_roles(target).await?,
+                        permissions: self.permissions(target).await?,
+                        group_ids: self.group_ids(target).await?,
+                        impersonator: Some(egret_core::context::Impersonator {
+                            user_id: UserId(ov.impersonator_id),
+                            email: row.email.clone(),
+                            workspace_scope: ov.workspace_scope_id.map(egret_core::WorkspaceId),
+                            expires_at: ov.expires_at,
+                        }),
+                    }));
+                }
+            }
+        }
 
         let platform_roles = self.platform_roles(UserId(row.user_id)).await?;
         let permissions = self.permissions(UserId(row.user_id)).await?;
@@ -198,6 +244,7 @@ impl SessionService {
 
 #[derive(sqlx::FromRow)]
 struct ValidateRow {
+    session_id: Uuid,
     user_id: Uuid,
     email: String,
     status: String,
