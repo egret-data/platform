@@ -39,8 +39,23 @@ impl ImpersonationRepo {
     }
 
     /// Insert an overlay. The unique index on `admin_session_id` rejects a second
-    /// active overlay on the same session (→ `Conflict`), which enforces no-nesting.
+    /// ACTIVE overlay on the same session (→ `Conflict`), which enforces no-nesting.
+    /// A stale, already-expired overlay for this session is reaped first (in the
+    /// same transaction as the insert) so a dead row never blocks a fresh start —
+    /// `start` doesn't depend on `active_for_session` having run first to clean it up.
     pub async fn start(&self, n: NewImpersonation) -> Result<()> {
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        // Reap a dead overlay for this session so a stale expired row doesn't block
+        // a fresh start. This deletes ONLY expired rows — an ACTIVE overlay is left
+        // untouched, so the INSERT below still hits the unique index and returns
+        // Conflict, preserving no-nesting.
+        sqlx::query(
+            "DELETE FROM impersonations WHERE admin_session_id = $1 AND expires_at <= now()",
+        )
+        .bind(n.admin_session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
         let res = sqlx::query(
             "INSERT INTO impersonations \
              (admin_session_id, impersonator_id, target_user_id, workspace_scope_id, reason, expires_at) \
@@ -52,10 +67,14 @@ impl ImpersonationRepo {
         .bind(n.workspace_scope.map(|w| w.0))
         .bind(&n.reason)
         .bind(n.ttl_minutes)
-        .execute(&self.db.pool)
+        .execute(&mut *tx)
         .await;
+        // Map the unique-violation on an ACTIVE row to Conflict, same as before.
         match res {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                tx.commit().await.map_err(db_err)?;
+                Ok(())
+            }
             Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(Error::Conflict(
                 "session already has an active impersonation overlay".into(),
             )),

@@ -143,3 +143,57 @@ async fn start_twice_on_one_session_is_rejected() {
         "unique index blocks a second overlay"
     );
 }
+
+/// `start` must not depend on `active_for_session` having run first to reap a
+/// dead overlay: a session whose overlay merely EXPIRED (never explicitly
+/// exited) must accept a fresh `start` on its own.
+#[tokio::test]
+async fn start_reaps_expired_overlay_on_same_session() {
+    let Some(db) = connect().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    let repo = ImpersonationRepo::new(db.clone());
+    let admin = seed_user(&db).await;
+    let t1 = seed_user(&db).await;
+    let t2 = seed_user(&db).await;
+    let sess = seed_session(&db, admin).await;
+
+    repo.start(NewImpersonation {
+        admin_session_id: sess,
+        impersonator_id: admin,
+        target_user_id: t1,
+        workspace_scope: None,
+        reason: "x".into(),
+        ttl_minutes: 30,
+    })
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE impersonations SET expires_at = now() - interval '1 minute' WHERE admin_session_id = $1",
+    )
+    .bind(sess)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    // No `active_for_session` call in between — `start` alone must reap the
+    // dead row and succeed with a different target.
+    repo.start(NewImpersonation {
+        admin_session_id: sess,
+        impersonator_id: admin,
+        target_user_id: t2,
+        workspace_scope: None,
+        reason: "y".into(),
+        ttl_minutes: 30,
+    })
+    .await
+    .expect("a fresh start must succeed once the old overlay has expired");
+
+    let active = repo
+        .active_for_session(sess)
+        .await
+        .unwrap()
+        .expect("active");
+    assert_eq!(active.target_user_id, t2.0);
+}
