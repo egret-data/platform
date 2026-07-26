@@ -10,6 +10,25 @@ if (typeof globalThis.ResizeObserver === "undefined") {
   };
 }
 
+// jsdom lacks matchMedia; ThemeProvider (system theme) and Header read it, so any
+// test that renders those — or the whole App — needs it. Defaults to "no match"
+// (light theme, no reduced-motion).
+if (typeof window !== "undefined" && !window.matchMedia) {
+  window.matchMedia = (query: string) =>
+    ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent() {
+        return false;
+      },
+    }) as MediaQueryList;
+}
+
 // jsdom lacks these; Radix DropdownMenu/Select need them to open via pointer events.
 beforeEach(() => {
   if (!HTMLElement.prototype.hasPointerCapture) HTMLElement.prototype.hasPointerCapture = () => false;
