@@ -21,6 +21,7 @@ fn mutation_from_impersonated_principal_records_both_parties() {
     };
     let ev = egret_audit::mutation_for(
         &principal,
+        None,
         "notebook.update",
         "notebook",
         Some("n1".into()),
@@ -56,7 +57,7 @@ fn mutation_from_ordinary_principal_has_no_impersonator() {
         group_ids: vec![],
         impersonator: None,
     };
-    let ev = egret_audit::mutation_for(&principal, "a", "t", None, serde_json::json!({}));
+    let ev = egret_audit::mutation_for(&principal, None, "a", "t", None, serde_json::json!({}));
     match ev {
         egret_audit::AuditEvent::Mutation {
             actor,
@@ -65,6 +66,27 @@ fn mutation_from_ordinary_principal_has_no_impersonator() {
         } => {
             assert_eq!(actor, Some(uid));
             assert_eq!(impersonator, None);
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn mutation_for_carries_the_workspace_id() {
+    let uid = uuid::Uuid::new_v4();
+    let ws = uuid::Uuid::new_v4();
+    let principal = egret_core::Principal {
+        user_id: egret_core::UserId(uid),
+        email: "u@x".into(),
+        platform_roles: vec![],
+        permissions: vec![],
+        group_ids: vec![],
+        impersonator: None,
+    };
+    let ev = egret_audit::mutation_for(&principal, Some(ws), "a", "t", None, serde_json::json!({}));
+    match ev {
+        egret_audit::AuditEvent::Mutation { workspace_id, .. } => {
+            assert_eq!(workspace_id, Some(ws));
         }
         _ => panic!(),
     }

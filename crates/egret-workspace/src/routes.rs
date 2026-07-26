@@ -432,15 +432,14 @@ async fn transfer_owner(
         .await
         .map_err(AuthError)?;
 
-    st.audit.emit(egret_audit::AuditEvent::Mutation {
-        actor: Some(p.user_id.0),
-        impersonator: None,
-        workspace_id: Some(id),
-        action: "workspace:transfer_owner".into(),
-        resource_type: "workspace".into(),
-        resource_id: Some(id.to_string()),
-        detail: serde_json::json!({ "new_owner_id": new_owner }),
-    });
+    st.audit.emit(egret_audit::mutation_for(
+        &p,
+        Some(id),
+        "workspace:transfer_owner",
+        "workspace",
+        Some(id.to_string()),
+        serde_json::json!({ "new_owner_id": new_owner }),
+    ));
 
     let ws = st
         .workspaces
@@ -573,18 +572,17 @@ async fn set_ws_features(
         .await
         .map_err(AuthError)?;
 
-    st.audit.emit(egret_audit::AuditEvent::Mutation {
-        actor: Some(p.user_id.0),
-        impersonator: p.impersonator.as_ref().map(|i| i.user_id.0),
-        workspace_id: Some(id),
-        action: "workspace.features.update".into(),
-        resource_type: "workspace".into(),
-        resource_id: Some(id.to_string()),
-        detail: serde_json::json!({
+    st.audit.emit(egret_audit::mutation_for(
+        &p,
+        Some(id),
+        "workspace.features.update",
+        "workspace",
+        Some(id.to_string()),
+        serde_json::json!({
             "before": before,
             "after": after,
         }),
-    });
+    ));
 
     Ok(Json(features_dto(&after)))
 }
@@ -990,15 +988,14 @@ async fn set_platform_roles(
         .replace_platform_roles(UserId(id), &body.roles)
         .await
         .map_err(AuthError)?;
-    st.audit.emit(egret_audit::AuditEvent::Mutation {
-        actor: Some(p.user_id.0),
-        impersonator: None,
-        workspace_id: None,
-        action: "platform_roles:set".into(),
-        resource_type: "grant".into(),
-        resource_id: Some(id.to_string()),
-        detail: serde_json::json!({ "user_id": id, "roles": body.roles }),
-    });
+    st.audit.emit(egret_audit::mutation_for(
+        &p,
+        None,
+        "platform_roles:set",
+        "grant",
+        Some(id.to_string()),
+        serde_json::json!({ "user_id": id, "roles": body.roles }),
+    ));
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -1320,19 +1317,18 @@ async fn add_member(
         )
         .await
         .map_err(AuthError)?;
-    st.audit.emit(egret_audit::AuditEvent::Mutation {
-        actor: Some(ctx.principal.user_id.0),
-        impersonator: None,
-        workspace_id: Some(ctx.workspace_id.0),
-        action: "member:add".into(),
-        resource_type: "grant".into(),
-        resource_id: None,
-        detail: serde_json::json!({
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "member:add",
+        "grant",
+        None,
+        serde_json::json!({
             "principal_type": body.principal_type,
             "principal_id": pid,
             "role": body.role,
         }),
-    });
+    ));
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -1384,18 +1380,17 @@ async fn remove_member(
         .remove(ctx.workspace_id, &ptype, pid)
         .await
         .map_err(AuthError)?;
-    st.audit.emit(egret_audit::AuditEvent::Mutation {
-        actor: Some(ctx.principal.user_id.0),
-        impersonator: None,
-        workspace_id: Some(ctx.workspace_id.0),
-        action: "member:remove".into(),
-        resource_type: "grant".into(),
-        resource_id: None,
-        detail: serde_json::json!({
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "member:remove",
+        "grant",
+        None,
+        serde_json::json!({
             "principal_type": ptype,
             "principal_id": pid,
         }),
-    });
+    ));
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -1638,18 +1633,17 @@ async fn approve_access_request(
         )
         .await
         .map_err(AuthError)?;
-    st.audit.emit(egret_audit::AuditEvent::Mutation {
-        actor: Some(ctx.principal.user_id.0),
-        impersonator: None,
-        workspace_id: Some(ctx.workspace_id.0),
-        action: "access_request:approve".into(),
-        resource_type: "access_request".into(),
-        resource_id: Some(id.to_string()),
-        detail: serde_json::json!({
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "access_request:approve",
+        "access_request",
+        Some(id.to_string()),
+        serde_json::json!({
             "role": body.role,
             "expires_at": body.expires_at.map(|t| t.to_rfc3339()),
         }),
-    });
+    ));
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -1690,15 +1684,14 @@ async fn deny_access_request(
         )
         .await
         .map_err(AuthError)?;
-    st.audit.emit(egret_audit::AuditEvent::Mutation {
-        actor: Some(ctx.principal.user_id.0),
-        impersonator: None,
-        workspace_id: Some(ctx.workspace_id.0),
-        action: "access_request:deny".into(),
-        resource_type: "access_request".into(),
-        resource_id: Some(id.to_string()),
-        detail: serde_json::json!({ "note": body.note }),
-    });
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "access_request:deny",
+        "access_request",
+        Some(id.to_string()),
+        serde_json::json!({ "note": body.note }),
+    ));
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

@@ -33,6 +33,7 @@ pub enum AuditEvent {
 /// both-parties rule holds everywhere by construction.
 pub fn mutation_for(
     principal: &egret_core::Principal,
+    workspace_id: Option<uuid::Uuid>,
     action: impl Into<String>,
     resource_type: impl Into<String>,
     resource_id: Option<String>,
@@ -41,7 +42,7 @@ pub fn mutation_for(
     AuditEvent::Mutation {
         actor: Some(principal.user_id.0),
         impersonator: principal.impersonator.as_ref().map(|i| i.user_id.0),
-        workspace_id: None,
+        workspace_id,
         action: action.into(),
         resource_type: resource_type.into(),
         resource_id,
