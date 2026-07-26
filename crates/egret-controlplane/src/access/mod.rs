@@ -419,6 +419,7 @@ async fn assign_user_role(
     st.roles.assign("user", id, body.role_id).await?;
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(p.user_id.0),
+        impersonator: None,
         workspace_id: None,
         action: "role:assign".into(),
         resource_type: "grant".into(),
@@ -459,6 +460,7 @@ async fn unassign_user_role(
     st.roles.unassign("user", id, role_id).await?;
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(p.user_id.0),
+        impersonator: None,
         workspace_id: None,
         action: "role:unassign".into(),
         resource_type: "grant".into(),
@@ -739,6 +741,7 @@ async fn assign_group_role(
     st.roles.assign("group", id, body.role_id).await?;
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(p.user_id.0),
+        impersonator: None,
         workspace_id: None,
         action: "role:assign".into(),
         resource_type: "grant".into(),
@@ -779,6 +782,7 @@ async fn unassign_group_role(
     st.roles.unassign("group", id, role_id).await?;
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(p.user_id.0),
+        impersonator: None,
         workspace_id: None,
         action: "role:unassign".into(),
         resource_type: "grant".into(),

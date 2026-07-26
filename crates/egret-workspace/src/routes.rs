@@ -420,6 +420,7 @@ async fn transfer_owner(
 
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(p.user_id.0),
+        impersonator: None,
         workspace_id: Some(id),
         action: "workspace:transfer_owner".into(),
         resource_type: "workspace".into(),
@@ -560,6 +561,7 @@ async fn set_ws_features(
 
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(p.user_id.0),
+        impersonator: None,
         workspace_id: Some(id),
         action: "workspace.features.update".into(),
         resource_type: "workspace".into(),
@@ -967,6 +969,7 @@ async fn set_platform_roles(
         .map_err(AuthError)?;
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(p.user_id.0),
+        impersonator: None,
         workspace_id: None,
         action: "platform_roles:set".into(),
         resource_type: "grant".into(),
@@ -1121,6 +1124,7 @@ async fn add_member(
         .map_err(AuthError)?;
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(ctx.principal.user_id.0),
+        impersonator: None,
         workspace_id: Some(ctx.workspace_id.0),
         action: "member:add".into(),
         resource_type: "grant".into(),
@@ -1184,6 +1188,7 @@ async fn remove_member(
         .map_err(AuthError)?;
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(ctx.principal.user_id.0),
+        impersonator: None,
         workspace_id: Some(ctx.workspace_id.0),
         action: "member:remove".into(),
         resource_type: "grant".into(),
@@ -1437,6 +1442,7 @@ async fn approve_access_request(
         .map_err(AuthError)?;
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(ctx.principal.user_id.0),
+        impersonator: None,
         workspace_id: Some(ctx.workspace_id.0),
         action: "access_request:approve".into(),
         resource_type: "access_request".into(),
@@ -1488,6 +1494,7 @@ async fn deny_access_request(
         .map_err(AuthError)?;
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(ctx.principal.user_id.0),
+        impersonator: None,
         workspace_id: Some(ctx.workspace_id.0),
         action: "access_request:deny".into(),
         resource_type: "access_request".into(),

@@ -354,6 +354,7 @@ async fn assign_resource_tag(
         .await?;
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(p.user_id.0),
+        impersonator: None,
         workspace_id: None,
         action: "tag:assign".into(),
         resource_type: "catalog".into(),
@@ -392,6 +393,7 @@ async fn unassign_resource_tag(
         .await?;
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(p.user_id.0),
+        impersonator: None,
         workspace_id: None,
         action: "tag:unassign".into(),
         resource_type: "catalog".into(),

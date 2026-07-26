@@ -311,6 +311,7 @@ async fn grant_put(
 
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(ctx.principal.user_id.0),
+        impersonator: None,
         workspace_id: Some(ctx.workspace_id.0),
         action: "object_grant:put".into(),
         resource_type: "object".into(),
@@ -376,6 +377,7 @@ async fn grant_delete(
     .map_err(|e| BiApiError::from(crate::BiError::Db(e)))?;
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(ctx.principal.user_id.0),
+        impersonator: None,
         workspace_id: Some(ctx.workspace_id.0),
         action: "object_grant:delete".into(),
         resource_type: "object".into(),
@@ -532,6 +534,7 @@ async fn object_tag_assign(
         .map_err(BiApiError::from)?;
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(ctx.principal.user_id.0),
+        impersonator: None,
         workspace_id: Some(ctx.workspace_id.0),
         action: "tag:assign".into(),
         resource_type: "object".into(),
@@ -575,6 +578,7 @@ async fn object_tag_unassign(
         .map_err(BiApiError::from)?;
     st.audit.emit(egret_audit::AuditEvent::Mutation {
         actor: Some(ctx.principal.user_id.0),
+        impersonator: None,
         workspace_id: Some(ctx.workspace_id.0),
         action: "tag:unassign".into(),
         resource_type: "object".into(),

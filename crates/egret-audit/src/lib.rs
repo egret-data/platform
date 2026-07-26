@@ -18,6 +18,7 @@ pub enum AuditEvent {
     },
     Mutation {
         actor: Option<Uuid>,
+        impersonator: Option<Uuid>,
         workspace_id: Option<Uuid>,
         action: String,
         resource_type: String,
@@ -60,6 +61,7 @@ pub struct AuditRow {
     pub decision: Option<String>,
     pub reasons: Option<Vec<String>>,
     pub detail: serde_json::Value,
+    pub impersonator: Option<Uuid>,
 }
 
 /// Filters for the query API. `None` = unfiltered.
@@ -94,7 +96,7 @@ impl AuditStore {
         }
         let mut qb = sqlx::QueryBuilder::new(
             "INSERT INTO audit.audit_log \
-             (kind, actor_user_id, workspace_id, action, resource_type, resource_id, decision, reasons, detail) ",
+             (kind, actor_user_id, impersonator, workspace_id, action, resource_type, resource_id, decision, reasons, detail) ",
         );
         qb.push_values(events, |mut b, ev| match ev {
             AuditEvent::Decision {
@@ -108,6 +110,7 @@ impl AuditStore {
             } => {
                 b.push_bind("decision")
                     .push_bind(*actor)
+                    .push_bind(Option::<Uuid>::None) // impersonator
                     .push_bind(*workspace_id)
                     .push_bind(action)
                     .push_bind(resource_type)
@@ -118,6 +121,7 @@ impl AuditStore {
             }
             AuditEvent::Mutation {
                 actor,
+                impersonator,
                 workspace_id,
                 action,
                 resource_type,
@@ -126,6 +130,7 @@ impl AuditStore {
             } => {
                 b.push_bind("mutation")
                     .push_bind(*actor)
+                    .push_bind(*impersonator)
                     .push_bind(*workspace_id)
                     .push_bind(action)
                     .push_bind(resource_type)

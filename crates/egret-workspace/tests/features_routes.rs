@@ -491,6 +491,7 @@ async fn put_features_emits_an_audit_event_naming_the_actor() {
     match ev {
         egret_audit::AuditEvent::Mutation {
             actor,
+            impersonator: _,
             workspace_id,
             action,
             resource_type,
