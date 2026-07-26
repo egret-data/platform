@@ -2,19 +2,29 @@ import { queryClient } from "./queryClient";
 
 export class UnauthorizedError extends Error {}
 export class ApiError extends Error {
-  /** The error body's machine-readable `code` (e.g. `"feature_disabled"`), when
-   * the server sent one. Optional so existing `new ApiError(status, message)`
-   * call sites keep working unchanged. */
-  constructor(public status: number, message: string, public code?: string) { super(message); }
+  /**
+   * @param status HTTP status.
+   * @param message Human-readable message (from the body's `error` field when present).
+   * @param code The error body's machine-readable `code` (e.g. `"feature_disabled"`,
+   *   `"oidc_step_up"`), when the server sent one. Optional so existing
+   *   `new ApiError(status, message)` call sites keep working unchanged.
+   * @param body The full parsed JSON error body, when the response was JSON. Most
+   *   call sites only need `code`/`message`, but some error bodies carry extra
+   *   fields beyond those two (e.g. `OidcStepUp`'s `authorize_url`) that a caller
+   *   may need to read — `code` alone can't surface them.
+   */
+  constructor(public status: number, message: string, public code?: string, public body?: unknown) { super(message); }
   static async from(res: Response): Promise<ApiError> {
     let msg = res.statusText;
     let code: string | undefined;
+    let body: unknown;
     try {
       const j = await res.json();
+      body = j;
       if (j?.error) msg = j.error;
       if (j?.code) code = j.code;
     } catch { /* ignore */ }
-    return new ApiError(res.status, msg, code);
+    return new ApiError(res.status, msg, code, body);
   }
 }
 
