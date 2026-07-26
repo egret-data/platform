@@ -104,6 +104,10 @@ impl From<egret_core::Error> for CatalogHttpError {
             egret_core::Error::Unauthorized | egret_core::Error::Forbidden => {
                 CatalogHttpError::Forbidden
             }
+            // Exhaustiveness only: this seam serves `/api/admin/*` warehouse
+            // routes, none of which go through `WsContext`, so the gate that
+            // produces `FeatureDisabled` can never actually reach here.
+            egret_core::Error::FeatureDisabled(_) => CatalogHttpError::Forbidden,
             egret_core::Error::TooManyRequests => {
                 CatalogHttpError::BadRequest("too many requests".to_string())
             }

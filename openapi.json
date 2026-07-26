@@ -1049,6 +1049,154 @@
         }
       }
     },
+    "/api/admin/workspaces/{id}/features": {
+      "get": {
+        "tags": [
+          "admin-workspaces"
+        ],
+        "operationId": "ws_features",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The catalog of modules, each with this workspace's on/off state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FeatureDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing platform permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "admin-workspaces"
+        ],
+        "operationId": "set_ws_features",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetFeatures"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The named keys were merged onto this workspace's state; the catalog with the resulting on/off state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FeatureDto"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An unknown feature key, or a resulting state that violates a cross-module dependency (e.g. dashboards enabled with charts disabled); nothing was written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing platform permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/workspaces/{id}/restore": {
       "post": {
         "tags": [
@@ -10014,6 +10162,7 @@
           "kernel-callback"
         ],
         "summary": "`POST /kernel/engine-token` — mint a fresh per-user engine JWT and return the\nengine's connection coordinates so the Daft kernel can open a direct\nconnection. Auth = `EGRET_KERNEL_TOKEN` bearer; identity + workspace come ONLY\nfrom `KernelIdentity`. The engine must be enabled for notebooks in the token's\nworkspace; unknown/disabled engines → 404.",
+        "description": "Feature entitlement is enforced HERE, by hand, for the same reason as in\n`notebook_runtime_token`: this is a kernel-subprocess callback carrying a\nbearer token and no browser session, so it never constructs a `WsContext`\nand the gate that lives there never runs. Letting an in-flight kernel finish\nits work is deliberate; minting it a FRESH engine credential for a module\nthe workspace no longer has is not.",
         "operationId": "engine_token",
         "requestBody": {
           "content": {
@@ -10038,6 +10187,16 @@
           },
           "401": {
             "description": "Missing/invalid EGRET_KERNEL_TOKEN bearer, or the user has no stored refresh token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The notebooks module is switched off for this workspace",
             "content": {
               "application/json": {
                 "schema": {
@@ -10628,6 +10787,109 @@
           },
           "500": {
             "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/charts/run": {
+      "post": {
+        "tags": [
+          "charts"
+        ],
+        "summary": "Run a client-supplied `QuerySpec` against a dataset and return the rows.",
+        "description": "This is `ch_run` for a spec that is not (yet) a saved chart: the chart\nbuilder's preview, dashboard edit-mode cards, and filter-value dropdowns. It\nexists so those three do not have to go through the free-form SQL endpoint —\nwhich lets `POST /queries` be gated on the SQL Lab entitlement without\nbreaking chart authoring, and stops raw SQL crossing the wire when a user is\nonly building a chart.\n\nAuthorization is workspace-scoped `CH_READ`, exactly like the `ch_data`\nbuild-only endpoint it replaces. It is deliberately NOT object-scoped: there\nis no chart id to resolve, so an object guest cannot reach it — guests keep\nusing `ch_run` (`/charts/{id}/data`), which is object-scoped.",
+        "operationId": "ch_run_spec",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChartDataBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The client-supplied spec, compiled + executed: columns + rows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChartRunResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query spec (unknown column/metric, bad filter, …)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing chart:read permission, or the charts module is disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Referenced dataset not in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Query engine error",
             "content": {
               "application/json": {
                 "schema": {
@@ -16005,6 +16267,7 @@
           "kernel-callback"
         ],
         "summary": "`POST /ws/{workspace}/notebook-runtime/token` — mint a fresh short-lived engine\nJWT for the kernel-token's user. Auth = `EGRET_KERNEL_TOKEN` bearer; identity\ncomes ONLY from `KernelIdentity` — the `{workspace}` path segment is accepted\nfor URL symmetry but never trusted for auth. Returns ONLY the caller's token.",
+        "description": "Feature entitlement is enforced HERE rather than by the gate in `WsContext`,\nbecause this is a kernel-subprocess callback carrying a bearer token and no\nbrowser session: it never constructs a `WsContext`, so it is the one\nworkspace-scoped path the gate there does not cover. Letting an in-flight\nkernel finish its work is deliberate; handing it a FRESH capability after\nthe module was switched off is not.",
         "operationId": "notebook_runtime_token",
         "parameters": [
           {
@@ -16030,6 +16293,16 @@
           },
           "401": {
             "description": "Missing/invalid EGRET_KERNEL_TOKEN bearer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The notebooks module is switched off for this workspace",
             "content": {
               "application/json": {
                 "schema": {
@@ -23303,6 +23576,38 @@
             "type": "string",
             "description": "Public-safe error message.",
             "example": "not found: user"
+          },
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Machine-readable discriminant, present only where clients must branch on\nthe reason. Currently only `\"feature_disabled\"`. Omitted otherwise, so\nno existing response changes shape.",
+            "example": "feature_disabled"
+          }
+        }
+      },
+      "FeatureDto": {
+        "type": "object",
+        "description": "One module and whether this workspace has it switched on.",
+        "required": [
+          "key",
+          "label",
+          "description",
+          "enabled"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
           }
         }
       },
@@ -25518,6 +25823,25 @@
           }
         }
       },
+      "SetFeatures": {
+        "type": "object",
+        "description": "The feature keys to change; any key this workspace's catalog entry already\nhas is left exactly as it is. This is a merge, not a full replacement,\ndespite arriving over `PUT`: `PUT` is still the right verb because the\noperation is idempotent (sending the same body twice yields the same\nstate) — it is not required to mention every field of the resource. A\nmerge is also forward-safe: when a sixth module joins the catalog, a\ncaller that still only sends today's five keys leaves it untouched\ninstead of implicitly switching it on, which is what a true full\nreplacement (write/delete a row for every key, mentioned or not) would do.",
+        "required": [
+          "features"
+        ],
+        "properties": {
+          "features": {
+            "type": "object",
+            "description": "Feature key -> enabled. Unknown keys are rejected with 400 and nothing\nis written (`WorkspaceRepo::set_features` validates the whole batch\nbefore opening its transaction). The *resulting* state — this batch\nmerged onto what is already stored — is also validated against\ncross-module dependencies (currently: `dashboards` requires `charts`),\nso a body that never mentions `dashboards` can still be rejected if it\nwould leave `dashboards` on and `charts` off.",
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "SetFolder": {
         "type": "object",
         "properties": {
@@ -26626,6 +26950,13 @@
               "string",
               "null"
             ]
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Module keys this workspace currently has switched on. Populated\nwherever a caller reads a workspace's entitlements back (`list_ws`,\n`get_ws`, `/api/me/workspaces`) via [`dto_with_features`]; left empty\nby the create/lifecycle handlers, which echo the resource they just\nmutated rather than reading entitlement state."
           }
         }
       },

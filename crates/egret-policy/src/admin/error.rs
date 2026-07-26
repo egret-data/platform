@@ -46,6 +46,10 @@ impl From<egret_core::Error> for PolicyHttpError {
             egret_core::Error::Unauthorized | egret_core::Error::Forbidden => {
                 PolicyHttpError::Forbidden
             }
+            // Exhaustiveness only: this seam serves `/api/admin/*` policy
+            // routes, none of which go through `WsContext`, so the gate that
+            // produces `FeatureDisabled` can never actually reach here.
+            egret_core::Error::FeatureDisabled(_) => PolicyHttpError::Forbidden,
             egret_core::Error::TooManyRequests => {
                 PolicyHttpError::BadRequest("too many requests".to_string())
             }

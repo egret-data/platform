@@ -39,6 +39,11 @@ export type kernelCallbackEngineTokenResponse401 = {
   status: 401
 }
 
+export type kernelCallbackEngineTokenResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
 export type kernelCallbackEngineTokenResponse404 = {
   data: ErrorBody
   status: 404
@@ -52,7 +57,7 @@ export type kernelCallbackEngineTokenResponse500 = {
 export type kernelCallbackEngineTokenResponseSuccess = (kernelCallbackEngineTokenResponse200) & {
   headers: Headers;
 };
-export type kernelCallbackEngineTokenResponseError = (kernelCallbackEngineTokenResponse401 | kernelCallbackEngineTokenResponse404 | kernelCallbackEngineTokenResponse500) & {
+export type kernelCallbackEngineTokenResponseError = (kernelCallbackEngineTokenResponse401 | kernelCallbackEngineTokenResponse403 | kernelCallbackEngineTokenResponse404 | kernelCallbackEngineTokenResponse500) & {
   headers: Headers;
 };
 
@@ -67,6 +72,12 @@ export const getKernelCallbackEngineTokenUrl = () => {
 }
 
 /**
+ * Feature entitlement is enforced HERE, by hand, for the same reason as in
+ * `notebook_runtime_token`: this is a kernel-subprocess callback carrying a
+ * bearer token and no browser session, so it never constructs a `WsContext`
+ * and the gate that lives there never runs. Letting an in-flight kernel finish
+ * its work is deliberate; minting it a FRESH engine credential for a module
+ * the workspace no longer has is not.
  * @summary `POST /kernel/engine-token` — mint a fresh per-user engine JWT and return the
 engine's connection coordinates so the Daft kernel can open a direct
 connection. Auth = `EGRET_KERNEL_TOKEN` bearer; identity + workspace come ONLY
@@ -146,6 +157,11 @@ export type kernelCallbackNotebookRuntimeTokenResponse401 = {
   status: 401
 }
 
+export type kernelCallbackNotebookRuntimeTokenResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
 export type kernelCallbackNotebookRuntimeTokenResponse500 = {
   data: ErrorBody
   status: 500
@@ -154,7 +170,7 @@ export type kernelCallbackNotebookRuntimeTokenResponse500 = {
 export type kernelCallbackNotebookRuntimeTokenResponseSuccess = (kernelCallbackNotebookRuntimeTokenResponse200) & {
   headers: Headers;
 };
-export type kernelCallbackNotebookRuntimeTokenResponseError = (kernelCallbackNotebookRuntimeTokenResponse401 | kernelCallbackNotebookRuntimeTokenResponse500) & {
+export type kernelCallbackNotebookRuntimeTokenResponseError = (kernelCallbackNotebookRuntimeTokenResponse401 | kernelCallbackNotebookRuntimeTokenResponse403 | kernelCallbackNotebookRuntimeTokenResponse500) & {
   headers: Headers;
 };
 
@@ -169,6 +185,12 @@ export const getKernelCallbackNotebookRuntimeTokenUrl = (workspace: string,) => 
 }
 
 /**
+ * Feature entitlement is enforced HERE rather than by the gate in `WsContext`,
+ * because this is a kernel-subprocess callback carrying a bearer token and no
+ * browser session: it never constructs a `WsContext`, so it is the one
+ * workspace-scoped path the gate there does not cover. Letting an in-flight
+ * kernel finish its work is deliberate; handing it a FRESH capability after
+ * the module was switched off is not.
  * @summary `POST /ws/{workspace}/notebook-runtime/token` — mint a fresh short-lived engine
 JWT for the kernel-token's user. Auth = `EGRET_KERNEL_TOKEN` bearer; identity
 comes ONLY from `KernelIdentity` — the `{workspace}` path segment is accepted

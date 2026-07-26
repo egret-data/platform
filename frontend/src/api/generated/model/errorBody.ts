@@ -18,4 +18,11 @@
 export interface ErrorBody {
   /** Public-safe error message. */
   error: string;
+  /**
+     * Machine-readable discriminant, present only where clients must branch on
+     * the reason. Currently only `"feature_disabled"`. Omitted otherwise, so
+     * no existing response changes shape.
+     * @nullable
+     */
+  code?: string | null;
 }

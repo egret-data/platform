@@ -1,0 +1,122 @@
+//! DB-gated tests for per-workspace feature entitlements; self-skip without DATABASE_URL.
+
+use egret_auth::password::hash_password;
+use egret_auth::users::UserRepo;
+use egret_core::{UserId, WorkspaceId};
+use egret_metastore::Db;
+use egret_workspace::workspaces::WorkspaceRepo;
+
+async fn connect() -> Option<Db> {
+    let url = std::env::var("DATABASE_URL").ok()?;
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    Some(db)
+}
+
+fn uniq(tag: &str) -> String {
+    format!("{tag}-{}", uuid::Uuid::new_v4().simple())
+}
+
+/// `workspaces.created_by` is a real FK to `users(id)` (migration 0003), so a
+/// synthetic UUID would fail the insert — seed an actual user.
+async fn seed_user(db: &Db) -> UserId {
+    UserRepo::new(db.clone())
+        .insert_local(
+            &format!("{}@test.local", uuid::Uuid::new_v4()),
+            "U",
+            &hash_password("pw").unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn seed_ws(db: &Db, repo: &WorkspaceRepo) -> WorkspaceId {
+    let owner = seed_user(db).await;
+    repo.create(&uniq("feat"), "Feature test ws", owner)
+        .await
+        .expect("create ws")
+        .id
+}
+
+#[tokio::test]
+async fn absent_row_means_enabled() {
+    let Some(db) = connect().await else { return };
+    let repo = WorkspaceRepo::new(db.clone());
+    let ws = seed_ws(&db, &repo).await;
+
+    let disabled = repo.disabled_features(ws).await.unwrap();
+
+    assert!(disabled.is_empty(), "a fresh workspace disables nothing");
+}
+
+#[tokio::test]
+async fn set_features_persists_only_the_disabled_ones() {
+    let Some(db) = connect().await else { return };
+    let repo = WorkspaceRepo::new(db.clone());
+    let ws = seed_ws(&db, &repo).await;
+
+    repo.set_features(
+        ws,
+        &[("notebooks".into(), false), ("charts".into(), true)],
+        None,
+    )
+    .await
+    .unwrap();
+
+    let disabled = repo.disabled_features(ws).await.unwrap();
+    assert!(disabled.contains("notebooks"));
+    assert!(!disabled.contains("charts"));
+}
+
+#[tokio::test]
+async fn re_enabling_clears_the_disabled_set() {
+    let Some(db) = connect().await else { return };
+    let repo = WorkspaceRepo::new(db.clone());
+    let ws = seed_ws(&db, &repo).await;
+
+    repo.set_features(ws, &[("notebooks".into(), false)], None)
+        .await
+        .unwrap();
+    repo.set_features(ws, &[("notebooks".into(), true)], None)
+        .await
+        .unwrap();
+
+    assert!(repo.disabled_features(ws).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unknown_feature_key_is_rejected() {
+    let Some(db) = connect().await else { return };
+    let repo = WorkspaceRepo::new(db.clone());
+    let ws = seed_ws(&db, &repo).await;
+
+    let err = repo
+        .set_features(ws, &[("teleporter".into(), false)], None)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, egret_core::Error::InvalidInput(ref m) if m.contains("teleporter")),
+        "expected InvalidInput naming the bad key, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn set_features_is_atomic_on_a_bad_key() {
+    let Some(db) = connect().await else { return };
+    let repo = WorkspaceRepo::new(db.clone());
+    let ws = seed_ws(&db, &repo).await;
+
+    let _ = repo
+        .set_features(
+            ws,
+            &[("notebooks".into(), false), ("teleporter".into(), false)],
+            None,
+        )
+        .await;
+
+    assert!(
+        repo.disabled_features(ws).await.unwrap().is_empty(),
+        "a rejected batch must write nothing"
+    );
+}

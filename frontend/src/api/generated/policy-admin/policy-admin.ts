@@ -859,6 +859,122 @@ export const usePolicyAdminCreateProfile = <TError = ErrorBody,
       > => {
       return useMutation(getPolicyAdminCreateProfileMutationOptions(options), queryClient);
     }
+    export type policyAdminDeleteProfileResponse204 = {
+  data: void
+  status: 204
+}
+
+export type policyAdminDeleteProfileResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type policyAdminDeleteProfileResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type policyAdminDeleteProfileResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type policyAdminDeleteProfileResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type policyAdminDeleteProfileResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type policyAdminDeleteProfileResponseSuccess = (policyAdminDeleteProfileResponse204) & {
+  headers: Headers;
+};
+export type policyAdminDeleteProfileResponseError = (policyAdminDeleteProfileResponse401 | policyAdminDeleteProfileResponse403 | policyAdminDeleteProfileResponse404 | policyAdminDeleteProfileResponse409 | policyAdminDeleteProfileResponse500) & {
+  headers: Headers;
+};
+
+export type policyAdminDeleteProfileResponse = (policyAdminDeleteProfileResponseSuccess | policyAdminDeleteProfileResponseError)
+
+export const getPolicyAdminDeleteProfileUrl = (service: string,) => {
+
+
+
+
+  return `/api/control-plane/policies/services/${encodeURIComponent(service)}`
+}
+
+/**
+ * GUARD: refused (409) while an engine still enforces the profile — deleting
+ * it out from under a bound engine would silently strip that engine's access
+ * control. The admin must unbind (or delete) the engine first. A paired tag
+ * service (`<name>_tag`), if any, is a separate profile and is deleted on its
+ * own.
+ * @summary DELETE /policies/services/{service} — delete a policy profile (Ranger
+service) and, via `ON DELETE CASCADE`, every policy under it.
+ */
+export const policyAdminDeleteProfile = async (service: string, options?: RequestInit): Promise<policyAdminDeleteProfileResponse> => {
+
+  return customInstance<policyAdminDeleteProfileResponse>(getPolicyAdminDeleteProfileUrl(service),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getPolicyAdminDeleteProfileMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof policyAdminDeleteProfile>>, TError,{service: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof policyAdminDeleteProfile>>, TError,{service: string}, TContext> => {
+
+const mutationKey = ['policyAdminDeleteProfile'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof policyAdminDeleteProfile>>, {service: string}> = (props) => {
+          const {service} = props ?? {};
+
+          return  policyAdminDeleteProfile(service,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PolicyAdminDeleteProfileMutationResult = NonNullable<Awaited<ReturnType<typeof policyAdminDeleteProfile>>>
+
+    export type PolicyAdminDeleteProfileMutationError = ErrorBody
+
+    /**
+ * @summary DELETE /policies/services/{service} — delete a policy profile (Ranger
+service) and, via `ON DELETE CASCADE`, every policy under it.
+ */
+export const usePolicyAdminDeleteProfile = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof policyAdminDeleteProfile>>, TError,{service: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof policyAdminDeleteProfile>>,
+        TError,
+        {service: string},
+        TContext
+      > => {
+      return useMutation(getPolicyAdminDeleteProfileMutationOptions(options), queryClient);
+    }
     export type policyAdminSeedDefaultsResponse200 = {
   data: SeedResult
   status: 200

@@ -391,4 +391,91 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
+
+    /// A `Pdp` that must never actually be consulted in this test: every
+    /// request below carries no session cookie, so `Auth` rejects it (401)
+    /// before any authz check runs. It exists purely to satisfy
+    /// `WorkspaceState`'s type — a `CedarPdp` would need to query a live
+    /// database at build time, which this test deliberately has none of.
+    struct UnreachablePdp;
+    #[async_trait::async_trait]
+    impl egret_core::authz::Pdp for UnreachablePdp {
+        async fn authorize(
+            &self,
+            _subject: &egret_core::authz::Subject,
+            _action: &str,
+            _resource: &egret_core::authz::Resource,
+        ) -> egret_core::Result<egret_core::authz::Decision> {
+            unreachable!("no request in this test should reach an authz check")
+        }
+    }
+
+    /// A `WorkspaceState` built without a live database: `Db::connect_lazy`
+    /// only parses the URL and never opens a connection, so this is safe to
+    /// build in a unit test with no Postgres running. Every repo/service here
+    /// just wraps the `Db` handle at construction — none of it queries — so
+    /// the only way this could touch the network is if a handler under test
+    /// actually ran a DB call, which the mount-reachability checks below never
+    /// do (they 401 on the missing session cookie first).
+    fn workspace_state_for_mount_check() -> WorkspaceState {
+        let db = Db::connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .expect("connect_lazy only parses the URL; it never touches the network");
+        WorkspaceState {
+            workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
+            members: egret_workspace::members::MemberRepo::new(db.clone()),
+            access_views: egret_workspace::access_views::AccessViewsRepo::new(db.clone()),
+            access_requests: egret_workspace::access_requests::AccessRequestRepo::new(
+                db.clone(),
+                egret_workspace::members::MemberRepo::new(db.clone()),
+            ),
+            authz: egret_workspace::rbac::Authorizer::new(db.clone()),
+            pdp: std::sync::Arc::new(UnreachablePdp),
+            users: egret_auth::users::UserRepo::new(db.clone()),
+            sessions: egret_auth::session::SessionService::new(
+                db.clone(),
+                chrono::Duration::hours(24),
+                chrono::Duration::minutes(60),
+            ),
+            audit: egret_audit::AuditSink::new(16).0,
+        }
+    }
+
+    /// Structural guard against a mount-path regression: `features_routes.rs`
+    /// (in `egret-workspace`) builds its own ad hoc router nested at
+    /// `/admin`/`/me`, so it would keep passing even if the *real* mount in
+    /// `build_router` above ever drifted from `/api/admin`/`/api/me` — and
+    /// `committed_openapi_json_is_current` wouldn't catch that either, since it
+    /// only compares the static `#[utoipa::path(path = …)]` string, never the
+    /// actual mount. This builds the real router and asserts the features
+    /// routes are genuinely reachable at their production path.
+    ///
+    /// The assertion is "not 404" rather than a specific status: the point is
+    /// reachability of the path, not the auth outcome. These requests carry no
+    /// session cookie, so today they 401 — but pinning that exact status would
+    /// couple this test to authentication behaviour it isn't about; a 404
+    /// specifically means "not mounted here", which is the one thing this test
+    /// exists to catch.
+    #[tokio::test]
+    async fn workspace_feature_routes_are_mounted_at_their_documented_path() {
+        let mut state = AppState::without_db();
+        state.workspace = Some(workspace_state_for_mount_check());
+        let app = build_router(state);
+
+        let some_uuid = "00000000-0000-0000-0000-000000000000";
+        for uri in [
+            format!("/api/admin/workspaces/{some_uuid}/features"),
+            "/api/me/workspaces".to_string(),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_ne!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{uri} must be mounted (got 404 — not authentication, which would be 401/403)"
+            );
+        }
+    }
 }

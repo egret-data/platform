@@ -36,6 +36,16 @@ impl Db {
         Ok(Self { pool })
     }
 
+    /// Build a `Db` handle without opening a connection: the pool connects
+    /// lazily on first use, so this only parses `url` and never touches the
+    /// network. For tests that need a `Db` to satisfy a constructor (e.g.
+    /// building a full `WorkspaceState` to check that routes are mounted)
+    /// without ever issuing a query against a live database.
+    pub fn connect_lazy(url: &str) -> Result<Self, sqlx::Error> {
+        let pool = PgPoolOptions::new().connect_lazy(url)?;
+        Ok(Self { pool })
+    }
+
     /// Run all pending migrations.
     pub async fn migrate(&self) -> Result<(), MigrateError> {
         MIGRATOR.run(&self.pool).await

@@ -12,4 +12,11 @@ import type { EngineOption } from './engineOption';
  */
 export interface NotebookSettings {
   engines: EngineOption[];
+  /**
+     * The workspace's chosen notebook (scratch) Iceberg warehouse, if set.
+     * @nullable
+     */
+  warehouse_id?: string | null;
+  /** The private namespace path notebook writes land under (empty when unset). */
+  namespace?: string[];
 }

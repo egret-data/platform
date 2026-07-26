@@ -61,6 +61,13 @@ pub struct WorkspaceDto {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub created_by: Option<String>,
     pub owner_name: Option<String>,
+    /// Module keys this workspace currently has switched on. Populated
+    /// wherever a caller reads a workspace's entitlements back (`list_ws`,
+    /// `get_ws`, `/api/me/workspaces`) via [`dto_with_features`]; left empty
+    /// by the create/lifecycle handlers, which echo the resource they just
+    /// mutated rather than reading entitlement state.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 impl From<crate::model::Workspace> for WorkspaceDto {
     fn from(w: crate::model::Workspace) -> Self {
@@ -72,8 +79,27 @@ impl From<crate::model::Workspace> for WorkspaceDto {
             created_at: w.created_at,
             created_by: w.created_by.map(|u| u.to_string()),
             owner_name: w.owner_name,
+            features: Vec::new(),
         }
     }
+}
+
+/// Attach `features` — the module keys currently switched ON — to a fresh
+/// `WorkspaceDto`. Shared by every handler that reads back a workspace's
+/// current entitlements (`list_ws`, `get_ws`, `list_my_workspaces`), so the
+/// field means the same thing everywhere it is populated: there is no
+/// "wasn't computed" state that could be confused with "every module is off".
+fn dto_with_features(
+    w: crate::model::Workspace,
+    off: Option<&std::collections::HashSet<String>>,
+) -> WorkspaceDto {
+    let mut dto = WorkspaceDto::from(w);
+    dto.features = crate::features::FEATURE_KEYS
+        .iter()
+        .filter(|k| !off.is_some_and(|s| s.contains(**k)))
+        .map(|k| k.to_string())
+        .collect();
+    dto
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -112,6 +138,10 @@ pub fn admin_workspace_router() -> Router<WorkspaceState> {
         .route("/workspaces/{id}/restore", post(restore_ws))
         .route("/workspaces/{id}/stats", get(workspace_stats))
         .route("/workspaces/{id}/transfer", post(transfer_owner))
+        .route(
+            "/workspaces/{id}/features",
+            get(ws_features).put(set_ws_features),
+        )
 }
 
 #[utoipa::path(
@@ -175,7 +205,20 @@ async fn list_ws(
         per_page: q.per_page.unwrap_or(50),
     };
     let list = st.workspaces.list(page).await.map_err(AuthError)?;
-    Ok(Json(list.into_iter().map(Into::into).collect()))
+    let ids: Vec<uuid::Uuid> = list.iter().map(|w| w.id.0).collect();
+    let disabled = st
+        .workspaces
+        .disabled_features_for(&ids)
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(
+        list.into_iter()
+            .map(|w| {
+                let off = disabled.get(&w.id.0);
+                dto_with_features(w, off)
+            })
+            .collect(),
+    ))
 }
 
 #[utoipa::path(
@@ -205,7 +248,14 @@ async fn get_ws(
         .await
         .map_err(AuthError)?
         .ok_or(AuthError(Error::NotFound("workspace".into())))?;
-    Ok(Json(ws.into()))
+    // A batch of one would be silly here — `get_ws` already has the single
+    // workspace id it needs, so it reads the disabled set directly.
+    let disabled = st
+        .workspaces
+        .disabled_features(WorkspaceId(id))
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(dto_with_features(ws, Some(&disabled))))
 }
 
 #[utoipa::path(
@@ -386,6 +436,143 @@ async fn transfer_owner(
     Ok(Json(ws.into()))
 }
 
+// ── Workspace feature entitlements (Tasks 8/9) ───────────────────────────────
+//
+// Which of the five modules (`sql_lab`, `datasets`, `charts`, `dashboards`,
+// `notebooks`) a workspace may use at all — distinct from RBAC, which decides
+// what a *user* may do. Gated on the same platform-scoped permissions the
+// sibling workspace-lifecycle routes already use: `workspace:read` for the
+// read, `workspace:update` for the write. No new permission key: toggling a
+// module is the same class of act as renaming or archiving a workspace.
+
+/// One module and whether this workspace has it switched on.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct FeatureDto {
+    pub key: String,
+    pub label: String,
+    pub description: String,
+    pub enabled: bool,
+}
+
+/// The feature keys to change; any key this workspace's catalog entry already
+/// has is left exactly as it is. This is a merge, not a full replacement,
+/// despite arriving over `PUT`: `PUT` is still the right verb because the
+/// operation is idempotent (sending the same body twice yields the same
+/// state) — it is not required to mention every field of the resource. A
+/// merge is also forward-safe: when a sixth module joins the catalog, a
+/// caller that still only sends today's five keys leaves it untouched
+/// instead of implicitly switching it on, which is what a true full
+/// replacement (write/delete a row for every key, mentioned or not) would do.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct SetFeatures {
+    /// Feature key -> enabled. Unknown keys are rejected with 400 and nothing
+    /// is written (`WorkspaceRepo::set_features` validates the whole batch
+    /// before opening its transaction). The *resulting* state — this batch
+    /// merged onto what is already stored — is also validated against
+    /// cross-module dependencies (currently: `dashboards` requires `charts`),
+    /// so a body that never mentions `dashboards` can still be rejected if it
+    /// would leave `dashboards` on and `charts` off.
+    pub features: std::collections::BTreeMap<String, bool>,
+}
+
+fn features_dto(disabled: &std::collections::HashSet<String>) -> Vec<FeatureDto> {
+    crate::features::FEATURES
+        .iter()
+        .map(|f| FeatureDto {
+            key: f.key.to_string(),
+            label: f.label.to_string(),
+            description: f.description.to_string(),
+            enabled: !disabled.contains(f.key),
+        })
+        .collect()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/workspaces/{id}/features",
+    tag = "admin-workspaces",
+    params(("id" = Uuid, Path, description = "Workspace id")),
+    responses(
+        (status = 200, description = "The catalog of modules, each with this workspace's on/off state", body = Vec<FeatureDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing platform permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn ws_features(
+    State(st): State<WorkspaceState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<FeatureDto>>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &p, "workspace:read")
+        .await
+        .map_err(AuthError)?;
+    let disabled = st
+        .workspaces
+        .disabled_features(WorkspaceId(id))
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(features_dto(&disabled)))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/admin/workspaces/{id}/features",
+    tag = "admin-workspaces",
+    params(("id" = Uuid, Path, description = "Workspace id")),
+    request_body = SetFeatures,
+    responses(
+        (status = 200, description = "The named keys were merged onto this workspace's state; the catalog with the resulting on/off state", body = Vec<FeatureDto>),
+        (status = 400, description = "An unknown feature key, or a resulting state that violates a cross-module dependency (e.g. dashboards enabled with charts disabled); nothing was written", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing platform permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn set_ws_features(
+    State(st): State<WorkspaceState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(body): Json<SetFeatures>,
+) -> Result<Json<Vec<FeatureDto>>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &p, "workspace:update")
+        .await
+        .map_err(AuthError)?;
+    let wid = WorkspaceId(id);
+    let before = st
+        .workspaces
+        .disabled_features(wid)
+        .await
+        .map_err(AuthError)?;
+    let updates: Vec<(String, bool)> = body.features.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    // Always pass `Some(actor)` — `set_features` writes
+    // `updated_by = EXCLUDED.updated_by`, so `None` would erase a previously
+    // recorded actor.
+    st.workspaces
+        .set_features(wid, &updates, Some(p.user_id))
+        .await
+        .map_err(AuthError)?;
+    let after = st
+        .workspaces
+        .disabled_features(wid)
+        .await
+        .map_err(AuthError)?;
+
+    st.audit.emit(egret_audit::AuditEvent::Mutation {
+        actor: Some(p.user_id.0),
+        workspace_id: Some(id),
+        action: "workspace.features.update".into(),
+        resource_type: "workspace".into(),
+        resource_id: Some(id.to_string()),
+        detail: serde_json::json!({
+            "before": before,
+            "after": after,
+        }),
+    });
+
+    Ok(Json(features_dto(&after)))
+}
+
 // ── Me routes (Task 1 / Phase 0b) ────────────────────────────────────────────
 
 #[utoipa::path(
@@ -408,7 +595,24 @@ async fn list_my_workspaces(
         .list_for_principal(p.user_id, is_admin)
         .await
         .map_err(AuthError)?;
-    Ok(Json(list.into_iter().map(Into::into).collect()))
+
+    // One batched query for the whole list — the workspace switcher must not
+    // issue a query per workspace.
+    let ids: Vec<uuid::Uuid> = list.iter().map(|w| w.id.0).collect();
+    let disabled = st
+        .workspaces
+        .disabled_features_for(&ids)
+        .await
+        .map_err(AuthError)?;
+
+    Ok(Json(
+        list.into_iter()
+            .map(|w| {
+                let off = disabled.get(&w.id.0);
+                dto_with_features(w, off)
+            })
+            .collect(),
+    ))
 }
 
 pub fn me_router() -> Router<WorkspaceState> {
@@ -1321,8 +1525,29 @@ pub struct AccessRequestApi;
 /// OpenAPI fragment for the platform-admin workspace router (`/api/admin/workspaces`).
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(create_ws, list_ws, get_ws, update_ws, archive_ws, restore_ws, workspace_stats, transfer_owner),
-    components(schemas(WorkspaceDto, WorkspaceStatsDto, TransferOwner, CreateWorkspace, UpdateWorkspace, Ack, ErrorBody)),
+    paths(
+        create_ws,
+        list_ws,
+        get_ws,
+        update_ws,
+        archive_ws,
+        restore_ws,
+        workspace_stats,
+        transfer_owner,
+        ws_features,
+        set_ws_features,
+    ),
+    components(schemas(
+        WorkspaceDto,
+        WorkspaceStatsDto,
+        TransferOwner,
+        CreateWorkspace,
+        UpdateWorkspace,
+        FeatureDto,
+        SetFeatures,
+        Ack,
+        ErrorBody,
+    )),
     tags((name = "admin-workspaces", description = "Platform-admin workspace lifecycle")),
 )]
 pub struct AdminWorkspaceApi;

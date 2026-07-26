@@ -1,4 +1,5 @@
-import { apiFetch, UnauthorizedError, readCookie } from "@/api/client";
+import { apiFetch, ApiError, UnauthorizedError, readCookie } from "@/api/client";
+import { queryClient } from "@/api/queryClient";
 import { afterEach, expect, test, vi } from "vitest";
 
 afterEach(() => vi.restoreAllMocks());
@@ -27,4 +28,54 @@ test("throws UnauthorizedError on 401", async () => {
 test("readCookie parses a value", () => {
   document.cookie = "egret_csrf=abc";
   expect(readCookie("egret_csrf")).toBe("abc");
+});
+
+test("ApiError carries the response body's code", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify({ error: "feature disabled: notebooks", code: "feature_disabled" }), {
+      status: 403,
+    }),
+  );
+  await expect(apiFetch("/x")).rejects.toMatchObject({
+    status: 403,
+    message: "feature disabled: notebooks",
+    code: "feature_disabled",
+  });
+});
+
+test("a feature_disabled 403 invalidates+refetches my-workspaces (awaited) so the nav/guard can catch up", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify({ error: "feature disabled: notebooks", code: "feature_disabled" }), {
+      status: 403,
+    }),
+  );
+  const spy = vi.spyOn(queryClient, "invalidateQueries");
+  await expect(apiFetch("/x")).rejects.toBeInstanceOf(ApiError);
+  // refetchType: "all" so an inactive my-workspaces query still refetches
+  // immediately rather than only being marked stale.
+  expect(spy).toHaveBeenCalledWith({ queryKey: ["my-workspaces"], refetchType: "all" });
+});
+
+test("the feature_disabled invalidation is awaited before the 403 rejects", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify({ error: "feature disabled: notebooks", code: "feature_disabled" }), {
+      status: 403,
+    }),
+  );
+  let invalidateResolved = false;
+  vi.spyOn(queryClient, "invalidateQueries").mockImplementation(async () => {
+    await Promise.resolve();
+    invalidateResolved = true;
+  });
+  await expect(apiFetch("/x")).rejects.toBeInstanceOf(ApiError);
+  expect(invalidateResolved).toBe(true);
+});
+
+test("a generic 403 does not invalidate my-workspaces", async () => {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify({ error: "nope" }), { status: 403 }),
+  );
+  const spy = vi.spyOn(queryClient, "invalidateQueries");
+  await expect(apiFetch("/x")).rejects.toBeInstanceOf(ApiError);
+  expect(spy).not.toHaveBeenCalled();
 });

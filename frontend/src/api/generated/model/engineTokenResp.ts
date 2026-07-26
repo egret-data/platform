@@ -12,4 +12,11 @@ export interface EngineTokenResp {
   kind: string;
   host: string;
   port: number;
+  /**
+     * The engine's self-signed TLS cert (PEM) when it serves over TLS, so the
+     * kernel can PIN it (verify against this cert only) instead of disabling
+     * verification. `None` for plain-HTTP engines.
+     * @nullable
+     */
+  tls_cert?: string | null;
 }

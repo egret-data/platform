@@ -1,51 +1,21 @@
-import { useEffect, useState } from "react";
 import type { Chart } from "@/api/charts";
-import { useBuildChartData } from "@/api/charts";
-import { useSubmitQuery, useQueryStatus, useResults } from "@/api/sqllab";
-
-type Col = { name: string; type: string };
+import { useSpecData } from "@/api/useSpecData";
 
 export interface ChartData {
-  columns: Col[];
+  columns: { name: string; type: string }[];
   rows: unknown[][];
   isLoading: boolean;
   error: string | null;
 }
 
-/** Run a saved chart's query via the existing build->submit->poll pipeline. */
+/**
+ * Run a saved chart's query for the dashboard EDIT-mode preview.
+ *
+ * View mode uses `useDashboardCardData` (`@/api/useSavedChartData`), which is
+ * object-scoped so share recipients keep working. This path is
+ * workspace-scoped and now runs through `POST /charts/run` rather than the
+ * free-form SQL endpoint.
+ */
 export function useChartData(ws: string, chart: Chart | null, nonce?: number, enabled = true): ChartData {
-  const build = useBuildChartData(ws);
-  const submit = useSubmitQuery(ws);
-  const [queryId, setQueryId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const status = useQueryStatus(ws, queryId);
-  const finished = status.data?.status === "finished";
-  const results = useResults(ws, queryId, 0, finished);
-
-  const specKey = chart ? `${chart.id}:${JSON.stringify(chart.params.spec)}` : "";
-  useEffect(() => {
-    let cancelled = false;
-    if (!chart || !enabled) return;
-    setQueryId(null);
-    setError(null);
-    (async () => {
-      try {
-        const { sql, database_id } = await build.mutateAsync({ dataset_id: chart.dataset_id, query_spec: chart.params.spec });
-        if (cancelled) return;
-        const q = await submit.mutateAsync({ database_id, sql, limit: chart.params.spec.row_limit });
-        if (!cancelled) setQueryId(q.id);
-      } catch (e) {
-        if (!cancelled) setError(String(e));
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [ws, specKey, nonce, enabled]);
-
-  const failed = status.data?.status === "failed" || status.data?.status === "cancelled";
-  return {
-    columns: results.data?.columns ?? [],
-    rows: results.data?.rows ?? [],
-    isLoading: enabled && !!chart && !error && !failed && !(finished && results.data),
-    error: error ?? (failed ? (status.data?.error ?? "Query failed") : null),
-  };
+  return useSpecData(ws, chart?.dataset_id ?? null, chart?.params.spec ?? null, enabled && !!chart, nonce);
 }

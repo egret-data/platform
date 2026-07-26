@@ -17,4 +17,12 @@ export interface ProfileDto {
   policy_version: number;
   policy_count: number;
   engines: ProfileEngine[];
+  /**
+     * The classification-tag policy service this Trino profile carries its
+     * tag-based masking/row-filters in (the configured `tagService` or the
+     * `<name>_tag` convention), if such a service exists. `None` otherwise — the
+     * FE shows a "Tags" tab only when this is set.
+     * @nullable
+     */
+  tag_service?: string | null;
 }

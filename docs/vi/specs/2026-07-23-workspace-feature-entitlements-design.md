@@ -1,0 +1,416 @@
+# Phân quyền tính năng theo workspace — Thiết kế
+
+> Bản tiếng Việt tham chiếu. Bản chuẩn:
+> [`docs/en/specs/2026-07-23-workspace-feature-entitlements-design.md`](../../en/specs/2026-07-23-workspace-feature-entitlements-design.md)
+
+## 1. Mục tiêu
+
+Cho phép platform admin quyết định **workspace nào được dùng module nào**:
+
+- workspace A — đầy đủ;
+- workspace B — chỉ BI, không có Notebook;
+- workspace C — bất kỳ tổ hợp nào khác của năm module.
+
+Đây là **entitlement ở mức tenant**, cố ý tách khỏi hai cơ chế egret đã có:
+
+| Cơ chế | Trả lời câu hỏi | Nằm ở đâu |
+| --- | --- | --- |
+| RBAC role (`ws_viewer/editor/admin`) + Cedar PDP | *User này có được làm hành động này không?* | `access_grants`, `egret-auth/pdp` |
+| Ranger / classification policy | *User này có được thấy dữ liệu này không?* | data plane |
+| **Feature entitlement (tài liệu này)** | *Workspace này có module này không?* | `workspace_features` |
+
+Hai trục độc lập và kết hợp theo AND: `ws_editor` trong workspace tắt `notebooks`
+thì không có notebook; `ws_viewer` trong workspace bật `notebooks` thì có
+notebook ở chế độ chỉ đọc.
+
+## 2. Phạm vi
+
+**Feature = module**, mỗi module đúng một công tắc, năm key:
+
+`sql_lab`, `datasets`, `charts`, `dashboards`, `notebooks`
+
+Mức đọc/ghi vẫn thuộc về RBAC — feature không có trạng thái "chỉ đọc".
+
+**Chỉ `platform_admin` bật/tắt**, tại Control Plane → Workspaces → chi tiết →
+*Features*. `ws_admin` không được; entitlement do platform cấp cho tenant, không
+phải do tenant tự chọn. Khớp mô hình ba tầng của ADR-19.
+
+**Vắng bản ghi nghĩa là bật.** Không backfill; mọi workspace đang chạy giữ nguyên
+hành vi. Chỉ ghi row khi admin thay đổi.
+
+### 2.1 Ngoài phạm vi
+
+- preset gói (`Full`, `BI-only`, …) — công tắc là nguyên thuỷ, preset chỉ là sugar
+  ở UI, thêm sau không cần đổi schema;
+- `ws_admin` tự thu hẹp;
+- thu hồi tài nguyên đang chạy khi tắt (kill kernel pod, huỷ runtime token, dừng
+  job định kỳ);
+- bốn mục nav placeholder (`workflows`, `alerts`, `data_api`, `pipelines`) — hiện
+  render `<Placeholder>` nên không có gì để gate; sẽ có key khi thành module thật;
+- override theo từng user.
+
+Dữ liệu của module bị tắt được **giữ nguyên** — chỉ là không truy cập được, bật
+lại là có lại.
+
+### 2.2 Platform admin KHÔNG bypass
+
+`platform_admin` bypass mọi kiểm tra quyền khác trong egret, và điều đó đúng:
+quyền mô tả *một người* được làm gì. Entitlement mô tả *một workspace* là gì, nên
+áp dụng cho tất cả mọi người trong workspace đó, kể cả admin. Workspace B tắt
+notebook thì platform admin vào workspace B cũng không thấy notebook.
+
+Lối thoát là bật lại — hai cú click, có audit. Miễn trừ ngầm cho admin sẽ khiến
+công tắc chỉ có nghĩa "ẩn với phần lớn mọi người", không đúng như nó tuyên bố.
+
+### 2.3 Phụ thuộc chéo module: `dashboards` cần `charts`
+
+Năm công tắc được trình bày như độc lập, nhưng thực ra không hẳn: một dashboard
+vẫn render các card đã lưu qua bề mặt gate bởi `dashboards` (`ch_run` /
+`useDashboardCardData`, scope theo object, §6), nhưng **dropdown filter tương
+tác** và **preview card ở chế độ edit** đều chạy qua `POST /charts/run`, vốn
+gate bởi `charts` (§6). `dashboards` **BẬT** với `charts` **TẮT** vì vậy là một
+cấu hình hỏng, không chỉ là bất thường: dashboard vẫn tải được, nhưng mọi filter
+và mọi thao tác sửa card đều 403.
+
+Phụ thuộc này được thực thi ở cả hai tầng, không chỉ là quy ước ở UI:
+
+- **API** (`crates/egret-workspace/src/features.rs`, `violates_dependencies`)
+  — `WorkspaceRepo::set_features` tính **trạng thái kết quả** (trạng thái hiện
+  tại của workspace, hợp nhất với thay đổi trong body của `PUT`) và từ chối với
+  `400` nếu kết quả đó có `dashboards` bật và `charts` tắt, trước khi ghi bất cứ
+  gì. Việc kiểm tra cố ý dựa trên trạng thái đã hợp nhất chứ không phải chỉ body
+  của request: vì `PUT` là hợp nhất (§7.1), một body chỉ nêu `charts` vẫn có thể
+  tạo ra tổ hợp hỏng nếu `dashboards` đã bật từ trước — quy tắc phải bắt được cả
+  trường hợp này, không chỉ khi body nêu cả hai key.
+- **Tab Features** (`WorkspaceFeaturesTab.tsx`) — draft không thể biểu diễn tổ
+  hợp hỏng này: tắt Charts sẽ kéo Dashboards tắt theo và vô hiệu hoá công tắc
+  của nó (kèm gợi ý "Requires Charts" ngay trong dòng), còn bật Dashboards sẽ
+  kéo Charts bật theo. Save luôn gửi một map năm-key nhất quán, nên quy tắc ở
+  backend tồn tại là để phòng caller không qua FE, chứ FE không bao giờ kích nó.
+
+**Đánh đổi, ghi nhận rõ:** điều này cố ý loại bỏ cấu hình "dashboards bật,
+charts tắt" — tức "thành viên được xem dashboard có sẵn nhưng không được tạo
+chart mới." Cấu hình đó chưa bao giờ dùng được trọn vẹn (filter và preview
+edit-mode đã hỏng sẵn dưới cấu hình đó), nên đóng nó lại là sửa lỗi đúng, không
+phải thêm hạn chế mới cho một cấu hình đang chạy tốt. Một workspace muốn có
+dashboard mà không có *quyền tạo* chart thì chưa biểu diễn được hôm nay; muốn
+vậy cần tách `charts` thành "xem" và "tạo" — ngoài phạm vi ở đây (§2.1).
+
+## 3. Mô hình dữ liệu
+
+Migration `0094_workspace_features.sql`:
+
+```sql
+CREATE TABLE workspace_features (
+  workspace_id UUID        NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  feature      TEXT        NOT NULL,
+  enabled      BOOLEAN     NOT NULL,
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_by   UUID        REFERENCES users(id) ON DELETE SET NULL,
+  PRIMARY KEY (workspace_id, feature)
+);
+```
+
+- `feature` là `TEXT`, hợp lệ hoá theo catalog trong code thay vì enum Postgres,
+  nên thêm module sau này không cần migration.
+- `ON DELETE CASCADE` theo workspace; `ON DELETE SET NULL` cho `updated_by`, nhất
+  quán với cách migration 0093 xử lý các cột attribution.
+- Row được giữ lại khi bật lại (`enabled = true`) để `updated_by` / `updated_at`
+  còn vết ai đã bật.
+
+Vì thiếu row = bật, bảng rỗng ở lần deploy đầu và tính năng nằm im cho tới khi có
+người dùng đến.
+
+## 4. Catalog trong code
+
+Module mới `crates/egret-workspace/src/features.rs` — nguồn sự thật duy nhất cho
+middleware, response API, danh sách UI, và test phủ route. Cùng cách permission
+catalog được định nghĩa trong code (`#174`).
+
+```rust
+/// Một bề mặt HTTP bị gate: path prefix dưới `/api/ws/{workspace}/`, kèm các
+/// method nó áp dụng (`None` = mọi method).
+pub struct GateRule {
+    pub prefix: &'static str,
+    pub methods: Option<&'static [Method]>,
+}
+
+pub struct Feature {
+    pub key: &'static str,          // "notebooks"
+    pub label: &'static str,        // "Notebooks"
+    pub description: &'static str,  // hiển thị trong tab Features
+    pub rules: &'static [GateRule],
+}
+
+pub const FEATURES: &[Feature] = &[ /* năm mục bên dưới */ ];
+
+/// Các path prefix ws-scoped không bao giờ bị gate. Mọi prefix dưới
+/// `/api/ws/{workspace}/` phải xuất hiện ở một `Feature` hoặc ở đây — xem test
+/// phủ route ở §8.1.
+pub const UNGATED: &[&str] = &[ /* … */ ];
+```
+
+### 4.1 Bản đồ
+
+| Feature key | Bề mặt bị gate dưới `/api/ws/{workspace}/` |
+| --- | --- |
+| `sql_lab` | `sqllab/**` (mọi method) và `POST /queries` (submit SQL tự do) |
+| `datasets` | `datasets/**` |
+| `charts` | `charts/**` |
+| `dashboards` | `dashboards/**` |
+| `notebooks` | `notebooks/**`, `kernel/**`, `notebook-runtime/**`, `notebook-settings/**` |
+
+Không bao giờ gate: `members`, `roles`, `shares`, `objects`, `folders`, `engines`,
+`databases`, `access-requests`, và phần không-submit của `/queries` —
+`GET /queries`, `GET /queries/{id}`, `GET /queries/{id}/results`,
+`GET /queries/{id}/results.csv`, `POST /queries/{id}/cancel`.
+
+Lý do chia `/queries` theo method: hành vi đặc quyền là **submit** SQL, không phải
+đọc lại hay huỷ query của chính mình. Tác giả chart cần đường đọc lại (§6), gate
+nó sẽ làm hỏng chart vì một lý do chẳng liên quan gì tới SQL Lab.
+
+`folders` và `objects` không gate vì chúng trung lập với loại nội dung (một folder
+chứa cả chart lẫn notebook; `objects` là bề mặt chia sẻ). Việc phân quyền theo
+từng object của chúng vốn đã đi qua PDP.
+
+## 5. Cưỡng chế — đặt trong `WsContext`
+
+Kiểm tra nằm trong `WsContext::from_request_parts`
+(`crates/egret-workspace/src/context.rs`), là bước mới giữa "load workspace đang
+active" (bước 3) và "giải quyết membership" (bước 4):
+
+```text
+3.  Load workspace active theo slug.
+3.5 Suy ra module của request từ `parts.uri.path()`.
+    Nếu module đó tắt với workspace này → Error::FeatureDisabled(key).
+4.  Membership / role (giữ nguyên).
+```
+
+Thứ tự quan trọng: kiểm tra feature chạy **trước** membership, để thành viên của
+workspace tắt notebook và người ngoài đều nhận 403 giống nhau, không ai suy ra
+thêm thông tin gì.
+
+### 5.1 Vì sao ở đây thay vì một `.layer()`
+
+Mọi route ws-scoped đều đã dùng `WsContext` — đã xác minh trên `egret-bi` (58 chỗ),
+`egret-query` (execution + registry routes), `egret-notebook` (kể cả `runtime.rs`),
+`egret-kernel`, và `egret-workspace`. Chúng *buộc* phải dùng: đó là cách duy nhất
+để giải slug `{workspace}` thành workspace id.
+
+Điều đó cho hai tính chất mà một layer riêng không có:
+
+1. **Phủ sóng do cấu trúc.** Một route ws-scoped mới không thể tồn tại nếu không
+   có `WsContext`, nên không thể nằm ngoài gate. Với layer, đảm bảo này phụ thuộc
+   vào việc nhớ mount đúng chỗ — mà `egret-bi` mount một router chứa chung charts,
+   dashboards, datasets và folders, nên layer per-router vẫn phải khớp path.
+2. **Không tra cứu trùng.** `WsContext` đã giải workspace rồi; layer sẽ phải giải
+   slug lần nữa.
+
+Cái giá là `WsContext` giờ làm hai việc. Chấp nhận được: cả hai đều là "request này
+có được chạm vào workspace này không", và phương án còn lại tệ hơn.
+
+### 5.1.1 Chỗ "do cấu trúc" hết đúng
+
+Tính chất 1 đúng với mọi route mà một **phiên trình duyệt** chạm tới — đó mới là
+điều lập luận trên thực sự nói. Nó không đúng với các callback dùng bearer token
+của kernel, và thiết kế chỉ trung thực khi nói ra điều đó:
+
+| Handler | Vì sao lọt |
+| --- | --- |
+| `POST /api/ws/{workspace}/notebook-runtime/token` | xác thực bằng kernel token chứ không phải session, nên không bao giờ dựng `WsContext` — dù URL có `{workspace}` |
+| `POST /api/kernel/engine-token` | cũng vậy, và URL còn không ws-scoped, nên catalog không có path nào để khớp |
+
+Cả hai đều trao cho một kernel **đang chạy** một capability **mới** — đúng thứ
+entitlement sinh ra để chặn; còn để kernel đang chạy làm nốt việc của nó là một
+non-goal riêng, đã ghi rõ (§2.1). Nên cả hai tự khẳng định entitlement `notebooks`
+**bằng tay**, gate theo `workspace_id` tin cậy trong `KernelIdentity` — không bao
+giờ theo segment `{workspace}` trên URL, vì chính kernel subprocess dựng URL đó và
+có thể trỏ vào workspace mà module còn bật.
+
+Hai chỗ kiểm tra bằng tay là một *pattern*, không phải ngoại lệ đơn lẻ, nên module
+doc của `features.rs` nêu tên cả hai. Người đi audit tính năng này sẽ bắt đầu từ
+catalog, và catalog phải nói thật về giới hạn của chính nó.
+
+Còn hai bất biến vẫn là quy ước chứ không phải cấu trúc, và mỗi cái được ghim bằng
+một test trong `crates/egret-server/tests/feature_route_coverage.rs` thay vì trông
+vào sự cẩn thận của con người:
+
+- mọi route ws-scoped phải mount dưới `/api/ws/` — `ws_path_suffix` không nhận
+  dạng nào khác, nên router ở `/api/v2` sẽ fail open trong khi catalog vẫn phân
+  loại segment của nó hoàn hảo;
+- mọi segment path ws-scoped phải được catalog biết đến (§8.1).
+
+### 5.2 Khớp path
+
+Lấy phần đuôi sau `/api/ws/{slug}/`, khớp prefix **dài nhất** với catalog (để
+`sqllab/queries` được giải trước `sqllab`), rồi kiểm tra tập method. Prefix không
+khớp thì tra trong `UNGATED`; thứ không nằm ở cả hai là bug bị bắt lúc test (§8.1),
+không phải lúc chạy — lúc chạy, prefix không khớp được cho qua, vì fail-closed trên
+route chưa khai báo sẽ biến một thiếu sót catalog thành sự cố production.
+
+### 5.3 Hình dạng lỗi
+
+Variant mới `Error::FeatureDisabled(&'static str)` trong `egret-core/src/error.rs`,
+ánh xạ sang **403**.
+
+`ErrorBody` (`egret-core/src/http.rs`) thêm một mã máy-đọc-được tuỳ chọn để
+frontend phân biệt với lỗi phân quyền thông thường:
+
+```rust
+pub struct ErrorBody {
+    pub error: String,                    // "feature disabled: notebooks"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,             // "feature_disabled"
+}
+```
+
+Trường này là bổ sung và bị bỏ qua với mọi lỗi hiện có, nên không response nào
+đang chạy bị đổi hình dạng.
+
+### 5.4 Chi phí
+
+Thêm một query có index (`SELECT feature FROM workspace_features WHERE
+workspace_id = $1 AND enabled = false`) mỗi request ws-scoped. `WsContext` vốn đã
+chạy hai query nên đây là cùng bậc. **Chưa cache ở v1** — chỉ thêm TTL cache kèm
+invalidate khi ghi nếu đo thấy cần.
+
+## 6. Tách đường chạy chart khỏi SQL tự do
+
+Có ba chỗ ở frontend build SQL từ `query_spec` rồi submit qua endpoint chung
+`POST /api/ws/{workspace}/queries` — gọi `POST /charts/data` (build) rồi
+submit-và-poll:
+
+| Chỗ gọi | Mục đích |
+| --- | --- |
+| `routes/explore/ChartExplore.tsx` | xem trước chart chưa lưu khi đang soạn |
+| `api/useChartData.ts` | xem trước card ở **chế độ sửa** dashboard |
+| `api/useColumnValues.ts` | lấy giá trị distinct của cột cho dropdown filter |
+| `components/chart/DrillRecordsDialog.tsx` | drill từ chart xuống bản ghi gốc |
+
+Nên gate `POST /queries` theo `sql_lab` sẽ làm hỏng cả soạn chart, sửa dashboard,
+lẫn dropdown filter — ba thứ chẳng liên quan gì tới SQL Lab.
+
+Backend vốn đã có sẵn đúng hình dạng cần thiết: `ch_run`
+(`POST /charts/{id}/data`) biên dịch spec của chart **đã lưu** qua
+`compile_chart_sql`, chạy **đồng bộ ở server** bằng
+`egret_query::execution::run_query`, và trả `{columns, rows}`.
+
+Cách sửa, nằm trong module `charts`:
+
+- **Mới** `POST /api/ws/{workspace}/charts/run`, body `{dataset_id, query_spec}`,
+  response `{columns, rows}`. Nó chính là `ch_run` nhưng nhận spec từ client thay
+  vì từ chart đã lưu: cùng chuỗi `compile_chart_sql` → `resolve_delegation` →
+  `run_query`, cùng `chart_run_limits()`, `row_limit` lấy từ spec. Phân quyền là
+  `CH_READ` ở mức workspace, đúng như `ch_data` mà nó thay thế.
+- Bốn chỗ gọi ở trên hội tụ về nó, bỏ hẳn build-rồi-poll. `useSubmitQuery` /
+  `useQueryStatus` / `useResults` từ đó chỉ còn SQL Lab dùng.
+- `ch_data` (`POST /charts/data`, chỉ build, trả `{sql, database_id}`) được giữ
+  lại. Nút "View SQL" của chart builder đọc từ đó, theo kiểu lazy. Nó thuộc quyền
+  `charts` chứ không phải `sql_lab` — đó mới là ranh giới đúng: thứ workspace mất
+  khi tắt SQL Lab là *công cụ* SQL tự do, không phải khả năng đọc SQL mà chính
+  chart của họ biên dịch ra.
+- Nhờ đó `POST /queries` trở thành SQL tự do và chỉ vậy, và gate nó theo `sql_lab`
+  là trung thực.
+
+Xem chart đã lưu không bị đụng tới: đường đó vốn đã đi qua `ch_run` /
+`useDashboardCardData`, và giữ nguyên object-scoped nên người được chia sẻ vẫn dùng
+được. `/charts/run` cố ý *không* object-scoped — nó nhận dataset + spec chứ không
+nhận chart id, nên phải yêu cầu quyền đọc chart ở mức workspace, đúng như `ch_data`
+đang yêu cầu hôm nay.
+
+Việc này cũng bịt một lỗ có sẵn: hôm nay ai tạo được chart là submit được SQL tuỳ ý
+qua chính endpoint đó.
+
+## 7. API và frontend
+
+### 7.1 API control-plane
+
+Thêm vào `admin_workspace_router` (`crates/egret-workspace/src/routes.rs`), dùng
+lại đúng các permission platform-scope mà route anh em đang dùng — `workspace:read`
+cho đọc và `workspace:update` cho ghi, cả hai đã có trong catalog code
+(`crates/egret-core/src/rbac.rs`). Không thêm permission key mới: bật/tắt một module
+cùng hạng với đổi tên hay archive workspace, và hiện chỉ `platform_admin` giữ chúng
+ở platform scope.
+
+- `GET /api/admin/workspaces/{id}/features` →
+  `[{key, label, description, enabled}]` — đủ năm, tính bằng
+  *catalog trừ đi các row disabled*.
+- `PUT /api/admin/workspaces/{id}/features`, body
+  `{"features": {"notebooks": false, "sql_lab": true, …}}` — thay toàn bộ năm key.
+  Key lạ → `400`. Upsert trong một transaction, rồi emit `AuditEvent`
+  (`action = "workspace.features.update"`, `resource_type = "workspace"`, `detail`
+  là map before/after) qua `AuditSink` sẵn có.
+
+### 7.2 API phía thành viên
+
+`GET /api/me/workspaces` (`list_my_workspaces`) — `WorkspaceDto` thêm
+`features: Vec<String>`, là các key đang bật của workspace đó. Một query gộp cho cả
+danh sách, không phải mỗi workspace một query.
+
+### 7.3 Frontend
+
+- **`components/layout/Sidebar.tsx`** — `NavItem` thêm `feature?: string`;
+  `EXPLORE_GROUPS` được lọc theo feature của workspace hiện tại, group nào rỗng thì
+  bỏ cả heading. Dùng lại đúng cách lọc đã viết cho nhóm control-plane.
+- **`App.tsx` / `ExploreRoutes`** — route bị gate được bọc bằng guard
+  `<RequireFeature name="…">`, render route `Forbidden` sẵn có. Redirect
+  `<Route index>` phải trỏ tới **module bật đầu tiên** thay vì hard-code `sql-lab`,
+  nếu không workspace tắt SQL Lab sẽ rơi vào trang bị chặn.
+- **`ChartExplore.tsx`, `api/useChartData.ts`, `api/useColumnValues.ts`** — cả ba
+  chuyển sang `/charts/run` đồng bộ (§6) và bỏ máy trạng thái submit/poll.
+- **Control Plane → Workspaces → chi tiết → tab Features** — năm hàng `Switch` kèm
+  label + mô tả, nút Save, toast, theo pattern bảng cấu hình đã lập ở `#328`.
+- **API client** — `403` mang `code: "feature_disabled"` thì render trang Forbidden
+  thay vì toast lỗi chung chung. Việc này xử lý tình huống admin tắt module trong
+  lúc user đang mở tab.
+
+## 8. Kiểm thử
+
+### 8.1 Test phủ route (quan trọng nhất)
+
+Một test Rust đọc tài liệu OpenAPI trong tiến trình (`egret_server::openapi_doc()`,
+không đọc file `openapi.json` đã commit — file cũ sẽ pass trong khi route thật đã
+trôi đi), gom mọi **segment đầu tiên** khác nhau dưới `/api/ws/{workspace}/`, và
+khẳng định mỗi segment hoặc thuộc một `Feature` hoặc nằm trong `UNGATED`. Mount
+một module mới mà không khai báo thì CI đỏ — đây chính là đảm bảo mà cách kiểm tra
+trong từng handler phải làm thủ công mới có.
+
+Phân loại theo segment chứ không theo từng path, và ranh giới đó là cố ý. Rủi ro
+cần chống là cả một module lên mà không ai gate — Pipelines hay Alerts ở
+`/api/ws/{workspace}/pipelines/…` — đó là sự kiện ở mức segment. Bản theo-từng-path
+sẽ phải coi `queries/{id}/results` là chưa phân loại dù nó cố ý để mở (§4.1), nên
+sẽ cần một danh sách ngoại lệ ở mức suffix cho đúng một segment duy nhất trong cả
+ứng dụng. Thay vào đó, ngữ nghĩa theo method của rule đó được ghim bởi một unit test
+trong `features.rs`: hai test, hai nhiệm vụ. Cái giá chấp nhận: một sub-path mới
+dưới segment đã phân loại sẽ không làm CI đỏ.
+
+### 8.2 Test tích hợp (sqlx, trên database test)
+
+- Tắt `notebooks` → `GET /ws/{s}/notebooks` trả `403` với `code = "feature_disabled"`,
+  còn `GET /ws/{s}/charts` vẫn `200`. Bật lại → `200`.
+- Tắt `sql_lab` → `POST /queries` trả `403`, nhưng `POST /charts/run` trả `200` và
+  `GET /queries/{id}/results` của lần chạy đó trả `200`.
+- `platform_admin` nhận cùng `403` như mọi người (§2.2).
+- `PUT …/features` với key lạ → `400`, và không ghi gì.
+- Tắt module không đụng tới dữ liệu: đếm notebook trước khi tắt, bật lại, đếm lại.
+
+### 8.3 Frontend (vitest)
+
+- Sidebar bỏ mục của feature đã tắt và bỏ luôn group rỗng.
+- `RequireFeature` render Forbidden cho module đã tắt.
+- Redirect index chọn module bật đầu tiên.
+
+### 8.4 End-to-end (Playwright)
+
+Một spec: platform admin tắt Notebooks của một workspace → thành viên workspace đó
+không thấy mục Notebooks trên nav, và vào thẳng URL notebook thì bị chặn.
+
+## 9. Triển khai
+
+Bổ sung và đảo ngược được. Bảng mới rỗng, vắng row = bật, nên deploy migration
+không đổi gì quan sát được. Thay đổi hành vi duy nhất ship vô điều kiện là việc tách
+đường chạy chart (§6), đã được phủ bởi test chart sẵn có cộng §8.2.
+
+Thứ tự làm: catalog + migration + repo → gate trong `WsContext` + hình dạng lỗi →
+`/charts/run` + đổi `ChartExplore` → API control-plane → tab Features → guard
+sidebar/route → tests.

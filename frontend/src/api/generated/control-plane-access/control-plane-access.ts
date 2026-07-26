@@ -2528,8 +2528,10 @@ export const getControlPlaneAccessDeleteUserUrl = (id: string,) => {
  * @summary `DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,
 not the last active platform admin (`guard_not_last_admin`, shared with the
 disable branch of `update_user`). Cleans up the user's sessions, group
-memberships, and platform role/permission grants, then the row itself, in
-one transaction (`UserRepo::hard_delete`).
+memberships, and platform role/permission grants, reassigns the target's
+notebooks to the deleting admin (`p.user_id`, since `owner_user_id` is NOT
+NULL), then removes the row itself, in one transaction
+(`UserRepo::hard_delete`).
  */
 export const controlPlaneAccessDeleteUser = async (id: string, options?: RequestInit): Promise<controlPlaneAccessDeleteUserResponse> => {
 
@@ -2581,8 +2583,10 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
  * @summary `DELETE /users/{id}` — hard-delete a user (Task 4). Guards: not yourself,
 not the last active platform admin (`guard_not_last_admin`, shared with the
 disable branch of `update_user`). Cleans up the user's sessions, group
-memberships, and platform role/permission grants, then the row itself, in
-one transaction (`UserRepo::hard_delete`).
+memberships, and platform role/permission grants, reassigns the target's
+notebooks to the deleting admin (`p.user_id`, since `owner_user_id` is NOT
+NULL), then removes the row itself, in one transaction
+(`UserRepo::hard_delete`).
  */
 export const useControlPlaneAccessDeleteUser = <TError = ErrorBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessDeleteUser>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
@@ -2619,6 +2623,11 @@ export type controlPlaneAccessUpdateUserResponse404 = {
   status: 404
 }
 
+export type controlPlaneAccessUpdateUserResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
 export type controlPlaneAccessUpdateUserResponse500 = {
   data: ErrorBody
   status: 500
@@ -2627,7 +2636,7 @@ export type controlPlaneAccessUpdateUserResponse500 = {
 export type controlPlaneAccessUpdateUserResponseSuccess = (controlPlaneAccessUpdateUserResponse200) & {
   headers: Headers;
 };
-export type controlPlaneAccessUpdateUserResponseError = (controlPlaneAccessUpdateUserResponse400 | controlPlaneAccessUpdateUserResponse401 | controlPlaneAccessUpdateUserResponse403 | controlPlaneAccessUpdateUserResponse404 | controlPlaneAccessUpdateUserResponse500) & {
+export type controlPlaneAccessUpdateUserResponseError = (controlPlaneAccessUpdateUserResponse400 | controlPlaneAccessUpdateUserResponse401 | controlPlaneAccessUpdateUserResponse403 | controlPlaneAccessUpdateUserResponse404 | controlPlaneAccessUpdateUserResponse409 | controlPlaneAccessUpdateUserResponse500) & {
   headers: Headers;
 };
 

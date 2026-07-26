@@ -1229,6 +1229,59 @@ async fn notebook_runtime_token_returns_minted_token(pool: sqlx::PgPool) {
     );
 }
 
+/// Switch the `notebooks` module off for `ws`. An absent row means enabled, so
+/// an explicit `enabled = false` row is the only way to say "off".
+async fn disable_notebooks(db: &Db, ws: WorkspaceId) {
+    sqlx::query(
+        "INSERT INTO workspace_features (workspace_id, feature, enabled) VALUES ($1, $2, false)",
+    )
+    .bind(ws.0)
+    .bind("notebooks")
+    .execute(&db.pool)
+    .await
+    .expect("disable notebooks");
+}
+
+/// Feature entitlement, on the one workspace-scoped path the `WsContext` gate
+/// cannot cover: this is a bearer-token kernel callback, so no `WsContext` is
+/// ever constructed and the handler must check for itself.
+///
+/// With `notebooks` switched off, an already-running kernel is refused a FRESH
+/// engine token. Killing the running kernel is explicitly out of scope; not
+/// re-arming it is not.
+#[sqlx::test(migrations = "../../migrations")]
+async fn notebook_runtime_token_is_refused_when_notebooks_is_disabled(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    let token = mint_kernel_token(&f.db, f.ws, f.owner).await;
+    let uri = format!("/ws/{}/notebook-runtime/token", f.slug);
+
+    // Control: the very same token mints successfully while the module is on,
+    // so the 403 below can only be the entitlement check.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(bearer_post(&uri, &token, serde_json::json!({})))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "control: module on → 200");
+
+    disable_notebooks(&f.db, f.ws).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(bearer_post(&uri, &token, serde_json::json!({})))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a disabled module must not hand out fresh engine tokens; body={json}"
+    );
+    assert_eq!(json["code"], "feature_disabled", "body={json}");
+}
+
 /// No Authorization header → 401.
 #[sqlx::test(migrations = "../../migrations")]
 async fn notebook_runtime_token_requires_auth(pool: sqlx::PgPool) {
@@ -1346,6 +1399,46 @@ async fn engine_token_returns_jwt_and_coords_for_enabled_engine(pool: sqlx::PgPo
         json.get("expires_at").is_some(),
         "expires_at must be present; body={json}"
     );
+}
+
+/// The engine-token callback's sibling entitlement check. Like
+/// `notebook-runtime/token` this is a bearer-token callback that never builds a
+/// `WsContext`, and unlike it the route is not even workspace-scoped by URL, so
+/// nothing in the feature catalog covers it — the handler asserts the module by
+/// hand and this is what proves it does.
+#[sqlx::test(migrations = "../../migrations")]
+async fn engine_token_is_refused_when_notebooks_is_disabled(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    let engine_id = seed_enabled_engine(&f.db, f.ws).await;
+    let token = mint_kernel_token(&f.db, f.ws, f.owner).await;
+    let body = serde_json::json!({ "engine": engine_id.to_string() });
+
+    // Control: the same token and the same enabled engine mint while the module
+    // is on, so the 403 below can only be the entitlement check — not a missing
+    // engine, which this route reports as 404.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(bearer_post("/kernel/engine-token", &token, body.clone()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "control: module on → 200");
+
+    disable_notebooks(&f.db, f.ws).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(bearer_post("/kernel/engine-token", &token, body))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a disabled module must not hand out fresh engine credentials; body={json}"
+    );
+    assert_eq!(json["code"], "feature_disabled", "body={json}");
 }
 
 /// Unknown/disabled engine id → 404.

@@ -4,12 +4,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import type { Chart } from "@/api/charts";
 
-const apiFetch = vi.fn();
-vi.mock("@/api/client", () => ({
-  apiJson: vi.fn(),
-  apiFetch: (...a: unknown[]) => apiFetch(...a),
-  ApiError: class ApiError extends Error {},
-  UnauthorizedError: class UnauthorizedError extends Error {},
+const chartsChRunSpec = vi.fn();
+vi.mock("@/api/generated/charts/charts", () => ({
+  chartsChRunSpec: (...a: unknown[]) => chartsChRunSpec(...a),
 }));
 
 import { useChartData } from "../useChartData";
@@ -22,14 +19,14 @@ function wrapper({ children }: { children: ReactNode }) {
 const chart = { id: "c1", dataset_id: "ds1", viz_type: "bar", params: { spec: { metrics: ["m"], dimensions: [], columns: [], filters: [], orderby: [], row_limit: 100, rollup_groups: [] } } } as unknown as Chart;
 
 beforeEach(() => {
-  apiFetch.mockReset();
-  apiFetch.mockResolvedValue({ status: 200, headers: new Headers({ "content-type": "application/json" }), json: () => Promise.resolve({ sql: "S", database_id: "db1" }) });
+  chartsChRunSpec.mockReset();
+  chartsChRunSpec.mockResolvedValue({ data: { columns: [], rows: [] } });
 });
 
 describe("useChartData enabled gate", () => {
   it("fires no request and is not loading when enabled=false", () => {
     const { result } = renderHook(() => useChartData("eng", chart, undefined, false), { wrapper });
-    expect(apiFetch).not.toHaveBeenCalled();
+    expect(chartsChRunSpec).not.toHaveBeenCalled();
     expect(result.current.isLoading).toBe(false);
   });
 });

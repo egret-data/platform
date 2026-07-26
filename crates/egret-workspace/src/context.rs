@@ -8,6 +8,7 @@ use egret_auth::principal::{Auth, AuthError};
 use egret_auth::session::SessionService;
 use egret_core::{Error, WorkspaceContext};
 
+use crate::features;
 use crate::model::workspace_role_rank;
 use crate::rbac::Authorizer;
 use crate::workspaces::WorkspaceRepo;
@@ -43,6 +44,41 @@ where
             .map_err(AuthError)?
             .filter(|w| w.status == "active")
             .ok_or_else(|| AuthError(Error::NotFound(format!("workspace: {slug}"))))?;
+
+        // 3.5 Feature entitlement. Whether the workspace has this module at all
+        //     is a property of the WORKSPACE, so it is checked before — and
+        //     independently of — who the caller is: a platform admin gets the
+        //     same 403 as anyone else, and a non-member cannot tell membership
+        //     from the response. The DB is only touched when the path actually
+        //     belongs to a gated module.
+        //
+        //     `nest()` rewrites the inner router's view of the URI, so
+        //     `parts.uri` is the path with the mount prefix already stripped —
+        //     and by how much depends on where the router happened to be
+        //     mounted. `OriginalUri` is the path as the client sent it, so the
+        //     answer no longer depends on mount depth. It falls back to
+        //     `parts.uri` for routers that were never nested at all.
+        //
+        //     One invariant remains, and it is convention rather than
+        //     construction: `ws_path_suffix` recognises a path only if it
+        //     begins `/api/ws/` or `/ws/`. A gated router mounted at, say,
+        //     `/api/v2` would yield `/api/v2/ws/{slug}/…`, match neither, and
+        //     fail OPEN. `every_workspace_scoped_route_is_mounted_under_api_ws`
+        //     in egret-server holds that invariant to CI.
+        let gated = {
+            let full_path = parts
+                .extensions
+                .get::<axum::extract::OriginalUri>()
+                .map_or_else(|| parts.uri.path(), |o| o.0.path());
+            features::ws_path_suffix(full_path)
+                .and_then(|suffix| features::gated_feature(suffix, parts.method.as_str()))
+        };
+        if let Some(key) = gated {
+            let disabled = repo.disabled_features(ws.id).await.map_err(AuthError)?;
+            if disabled.contains(key) {
+                return Err(AuthError(Error::FeatureDisabled(key)));
+            }
+        }
 
         // 4. Membership: platform_admin bypass, else a workspace role, else an
         //    object-guest. An object-guest is a NON-member who holds an

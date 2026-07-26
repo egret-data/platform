@@ -6,21 +6,26 @@
  * OpenAPI spec version: 0.1.0
  */
 import {
+  useMutation,
   useQuery
 } from '@tanstack/react-query';
 import type {
   DataTag,
   DefinedInitialDataOptions,
   DefinedUseQueryResult,
+  MutationFunction,
   QueryClient,
   QueryFunction,
   QueryKey,
   UndefinedInitialDataOptions,
+  UseMutationOptions,
+  UseMutationResult,
   UseQueryOptions,
   UseQueryResult
 } from '@tanstack/react-query';
 
 import type {
+  BackchannelLogoutForm,
   OidcOidcCallbackParams
 } from '../model';
 
@@ -46,7 +51,107 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   return result;
 };
 
-export type oidcOidcCallbackResponse303 = {
+export type oidcBackchannelLogoutResponse200 = {
+  data: void
+  status: 200
+}
+
+export type oidcBackchannelLogoutResponse400 = {
+  data: void
+  status: 400
+}
+
+export type oidcBackchannelLogoutResponseSuccess = (oidcBackchannelLogoutResponse200) & {
+  headers: Headers;
+};
+export type oidcBackchannelLogoutResponseError = (oidcBackchannelLogoutResponse400) & {
+  headers: Headers;
+};
+
+export type oidcBackchannelLogoutResponse = (oidcBackchannelLogoutResponseSuccess | oidcBackchannelLogoutResponseError)
+
+export const getOidcBackchannelLogoutUrl = () => {
+
+
+
+
+  return `/api/auth/oidc/backchannel-logout`
+}
+
+/**
+ * Keycloak (or any conformant IdP) calls this server-to-server when a user logs
+ * out or their session ends upstream. There is no cookie and no CSRF token on
+ * this request — it's secured entirely by the logout token's JWS signature
+ * (verified against the provider's JWKS, `iss`/`aud`/`exp` enforced) — see
+ * [`crate::oidc::verify_logout_token`]. On success, every egret session for the
+ * token's `sub` is revoked. An unrecognized `sub` (e.g. a user who never
+ * completed OIDC login) is a no-op 200, matching the spec's guidance that the
+ * RP should not leak whether it knows a given subject. Always sets
+ * `Cache-Control: no-store` per the Back-Channel Logout spec.
+ * @summary `POST /api/auth/oidc/backchannel-logout` — OIDC Back-Channel Logout 1.0.
+ */
+export const oidcBackchannelLogout = async (backchannelLogoutForm: BackchannelLogoutForm, options?: RequestInit): Promise<oidcBackchannelLogoutResponse> => {
+    const formUrlEncoded = new URLSearchParams();
+formUrlEncoded.append(`logout_token`, backchannelLogoutForm.logout_token);
+
+  return customInstance<oidcBackchannelLogoutResponse>(getOidcBackchannelLogoutUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...options?.headers },
+    body: formUrlEncoded
+  }
+);}
+
+
+
+
+
+export const getOidcBackchannelLogoutMutationOptions = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof oidcBackchannelLogout>>, TError,{data: BackchannelLogoutForm}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof oidcBackchannelLogout>>, TError,{data: BackchannelLogoutForm}, TContext> => {
+
+const mutationKey = ['oidcBackchannelLogout'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof oidcBackchannelLogout>>, {data: BackchannelLogoutForm}> = (props) => {
+          const {data} = props ?? {};
+
+          return  oidcBackchannelLogout(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type OidcBackchannelLogoutMutationResult = NonNullable<Awaited<ReturnType<typeof oidcBackchannelLogout>>>
+    export type OidcBackchannelLogoutMutationBody = BackchannelLogoutForm
+    export type OidcBackchannelLogoutMutationError = void
+
+    /**
+ * @summary `POST /api/auth/oidc/backchannel-logout` — OIDC Back-Channel Logout 1.0.
+ */
+export const useOidcBackchannelLogout = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof oidcBackchannelLogout>>, TError,{data: BackchannelLogoutForm}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof oidcBackchannelLogout>>,
+        TError,
+        {data: BackchannelLogoutForm},
+        TContext
+      > => {
+      return useMutation(getOidcBackchannelLogoutMutationOptions(options), queryClient);
+    }
+    export type oidcOidcCallbackResponse303 = {
   data: void
   status: 303
 }

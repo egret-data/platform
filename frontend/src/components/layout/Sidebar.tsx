@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
-  BarChart3, Bell, Boxes, ChevronDown, ChevronRight, Compass,
-  FolderKanban, Gauge, HardDrive, KeyRound, LayoutDashboard, ListChecks, type LucideIcon,
-  NotebookText, PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Server, Settings, Share2, ShieldCheck,
-  SquareTerminal, Table2, Tags, UserCog, Users, UsersRound, Waypoints, Workflow,
+  Bell, Boxes, ChevronDown, ChevronRight, Compass,
+  FolderKanban, Gauge, HardDrive, KeyRound, ListChecks, type LucideIcon,
+  PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Server, Settings, Share2, ShieldCheck,
+  Tags, UserCog, Users, UsersRound, Waypoints, Workflow,
 } from "lucide-react";
 import {
   Tooltip,
@@ -12,22 +12,22 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useAuth } from "@/auth/useAuth";
+import { useWorkspaceFeatures } from "@/hooks/useWorkspaceFeatures";
+import { EXPLORE_MODULES } from "@/lib/exploreModules";
 
 /** `perm` is the fine-grained read permission that unlocks this item in the
- * Control Plane; items with no `perm` (e.g. Workspaces) are platform_admin-only. */
-type NavItem = { label: string; icon: LucideIcon; perm?: string; to?: string };
+ * Control Plane; items with no `perm` (e.g. Workspaces) are platform_admin-only.
+ * `feature` is the workspace entitlement key (e.g. `notebooks`) that unlocks an
+ * Explore item; items with no `feature` are unaffected by entitlements. */
+type NavItem = { label: string; icon: LucideIcon; perm?: string; feature?: string; to?: string };
 type NavGroup = { heading: string; items: NavItem[] };
 
 const EXPLORE_GROUPS: NavGroup[] = [
   {
     heading: "Explore",
-    items: [
-      { label: "SQL Lab", icon: SquareTerminal },
-      { label: "Datasets", icon: Table2 },
-      { label: "Charts", icon: BarChart3 },
-      { label: "Dashboards", icon: LayoutDashboard },
-      { label: "Notebooks", icon: NotebookText },
-    ],
+    // The five modules + their order/route come from EXPLORE_MODULES, the
+    // single source of truth shared with useDefaultExplorePath — see there.
+    items: EXPLORE_MODULES.map((m) => ({ label: m.label, icon: m.icon, feature: m.key, to: m.path })),
   },
   {
     heading: "Automate",
@@ -127,11 +127,14 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const { me } = useAuth();
   const isPlatformAdmin = me?.platform_roles.includes("platform_admin") ?? false;
   const permissions = me?.permissions ?? [];
+  const enabledFeatures = useWorkspaceFeatures();
 
   // Control-plane items are permission-gated: platform_admin sees everything,
   // everyone else sees only items whose `perm` they hold. Items with no `perm`
-  // (Workspaces) are platform_admin-only. Groups left with no visible items
-  // are dropped entirely (heading included). Explore items are unchanged.
+  // (Workspaces) are platform_admin-only. Explore items are entitlement-gated:
+  // an item with a `feature` only shows when the workspace has it switched on
+  // (entitlements apply to everyone, admins included — no bypass). Either way,
+  // groups left with no visible items are dropped entirely (heading included).
   const groups = isAdmin
     ? CONTROL_PLANE_GROUPS.map((group) => ({
         ...group,
@@ -139,7 +142,10 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
           (item) => isPlatformAdmin || (item.perm !== undefined && permissions.includes(item.perm)),
         ),
       })).filter((group) => group.items.length > 0)
-    : EXPLORE_GROUPS;
+    : EXPLORE_GROUPS.map((group) => ({
+        ...group,
+        items: group.items.filter((item) => !item.feature || enabledFeatures.includes(item.feature)),
+      })).filter((group) => group.items.length > 0);
   const base = isAdmin ? "/control-plane" : `/explore/${workspace ?? ""}`;
 
   // Per-group collapse (only meaningful when the sidebar itself is expanded).
