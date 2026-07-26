@@ -1,6 +1,7 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { ThemeProvider } from "@/components/theme-provider";
+import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider } from "@/auth/AuthProvider";
 import { RequireAuth, RequireControlPlaneAccess, RequireGlobalAdmin, RequirePermission, RequireWorkspace } from "@/auth/guards";
 import { AppShell } from "@/components/layout/AppShell";
@@ -201,6 +202,11 @@ export default function App() {
             </Routes>
           </AuthProvider>
         </BrowserRouter>
+        {/* The single global toast host. Every `toast()` call across the app
+            (32 call sites) is a no-op until this is mounted — it was defined in
+            components/ui/sonner.tsx but never rendered. Sits inside ThemeProvider
+            so it picks up light/dark; one instance, app-wide. */}
+        <Toaster />
       </ThemeProvider>
     </QueryClientProvider>
   );
