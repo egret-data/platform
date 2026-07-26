@@ -23,7 +23,7 @@ use crate::session::SessionService;
 use crate::token::generate_token;
 use crate::users::UserRepo;
 use egret_audit::{AuditEvent, AuditSink};
-use egret_core::UserId;
+use egret_core::{UserId, WorkspaceId};
 
 static DUMMY_HASH: OnceLock<String> = OnceLock::new();
 
@@ -403,6 +403,37 @@ fn impersonate_oidc_step_up(
             "OIDC step-up requested but OIDC is not configured"
         ))));
     };
+    Ok(build_impersonation_step_up(
+        oidc,
+        key,
+        st.config.session.secure,
+        impersonator_id,
+        target,
+        reason,
+        None,
+    ))
+}
+
+/// Build the OIDC step-up `409` response carrying a sealed impersonation intent.
+/// `workspace_id` is `None` for a platform-scoped step-up and `Some(ws)` for a
+/// ws_admin-scoped one (Task 9). No overlay is written here — the OIDC callback
+/// creates it only after a fresh IdP re-authentication proves the same admin's
+/// identity AND re-checks the required authority (platform_admin, or `ws_admin` on
+/// `ws`). The intent rides inside the `PrivateCookieJar`-sealed state cookie, so a
+/// client cannot forge a target or a scope without the server's cookie key.
+///
+/// Shared (`pub`) so the ws_admin start endpoint in egret-workspace can emit the
+/// identical 409 without duplicating the sealing logic across crates.
+#[allow(clippy::too_many_arguments)]
+pub fn build_impersonation_step_up(
+    oidc: &crate::oidc::OidcService,
+    cookie_key: &axum_extra::extract::cookie::Key,
+    secure: bool,
+    impersonator_id: UserId,
+    target: UserId,
+    reason: String,
+    workspace_id: Option<WorkspaceId>,
+) -> Response {
     let start = oidc.start_step_up();
     let cookie = build_state_cookie(
         &OidcStateCookie {
@@ -413,13 +444,13 @@ fn impersonate_oidc_step_up(
                 impersonator_id: impersonator_id.0,
                 target_user_id: target.0,
                 reason,
-                workspace_id: None,
+                workspace_id: workspace_id.map(|w| w.0),
             }),
         },
-        st.config.session.secure,
+        secure,
     );
-    let jar = PrivateCookieJar::new(key.clone()).add(cookie);
-    Ok((
+    let jar = PrivateCookieJar::new(cookie_key.clone()).add(cookie);
+    (
         StatusCode::CONFLICT,
         jar,
         Json(OidcStepUp {
@@ -427,7 +458,7 @@ fn impersonate_oidc_step_up(
             authorize_url: start.authorize_url,
         }),
     )
-        .into_response())
+        .into_response()
 }
 
 #[utoipa::path(

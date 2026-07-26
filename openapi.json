@@ -15912,6 +15912,85 @@
         }
       }
     },
+    "/api/ws/{workspace}/impersonate": {
+      "post": {
+        "tags": [
+          "workspace-members"
+        ],
+        "summary": "`POST /api/ws/{workspace}/impersonate` — a `ws_admin` of `{workspace}` (or a\nplatform_admin) starts impersonating a MEMBER of that workspace. The resulting\noverlay is **workspace-scoped**: `WsContext` confines it to `{workspace}` even\nthough the target may belong to others (see the containment guard there).",
+        "description": "Guards run in a deliberate order so a caller learns nothing before its own\nauthority is proven: (1) not already impersonating; (2) caller is `ws_admin`\nhere or a platform_admin; (3) the shared target guards (not-self, reason\nnon-empty, target exists, target-not-platform-admin); (4) the target is a\nMEMBER of this workspace and is NOT itself a `ws_admin` of it. Step-up re-auth\nthen mirrors the platform endpoint: a local caller re-enters their password; an\nOIDC caller gets a `409` with an authorize URL whose sealed intent carries this\n`workspace_id`, and the overlay is created by the OIDC callback.",
+        "operationId": "ws_impersonate_start",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartWsImpersonation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Impersonation started; the session now resolves to the target, scoped to this workspace"
+          },
+          "400": {
+            "description": "Bad target / empty reason",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated, or wrong step-up password",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a ws_admin, already impersonating, target not a member, or target is an admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "OIDC caller: re-authenticate at `authorize_url`, then the callback creates the overlay"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/kernel": {
       "get": {
         "tags": [
@@ -26265,6 +26344,29 @@
               "null"
             ],
             "description": "Required for a local-auth admin (step-up). OIDC admins re-auth via OIDC (Task 8)."
+          }
+        }
+      },
+      "StartWsImpersonation": {
+        "type": "object",
+        "description": "Body for `POST /api/ws/{workspace}/impersonate`.",
+        "required": [
+          "target_user_id",
+          "reason"
+        ],
+        "properties": {
+          "target_user_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for a local-auth caller (step-up). OIDC callers re-auth via OIDC."
           }
         }
       },

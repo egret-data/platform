@@ -256,6 +256,7 @@ export * from './starRocksConfigBodyFeConfig';
 export * from './starRocksConfigBodyFeResources';
 export * from './starRocksConfigBodyPod';
 export * from './startImpersonation';
+export * from './startWsImpersonation';
 export * from './statusBody';
 export * from './storageDto';
 export * from './storageInput';

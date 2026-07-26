@@ -12,6 +12,9 @@ egret-audit = { workspace = true }
 egret-metastore.workspace = true
 egret-auth.workspace = true
 axum.workspace = true
+# `cookie` feature: read the session cookie (`CookieJar`) in the ws_admin
+# impersonation start endpoint to key the overlay on the caller's own session.
+axum-extra = { workspace = true }
 sqlx.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,7 +1,7 @@
 //! Server-side sessions with two-tier expiry (absolute cap + sliding idle window).
 
 use chrono::{DateTime, Duration, Utc};
-use egret_core::{Principal, Result, UserId};
+use egret_core::{Principal, Result, UserId, WorkspaceId};
 use egret_metastore::Db;
 use uuid::Uuid;
 
@@ -194,6 +194,35 @@ impl SessionService {
     /// user's platform roles (e.g. to forbid impersonating a platform_admin).
     pub async fn platform_roles_of(&self, user_id: UserId) -> Result<Vec<String>> {
         self.platform_roles(user_id).await
+    }
+
+    /// True if `user_id` holds a `ws_admin` grant on `workspace_id` (direct or via a
+    /// group), non-expired. A direct `access_grants` query — egret-auth can't import
+    /// egret-workspace's `Authorizer` (that would be a dependency cycle), and this
+    /// authority IS just a grant row. Modeled on `platform_roles` (same
+    /// group-membership union and `expires_at` filter), narrowed to
+    /// `scope_type = 'workspace' AND scope_id = $ws AND r.name = 'ws_admin'`.
+    ///
+    /// Used by the OIDC step-up callback to re-check a workspace-scoped
+    /// impersonation's authority at completion time (closes the ws-path demotion
+    /// TOCTOU, Task 9).
+    pub async fn ws_admin_of(&self, user_id: UserId, workspace_id: WorkspaceId) -> Result<bool> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+               SELECT 1 FROM access_grants ag \
+               JOIN roles r ON r.id = ag.role_id \
+               WHERE ag.scope_type = 'workspace' AND ag.scope_id = $2 AND r.name = 'ws_admin' \
+                 AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+                 AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
+                    OR (ag.principal_type = 'group' AND ag.principal_id IN \
+                           (SELECT group_id FROM user_groups WHERE user_id = $1)) ) )",
+        )
+        .bind(user_id.0)
+        .bind(workspace_id.0)
+        .fetch_one(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(exists)
     }
 
     /// Platform roles for the user (direct + via group membership).

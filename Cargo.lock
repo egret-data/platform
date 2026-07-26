@@ -3170,6 +3170,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "axum-extra 0.10.3",
  "chrono",
  "egret-audit",
  "egret-auth",

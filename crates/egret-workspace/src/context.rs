@@ -45,6 +45,22 @@ where
             .filter(|w| w.status == "active")
             .ok_or_else(|| AuthError(Error::NotFound(format!("workspace: {slug}"))))?;
 
+        // 3.4 Impersonation containment. A ws-scoped impersonation (a ws_admin
+        //      acting as a member) is confined to the ONE workspace it was started
+        //      in — even though the target may belong to others. Deny any other
+        //      workspace outright, BEFORE membership is resolved. `WsContext` is the
+        //      only way to resolve a `{workspace}`, so denying here is the airtight
+        //      choke point for the ws-scoped isolation boundary: no route can reach
+        //      another workspace under a scoped overlay. A platform-scoped overlay
+        //      (`workspace_scope == None`) is unrestricted and skips this.
+        if let Some(imp) = &principal.impersonator {
+            if let Some(scope) = imp.workspace_scope {
+                if scope != ws.id {
+                    return Err(AuthError(Error::Forbidden));
+                }
+            }
+        }
+
         // 3.5 Feature entitlement. Whether the workspace has this module at all
         //     is a property of the WORKSPACE, so it is checked before — and
         //     independently of — who the caller is: a platform admin gets the

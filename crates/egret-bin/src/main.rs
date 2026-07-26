@@ -1144,7 +1144,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| "http://localhost:8080".into());
 
-    let oidc = match (oidc_service, oidc_cookie_key) {
+    let oidc = match (oidc_service.clone(), oidc_cookie_key.clone()) {
         (Some(service), Some(cookie_key)) => Some(egret_auth::oidc_routes::OidcRoutesState {
             oidc: service,
             users: users.clone(),
@@ -1215,6 +1215,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         users: users.clone(),
         sessions: sessions.clone(),
         audit: audit_sink.clone(),
+        impersonations: egret_auth::impersonation::ImpersonationRepo::new(db.clone()),
+        oidc: oidc_service.clone(),
+        cookie_key: oidc_cookie_key.clone(),
+        session_secure: config.session.secure,
     };
 
     // `secrets` (the SecretStore) is shared: the per-workspace storage layer and

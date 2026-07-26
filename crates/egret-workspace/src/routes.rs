@@ -34,6 +34,20 @@ pub struct WorkspaceState {
     /// Append-only audit sink (B4). Emits Mutation events at platform-role and
     /// membership changes; best-effort, never fails the request.
     pub audit: egret_audit::AuditSink,
+    /// Overlay store — the ws_admin impersonation start endpoint writes the
+    /// scoped overlay here (Task 9).
+    pub impersonations: egret_auth::impersonation::ImpersonationRepo,
+    /// The OIDC service, present only when SSO is enabled. Used by the ws_admin
+    /// impersonation start endpoint to build the step-up authorize URL for an
+    /// OIDC-provider caller. `None` on non-OIDC deploys and in unit tests.
+    pub oidc: Option<egret_auth::oidc::OidcService>,
+    /// The cookie-encryption key, present only when OIDC is enabled — needed to
+    /// seal the impersonation intent into the `PrivateCookieJar`-encrypted state
+    /// cookie. `None` when `oidc` is `None`.
+    pub cookie_key: Option<axum_extra::extract::cookie::Key>,
+    /// Whether session/state cookies are marked `Secure` (mirrors
+    /// `config.session.secure`). Threaded into the OIDC step-up cookie builder.
+    pub session_secure: bool,
 }
 
 impl FromRef<WorkspaceState> for WorkspaceRepo {
@@ -598,6 +612,15 @@ async fn list_my_workspaces(
         .await
         .map_err(AuthError)?;
 
+    // Containment: a ws-scoped impersonation (a ws_admin acting as a member) is
+    // confined to the one workspace it was started in — even though the target may
+    // belong to others. Show only that workspace, matching the `WsContext` guard
+    // that denies every other one outright.
+    let list = match p.impersonator.as_ref().and_then(|i| i.workspace_scope) {
+        Some(scope) => list.into_iter().filter(|w| w.id == scope).collect(),
+        None => list,
+    };
+
     // One batched query for the whole list — the workspace switcher must not
     // issue a query per workspace.
     let ids: Vec<uuid::Uuid> = list.iter().map(|w| w.id.0).collect();
@@ -1001,6 +1024,7 @@ pub struct MemberDto {
 
 pub fn ws_member_router() -> Router<WorkspaceState> {
     Router::new()
+        .route("/{workspace}/impersonate", post(ws_impersonate_start))
         .route("/{workspace}/members", get(list_members).post(add_member))
         .route("/{workspace}/members/{ptype}/{pid}", delete(remove_member))
         .route("/{workspace}/roles", get(list_workspace_roles))
@@ -1017,6 +1041,180 @@ pub fn ws_member_router() -> Router<WorkspaceState> {
             "/{workspace}/access-requests/{id}/deny",
             post(deny_access_request),
         )
+}
+
+/// Body for `POST /api/ws/{workspace}/impersonate`.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct StartWsImpersonation {
+    pub target_user_id: String,
+    pub reason: String,
+    /// Required for a local-auth caller (step-up). OIDC callers re-auth via OIDC.
+    pub password: Option<String>,
+}
+
+/// `POST /api/ws/{workspace}/impersonate` — a `ws_admin` of `{workspace}` (or a
+/// platform_admin) starts impersonating a MEMBER of that workspace. The resulting
+/// overlay is **workspace-scoped**: `WsContext` confines it to `{workspace}` even
+/// though the target may belong to others (see the containment guard there).
+///
+/// Guards run in a deliberate order so a caller learns nothing before its own
+/// authority is proven: (1) not already impersonating; (2) caller is `ws_admin`
+/// here or a platform_admin; (3) the shared target guards (not-self, reason
+/// non-empty, target exists, target-not-platform-admin); (4) the target is a
+/// MEMBER of this workspace and is NOT itself a `ws_admin` of it. Step-up re-auth
+/// then mirrors the platform endpoint: a local caller re-enters their password; an
+/// OIDC caller gets a `409` with an authorize URL whose sealed intent carries this
+/// `workspace_id`, and the overlay is created by the OIDC callback.
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/impersonate",
+    tag = "workspace-members",
+    params(WorkspacePath),
+    request_body = StartWsImpersonation,
+    responses(
+        (status = 200, description = "Impersonation started; the session now resolves to the target, scoped to this workspace"),
+        (status = 400, description = "Bad target / empty reason", body = ErrorBody),
+        (status = 401, description = "Not authenticated, or wrong step-up password", body = ErrorBody),
+        (status = 403, description = "Not a ws_admin, already impersonating, target not a member, or target is an admin", body = ErrorBody),
+        (status = 409, description = "OIDC caller: re-authenticate at `authorize_url`, then the callback creates the overlay"),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn ws_impersonate_start(
+    State(st): State<WorkspaceState>,
+    WsContext(ctx): WsContext,
+    jar: axum_extra::extract::cookie::CookieJar,
+    Json(body): Json<StartWsImpersonation>,
+) -> Result<axum::response::Response, AuthError> {
+    use axum::response::IntoResponse;
+
+    // 1. No nesting: a caller already impersonating cannot start another. Checked
+    //    before anything reads the target, so it leaks nothing.
+    if ctx.principal.impersonator.is_some() {
+        return Err(AuthError(Error::Forbidden));
+    }
+    // 2. Caller authority: a `ws_admin` of THIS workspace, or a platform_admin.
+    //    Learn nothing about the target before this passes.
+    if ctx.workspace_role != "ws_admin" && !ctx.is_platform_admin() {
+        return Err(AuthError(Error::Forbidden));
+    }
+    // 3. Parse the target and run the SHARED target guards (not-self, reason
+    //    non-empty, target exists, target-not-platform-admin) — identical to the
+    //    platform start endpoint and the OIDC callback.
+    let target = UserId(
+        body.target_user_id
+            .parse::<Uuid>()
+            .map_err(|_| AuthError(Error::InvalidInput("invalid target_user_id".into())))?,
+    );
+    let reason = body.reason.trim().to_string();
+    egret_auth::impersonation::validate_impersonation_target(
+        &st.users,
+        &st.sessions,
+        ctx.principal.user_id,
+        target,
+        &reason,
+    )
+    .await
+    .map_err(AuthError)?;
+    // 4. Workspace-specific target guards. `workspace_roles_for` resolves the
+    //    target's roles in THIS workspace (direct + via group, non-expired): an
+    //    empty set means the target is not a member (403), and a set containing
+    //    `ws_admin` means the target is itself an admin here (403). Both catch
+    //    group-derived roles, not just direct grants.
+    let target_roles = st
+        .authz
+        .workspace_roles_for(target, ctx.workspace_id)
+        .await
+        .map_err(AuthError)?;
+    if target_roles.is_empty() || target_roles.iter().any(|r| r == "ws_admin") {
+        return Err(AuthError(Error::Forbidden));
+    }
+    // 5. Step-up re-authentication of the CALLER. A local caller re-enters their
+    //    password inline; an OIDC caller must re-authenticate with the IdP, so we
+    //    return a 409 carrying the authorize URL with the impersonation intent —
+    //    including this `workspace_id` — sealed into the encrypted state cookie.
+    //    The overlay is then created by the OIDC callback (which re-checks
+    //    `ws_admin` on this workspace before writing it).
+    let caller = st
+        .users
+        .find_by_id(ctx.principal.user_id)
+        .await
+        .map_err(AuthError)?
+        .ok_or(AuthError(Error::Unauthorized))?;
+    if caller.provider != "local" {
+        let (Some(oidc), Some(key)) = (st.oidc.as_ref(), st.cookie_key.as_ref()) else {
+            return Err(AuthError(Error::Internal(anyhow::anyhow!(
+                "OIDC step-up requested but OIDC is not configured"
+            ))));
+        };
+        return Ok(egret_auth::routes::build_impersonation_step_up(
+            oidc,
+            key,
+            st.session_secure,
+            ctx.principal.user_id,
+            target,
+            reason,
+            Some(ctx.workspace_id),
+        ));
+    }
+    let hash = caller
+        .password_hash
+        .as_deref()
+        .ok_or(AuthError(Error::Unauthorized))?;
+    let ok = egret_auth::password::verify_password(body.password.as_deref().unwrap_or(""), hash)
+        .map_err(AuthError)?;
+    if !ok {
+        return Err(AuthError(Error::Unauthorized));
+    }
+    // 6. Write the workspace-scoped overlay on THIS caller's session. A slipped-
+    //    through nesting Conflict maps to Forbidden.
+    let sid = session_id_from_jar(&st, &jar).await?;
+    st.impersonations
+        .start(egret_auth::impersonation::NewImpersonation {
+            admin_session_id: sid,
+            impersonator_id: ctx.principal.user_id,
+            target_user_id: target,
+            workspace_scope: Some(ctx.workspace_id),
+            reason: reason.clone(),
+            ttl_minutes: 30,
+        })
+        .await
+        .map_err(|e| match e {
+            Error::Conflict(_) => AuthError(Error::Forbidden),
+            other => AuthError(other),
+        })?;
+    // 7. Audit, stamped with this workspace.
+    st.audit.emit(egret_audit::AuditEvent::Mutation {
+        actor: Some(ctx.principal.user_id.0),
+        impersonator: Some(ctx.principal.user_id.0),
+        workspace_id: Some(ctx.workspace_id.0),
+        action: "impersonation.start".into(),
+        resource_type: "user".into(),
+        resource_id: Some(target.0.to_string()),
+        detail: serde_json::json!({
+            "reason": reason,
+            "scope": ctx.workspace_id.0.to_string(),
+        }),
+    });
+    Ok(Json(serde_json::json!({ "ok": true })).into_response())
+}
+
+/// Resolve THIS request's `sessions.id` from the session cookie. The overlay is
+/// keyed on the caller's own session row (same convention as the platform start
+/// endpoint's `session_id_from_jar`).
+async fn session_id_from_jar(
+    st: &WorkspaceState,
+    jar: &axum_extra::extract::cookie::CookieJar,
+) -> Result<Uuid, AuthError> {
+    let token = jar
+        .get(egret_auth::cookie::SESSION_COOKIE)
+        .map(|c| c.value().to_string())
+        .ok_or(AuthError(Error::Unauthorized))?;
+    st.sessions
+        .session_id_for_token(&token)
+        .await
+        .map_err(AuthError)?
+        .ok_or(AuthError(Error::Unauthorized))
 }
 
 #[utoipa::path(
@@ -1572,6 +1770,7 @@ pub struct AdminUserApi;
 #[derive(utoipa::OpenApi)]
 #[openapi(
     paths(
+        ws_impersonate_start,
         list_members,
         add_member,
         remove_member,
@@ -1582,6 +1781,7 @@ pub struct AdminUserApi;
         deny_access_request,
     ),
     components(schemas(
+        StartWsImpersonation,
         MemberDto,
         AddMember,
         WsRoleDto,

@@ -270,14 +270,15 @@ pub async fn complete_impersonation_step_up(
             Err(_) => false,
         },
         // Workspace scope (Task 9's path, which also completes through this
-        // callback). The `ws_admin`-on-workspace authority check lives in
-        // egret-workspace and isn't cleanly reachable from egret-auth yet, so this
-        // branch FAILS CLOSED for now: no workspace-scoped step-up can complete
-        // until Task 9 wires the ws start endpoint and replaces this with a real
-        // `ws_admin`-on-`ws` re-check. (Nothing sets `workspace_id` today, so this
-        // branch is currently unreachable in production.)
-        // TODO(task-9): enforce `ws_admin` on `intent.workspace_id` here.
-        Some(_ws) => false,
+        // callback): the authenticated admin must STILL be a `ws_admin` of the
+        // intent's workspace. Re-checked live against `access_grants` (direct or via
+        // group), so a ws_admin demoted in the seconds between start and callback
+        // fails closed here — no overlay — exactly as the platform branch does.
+        Some(ws) => st
+            .sessions
+            .ws_admin_of(authenticated, WorkspaceId(ws))
+            .await
+            .unwrap_or(false),
     };
     if !authority_ok {
         return (
