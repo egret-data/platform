@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { ApiError } from "@/api/client";
 import { useStartPlatformImpersonation, useStartWsImpersonation } from "@/api/impersonation";
@@ -39,6 +40,18 @@ export interface ImpersonateDialogProps {
  * leaves it blank and the backend responds `409 oidc_step_up`, which
  * `useStartPlatformImpersonation`/`useStartWsImpersonation` turn into a
  * redirect to the IdP. The password is simply unused in that case.
+ *
+ * On a successful (non-OIDC) start, navigates to `/`: the entry points this
+ * dialog opens from can be permission-gated pages (Control Plane → Users is
+ * platform_admin-only) that the impersonated target may not be able to see —
+ * staying put risks the *inner* route guard (`RequireControlPlaneAccess` /
+ * `RequireWorkspace`, evaluated against the now-swapped `me`) rendering a bare
+ * `Forbidden` on the next render. `HomeRedirect` then sends the admin into the
+ * target's own first workspace, where the target's access keeps the page (and
+ * `ImpersonationBanner`, mounted in `RequireAuth` above those inner guards —
+ * see its docstring) rendering normally. The mutation's own `onSuccess`
+ * (`api/impersonation.ts`) invalidates `["me"]`/`["my-workspaces"]` before this
+ * `await` resolves, so `HomeRedirect` reads fresh data once it mounts.
  */
 export function ImpersonateDialog({
   open,
@@ -48,6 +61,7 @@ export function ImpersonateDialog({
   workspaceScope,
   onStarted,
 }: ImpersonateDialogProps) {
+  const navigate = useNavigate();
   const [reason, setReason] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -84,6 +98,13 @@ export function ImpersonateDialog({
       });
       onStarted?.();
       handleOpenChange(false);
+      // Navigate away from whatever page opened this dialog — see the
+      // component doc for why this matters (a permission-gated entry point
+      // like Control Plane → Users can turn into a Forbidden dead-end for the
+      // now-impersonated identity). `["me"]`/`["my-workspaces"]` were already
+      // invalidated inside the mutation's own `onSuccess`, so `HomeRedirect`
+      // reads fresh data once it mounts.
+      navigate("/");
     } catch (err) {
       // A 409 oidc_step_up redirects the whole browser away (handled inside
       // the start hook's onError) — there's nothing left to show in the dialog.

@@ -15,7 +15,12 @@ function formatRemaining(expiresAt: string, now: number): string {
 /**
  * Persistent, unmissable bar shown on every authed page while an admin is
  * acting as another user (see `Me.impersonating`). Mounted once in
- * `AppShell` so it can never be scrolled past or forgotten.
+ * `RequireAuth` (`auth/guards.tsx`) — ABOVE the inner per-route guards
+ * (`RequireControlPlaneAccess`, `RequireGlobalAdmin`, `RequirePermission`,
+ * `RequireWorkspace`) and thus above `AppShell` too — so the Exit affordance
+ * survives even if an inner guard renders a bare `Forbidden` (e.g. the
+ * impersonated target has fewer permissions than the admin on a
+ * permission-gated page). See `RequireAuth`'s docstring for the full story.
  */
 export function ImpersonationBanner() {
   const { data: me } = useMe();

@@ -3,7 +3,10 @@
  *
  * `useStartPlatformImpersonation`/`useStartWsImpersonation` (from
  * `@/api/impersonation`) are mocked so no network requests are made and each
- * mutation's `mutateAsync` call can be asserted directly.
+ * mutation's `mutateAsync` call can be asserted directly. `react-router-dom`'s
+ * `useNavigate` is mocked (rest of the module kept real) so the post-success
+ * `navigate("/")` call — the fix for the Control-Plane-Users-to-Forbidden
+ * dead-end — can be asserted directly too.
  */
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -11,11 +14,17 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const useStartPlatformImpersonation = vi.fn();
 const useStartWsImpersonation = vi.fn();
+const mockNavigate = vi.fn();
 
 vi.mock("@/api/impersonation", () => ({
   useStartPlatformImpersonation: () => useStartPlatformImpersonation(),
   useStartWsImpersonation: (workspace: string) => useStartWsImpersonation(workspace),
 }));
+
+vi.mock("react-router-dom", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-router-dom")>();
+  return { ...actual, useNavigate: () => mockNavigate };
+});
 
 import { ImpersonateDialog } from "@/components/ImpersonateDialog";
 
@@ -36,6 +45,7 @@ beforeEach(() => {
   wsMutation = mutationStub();
   useStartPlatformImpersonation.mockReset().mockReturnValue(platformMutation);
   useStartWsImpersonation.mockReset().mockReturnValue(wsMutation);
+  mockNavigate.mockReset();
 });
 
 afterEach(() => {
@@ -85,6 +95,10 @@ describe("ImpersonateDialog", () => {
     });
     expect(wsMutation.mutateAsync).not.toHaveBeenCalled();
     expect(onOpenChange).toHaveBeenCalledWith(false);
+    // Navigates away from whatever (possibly permission-gated) page opened
+    // the dialog — see ImpersonateDialog's doc comment for the Forbidden
+    // dead-end this avoids.
+    expect(mockNavigate).toHaveBeenCalledWith("/");
   });
 
   test("submits without a password when left blank", async () => {
@@ -116,5 +130,20 @@ describe("ImpersonateDialog", () => {
       password: undefined,
     });
     expect(platformMutation.mutateAsync).not.toHaveBeenCalled();
+    // Uniform behaviour across both entry points: the ws-scoped start also
+    // navigates to "/" on success.
+    expect(mockNavigate).toHaveBeenCalledWith("/");
+  });
+
+  test("does not navigate when the start mutation fails", async () => {
+    platformMutation.mutateAsync.mockRejectedValue(new Error("boom"));
+    const user = userEvent.setup();
+    renderDialog();
+
+    await user.type(screen.getByLabelText(/reason/i), "Debugging a support ticket");
+    await user.click(screen.getByRole("button", { name: /impersonate/i }));
+
+    expect(await screen.findByText("boom")).toBeInTheDocument();
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 });

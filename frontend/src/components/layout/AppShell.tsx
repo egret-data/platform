@@ -1,7 +1,6 @@
 import { useState, useEffect, type ReactNode } from "react";
 import { Header } from "./Header";
 import { Sidebar } from "./Sidebar";
-import { ImpersonationBanner } from "./ImpersonationBanner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 const STORAGE_KEY = "egret:sidebar-collapsed";
@@ -19,10 +18,13 @@ export function AppShell({ children }: { children: ReactNode }) {
     localStorage.setItem(STORAGE_KEY, collapsed ? "1" : "0");
   }, [collapsed]);
 
+  // `h-full` (not `h-screen`): the viewport-height div now lives one level up, in
+  // `RequireAuth` (see its docstring) — it wraps `ImpersonationBanner` plus this
+  // shell in a single `h-screen` flex column so the banner never doubles the
+  // viewport height. This shell just fills whatever height that wrapper gives it.
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex h-screen flex-col bg-background">
-        <ImpersonationBanner />
+      <div className="flex h-full flex-col bg-background">
         <Header />
         <div className="flex min-h-0 flex-1">
           <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
