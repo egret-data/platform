@@ -1041,6 +1041,33 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         }
     }
 
+    // Build the audit sink + spawn the batch writer and retention prune (best-effort).
+    // `audit_sink` and `audit_store` are kept in scope after this block: the
+    // mutation-emitting states (incl. AuthState's impersonation endpoints) and the
+    // query API's CpState clone them.
+    let audit_store = egret_audit::AuditStore::new(db.clone());
+    let (audit_sink, audit_rx) = egret_audit::AuditSink::new(config.audit.channel_capacity);
+    if config.audit.enabled {
+        let store = audit_store.clone();
+        tokio::spawn(egret_audit::AuditWriter::run(
+            audit_rx,
+            store,
+            config.audit.batch_size,
+            std::time::Duration::from_millis(config.audit.flush_interval_ms),
+        ));
+        let prune_store = audit_store.clone();
+        let retention = config.audit.retention_days;
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                if let Err(e) = prune_store.prune(retention).await {
+                    tracing::warn!(error=%e, "audit prune failed");
+                }
+            }
+        });
+    }
+
     let users = UserRepo::new(db.clone());
     let sessions = SessionService::new(
         db.clone(),
@@ -1057,6 +1084,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         config: config.clone(),
         rate_limiter,
+        audit: audit_sink.clone(),
+        impersonations: egret_auth::impersonation::ImpersonationRepo::new(db.clone()),
     };
 
     // Shared secret store: one `SecretStore` built from `db` + the master key,
@@ -1146,32 +1175,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
 
     // event bus — RoleRepo publishes RolesChanged; the Cedar PDP subscriber is wired in B1b-1
     let bus = egret_events::EventBus::new();
-
-    // Build the audit sink + spawn the batch writer and retention prune (best-effort).
-    // `audit_sink` and `audit_store` are kept in scope after this block: Tasks 4/5
-    // clone them into the mutation-emitting states and the query API's CpState.
-    let audit_store = egret_audit::AuditStore::new(db.clone());
-    let (audit_sink, audit_rx) = egret_audit::AuditSink::new(config.audit.channel_capacity);
-    if config.audit.enabled {
-        let store = audit_store.clone();
-        tokio::spawn(egret_audit::AuditWriter::run(
-            audit_rx,
-            store,
-            config.audit.batch_size,
-            std::time::Duration::from_millis(config.audit.flush_interval_ms),
-        ));
-        let prune_store = audit_store.clone();
-        let retention = config.audit.retention_days;
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
-            loop {
-                tick.tick().await;
-                if let Err(e) = prune_store.prune(retention).await {
-                    tracing::warn!(error=%e, "audit prune failed");
-                }
-            }
-        });
-    }
 
     // Cedar PDP — built from the SAME bus as RoleRepo so RolesChanged hot-reloads
     // it (B1b-0 F1). A different EventBus would silently never reload. Defined

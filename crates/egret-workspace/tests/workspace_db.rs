@@ -709,6 +709,8 @@ async fn platform_admin_can_create_workspace() {
         ),
         config: Config::default(),
         rate_limiter: egret_auth::ratelimit::RateLimiter::new(5, 300, 300),
+        audit: egret_audit::AuditSink::new(16).0,
+        impersonations: egret_auth::impersonation::ImpersonationRepo::new(db.clone()),
     };
 }
 

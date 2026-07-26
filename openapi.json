@@ -278,6 +278,69 @@
         }
       }
     },
+    "/api/admin/impersonate": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "impersonate_start",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartImpersonation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Impersonation started; the session now resolves to the target"
+          },
+          "400": {
+            "description": "Bad target / empty reason / OIDC step-up required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated, or wrong step-up password",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a platform admin, already impersonating, or target is an admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/users": {
       "get": {
         "tags": [
@@ -1426,6 +1489,46 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AuthConfig"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/impersonation/exit": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "impersonate_exit",
+        "responses": {
+          "200": {
+            "description": "Impersonation ended; the session returns to the admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -23765,6 +23868,32 @@
           }
         }
       },
+      "ImpersonationDto": {
+        "type": "object",
+        "description": "The active impersonation as surfaced by `/me`: who is being acted-as\n(`target`), the admin behind it (`impersonator`), and the overlay's bounds.",
+        "required": [
+          "target",
+          "impersonator",
+          "expires_at"
+        ],
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/UserRef"
+          },
+          "impersonator": {
+            "$ref": "#/components/schemas/UserRef"
+          },
+          "workspace_scope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "type": "string"
+          }
+        }
+      },
       "JoinableWorkspaceDto": {
         "type": "object",
         "description": "A workspace a user may request to join (they are not already a member).",
@@ -23954,6 +24083,17 @@
             "items": {
               "type": "string"
             }
+          },
+          "impersonating": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImpersonationDto",
+                "description": "Present when the caller is currently impersonating another user (an active\nadmin overlay resolved to the target). `null` for an ordinary session."
+              }
+            ]
           }
         }
       },
@@ -26077,6 +26217,29 @@
           }
         }
       },
+      "StartImpersonation": {
+        "type": "object",
+        "description": "Body for `POST /api/admin/impersonate`.",
+        "required": [
+          "target_user_id",
+          "reason"
+        ],
+        "properties": {
+          "target_user_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for a local-auth admin (step-up). OIDC admins re-auth via OIDC (Task 8)."
+          }
+        }
+      },
       "StatusBody": {
         "type": "object",
         "required": [
@@ -26825,6 +26988,22 @@
             "type": "string"
           },
           "status": {
+            "type": "string"
+          }
+        }
+      },
+      "UserRef": {
+        "type": "object",
+        "description": "A minimal user reference (id + email) for the impersonation state on `/me`.",
+        "required": [
+          "user_id",
+          "email"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "email": {
             "type": "string"
           }
         }

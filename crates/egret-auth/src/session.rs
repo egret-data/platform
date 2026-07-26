@@ -158,6 +158,19 @@ impl SessionService {
         }))
     }
 
+    /// Resolve the `sessions.id` for a raw session token (via its stored hash),
+    /// or `None` if no such session row exists. Used by the impersonation
+    /// endpoints to key the overlay on the admin's own session.
+    pub async fn session_id_for_token(&self, token: &str) -> Result<Option<Uuid>> {
+        let token_hash = hash_token(token);
+        let id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM sessions WHERE token_hash = $1")
+            .bind(&token_hash)
+            .fetch_optional(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(id)
+    }
+
     pub async fn revoke(&self, token: &str) -> Result<()> {
         let token_hash = hash_token(token);
         sqlx::query("DELETE FROM sessions WHERE token_hash = $1")
@@ -175,6 +188,12 @@ impl SessionService {
             .await
             .map_err(db_err)?;
         Ok(())
+    }
+
+    /// Public wrapper over `platform_roles` so endpoints can check a target
+    /// user's platform roles (e.g. to forbid impersonating a platform_admin).
+    pub async fn platform_roles_of(&self, user_id: UserId) -> Result<Vec<String>> {
+        self.platform_roles(user_id).await
     }
 
     /// Platform roles for the user (direct + via group membership).

@@ -380,3 +380,420 @@ async fn validate_disabled_target_falls_through_to_admin() {
     );
     assert!(p.impersonator.is_none());
 }
+
+// ── HTTP endpoint tests: the platform-admin impersonation start/exit surface ──
+//
+// These drive the real routers (`auth_router` + `admin_impersonation_router`) over
+// an in-process `AuthState`, exercising the guards that make this a security
+// surface: no-nesting, platform-admin only, step-up re-auth, no-self, reason
+// required, target-not-admin, and the `/me` impersonation state.
+mod http {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request as HttpRequest, StatusCode};
+    use egret_auth::routes::{admin_impersonation_router, auth_router, AuthState};
+    use egret_auth::session::SessionService;
+    use egret_config::Config;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    /// Insert a local user with password "pw"; return its id and email.
+    async fn seed_local(db: &Db) -> (UserId, String) {
+        let repo = UserRepo::new(db.clone());
+        let email = unique_email("http");
+        let id = repo
+            .insert_local(&email, "H", &hash_password("pw").unwrap())
+            .await
+            .unwrap();
+        (id, email)
+    }
+
+    /// Grant the caller the platform `platform_admin` role directly (user grant).
+    async fn grant_platform_admin(db: &Db, uid: UserId) {
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT 'user', $1, id, 'platform', NULL FROM roles \
+             WHERE scope = 'platform' AND name = 'platform_admin' \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(uid.0)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+
+    fn app(db: &Db) -> axum::Router {
+        let st = AuthState {
+            users: UserRepo::new(db.clone()),
+            sessions: SessionService::new(
+                db.clone(),
+                chrono::Duration::hours(24),
+                chrono::Duration::minutes(60),
+            ),
+            config: Config::default(),
+            rate_limiter: egret_auth::ratelimit::RateLimiter::new(50, 300, 300),
+            audit: egret_audit::AuditSink::new(16).0,
+            impersonations: ImpersonationRepo::new(db.clone()),
+        };
+        axum::Router::new()
+            .nest("/api/auth", auth_router())
+            .nest("/api/admin", admin_impersonation_router())
+            .with_state(st)
+    }
+
+    /// Log in and return `(cookie_header, csrf_value)` — the cookie header carries
+    /// both the session and CSRF cookies; the csrf value is echoed in the header
+    /// for mutating requests.
+    async fn login(app: &axum::Router, email: &str) -> (String, String) {
+        let body =
+            serde_json::to_vec(&serde_json::json!({"email": email, "password": "pw"})).unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "login should succeed");
+        let mut session_kv = String::new();
+        let mut csrf_kv = String::new();
+        let mut csrf_val = String::new();
+        for v in resp.headers().get_all("set-cookie").iter() {
+            let s = v.to_str().unwrap();
+            let kv = s.split(';').next().unwrap();
+            if let Some(rest) = kv.strip_prefix("egret_session=") {
+                session_kv = format!("egret_session={rest}");
+            } else if let Some(rest) = kv.strip_prefix("egret_csrf=") {
+                csrf_kv = format!("egret_csrf={rest}");
+                csrf_val = rest.to_string();
+            }
+        }
+        assert!(!session_kv.is_empty(), "session cookie present");
+        assert!(!csrf_val.is_empty(), "csrf cookie present");
+        (format!("{session_kv}; {csrf_kv}"), csrf_val)
+    }
+
+    async fn me(app: &axum::Router, cookie: &str) -> serde_json::Value {
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/auth/me")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// POST /api/admin/impersonate with the given JSON body; returns the status.
+    async fn post_impersonate(
+        app: &axum::Router,
+        cookie: &str,
+        csrf: &str,
+        body: serde_json::Value,
+    ) -> StatusCode {
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/admin/impersonate")
+                    .header("cookie", cookie)
+                    .header("x-egret-csrf", csrf)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        resp.status()
+    }
+
+    async fn active_overlay_count(db: &Db, impersonator: UserId) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM impersonations WHERE impersonator_id = $1",
+        )
+        .bind(impersonator.0)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn platform_admin_impersonates_and_me_reflects_it() {
+        let Some(db) = connect().await else {
+            eprintln!("DATABASE_URL unset — skipping");
+            return;
+        };
+        let app = app(&db);
+        let (admin, admin_email) = seed_local(&db).await;
+        grant_platform_admin(&db, admin).await;
+        let (target, target_email) = seed_local(&db).await;
+        let (cookie, csrf) = login(&app, &admin_email).await;
+
+        let status = post_impersonate(
+            &app,
+            &cookie,
+            &csrf,
+            serde_json::json!({
+                "target_user_id": target.0.to_string(),
+                "reason": "support ticket 42",
+                "password": "pw",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let m = me(&app, &cookie).await;
+        assert_eq!(
+            m["email"].as_str().unwrap().to_lowercase(),
+            target_email.to_lowercase(),
+            "me now resolves to the target"
+        );
+        let imp = &m["impersonating"];
+        assert!(!imp.is_null(), "impersonating state present");
+        assert_eq!(
+            imp["target"]["email"].as_str().unwrap().to_lowercase(),
+            target_email.to_lowercase()
+        );
+        assert_eq!(
+            imp["impersonator"]["user_id"].as_str().unwrap(),
+            admin.0.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_step_up_password_is_401_and_writes_nothing() {
+        let Some(db) = connect().await else {
+            eprintln!("DATABASE_URL unset — skipping");
+            return;
+        };
+        let app = app(&db);
+        let (admin, admin_email) = seed_local(&db).await;
+        grant_platform_admin(&db, admin).await;
+        let (target, _te) = seed_local(&db).await;
+        let (cookie, csrf) = login(&app, &admin_email).await;
+
+        let status = post_impersonate(
+            &app,
+            &cookie,
+            &csrf,
+            serde_json::json!({
+                "target_user_id": target.0.to_string(),
+                "reason": "nope",
+                "password": "WRONG",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // No overlay row was written for this admin.
+        assert_eq!(
+            active_overlay_count(&db, admin).await,
+            0,
+            "a wrong step-up password must write zero overlay rows"
+        );
+        // And me still resolves to the admin.
+        let m = me(&app, &cookie).await;
+        assert_eq!(
+            m["email"].as_str().unwrap().to_lowercase(),
+            admin_email.to_lowercase()
+        );
+        assert!(m["impersonating"].is_null());
+    }
+
+    #[tokio::test]
+    async fn cannot_impersonate_a_platform_admin() {
+        let Some(db) = connect().await else {
+            eprintln!("DATABASE_URL unset — skipping");
+            return;
+        };
+        let app = app(&db);
+        let (admin, admin_email) = seed_local(&db).await;
+        grant_platform_admin(&db, admin).await;
+        let (target, _te) = seed_local(&db).await;
+        grant_platform_admin(&db, target).await; // target is also an admin
+        let (cookie, csrf) = login(&app, &admin_email).await;
+
+        let status = post_impersonate(
+            &app,
+            &cookie,
+            &csrf,
+            serde_json::json!({
+                "target_user_id": target.0.to_string(),
+                "reason": "x",
+                "password": "pw",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(active_overlay_count(&db, admin).await, 0);
+    }
+
+    #[tokio::test]
+    async fn cannot_impersonate_self() {
+        let Some(db) = connect().await else {
+            eprintln!("DATABASE_URL unset — skipping");
+            return;
+        };
+        let app = app(&db);
+        let (admin, admin_email) = seed_local(&db).await;
+        grant_platform_admin(&db, admin).await;
+        let (cookie, csrf) = login(&app, &admin_email).await;
+
+        let status = post_impersonate(
+            &app,
+            &cookie,
+            &csrf,
+            serde_json::json!({
+                "target_user_id": admin.0.to_string(),
+                "reason": "x",
+                "password": "pw",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn reason_is_required() {
+        let Some(db) = connect().await else {
+            eprintln!("DATABASE_URL unset — skipping");
+            return;
+        };
+        let app = app(&db);
+        let (admin, admin_email) = seed_local(&db).await;
+        grant_platform_admin(&db, admin).await;
+        let (target, _te) = seed_local(&db).await;
+        let (cookie, csrf) = login(&app, &admin_email).await;
+
+        let status = post_impersonate(
+            &app,
+            &cookie,
+            &csrf,
+            serde_json::json!({
+                "target_user_id": target.0.to_string(),
+                "reason": "   ",
+                "password": "pw",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(active_overlay_count(&db, admin).await, 0);
+    }
+
+    #[tokio::test]
+    async fn cannot_nest() {
+        let Some(db) = connect().await else {
+            eprintln!("DATABASE_URL unset — skipping");
+            return;
+        };
+        let app = app(&db);
+        let (admin, admin_email) = seed_local(&db).await;
+        grant_platform_admin(&db, admin).await;
+        let (t1, _t1e) = seed_local(&db).await;
+        let (t2, _t2e) = seed_local(&db).await;
+        let (cookie, csrf) = login(&app, &admin_email).await;
+
+        // First impersonation succeeds.
+        assert_eq!(
+            post_impersonate(
+                &app,
+                &cookie,
+                &csrf,
+                serde_json::json!({
+                    "target_user_id": t1.0.to_string(),
+                    "reason": "first",
+                    "password": "pw",
+                }),
+            )
+            .await,
+            StatusCode::OK
+        );
+        // A second, while impersonating, is forbidden (no nesting). Note the
+        // session now resolves to the target, so `password` is irrelevant — the
+        // no-nest guard fires first.
+        assert_eq!(
+            post_impersonate(
+                &app,
+                &cookie,
+                &csrf,
+                serde_json::json!({
+                    "target_user_id": t2.0.to_string(),
+                    "reason": "second",
+                    "password": "pw",
+                }),
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_returns_to_admin() {
+        let Some(db) = connect().await else {
+            eprintln!("DATABASE_URL unset — skipping");
+            return;
+        };
+        let app = app(&db);
+        let (admin, admin_email) = seed_local(&db).await;
+        grant_platform_admin(&db, admin).await;
+        let (target, target_email) = seed_local(&db).await;
+        let (cookie, csrf) = login(&app, &admin_email).await;
+
+        assert_eq!(
+            post_impersonate(
+                &app,
+                &cookie,
+                &csrf,
+                serde_json::json!({
+                    "target_user_id": target.0.to_string(),
+                    "reason": "x",
+                    "password": "pw",
+                }),
+            )
+            .await,
+            StatusCode::OK
+        );
+        // Sanity: me is the target while impersonating.
+        let m = me(&app, &cookie).await;
+        assert_eq!(
+            m["email"].as_str().unwrap().to_lowercase(),
+            target_email.to_lowercase()
+        );
+
+        // Exit.
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/auth/impersonation/exit")
+                    .header("cookie", &cookie)
+                    .header("x-egret-csrf", &csrf)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // me is the admin again, impersonating null.
+        let m = me(&app, &cookie).await;
+        assert_eq!(
+            m["email"].as_str().unwrap().to_lowercase(),
+            admin_email.to_lowercase()
+        );
+        assert!(m["impersonating"].is_null());
+        assert_eq!(active_overlay_count(&db, admin).await, 0);
+    }
+}
