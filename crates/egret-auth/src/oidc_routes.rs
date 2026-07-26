@@ -11,13 +11,16 @@ use serde::Deserialize;
 
 use crate::cookie::{csrf_cookie, session_cookie};
 use crate::groups::GroupRepo;
+use crate::impersonation::{validate_impersonation_target, ImpersonationRepo, NewImpersonation};
 use crate::oidc::{provision_and_sync, OidcService};
 use crate::oidc_cookie::{
-    build_state_cookie, clear_state_cookie, OidcStateCookie, OIDC_STATE_COOKIE,
+    build_state_cookie, clear_state_cookie, ImpersonateIntent, OidcStateCookie, OIDC_STATE_COOKIE,
 };
 use crate::session::SessionService;
 use crate::token::generate_token;
 use crate::users::UserRepo;
+use egret_audit::{AuditEvent, AuditSink};
+use egret_core::{UserId, WorkspaceId};
 
 #[derive(Clone)]
 pub struct OidcRoutesState {
@@ -27,6 +30,12 @@ pub struct OidcRoutesState {
     pub sessions: SessionService,
     pub config: Config,
     pub cookie_key: Key,
+    /// Overlay store — the OIDC callback creates the impersonation here once a
+    /// step-up re-auth completes (Task 8).
+    pub impersonations: ImpersonationRepo,
+    /// Audit sink for the `impersonation.start` event emitted on a completed
+    /// step-up.
+    pub audit: AuditSink,
 }
 
 impl FromRef<OidcRoutesState> for Key {
@@ -75,6 +84,7 @@ async fn oidc_login(State(st): State<OidcRoutesState>, jar: PrivateCookieJar) ->
             state: start.state,
             nonce: start.nonce,
             pkce_verifier: start.pkce_verifier,
+            impersonate: None,
         },
         st.config.session.secure,
     );
@@ -180,6 +190,14 @@ async fn oidc_callback(
                 .into_response()
         }
     };
+
+    // Impersonation step-up (Task 8): this authorize round-trip carried an intent
+    // sealed in the (authenticated-encryption) state cookie. Complete the overlay
+    // here rather than performing an ordinary login.
+    if let Some(intent) = state.impersonate {
+        return complete_impersonation_step_up(&st, jar, user_id, intent).await;
+    }
+
     let issued = match st.sessions.create(user_id, "", "").await {
         Ok(i) => i,
         Err(_) => {
@@ -191,6 +209,125 @@ async fn oidc_callback(
         }
     };
 
+    let secure = st.config.session.secure;
+    let max_age = st.config.session.absolute_ttl_hours as i64 * 3600;
+    let csrf = generate_token();
+    login_response(
+        jar,
+        issued.token,
+        csrf,
+        secure,
+        max_age,
+        &st.config.oidc.post_login_redirect,
+    )
+}
+
+/// Complete an OIDC impersonation step-up (Task 8). `authenticated` is the user id
+/// `provision_and_sync` resolved from the freshly-verified id_token's `sub`. We:
+///
+/// 1. require it to equal the admin who INITIATED the step-up (sealed in
+///    `intent.impersonator_id`) — a *different* IdP login must not complete
+///    someone else's impersonation intent;
+/// 2. re-run the shared target guards (not-self / reason / target-exists /
+///    target-not-admin), identical to the platform start endpoint;
+/// 3. mint a fresh session for the admin and attach the overlay to it (binding the
+///    overlay to a session we KNOW belongs to the just-authenticated admin, rather
+///    than trusting a pre-existing session cookie);
+/// 4. audit; and
+/// 5. redirect into the app carrying that (now-overlaid) session.
+///
+/// Any failure clears the state cookie and writes NO overlay.
+async fn complete_impersonation_step_up(
+    st: &OidcRoutesState,
+    jar: PrivateCookieJar,
+    authenticated: UserId,
+    intent: ImpersonateIntent,
+) -> Response {
+    // (1) Same-admin check: the fresh authentication must be the initiator.
+    if authenticated.0 != intent.impersonator_id {
+        return (
+            jar.remove(clear_state_cookie()),
+            (StatusCode::FORBIDDEN, "step-up identity mismatch"),
+        )
+            .into_response();
+    }
+    let target = UserId(intent.target_user_id);
+    // (2) Re-run the shared target guards. The initiator is already known to be a
+    //     platform admin (checked at start time); here we re-validate the target.
+    if let Err(e) = validate_impersonation_target(
+        &st.users,
+        &st.sessions,
+        authenticated,
+        target,
+        &intent.reason,
+    )
+    .await
+    {
+        return (
+            jar.remove(clear_state_cookie()),
+            (e.status_code(), "step-up target rejected"),
+        )
+            .into_response();
+    }
+    // (3) Mint a fresh admin session and attach the overlay to it.
+    let issued = match st.sessions.create(authenticated, "", "").await {
+        Ok(i) => i,
+        Err(_) => {
+            return (
+                jar.remove(clear_state_cookie()),
+                (StatusCode::INTERNAL_SERVER_ERROR, "session failed"),
+            )
+                .into_response()
+        }
+    };
+    let sid = match st.sessions.session_id_for_token(&issued.token).await {
+        Ok(Some(id)) => id,
+        _ => {
+            return (
+                jar.remove(clear_state_cookie()),
+                (StatusCode::INTERNAL_SERVER_ERROR, "session failed"),
+            )
+                .into_response()
+        }
+    };
+    let workspace_scope = intent.workspace_id.map(WorkspaceId);
+    if let Err(e) = st
+        .impersonations
+        .start(NewImpersonation {
+            admin_session_id: sid,
+            impersonator_id: authenticated,
+            target_user_id: target,
+            workspace_scope,
+            reason: intent.reason.clone(),
+            ttl_minutes: 30,
+        })
+        .await
+    {
+        tracing::warn!(error = %e, "impersonation step-up: overlay insert failed");
+        return (
+            jar.remove(clear_state_cookie()),
+            (StatusCode::INTERNAL_SERVER_ERROR, "overlay failed"),
+        )
+            .into_response();
+    }
+    // (4) Audit.
+    st.audit.emit(AuditEvent::Mutation {
+        actor: Some(authenticated.0),
+        impersonator: Some(authenticated.0),
+        workspace_id: intent.workspace_id,
+        action: "impersonation.start".into(),
+        resource_type: "user".into(),
+        resource_id: Some(target.0.to_string()),
+        detail: serde_json::json!({
+            "reason": intent.reason,
+            "scope": intent
+                .workspace_id
+                .map(|w| w.to_string())
+                .unwrap_or_else(|| "platform".to_string()),
+            "step_up": "oidc",
+        }),
+    });
+    // (5) Redirect into the app carrying the new admin session (now overlaid).
     let secure = st.config.session.secure;
     let max_age = st.config.session.absolute_ttl_hours as i64 * 3600;
     let csrf = generate_token();

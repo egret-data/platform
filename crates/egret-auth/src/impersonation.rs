@@ -6,6 +6,49 @@ use egret_core::{Error, Result, UserId, WorkspaceId};
 use egret_metastore::Db;
 use uuid::Uuid;
 
+use crate::session::SessionService;
+use crate::users::UserRepo;
+
+/// Validate that `impersonator` (already known to be an authorized admin for the
+/// intended scope) may target `target_user_id`. Enforces the target-facing
+/// invariants shared by **every** impersonation entry point: not self, reason
+/// non-empty, target exists, and the target is not itself a `platform_admin`
+/// (admins are off-limits so an overlay can never be used to borrow admin power).
+///
+/// It deliberately does **not** check the caller's own authority (platform-admin
+/// vs ws-admin) — that differs per entry point and the caller enforces it first,
+/// before reaching here. Returns `Ok(())` or the domain [`Error`] that maps to the
+/// right HTTP status (`InvalidInput` → 400, `Forbidden` → 403).
+///
+/// Used by the platform start endpoint (Task 7), the OIDC step-up callback
+/// (Task 8), and the ws_admin start endpoint (Task 9) so the guard set stays
+/// identical across all three.
+pub async fn validate_impersonation_target(
+    users: &UserRepo,
+    sessions: &SessionService,
+    impersonator_id: UserId,
+    target_user_id: UserId,
+    reason: &str,
+) -> Result<()> {
+    if target_user_id == impersonator_id {
+        return Err(Error::InvalidInput("cannot impersonate yourself".into()));
+    }
+    if reason.trim().is_empty() {
+        return Err(Error::InvalidInput("reason is required".into()));
+    }
+    // Target must exist.
+    users
+        .find_by_id(target_user_id)
+        .await?
+        .ok_or_else(|| Error::InvalidInput("unknown target".into()))?;
+    // Target must NOT itself be a platform admin.
+    let target_roles = sessions.platform_roles_of(target_user_id).await?;
+    if target_roles.iter().any(|r| r == "platform_admin") {
+        return Err(Error::Forbidden);
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct ImpersonationRepo {
     db: Db,

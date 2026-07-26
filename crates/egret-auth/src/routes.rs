@@ -3,18 +3,19 @@
 use std::sync::OnceLock;
 
 use axum::extract::{FromRef, State};
-use axum::http::HeaderMap;
-use axum::response::IntoResponse;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use axum_extra::extract::cookie::CookieJar;
+use axum_extra::extract::cookie::{CookieJar, PrivateCookieJar};
 use egret_config::Config;
 use egret_core::http::ErrorBody;
 use egret_core::{Ack, Error};
 use serde::{Deserialize, Serialize};
 
 use crate::cookie::{clear_cookie, csrf_cookie, session_cookie, CSRF_COOKIE, SESSION_COOKIE};
-use crate::impersonation::{ImpersonationRepo, NewImpersonation};
+use crate::impersonation::{validate_impersonation_target, ImpersonationRepo, NewImpersonation};
+use crate::oidc_cookie::{build_state_cookie, ImpersonateIntent, OidcStateCookie};
 use crate::password::verify_password;
 use crate::principal::{Auth, AuthError};
 use crate::ratelimit::RateLimiter;
@@ -34,6 +35,14 @@ pub struct AuthState {
     pub rate_limiter: RateLimiter,
     pub audit: AuditSink,
     pub impersonations: ImpersonationRepo,
+    /// The OIDC service, present only when SSO is enabled. Used by the
+    /// impersonation start endpoint to build the step-up authorize URL for an
+    /// OIDC-provider admin (Task 8). `None` on non-OIDC deploys and in unit tests.
+    pub oidc: Option<crate::oidc::OidcService>,
+    /// The cookie-encryption key, present only when OIDC is enabled. Needed to
+    /// seal the impersonation intent into the same `PrivateCookieJar`-encrypted
+    /// state cookie the normal login flow uses. `None` when `oidc` is `None`.
+    pub cookie_key: Option<axum_extra::extract::cookie::Key>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -78,6 +87,18 @@ pub struct StartImpersonation {
     pub reason: String,
     /// Required for a local-auth admin (step-up). OIDC admins re-auth via OIDC (Task 8).
     pub password: Option<String>,
+}
+
+/// `409` body returned when an OIDC-provider admin starts an impersonation: the
+/// client must redirect the browser to `authorize_url` to complete a fresh IdP
+/// re-authentication (`prompt=login`) before the overlay is created (Task 8). The
+/// `code` lets the SPA branch on this specific response.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct OidcStepUp {
+    /// Always `"oidc_step_up"`.
+    pub code: String,
+    /// The OIDC authorize URL (carries the sealed impersonation intent in `state`).
+    pub authorize_url: String,
 }
 
 /// Pre-login capability probe returned by `GET /api/auth/config`: tells the
@@ -276,9 +297,10 @@ async fn session_id_from_jar(st: &AuthState, jar: &CookieJar) -> Result<uuid::Uu
     request_body = StartImpersonation,
     responses(
         (status = 200, description = "Impersonation started; the session now resolves to the target"),
-        (status = 400, description = "Bad target / empty reason / OIDC step-up required", body = ErrorBody),
+        (status = 400, description = "Bad target / empty reason", body = ErrorBody),
         (status = 401, description = "Not authenticated, or wrong step-up password", body = ErrorBody),
         (status = 403, description = "Not a platform admin, already impersonating, or target is an admin", body = ErrorBody),
+        (status = 409, description = "OIDC admin: re-authenticate at `authorize_url`, then the callback creates the overlay", body = OidcStepUp),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -287,7 +309,7 @@ async fn impersonate_start(
     Auth(p): Auth,
     jar: CookieJar,
     Json(body): Json<StartImpersonation>,
-) -> Result<impl IntoResponse, AuthError> {
+) -> Result<Response, AuthError> {
     // 1. No nesting: an active overlay session cannot start another. This is
     //    checked BEFORE anything reads the target, so a non-admin (or a caller
     //    already impersonating) learns nothing about the target.
@@ -298,60 +320,41 @@ async fn impersonate_start(
     if !p.platform_roles.iter().any(|r| r == "platform_admin") {
         return Err(AuthError(Error::Forbidden));
     }
-    // 3. Parse + validate inputs.
+    // 3. Parse the target and run the SHARED target guards (not-self, reason
+    //    non-empty, target exists, target-not-admin). Same guard set the OIDC
+    //    callback and the ws_admin start (Task 9) reuse.
     let target = UserId(
         body.target_user_id
             .parse::<uuid::Uuid>()
             .map_err(|_| AuthError(Error::InvalidInput("invalid target_user_id".into())))?,
     );
-    if target == p.user_id {
-        return Err(AuthError(Error::InvalidInput(
-            "cannot impersonate yourself".into(),
-        )));
-    }
     let reason = body.reason.trim().to_string();
-    if reason.is_empty() {
-        return Err(AuthError(Error::InvalidInput("reason is required".into())));
-    }
-    // 4. Step-up re-authentication of the ADMIN. Local admins re-enter their
-    //    password; OIDC admins are rejected here (Task 8 adds OIDC step-up).
+    validate_impersonation_target(&st.users, &st.sessions, p.user_id, target, &reason)
+        .await
+        .map_err(AuthError)?;
+    // 4. Step-up re-authentication of the ADMIN. A local admin re-enters their
+    //    password inline; an OIDC admin must re-authenticate with the IdP, so we
+    //    return a 409 carrying the authorize URL (`prompt=login`) with the
+    //    impersonation intent sealed into the encrypted state cookie. The overlay
+    //    is then created by the OIDC callback (see `oidc_routes::oidc_callback`).
     let admin = st
         .users
         .find_by_id(p.user_id)
         .await
         .map_err(AuthError)?
         .ok_or(AuthError(Error::Unauthorized))?;
-    if admin.provider == "local" {
-        let hash = admin
-            .password_hash
-            .as_deref()
-            .ok_or(AuthError(Error::Unauthorized))?;
-        let ok =
-            verify_password(body.password.as_deref().unwrap_or(""), hash).map_err(AuthError)?;
-        if !ok {
-            return Err(AuthError(Error::Unauthorized));
-        }
-    } else {
-        return Err(AuthError(Error::InvalidInput(
-            "OIDC step-up required".into(),
-        )));
+    if admin.provider != "local" {
+        return impersonate_oidc_step_up(&st, p.user_id, target, reason);
     }
-    // 5. Target must exist and must NOT itself be a platform admin.
-    let _target_user = st
-        .users
-        .find_by_id(target)
-        .await
-        .map_err(AuthError)?
-        .ok_or(AuthError(Error::InvalidInput("unknown target".into())))?;
-    let target_roles = st
-        .sessions
-        .platform_roles_of(target)
-        .await
-        .map_err(AuthError)?;
-    if target_roles.iter().any(|r| r == "platform_admin") {
-        return Err(AuthError(Error::Forbidden));
+    let hash = admin
+        .password_hash
+        .as_deref()
+        .ok_or(AuthError(Error::Unauthorized))?;
+    let ok = verify_password(body.password.as_deref().unwrap_or(""), hash).map_err(AuthError)?;
+    if !ok {
+        return Err(AuthError(Error::Unauthorized));
     }
-    // 6. Write the overlay on THIS admin session (step-up already passed, so a
+    // 5. Write the overlay on THIS admin session (step-up already passed, so a
     //    wrong password left zero rows). Map a slipped-through nesting Conflict
     //    to Forbidden.
     let sid = session_id_from_jar(&st, &jar).await?;
@@ -369,7 +372,7 @@ async fn impersonate_start(
             Error::Conflict(_) => AuthError(Error::Forbidden),
             other => AuthError(other),
         })?;
-    // 7. Audit both parties.
+    // 6. Audit both parties.
     st.audit.emit(AuditEvent::Mutation {
         actor: Some(p.user_id.0),
         impersonator: Some(p.user_id.0),
@@ -379,7 +382,52 @@ async fn impersonate_start(
         resource_id: Some(target.0.to_string()),
         detail: serde_json::json!({ "reason": reason, "scope": "platform" }),
     });
-    Ok(Json(serde_json::json!({ "ok": true })))
+    Ok(Json(serde_json::json!({ "ok": true })).into_response())
+}
+
+/// Build the OIDC step-up `409` for an OIDC-provider admin: seal the impersonation
+/// intent into the same `PrivateCookieJar`-encrypted state cookie the login flow
+/// uses, and hand the client an authorize URL with `prompt=login`. No overlay is
+/// written here — that happens in the OIDC callback once the admin has proven a
+/// fresh identity AND been confirmed to be the same admin who initiated.
+fn impersonate_oidc_step_up(
+    st: &AuthState,
+    impersonator_id: UserId,
+    target: UserId,
+    reason: String,
+) -> Result<Response, AuthError> {
+    let (Some(oidc), Some(key)) = (st.oidc.as_ref(), st.cookie_key.as_ref()) else {
+        // OIDC admin on a deploy without OIDC wired: nothing can complete the
+        // step-up, so this is a server misconfiguration, not a client error.
+        return Err(AuthError(Error::Internal(anyhow::anyhow!(
+            "OIDC step-up requested but OIDC is not configured"
+        ))));
+    };
+    let start = oidc.start_step_up();
+    let cookie = build_state_cookie(
+        &OidcStateCookie {
+            state: start.state,
+            nonce: start.nonce,
+            pkce_verifier: start.pkce_verifier,
+            impersonate: Some(ImpersonateIntent {
+                impersonator_id: impersonator_id.0,
+                target_user_id: target.0,
+                reason,
+                workspace_id: None,
+            }),
+        },
+        st.config.session.secure,
+    );
+    let jar = PrivateCookieJar::new(key.clone()).add(cookie);
+    Ok((
+        StatusCode::CONFLICT,
+        jar,
+        Json(OidcStepUp {
+            code: "oidc_step_up".into(),
+            authorize_url: start.authorize_url,
+        }),
+    )
+        .into_response())
 }
 
 #[utoipa::path(
@@ -432,6 +480,7 @@ impl FromRef<AuthState> for SessionService {
         UserRef,
         ImpersonationDto,
         StartImpersonation,
+        OidcStepUp,
         Ack,
         ErrorBody
     )),

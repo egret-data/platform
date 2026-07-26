@@ -29,7 +29,9 @@ import type {
   AuthConfig,
   ErrorBody,
   LoginRequest,
-  MeResponse
+  MeResponse,
+  OidcStepUp,
+  StartImpersonation
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -54,7 +56,110 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   return result;
 };
 
-export type authAuthConfigResponse200 = {
+export type authImpersonateStartResponse200 = {
+  data: void
+  status: 200
+}
+
+export type authImpersonateStartResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type authImpersonateStartResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type authImpersonateStartResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type authImpersonateStartResponse409 = {
+  data: OidcStepUp
+  status: 409
+}
+
+export type authImpersonateStartResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type authImpersonateStartResponseSuccess = (authImpersonateStartResponse200) & {
+  headers: Headers;
+};
+export type authImpersonateStartResponseError = (authImpersonateStartResponse400 | authImpersonateStartResponse401 | authImpersonateStartResponse403 | authImpersonateStartResponse409 | authImpersonateStartResponse500) & {
+  headers: Headers;
+};
+
+export type authImpersonateStartResponse = (authImpersonateStartResponseSuccess | authImpersonateStartResponseError)
+
+export const getAuthImpersonateStartUrl = () => {
+
+
+
+
+  return `/api/admin/impersonate`
+}
+
+export const authImpersonateStart = async (startImpersonation: StartImpersonation, options?: RequestInit): Promise<authImpersonateStartResponse> => {
+
+  return customInstance<authImpersonateStartResponse>(getAuthImpersonateStartUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(startImpersonation)
+  }
+);}
+
+
+
+
+
+export const getAuthImpersonateStartMutationOptions = <TError = ErrorBody | OidcStepUp,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof authImpersonateStart>>, TError,{data: StartImpersonation}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof authImpersonateStart>>, TError,{data: StartImpersonation}, TContext> => {
+
+const mutationKey = ['authImpersonateStart'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof authImpersonateStart>>, {data: StartImpersonation}> = (props) => {
+          const {data} = props ?? {};
+
+          return  authImpersonateStart(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AuthImpersonateStartMutationResult = NonNullable<Awaited<ReturnType<typeof authImpersonateStart>>>
+    export type AuthImpersonateStartMutationBody = StartImpersonation
+    export type AuthImpersonateStartMutationError = ErrorBody | OidcStepUp
+
+    export const useAuthImpersonateStart = <TError = ErrorBody | OidcStepUp,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof authImpersonateStart>>, TError,{data: StartImpersonation}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof authImpersonateStart>>,
+        TError,
+        {data: StartImpersonation},
+        TContext
+      > => {
+      return useMutation(getAuthImpersonateStartMutationOptions(options), queryClient);
+    }
+    export type authAuthConfigResponse200 = {
   data: AuthConfig
   status: 200
 }
@@ -167,7 +272,95 @@ export function useAuthAuthConfig<TData = Awaited<ReturnType<typeof authAuthConf
 
 
 
-export type authLoginResponse200 = {
+export type authImpersonateExitResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type authImpersonateExitResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type authImpersonateExitResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type authImpersonateExitResponseSuccess = (authImpersonateExitResponse200) & {
+  headers: Headers;
+};
+export type authImpersonateExitResponseError = (authImpersonateExitResponse401 | authImpersonateExitResponse500) & {
+  headers: Headers;
+};
+
+export type authImpersonateExitResponse = (authImpersonateExitResponseSuccess | authImpersonateExitResponseError)
+
+export const getAuthImpersonateExitUrl = () => {
+
+
+
+
+  return `/api/auth/impersonation/exit`
+}
+
+export const authImpersonateExit = async ( options?: RequestInit): Promise<authImpersonateExitResponse> => {
+
+  return customInstance<authImpersonateExitResponse>(getAuthImpersonateExitUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getAuthImpersonateExitMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof authImpersonateExit>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof authImpersonateExit>>, TError,void, TContext> => {
+
+const mutationKey = ['authImpersonateExit'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof authImpersonateExit>>, void> = () => {
+
+
+          return  authImpersonateExit(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AuthImpersonateExitMutationResult = NonNullable<Awaited<ReturnType<typeof authImpersonateExit>>>
+
+    export type AuthImpersonateExitMutationError = ErrorBody
+
+    export const useAuthImpersonateExit = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof authImpersonateExit>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof authImpersonateExit>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getAuthImpersonateExitMutationOptions(options), queryClient);
+    }
+    export type authLoginResponse200 = {
   data: MeResponse
   status: 200
 }

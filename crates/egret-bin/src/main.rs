@@ -1079,13 +1079,34 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         config.rate_limit.login_window_secs,
         config.rate_limit.login_lockout_secs,
     );
+    // Build the OIDC service + cookie-encryption key up front (when SSO is
+    // enabled): both the auth-state's impersonation step-up (Task 8, which returns
+    // an authorize URL + seals the intent into the encrypted state cookie) and the
+    // OIDC login/callback router below share the same discovered service and key.
+    let (oidc_service, oidc_cookie_key) = if config.oidc.enabled {
+        use axum_extra::extract::cookie::Key;
+        use base64::Engine;
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(config.security.secret_key.as_bytes())
+            .map_err(|e| anyhow::anyhow!("security.secret_key base64: {e}"))?;
+        let service = egret_auth::oidc::OidcService::discover(&config.oidc)
+            .await
+            .map_err(|e| anyhow::anyhow!("oidc discovery: {e}"))?;
+        (Some(service), Some(Key::from(&key_bytes)))
+    } else {
+        (None, None)
+    };
+
+    let impersonations = egret_auth::impersonation::ImpersonationRepo::new(db.clone());
     let auth = AuthState {
         users: users.clone(),
         sessions: sessions.clone(),
         config: config.clone(),
         rate_limiter,
         audit: audit_sink.clone(),
-        impersonations: egret_auth::impersonation::ImpersonationRepo::new(db.clone()),
+        impersonations: impersonations.clone(),
+        oidc: oidc_service.clone(),
+        cookie_key: oidc_cookie_key.clone(),
     };
 
     // Shared secret store: one `SecretStore` built from `db` + the master key,
@@ -1123,16 +1144,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| "http://localhost:8080".into());
 
-    let oidc = if config.oidc.enabled {
-        use axum_extra::extract::cookie::Key;
-        use base64::Engine;
-        let key_bytes = base64::engine::general_purpose::STANDARD
-            .decode(config.security.secret_key.as_bytes())
-            .map_err(|e| anyhow::anyhow!("security.secret_key base64: {e}"))?;
-        let service = egret_auth::oidc::OidcService::discover(&config.oidc)
-            .await
-            .map_err(|e| anyhow::anyhow!("oidc discovery: {e}"))?;
-        Some(egret_auth::oidc_routes::OidcRoutesState {
+    let oidc = match (oidc_service, oidc_cookie_key) {
+        (Some(service), Some(cookie_key)) => Some(egret_auth::oidc_routes::OidcRoutesState {
             oidc: service,
             users: users.clone(),
             groups: GroupRepo::new(db.clone()),
@@ -1142,10 +1155,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 Duration::minutes(config.session.idle_ttl_minutes as i64),
             ),
             config: config.clone(),
-            cookie_key: Key::from(&key_bytes),
-        })
-    } else {
-        None
+            cookie_key,
+            impersonations: impersonations.clone(),
+            audit: audit_sink.clone(),
+        }),
+        _ => None,
     };
 
     let ranger = if config.ranger.enabled {

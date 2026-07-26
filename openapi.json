@@ -299,7 +299,7 @@
             "description": "Impersonation started; the session now resolves to the target"
           },
           "400": {
-            "description": "Bad target / empty reason / OIDC step-up required",
+            "description": "Bad target / empty reason",
             "content": {
               "application/json": {
                 "schema": {
@@ -324,6 +324,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "OIDC admin: re-authenticate at `authorize_url`, then the callback creates the overlay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcStepUp"
                 }
               }
             }
@@ -24685,6 +24695,24 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "OidcStepUp": {
+        "type": "object",
+        "description": "`409` body returned when an OIDC-provider admin starts an impersonation: the\nclient must redirect the browser to `authorize_url` to complete a fresh IdP\nre-authentication (`prompt=login`) before the overlay is created (Task 8). The\n`code` lets the SPA branch on this specific response.",
+        "required": [
+          "code",
+          "authorize_url"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Always `\"oidc_step_up\"`."
+          },
+          "authorize_url": {
+            "type": "string",
+            "description": "The OIDC authorize URL (carries the sealed impersonation intent in `state`)."
           }
         }
       },

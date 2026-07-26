@@ -434,6 +434,8 @@ mod http {
             rate_limiter: egret_auth::ratelimit::RateLimiter::new(50, 300, 300),
             audit: egret_audit::AuditSink::new(16).0,
             impersonations: ImpersonationRepo::new(db.clone()),
+            oidc: None,
+            cookie_key: None,
         };
         axum::Router::new()
             .nest("/api/auth", auth_router())
@@ -795,5 +797,168 @@ mod http {
         );
         assert!(m["impersonating"].is_null());
         assert_eq!(active_overlay_count(&db, admin).await, 0);
+    }
+
+    // ── Task 8: OIDC step-up ─────────────────────────────────────────────────
+    //
+    // An OIDC-provider admin calling start (with a valid session) must get a 409
+    // carrying an authorize URL and code "oidc_step_up" — NOT a 400 — and must
+    // write NO overlay. The real IdP round-trip (redirect → callback → overlay) is
+    // proven by the Task 12 e2e, not here; this only asserts the 409 contract. We
+    // stand up a tiny in-process mock IdP (discovery + JWKS) purely so the only
+    // `OidcService` constructor (live discovery) succeeds — the same technique the
+    // back-channel-logout HTTP test uses.
+
+    /// Discover a real `OidcService` against a throwaway in-process mock IdP.
+    async fn discover_mock_oidc() -> egret_auth::oidc::OidcService {
+        use egret_machine_idp::generate_rsa_key;
+        use serde_json::json;
+
+        let km = generate_rsa_key("mock-kid").expect("rsa key");
+        let jwk_value = km.public_jwk.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let base = format!("http://{addr}");
+        let issuer = base.clone();
+        let discovery = json!({
+            "issuer": issuer,
+            "authorization_endpoint": format!("{base}/auth"),
+            "token_endpoint": format!("{base}/token"),
+            "jwks_uri": format!("{base}/jwks"),
+            "response_types_supported": ["code"],
+            "subject_types_supported": ["public"],
+            "id_token_signing_alg_values_supported": ["RS256"],
+        });
+        let jwks_doc = json!({ "keys": [jwk_value] });
+        let mock = axum::Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                axum::routing::get(move || {
+                    let d = discovery.clone();
+                    async move { axum::Json(d) }
+                }),
+            )
+            .route(
+                "/jwks",
+                axum::routing::get(move || {
+                    let j = jwks_doc.clone();
+                    async move { axum::Json(j) }
+                }),
+            );
+        tokio::spawn(async move {
+            axum::serve(listener, mock).await.expect("mock idp serve");
+        });
+
+        egret_auth::oidc::OidcService::discover(&egret_config::OidcConfig {
+            enabled: true,
+            issuer_url: issuer,
+            client_id: "egret-backend".into(),
+            client_secret: "mock-secret".into(),
+            redirect_url: format!("{base}/api/auth/oidc/callback"),
+            scopes: vec!["openid".into()],
+            groups_claim: "groups".into(),
+            post_login_redirect: "/".into(),
+            catalog_audience: "catalog".into(),
+        })
+        .await
+        .expect("discover against mock idp")
+    }
+
+    /// Build an app whose `AuthState` has OIDC wired (so the step-up 409 path is
+    /// reachable), sharing `db` so a directly-created session validates.
+    fn app_with_oidc(db: &Db, oidc: egret_auth::oidc::OidcService) -> axum::Router {
+        let st = AuthState {
+            users: UserRepo::new(db.clone()),
+            sessions: SessionService::new(
+                db.clone(),
+                chrono::Duration::hours(24),
+                chrono::Duration::minutes(60),
+            ),
+            config: Config::default(),
+            rate_limiter: egret_auth::ratelimit::RateLimiter::new(50, 300, 300),
+            audit: egret_audit::AuditSink::new(16).0,
+            impersonations: ImpersonationRepo::new(db.clone()),
+            oidc: Some(oidc),
+            cookie_key: Some(axum_extra::extract::cookie::Key::generate()),
+        };
+        axum::Router::new()
+            .nest("/api/auth", auth_router())
+            .nest("/api/admin", admin_impersonation_router())
+            .with_state(st)
+    }
+
+    #[tokio::test]
+    async fn oidc_admin_start_returns_409_step_up() {
+        let Some(db) = connect().await else {
+            eprintln!("DATABASE_URL unset — skipping");
+            return;
+        };
+        let oidc = discover_mock_oidc().await;
+        let app = app_with_oidc(&db, oidc);
+
+        // Seed a platform_admin whose provider = "oidc", and log them in by creating
+        // a session directly (OIDC login needs a live IdP; we only need the cookie).
+        let users = UserRepo::new(db.clone());
+        let sub = format!("oidc-sub-{}", uuid::Uuid::new_v4());
+        let admin = users
+            .insert_oidc(&sub, &unique_email("oidc-admin"), "OA")
+            .await
+            .unwrap();
+        grant_platform_admin(&db, admin).await;
+        let (target, _te) = seed_local(&db).await;
+
+        let sessions = SessionService::new(
+            db.clone(),
+            chrono::Duration::hours(24),
+            chrono::Duration::minutes(60),
+        );
+        let issued = sessions.create(admin, "", "").await.unwrap();
+        let cookie = format!("egret_session={}; egret_csrf=csrf1", issued.token);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/admin/impersonate")
+                    .header("cookie", &cookie)
+                    .header("x-egret-csrf", "csrf1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "target_user_id": target.0.to_string(),
+                            "reason": "support ticket 8",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "OIDC admin must get 409, not 400"
+        );
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "oidc_step_up");
+        assert!(
+            body["authorize_url"]
+                .as_str()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+            "authorize_url must be present and non-empty, got {body:?}"
+        );
+
+        // No overlay was written — the overlay is created only by the callback.
+        assert_eq!(
+            active_overlay_count(&db, admin).await,
+            0,
+            "the 409 step-up must not write an overlay"
+        );
     }
 }
