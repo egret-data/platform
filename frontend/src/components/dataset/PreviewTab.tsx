@@ -1,13 +1,17 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ChartTable, type ResultColumn } from "@/components/chart/ChartTable";
+import type { ColumnFormat } from "@/components/chart/format-types";
+import { parseFormat } from "@/components/dataset/FormatPicker";
+import type { DatasetColumn } from "@/api/datasets";
 import { useDatasetsDsData } from "@/api/generated/datasets/datasets";
 
 interface Props {
   ws: string;
   datasetId: string;
+  columns?: DatasetColumn[];
 }
 
 const PREVIEW_LIMIT = 100;
@@ -16,9 +20,20 @@ const PREVIEW_LIMIT = 100;
 // (bounded `SELECT * … LIMIT n`) once on mount and on demand via Refresh. A
 // governed viewer without data access gets a 403/5xx here — we surface the
 // message rather than crash.
-export function PreviewTab({ ws, datasetId }: Props) {
+export function PreviewTab({ ws, datasetId, columns = [] }: Props) {
   const preview = useDatasetsDsData();
   const { mutate } = preview;
+
+  // Apply each column's semantic-layer format (a ColumnFormat) to the preview,
+  // so setting e.g. Currency on a column is visible here, not just stored.
+  const columnSettings = useMemo(() => {
+    const m: Record<string, ColumnFormat> = {};
+    for (const c of columns) {
+      const cf = parseFormat(c.format);
+      if (Object.keys(cf).length) m[c.column_name] = cf;
+    }
+    return m;
+  }, [columns]);
 
   // Run once on mount (and if the target dataset changes); guarded so a
   // re-render doesn't re-fire the request.
@@ -87,7 +102,7 @@ export function PreviewTab({ ws, datasetId }: Props) {
     <div>
       {header}
       <div className="overflow-x-auto">
-        <ChartTable columns={mappedCols} rows={result.rows} />
+        <ChartTable columns={mappedCols} rows={result.rows} columnSettings={columnSettings} />
       </div>
     </div>
   );

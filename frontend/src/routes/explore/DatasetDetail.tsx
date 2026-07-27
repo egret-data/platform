@@ -199,7 +199,7 @@ export default function DatasetDetail() {
           <UsageTab ws={ws} datasetId={id} />
         </TabsContent>
         <TabsContent value="preview">
-          <PreviewTab ws={ws} datasetId={id} />
+          <PreviewTab ws={ws} datasetId={id} columns={ds.columns} />
         </TabsContent>
       </Tabs>
 
