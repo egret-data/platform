@@ -3,6 +3,7 @@
 **Status:** approved design, pending implementation plan
 **Date:** 2026-07-27
 **Sub-project:** A · Chart Studio (of the larger "chart platform" effort)
+**Vietnamese reference:** `docs/vi/specs/2026-07-27-chart-studio-design.md`
 
 ## Context
 
