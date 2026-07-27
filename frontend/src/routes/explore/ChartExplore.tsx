@@ -43,6 +43,7 @@ import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
 import { MAPS } from "@/components/chart/echarts/maps/registry";
 import { missingFields } from "@/components/chart/requiredFields";
 import { useAutoRun } from "@/components/chart/useAutoRun";
+import { ChartEmptyState, ChartLoadingState, ChartErrorState } from "@/components/chart/ChartPreviewStates";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 
 const UNDERLINE_LIST = "h-auto w-full justify-start gap-4 rounded-none border-b bg-transparent p-0";
@@ -964,10 +965,8 @@ export default function ChartExplore() {
         {filters.length > 0 && (
           <FilterChips filters={filters} onRemove={(i) => setFilters((prev) => prev.filter((_, j) => j !== i))} />
         )}
-        {data.error && (
-          <p className="rounded bg-destructive/10 p-3 text-sm text-destructive">{data.error}</p>
-        )}
-        {isRunning && <p className="text-sm text-muted-foreground">Running…</p>}
+        {data.error && <ChartErrorState message={data.error} onRetry={run} />}
+        {isRunning && <ChartLoadingState />}
 
         <div ref={previewRef} className="contents">
         {finished && viz === "pivot_table" && (
@@ -1013,7 +1012,7 @@ export default function ChartExplore() {
           <ChartErrorBoundary resetKey={`${viz}:${data.columns.length}:${data.rows.length}`}>
             {/* ChartRenderer fills its parent; the preview owns the height + frame
                 (dashboard cards size it to the grid cell instead). */}
-            <div className="h-[70vh] rounded-md border p-2">
+            <div className="min-h-[60vh] rounded-lg border p-2">
               <ChartRenderer
                 vizType={viz}
                 params={{ ...paramsForSave(), columnSettings: effCS }}
@@ -1025,9 +1024,13 @@ export default function ChartExplore() {
           </ChartErrorBoundary>
         )}
         </div>
-        {!ranSpec && !data.isLoading && (
-          <p className="text-sm text-muted-foreground">Configure the controls on the left and click Run.</p>
-        )}
+        {!ranSpec && !data.isLoading && (() => {
+          const missing = datasetId ? missingFields(viz, validationInput()) : ["a dataset"];
+          return (
+            <ChartEmptyState icon={vizMeta?.icon} title={`Set up your ${vizMeta?.name ?? "chart"}`}
+              hint={missing.length ? `Add: ${missing.join(", ")}${autoRun ? "" : ", then Run"}` : (autoRun ? "Ready — adjust the fields on the left." : "Ready — click Run to preview.")} />
+          );
+        })()}
       </div>
 
       {/* Change-visualization dialog */}
