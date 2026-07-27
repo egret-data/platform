@@ -287,6 +287,8 @@ export default function ChartExplore() {
   // Signature of the last spec actually run (manual or auto), shared with
   // useAutoRun so a manual Run cancels a pending auto-fire for the same query.
   const lastRunSig = useRef("");
+  // Params of the last run, rendered while the query is stale (see previewParams).
+  const ranParams = useRef<ChartParams | null>(null);
   const data = useSpecData(ws, datasetId, ranSpec, !!ranSpec, runNonce);
   const finished = !data.isLoading && !data.error && !!ranSpec;
   const resultColumns = data.columns.filter((c) => !c.name.startsWith("__grp_"));
@@ -342,6 +344,8 @@ export default function ChartExplore() {
     // restoring it would just double-report the same failure.
     setRanSpec(specForRun());
     setRunNonce((n) => n + 1);
+    // Snapshot the params this run renders with (see previewParams).
+    ranParams.current = paramsForSave();
     // Stamp the signature so a pending auto-run timer for this same query
     // (e.g. the user clicked Run before the debounce elapsed) won't re-fire it.
     lastRunSig.current = datasetId ? JSON.stringify({ datasetId, spec: specForRun() }) : "";
@@ -356,6 +360,19 @@ export default function ChartExplore() {
       ? JSON.stringify({ datasetId, spec: specForRun() })
       : "";
   useAutoRun({ enabled: autoRun, signature: querySignature, onRun: run, lastRunRef: lastRunSig });
+
+  // Params the preview renders from. The field names inside them (x-axis, metrics,
+  // breakout…) address columns of the result on screen, so while the query is stale
+  // — edited but not re-run, the normal state with Auto off — we keep rendering the
+  // params that produced that result. Pairing freshly edited field names with the old
+  // columns finds nothing and renders an empty chart, which reads as "you broke it"
+  // rather than "not run yet". Display-only edits don't change the signature, so they
+  // still preview live.
+  const previewParams = (): ChartParams => {
+    const stale = querySignature !== lastRunSig.current;
+    const base = stale && ranParams.current ? ranParams.current : paramsForSave();
+    return { ...base, columnSettings: effCS };
+  };
 
   function addFilter(f: ChartFilter) {
     setFilters((prev) => [...prev.filter((x) => x.col !== f.col), f]);
@@ -1006,10 +1023,10 @@ export default function ChartExplore() {
           <ChartErrorBoundary resetKey={`${viz}:${data.columns.length}:${data.rows.length}`}>
             {/* ChartRenderer fills its parent; the preview owns the height + frame
                 (dashboard cards size it to the grid cell instead). */}
-            <div className="min-h-[60vh] rounded-lg border p-2">
+            <div className="h-[60vh] rounded-lg border p-2">
               <ChartRenderer
                 vizType={viz}
-                params={{ ...paramsForSave(), columnSettings: effCS }}
+                params={previewParams()}
                 columns={data.columns}
                 rows={data.rows}
                 metricTypes={metricTypes}

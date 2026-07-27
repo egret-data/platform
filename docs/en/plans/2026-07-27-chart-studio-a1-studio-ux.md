@@ -466,7 +466,12 @@ with (uses the current viz meta + missing fields):
 
 - [ ] **Step 4: Replace the fixed preview height**
 
-Change (~line 1029) `<div className="h-[70vh] rounded-md border p-2">` to `<div className="min-h-[60vh] rounded-lg border p-2">`.
+Change (~line 1029) `<div className="h-[70vh] rounded-md border p-2">` to `<div className="h-[60vh] rounded-lg border p-2">`.
+
+The height must stay **definite** (`h-`, not `min-h-`): `ChartRenderer` sizes itself with
+`h-full`, which resolves to 0 against an auto-height parent — the chart then mounts with a
+0px canvas and the preview looks blank. (`min-h-[60vh]` is fine on the empty/loading states
+in Task 5, whose content sizes them.)
 
 - [ ] **Step 5: Verify build + tests**
 
