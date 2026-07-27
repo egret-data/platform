@@ -9,7 +9,9 @@
 FROM rust:bookworm AS builder
 WORKDIR /src
 COPY . .
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
     cargo build --release -p egret-bin --locked \
  && cp target/release/egret /usr/local/bin/egret
