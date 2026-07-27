@@ -350,12 +350,17 @@ export default function ChartExplore() {
   const [sqlOpen, setSqlOpen] = useState(false);
   const chartSql = useBuildChartData(ws, datasetId, ranSpec, sqlOpen);
 
-  const validationInput = () => ({
-    cartesian: { xAxis: cartesian.xAxis, yMetrics: cartesian.yMetrics },
-    pie, scalar, progress, gauge, funnel, waterfall, smart, box, sankey, map: mapCfg,
-    pivot: { rows: pRows, vals: pVals },
-    objectCols: tableCols,
-  });
+  // A function declaration, not a const: `missingNow` reaches this while useChartRun runs,
+  // which sits above it in the body, so an arrow const would be in its temporal dead zone
+  // and every bridge viz would crash on open.
+  function validationInput() {
+    return {
+      cartesian: { xAxis: cartesian.xAxis, yMetrics: cartesian.yMetrics },
+      pie, scalar, progress, gauge, funnel, waterfall, smart, box, sankey, map: mapCfg,
+      pivot: { rows: pRows, vals: pVals },
+      objectCols: tableCols,
+    };
+  }
 
   /** Fields the active viz still needs — from its descriptor, or the bridge's table. */
   function missingNow(): string[] {
