@@ -349,7 +349,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
       <SaveQueryDialog open={saveOpen} onOpenChange={setSaveOpen}
         onSave={async (name, description) => { await save.mutateAsync({ database_id: tab.dbId, name, sql: tab.sql, description }); toast.success("Saved"); }} />
       <CreateDatasetDialog ws={ws} open={datasetOpen} onOpenChange={setDatasetOpen}
-        initialSql={tab.sql} initialDbId={tab.dbId} initialTab="sql" />
+        initialSql={tab.sql} initialDbId={tab.dbId} />
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} actions={actions} />
       <Dialog open={shortcutsOpen} onOpenChange={setShortcutsOpen}>
         <DialogContent className="max-w-sm">

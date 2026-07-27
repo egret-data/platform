@@ -1,5 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { expect, test, vi } from "vitest";
@@ -30,41 +29,44 @@ function renderDialog(props: Partial<React.ComponentProps<typeof CreateDatasetDi
   );
 }
 
-/** Return the SQL tab panel — the one that is currently visible (not hidden). */
-function getSqlTabPanel() {
-  const panels = screen.getAllByRole("tabpanel");
-  // Radix may keep both panels in the DOM; pick the one that contains the SQL textarea.
-  return panels.find((p) => within(p).queryByPlaceholderText("SELECT …") !== null)!;
-}
+// --- Default (physical) mode: pick a table, no SQL editing here. ---
 
-test("renders both tab triggers", () => {
+test("physical mode: name input + database picker are present", () => {
   renderDialog();
-  expect(screen.getByRole("tab", { name: "From table" })).toBeInTheDocument();
-  expect(screen.getByRole("tab", { name: "From SQL" })).toBeInTheDocument();
+  expect(screen.getByPlaceholderText("Dataset name")).toBeInTheDocument();
+  expect(screen.getByText("Database")).toBeInTheDocument();
 });
 
-test("dataset name input is present", () => {
+test("physical mode: no SQL editor, but a link to SQL Lab for custom queries", () => {
   renderDialog();
+  // Virtual/SQL datasets are made in SQL Lab now — not via a tab here.
+  expect(screen.queryByRole("tab", { name: "From SQL" })).not.toBeInTheDocument();
+  expect(screen.queryByPlaceholderText("SELECT …")).not.toBeInTheDocument();
+  const link = screen.getByRole("link", { name: /SQL Lab/i });
+  expect(link).toHaveAttribute("href", "/explore/eng/sql-lab");
+});
+
+test("physical mode: Create is disabled until a table is chosen", () => {
+  renderDialog();
+  expect(screen.getByRole("button", { name: "Create" })).toBeDisabled();
+});
+
+// --- SQL / "Save as dataset" mode: query is supplied (from SQL Lab / Duplicate). ---
+
+test("sql mode: shows the query read-only and a name field", () => {
+  renderDialog({ initialSql: "SELECT 1", initialDbId: "db1" });
+  expect(screen.getByText("Save as dataset")).toBeInTheDocument();
+  expect(screen.getByText("SELECT 1")).toBeInTheDocument();
   expect(screen.getByPlaceholderText("Dataset name")).toBeInTheDocument();
 });
 
-test("From SQL tab shows Create button disabled when SQL textarea is empty", async () => {
-  renderDialog({ initialTab: "sql" });
-  // Click "From SQL" tab to make sure it is active
-  await userEvent.click(screen.getByRole("tab", { name: "From SQL" }));
-  // Scope to the SQL tab panel specifically
-  const sqlPanel = getSqlTabPanel();
-  const createBtn = within(sqlPanel).getByRole("button", { name: "Create" });
-  expect(createBtn).toBeDisabled();
+test("sql mode: Create dataset disabled until a name is entered", () => {
+  renderDialog({ initialSql: "SELECT 1", initialDbId: "db1" });
+  // Name starts empty → disabled.
+  expect(screen.getByRole("button", { name: "Create dataset" })).toBeDisabled();
 });
 
-test("SQL Create button enabled after typing SQL", async () => {
-  renderDialog({ initialTab: "sql" });
-  await userEvent.click(screen.getByRole("tab", { name: "From SQL" }));
-  const textarea = screen.getByPlaceholderText("SELECT …");
-  await userEvent.type(textarea, "SELECT 1");
-  // Scope to the SQL tab panel to get the right Create button
-  const sqlPanel = getSqlTabPanel();
-  const createBtn = within(sqlPanel).getByRole("button", { name: "Create" });
-  expect(createBtn).not.toBeDisabled();
+test("sql mode: Create dataset enabled once a name is supplied", () => {
+  renderDialog({ initialSql: "SELECT 1", initialDbId: "db1", initialName: "My dataset" });
+  expect(screen.getByRole("button", { name: "Create dataset" })).not.toBeDisabled();
 });

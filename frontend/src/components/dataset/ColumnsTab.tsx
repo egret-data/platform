@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { FormatPicker } from "@/components/dataset/FormatPicker";
 import { useDatasetMutations, type ColumnUpdate, type DatasetColumn } from "@/api/datasets";
 
 interface Props {
@@ -121,8 +122,7 @@ export function ColumnsTab({ ws, datasetId, columns }: Props) {
                 <td className="px-2 py-1.5 text-center"><Switch checked={c.filterable} onCheckedChange={(v) => save(c.column_name, { filterable: v })} aria-label={`Filterable ${c.column_name}`} /></td>
                 <td className="px-2 py-1.5 text-center"><Switch checked={c.is_temporal} onCheckedChange={(v) => save(c.column_name, { is_temporal: v })} aria-label={`Temporal ${c.column_name}`} /></td>
                 <td className="px-2 py-1.5">
-                  <Input key={`fmt-${c.format}`} defaultValue={c.format} placeholder="e.g. $0.00" className="h-7 w-24 font-mono text-xs"
-                    onBlur={(e) => { if (e.target.value !== c.format) save(c.column_name, { format: e.target.value }); }} />
+                  <FormatPicker value={c.format} onChange={(v) => { if (v !== c.format) save(c.column_name, { format: v }); }} />
                 </td>
                 <td className="px-2 py-1.5">
                   <Input key={`vn-${c.verbose_name}`} defaultValue={c.verbose_name} placeholder="e.g. Country" className="h-7 w-36 text-xs"

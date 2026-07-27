@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { HelpCircle } from "lucide-react";
+import { FormatPicker } from "@/components/dataset/FormatPicker";
 import { useDatasetMutations, type DatasetMetric, type MetricInput } from "@/api/datasets";
 
 /** A column header with an info icon that explains the field in plain language. */
@@ -106,8 +107,7 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
                   </td>
                   <td className="px-2 py-1.5 font-mono text-xs text-muted-foreground">{m.expression}</td>
                   <td className="px-2 py-1.5">
-                    <Input key={`fmt-${m.format}`} defaultValue={m.format} placeholder="e.g. $0.00" className="h-7 w-24 font-mono text-xs"
-                      onBlur={(e) => { if (e.target.value !== m.format) patchMetric(m, { format: e.target.value }); }} />
+                    <FormatPicker value={m.format} onChange={(v) => { if (v !== m.format) patchMetric(m, { format: v }); }} />
                   </td>
                   <td className="px-2 py-1.5 text-center"><Switch checked={m.certified} onCheckedChange={(v) => patchMetric(m, { certified: v })} aria-label={`Certified ${m.metric_name}`} /></td>
                   <td className="px-2 py-1.5 text-muted-foreground">{m.verbose_name || "—"}</td>
@@ -145,8 +145,8 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
                   <Input id="m-vn" placeholder="e.g. Total Sales" value={editing.verbose_name ?? ""} onChange={(e) => setEditing({ ...editing, verbose_name: e.target.value })} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label htmlFor="m-fmt">Format <span className="font-normal text-muted-foreground">(optional)</span></Label>
-                  <Input id="m-fmt" className="font-mono" placeholder="e.g. $0.00" value={editing.format ?? ""} onChange={(e) => setEditing({ ...editing, format: e.target.value })} />
+                  <Label>Format <span className="font-normal text-muted-foreground">(optional)</span></Label>
+                  <FormatPicker value={editing.format ?? ""} onChange={(v) => setEditing({ ...editing, format: v })} className="w-full" />
                 </div>
               </div>
               <div className="space-y-1.5">
