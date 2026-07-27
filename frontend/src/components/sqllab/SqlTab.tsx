@@ -26,6 +26,7 @@ import { DataPanel } from "@/components/sqllab/DataPanel";
 import { SaveQueryDialog } from "@/components/sqllab/SaveQueryDialog";
 import { HistoryTab } from "@/components/sqllab/HistoryTab";
 import { SavedTab } from "@/components/sqllab/SavedTab";
+import { SnippetsTab } from "@/components/sqllab/SnippetsTab";
 import { CommandPalette, type PaletteAction } from "@/components/notebook/CommandPalette";
 import { CreateDatasetDialog } from "@/components/dataset/CreateDatasetDialog";
 import { emptySchemaIndex, type SchemaIndex } from "@/components/sqllab/schemaIndex";
@@ -38,6 +39,14 @@ const CUSTOM_CURRENT = "__custom_current__";
 
 function fmtElapsed(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+}
+
+const PARAM_RE = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g;
+/** Distinct `{{name}}` template parameters referenced in `sql`, in first-seen order. */
+function extractParams(sql: string): string[] {
+  const seen = new Set<string>();
+  for (const m of sql.matchAll(PARAM_RE)) seen.add(m[1]);
+  return [...seen];
 }
 
 export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
@@ -58,6 +67,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
   const [tabValue, setTabValue] = useState("results");
   const [customLimit, setCustomLimit] = useState(false);
   const [resultView, setResultView] = useState<"table" | "chart">("table");
+  const [paramValues, setParamValues] = useState<Record<string, { type: string; value: string }>>({});
   const [elapsedMs, setElapsedMs] = useState<number | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -91,8 +101,11 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
     if (!dbId) { toast.error("Pick a database"); return; }
     const sql = sqlOverride ?? tab.sql;
     setQueryId(null); setElapsedMs(null); setTabValue("results"); setResultView("table");
+    const params = extractParams(sql).map((n) => ({
+      name: n, type: paramValues[n]?.type ?? "string", value: paramValues[n]?.value ?? "",
+    }));
     try {
-      const { id } = await submit.mutateAsync({ database_id: dbId, sql, limit: tab.limit });
+      const { id } = await submit.mutateAsync({ database_id: dbId, sql, limit: tab.limit, params });
       setQueryId(id); startedRef.current = performance.now();
     } catch (e) { toast.error(String(e)); }
   }
@@ -115,6 +128,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
 
   const isPreset = LIMITS.includes(tab.limit);
   const hasSelection = selectedSql.trim().length > 0;
+  const editorParams = useMemo(() => extractParams(tab.sql), [tab.sql]);
   const rowCount = finished ? status.data?.row_count ?? null : null;
   const statusLine =
     elapsedMs == null ? null
@@ -255,6 +269,30 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
               </DropdownMenu>
             </div>
           </div>
+          {editorParams.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 border-b bg-muted/10 px-2 py-1.5 text-xs">
+              <span className="font-medium text-muted-foreground">Parameters</span>
+              {editorParams.map((n) => {
+                const pv = paramValues[n] ?? { type: "string", value: "" };
+                const set = (patchPv: Partial<{ type: string; value: string }>) =>
+                  setParamValues((v) => ({ ...v, [n]: { ...pv, ...patchPv } }));
+                return (
+                  <span key={n} className="inline-flex items-center gap-1 rounded-md border bg-background pl-2 text-xs">
+                    <span className="font-mono">{n}</span>
+                    <select value={pv.type} onChange={(e) => set({ type: e.target.value })}
+                      aria-label={`Type of ${n}`} className="border-l bg-transparent px-1 py-1 outline-none">
+                      <option value="string">str</option>
+                      <option value="number">num</option>
+                      <option value="boolean">bool</option>
+                    </select>
+                    <input value={pv.value} onChange={(e) => set({ value: e.target.value })}
+                      aria-label={`Value of ${n}`} placeholder="value"
+                      className="w-24 rounded-r-md border-l bg-transparent px-1.5 py-1 outline-none focus-visible:ring-1 focus-visible:ring-ring" />
+                  </span>
+                );
+              })}
+            </div>
+          )}
           <div className="min-h-0 flex-1"><SqlEditor value={tab.sql} onChange={(v) => patch({ sql: v })} schemaWords={words} schema={schema}
             onRun={(sql) => run(sql)} onSelectionChange={setSelectedSql} /></div>
         </div>
@@ -263,7 +301,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
       <Panel defaultSize={45} minSize={20}>
         <Tabs value={tabValue} onValueChange={setTabValue} className="flex h-full flex-col">
           <div className="flex items-center gap-2 border-b px-2 py-1.5">
-            <TabsList className="h-8"><TabsTrigger value="results">Results</TabsTrigger><TabsTrigger value="history">History</TabsTrigger><TabsTrigger value="saved">Saved</TabsTrigger></TabsList>
+            <TabsList className="h-8"><TabsTrigger value="results">Results</TabsTrigger><TabsTrigger value="history">History</TabsTrigger><TabsTrigger value="saved">Saved</TabsTrigger><TabsTrigger value="snippets">Snippets</TabsTrigger></TabsList>
             {tabValue === "results" && (
               <div className="ml-auto flex items-center gap-2">
                 {finished && results.data && (
@@ -296,6 +334,10 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
           </TabsContent>
           <TabsContent value="saved" className="min-h-0 flex-1 overflow-auto">
             <SavedTab ws={ws} databases={databases} onOpen={onOpenSaved} />
+          </TabsContent>
+          <TabsContent value="snippets" className="min-h-0 flex-1 overflow-hidden">
+            <SnippetsTab ws={ws} currentSql={tab.sql}
+              onInsert={(body) => patch({ sql: tab.sql.trim() ? `${tab.sql}\n${body}` : body })} />
           </TabsContent>
         </Tabs>
       </Panel>

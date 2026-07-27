@@ -39,6 +39,34 @@ pub struct SchemaColumn {
     pub ty: String,
 }
 
+/// A schema-object search hit (a table/view matched by the SQL Lab global
+/// object search). `catalog` is empty for engines without a catalog level.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SearchHit {
+    pub catalog: String,
+    pub schema: String,
+    pub table: String,
+}
+
+/// A reusable SQL snippet (SQL Lab).
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SnippetDto {
+    pub id: String,
+    pub name: String,
+    pub body: String,
+    pub description: String,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Create/update body for a SQL snippet.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+pub struct SnippetBody {
+    pub name: String,
+    pub body: String,
+    #[serde(default)]
+    pub description: String,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct FolderDto {
     pub id: String,

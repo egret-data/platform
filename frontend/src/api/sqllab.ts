@@ -19,7 +19,6 @@ import {
   queriesHistory,
   queriesResults,
   queriesStatus,
-  queriesSubmit,
 } from "./generated/queries/queries";
 import {
   sqllabCatalogs,
@@ -75,10 +74,21 @@ export function useDatabases(ws: string) {
 }
 
 // ── run / poll / results (engine API) ──
+export interface QueryParamInput { name: string; type: string; value: string }
 export function useSubmitQuery(ws: string) {
   return useMutation({
-    mutationFn: async (body: { database_id: string; sql: string; limit?: number }) =>
-      (await queriesSubmit(ws, body)).data as { id: string; status: QueryStatus },
+    // Hand-written (not the generated fetch fn) so it can carry template
+    // `params`; a 400 surfaces the engine/render message verbatim to the toast.
+    mutationFn: async (body: { database_id: string; sql: string; limit?: number; params?: QueryParamInput[] }) => {
+      const r = await fetch(`/api/ws/${encodeURIComponent(ws)}/queries`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...csrfHeaders() },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error((await r.text().catch(() => "")) || `submit failed: ${r.status}`);
+      return (await r.json()) as { id: string; status: QueryStatus };
+    },
   });
 }
 export function useQueryStatus(ws: string, id: string | null) {
@@ -159,6 +169,74 @@ export function useColumns(ws: string, db: string | null, catalog: string, schem
   return useQuery<SchemaColumn[]>({ queryKey: qk.schema(ws, db ?? "", "columns", catalog, schema, table), enabled: !!db && enabled, staleTime: SCHEMA_STALE,
     queryFn: async () => (await sqllabColumns(ws, db!, { catalog, schema, table })).data as unknown as SchemaColumn[] });
 }
+// ── global object search (egret-bi) ──
+export interface SearchHit { catalog: string; schema: string; table: string }
+export function fqnOf(h: SearchHit): string {
+  return h.catalog ? `${h.catalog}.${h.schema}.${h.table}` : `${h.schema}.${h.table}`;
+}
+export function useSearchObjects(ws: string, db: string | null, query: string) {
+  const q = query.trim();
+  return useQuery<SearchHit[]>({
+    queryKey: ["sqllab", ws, "search", db ?? "", q],
+    enabled: !!db && q.length >= 2,
+    staleTime: 30_000,
+    queryFn: async () => {
+      const r = await fetch(
+        `/api/ws/${encodeURIComponent(ws)}/sqllab/databases/${db}/search?q=${encodeURIComponent(q)}`,
+        { credentials: "same-origin" },
+      );
+      if (!r.ok) throw new Error(`search failed: ${r.status}`);
+      return (await r.json()) as SearchHit[];
+    },
+  });
+}
+
+// ── SQL snippets (egret-bi) ──
+export interface SqlSnippet { id: string; name: string; body: string; description: string; updated_at: string }
+export interface SnippetBody { name: string; body: string; description?: string }
+function csrfHeaders(): Record<string, string> {
+  const m = document.cookie.match(/(?:^|; )egret_csrf=([^;]+)/);
+  return m ? { "X-Egret-CSRF": decodeURIComponent(m[1]) } : {};
+}
+async function snippetFetch(url: string, init?: RequestInit) {
+  const r = await fetch(url, {
+    credentials: "same-origin",
+    ...init,
+    headers: { "Content-Type": "application/json", ...csrfHeaders(), ...(init?.headers ?? {}) },
+  });
+  if (!r.ok) throw new Error(`snippet request failed: ${r.status}`);
+  return r.status === 200 ? r.json() : undefined;
+}
+const snippetsBase = (ws: string) => `/api/ws/${encodeURIComponent(ws)}/sqllab/snippets`;
+export function useSnippets(ws: string) {
+  return useQuery<SqlSnippet[]>({
+    queryKey: ["sqllab", ws, "snippets"],
+    queryFn: () => snippetFetch(snippetsBase(ws)) as Promise<SqlSnippet[]>,
+  });
+}
+export function useCreateSnippet(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (b: SnippetBody) => snippetFetch(snippetsBase(ws), { method: "POST", body: JSON.stringify(b) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sqllab", ws, "snippets"] }),
+  });
+}
+export function useUpdateSnippet(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...b }: SnippetBody & { id: string }) =>
+      snippetFetch(`${snippetsBase(ws)}/${id}`, { method: "PUT", body: JSON.stringify(b) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sqllab", ws, "snippets"] }),
+  });
+}
+export function useDeleteSnippet(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => snippetFetch(`${snippetsBase(ws)}/${id}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sqllab", ws, "snippets"] }),
+  });
+}
+
 export function useRefreshSchema(ws: string) {
   const qc = useQueryClient();
   return (db: string) => qc.invalidateQueries({ queryKey: ["sqllab", ws, "schema", db] });

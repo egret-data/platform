@@ -154,6 +154,10 @@ async fn submit(
     } else {
         (Some(ctx.principal.email.clone()), None)
     };
+    // Substitute {{param}} placeholders with typed, escaped literals (400 on a
+    // missing/invalid parameter) before the SQL reaches the engine.
+    let rendered = crate::execution::template::render(&body.sql, &body.params)
+        .map_err(|m| EngineApiError::from(egret_core::Error::InvalidInput(m)))?;
     let id = st
         .jobs
         .submit(
@@ -162,7 +166,7 @@ async fn submit(
             Some(ctx.principal.user_id.0),
             session_user,
             bearer,
-            &body.sql,
+            &rendered,
             body.limit,
         )
         .await
@@ -473,6 +477,7 @@ async fn history(
     paths(submit, history, status, results, results_csv, cancel),
     components(schemas(
         SubmitQuery,
+        crate::execution::model::QueryParam,
         SubmitAck,
         QueryStatus,
         QueryStatusDto,

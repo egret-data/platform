@@ -5,7 +5,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useCatalogs, useColumns, useDatabases, useSchemas, useTables } from "@/api/sqllab";
+import { fqnOf, useCatalogs, useColumns, useDatabases, useSchemas, useSearchObjects, useTables } from "@/api/sqllab";
 import { emptySchemaIndex, type SchemaIndex, type SchemaSink } from "./schemaIndex";
 
 export interface DataPanelProps {
@@ -267,6 +267,15 @@ export function DataPanel({ ws, dbId, onDb, onInsert, onWords, onSchema, onPrevi
   const engine = dbMeta?.engine ?? null;
   const isTrino = engine === "trino";
   const [filter, setFilter] = useState("");
+  // Debounced global object search: at >=2 chars the Explorer swaps the tree for
+  // a flat, cross-schema search result list (one bounded engine query).
+  const [debounced, setDebounced] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(filter), 250);
+    return () => clearTimeout(t);
+  }, [filter]);
+  const searchMode = debounced.trim().length >= 2;
+  const search = useSearchObjects(ws, dbId, debounced);
 
   // Auto-select the only available database (improves UX + makes tests deterministic).
   useEffect(() => {
@@ -343,7 +352,7 @@ export function DataPanel({ ws, dbId, onDb, onInsert, onWords, onSchema, onPrevi
           <input
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            placeholder="Filter objects…"
+            placeholder="Search tables…"
             aria-label="Filter database objects"
             disabled={!dbId}
             className="h-8 w-full rounded-md border bg-background pl-7 pr-2 text-xs outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
@@ -361,6 +370,36 @@ export function DataPanel({ ws, dbId, onDb, onInsert, onWords, onSchema, onPrevi
           <InfoRow depth={0} spinning>Loading…</InfoRow>
         ) : !dbMeta ? (
           <InfoRow depth={0} error>This database is no longer available.</InfoRow>
+        ) : searchMode ? (
+          search.isLoading ? (
+            <InfoRow depth={0} spinning>Searching…</InfoRow>
+          ) : search.isError ? (
+            <InfoRow depth={0} error>Search failed — check access or engine.</InfoRow>
+          ) : !search.data?.length ? (
+            <InfoRow depth={0}>No objects match “{debounced.trim()}”.</InfoRow>
+          ) : (
+            search.data.map((h) => {
+              const fqn = fqnOf(h);
+              return (
+                <TreeRow
+                  key={fqn}
+                  depth={0}
+                  label={h.table}
+                  icon={<TableIcon className="h-3 w-3 shrink-0 text-muted-foreground" />}
+                  onClick={() => onInsert(fqn)}
+                  title={`${fqn} — click to insert`}
+                  trailing={<span className="ml-auto shrink-0 truncate pl-2 text-[10px] text-muted-foreground">{h.catalog ? `${h.catalog}.${h.schema}` : h.schema}</span>}
+                  action={
+                    <button type="button" aria-label={`Preview ${h.table}`} title="Preview data"
+                      onClick={(e) => { e.stopPropagation(); sink.preview(fqn); }}
+                      className="mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 hover:bg-background hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100">
+                      <Eye className="h-3.5 w-3.5" />
+                    </button>
+                  }
+                />
+              );
+            })
+          )
         ) : isTrino ? (
           <CatalogList ws={ws} db={dbId} depth={0} filter={filter} onInsert={onInsert} sink={sink} />
         ) : (

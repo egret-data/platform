@@ -52,6 +52,26 @@ pub struct SubmitQuery {
     pub sql: String,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Template parameters substituted into `{{name}}` placeholders before the
+    /// query is sent to the engine.
+    #[serde(default)]
+    pub params: Vec<QueryParam>,
+}
+
+/// A single SQL-Lab template parameter. `value` is substituted for `{{name}}`
+/// as a typed, escaped SQL literal (never raw text) so parameters cannot inject.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+pub struct QueryParam {
+    pub name: String,
+    /// `string` (default; single-quoted + escaped), `number`, or `boolean`.
+    #[serde(default = "default_param_type", rename = "type")]
+    pub ty: String,
+    #[serde(default)]
+    pub value: String,
+}
+
+fn default_param_type() -> String {
+    "string".to_string()
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
