@@ -42,6 +42,7 @@ import { pruneUnits } from "@/components/chart/temporal-units";
 import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
 import { MAPS } from "@/components/chart/echarts/maps/registry";
 import { missingFields } from "@/components/chart/requiredFields";
+import { useAutoRun } from "@/components/chart/useAutoRun";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 
 const UNDERLINE_LIST = "h-auto w-full justify-start gap-4 rounded-none border-b bg-transparent p-0";
@@ -279,6 +280,9 @@ export default function ChartExplore() {
   }, [activeDims.join("|"), columns]);
 
   const [ranSpec, setRanSpec] = useState<QuerySpec | null>(null);
+  // setAutoRun is wired to a toolbar toggle in a later task; not built yet.
+  const [autoRun, setAutoRun] = useState(true);
+  void setAutoRun;
   const [runNonce, setRunNonce] = useState(0);
   const data = useSpecData(ws, datasetId, ranSpec, !!ranSpec, runNonce);
   const finished = !data.isLoading && !data.error && !!ranSpec;
@@ -337,11 +341,19 @@ export default function ChartExplore() {
     setRunNonce((n) => n + 1);
   }
 
+  // Serialized "is this chart runnable, and with what config" signature. Empty
+  // whenever the chart isn't ready (no dataset or missing required fields) so
+  // auto-run never fires an invalid query. Filters are part of specForRun(),
+  // so changing them changes this signature too.
+  const querySignature =
+    datasetId && missingFields(viz, validationInput()).length === 0
+      ? JSON.stringify({ datasetId, spec: specForRun() })
+      : "";
+  useAutoRun({ enabled: autoRun, signature: querySignature, onRun: run });
+
   function addFilter(f: ChartFilter) {
     setFilters((prev) => [...prev.filter((x) => x.col !== f.col), f]);
   }
-  // Re-run whenever filters change, but only if a query is already in flight/done
-  useEffect(() => { if (ranSpec) void run(); }, [filters]); // intentionally omits run/ranSpec to avoid infinite loop
 
   const mutations = useChartMutations(ws);
   const [saveOpen, setSaveOpen] = useState(false);
