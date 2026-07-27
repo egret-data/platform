@@ -211,3 +211,75 @@ async fn resolve_delegation_covers_all_three_branches() {
     );
     assert_eq!(bearer, None, "non-delegated: NO bearer is attached");
 }
+
+/// Regression: the SQL-Lab schema browser (`conn_spec_granted`, which fronts
+/// catalogs/schemas/tables/columns) MUST apply the same per-user delegation as
+/// the data path. Before this was wired, browsing a JWT-delegated engine built a
+/// bearer-less connection → Trino answered 403 → the endpoint 502'd with
+/// `engine: forbidden` even though query execution (which delegates) worked.
+#[tokio::test]
+async fn schema_browse_conn_spec_applies_delegation() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let email = format!("schbrowse_{}@egret.local", Uuid::new_v4().simple());
+    let uid = seed_user(&db, &email).await;
+    let slug = format!("schbrowse-{}", Uuid::new_v4().simple());
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'Schema Browse Test', $2, 'active') RETURNING id",
+    )
+    .bind(&slug)
+    .bind(uid)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert workspace");
+
+    let delegated_db = seed_db(&db, ws, true).await;
+    let plain_db = seed_db(&db, ws, false).await;
+    let ctx = ctx_for(ws, uid, &email);
+
+    let users = egret_auth::users::UserRepo::new(db.clone());
+    let expected_username = users
+        .ensure_username(egret_core::UserId(uid))
+        .await
+        .expect("ensure_username");
+
+    let st = build_state(
+        db.clone(),
+        Arc::new(FakeMinter {
+            token: Some("fake-engine-jwt".into()),
+        }),
+    );
+
+    // DELEGATED engine: the browse connection MUST carry the per-user JWT + the
+    // caller's username — otherwise Trino rejects the SHOW CATALOGS with 403.
+    let spec = egret_bi::conn_spec_granted(&st, &ctx, delegated_db)
+        .await
+        .expect("conn spec for a granted delegated db");
+    assert_eq!(
+        spec.bearer_token.as_deref(),
+        Some("fake-engine-jwt"),
+        "schema browse MUST attach the per-user engine JWT for a delegated engine"
+    );
+    assert_eq!(
+        spec.session_user,
+        Some(expected_username),
+        "schema browse MUST run as the caller's username on a delegated engine"
+    );
+
+    // NON-DELEGATED engine: unchanged shared-service behavior (email, no bearer).
+    let spec = egret_bi::conn_spec_granted(&st, &ctx, plain_db)
+        .await
+        .expect("conn spec for a granted non-delegated db");
+    assert_eq!(spec.bearer_token, None, "non-delegated: no bearer attached");
+    assert_eq!(
+        spec.session_user,
+        Some(email),
+        "non-delegated: session_user stays the caller email"
+    );
+}

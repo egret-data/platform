@@ -334,7 +334,14 @@ async fn conn_spec_perm(
 /// Build a `ConnSpec` for a workspace-granted database WITHOUT an authz gate —
 /// the caller has already authorized (e.g. object-scope `require_object`). Still
 /// enforces that the database is granted to the workspace.
-async fn conn_spec_granted(
+///
+/// Applies the same per-user delegation the BI data path uses
+/// ([`resolve_delegation`]): a JWT-delegated engine requires the caller's engine
+/// JWT (Trino rejects an unauthenticated request with 403 → surfaced as
+/// `engine: forbidden`), and impersonation needs the resolved `session_user`.
+/// Skipping this is exactly what made schema browsing (catalogs/schemas/tables/
+/// columns) 502 on delegated engines while query execution worked.
+pub async fn conn_spec_granted(
     st: &BiState,
     ctx: &egret_core::WorkspaceContext,
     db: Uuid,
@@ -357,7 +364,16 @@ async fn conn_spec_granted(
         .open_secret(db)
         .await
         .map_err(|e| BiApiError::from(crate::BiError::from(e)))?;
-    Ok(ConnSpec::from_database(&database, secret))
+    // Delegated engines require the caller's per-user identity/JWT on EVERY
+    // connection — including these read-only meta-queries. Reuse the data
+    // path's picker so browse behaves like execution.
+    let (session_user, bearer) = resolve_delegation(st, ctx, db).await?;
+    Ok(ConnSpec::from_database_as(
+        &database,
+        secret,
+        session_user,
+        bearer,
+    ))
 }
 
 #[derive(Deserialize)]

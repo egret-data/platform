@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { toast } from "sonner";
-import { Copy, Play } from "lucide-react";
+import { Copy, Play, Search } from "lucide-react";
 import { useHistory, type DatabaseListItem } from "@/api/sqllab";
 import { QueryStatusBadge } from "@/components/sqllab/QueryStatusBadge";
 import { timeAgo, fullTimestamp } from "@/lib/relativeTime";
@@ -16,6 +17,7 @@ export function HistoryTab({ ws, databases, onLoad, onRun }: {
 }) {
   const { data } = useHistory(ws);
   const items = data ?? [];
+  const [q, setQ] = useState("");
   if (items.length === 0) return <div className="p-4 text-center text-sm text-muted-foreground">No queries run yet.</div>;
 
   async function copy(sql: string) {
@@ -23,9 +25,25 @@ export function HistoryTab({ ws, databases, onLoad, onRun }: {
     catch { toast.error("Copy failed"); }
   }
 
+  const needle = q.trim().toLowerCase();
+  const shown = needle
+    ? items.filter((h) => h.sql.toLowerCase().includes(needle) || dbName(databases, h.database_id).toLowerCase().includes(needle))
+    : items;
+
   return (
-    <div className="divide-y">
-      {items.map((h) => (
+    <div>
+      <div className="sticky top-0 z-10 border-b bg-background p-2">
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search history…" aria-label="Search query history"
+            className="h-7 w-full rounded-md border bg-background pl-7 pr-2 text-xs outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring" />
+        </div>
+      </div>
+      {shown.length === 0 ? (
+        <div className="p-4 text-center text-sm text-muted-foreground">No history matches “{q}”.</div>
+      ) : (
+      <div className="divide-y">
+      {shown.map((h) => (
         <div key={h.id} className="group flex items-start gap-2 px-3 py-2 hover:bg-accent">
           <button className="min-w-0 flex-1 text-left" onClick={() => onLoad(h.sql)}>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -43,6 +61,8 @@ export function HistoryTab({ ws, databases, onLoad, onRun }: {
           </div>
         </div>
       ))}
+      </div>
+      )}
     </div>
   );
 }

@@ -23,8 +23,8 @@ pub use dataset::{Dataset, DatasetColumn, DatasetRepo, Metric, NewColumn, Source
 pub use error::{BiApiError, BiError};
 pub use expr::{validate_expression, DescribedExpr};
 pub use routes::{
-    chart_router, dashboard_router, dataset_router, folder_router, resolve_delegation,
-    sqllab_router, BiState,
+    chart_router, conn_spec_granted, dashboard_router, dataset_router, folder_router,
+    resolve_delegation, sqllab_router, BiState,
 };
 pub use shares::shares_router;
 

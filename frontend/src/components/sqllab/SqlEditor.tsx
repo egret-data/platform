@@ -1,6 +1,8 @@
 import Editor, { type Monaco } from "@monaco-editor/react";
 import type * as MonacoNS from "monaco-editor";
 import { useEffect, useRef } from "react";
+import { useIsDark } from "@/hooks/useIsDark";
+import { emptySchemaIndex, type SchemaIndex } from "./schemaIndex";
 import { pickRunSql } from "./pickRunSql";
 
 const KEYWORDS = [
@@ -9,15 +11,95 @@ const KEYWORDS = [
   "AVG","MIN","MAX","CASE","WHEN","THEN","ELSE","END","UNION","UNION ALL","WITH","INSERT","UPDATE","DELETE","CREATE","TABLE",
 ];
 
-export function SqlEditor({ value, onChange, schemaWords, onRun, onSelectionChange }: {
+// Editor backgrounds tuned to egret's surface tokens so the editor blends with
+// the surrounding panels rather than reading as a foreign white/black block.
+const LIGHT_THEME = "egret-sql-light";
+const DARK_THEME = "egret-sql-dark";
+
+function defineThemes(monaco: Monaco) {
+  monaco.editor.defineTheme(LIGHT_THEME, {
+    base: "vs", inherit: true, rules: [],
+    colors: { "editor.background": "#ffffff" },
+  });
+  monaco.editor.defineTheme(DARK_THEME, {
+    base: "vs-dark", inherit: true, rules: [],
+    colors: { "editor.background": "#1c1c22" },
+  });
+}
+
+/** Tables referenced by the whole query, so column suggestions can be scoped to
+ *  what's actually in scope (FROM/JOIN targets). */
+function referencedTables(sql: string): string[] {
+  return [...sql.matchAll(/\b(?:from|join)\s+([a-zA-Z_][\w".]*)/gi)].map((m) => m[1].replace(/"/g, ""));
+}
+
+/** Build ranked, context-aware completions for the cursor position. */
+function completionsFor(
+  monaco: Monaco,
+  model: MonacoNS.editor.ITextModel,
+  position: MonacoNS.Position,
+  schema: SchemaIndex,
+  extraWords: string[],
+) {
+  const K = monaco.languages.CompletionItemKind;
+  const word = model.getWordUntilPosition(position);
+  const range = { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber, startColumn: word.startColumn, endColumn: word.endColumn };
+  const textUntil = model.getValueInRange({ startLineNumber: 1, startColumn: 1, endLineNumber: position.lineNumber, endColumn: position.column });
+  const cols = schema.columnsByTable;
+
+  const colItem = (c: { name: string; type: string }, src: string, sort: string) => ({
+    label: c.name, kind: K.Field, insertText: c.name, range, detail: `${c.type} · ${src}`, sortText: sort + c.name,
+  });
+  const tableItem = (t: string, sort: string) => ({
+    label: t, kind: K.Struct, insertText: t, range, detail: "table", sortText: sort + t,
+  });
+
+  // 1) Dotted path `prefix.` → columns of that table, else child objects.
+  const dot = /([a-zA-Z_][\w"]*)\.\s*[\w"]*$/.exec(textUntil);
+  if (dot) {
+    const prefix = dot[1].replace(/"/g, "").toLowerCase();
+    const tableCols = cols[prefix] ?? cols[prefix.split(".").pop() ?? ""];
+    if (tableCols) return { suggestions: tableCols.map((c) => colItem(c, prefix, "0")) };
+    const children = new Set<string>();
+    for (const t of schema.tables) {
+      const tl = t.toLowerCase();
+      if (tl.startsWith(prefix + ".")) children.add(t.slice(prefix.length + 1).split(".")[0]);
+    }
+    if (children.size) return { suggestions: [...children].map((n) => ({ label: n, kind: K.Module, insertText: n, range, sortText: "0" + n })) };
+  }
+
+  // 2) Right after FROM/JOIN → tables.
+  if (/\b(from|join)\s+[\w".]*$/i.test(textUntil)) {
+    return { suggestions: schema.tables.map((t) => tableItem(t, "0")) };
+  }
+
+  // 3) General: columns of referenced tables first, then tables, keywords, others.
+  const suggestions: MonacoNS.languages.CompletionItem[] = [];
+  const seen = new Set<string>();
+  for (const ref of referencedTables(model.getValue())) {
+    const key = ref.toLowerCase();
+    const tc = cols[key] ?? cols[key.split(".").pop() ?? ""];
+    if (tc) for (const c of tc) if (!seen.has(c.name)) { seen.add(c.name); suggestions.push(colItem(c, ref, "0") as MonacoNS.languages.CompletionItem); }
+  }
+  for (const t of schema.tables) suggestions.push(tableItem(t, "1") as MonacoNS.languages.CompletionItem);
+  for (const k of KEYWORDS) suggestions.push({ label: k, kind: K.Keyword, insertText: k, range, sortText: "2" + k });
+  for (const w of extraWords) if (!seen.has(w)) suggestions.push({ label: w, kind: K.Field, insertText: w, range, sortText: "3" + w });
+  return { suggestions };
+}
+
+export function SqlEditor({ value, onChange, schemaWords, schema, onRun, onSelectionChange }: {
   value: string;
   onChange: (v: string) => void;
   schemaWords: string[];
+  schema?: SchemaIndex;
   onRun?: (sql: string) => void;
   onSelectionChange?: (selectedText: string) => void;
 }) {
+  const isDark = useIsDark();
   const wordsRef = useRef(schemaWords);
   wordsRef.current = schemaWords;
+  const schemaRef = useRef(schema ?? emptySchemaIndex());
+  schemaRef.current = schema ?? emptySchemaIndex();
   const onRunRef = useRef(onRun);
   onRunRef.current = onRun;
   const onSelRef = useRef(onSelectionChange);
@@ -33,13 +115,9 @@ export function SqlEditor({ value, onChange, schemaWords, onRun, onSelectionChan
   function handleMount(editor: MonacoNS.editor.IStandaloneCodeEditor, monaco: Monaco) {
     disposables.current.push(
       monaco.languages.registerCompletionItemProvider("sql", {
-        provideCompletionItems: (model: MonacoNS.editor.ITextModel, position: MonacoNS.Position) => {
-          const word = model.getWordUntilPosition(position);
-          const range = { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber, startColumn: word.startColumn, endColumn: word.endColumn };
-          const kw = KEYWORDS.map((k) => ({ label: k, kind: monaco.languages.CompletionItemKind.Keyword, insertText: k, range }));
-          const objs = Array.from(new Set(wordsRef.current)).map((w) => ({ label: w, kind: monaco.languages.CompletionItemKind.Field, insertText: w, range }));
-          return { suggestions: [...objs, ...kw] };
-        },
+        triggerCharacters: ["."],
+        provideCompletionItems: (model: MonacoNS.editor.ITextModel, position: MonacoNS.Position) =>
+          completionsFor(monaco, model, position, schemaRef.current, wordsRef.current),
       }),
     );
     // Cmd/Ctrl+Enter → run the selection (if any) else the whole editor.
@@ -52,6 +130,9 @@ export function SqlEditor({ value, onChange, schemaWords, onRun, onSelectionChan
     );
   }
 
-  return <Editor height="100%" defaultLanguage="sql" value={value} onChange={(v) => onChange(v ?? "")} onMount={handleMount}
-    options={{ minimap: { enabled: false }, fontSize: 13, scrollBeyondLastLine: false }} />;
+  return <Editor height="100%" defaultLanguage="sql" value={value} onChange={(v) => onChange(v ?? "")}
+    theme={isDark ? DARK_THEME : LIGHT_THEME}
+    beforeMount={defineThemes}
+    onMount={handleMount}
+    options={{ minimap: { enabled: false }, fontSize: 13, scrollBeyondLastLine: false, padding: { top: 10, bottom: 10 }, renderLineHighlight: "line", smoothScrolling: true }} />;
 }

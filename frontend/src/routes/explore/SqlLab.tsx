@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
-import { Plus, X } from "lucide-react";
+import { Command, Plus, X } from "lucide-react";
 import { useTabs } from "@/hooks/useTabs";
 import { SqlTab } from "@/components/sqllab/SqlTab";
 
@@ -17,28 +17,51 @@ function SqlLabWorkspace({ ws }: { ws: string }) {
   const active = tabs.find((t) => t.id === activeId) ?? tabs[0];
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col bg-background">
       <h1 className="sr-only">SQL Lab</h1>
-      <div className="flex items-center gap-1 border-b bg-muted/30 px-1">
-        {tabs.map((t) => (
-          <div key={t.id} className={`flex items-center gap-1 border-b-2 px-3 py-1.5 text-sm ${t.id === activeId ? "border-primary bg-background font-medium text-foreground" : "border-transparent text-muted-foreground hover:bg-accent"}`}>
-            {editing === t.id ? (
-              <input autoFocus defaultValue={t.title} className="w-24 bg-transparent outline-none"
-                onBlur={(e) => { renameTab(t.id, e.target.value || t.title); setEditing(null); }}
-                onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
-            ) : (
-              <button onClick={() => setActive(t.id)} onDoubleClick={() => setEditing(t.id)} className="max-w-[12rem] truncate">{t.title}</button>
-            )}
-            <button onClick={() => closeTab(t.id)} aria-label={`Close ${t.title}`} className="text-muted-foreground hover:text-foreground"><X className="h-3 w-3" /></button>
-          </div>
-        ))}
-        <button onClick={addTab} className="px-2 py-1 text-muted-foreground hover:text-foreground" title="New tab"><Plus className="h-4 w-4" /></button>
+      {/* Tab strip — VS Code-style editor tabs. */}
+      <div className="flex items-stretch border-b bg-muted/40">
+        <div className="flex min-w-0 flex-1 items-stretch overflow-x-auto">
+          {tabs.map((t) => {
+            const activeTab = t.id === activeId;
+            return (
+              <div key={t.id}
+                className={`group flex min-w-0 items-center gap-1.5 border-r px-3 text-sm ${
+                  activeTab
+                    ? "border-t-2 border-t-primary bg-background font-medium text-foreground"
+                    : "border-t-2 border-t-transparent text-muted-foreground hover:bg-accent/60"}`}>
+                {editing === t.id ? (
+                  <input autoFocus defaultValue={t.title}
+                    className="my-1.5 w-28 rounded bg-transparent px-1 outline-none ring-1 ring-ring"
+                    onBlur={(e) => { renameTab(t.id, e.target.value || t.title); setEditing(null); }}
+                    onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditing(null); }} />
+                ) : (
+                  <button onClick={() => setActive(t.id)} onDoubleClick={() => setEditing(t.id)}
+                    title="Double-click to rename"
+                    className="max-w-[12rem] truncate py-2">{t.title}</button>
+                )}
+                <button onClick={() => closeTab(t.id)} aria-label={`Close ${t.title}`}
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            );
+          })}
+          <button onClick={addTab} title="New tab" aria-label="New tab"
+            className="flex h-9 w-9 shrink-0 items-center justify-center text-muted-foreground hover:bg-accent hover:text-foreground">
+            <Plus className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="hidden items-center gap-1 border-l px-3 text-[11px] text-muted-foreground sm:flex">
+          <Command className="h-3 w-3" /> K for commands
+        </div>
       </div>
-      <div className="flex-1 overflow-hidden">
+      <div className="min-h-0 flex-1 overflow-hidden">
         {active && (
           <SqlTab key={active.id} ws={ws} tab={active}
             patch={(p) => patchTab(active.id, p)}
-            onOpenSaved={(sql, dbId) => openTab({ title: "Saved", sql, dbId, limit: active.limit })} />
+            onOpenSaved={(sql, dbId) => openTab({ title: "Saved", sql, dbId, limit: active.limit })}
+            onOpenPreview={(init) => openTab({ ...init, limit: 100, autoRun: true })} />
         )}
       </div>
     </div>

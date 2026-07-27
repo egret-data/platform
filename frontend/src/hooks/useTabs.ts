@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export interface SqlTabState { id: string; title: string; sql: string; dbId: string | null; limit: number }
+export interface SqlTabState { id: string; title: string; sql: string; dbId: string | null; limit: number; autoRun?: boolean }
 
 const DEFAULT_LIMIT = 1000;
 const newId = () => Math.random().toString(36).slice(2, 10);
