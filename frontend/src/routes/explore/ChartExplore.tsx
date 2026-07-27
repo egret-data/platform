@@ -20,6 +20,7 @@ import { ChartSettingsSections } from "@/components/chart/settings/ChartSettings
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
+import { StudioToolbar } from "@/components/chart/StudioToolbar";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 import { parseFormat } from "@/components/dataset/FormatPicker";
 import { Button } from "@/components/ui/button";
@@ -41,6 +42,9 @@ import { SectionLabel } from "@/components/chart/settings/SectionLabel";
 import { pruneUnits } from "@/components/chart/temporal-units";
 import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
 import { MAPS } from "@/components/chart/echarts/maps/registry";
+import { missingFields } from "@/components/chart/requiredFields";
+import { useAutoRun } from "@/components/chart/useAutoRun";
+import { ChartEmptyState, ChartLoadingState, ChartErrorState } from "@/components/chart/ChartPreviewStates";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 
 const UNDERLINE_LIST = "h-auto w-full justify-start gap-4 rounded-none border-b bg-transparent p-0";
@@ -278,7 +282,13 @@ export default function ChartExplore() {
   }, [activeDims.join("|"), columns]);
 
   const [ranSpec, setRanSpec] = useState<QuerySpec | null>(null);
+  const [autoRun, setAutoRun] = useState(true);
   const [runNonce, setRunNonce] = useState(0);
+  // Signature of the last spec actually run (manual or auto), shared with
+  // useAutoRun so a manual Run cancels a pending auto-fire for the same query.
+  const lastRunSig = useRef("");
+  // Params of the last run, rendered while the query is stale (see previewParams).
+  const ranParams = useRef<ChartParams | null>(null);
   const data = useSpecData(ws, datasetId, ranSpec, !!ranSpec, runNonce);
   const finished = !data.isLoading && !data.error && !!ranSpec;
   const resultColumns = data.columns.filter((c) => !c.name.startsWith("__grp_"));
@@ -313,44 +323,18 @@ export default function ChartExplore() {
   const [sqlOpen, setSqlOpen] = useState(false);
   const chartSql = useBuildChartData(ws, datasetId, ranSpec, sqlOpen);
 
+  const validationInput = () => ({
+    cartesian: { xAxis: cartesian.xAxis, yMetrics: cartesian.yMetrics },
+    pie, scalar, progress, gauge, funnel, waterfall, smart, box, sankey, map: mapCfg,
+    pivot: { rows: pRows, vals: pVals },
+    objectCols: tableCols,
+  });
+
   function run() {
     setRanSpec(null);
     if (!datasetId) { toast.error("Pick a dataset first"); return; }
-    if (viz === "pivot_table" && (pRows.length === 0 || pVals.length === 0)) {
-      toast.error("Pivot needs at least one row dimension and one value"); return;
-    }
-    if (isCartesianViz(viz) && (!cartesian.xAxis || cartesian.yMetrics.length === 0)) {
-      toast.error("This chart needs an X-axis and at least one metric"); return;
-    }
-    if (viz === "pie" && (!pie.dimension || !pie.metric)) {
-      toast.error("Pie needs a dimension and a metric"); return;
-    }
-    if (viz === "scalar" && !scalar.metric) {
-      toast.error("Big number needs a metric"); return;
-    }
-    if (viz === "progress" && !progress.metric) {
-      toast.error("Progress needs a metric"); return;
-    }
-    if (viz === "gauge" && !gauge.metric) {
-      toast.error("Gauge needs a metric"); return;
-    }
-    if (viz === "funnel" && (!funnel.dimension || !funnel.metric)) {
-      toast.error("Funnel needs a dimension and a metric"); return;
-    }
-    if (viz === "waterfall" && (!waterfall.xAxis || !waterfall.metric)) {
-      toast.error("Waterfall needs an x-axis and a metric"); return;
-    }
-    if (viz === "smartscalar" && (!smart.dimension || !smart.metric)) {
-      toast.error("Trend needs a time dimension and a metric"); return;
-    }
-    if (viz === "boxplot" && (!box.category || !box.value)) {
-      toast.error("Box plot needs a category and a value column"); return;
-    }
-    if (viz === "sankey" && (!sankey.source || !sankey.target || !sankey.metric)) {
-      toast.error("Sankey needs source, target and a metric"); return;
-    }
-    if (viz === "map" && (!mapCfg.region || !mapCfg.metric)) { toast.error("Map needs a region and a metric"); return; }
-    if (viz === "object" && tableCols.length === 0) { toast.error("Object detail needs at least one column"); return; }
+    const missing = missingFields(viz, validationInput());
+    if (missing.length) { toast.error(`This chart needs ${missing.join(" and ")}`); return; }
     // No try/catch here (unlike the validation guards above, which are
     // synchronous toasts): the actual request now runs inside useSpecData's
     // useQuery, and its failure surfaces through `data.error` (rendered as the
@@ -360,13 +344,39 @@ export default function ChartExplore() {
     // restoring it would just double-report the same failure.
     setRanSpec(specForRun());
     setRunNonce((n) => n + 1);
+    // Snapshot the params this run renders with (see previewParams).
+    ranParams.current = paramsForSave();
+    // Stamp the signature so a pending auto-run timer for this same query
+    // (e.g. the user clicked Run before the debounce elapsed) won't re-fire it.
+    lastRunSig.current = datasetId ? JSON.stringify({ datasetId, spec: specForRun() }) : "";
   }
+
+  // Serialized "is this chart runnable, and with what config" signature. Empty
+  // whenever the chart isn't ready (no dataset or missing required fields) so
+  // auto-run never fires an invalid query. Filters are part of specForRun(),
+  // so changing them changes this signature too.
+  const querySignature =
+    datasetId && missingFields(viz, validationInput()).length === 0
+      ? JSON.stringify({ datasetId, spec: specForRun() })
+      : "";
+  useAutoRun({ enabled: autoRun, signature: querySignature, onRun: run, lastRunRef: lastRunSig });
+
+  // Params the preview renders from. The field names inside them (x-axis, metrics,
+  // breakout…) address columns of the result on screen, so while the query is stale
+  // — edited but not re-run, the normal state with Auto off — we keep rendering the
+  // params that produced that result. Pairing freshly edited field names with the old
+  // columns finds nothing and renders an empty chart, which reads as "you broke it"
+  // rather than "not run yet". Display-only edits don't change the signature, so they
+  // still preview live.
+  const previewParams = (): ChartParams => {
+    const stale = querySignature !== lastRunSig.current;
+    const base = stale && ranParams.current ? ranParams.current : paramsForSave();
+    return { ...base, columnSettings: effCS };
+  };
 
   function addFilter(f: ChartFilter) {
     setFilters((prev) => [...prev.filter((x) => x.col !== f.col), f]);
   }
-  // Re-run whenever filters change, but only if a query is already in flight/done
-  useEffect(() => { if (ranSpec) void run(); }, [filters]); // intentionally omits run/ranSpec to avoid infinite loop
 
   const mutations = useChartMutations(ws);
   const [saveOpen, setSaveOpen] = useState(false);
@@ -944,43 +954,30 @@ export default function ChartExplore() {
       {/* Main area (full-width preview) */}
       <div className="flex-1 overflow-auto p-4 space-y-3">
         <h1 className="sr-only">{saveName || "New chart"}</h1>
-        <div className="flex items-center gap-2">
-          <Button onClick={run} disabled={data.isLoading} size="sm">
-            {data.isLoading ? "Running…" : "Run"}
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => setSaveOpen(true)}>{id ? "Update" : "Save"}</Button>
-          <ChartExportMenu
-            title={saveName || undefined}
-            columns={resultColumns}
-            rows={data.rows}
-            containerRef={previewRef}
-            disabled={!finished || resultColumns.length === 0}
-          />
-          {ranSpec && (
-            <details
-              className="ml-auto text-xs text-muted-foreground"
-              open={sqlOpen}
-              onToggle={(e) => setSqlOpen(e.currentTarget.open)}
-            >
+        <StudioToolbar
+          name={saveName} onName={setSaveName}
+          autoRun={autoRun} onAutoRun={setAutoRun}
+          onRun={run} onSave={() => setSaveOpen(true)}
+          running={data.isLoading} saveLabel={id ? "Update" : "Save"}
+          exportMenu={
+            <ChartExportMenu title={saveName || undefined} columns={resultColumns} rows={data.rows}
+              containerRef={previewRef} disabled={!finished || resultColumns.length === 0} />
+          }
+          sqlDisclosure={ranSpec && (
+            <details className="text-xs text-muted-foreground" open={sqlOpen} onToggle={(e) => setSqlOpen(e.currentTarget.open)}>
               <summary className="cursor-pointer select-none hover:text-foreground">View SQL</summary>
               {sqlOpen && chartSql.isLoading && <p className="mt-1 text-xs">Loading…</p>}
-              {sqlOpen && chartSql.error && (
-                <p className="mt-1 text-xs text-destructive">{String(chartSql.error)}</p>
-              )}
-              {chartSql.data?.sql && (
-                <pre className="mt-1 max-h-40 overflow-auto rounded bg-muted p-2 text-xs">{chartSql.data.sql}</pre>
-              )}
+              {sqlOpen && chartSql.error && <p className="mt-1 text-xs text-destructive">{String(chartSql.error)}</p>}
+              {chartSql.data?.sql && <pre className="mt-1 max-h-40 overflow-auto rounded bg-muted p-2 text-xs">{chartSql.data.sql}</pre>}
             </details>
           )}
-        </div>
+        />
 
         {filters.length > 0 && (
           <FilterChips filters={filters} onRemove={(i) => setFilters((prev) => prev.filter((_, j) => j !== i))} />
         )}
-        {data.error && (
-          <p className="rounded bg-destructive/10 p-3 text-sm text-destructive">{data.error}</p>
-        )}
-        {isRunning && <p className="text-sm text-muted-foreground">Running…</p>}
+        {data.error && <ChartErrorState message={data.error} onRetry={run} />}
+        {isRunning && <ChartLoadingState />}
 
         <div ref={previewRef} className="contents">
         {finished && viz === "pivot_table" && (
@@ -1026,10 +1023,10 @@ export default function ChartExplore() {
           <ChartErrorBoundary resetKey={`${viz}:${data.columns.length}:${data.rows.length}`}>
             {/* ChartRenderer fills its parent; the preview owns the height + frame
                 (dashboard cards size it to the grid cell instead). */}
-            <div className="h-[70vh] rounded-md border p-2">
+            <div className="h-[60vh] rounded-lg border p-2">
               <ChartRenderer
                 vizType={viz}
-                params={{ ...paramsForSave(), columnSettings: effCS }}
+                params={previewParams()}
                 columns={data.columns}
                 rows={data.rows}
                 metricTypes={metricTypes}
@@ -1038,9 +1035,13 @@ export default function ChartExplore() {
           </ChartErrorBoundary>
         )}
         </div>
-        {!ranSpec && !data.isLoading && (
-          <p className="text-sm text-muted-foreground">Configure the controls on the left and click Run.</p>
-        )}
+        {!ranSpec && !data.isLoading && (() => {
+          const missing = datasetId ? missingFields(viz, validationInput()) : ["a dataset"];
+          return (
+            <ChartEmptyState icon={vizMeta?.icon} title={`Set up your ${vizMeta?.name ?? "chart"}`}
+              hint={missing.length ? `Add: ${missing.join(", ")}${autoRun ? "" : ", then Run"}` : (autoRun ? "Ready — adjust the fields on the left." : "Ready — click Run to preview.")} />
+          );
+        })()}
       </div>
 
       {/* Change-visualization dialog */}
