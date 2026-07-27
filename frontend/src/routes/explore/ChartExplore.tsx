@@ -480,6 +480,10 @@ export default function ChartExplore() {
   const isRunning = data.isLoading;
   const vizMeta = CHART_TYPES.find((t) => t.key === viz);
   const previewRef = useRef<HTMLDivElement>(null);
+  // "View as table" — an accessible data-table alternative for any non-table viz
+  // (Superset parity; canvas charts are opaque to screen readers).
+  const [viewAsTable, setViewAsTable] = useState(false);
+  const isTabular = viz === "table" || viz === "pivot_table";
 
   // ── New-chart gallery: shown when creating a chart with no type chosen yet ──
   if (!id && !typeParam) {
@@ -956,6 +960,13 @@ export default function ChartExplore() {
             containerRef={previewRef}
             disabled={!finished || resultColumns.length === 0}
           />
+          {!isTabular && (
+            <Button variant={viewAsTable ? "secondary" : "outline"} size="sm" aria-pressed={viewAsTable}
+              disabled={!finished || resultColumns.length === 0}
+              onClick={() => setViewAsTable((v) => !v)}>
+              {viewAsTable ? "View chart" : "View as table"}
+            </Button>
+          )}
           {ranSpec && (
             <details
               className="ml-auto text-xs text-muted-foreground"
@@ -1022,7 +1033,10 @@ export default function ChartExplore() {
             dimensionColumns={tableMetrics.length > 0 ? tableCols : []}
             onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })} />
         )}
-        {finished && viz !== "table" && viz !== "pivot_table" && (
+        {finished && !isTabular && viewAsTable && (
+          <ChartTable columns={data.columns} rows={data.rows} columnSettings={effCS} />
+        )}
+        {finished && !isTabular && !viewAsTable && (
           <ChartErrorBoundary resetKey={`${viz}:${data.columns.length}:${data.rows.length}`}>
             {/* ChartRenderer fills its parent; the preview owns the height + frame
                 (dashboard cards size it to the grid cell instead). */}

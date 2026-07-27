@@ -22,6 +22,18 @@ const EmptyState = () => (
   <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
 );
 
+const VIZ_NAMES: Partial<Record<VizType, string>> = {
+  bar: "Bar", row: "Row bar", line: "Line", area: "Area", scatter: "Scatter", combo: "Combo",
+  pie: "Pie", gauge: "Gauge", funnel: "Funnel", waterfall: "Waterfall", boxplot: "Box plot", sankey: "Sankey",
+};
+
+/** One-line summary read by assistive tech (the chart canvas is otherwise opaque). */
+function ariaSummary(vizType: VizType, rows: number, detail: string): string {
+  const name = VIZ_NAMES[vizType] ?? vizType;
+  const what = detail.trim() ? `: ${detail.trim()}` : "";
+  return `${name} chart${what} (${rows} data ${rows === 1 ? "point" : "points"})`;
+}
+
 export interface ChartRendererProps {
   vizType: VizType;
   params: ChartParams;
@@ -98,7 +110,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildCartesianOption(columns, rows, {
+          : <EChartsRenderer ariaLabel={ariaSummary(vizType, rows.length, `${(cartesian.yMetrics ?? []).join(", ")}${cartesian.xAxis ? ` by ${cartesian.xAxis}` : ""}`)} option={buildCartesianOption(columns, rows, {
               kind: vizType, xAxis: cartesian.xAxis, xMetric: cartesian.xMetric, yMetrics: cartesian.yMetrics, series: cartesian.series,
               stacked: cartesian.stacked, horizontal: cartesian.horizontal, smooth: cartesian.smooth,
               showLabels: cartesian.showLabels, showLegend: cartesian.showLegend,
@@ -131,7 +143,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildPieOption(columns, rows, {
+          : <EChartsRenderer ariaLabel={ariaSummary("pie", rows.length, `${pie.metric ?? ""}${pie.dimension ? ` by ${pie.dimension}` : ""}`)} option={buildPieOption(columns, rows, {
               dimension: pie.dimension, metric: pie.metric, donut: pie.donut,
               showLegend: pie.showLegend, showLabels: pie.showLabels,
               sliceThreshold: pie.sliceThreshold, sortRows: pie.sortRows,
@@ -178,7 +190,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildGaugeOption(columns, rows, {
+          : <EChartsRenderer ariaLabel={ariaSummary("gauge", rows.length, gauge.metric ?? "")} option={buildGaugeOption(columns, rows, {
               metric: gauge.metric, min: gauge.min, max: gauge.max, columnSettings, metricTypes,
             })} />}
       </div>
@@ -190,7 +202,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildFunnelOption(columns, rows, {
+          : <EChartsRenderer ariaLabel={ariaSummary("funnel", rows.length, `${funnel.metric ?? ""}${funnel.dimension ? ` by ${funnel.dimension}` : ""}`)} option={buildFunnelOption(columns, rows, {
               dimension: funnel.dimension, metric: funnel.metric, columnSettings, metricTypes,
             })} />}
       </div>
@@ -202,7 +214,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildWaterfallOption(columns, rows, {
+          : <EChartsRenderer ariaLabel={ariaSummary("waterfall", rows.length, `${waterfall.metric ?? ""}${waterfall.xAxis ? ` by ${waterfall.xAxis}` : ""}`)} option={buildWaterfallOption(columns, rows, {
               xAxis: waterfall.xAxis, metric: waterfall.metric, showTotal: waterfall.showTotal, columnSettings, metricTypes,
             })} />}
       </div>
@@ -228,7 +240,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildBoxplotOption(columns, rows, {
+          : <EChartsRenderer ariaLabel={ariaSummary("boxplot", rows.length, `${box.value ?? ""}${box.category ? ` by ${box.category}` : ""}`)} option={buildBoxplotOption(columns, rows, {
               category: box.category, value: box.value, columnSettings, metricTypes,
             })} />}
       </div>
@@ -240,7 +252,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildSankeyOption(columns, rows, {
+          : <EChartsRenderer ariaLabel={ariaSummary("sankey", rows.length, `${sankey.metric ?? ""}${sankey.source && sankey.target ? ` from ${sankey.source} to ${sankey.target}` : ""}`)} option={buildSankeyOption(columns, rows, {
               source: sankey.source, target: sankey.target, metric: sankey.metric, columnSettings, metricTypes,
             })} />}
       </div>

@@ -28,10 +28,14 @@ import { EChartsRenderer } from "../EChartsRenderer";
 const opt = { series: [] } as EChartsCoreOption;
 
 describe("EChartsRenderer", () => {
-  it("inits and sets the option on mount", () => {
+  it("inits and sets the option on mount, with a11y (aria) applied", () => {
     render(<EChartsRenderer option={opt} />);
     expect(init).toHaveBeenCalledTimes(1);
-    expect(instance.setOption).toHaveBeenCalledWith(opt, true);
+    // The renderer wraps every option with screen-reader aria + reduced-motion handling.
+    expect(instance.setOption).toHaveBeenCalledWith(
+      expect.objectContaining({ series: [], aria: { enabled: true }, animation: true }),
+      true,
+    );
   });
   it("disposes on unmount", () => {
     const { unmount } = render(<EChartsRenderer option={opt} />);
