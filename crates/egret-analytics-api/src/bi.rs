@@ -127,6 +127,12 @@ pub struct DatasetColumnDto {
     pub verbose_name: String,
     pub description: String,
     pub is_calculated: bool,
+    /// Usable as a groupby dimension in charts.
+    pub groupby: bool,
+    /// Usable as a filter in charts.
+    pub filterable: bool,
+    /// Display format (d3-format / date pattern); empty = default.
+    pub format: String,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -174,6 +180,10 @@ pub struct MetricDto {
     pub verbose_name: String,
     pub description: String,
     pub ordinal: i32,
+    /// Display format (d3-format); empty = default.
+    pub format: String,
+    /// Marked as a trusted/certified metric.
+    pub certified: bool,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -184,6 +194,17 @@ pub struct MetricBody {
     pub verbose_name: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub format: String,
+    #[serde(default)]
+    pub certified: bool,
+}
+
+/// A chart that uses a dataset (for the dataset Usage view).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DatasetUsageDto {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -204,6 +225,14 @@ pub struct UpdateColumnBody {
     pub description: Option<String>,
     #[serde(default)]
     pub expression: Option<String>,
+    #[serde(default)]
+    pub groupby: Option<bool>,
+    #[serde(default)]
+    pub filterable: Option<bool>,
+    #[serde(default)]
+    pub is_temporal: Option<bool>,
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]

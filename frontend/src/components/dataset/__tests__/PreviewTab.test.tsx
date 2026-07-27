@@ -13,6 +13,7 @@ vi.mock("@/api/generated/datasets/datasets", () => ({
 }));
 
 import { PreviewTab } from "@/components/dataset/PreviewTab";
+import type { DatasetColumn } from "@/api/datasets";
 
 function renderWithProviders(ui: React.ReactElement) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -49,6 +50,27 @@ test("PreviewTab: success renders column header + cell value and runs on mount",
   // Column header + a cell value.
   expect(screen.getByText("order_id")).toBeInTheDocument();
   expect(screen.getByText("42")).toBeInTheDocument();
+});
+
+test("PreviewTab: applies a column's semantic-layer format to the rendered value", () => {
+  mockState = {
+    isPending: false,
+    isError: false,
+    error: null,
+    data: {
+      status: 200,
+      data: { columns: [{ name: "amount", type: "bigint" }], rows: [[10]] },
+    },
+  };
+  // amount carries a Currency ColumnFormat (as stored by the FormatPicker).
+  const columns = [{
+    column_name: "amount", data_type: "bigint", type_generic: "numeric", is_temporal: false,
+    ordinal: 1, expression: null, verbose_name: "", description: "", is_calculated: false,
+    groupby: true, filterable: true, format: JSON.stringify({ number_style: "currency", decimals: 2 }),
+  }] as DatasetColumn[];
+  renderWithProviders(<PreviewTab ws="eng" datasetId="ds1" columns={columns} />);
+  // Raw value 10 renders as currency — the format actually takes effect.
+  expect(screen.getByText("$10.00")).toBeInTheDocument();
 });
 
 test("PreviewTab: error state shows the Alert message", () => {

@@ -56,7 +56,9 @@ export default function ChartExplore() {
   const datasets = useDatasets(ws);
   const existing = useChart(ws, id ?? null);
 
-  const [datasetId, setDatasetId] = useState<string | null>(null);
+  // New chart may arrive with a preselected dataset (?dataset=<id>) from the
+  // dataset detail page's "Create chart" action; saved charts hydrate below.
+  const [datasetId, setDatasetId] = useState<string | null>(() => (!id ? searchParams.get("dataset") : null));
   const detail = useDataset(ws, datasetId);
   const [viz, setViz] = useState<VizType>(!id && isValidViz(typeParam) ? typeParam : "table");
   const [vizPickerOpen, setVizPickerOpen] = useState(false);

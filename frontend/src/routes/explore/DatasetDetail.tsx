@@ -1,19 +1,33 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
 import { toast } from "sonner";
+import { BarChart3, Clock, Columns3, Pencil, RefreshCw, Sigma, Table2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { RelativeTime } from "@/components/explore/RelativeTime";
+import { SqlEditor } from "@/components/sqllab/SqlEditor";
 import { useDataset, useRefreshDataset, useDeleteDataset, useUpdateDataset } from "@/api/datasets";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { ColumnsTab } from "@/components/dataset/ColumnsTab";
 import { MetricsTab } from "@/components/dataset/MetricsTab";
 import { PreviewTab } from "@/components/dataset/PreviewTab";
+import { UsageTab } from "@/components/dataset/UsageTab";
+
+/** Compact "n unit(s)" stat chip for the header. */
+function Stat({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+      {icon}
+      {children}
+    </span>
+  );
+}
 
 export default function DatasetDetail() {
   const { workspace: ws = "", id = "" } = useParams();
@@ -31,8 +45,6 @@ export default function DatasetDetail() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
 
-  // Edit form is dirty when any editable field diverges from the loaded dataset.
-  // (sql is only editable for virtual datasets.) beforeunload-only guard.
   const dirty = editing && !!ds && (
     name !== ds.name ||
     description !== ds.description ||
@@ -40,7 +52,6 @@ export default function DatasetDetail() {
   );
   useUnsavedChangesWarning(dirty);
 
-  // Detail tab in the URL (?tab=), default "columns" (preserves prior behavior).
   const tab = searchParams.get("tab") ?? "columns";
   const setTab = (v: string) =>
     setSearchParams((prev) => {
@@ -74,7 +85,7 @@ export default function DatasetDetail() {
     );
   if (!ds) return <div className="p-4">Not found. <Link className="underline" to={listHref}>Back</Link></div>;
 
-  const source = ds.kind === "virtual" ? ds.sql : [ds.catalog, ds.schema, ds.table].filter(Boolean).join(".");
+  const source = ds.kind === "virtual" ? (ds.sql ?? "") : [ds.catalog, ds.schema, ds.table].filter(Boolean).join(".");
 
   function startEdit() {
     if (!ds) return;
@@ -101,48 +112,81 @@ export default function DatasetDetail() {
 
   return (
     <div className="p-4">
-      <div className="mb-4 flex items-start justify-between">
-        <div className="min-w-0 flex-1">
-          <Link className="text-sm text-muted-foreground hover:underline" to={listHref}>← Datasets</Link>
-          {editing ? (
-            <div className="mt-1 max-w-2xl space-y-2">
-              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Dataset name" />
-              <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description (optional)" />
-              {ds.kind === "virtual" && (
-                <Textarea className="h-40 font-mono text-sm" value={sql} onChange={(e) => setSql(e.target.value)} placeholder="SELECT …" />
-              )}
+      <Link className="text-sm text-muted-foreground hover:underline" to={listHref}>← Datasets</Link>
+
+      {/* Header card */}
+      <div className="mt-2 rounded-lg border bg-card p-4">
+        {editing ? (
+          <div className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="ds-name">Name</Label>
+                <Input id="ds-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Dataset name" />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="ds-desc">Description</Label>
+                <Input id="ds-desc" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What this dataset is for (optional)" />
+              </div>
             </div>
-          ) : (
-            <>
-              <h1 className="text-lg font-semibold">{ds.name} <Badge variant="secondary" className="ml-2">{ds.kind}</Badge></h1>
-              {ds.description && <p className="text-sm text-muted-foreground">{ds.description}</p>}
-              <pre className="mt-1 max-w-2xl overflow-auto rounded bg-muted p-2 text-xs">{source}</pre>
-            </>
-          )}
-        </div>
-        <div className="flex shrink-0 gap-2">
-          {editing ? (
-            <>
+            {ds.kind === "virtual" && (
+              <div className="space-y-1.5">
+                <Label>SQL query</Label>
+                <div className="h-64 overflow-hidden rounded-md border">
+                  <SqlEditor value={sql} onChange={setSql} schemaWords={[]} />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  The query result becomes the dataset. After changing it, click <span className="font-medium">Refresh</span> to re-sync the columns.
+                </p>
+              </div>
+            )}
+            <div className="flex gap-2">
               <Button disabled={update.isPending} onClick={save}>{update.isPending ? "Saving…" : "Save"}</Button>
               <Button variant="outline" onClick={() => { if (dirty && !window.confirm("Discard unsaved changes?")) return; setEditing(false); }}>Cancel</Button>
-            </>
-          ) : (
-            <>
-              <Button variant="outline" onClick={startEdit}>Edit</Button>
-              <Button variant="outline" disabled={refresh.isPending}
-                onClick={() => refresh.mutateAsync().then(() => toast.success("Refreshed")).catch((e) => toast.error(String(e)))}>
-                {refresh.isPending ? "Refreshing…" : "Refresh"}
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <h1 className="truncate text-lg font-semibold">{ds.name}</h1>
+                <Badge variant="secondary" className="gap-1">
+                  {ds.kind === "virtual" ? <Sigma className="h-3 w-3" /> : <Table2 className="h-3 w-3" />}
+                  {ds.kind}
+                </Badge>
+              </div>
+              {ds.description && <p className="mt-0.5 text-sm text-muted-foreground">{ds.description}</p>}
+              <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+                <Stat icon={<Columns3 className="h-3.5 w-3.5" />}>{ds.columns.length} columns</Stat>
+                <Stat icon={<Sigma className="h-3.5 w-3.5" />}>{ds.metrics.length} metrics</Stat>
+                <Stat icon={<Clock className="h-3.5 w-3.5" />}>updated <RelativeTime iso={ds.updated_at} /></Stat>
+              </div>
+              <div className="mt-2 flex items-start gap-1.5 text-xs text-muted-foreground">
+                {ds.kind === "virtual" ? <Sigma className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : <Table2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+                <code title={source} className="min-w-0 max-w-2xl truncate rounded bg-muted px-1.5 py-0.5 font-mono">{source || "—"}</code>
+              </div>
+            </div>
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
+              <Button asChild className="gap-1.5">
+                <Link to={`/explore/${ws}/charts/new?dataset=${ds.id}`}><BarChart3 className="h-4 w-4" /> Create chart</Link>
               </Button>
-              <Button variant="destructive" onClick={() => setConfirmDelete(true)}>Delete</Button>
-            </>
-          )}
-        </div>
+              <Button variant="outline" size="icon" title="Edit" onClick={startEdit}><Pencil className="h-4 w-4" /></Button>
+              <Button variant="outline" size="icon" title="Refresh columns" disabled={refresh.isPending}
+                onClick={() => refresh.mutateAsync().then(() => toast.success("Refreshed")).catch((e) => toast.error(String(e)))}>
+                <RefreshCw className={`h-4 w-4 ${refresh.isPending ? "animate-spin" : ""}`} />
+              </Button>
+              <Button variant="outline" size="icon" title="Delete" className="text-destructive hover:text-destructive" onClick={() => setConfirmDelete(true)}>
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
       <Tabs value={tab} onValueChange={setTab} className="mt-4">
         <TabsList>
           <TabsTrigger value="columns">Columns ({ds.columns.length})</TabsTrigger>
           <TabsTrigger value="metrics">Metrics ({ds.metrics.length})</TabsTrigger>
+          <TabsTrigger value="usage">Usage</TabsTrigger>
           <TabsTrigger value="preview">Preview</TabsTrigger>
         </TabsList>
         <TabsContent value="columns">
@@ -151,8 +195,11 @@ export default function DatasetDetail() {
         <TabsContent value="metrics">
           <MetricsTab ws={ws} datasetId={id} metrics={ds.metrics} />
         </TabsContent>
+        <TabsContent value="usage">
+          <UsageTab ws={ws} datasetId={id} />
+        </TabsContent>
         <TabsContent value="preview">
-          <PreviewTab ws={ws} datasetId={id} />
+          <PreviewTab ws={ws} datasetId={id} columns={ds.columns} />
         </TabsContent>
       </Tabs>
 

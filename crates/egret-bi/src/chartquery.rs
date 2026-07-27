@@ -579,6 +579,9 @@ mod tests {
             expression: expr.map(|e| e.into()),
             verbose_name: String::new(),
             description: String::new(),
+            groupby: true,
+            filterable: true,
+            format: String::new(),
         }
     }
     fn metric(name: &str, expr: &str) -> Metric {
@@ -591,6 +594,8 @@ mod tests {
             verbose_name: String::new(),
             description: String::new(),
             ordinal: 0,
+            format: String::new(),
+            certified: false,
         }
     }
     fn phys() -> SourceSpec {
@@ -938,6 +943,9 @@ mod tests {
             expression: None,
             verbose_name: String::new(),
             description: String::new(),
+            groupby: true,
+            filterable: true,
+            format: String::new(),
         }
     }
 

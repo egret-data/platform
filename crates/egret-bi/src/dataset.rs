@@ -60,6 +60,9 @@ pub struct DatasetColumn {
     pub expression: Option<String>,
     pub verbose_name: String,
     pub description: String,
+    pub groupby: bool,
+    pub filterable: bool,
+    pub format: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -72,6 +75,15 @@ pub struct Metric {
     pub verbose_name: String,
     pub description: String,
     pub ordinal: i32,
+    pub format: String,
+    pub certified: bool,
+}
+
+/// A chart that references a dataset (Usage view).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DatasetUsage {
+    pub id: Uuid,
+    pub name: String,
 }
 
 const COLS: &str = "id, workspace_id, database_id, name, description, catalog, schema_name, table_name, sql, created_by, folder_id, updated_at, deleted_at";
@@ -241,7 +253,7 @@ impl DatasetRepo {
 
     pub async fn columns(&self, dataset_id: Uuid) -> Result<Vec<DatasetColumn>, BiError> {
         Ok(sqlx::query_as::<_, DatasetColumn>(
-            "SELECT column_name, data_type, type_generic, is_temporal, ordinal, expression, verbose_name, description \
+            "SELECT column_name, data_type, type_generic, is_temporal, ordinal, expression, verbose_name, description, groupby, filterable, format \
              FROM analytics.dataset_columns WHERE dataset_id = $1 ORDER BY ordinal",
         )
         .bind(dataset_id)
@@ -374,7 +386,7 @@ impl DatasetRepo {
 
     pub async fn metrics(&self, dataset_id: Uuid) -> Result<Vec<Metric>, BiError> {
         Ok(sqlx::query_as::<_, Metric>(
-            "SELECT id, metric_name, expression, data_type, type_generic, verbose_name, description, ordinal \
+            "SELECT id, metric_name, expression, data_type, type_generic, verbose_name, description, ordinal, format, certified \
              FROM analytics.dataset_metrics WHERE dataset_id = $1 ORDER BY ordinal",
         )
         .bind(dataset_id)
@@ -382,6 +394,18 @@ impl DatasetRepo {
         .await?)
     }
 
+    /// Charts that use this dataset (Usage view).
+    pub async fn usage(&self, dataset_id: Uuid) -> Result<Vec<DatasetUsage>, BiError> {
+        Ok(sqlx::query_as::<_, DatasetUsage>(
+            "SELECT id, name FROM analytics.charts \
+             WHERE dataset_id = $1 AND deleted_at IS NULL ORDER BY updated_at DESC",
+        )
+        .bind(dataset_id)
+        .fetch_all(&self.db.pool)
+        .await?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub async fn add_metric(
         &self,
@@ -392,11 +416,13 @@ impl DatasetRepo {
         type_generic: &str,
         verbose_name: &str,
         description: &str,
+        format: &str,
+        certified: bool,
     ) -> Result<(), BiError> {
         let r = sqlx::query(
             "INSERT INTO analytics.dataset_metrics \
-               (dataset_id, metric_name, expression, data_type, type_generic, verbose_name, description, ordinal) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7, \
+               (dataset_id, metric_name, expression, data_type, type_generic, verbose_name, description, format, certified, ordinal) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, \
                (SELECT COALESCE(MAX(ordinal),-1)+1 FROM analytics.dataset_metrics WHERE dataset_id=$1))",
         )
         .bind(dataset_id)
@@ -406,6 +432,8 @@ impl DatasetRepo {
         .bind(type_generic)
         .bind(verbose_name)
         .bind(description)
+        .bind(format)
+        .bind(certified)
         .execute(&self.db.pool)
         .await;
         conflict_on_unique(r, "metric name already exists").map(|_| ())
@@ -421,10 +449,12 @@ impl DatasetRepo {
         type_generic: &str,
         verbose_name: &str,
         description: &str,
+        format: &str,
+        certified: bool,
     ) -> Result<(), BiError> {
         let r = sqlx::query(
             "UPDATE analytics.dataset_metrics SET metric_name=$2, expression=$3, data_type=$4, \
-               type_generic=$5, verbose_name=$6, description=$7 WHERE id=$1",
+               type_generic=$5, verbose_name=$6, description=$7, format=$8, certified=$9 WHERE id=$1",
         )
         .bind(metric_id)
         .bind(name)
@@ -433,6 +463,8 @@ impl DatasetRepo {
         .bind(type_generic)
         .bind(verbose_name)
         .bind(description)
+        .bind(format)
+        .bind(certified)
         .execute(&self.db.pool)
         .await;
         conflict_on_unique(r, "metric name already exists").map(|_| ())
@@ -486,12 +518,17 @@ impl DatasetRepo {
         conflict_on_unique(r, "column name already exists").map(|_| ())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_column(
         &self,
         dataset_id: Uuid,
         column_name: &str,
         verbose_name: Option<&str>,
         description: Option<&str>,
+        groupby: Option<bool>,
+        filterable: Option<bool>,
+        is_temporal: Option<bool>,
+        format: Option<&str>,
         expr_update: Option<(&str, &str, &str, bool)>,
     ) -> Result<(), BiError> {
         // Both updates in one tx so a metadata+expression edit applies atomically.
@@ -499,13 +536,21 @@ impl DatasetRepo {
         sqlx::query(
             "UPDATE analytics.dataset_columns SET \
                verbose_name = COALESCE($3, verbose_name), \
-               description  = COALESCE($4, description) \
+               description  = COALESCE($4, description), \
+               groupby      = COALESCE($5, groupby), \
+               filterable   = COALESCE($6, filterable), \
+               is_temporal  = COALESCE($7, is_temporal), \
+               format       = COALESCE($8, format) \
              WHERE dataset_id=$1 AND column_name=$2",
         )
         .bind(dataset_id)
         .bind(column_name)
         .bind(verbose_name)
         .bind(description)
+        .bind(groupby)
+        .bind(filterable)
+        .bind(is_temporal)
+        .bind(format)
         .execute(&mut *tx)
         .await?;
 

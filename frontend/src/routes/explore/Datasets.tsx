@@ -309,7 +309,6 @@ export default function Datasets() {
           ws={ws}
           open
           onOpenChange={(o) => { if (!o) setDupId(null); }}
-          initialTab="sql"
           initialSql={dup.data.sql ?? ""}
           initialDbId={dup.data.database_id}
           initialName={`copy of ${dup.data.name}`}
