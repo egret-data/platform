@@ -19,7 +19,6 @@ import {
   queriesHistory,
   queriesResults,
   queriesStatus,
-  queriesSubmit,
 } from "./generated/queries/queries";
 import {
   sqllabCatalogs,
@@ -75,10 +74,21 @@ export function useDatabases(ws: string) {
 }
 
 // ── run / poll / results (engine API) ──
+export interface QueryParamInput { name: string; type: string; value: string }
 export function useSubmitQuery(ws: string) {
   return useMutation({
-    mutationFn: async (body: { database_id: string; sql: string; limit?: number }) =>
-      (await queriesSubmit(ws, body)).data as { id: string; status: QueryStatus },
+    // Hand-written (not the generated fetch fn) so it can carry template
+    // `params`; a 400 surfaces the engine/render message verbatim to the toast.
+    mutationFn: async (body: { database_id: string; sql: string; limit?: number; params?: QueryParamInput[] }) => {
+      const r = await fetch(`/api/ws/${encodeURIComponent(ws)}/queries`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...csrfHeaders() },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error((await r.text().catch(() => "")) || `submit failed: ${r.status}`);
+      return (await r.json()) as { id: string; status: QueryStatus };
+    },
   });
 }
 export function useQueryStatus(ws: string, id: string | null) {

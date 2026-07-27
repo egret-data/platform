@@ -7,6 +7,7 @@ mod job;
 pub mod model;
 pub mod routes;
 pub mod store;
+mod template;
 
 pub use error::{EngineApiError, EngineError};
 pub use job::{run_query, JobManager};
