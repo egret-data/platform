@@ -13,6 +13,7 @@ mod routes;
 mod saved;
 mod schema;
 pub mod shares;
+mod snippet;
 pub mod tags;
 mod typegen;
 
@@ -45,5 +46,6 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
 }
 pub use saved::{SavedQuery, SavedQueryRepo};
 pub use schema::SchemaService;
+pub use snippet::{Snippet, SnippetRepo};
 pub use tags::{ClassificationPolicyRepo, Tag, TagRepo};
 pub use typegen::{generic_type, GenericType};

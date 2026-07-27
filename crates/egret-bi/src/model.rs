@@ -19,8 +19,8 @@ pub use egret_analytics_api::bi::{
     CreateDashboard, CreateDataset, CreateFolder, CreateSource, DashboardCardDto,
     DashboardDetailDto, DashboardSummaryDto, DashboardTabDto, DatasetColumnDto, DatasetDetailDto,
     DatasetSummaryDto, FolderDto, MetricBody, MetricDto, NewTabInput, RenameFolder, SaveQuery,
-    SavedQueryDto, SchemaColumn, SearchHit, SetFolder, UpdateChart, UpdateColumnBody,
-    UpdateDashboard, UpdateDataset,
+    SavedQueryDto, SchemaColumn, SearchHit, SetFolder, SnippetBody, SnippetDto, UpdateChart,
+    UpdateColumnBody, UpdateDashboard, UpdateDataset,
 };
 
 pub fn folder_dto(f: crate::folder::Folder) -> FolderDto {

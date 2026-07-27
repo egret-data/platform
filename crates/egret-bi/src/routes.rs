@@ -103,6 +103,24 @@ pub fn sqllab_router() -> Router<BiState> {
             get(columns),
         )
         .route("/ws/{workspace}/sqllab/databases/{db}/search", get(search))
+        .route(
+            "/ws/{workspace}/sqllab/snippets",
+            get(snippets_list).post(snippets_create),
+        )
+        .route(
+            "/ws/{workspace}/sqllab/snippets/{id}",
+            put(snippets_update).delete(snippets_remove),
+        )
+}
+
+fn snippet_dto(s: crate::snippet::Snippet) -> crate::model::SnippetDto {
+    crate::model::SnippetDto {
+        id: s.id.to_string(),
+        name: s.name,
+        body: s.body,
+        description: s.description,
+        updated_at: s.updated_at,
+    }
 }
 
 fn dto(q: crate::saved::SavedQuery) -> SavedQueryDto {
@@ -561,6 +579,101 @@ async fn search(
             .await
             .map_err(BiApiError::from)?,
     ))
+}
+
+// ── SQL snippets ──────────────────────────────────────────────────────────
+fn snippet_repo(st: &BiState) -> crate::snippet::SnippetRepo {
+    crate::snippet::SnippetRepo::new(st.db.clone())
+}
+
+#[utoipa::path(
+    get, path = "/api/ws/{workspace}/sqllab/snippets", tag = "sqllab", params(WorkspacePath),
+    responses((status = 200, description = "Workspace SQL snippets", body = Vec<crate::model::SnippetDto>)),
+)]
+async fn snippets_list(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<Vec<crate::model::SnippetDto>>, BiApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, SQ_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    let items = snippet_repo(&st)
+        .list(ctx.workspace_id.0)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(items.into_iter().map(snippet_dto).collect()))
+}
+
+#[utoipa::path(
+    post, path = "/api/ws/{workspace}/sqllab/snippets", tag = "sqllab", params(WorkspacePath),
+    request_body = crate::model::SnippetBody,
+    responses((status = 200, description = "Created snippet", body = crate::model::SnippetDto)),
+)]
+async fn snippets_create(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Json(b): Json<crate::model::SnippetBody>,
+) -> Result<Json<crate::model::SnippetDto>, BiApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, SQ_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    let s = snippet_repo(&st)
+        .create(
+            ctx.workspace_id.0,
+            &b.name,
+            &b.body,
+            &b.description,
+            Some(ctx.principal.user_id),
+        )
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(snippet_dto(s)))
+}
+
+#[utoipa::path(
+    put, path = "/api/ws/{workspace}/sqllab/snippets/{id}", tag = "sqllab",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "Snippet id")),
+    request_body = crate::model::SnippetBody,
+    responses(
+        (status = 200, description = "Updated snippet", body = crate::model::SnippetDto),
+        (status = 404, description = "Snippet not found in this workspace", body = ErrorBody),
+    ),
+)]
+async fn snippets_update(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    Json(b): Json<crate::model::SnippetBody>,
+) -> Result<Json<crate::model::SnippetDto>, BiApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, SQ_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    let s = snippet_repo(&st)
+        .update(ctx.workspace_id.0, id, &b.name, &b.body, &b.description)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or_else(|| BiApiError::from(Error::NotFound("snippet".into())))?;
+    Ok(Json(snippet_dto(s)))
+}
+
+#[utoipa::path(
+    delete, path = "/api/ws/{workspace}/sqllab/snippets/{id}", tag = "sqllab",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "Snippet id")),
+    responses((status = 200, description = "Deleted", body = Ack)),
+)]
+async fn snippets_remove(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, SQ_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    snippet_repo(&st)
+        .delete(ctx.workspace_id.0, id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 // ── Dataset routes ──────────────────────────────────────────────────────────
@@ -3052,12 +3165,18 @@ pub struct BiFolderApi;
         tables,
         columns,
         search,
+        snippets_list,
+        snippets_create,
+        snippets_update,
+        snippets_remove,
     ),
     components(schemas(
         SaveQuery,
         SavedQueryDto,
         SchemaColumn,
         crate::model::SearchHit,
+        crate::model::SnippetDto,
+        crate::model::SnippetBody,
         SetFolder,
         Ack,
         ErrorBody,

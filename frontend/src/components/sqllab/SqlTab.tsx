@@ -26,6 +26,7 @@ import { DataPanel } from "@/components/sqllab/DataPanel";
 import { SaveQueryDialog } from "@/components/sqllab/SaveQueryDialog";
 import { HistoryTab } from "@/components/sqllab/HistoryTab";
 import { SavedTab } from "@/components/sqllab/SavedTab";
+import { SnippetsTab } from "@/components/sqllab/SnippetsTab";
 import { CommandPalette, type PaletteAction } from "@/components/notebook/CommandPalette";
 import { CreateDatasetDialog } from "@/components/dataset/CreateDatasetDialog";
 import { emptySchemaIndex, type SchemaIndex } from "@/components/sqllab/schemaIndex";
@@ -263,7 +264,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
       <Panel defaultSize={45} minSize={20}>
         <Tabs value={tabValue} onValueChange={setTabValue} className="flex h-full flex-col">
           <div className="flex items-center gap-2 border-b px-2 py-1.5">
-            <TabsList className="h-8"><TabsTrigger value="results">Results</TabsTrigger><TabsTrigger value="history">History</TabsTrigger><TabsTrigger value="saved">Saved</TabsTrigger></TabsList>
+            <TabsList className="h-8"><TabsTrigger value="results">Results</TabsTrigger><TabsTrigger value="history">History</TabsTrigger><TabsTrigger value="saved">Saved</TabsTrigger><TabsTrigger value="snippets">Snippets</TabsTrigger></TabsList>
             {tabValue === "results" && (
               <div className="ml-auto flex items-center gap-2">
                 {finished && results.data && (
@@ -296,6 +297,10 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
           </TabsContent>
           <TabsContent value="saved" className="min-h-0 flex-1 overflow-auto">
             <SavedTab ws={ws} databases={databases} onOpen={onOpenSaved} />
+          </TabsContent>
+          <TabsContent value="snippets" className="min-h-0 flex-1 overflow-hidden">
+            <SnippetsTab ws={ws} currentSql={tab.sql}
+              onInsert={(body) => patch({ sql: tab.sql.trim() ? `${tab.sql}\n${body}` : body })} />
           </TabsContent>
         </Tabs>
       </Panel>

@@ -181,6 +181,52 @@ export function useSearchObjects(ws: string, db: string | null, query: string) {
   });
 }
 
+// ── SQL snippets (egret-bi) ──
+export interface SqlSnippet { id: string; name: string; body: string; description: string; updated_at: string }
+export interface SnippetBody { name: string; body: string; description?: string }
+function csrfHeaders(): Record<string, string> {
+  const m = document.cookie.match(/(?:^|; )egret_csrf=([^;]+)/);
+  return m ? { "X-Egret-CSRF": decodeURIComponent(m[1]) } : {};
+}
+async function snippetFetch(url: string, init?: RequestInit) {
+  const r = await fetch(url, {
+    credentials: "same-origin",
+    ...init,
+    headers: { "Content-Type": "application/json", ...csrfHeaders(), ...(init?.headers ?? {}) },
+  });
+  if (!r.ok) throw new Error(`snippet request failed: ${r.status}`);
+  return r.status === 200 ? r.json() : undefined;
+}
+const snippetsBase = (ws: string) => `/api/ws/${encodeURIComponent(ws)}/sqllab/snippets`;
+export function useSnippets(ws: string) {
+  return useQuery<SqlSnippet[]>({
+    queryKey: ["sqllab", ws, "snippets"],
+    queryFn: () => snippetFetch(snippetsBase(ws)) as Promise<SqlSnippet[]>,
+  });
+}
+export function useCreateSnippet(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (b: SnippetBody) => snippetFetch(snippetsBase(ws), { method: "POST", body: JSON.stringify(b) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sqllab", ws, "snippets"] }),
+  });
+}
+export function useUpdateSnippet(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...b }: SnippetBody & { id: string }) =>
+      snippetFetch(`${snippetsBase(ws)}/${id}`, { method: "PUT", body: JSON.stringify(b) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sqllab", ws, "snippets"] }),
+  });
+}
+export function useDeleteSnippet(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => snippetFetch(`${snippetsBase(ws)}/${id}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sqllab", ws, "snippets"] }),
+  });
+}
+
 export function useRefreshSchema(ws: string) {
   const qc = useQueryClient();
   return (db: string) => qc.invalidateQueries({ queryKey: ["sqllab", ws, "schema", db] });

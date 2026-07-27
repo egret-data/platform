@@ -17,6 +17,7 @@ use sqlx::PgPool;
 // migration 0027: per-token permissions on catalog_tokens
 // migration 0028: per-token namespace_scope on catalog_tokens
 // migration 0031: per-workspace DB connections (databases.workspace_id; drop workspace_database_grant)
+// migration 0096: analytics.sql_snippets (SQL Lab reusable snippets)
 /// All SQL migrations, embedded at compile time from the workspace `migrations/` dir.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
