@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { BarChart3 } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { ResultsPage } from "@/api/sqllab";
@@ -8,7 +8,7 @@ const isNumeric = (type: string) => NUMERIC.test(type.trim());
 
 type ChartType = "bar" | "line" | "area";
 const MAX_CATEGORIES = 50;
-const W = 820, H = 340, PAD = { top: 16, right: 20, bottom: 66, left: 64 };
+const PAD = { top: 16, right: 24, bottom: 66, left: 64 };
 
 function niceTicks(min: number, max: number, count = 4): number[] {
   if (min === max) return [min];
@@ -24,6 +24,20 @@ export function ResultChart({ page }: { page: ResultsPage | null }) {
   const [type, setType] = useState<ChartType>("bar");
   const [xCol, setXCol] = useState<number>(() => cols.findIndex((c) => !isNumeric(c.type)) >= 0 ? cols.findIndex((c) => !isNumeric(c.type)) : 0);
   const [yCol, setYCol] = useState<number>(() => (numericIdx[0] ?? 1));
+
+  // Fill the available area instead of letterboxing a fixed viewBox: measure the
+  // plot container and draw the SVG 1:1 at its real pixel size.
+  const [size, setSize] = useState({ w: 800, h: 320 });
+  const roRef = useRef<ResizeObserver | null>(null);
+  const measureRef = useCallback((node: HTMLDivElement | null) => {
+    roRef.current?.disconnect();
+    if (!node) return;
+    const update = () => setSize({ w: Math.max(360, node.clientWidth), h: Math.max(220, node.clientHeight) });
+    update();
+    roRef.current = new ResizeObserver(update);
+    roRef.current.observe(node);
+  }, []);
+  const W = size.w, H = size.h;
 
   const data = useMemo(() => {
     if (!page || yCol == null) return [];
@@ -85,8 +99,8 @@ export function ResultChart({ page }: { page: ResultsPage | null }) {
         </Select>
         {data.length >= MAX_CATEGORIES && <span className="text-[11px] text-muted-foreground">showing first {MAX_CATEGORIES} categories</span>}
       </div>
-      <div className="min-h-0 flex-1 overflow-hidden p-2">
-        <svg viewBox={`0 0 ${W} ${H}`} width="100%" height="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label={`${cols[yCol]?.name} by ${cols[xCol]?.name}`}>
+      <div ref={measureRef} className="min-h-0 flex-1 overflow-hidden">
+        <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`${cols[yCol]?.name} by ${cols[xCol]?.name}`}>
           {/* gridlines + y ticks */}
           {ticks.map((t, i) => (
             <g key={i}>
@@ -97,7 +111,8 @@ export function ResultChart({ page }: { page: ResultsPage | null }) {
           {/* marks */}
           {type === "bar" && data.map((d, i) => {
             const y = yScale(d.value); const h = Math.abs(y - zeroY);
-            return <rect key={i} x={xCenter(i) - band * 0.35} y={Math.min(y, zeroY)} width={band * 0.7} height={h || 1} rx={2} fill="var(--primary)" />;
+            const bw = Math.min(band * 0.7, 72); // cap width so few bars aren't huge slabs
+            return <rect key={i} x={xCenter(i) - bw / 2} y={Math.min(y, zeroY)} width={bw} height={h || 1} rx={2} fill="var(--primary)" />;
           })}
           {type === "area" && <path d={areaPath} fill="var(--primary)" fillOpacity={0.18} stroke="none" />}
           {(type === "line" || type === "area") && (
