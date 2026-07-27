@@ -1054,7 +1054,15 @@ async fn ds_update(
         .await
         .map_err(BiApiError::from)?;
     st.datasets
-        .update(id, &b.name, &b.description, b.sql.as_deref())
+        .update(
+            id,
+            &b.name,
+            &b.description,
+            b.sql.as_deref(),
+            b.certified,
+            b.certified_by.as_deref(),
+            b.certification_details.as_deref(),
+        )
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(load_detail(&st, id).await?))
@@ -1324,6 +1332,8 @@ async fn ds_add_metric(
             &b.description,
             &b.format,
             b.certified,
+            &b.certified_by,
+            &b.certification_details,
         )
         .await
         .map_err(BiApiError::from)?;
@@ -1381,6 +1391,8 @@ async fn ds_update_metric(
             &b.description,
             &b.format,
             b.certified,
+            &b.certified_by,
+            &b.certification_details,
         )
         .await
         .map_err(BiApiError::from)?;
@@ -1548,6 +1560,7 @@ async fn ds_update_column(
             b.filterable,
             b.is_temporal,
             b.format.as_deref(),
+            b.semantic_type.as_deref(),
             eu,
         )
         .await

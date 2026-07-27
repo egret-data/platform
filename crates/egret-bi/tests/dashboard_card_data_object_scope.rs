@@ -591,7 +591,7 @@ async fn dashboard_card_data_merges_and_validates_temporal_units() {
     // to its dimension) has a valid measure.
     st.datasets
         .add_metric(
-            ds, "cnt", "COUNT(*)", "integer", "numeric", "Count", "", "", false,
+            ds, "cnt", "COUNT(*)", "integer", "numeric", "Count", "", "", false, "", "",
         )
         .await
         .unwrap();

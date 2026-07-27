@@ -48,6 +48,9 @@ pub struct Dataset {
     pub folder_id: Option<Uuid>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub certified: bool,
+    pub certified_by: String,
+    pub certification_details: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -63,6 +66,7 @@ pub struct DatasetColumn {
     pub groupby: bool,
     pub filterable: bool,
     pub format: String,
+    pub semantic_type: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -77,6 +81,8 @@ pub struct Metric {
     pub ordinal: i32,
     pub format: String,
     pub certified: bool,
+    pub certified_by: String,
+    pub certification_details: String,
 }
 
 /// A chart that references a dataset (Usage view).
@@ -86,7 +92,7 @@ pub struct DatasetUsage {
     pub name: String,
 }
 
-const COLS: &str = "id, workspace_id, database_id, name, description, catalog, schema_name, table_name, sql, created_by, folder_id, updated_at, deleted_at";
+const COLS: &str = "id, workspace_id, database_id, name, description, catalog, schema_name, table_name, sql, created_by, folder_id, updated_at, deleted_at, certified, certified_by, certification_details";
 
 /// Private struct for list() — sqlx tuple FromRow is version-sensitive; use flatten instead.
 #[derive(sqlx::FromRow)]
@@ -253,7 +259,7 @@ impl DatasetRepo {
 
     pub async fn columns(&self, dataset_id: Uuid) -> Result<Vec<DatasetColumn>, BiError> {
         Ok(sqlx::query_as::<_, DatasetColumn>(
-            "SELECT column_name, data_type, type_generic, is_temporal, ordinal, expression, verbose_name, description, groupby, filterable, format \
+            "SELECT column_name, data_type, type_generic, is_temporal, ordinal, expression, verbose_name, description, groupby, filterable, format, semantic_type \
              FROM analytics.dataset_columns WHERE dataset_id = $1 ORDER BY ordinal",
         )
         .bind(dataset_id)
@@ -261,23 +267,35 @@ impl DatasetRepo {
         .await?)
     }
 
-    /// Update name/description, and (for virtual datasets) sql. Does not touch columns.
+    /// Update name/description, (for virtual datasets) sql, and optionally the
+    /// certification (a None certification arg leaves that field unchanged).
+    /// Does not touch columns.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &self,
         id: Uuid,
         name: &str,
         description: &str,
         sql: Option<&str>,
+        certified: Option<bool>,
+        certified_by: Option<&str>,
+        certification_details: Option<&str>,
     ) -> Result<Dataset, BiError> {
         let ds = sqlx::query_as::<_, Dataset>(&format!(
             "UPDATE analytics.datasets SET name=$2, description=$3, \
              sql = CASE WHEN sql IS NULL THEN sql ELSE COALESCE($4, sql) END, \
+             certified = COALESCE($5, certified), \
+             certified_by = COALESCE($6, certified_by), \
+             certification_details = COALESCE($7, certification_details), \
              updated_at = now() WHERE id=$1 RETURNING {COLS}"
         ))
         .bind(id)
         .bind(name)
         .bind(description)
         .bind(sql)
+        .bind(certified)
+        .bind(certified_by)
+        .bind(certification_details)
         .fetch_optional(&self.db.pool)
         .await?
         .ok_or_else(|| BiError::NotFound(id.to_string()))?;
@@ -386,7 +404,7 @@ impl DatasetRepo {
 
     pub async fn metrics(&self, dataset_id: Uuid) -> Result<Vec<Metric>, BiError> {
         Ok(sqlx::query_as::<_, Metric>(
-            "SELECT id, metric_name, expression, data_type, type_generic, verbose_name, description, ordinal, format, certified \
+            "SELECT id, metric_name, expression, data_type, type_generic, verbose_name, description, ordinal, format, certified, certified_by, certification_details \
              FROM analytics.dataset_metrics WHERE dataset_id = $1 ORDER BY ordinal",
         )
         .bind(dataset_id)
@@ -418,11 +436,13 @@ impl DatasetRepo {
         description: &str,
         format: &str,
         certified: bool,
+        certified_by: &str,
+        certification_details: &str,
     ) -> Result<(), BiError> {
         let r = sqlx::query(
             "INSERT INTO analytics.dataset_metrics \
-               (dataset_id, metric_name, expression, data_type, type_generic, verbose_name, description, format, certified, ordinal) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, \
+               (dataset_id, metric_name, expression, data_type, type_generic, verbose_name, description, format, certified, certified_by, certification_details, ordinal) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, \
                (SELECT COALESCE(MAX(ordinal),-1)+1 FROM analytics.dataset_metrics WHERE dataset_id=$1))",
         )
         .bind(dataset_id)
@@ -434,6 +454,8 @@ impl DatasetRepo {
         .bind(description)
         .bind(format)
         .bind(certified)
+        .bind(certified_by)
+        .bind(certification_details)
         .execute(&self.db.pool)
         .await;
         conflict_on_unique(r, "metric name already exists").map(|_| ())
@@ -451,10 +473,13 @@ impl DatasetRepo {
         description: &str,
         format: &str,
         certified: bool,
+        certified_by: &str,
+        certification_details: &str,
     ) -> Result<(), BiError> {
         let r = sqlx::query(
             "UPDATE analytics.dataset_metrics SET metric_name=$2, expression=$3, data_type=$4, \
-               type_generic=$5, verbose_name=$6, description=$7, format=$8, certified=$9 WHERE id=$1",
+               type_generic=$5, verbose_name=$6, description=$7, format=$8, certified=$9, \
+               certified_by=$10, certification_details=$11 WHERE id=$1",
         )
         .bind(metric_id)
         .bind(name)
@@ -465,6 +490,8 @@ impl DatasetRepo {
         .bind(description)
         .bind(format)
         .bind(certified)
+        .bind(certified_by)
+        .bind(certification_details)
         .execute(&self.db.pool)
         .await;
         conflict_on_unique(r, "metric name already exists").map(|_| ())
@@ -529,18 +556,20 @@ impl DatasetRepo {
         filterable: Option<bool>,
         is_temporal: Option<bool>,
         format: Option<&str>,
+        semantic_type: Option<&str>,
         expr_update: Option<(&str, &str, &str, bool)>,
     ) -> Result<(), BiError> {
         // Both updates in one tx so a metadata+expression edit applies atomically.
         let mut tx = self.db.pool.begin().await?;
         sqlx::query(
             "UPDATE analytics.dataset_columns SET \
-               verbose_name = COALESCE($3, verbose_name), \
-               description  = COALESCE($4, description), \
-               groupby      = COALESCE($5, groupby), \
-               filterable   = COALESCE($6, filterable), \
-               is_temporal  = COALESCE($7, is_temporal), \
-               format       = COALESCE($8, format) \
+               verbose_name  = COALESCE($3, verbose_name), \
+               description   = COALESCE($4, description), \
+               groupby       = COALESCE($5, groupby), \
+               filterable    = COALESCE($6, filterable), \
+               is_temporal   = COALESCE($7, is_temporal), \
+               format        = COALESCE($8, format), \
+               semantic_type = COALESCE($9, semantic_type) \
              WHERE dataset_id=$1 AND column_name=$2",
         )
         .bind(dataset_id)
@@ -551,6 +580,7 @@ impl DatasetRepo {
         .bind(filterable)
         .bind(is_temporal)
         .bind(format)
+        .bind(semantic_type)
         .execute(&mut *tx)
         .await?;
 

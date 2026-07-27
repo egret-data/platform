@@ -29,7 +29,14 @@ export function PreviewTab({ ws, datasetId, columns = [] }: Props) {
   const columnSettings = useMemo(() => {
     const m: Record<string, ColumnFormat> = {};
     for (const c of columns) {
-      const cf = parseFormat(c.format);
+      const cf: ColumnFormat = { ...parseFormat(c.format) };
+      // Semantic type gives a default rendering when the column has no explicit format.
+      if (!cf.view_as) {
+        if (c.semantic_type === "email") cf.view_as = "email";
+        else if (c.semantic_type === "url") cf.view_as = "link";
+        else if (c.semantic_type === "image") cf.view_as = "image";
+      }
+      if (c.semantic_type === "currency" && !cf.number_style) { cf.number_style = "currency"; cf.currency = cf.currency ?? "USD"; }
       if (Object.keys(cf).length) m[c.column_name] = cf;
     }
     return m;

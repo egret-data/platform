@@ -45,7 +45,7 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
   const patchMetric = (m: DatasetMetric, patch: Partial<MetricInput>) =>
     updateMetric.mutateAsync({
       metricId: m.id,
-      body: { metric_name: m.metric_name, expression: m.expression, verbose_name: m.verbose_name, description: m.description, format: m.format, certified: m.certified, ...patch },
+      body: { metric_name: m.metric_name, expression: m.expression, verbose_name: m.verbose_name, description: m.description, format: m.format, certified: m.certified, certified_by: m.certified_by, certification_details: m.certification_details, ...patch },
     }).catch((e) => toast.error(String(e)));
 
   async function save() {
@@ -57,6 +57,8 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
       description: (editing.description ?? "").trim(),
       format: (editing.format ?? "").trim(),
       certified: editing.certified ?? false,
+      certified_by: (editing.certified_by ?? "").trim(),
+      certification_details: (editing.certification_details ?? "").trim(),
     };
     if (!body.metric_name || !body.expression) { toast.error("Name and expression required"); return; }
     try {
@@ -100,14 +102,18 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
                 <tr key={m.id} className="border-t align-middle hover:bg-accent/40">
                   <td className="px-3 py-1.5">
                     <span className="inline-flex items-center gap-1.5 font-semibold">
-                      {m.certified && <BadgeCheck className="h-4 w-4 text-primary" />}
+                      {m.certified && (
+                        <span title={[m.certified_by && `Certified by ${m.certified_by}`, m.certification_details].filter(Boolean).join(" — ") || "Certified"}>
+                          <BadgeCheck className="h-4 w-4 text-primary" />
+                        </span>
+                      )}
                       {m.metric_name}
                       <Badge variant="secondary" className="text-[10px]">{m.type_generic}</Badge>
                     </span>
                   </td>
                   <td className="px-2 py-1.5 font-mono text-xs text-muted-foreground">{m.expression}</td>
                   <td className="px-2 py-1.5">
-                    <FormatPicker value={m.format} onChange={(v) => { if (v !== m.format) patchMetric(m, { format: v }); }} />
+                    <FormatPicker type={m.data_type} value={m.format} onChange={(v) => { if (v !== m.format) patchMetric(m, { format: v }); }} />
                   </td>
                   <td className="px-2 py-1.5 text-center"><Switch checked={m.certified} onCheckedChange={(v) => patchMetric(m, { certified: v })} aria-label={`Certified ${m.metric_name}`} /></td>
                   <td className="px-2 py-1.5 text-muted-foreground">{m.verbose_name || "—"}</td>
@@ -146,17 +152,25 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
                 </div>
                 <div className="space-y-1.5">
                   <Label>Format <span className="font-normal text-muted-foreground">(optional)</span></Label>
-                  <FormatPicker value={editing.format ?? ""} onChange={(v) => setEditing({ ...editing, format: v })} className="w-full" />
+                  <FormatPicker type={editing.data_type ?? ""} value={editing.format ?? ""} onChange={(v) => setEditing({ ...editing, format: v })} className="w-full" />
                 </div>
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="m-desc">Description <span className="font-normal text-muted-foreground">(optional)</span></Label>
                 <Textarea id="m-desc" placeholder="What this metric measures" value={editing.description ?? ""} onChange={(e) => setEditing({ ...editing, description: e.target.value })} />
               </div>
-              <label className="flex items-center gap-2 text-sm">
-                <Switch checked={editing.certified ?? false} onCheckedChange={(v) => setEditing({ ...editing, certified: v })} />
-                Certified <span className="text-muted-foreground">— mark as the trusted, official metric</span>
-              </label>
+              <div className="space-y-2 rounded-md border p-2.5">
+                <label className="flex items-center gap-2 text-sm">
+                  <Switch checked={editing.certified ?? false} onCheckedChange={(v) => setEditing({ ...editing, certified: v })} />
+                  Certified <span className="text-muted-foreground">— mark as the trusted, official metric</span>
+                </label>
+                {editing.certified && (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <Input placeholder="Certified by (name/team)" value={editing.certified_by ?? ""} onChange={(e) => setEditing({ ...editing, certified_by: e.target.value })} />
+                    <Input placeholder="Details (why it's trusted)" value={editing.certification_details ?? ""} onChange={(e) => setEditing({ ...editing, certification_details: e.target.value })} />
+                  </div>
+                )}
+              </div>
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={() => setEditing(null)}>Cancel</Button>
                 <Button onClick={save} disabled={addMetric.isPending || updateMetric.isPending}>Save</Button>

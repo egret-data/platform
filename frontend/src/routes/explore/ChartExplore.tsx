@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { useDatasets, useDataset } from "@/api/datasets";
@@ -21,6 +21,7 @@ import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
+import { parseFormat } from "@/components/dataset/FormatPicker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -282,6 +283,29 @@ export default function ChartExplore() {
   const finished = !data.isLoading && !data.error && !!ranSpec;
   const resultColumns = data.columns.filter((c) => !c.name.startsWith("__grp_"));
   const metricTypes = Object.fromEntries((detail.data?.metrics ?? []).map((m) => [m.metric_name, m.data_type ?? "double"]));
+
+  // Dataset-level formats (column & metric) become chart DEFAULTS: they render
+  // unless the chart has its own per-column override. Applied at render time
+  // only (never baked into saved params) so editing the dataset stays live.
+  const datasetDefaults = useMemo(() => {
+    const m: Record<string, ColumnFormat> = {};
+    for (const c of detail.data?.columns ?? []) {
+      const cf: ColumnFormat = { ...parseFormat(c.format) };
+      if (!cf.view_as) {
+        if (c.semantic_type === "email") cf.view_as = "email";
+        else if (c.semantic_type === "url") cf.view_as = "link";
+        else if (c.semantic_type === "image") cf.view_as = "image";
+      }
+      if (c.semantic_type === "currency" && !cf.number_style) { cf.number_style = "currency"; cf.currency = cf.currency ?? "USD"; }
+      if (Object.keys(cf).length) m[c.column_name] = cf;
+    }
+    for (const mt of detail.data?.metrics ?? []) {
+      const cf = parseFormat(mt.format);
+      if (Object.keys(cf).length) m[mt.metric_name] = cf;
+    }
+    return m;
+  }, [detail.data]);
+  const effCS = useMemo(() => ({ ...datasetDefaults, ...columnSettings }), [datasetDefaults, columnSettings]);
 
   // "View SQL" disclosure: build-only, fetched lazily (only while the
   // disclosure is open) via the `charts`-gated ch_data endpoint — independent
@@ -968,7 +992,7 @@ export default function ChartExplore() {
               showRowTotals, showColTotals, condense, collapsed,
               sortDims: pivotSort,
             }}
-            columnSettings={columnSettings}
+            columnSettings={effCS}
             conditionalFormatting={conditionalFormatting}
             metricTypes={metricTypes}
             onToggleCollapse={(path) =>
@@ -993,7 +1017,7 @@ export default function ChartExplore() {
         )}
         {finished && viz === "table" && (
           <ChartTable columns={data.columns} rows={data.rows}
-            columnSettings={columnSettings} conditionalFormatting={conditionalFormatting}
+            columnSettings={effCS} conditionalFormatting={conditionalFormatting}
             tableState={tableState} onTableStateChange={setTableState}
             dimensionColumns={tableMetrics.length > 0 ? tableCols : []}
             onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })} />
@@ -1005,7 +1029,7 @@ export default function ChartExplore() {
             <div className="h-[70vh] rounded-md border p-2">
               <ChartRenderer
                 vizType={viz}
-                params={paramsForSave()}
+                params={{ ...paramsForSave(), columnSettings: effCS }}
                 columns={data.columns}
                 rows={data.rows}
                 metricTypes={metricTypes}

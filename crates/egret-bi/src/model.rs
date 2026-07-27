@@ -50,6 +50,8 @@ pub fn metric_dto(m: Metric) -> MetricDto {
         ordinal: m.ordinal,
         format: m.format,
         certified: m.certified,
+        certified_by: m.certified_by,
+        certification_details: m.certification_details,
     }
 }
 
@@ -67,6 +69,7 @@ pub fn summary_dto(ds: Dataset, column_count: i64) -> DatasetSummaryDto {
         folder_id: ds.folder_id.map(|u| u.to_string()),
         updated_at: ds.updated_at,
         deleted_at: ds.deleted_at,
+        certified: ds.certified,
         bookmarked: false,
     }
 }
@@ -85,6 +88,7 @@ pub fn summary_dto_bm(ds: Dataset, column_count: i64, bookmarked: bool) -> Datas
         folder_id: ds.folder_id.map(|u| u.to_string()),
         updated_at: ds.updated_at,
         deleted_at: ds.deleted_at,
+        certified: ds.certified,
         bookmarked,
     }
 }
@@ -122,10 +126,14 @@ pub fn detail_dto(
                     groupby: c.groupby,
                     filterable: c.filterable,
                     format: c.format,
+                    semantic_type: c.semantic_type,
                 }
             })
             .collect(),
         metrics: metrics.into_iter().map(metric_dto).collect(),
+        certified: ds.certified,
+        certified_by: ds.certified_by,
+        certification_details: ds.certification_details,
     }
 }
 

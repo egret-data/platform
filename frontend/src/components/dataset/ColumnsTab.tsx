@@ -93,6 +93,7 @@ export function ColumnsTab({ ws, datasetId, columns }: Props) {
             <tr>
               <th className="px-3 py-2 font-medium">Column</th>
               <th className="px-2 py-2 font-medium">Type</th>
+              <th className="px-2 py-2 font-medium"><HeaderHint label="Role" hint="Semantic role — Country enables maps, Email/URL/Image render specially, Currency formats as money." /></th>
               <th className="px-2 py-2 text-center font-medium"><HeaderHint center label="Dimension" hint="Group charts by this column — a category like Country or Product." /></th>
               <th className="px-2 py-2 text-center font-medium"><HeaderHint center label="Filter" hint="Let viewers filter charts by this column." /></th>
               <th className="px-2 py-2 text-center font-medium"><HeaderHint center label="Time" hint="This column is a date/time — turn on to enable time-based charts." /></th>
@@ -104,7 +105,7 @@ export function ColumnsTab({ ws, datasetId, columns }: Props) {
           </thead>
           <tbody>
             {shown.length === 0 && (
-              <tr><td colSpan={9} className="px-3 py-4 text-center text-muted-foreground">
+              <tr><td colSpan={10} className="px-3 py-4 text-center text-muted-foreground">
                 {columns.length === 0 ? "No columns yet — Refresh to sync from the source." : `No columns match “${q}”.`}
               </td></tr>
             )}
@@ -118,11 +119,24 @@ export function ColumnsTab({ ws, datasetId, columns }: Props) {
                   </span>
                 </td>
                 <td className="px-2 py-1.5 font-mono text-xs text-muted-foreground">{c.data_type}</td>
+                <td className="px-2 py-1.5">
+                  <select className="h-7 w-24 rounded border bg-background px-1 text-xs" value={c.semantic_type}
+                    aria-label={`Role ${c.column_name}`}
+                    onChange={(e) => save(c.column_name, { semantic_type: e.target.value })}>
+                    <option value="">—</option>
+                    <option value="category">Category</option>
+                    <option value="country">Country</option>
+                    <option value="currency">Currency</option>
+                    <option value="email">Email</option>
+                    <option value="url">URL</option>
+                    <option value="image">Image</option>
+                  </select>
+                </td>
                 <td className="px-2 py-1.5 text-center"><Switch checked={c.groupby} onCheckedChange={(v) => save(c.column_name, { groupby: v })} aria-label={`Dimension ${c.column_name}`} /></td>
                 <td className="px-2 py-1.5 text-center"><Switch checked={c.filterable} onCheckedChange={(v) => save(c.column_name, { filterable: v })} aria-label={`Filterable ${c.column_name}`} /></td>
                 <td className="px-2 py-1.5 text-center"><Switch checked={c.is_temporal} onCheckedChange={(v) => save(c.column_name, { is_temporal: v })} aria-label={`Temporal ${c.column_name}`} /></td>
                 <td className="px-2 py-1.5">
-                  <FormatPicker value={c.format} onChange={(v) => { if (v !== c.format) save(c.column_name, { format: v }); }} />
+                  <FormatPicker type={c.data_type} value={c.format} onChange={(v) => { if (v !== c.format) save(c.column_name, { format: v }); }} />
                 </td>
                 <td className="px-2 py-1.5">
                   <Input key={`vn-${c.verbose_name}`} defaultValue={c.verbose_name} placeholder="e.g. Country" className="h-7 w-36 text-xs"

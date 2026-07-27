@@ -114,6 +114,12 @@ pub struct UpdateDataset {
     pub description: String,
     #[serde(default)]
     pub sql: Option<String>,
+    #[serde(default)]
+    pub certified: Option<bool>,
+    #[serde(default)]
+    pub certified_by: Option<String>,
+    #[serde(default)]
+    pub certification_details: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -131,8 +137,10 @@ pub struct DatasetColumnDto {
     pub groupby: bool,
     /// Usable as a filter in charts.
     pub filterable: bool,
-    /// Display format (d3-format / date pattern); empty = default.
+    /// Display format (ColumnFormat JSON); empty = default.
     pub format: String,
+    /// Semantic role (category/country/currency/email/url/image/…); '' = none.
+    pub semantic_type: String,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -151,6 +159,8 @@ pub struct DatasetSummaryDto {
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
     pub bookmarked: bool,
+    /// Certified as a trusted/official dataset (for a list badge).
+    pub certified: bool,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -168,6 +178,10 @@ pub struct DatasetDetailDto {
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub columns: Vec<DatasetColumnDto>,
     pub metrics: Vec<MetricDto>,
+    /// Certified as a trusted/official dataset.
+    pub certified: bool,
+    pub certified_by: String,
+    pub certification_details: String,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -180,10 +194,12 @@ pub struct MetricDto {
     pub verbose_name: String,
     pub description: String,
     pub ordinal: i32,
-    /// Display format (d3-format); empty = default.
+    /// Display format (ColumnFormat JSON); empty = default.
     pub format: String,
     /// Marked as a trusted/certified metric.
     pub certified: bool,
+    pub certified_by: String,
+    pub certification_details: String,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -198,6 +214,10 @@ pub struct MetricBody {
     pub format: String,
     #[serde(default)]
     pub certified: bool,
+    #[serde(default)]
+    pub certified_by: String,
+    #[serde(default)]
+    pub certification_details: String,
 }
 
 /// A chart that uses a dataset (for the dataset Usage view).
@@ -233,6 +253,8 @@ pub struct UpdateColumnBody {
     pub is_temporal: Option<bool>,
     #[serde(default)]
     pub format: Option<String>,
+    #[serde(default)]
+    pub semantic_type: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]

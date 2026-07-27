@@ -43,21 +43,24 @@ export interface DatasetSummary {
   folder_id: string | null;
   bookmarked?: boolean;
   deleted_at?: string | null;
+  certified?: boolean;
 }
 export interface DatasetColumn {
   column_name: string; data_type: string; type_generic: string; is_temporal: boolean; ordinal: number;
   expression: string | null; verbose_name: string; description: string; is_calculated: boolean;
-  groupby: boolean; filterable: boolean; format: string;
+  groupby: boolean; filterable: boolean; format: string; semantic_type: string;
 }
 export interface DatasetMetric {
   id: string; metric_name: string; expression: string; data_type: string; type_generic: string;
-  verbose_name: string; description: string; ordinal: number; format: string; certified: boolean;
+  verbose_name: string; description: string; ordinal: number; format: string;
+  certified: boolean; certified_by: string; certification_details: string;
 }
 export interface DatasetUsage { id: string; name: string }
 export interface DatasetDetail {
   id: string; name: string; description: string; database_id: string; kind: DatasetKind;
   catalog: string | null; schema: string | null; table: string | null; sql: string | null;
   updated_at: string; columns: DatasetColumn[]; metrics: DatasetMetric[];
+  certified: boolean; certified_by: string; certification_details: string;
 }
 export type CreateSource =
   | { kind: "physical"; catalog?: string | null; schema: string; table: string }
@@ -92,7 +95,7 @@ export function useCreateDataset(ws: string) {
 }
 export function useUpdateDataset(ws: string, id: string) {
   const qc = useQueryClient();
-  return useMutation<DatasetDetail, ApiError, { name: string; description?: string; sql?: string | null }>({
+  return useMutation<DatasetDetail, ApiError, { name: string; description?: string; sql?: string | null; certified?: boolean; certified_by?: string; certification_details?: string }>({
     mutationFn: async (body) => (await datasetsDsUpdate(ws, id, body)).data as DatasetDetail,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: getDatasetsDsGetQueryKey(ws, id) });
@@ -137,8 +140,8 @@ export function useDatasetListMutations(ws: string) {
   return { trash, restore, addBookmark, removeBookmark };
 }
 
-export interface MetricInput { metric_name: string; expression: string; verbose_name?: string; description?: string; format?: string; certified?: boolean }
-export interface ColumnUpdate { verbose_name?: string; description?: string; expression?: string; groupby?: boolean; filterable?: boolean; is_temporal?: boolean; format?: string }
+export interface MetricInput { metric_name: string; expression: string; verbose_name?: string; description?: string; format?: string; certified?: boolean; certified_by?: string; certification_details?: string }
+export interface ColumnUpdate { verbose_name?: string; description?: string; expression?: string; groupby?: boolean; filterable?: boolean; is_temporal?: boolean; format?: string; semantic_type?: string }
 
 // The detail query caches orval's envelope (`{ status, data, headers }`); the
 // `select` in useDataset only transforms the hook's return, not the cache.

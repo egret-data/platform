@@ -39,6 +39,7 @@ fn dim(name: &str) -> DatasetColumn {
         groupby: true,
         filterable: true,
         format: String::new(),
+        semantic_type: String::new(),
     }
 }
 
@@ -54,6 +55,8 @@ fn revenue() -> Metric {
         ordinal: 0,
         format: String::new(),
         certified: false,
+        certified_by: String::new(),
+        certification_details: String::new(),
     }
 }
 
