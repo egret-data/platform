@@ -146,6 +146,12 @@ pub fn build_router(state: AppState) -> Router {
         router = router.merge(
             Router::new()
                 .nest("/api/auth", auth_router())
+                // Platform-admin impersonation start (POST /api/admin/impersonate);
+                // exit lives on the auth protected router (/api/auth/impersonation/exit).
+                .nest(
+                    "/api/admin",
+                    egret_auth::routes::admin_impersonation_router(),
+                )
                 .with_state(auth),
         );
     }
@@ -437,6 +443,10 @@ mod tests {
                 chrono::Duration::minutes(60),
             ),
             audit: egret_audit::AuditSink::new(16).0,
+            impersonations: egret_auth::impersonation::ImpersonationRepo::new(db.clone()),
+            oidc: None,
+            cookie_key: None,
+            session_secure: false,
         }
     }
 

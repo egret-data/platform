@@ -126,6 +126,25 @@ In addition to the prerequisites above, the target workspace needs:
 
 Without (1), Run reports no read-write catalog and the roundtrip fails.
 
+## User impersonation e2e (`impersonation.spec.ts`)
+
+Opt-in (`EGRET_E2E_IMPERSONATION=1`) against the ordinary dev stack, same
+pattern as `notebook.spec.ts` / `workspace-features.spec.ts` (not `*-kind`).
+
+The break-glass local admin logs in once, seeds a plain local member with no
+control-plane permission (`POST /api/control-plane/users`, then added to the
+shared workspace as `ws_editor`), and starts a platform impersonation of that
+member from **Control Plane → Users → Impersonate**. Asserts the persistent
+banner names the target, the app's identity resolves to the target (user menu
++ `GET /api/auth/me`'s `impersonating` overlay), a target-only view differs
+from the admin's (no Control Plane link), and **Exit** reverts everything.
+Exits any still-active impersonation and deletes the seeded user in a
+`finally`.
+
+```bash
+cd frontend && EGRET_E2E_IMPERSONATION=1 npx playwright test impersonation
+```
+
 ## Embedded-catalog e2e (`embedded-catalog.spec.ts`)
 
 Opt-in machine-path loop for the embedded catalog: provision a warehouse + role

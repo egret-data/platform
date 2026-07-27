@@ -352,17 +352,17 @@ async fn assign_resource_tag(
             Some(p.user_id.0),
         )
         .await?;
-    st.audit.emit(egret_audit::AuditEvent::Mutation {
-        actor: Some(p.user_id.0),
-        workspace_id: None,
-        action: "tag:assign".into(),
-        resource_type: "catalog".into(),
-        resource_id: Some(format!(
+    st.audit.emit(egret_audit::mutation_for(
+        &p,
+        None,
+        "tag:assign",
+        "catalog",
+        Some(format!(
             "{warehouse_id}:{}.{}.{}",
             b.schema, b.table, column
         )),
-        detail: serde_json::json!({ "tag_id": b.tag_id }),
-    });
+        serde_json::json!({ "tag_id": b.tag_id }),
+    ));
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -390,17 +390,17 @@ async fn unassign_resource_tag(
     CatalogTagRepo::new(st.db.clone())
         .unassign_catalog(b.tag_id, warehouse_id, &b.schema, &b.table, column)
         .await?;
-    st.audit.emit(egret_audit::AuditEvent::Mutation {
-        actor: Some(p.user_id.0),
-        workspace_id: None,
-        action: "tag:unassign".into(),
-        resource_type: "catalog".into(),
-        resource_id: Some(format!(
+    st.audit.emit(egret_audit::mutation_for(
+        &p,
+        None,
+        "tag:unassign",
+        "catalog",
+        Some(format!(
             "{warehouse_id}:{}.{}.{}",
             b.schema, b.table, column
         )),
-        detail: serde_json::json!({ "tag_id": b.tag_id }),
-    });
+        serde_json::json!({ "tag_id": b.tag_id }),
+    ));
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

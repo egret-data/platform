@@ -271,6 +271,18 @@ impl OidcService {
 
     /// Build the authorize URL with a fresh PKCE challenge, nonce, and state.
     pub fn start(&self) -> OidcStart {
+        self.start_inner(false)
+    }
+
+    /// Like [`Self::start`] but forces the IdP to **re-prompt for credentials**
+    /// (`prompt=login`) rather than silently reusing an existing IdP session. This
+    /// is the OIDC step-up used to gate an impersonation start (Task 8): it proves
+    /// a *fresh* proof of identity, the SSO analogue of re-entering the password.
+    pub fn start_step_up(&self) -> OidcStart {
+        self.start_inner(true)
+    }
+
+    fn start_inner(&self, prompt_login: bool) -> OidcStart {
         let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
         let mut req = self.client.authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
@@ -279,6 +291,9 @@ impl OidcService {
         );
         for s in &self.scopes {
             req = req.add_scope(Scope::new(s.clone()));
+        }
+        if prompt_login {
+            req = req.add_prompt(CoreAuthPrompt::Login);
         }
         let (url, state, nonce) = req.set_pkce_challenge(challenge).url();
         OidcStart {

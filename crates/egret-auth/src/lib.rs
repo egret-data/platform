@@ -6,6 +6,7 @@ pub mod effective;
 pub mod events;
 pub mod grants;
 pub mod groups;
+pub mod impersonation;
 pub mod model;
 pub mod oidc;
 pub mod oidc_cookie;

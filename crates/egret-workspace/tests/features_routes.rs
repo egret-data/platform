@@ -69,6 +69,10 @@ async fn ws_state_with_audit(db: &Db, audit: egret_audit::AuditSink) -> Workspac
             chrono::Duration::minutes(60),
         ),
         audit,
+        impersonations: egret_auth::impersonation::ImpersonationRepo::new(db.clone()),
+        oidc: None,
+        cookie_key: None,
+        session_secure: false,
     }
 }
 
@@ -491,6 +495,7 @@ async fn put_features_emits_an_audit_event_naming_the_actor() {
     match ev {
         egret_audit::AuditEvent::Mutation {
             actor,
+            impersonator: _,
             workspace_id,
             action,
             resource_type,

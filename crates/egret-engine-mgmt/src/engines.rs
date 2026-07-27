@@ -6089,6 +6089,7 @@ mod tests {
             platform_roles: vec!["platform_admin".into()],
             permissions: vec![],
             group_ids: vec![],
+            impersonator: None,
         };
 
         match create_engine(State(st), Auth(principal), Json(body)).await {
@@ -6374,6 +6375,7 @@ mod tests {
             platform_roles: vec!["platform_admin".into()],
             permissions: vec![],
             group_ids: vec![],
+            impersonator: None,
         };
         let _ = create_engine(State(st.clone()), Auth(principal), Json(body)).await?;
         Ok(st
@@ -6571,6 +6573,7 @@ mod tests {
             platform_roles: vec!["platform_admin".into()],
             permissions: vec![],
             group_ids: vec![],
+            impersonator: None,
         };
 
         // `create_engine`'s Ok type (`Json<EngineDto>`) isn't `Debug`, so match

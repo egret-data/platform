@@ -213,6 +213,10 @@ async fn setup(pool: sqlx::PgPool, caller: Caller) -> Fixture {
             users: UserRepo::new(db.clone()),
             sessions,
             audit: egret_audit::AuditSink::new(16).0,
+            impersonations: egret_auth::impersonation::ImpersonationRepo::new(db.clone()),
+            oidc: None,
+            cookie_key: None,
+            session_secure: false,
         });
 
     Fixture {

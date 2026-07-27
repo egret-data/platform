@@ -5,6 +5,18 @@
 
 use crate::ids::{UserId, WorkspaceId};
 
+/// The real admin behind an impersonated request. Present on `Principal` iff the
+/// request is an impersonation; the principal's own `user_id`/`email`/roles are
+/// then the TARGET's.
+#[derive(Debug, Clone)]
+pub struct Impersonator {
+    pub user_id: crate::ids::UserId,
+    pub email: String,
+    /// NULL for platform_admin (unrestricted); Some(ws) confines a ws_admin.
+    pub workspace_scope: Option<crate::ids::WorkspaceId>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// The authenticated caller.
 #[derive(Debug, Clone)]
 pub struct Principal {
@@ -16,6 +28,8 @@ pub struct Principal {
     pub permissions: Vec<String>,
     /// Group ids the user belongs to (direct memberships), for the PDP subject.
     pub group_ids: Vec<crate::ids::GroupId>,
+    /// Set iff this request is an impersonation. See `Impersonator`.
+    pub impersonator: Option<Impersonator>,
 }
 
 /// Identity + the workspace the current request operates within.
@@ -49,6 +63,7 @@ mod tests {
                 platform_roles: roles.into_iter().map(String::from).collect(),
                 permissions: vec![],
                 group_ids: vec![],
+                impersonator: None,
             },
             workspace_role: "ws_editor".into(),
         }

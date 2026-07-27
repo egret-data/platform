@@ -358,6 +358,10 @@ async fn ws_state(db: &Db) -> WorkspaceState {
             chrono::Duration::minutes(60),
         ),
         audit: egret_audit::AuditSink::new(16).0,
+        impersonations: egret_auth::impersonation::ImpersonationRepo::new(db.clone()),
+        oidc: None,
+        cookie_key: None,
+        session_secure: false,
     }
 }
 
@@ -709,6 +713,10 @@ async fn platform_admin_can_create_workspace() {
         ),
         config: Config::default(),
         rate_limiter: egret_auth::ratelimit::RateLimiter::new(5, 300, 300),
+        audit: egret_audit::AuditSink::new(16).0,
+        impersonations: egret_auth::impersonation::ImpersonationRepo::new(db.clone()),
+        oidc: None,
+        cookie_key: None,
     };
 }
 

@@ -1,7 +1,7 @@
 //! Server-side sessions with two-tier expiry (absolute cap + sliding idle window).
 
 use chrono::{DateTime, Duration, Utc};
-use egret_core::{Principal, Result, UserId};
+use egret_core::{Principal, Result, UserId, WorkspaceId};
 use egret_metastore::Db;
 use uuid::Uuid;
 
@@ -12,6 +12,7 @@ pub struct SessionService {
     db: Db,
     absolute_ttl: Duration,
     idle_ttl: Duration,
+    impersonations: crate::impersonation::ImpersonationRepo,
 }
 
 /// What `create` returns: the raw token (for the cookie) plus expiry timestamps.
@@ -23,10 +24,12 @@ pub struct IssuedSession {
 
 impl SessionService {
     pub fn new(db: Db, absolute_ttl: Duration, idle_ttl: Duration) -> Self {
+        let impersonations = crate::impersonation::ImpersonationRepo::new(db.clone());
         Self {
             db,
             absolute_ttl,
             idle_ttl,
+            impersonations,
         }
     }
 
@@ -72,7 +75,7 @@ impl SessionService {
         let now = Utc::now();
 
         let row = sqlx::query_as::<_, ValidateRow>(
-            "SELECT s.user_id, u.email, u.status \
+            "SELECT s.id AS session_id, s.user_id, u.email, u.status \
              FROM sessions s JOIN users u ON u.id = s.user_id \
              WHERE s.token_hash = $1 AND s.absolute_expires_at > $2 AND s.idle_expires_at > $2",
         )
@@ -99,6 +102,49 @@ impl SessionService {
         .await
         .map_err(db_err)?;
 
+        // Impersonation overlay: if this admin session is currently impersonating,
+        // resolve to the TARGET's principal and carry the admin as `impersonator`.
+        // Only ever consult the overlay for THIS admin session's own row
+        // (`row.session_id`) — never the target's. Expired overlays are ignored by
+        // `active_for_session` (auto-return to admin), so this branch only runs for a
+        // live overlay. If the target user is not active (disabled since the overlay
+        // was started), the overlay is treated as inert and we fall through to the
+        // admin principal — impersonating a disabled user must not resolve.
+        if let Some(ov) = self
+            .impersonations
+            .active_for_session(row.session_id)
+            .await?
+        {
+            let target = UserId(ov.target_user_id);
+            let target_row: Option<(String, String)> =
+                sqlx::query_as("SELECT email, status FROM users WHERE id = $1")
+                    .bind(ov.target_user_id)
+                    .fetch_optional(&self.db.pool)
+                    .await
+                    .map_err(db_err)?;
+            if let Some((target_email, target_status)) = target_row {
+                if target_status == "active" {
+                    // `impersonator_id` == the session owner (`row.user_id`), by
+                    // construction — the overlay is always attached to the admin's own
+                    // session — so `row.email` is the impersonator's email and no extra
+                    // query is needed.
+                    return Ok(Some(Principal {
+                        user_id: target,
+                        email: target_email,
+                        platform_roles: self.platform_roles(target).await?,
+                        permissions: self.permissions(target).await?,
+                        group_ids: self.group_ids(target).await?,
+                        impersonator: Some(egret_core::context::Impersonator {
+                            user_id: UserId(ov.impersonator_id),
+                            email: row.email.clone(),
+                            workspace_scope: ov.workspace_scope_id.map(egret_core::WorkspaceId),
+                            expires_at: ov.expires_at,
+                        }),
+                    }));
+                }
+            }
+        }
+
         let platform_roles = self.platform_roles(UserId(row.user_id)).await?;
         let permissions = self.permissions(UserId(row.user_id)).await?;
         let group_ids = self.group_ids(UserId(row.user_id)).await?;
@@ -108,7 +154,21 @@ impl SessionService {
             platform_roles,
             permissions,
             group_ids,
+            impersonator: None,
         }))
+    }
+
+    /// Resolve the `sessions.id` for a raw session token (via its stored hash),
+    /// or `None` if no such session row exists. Used by the impersonation
+    /// endpoints to key the overlay on the admin's own session.
+    pub async fn session_id_for_token(&self, token: &str) -> Result<Option<Uuid>> {
+        let token_hash = hash_token(token);
+        let id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM sessions WHERE token_hash = $1")
+            .bind(&token_hash)
+            .fetch_optional(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(id)
     }
 
     pub async fn revoke(&self, token: &str) -> Result<()> {
@@ -128,6 +188,41 @@ impl SessionService {
             .await
             .map_err(db_err)?;
         Ok(())
+    }
+
+    /// Public wrapper over `platform_roles` so endpoints can check a target
+    /// user's platform roles (e.g. to forbid impersonating a platform_admin).
+    pub async fn platform_roles_of(&self, user_id: UserId) -> Result<Vec<String>> {
+        self.platform_roles(user_id).await
+    }
+
+    /// True if `user_id` holds a `ws_admin` grant on `workspace_id` (direct or via a
+    /// group), non-expired. A direct `access_grants` query — egret-auth can't import
+    /// egret-workspace's `Authorizer` (that would be a dependency cycle), and this
+    /// authority IS just a grant row. Modeled on `platform_roles` (same
+    /// group-membership union and `expires_at` filter), narrowed to
+    /// `scope_type = 'workspace' AND scope_id = $ws AND r.name = 'ws_admin'`.
+    ///
+    /// Used by the OIDC step-up callback to re-check a workspace-scoped
+    /// impersonation's authority at completion time (closes the ws-path demotion
+    /// TOCTOU, Task 9).
+    pub async fn ws_admin_of(&self, user_id: UserId, workspace_id: WorkspaceId) -> Result<bool> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS ( \
+               SELECT 1 FROM access_grants ag \
+               JOIN roles r ON r.id = ag.role_id \
+               WHERE ag.scope_type = 'workspace' AND ag.scope_id = $2 AND r.name = 'ws_admin' \
+                 AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
+                 AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
+                    OR (ag.principal_type = 'group' AND ag.principal_id IN \
+                           (SELECT group_id FROM user_groups WHERE user_id = $1)) ) )",
+        )
+        .bind(user_id.0)
+        .bind(workspace_id.0)
+        .fetch_one(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(exists)
     }
 
     /// Platform roles for the user (direct + via group membership).
@@ -197,6 +292,7 @@ impl SessionService {
 
 #[derive(sqlx::FromRow)]
 struct ValidateRow {
+    session_id: Uuid,
     user_id: Uuid,
     email: String,
     status: String,

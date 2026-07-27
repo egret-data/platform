@@ -309,19 +309,19 @@ async fn grant_put(
     .await
     .map_err(|e| BiApiError::from(crate::BiError::Db(e)))?;
 
-    st.audit.emit(egret_audit::AuditEvent::Mutation {
-        actor: Some(ctx.principal.user_id.0),
-        workspace_id: Some(ctx.workspace_id.0),
-        action: "object_grant:put".into(),
-        resource_type: "object".into(),
-        resource_id: Some(format!("{kind}:{id}")),
-        detail: serde_json::json!({
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "object_grant:put",
+        "object",
+        Some(format!("{kind}:{id}")),
+        serde_json::json!({
             "principal_type": b.principal_type,
             "principal_id": b.principal_id,
             "role": b.role,
             "effect": b.effect,
         }),
-    });
+    ));
 
     Ok(Json(ObjectGrantDto {
         id: grant_id,
@@ -374,14 +374,14 @@ async fn grant_delete(
     .execute(&st.db.pool)
     .await
     .map_err(|e| BiApiError::from(crate::BiError::Db(e)))?;
-    st.audit.emit(egret_audit::AuditEvent::Mutation {
-        actor: Some(ctx.principal.user_id.0),
-        workspace_id: Some(ctx.workspace_id.0),
-        action: "object_grant:delete".into(),
-        resource_type: "object".into(),
-        resource_id: Some(format!("{kind}:{id}")),
-        detail: serde_json::json!({ "grant_id": grant_id }),
-    });
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "object_grant:delete",
+        "object",
+        Some(format!("{kind}:{id}")),
+        serde_json::json!({ "grant_id": grant_id }),
+    ));
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -530,14 +530,14 @@ async fn object_tag_assign(
         .assign(tag_id, &kind, id, Some(ctx.principal.user_id.0))
         .await
         .map_err(BiApiError::from)?;
-    st.audit.emit(egret_audit::AuditEvent::Mutation {
-        actor: Some(ctx.principal.user_id.0),
-        workspace_id: Some(ctx.workspace_id.0),
-        action: "tag:assign".into(),
-        resource_type: "object".into(),
-        resource_id: Some(format!("{kind}:{id}")),
-        detail: serde_json::json!({ "tag_id": tag_id }),
-    });
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "tag:assign",
+        "object",
+        Some(format!("{kind}:{id}")),
+        serde_json::json!({ "tag_id": tag_id }),
+    ));
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -573,14 +573,14 @@ async fn object_tag_unassign(
         .unassign(tag_id, &kind, id)
         .await
         .map_err(BiApiError::from)?;
-    st.audit.emit(egret_audit::AuditEvent::Mutation {
-        actor: Some(ctx.principal.user_id.0),
-        workspace_id: Some(ctx.workspace_id.0),
-        action: "tag:unassign".into(),
-        resource_type: "object".into(),
-        resource_id: Some(format!("{kind}:{id}")),
-        detail: serde_json::json!({ "tag_id": tag_id }),
-    });
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "tag:unassign",
+        "object",
+        Some(format!("{kind}:{id}")),
+        serde_json::json!({ "tag_id": tag_id }),
+    ));
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

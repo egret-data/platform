@@ -5,10 +5,12 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { ImpersonationDto } from './impersonationDto';
 
 export interface MeResponse {
   user_id: string;
   email: string;
   platform_roles: string[];
   permissions: string[];
+  impersonating?: null | ImpersonationDto;
 }

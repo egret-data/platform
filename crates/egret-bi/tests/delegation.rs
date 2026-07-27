@@ -124,6 +124,7 @@ fn ctx_for(ws: Uuid, uid: Uuid, email: &str) -> egret_core::WorkspaceContext {
             platform_roles: vec![],
             permissions: vec![],
             group_ids: vec![],
+            impersonator: None,
         },
         workspace_role: "ws_viewer".into(),
     }

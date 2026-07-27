@@ -47,6 +47,7 @@ async fn sink_emit_is_non_blocking_and_drops_when_full() {
     for _ in 0..3 {
         sink.emit(AuditEvent::Mutation {
             actor: None,
+            impersonator: None,
             workspace_id: None,
             action: "noop".into(),
             resource_type: "grant".into(),

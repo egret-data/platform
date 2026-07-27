@@ -12,6 +12,7 @@ import {
   Plus,
   ShieldCheck,
   Trash2,
+  UserCog,
   Users,
 } from "lucide-react";
 
@@ -29,6 +30,7 @@ import {
 } from "@/api/access";
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
+import { ImpersonateDialog } from "@/components/ImpersonateDialog";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { EmptyState } from "@/components/explore/EmptyState";
@@ -130,6 +132,7 @@ export default function UsersPage() {
   const [editTarget, setEditTarget] = useState<AccessUser | null>(null);
   const [rolesTarget, setRolesTarget] = useState<AccessUser | null>(null);
   const [resetTarget, setResetTarget] = useState<AccessUser | null>(null);
+  const [impersonateTarget, setImpersonateTarget] = useState<AccessUser | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AccessUser | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [statusFacet, setStatusFacet] = useState(FACET_ALL);
@@ -265,6 +268,16 @@ export default function UsersPage() {
               <DropdownMenuItem onClick={() => setResetTarget(u)}>
                 <KeyRound className="mr-2 h-4 w-4" />
                 Reset password
+              </DropdownMenuItem>
+            )}
+            {/* Impersonate is a platform_admin-only capability. Hidden (not just
+                disabled) for the caller's own row and for platform_admin targets —
+                the backend rejects both, but a visible-then-403 action reads as a
+                bug rather than a rule. */}
+            {isAdmin && u.id !== me?.user_id && !u.roles.includes("platform_admin") && (
+              <DropdownMenuItem onClick={() => setImpersonateTarget(u)}>
+                <UserCog className="mr-2 h-4 w-4" />
+                Impersonate
               </DropdownMenuItem>
             )}
             <DropdownMenuSeparator />
@@ -454,6 +467,16 @@ export default function UsersPage() {
           if (!o) setResetTarget(null);
         }}
       />
+      {impersonateTarget && (
+        <ImpersonateDialog
+          open
+          onOpenChange={(o) => {
+            if (!o) setImpersonateTarget(null);
+          }}
+          targetUserId={impersonateTarget.id}
+          targetEmail={impersonateTarget.email}
+        />
+      )}
       <BulkAssignRoleDialog
         open={bulkRoleOpen}
         users={selectedUsers()}

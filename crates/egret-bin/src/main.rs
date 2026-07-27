@@ -1041,6 +1041,33 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         }
     }
 
+    // Build the audit sink + spawn the batch writer and retention prune (best-effort).
+    // `audit_sink` and `audit_store` are kept in scope after this block: the
+    // mutation-emitting states (incl. AuthState's impersonation endpoints) and the
+    // query API's CpState clone them.
+    let audit_store = egret_audit::AuditStore::new(db.clone());
+    let (audit_sink, audit_rx) = egret_audit::AuditSink::new(config.audit.channel_capacity);
+    if config.audit.enabled {
+        let store = audit_store.clone();
+        tokio::spawn(egret_audit::AuditWriter::run(
+            audit_rx,
+            store,
+            config.audit.batch_size,
+            std::time::Duration::from_millis(config.audit.flush_interval_ms),
+        ));
+        let prune_store = audit_store.clone();
+        let retention = config.audit.retention_days;
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                if let Err(e) = prune_store.prune(retention).await {
+                    tracing::warn!(error=%e, "audit prune failed");
+                }
+            }
+        });
+    }
+
     let users = UserRepo::new(db.clone());
     let sessions = SessionService::new(
         db.clone(),
@@ -1052,11 +1079,34 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         config.rate_limit.login_window_secs,
         config.rate_limit.login_lockout_secs,
     );
+    // Build the OIDC service + cookie-encryption key up front (when SSO is
+    // enabled): both the auth-state's impersonation step-up (Task 8, which returns
+    // an authorize URL + seals the intent into the encrypted state cookie) and the
+    // OIDC login/callback router below share the same discovered service and key.
+    let (oidc_service, oidc_cookie_key) = if config.oidc.enabled {
+        use axum_extra::extract::cookie::Key;
+        use base64::Engine;
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(config.security.secret_key.as_bytes())
+            .map_err(|e| anyhow::anyhow!("security.secret_key base64: {e}"))?;
+        let service = egret_auth::oidc::OidcService::discover(&config.oidc)
+            .await
+            .map_err(|e| anyhow::anyhow!("oidc discovery: {e}"))?;
+        (Some(service), Some(Key::from(&key_bytes)))
+    } else {
+        (None, None)
+    };
+
+    let impersonations = egret_auth::impersonation::ImpersonationRepo::new(db.clone());
     let auth = AuthState {
         users: users.clone(),
         sessions: sessions.clone(),
         config: config.clone(),
         rate_limiter,
+        audit: audit_sink.clone(),
+        impersonations: impersonations.clone(),
+        oidc: oidc_service.clone(),
+        cookie_key: oidc_cookie_key.clone(),
     };
 
     // Shared secret store: one `SecretStore` built from `db` + the master key,
@@ -1094,16 +1144,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| "http://localhost:8080".into());
 
-    let oidc = if config.oidc.enabled {
-        use axum_extra::extract::cookie::Key;
-        use base64::Engine;
-        let key_bytes = base64::engine::general_purpose::STANDARD
-            .decode(config.security.secret_key.as_bytes())
-            .map_err(|e| anyhow::anyhow!("security.secret_key base64: {e}"))?;
-        let service = egret_auth::oidc::OidcService::discover(&config.oidc)
-            .await
-            .map_err(|e| anyhow::anyhow!("oidc discovery: {e}"))?;
-        Some(egret_auth::oidc_routes::OidcRoutesState {
+    let oidc = match (oidc_service.clone(), oidc_cookie_key.clone()) {
+        (Some(service), Some(cookie_key)) => Some(egret_auth::oidc_routes::OidcRoutesState {
             oidc: service,
             users: users.clone(),
             groups: GroupRepo::new(db.clone()),
@@ -1113,10 +1155,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 Duration::minutes(config.session.idle_ttl_minutes as i64),
             ),
             config: config.clone(),
-            cookie_key: Key::from(&key_bytes),
-        })
-    } else {
-        None
+            cookie_key,
+            impersonations: impersonations.clone(),
+            audit: audit_sink.clone(),
+        }),
+        _ => None,
     };
 
     let ranger = if config.ranger.enabled {
@@ -1147,32 +1190,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // event bus — RoleRepo publishes RolesChanged; the Cedar PDP subscriber is wired in B1b-1
     let bus = egret_events::EventBus::new();
 
-    // Build the audit sink + spawn the batch writer and retention prune (best-effort).
-    // `audit_sink` and `audit_store` are kept in scope after this block: Tasks 4/5
-    // clone them into the mutation-emitting states and the query API's CpState.
-    let audit_store = egret_audit::AuditStore::new(db.clone());
-    let (audit_sink, audit_rx) = egret_audit::AuditSink::new(config.audit.channel_capacity);
-    if config.audit.enabled {
-        let store = audit_store.clone();
-        tokio::spawn(egret_audit::AuditWriter::run(
-            audit_rx,
-            store,
-            config.audit.batch_size,
-            std::time::Duration::from_millis(config.audit.flush_interval_ms),
-        ));
-        let prune_store = audit_store.clone();
-        let retention = config.audit.retention_days;
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
-            loop {
-                tick.tick().await;
-                if let Err(e) = prune_store.prune(retention).await {
-                    tracing::warn!(error=%e, "audit prune failed");
-                }
-            }
-        });
-    }
-
     // Cedar PDP — built from the SAME bus as RoleRepo so RolesChanged hot-reloads
     // it (B1b-0 F1). A different EventBus would silently never reload. Defined
     // above all seam-state constructions so `pdp.clone()` is in scope everywhere.
@@ -1198,6 +1215,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         users: users.clone(),
         sessions: sessions.clone(),
         audit: audit_sink.clone(),
+        impersonations: egret_auth::impersonation::ImpersonationRepo::new(db.clone()),
+        oidc: oidc_service.clone(),
+        cookie_key: oidc_cookie_key.clone(),
+        session_secure: config.session.secure,
     };
 
     // `secrets` (the SecretStore) is shared: the per-workspace storage layer and

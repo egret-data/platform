@@ -278,6 +278,79 @@
         }
       }
     },
+    "/api/admin/impersonate": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "impersonate_start",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartImpersonation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Impersonation started; the session now resolves to the target"
+          },
+          "400": {
+            "description": "Bad target / empty reason",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated, or wrong step-up password",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a platform admin, already impersonating, or target is an admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "OIDC admin: re-authenticate at `authorize_url`, then the callback creates the overlay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcStepUp"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/users": {
       "get": {
         "tags": [
@@ -1426,6 +1499,46 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AuthConfig"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/impersonation/exit": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "impersonate_exit",
+        "responses": {
+          "200": {
+            "description": "Impersonation ended; the session returns to the admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -15799,6 +15912,85 @@
         }
       }
     },
+    "/api/ws/{workspace}/impersonate": {
+      "post": {
+        "tags": [
+          "workspace-members"
+        ],
+        "summary": "`POST /api/ws/{workspace}/impersonate` — a `ws_admin` of `{workspace}` (or a\nplatform_admin) starts impersonating a MEMBER of that workspace. The resulting\noverlay is **workspace-scoped**: `WsContext` confines it to `{workspace}` even\nthough the target may belong to others (see the containment guard there).",
+        "description": "Guards run in a deliberate order so a caller learns nothing before its own\nauthority is proven: (1) not already impersonating; (2) caller is `ws_admin`\nhere or a platform_admin; (3) the shared target guards (not-self, reason\nnon-empty, target exists, target-not-platform-admin); (4) the target is a\nMEMBER of this workspace and is NOT itself a `ws_admin` of it. Step-up re-auth\nthen mirrors the platform endpoint: a local caller re-enters their password; an\nOIDC caller gets a `409` with an authorize URL whose sealed intent carries this\n`workspace_id`, and the overlay is created by the OIDC callback.",
+        "operationId": "ws_impersonate_start",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartWsImpersonation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Impersonation started; the session now resolves to the target, scoped to this workspace"
+          },
+          "400": {
+            "description": "Bad target / empty reason",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated, or wrong step-up password",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a ws_admin, already impersonating, target not a member, or target is an admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "OIDC caller: re-authenticate at `authorize_url`, then the callback creates the overlay"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/kernel": {
       "get": {
         "tags": [
@@ -23765,6 +23957,32 @@
           }
         }
       },
+      "ImpersonationDto": {
+        "type": "object",
+        "description": "The active impersonation as surfaced by `/me`: who is being acted-as\n(`target`), the admin behind it (`impersonator`), and the overlay's bounds.",
+        "required": [
+          "target",
+          "impersonator",
+          "expires_at"
+        ],
+        "properties": {
+          "target": {
+            "$ref": "#/components/schemas/UserRef"
+          },
+          "impersonator": {
+            "$ref": "#/components/schemas/UserRef"
+          },
+          "workspace_scope": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "type": "string"
+          }
+        }
+      },
       "JoinableWorkspaceDto": {
         "type": "object",
         "description": "A workspace a user may request to join (they are not already a member).",
@@ -23954,6 +24172,17 @@
             "items": {
               "type": "string"
             }
+          },
+          "impersonating": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ImpersonationDto",
+                "description": "Present when the caller is currently impersonating another user (an active\nadmin overlay resolved to the target). `null` for an ordinary session."
+              }
+            ]
           }
         }
       },
@@ -24545,6 +24774,24 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "OidcStepUp": {
+        "type": "object",
+        "description": "`409` body returned when an OIDC-provider admin starts an impersonation: the\nclient must redirect the browser to `authorize_url` to complete a fresh IdP\nre-authentication (`prompt=login`) before the overlay is created (Task 8). The\n`code` lets the SPA branch on this specific response.",
+        "required": [
+          "code",
+          "authorize_url"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Always `\"oidc_step_up\"`."
+          },
+          "authorize_url": {
+            "type": "string",
+            "description": "The OIDC authorize URL (carries the sealed impersonation intent in `state`)."
           }
         }
       },
@@ -26077,6 +26324,52 @@
           }
         }
       },
+      "StartImpersonation": {
+        "type": "object",
+        "description": "Body for `POST /api/admin/impersonate`.",
+        "required": [
+          "target_user_id",
+          "reason"
+        ],
+        "properties": {
+          "target_user_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for a local-auth admin (step-up). OIDC admins re-auth via OIDC (Task 8)."
+          }
+        }
+      },
+      "StartWsImpersonation": {
+        "type": "object",
+        "description": "Body for `POST /api/ws/{workspace}/impersonate`.",
+        "required": [
+          "target_user_id",
+          "reason"
+        ],
+        "properties": {
+          "target_user_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required for a local-auth caller (step-up). OIDC callers re-auth via OIDC."
+          }
+        }
+      },
       "StatusBody": {
         "type": "object",
         "required": [
@@ -26825,6 +27118,22 @@
             "type": "string"
           },
           "status": {
+            "type": "string"
+          }
+        }
+      },
+      "UserRef": {
+        "type": "object",
+        "description": "A minimal user reference (id + email) for the impersonation state on `/me`.",
+        "required": [
+          "user_id",
+          "email"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "email": {
             "type": "string"
           }
         }

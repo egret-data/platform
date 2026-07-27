@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ListChecks, Loader2, Lock, MoreHorizontal, Trash2, UserPlus } from "lucide-react";
+import { ListChecks, Loader2, Lock, MoreHorizontal, Trash2, UserCog, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -13,6 +13,7 @@ import {
 } from "@/api/members";
 import { listPrincipals } from "@/api/policies";
 import { useAuth } from "@/auth/useAuth";
+import { ImpersonateDialog } from "@/components/ImpersonateDialog";
 import { timeAgo, fullTimestamp } from "@/lib/relativeTime";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -94,6 +95,7 @@ export function MembersPanel({ workspaceId }: { workspaceId: string }) {
   const removeMut = useRemoveMember(ws);
 
   const [removeTarget, setRemoveTarget] = useState<WorkspaceMember | null>(null);
+  const [impersonateTarget, setImpersonateTarget] = useState<WorkspaceMember | null>(null);
   const [bulkRoleOpen, setBulkRoleOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
 
@@ -243,6 +245,17 @@ export function MembersPanel({ workspaceId }: { workspaceId: string }) {
       className: "text-right w-10",
       cell: (m) => {
         const lastAdmin = m.role === ADMIN_ROLE && adminCount <= 1;
+        // Impersonate is a ws_admin (or platform_admin) capability, already
+        // gated at the panel level (this column only renders when `!forbidden`,
+        // i.e. the caller has one of those). Hidden — not just disabled — for
+        // the caller's own row, for another ws_admin, for a platform_admin, and
+        // for groups: the backend rejects all four, but a visible-then-403
+        // action reads as a bug rather than a rule.
+        const canImpersonate =
+          m.principal_type === "user" &&
+          !isSelf(m) &&
+          m.role !== ADMIN_ROLE &&
+          !m.is_platform_admin;
         return (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -255,6 +268,12 @@ export function MembersPanel({ workspaceId }: { workspaceId: string }) {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
+              {canImpersonate && (
+                <DropdownMenuItem onClick={() => setImpersonateTarget(m)}>
+                  <UserCog className="mr-2 h-4 w-4" />
+                  Impersonate
+                </DropdownMenuItem>
+              )}
               <DropdownMenuItem
                 className="text-destructive focus:text-destructive"
                 disabled={lastAdmin}
@@ -345,6 +364,18 @@ export function MembersPanel({ workspaceId }: { workspaceId: string }) {
             }
           />
         </>
+      )}
+
+      {impersonateTarget && (
+        <ImpersonateDialog
+          open
+          onOpenChange={(o) => {
+            if (!o) setImpersonateTarget(null);
+          }}
+          targetUserId={impersonateTarget.principal_id}
+          targetEmail={impersonateTarget.principal_name ?? impersonateTarget.principal_id}
+          workspaceScope={ws}
+        />
       )}
 
       <AddMemberDialog

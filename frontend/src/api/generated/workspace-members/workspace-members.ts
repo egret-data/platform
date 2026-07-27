@@ -33,6 +33,7 @@ import type {
   ErrorBody,
   MemberDto,
   ObjectGrantRollupDto,
+  StartWsImpersonation,
   WorkspaceMembersListWorkspaceAccessRequestsParams,
   WsRoleDto
 } from '../model';
@@ -431,6 +432,130 @@ export const useWorkspaceMembersDenyAccessRequest = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getWorkspaceMembersDenyAccessRequestMutationOptions(options), queryClient);
+    }
+    export type workspaceMembersWsImpersonateStartResponse200 = {
+  data: void
+  status: 200
+}
+
+export type workspaceMembersWsImpersonateStartResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workspaceMembersWsImpersonateStartResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workspaceMembersWsImpersonateStartResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workspaceMembersWsImpersonateStartResponse409 = {
+  data: void
+  status: 409
+}
+
+export type workspaceMembersWsImpersonateStartResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workspaceMembersWsImpersonateStartResponseSuccess = (workspaceMembersWsImpersonateStartResponse200) & {
+  headers: Headers;
+};
+export type workspaceMembersWsImpersonateStartResponseError = (workspaceMembersWsImpersonateStartResponse400 | workspaceMembersWsImpersonateStartResponse401 | workspaceMembersWsImpersonateStartResponse403 | workspaceMembersWsImpersonateStartResponse409 | workspaceMembersWsImpersonateStartResponse500) & {
+  headers: Headers;
+};
+
+export type workspaceMembersWsImpersonateStartResponse = (workspaceMembersWsImpersonateStartResponseSuccess | workspaceMembersWsImpersonateStartResponseError)
+
+export const getWorkspaceMembersWsImpersonateStartUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/impersonate`
+}
+
+/**
+ * Guards run in a deliberate order so a caller learns nothing before its own
+ * authority is proven: (1) not already impersonating; (2) caller is `ws_admin`
+ * here or a platform_admin; (3) the shared target guards (not-self, reason
+ * non-empty, target exists, target-not-platform-admin); (4) the target is a
+ * MEMBER of this workspace and is NOT itself a `ws_admin` of it. Step-up re-auth
+ * then mirrors the platform endpoint: a local caller re-enters their password; an
+ * OIDC caller gets a `409` with an authorize URL whose sealed intent carries this
+ * `workspace_id`, and the overlay is created by the OIDC callback.
+ * @summary `POST /api/ws/{workspace}/impersonate` — a `ws_admin` of `{workspace}` (or a
+platform_admin) starts impersonating a MEMBER of that workspace. The resulting
+overlay is **workspace-scoped**: `WsContext` confines it to `{workspace}` even
+though the target may belong to others (see the containment guard there).
+ */
+export const workspaceMembersWsImpersonateStart = async (workspace: string,
+    startWsImpersonation: StartWsImpersonation, options?: RequestInit): Promise<workspaceMembersWsImpersonateStartResponse> => {
+
+  return customInstance<workspaceMembersWsImpersonateStartResponse>(getWorkspaceMembersWsImpersonateStartUrl(workspace),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(startWsImpersonation)
+  }
+);}
+
+
+
+
+
+export const getWorkspaceMembersWsImpersonateStartMutationOptions = <TError = ErrorBody | void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workspaceMembersWsImpersonateStart>>, TError,{workspace: string;data: StartWsImpersonation}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workspaceMembersWsImpersonateStart>>, TError,{workspace: string;data: StartWsImpersonation}, TContext> => {
+
+const mutationKey = ['workspaceMembersWsImpersonateStart'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workspaceMembersWsImpersonateStart>>, {workspace: string;data: StartWsImpersonation}> = (props) => {
+          const {workspace,data} = props ?? {};
+
+          return  workspaceMembersWsImpersonateStart(workspace,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkspaceMembersWsImpersonateStartMutationResult = NonNullable<Awaited<ReturnType<typeof workspaceMembersWsImpersonateStart>>>
+    export type WorkspaceMembersWsImpersonateStartMutationBody = StartWsImpersonation
+    export type WorkspaceMembersWsImpersonateStartMutationError = ErrorBody | void
+
+    /**
+ * @summary `POST /api/ws/{workspace}/impersonate` — a `ws_admin` of `{workspace}` (or a
+platform_admin) starts impersonating a MEMBER of that workspace. The resulting
+overlay is **workspace-scoped**: `WsContext` confines it to `{workspace}` even
+though the target may belong to others (see the containment guard there).
+ */
+export const useWorkspaceMembersWsImpersonateStart = <TError = ErrorBody | void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workspaceMembersWsImpersonateStart>>, TError,{workspace: string;data: StartWsImpersonation}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workspaceMembersWsImpersonateStart>>,
+        TError,
+        {workspace: string;data: StartWsImpersonation},
+        TContext
+      > => {
+      return useMutation(getWorkspaceMembersWsImpersonateStartMutationOptions(options), queryClient);
     }
     export type workspaceMembersListMembersResponse200 = {
   data: MemberDto[]

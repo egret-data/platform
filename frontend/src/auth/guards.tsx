@@ -3,12 +3,34 @@ import { Navigate, useParams } from "react-router-dom";
 import { useAuth } from "./useAuth";
 import { useMyWorkspaces } from "@/api/hooks";
 import { Forbidden } from "@/routes/Forbidden";
+import { ImpersonationBanner } from "@/components/layout/ImpersonationBanner";
 
+/**
+ * Outer gate for every authenticated route (`/`, `/explore/*`, `/control-plane/*`
+ * in `App.tsx`). Mounts `ImpersonationBanner` HERE — above `RequireControlPlaneAccess`
+ * / `RequireGlobalAdmin` / `RequirePermission` / `RequireWorkspace`, which only wrap
+ * the inner route content — so the Exit affordance survives even when one of those
+ * inner guards renders a bare `Forbidden`. That case is real: impersonating a target
+ * with fewer permissions than the admin while sitting on a permission-gated page
+ * (e.g. starting impersonation from Control Plane → Users) instantly fails the inner
+ * guard on the next render, and previously tore down `AppShell` — and the banner
+ * mounted inside it — leaving the admin stranded with no way back but the 30-minute
+ * auto-expiry or hand-editing the URL. `ImpersonateDialog` now also navigates to `/`
+ * on a successful start precisely to avoid landing here at all; this is the
+ * defense-in-depth backstop for when it doesn't.
+ *
+ * Mounted only once (not also in `AppShell`) to avoid a double banner.
+ */
 export function RequireAuth({ children }: { children: ReactNode }) {
   const { me, isLoading } = useAuth();
   if (isLoading) return <div className="p-10">Loading…</div>;
   if (!me) return <Navigate to="/login" replace />;
-  return <>{children}</>;
+  return (
+    <div className="flex h-screen flex-col">
+      <ImpersonationBanner />
+      <div className="min-h-0 flex-1">{children}</div>
+    </div>
+  );
 }
 
 export function RequirePlatform({ children }: { children: ReactNode }) {

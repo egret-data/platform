@@ -201,6 +201,10 @@ async fn login_sets_cookies_and_me_returns_user() {
         sessions: SessionService::new(db.clone(), Duration::hours(24), Duration::minutes(60)),
         config: Config::default(),
         rate_limiter: egret_auth::ratelimit::RateLimiter::new(5, 300, 300),
+        audit: egret_audit::AuditSink::new(16).0,
+        impersonations: egret_auth::impersonation::ImpersonationRepo::new(db.clone()),
+        oidc: None,
+        cookie_key: None,
     };
     let app = axum::Router::new()
         .nest("/api/auth", auth_router())
@@ -267,6 +271,10 @@ async fn me_without_cookie_is_401() {
         sessions: SessionService::new(db.clone(), Duration::hours(24), Duration::minutes(60)),
         config: Config::default(),
         rate_limiter: egret_auth::ratelimit::RateLimiter::new(5, 300, 300),
+        audit: egret_audit::AuditSink::new(16).0,
+        impersonations: egret_auth::impersonation::ImpersonationRepo::new(db.clone()),
+        oidc: None,
+        cookie_key: None,
     };
     let app = axum::Router::new()
         .nest("/api/auth", auth_router())
@@ -490,6 +498,10 @@ async fn login_is_rate_limited() {
         sessions: SessionService::new(db.clone(), Duration::hours(24), Duration::minutes(60)),
         config: Config::default(),
         rate_limiter: egret_auth::ratelimit::RateLimiter::new(2, 300, 300),
+        audit: egret_audit::AuditSink::new(16).0,
+        impersonations: egret_auth::impersonation::ImpersonationRepo::new(db.clone()),
+        oidc: None,
+        cookie_key: None,
     };
     let app = axum::Router::new()
         .nest("/api/auth", auth_router())
