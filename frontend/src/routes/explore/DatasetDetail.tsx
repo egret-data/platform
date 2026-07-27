@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
 import { toast } from "sonner";
-import { BarChart3, Clock, Columns3, Pencil, RefreshCw, Sigma, Table2, Trash2 } from "lucide-react";
+import { BadgeCheck, BarChart3, Clock, Columns3, Pencil, RefreshCw, Sigma, Table2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -43,6 +45,8 @@ export default function DatasetDetail() {
   const [description, setDescription] = useState("");
   const [sql, setSql] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [certifyOpen, setCertifyOpen] = useState(false);
+  const [cert, setCert] = useState({ certified: false, by: "", details: "" });
   const [searchParams, setSearchParams] = useSearchParams();
 
   const dirty = editing && !!ds && (
@@ -110,6 +114,26 @@ export default function DatasetDetail() {
     } catch (e) { toast.error(String(e)); }
   }
 
+  function openCertify() {
+    if (!ds) return;
+    setCert({ certified: ds.certified, by: ds.certified_by, details: ds.certification_details });
+    setCertifyOpen(true);
+  }
+  async function saveCert() {
+    if (!ds) return;
+    try {
+      await update.mutateAsync({
+        name: ds.name,
+        description: ds.description,
+        certified: cert.certified,
+        certified_by: cert.certified ? cert.by : "",
+        certification_details: cert.certified ? cert.details : "",
+      });
+      setCertifyOpen(false);
+      toast.success(cert.certified ? "Dataset certified" : "Certification removed");
+    } catch (e) { toast.error(String(e)); }
+  }
+
   return (
     <div className="p-4">
       <Link className="text-sm text-muted-foreground hover:underline" to={listHref}>← Datasets</Link>
@@ -153,6 +177,11 @@ export default function DatasetDetail() {
                   {ds.kind === "virtual" ? <Sigma className="h-3 w-3" /> : <Table2 className="h-3 w-3" />}
                   {ds.kind}
                 </Badge>
+                {ds.certified && (
+                  <Badge className="gap-1" title={[ds.certified_by && `Certified by ${ds.certified_by}`, ds.certification_details].filter(Boolean).join(" — ") || "Certified"}>
+                    <BadgeCheck className="h-3 w-3" /> Certified
+                  </Badge>
+                )}
               </div>
               {ds.description && <p className="mt-0.5 text-sm text-muted-foreground">{ds.description}</p>}
               <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -168,6 +197,9 @@ export default function DatasetDetail() {
             <div className="flex shrink-0 flex-wrap items-center gap-2">
               <Button asChild className="gap-1.5">
                 <Link to={`/explore/${ws}/charts/new?dataset=${ds.id}`}><BarChart3 className="h-4 w-4" /> Create chart</Link>
+              </Button>
+              <Button variant="outline" size="icon" title={ds.certified ? "Certification" : "Certify dataset"} onClick={openCertify}>
+                <BadgeCheck className={`h-4 w-4 ${ds.certified ? "text-primary" : ""}`} />
               </Button>
               <Button variant="outline" size="icon" title="Edit" onClick={startEdit}><Pencil className="h-4 w-4" /></Button>
               <Button variant="outline" size="icon" title="Refresh columns" disabled={refresh.isPending}
@@ -202,6 +234,34 @@ export default function DatasetDetail() {
           <PreviewTab ws={ws} datasetId={id} columns={ds.columns} />
         </TabsContent>
       </Tabs>
+
+      <Dialog open={certifyOpen} onOpenChange={setCertifyOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Certify dataset</DialogTitle></DialogHeader>
+          <p className="-mt-1 text-sm text-muted-foreground">Mark this as a trusted, official dataset so people know it's vetted.</p>
+          <div className="space-y-3 pt-1">
+            <label className="flex items-center gap-2 text-sm">
+              <Switch checked={cert.certified} onCheckedChange={(v) => setCert((c) => ({ ...c, certified: v }))} /> Certified
+            </label>
+            {cert.certified && (
+              <>
+                <div className="space-y-1.5">
+                  <Label htmlFor="cert-by">Certified by</Label>
+                  <Input id="cert-by" placeholder="Name or team" value={cert.by} onChange={(e) => setCert((c) => ({ ...c, by: e.target.value }))} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="cert-det">Details <span className="font-normal text-muted-foreground">(optional)</span></Label>
+                  <Input id="cert-det" placeholder="Why it's trusted" value={cert.details} onChange={(e) => setCert((c) => ({ ...c, details: e.target.value }))} />
+                </div>
+              </>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setCertifyOpen(false)}>Cancel</Button>
+              <Button onClick={saveCert} disabled={update.isPending}>{update.isPending ? "Saving…" : "Save"}</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <ConfirmDeleteDialog
         open={confirmDelete}

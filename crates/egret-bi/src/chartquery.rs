@@ -582,6 +582,7 @@ mod tests {
             groupby: true,
             filterable: true,
             format: String::new(),
+            semantic_type: String::new(),
         }
     }
     fn metric(name: &str, expr: &str) -> Metric {
@@ -596,6 +597,8 @@ mod tests {
             ordinal: 0,
             format: String::new(),
             certified: false,
+            certified_by: String::new(),
+            certification_details: String::new(),
         }
     }
     fn phys() -> SourceSpec {
@@ -946,6 +949,7 @@ mod tests {
             groupby: true,
             filterable: true,
             format: String::new(),
+            semantic_type: String::new(),
         }
     }
 

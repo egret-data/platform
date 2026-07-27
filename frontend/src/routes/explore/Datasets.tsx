@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Search, Star, Trash2, FolderPlus, ListChecks } from "lucide-react";
+import { Search, Star, Trash2, FolderPlus, ListChecks, BadgeCheck } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -121,6 +121,7 @@ export default function Datasets() {
             </Button>
           )}
           <Link className="font-medium hover:underline" to={d.id}>{d.name}</Link>
+          {d.certified && <BadgeCheck className="h-3.5 w-3.5 text-primary" aria-label="Certified" />}
         </span>
       </td>
       <td><Badge variant="secondary">{d.kind}</Badge></td>

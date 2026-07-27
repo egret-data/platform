@@ -3,16 +3,16 @@ import { Check, ChevronDown } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { ColumnFormat } from "@/components/chart/format-types";
+import { isNumericType, isTemporalType, type ColumnFormat } from "@/components/chart/format-types";
 import { cn } from "@/lib/utils";
 
 /**
- * Number-format picker, Metabase-style. The stored `value` is a JSON string of
- * the app's canonical `ColumnFormat` (the same model the chart/table renderer
- * consumes via formatValue) — so a format set here actually changes how values
- * display, not just a label. Empty string means "no format" (engine default).
+ * Format picker, Metabase-style. Stored `value` is a JSON string of the app's
+ * canonical `ColumnFormat` (the model the chart/table renderer consumes) — so a
+ * format set here actually changes how values display. Sections adapt to the
+ * column's type (number / date / text). All edits are committed once, on close.
  */
-const PRESETS: { label: string; example: string; cf: ColumnFormat }[] = [
+const NUMBER_PRESETS: { label: string; example: string; cf: ColumnFormat }[] = [
   { label: "Default", example: "1,234.5", cf: {} },
   { label: "Integer", example: "1,235", cf: { decimals: 0 } },
   { label: "1 decimal", example: "1,234.5", cf: { decimals: 1 } },
@@ -23,18 +23,34 @@ const PRESETS: { label: string; example: string; cf: ColumnFormat }[] = [
   { label: "Scientific", example: "1.23e+3", cf: { number_style: "scientific", decimals: 2 } },
 ];
 
-/** Parse a stored format string into a ColumnFormat (empty → {}). */
+const DATE_PRESETS: { label: string; date_style: string }[] = [
+  { label: "January 5, 2026", date_style: "MMMM D, YYYY" },
+  { label: "Jan 5, 2026", date_style: "MMM D, YYYY" },
+  { label: "1/5/2026", date_style: "M/D/YYYY" },
+  { label: "2026-01-05", date_style: "YYYY-MM-DD" },
+  { label: "January 2026", date_style: "MMMM YYYY" },
+  { label: "Jan 5", date_style: "MMM D" },
+];
+
+const CURRENCIES = ["USD", "EUR", "GBP", "JPY", "CNY", "VND", "KRW", "INR", "AUD", "CAD", "SGD", "THB"];
+
+const VIEW_AS: { label: string; value: NonNullable<ColumnFormat["view_as"]> }[] = [
+  { label: "Text", value: "text" },
+  { label: "Link", value: "link" },
+  { label: "Email", value: "email" },
+  { label: "Image", value: "image" },
+];
+
 export function parseFormat(value: string): ColumnFormat {
   if (!value) return {};
   try {
     const v = JSON.parse(value);
     return v && typeof v === "object" ? (v as ColumnFormat) : {};
   } catch {
-    return {}; // tolerate legacy/garbage values as "no format"
+    return {};
   }
 }
 
-/** Canonical serialization (sorted keys, drops empties) for storage + matching. */
 function serialize(cf: ColumnFormat): string {
   const entries = Object.entries(cf)
     .filter(([, v]) => v !== undefined && v !== null && v !== "")
@@ -42,96 +58,133 @@ function serialize(cf: ColumnFormat): string {
   return entries.length ? JSON.stringify(Object.fromEntries(entries)) : "";
 }
 
-/** Friendly label for a stored format string (shown on the trigger). */
+/** Friendly label for the trigger. */
 export function formatLabel(value: string): string {
-  const canon = serialize(parseFormat(value));
-  if (canon === "") return "Default";
-  const p = PRESETS.find((x) => serialize(x.cf) === canon);
-  return p ? p.label : "Custom";
+  const cf = parseFormat(value);
+  if (cf.number_style === "currency") return "Currency";
+  if (cf.number_style === "percent") return "Percent";
+  if (cf.date_style) return "Date";
+  if (cf.view_as && cf.view_as !== "text" && cf.view_as !== "auto") return VIEW_AS.find((v) => v.value === cf.view_as)?.label ?? "Custom";
+  const p = NUMBER_PRESETS.find((x) => serialize(x.cf) === serialize(cf));
+  if (p) return p.label;
+  return serialize(cf) === "" ? "Default" : "Custom";
 }
 
-export function FormatPicker({ value, onChange, className }: {
-  value: string;            // JSON of ColumnFormat, or "" for none
+function numberShapeMatches(a: ColumnFormat, b: ColumnFormat): boolean {
+  return (a.number_style ?? "") === (b.number_style ?? "") &&
+    (a.decimals ?? -1) === (b.decimals ?? -1) &&
+    !!a.compact === !!b.compact;
+}
+
+export function FormatPicker({ value, onChange, type = "", className }: {
+  value: string;
   onChange: (v: string) => void;
+  type?: string;         // column data_type, to choose number/date/text sections
   className?: string;
 }) {
+  const kind = isTemporalType(type) ? "date" : type && !isNumericType(type) ? "text" : "number";
   const [open, setOpen] = useState(false);
-  const [showCustom, setShowCustom] = useState(false);
   const [draft, setDraft] = useState<ColumnFormat>({});
 
-  const canon = serialize(parseFormat(value));
-  const matchedPreset = PRESETS.find((p) => serialize(p.cf) === canon);
-
   function openChange(o: boolean) {
-    if (o) {
-      setDraft(parseFormat(value));
-      setShowCustom(!matchedPreset && canon !== ""); // a non-preset value was custom
-    } else if (showCustom) {
-      const next = serialize(draft);
-      if (next !== canon) onChange(next); // commit custom edits once, on close
-    }
+    if (o) setDraft(parseFormat(value));
+    else if (serialize(draft) !== serialize(parseFormat(value))) onChange(serialize(draft));
     setOpen(o);
   }
-  function pick(cf: ColumnFormat) {
-    onChange(serialize(cf));
-    setShowCustom(false);
-    setOpen(false);
-  }
-  function patchDraft(p: Partial<ColumnFormat>) {
-    setDraft((d) => ({ ...d, ...p }));
-  }
+  const patch = (p: Partial<ColumnFormat>) => setDraft((d) => ({ ...d, ...p }));
 
   return (
     <Popover open={open} onOpenChange={openChange}>
       <PopoverTrigger asChild>
         <button type="button"
           className={cn("flex h-7 w-28 items-center justify-between gap-1 rounded border px-2 text-xs hover:bg-accent", className)}
-          aria-label="Number format">
+          aria-label="Format">
           <span className="truncate">{formatLabel(value)}</span>
           <ChevronDown className="h-3 w-3 shrink-0 opacity-50" />
         </button>
       </PopoverTrigger>
       <PopoverContent align="start" className="w-64 p-1">
-        <div className="max-h-80 overflow-auto">
-          {PRESETS.map((p) => (
-            <button key={p.label} type="button" onClick={() => pick(p.cf)}
-              className="flex w-full items-center justify-between gap-3 rounded px-2 py-1.5 text-left text-sm hover:bg-accent">
-              <span className="flex items-center gap-2">
-                <Check className={cn("h-3.5 w-3.5", !showCustom && matchedPreset?.label === p.label ? "opacity-100" : "opacity-0")} />
-                {p.label}
-              </span>
-              <span className="font-mono text-xs text-muted-foreground">{p.example}</span>
-            </button>
-          ))}
-          <div className="my-1 border-t" />
-          <button type="button" onClick={() => setShowCustom(true)}
-            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent">
-            <Check className={cn("h-3.5 w-3.5", showCustom ? "opacity-100" : "opacity-0")} />
-            Custom…
-          </button>
-          {showCustom && (
-            <div className="space-y-2 px-2 pb-1.5 pt-2">
-              <div className="space-y-1">
-                <Label className="text-xs" htmlFor="fmt-dec">Decimal places</Label>
-                <Input id="fmt-dec" type="number" min={0} max={10} className="h-7 text-xs"
-                  value={draft.decimals ?? ""} placeholder="auto"
-                  onChange={(e) => patchDraft({ decimals: e.target.value === "" ? undefined : Number(e.target.value) })} />
-              </div>
-              <div className="grid grid-cols-2 gap-2">
+        <div className="max-h-96 space-y-1 overflow-auto">
+          {kind === "number" && (
+            <>
+              {NUMBER_PRESETS.map((p) => (
+                <button key={p.label} type="button"
+                  onClick={() => setDraft(p.cf.number_style === "currency" ? { ...p.cf, currency: draft.currency ?? "USD" } : { ...p.cf })}
+                  className="flex w-full items-center justify-between gap-3 rounded px-2 py-1.5 text-left text-sm hover:bg-accent">
+                  <span className="flex items-center gap-2">
+                    <Check className={cn("h-3.5 w-3.5", numberShapeMatches(draft, p.cf) ? "opacity-100" : "opacity-0")} />
+                    {p.label}
+                  </span>
+                  <span className="font-mono text-xs text-muted-foreground">{p.example}</span>
+                </button>
+              ))}
+              {draft.number_style === "currency" && (
+                <div className="px-2 pt-1">
+                  <Label className="text-xs">Currency</Label>
+                  <select className="mt-1 h-7 w-full rounded border bg-background px-1 text-xs"
+                    value={draft.currency ?? "USD"} onChange={(e) => patch({ currency: e.target.value })}>
+                    {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+              )}
+              <div className="grid grid-cols-3 gap-1.5 px-2 pt-1.5">
                 <div className="space-y-1">
-                  <Label className="text-xs" htmlFor="fmt-pre">Prefix</Label>
-                  <Input id="fmt-pre" className="h-7 text-xs" value={draft.prefix ?? ""} placeholder="€"
-                    onChange={(e) => patchDraft({ prefix: e.target.value })} />
+                  <Label className="text-[11px]">Decimals</Label>
+                  <Input type="number" min={0} max={10} className="h-7 px-1 text-xs" placeholder="auto"
+                    value={draft.decimals ?? ""} onChange={(e) => patch({ decimals: e.target.value === "" ? undefined : Number(e.target.value) })} />
                 </div>
                 <div className="space-y-1">
-                  <Label className="text-xs" htmlFor="fmt-suf">Suffix</Label>
-                  <Input id="fmt-suf" className="h-7 text-xs" value={draft.suffix ?? ""} placeholder=" kg"
-                    onChange={(e) => patchDraft({ suffix: e.target.value })} />
+                  <Label className="text-[11px]">Prefix</Label>
+                  <Input className="h-7 px-1 text-xs" value={draft.prefix ?? ""} onChange={(e) => patch({ prefix: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[11px]">Suffix</Label>
+                  <Input className="h-7 px-1 text-xs" value={draft.suffix ?? ""} onChange={(e) => patch({ suffix: e.target.value })} />
                 </div>
               </div>
-              <p className="text-[11px] text-muted-foreground">Applied when you close this.</p>
-            </div>
+            </>
           )}
+
+          {kind === "date" && (
+            <>
+              {DATE_PRESETS.map((p) => (
+                <button key={p.date_style} type="button" onClick={() => patch({ date_style: p.date_style })}
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent">
+                  <Check className={cn("h-3.5 w-3.5", (draft.date_style ?? "MMMM D, YYYY") === p.date_style ? "opacity-100" : "opacity-0")} />
+                  {p.label}
+                </button>
+              ))}
+              <label className="flex items-center gap-2 px-2 pt-1.5 text-sm">
+                <input type="checkbox" checked={!!draft.time_enabled}
+                  onChange={(e) => patch({ time_enabled: e.target.checked ? "minutes" : null })} />
+                Show time
+              </label>
+            </>
+          )}
+
+          {kind === "text" && (
+            <>
+              <div className="px-2 pb-1 pt-1 text-[11px] font-medium text-muted-foreground">Display as</div>
+              {VIEW_AS.map((v) => (
+                <button key={v.value} type="button" onClick={() => patch({ view_as: v.value })}
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent">
+                  <Check className={cn("h-3.5 w-3.5", (draft.view_as ?? "text") === v.value ? "opacity-100" : "opacity-0")} />
+                  {v.label}
+                </button>
+              ))}
+              <div className="grid grid-cols-2 gap-1.5 px-2 pt-1.5">
+                <div className="space-y-1">
+                  <Label className="text-[11px]">Prefix</Label>
+                  <Input className="h-7 px-1 text-xs" value={draft.prefix ?? ""} onChange={(e) => patch({ prefix: e.target.value })} />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-[11px]">Suffix</Label>
+                  <Input className="h-7 px-1 text-xs" value={draft.suffix ?? ""} onChange={(e) => patch({ suffix: e.target.value })} />
+                </div>
+              </div>
+            </>
+          )}
+          <p className="px-2 pb-0.5 pt-1 text-[11px] text-muted-foreground">Applied when you close this.</p>
         </div>
       </PopoverContent>
     </Popover>

@@ -43,6 +43,7 @@ const physicalColumn: DatasetColumn = {
   groupby: true,
   filterable: true,
   format: "",
+  semantic_type: "",
 };
 
 const calculatedColumn: DatasetColumn = {
@@ -58,6 +59,7 @@ const calculatedColumn: DatasetColumn = {
   groupby: true,
   filterable: true,
   format: "",
+  semantic_type: "",
 };
 
 const sampleMetric: DatasetMetric = {
@@ -71,6 +73,8 @@ const sampleMetric: DatasetMetric = {
   ordinal: 1,
   format: "",
   certified: false,
+  certified_by: "",
+  certification_details: "",
 };
 
 test("ColumnsTab: calculated column shows 'calculated' badge", () => {

@@ -201,7 +201,10 @@ async fn update_name_and_description() {
         .await
         .unwrap();
 
-    let upd = r.update(ds.id, "after", "new desc", None).await.unwrap();
+    let upd = r
+        .update(ds.id, "after", "new desc", None, None, None, None)
+        .await
+        .unwrap();
     assert_eq!(upd.name, "after");
     assert_eq!(upd.description, "new desc");
 
@@ -342,6 +345,7 @@ async fn reconcile_preserves_calculated_columns_and_metadata() {
         None,
         None,
         None,
+        None,
     )
     .await
     .unwrap();
@@ -414,18 +418,18 @@ async fn metric_and_calc_column_crud() {
         .unwrap();
 
     repo.add_metric(
-        ds.id, "total", "SUM(n)", "bigint", "numeric", "Total", "", "", false,
+        ds.id, "total", "SUM(n)", "bigint", "numeric", "Total", "", "", false, "", "",
     )
     .await
     .unwrap();
     assert!(repo
-        .add_metric(ds.id, "total", "COUNT(*)", "bigint", "numeric", "", "", "", false)
+        .add_metric(ds.id, "total", "COUNT(*)", "bigint", "numeric", "", "", "", false, "", "")
         .await
         .is_err());
     let ms = repo.metrics(ds.id).await.unwrap();
     assert_eq!(ms.len(), 1);
     repo.update_metric(
-        ms[0].id, "total2", "COUNT(*)", "bigint", "numeric", "", "", "", false,
+        ms[0].id, "total2", "COUNT(*)", "bigint", "numeric", "", "", "", false, "", "",
     )
     .await
     .unwrap();
