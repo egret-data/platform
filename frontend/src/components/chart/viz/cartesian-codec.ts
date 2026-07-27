@@ -27,7 +27,7 @@ export function cartesianFromSettings(settings: VizSettings): CartesianConfig {
   const out = { yMetrics: [] } as CartesianConfig;
   for (const k of KEYS) {
     const v = settings[CARTESIAN_PREFIX + k];
-    if (v !== undefined) (out as Record<string, unknown>)[k] = v;
+    if (v !== undefined) (out as unknown as Record<string, unknown>)[k] = v;
   }
   return out;
 }

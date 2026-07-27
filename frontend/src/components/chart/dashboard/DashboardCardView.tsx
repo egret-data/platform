@@ -5,6 +5,7 @@ import { useChartData, type ChartData } from "@/api/useChartData";
 import { useDashboardCardData } from "@/api/useSavedChartData";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
+import { toRenderParams } from "@/components/chart/viz/renderParams";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
 import type { DrillContext } from "@/components/chart/drill";
 import { TextCard } from "./TextCard";
@@ -70,7 +71,12 @@ function ChartCardTileBody({ card, chart, onValueClick, blocked, editing, autoHe
             : data.error ? <div className="text-sm text-destructive">{data.error}</div>
             : data.isLoading ? <div className="text-sm text-muted-foreground">Loading…</div>
             : (() => {
-              const eff = applyVizOverride(chart, card.options.vizOverride as Record<string, unknown> | undefined);
+              // The override is a v1-shaped partial stored in dashboard JSONB, so it is
+              // merged AFTER the adapter — that is why no stored override needs migrating.
+              const eff = applyVizOverride(
+                { ...chart, params: toRenderParams(chart.viz_type, chart.params) },
+                card.options.vizOverride as Record<string, unknown> | undefined,
+              );
               return (
                 <ChartErrorBoundary resetKey={`${chart.id}:${eff.viz_type}:${data.columns?.length ?? 0}:${data.rows?.length ?? 0}`}>
                   <ChartRenderer vizType={eff.viz_type} params={eff.params} columns={data.columns} rows={data.rows} onValueClick={onValueClick} />

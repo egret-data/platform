@@ -360,9 +360,13 @@ export function interpolateParams(
   });
 }
 
-/** Merge a display-only override over a chart's params (never the query `spec`); optionally override viz_type. */
+/**
+ * Merge a display-only override over a chart's params (never the query `spec`); optionally
+ * override viz_type. Takes params already put through `toRenderParams`, because stored
+ * overrides address the pre-A2 (v1) keys.
+ */
 export function applyVizOverride(
-  chart: Chart,
+  chart: { viz_type: VizType; params: ChartParams },
   override?: Record<string, unknown>,
 ): { viz_type: VizType; params: ChartParams } {
   if (!override) return { viz_type: chart.viz_type, params: chart.params };
