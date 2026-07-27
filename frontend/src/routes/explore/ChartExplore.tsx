@@ -37,6 +37,7 @@ import {
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { FieldZone } from "@/components/chart/config/FieldZone";
+import { CartesianDataControls } from "@/components/chart/controls/CartesianDataControls";
 import { SectionLabel } from "@/components/chart/settings/SectionLabel";
 import { pruneUnits } from "@/components/chart/temporal-units";
 import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
@@ -648,45 +649,8 @@ export default function ChartExplore() {
             )}
 
             {isCartesianViz(viz) && (
-              <>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">X-axis</Label>
-                  <Select value={cartesian.xAxis ?? ""} onValueChange={(v) => patchCartesian({ xAxis: v || undefined })}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
-                    <SelectContent>
-                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                {unitRow(cartesian.xAxis)}
-                {viz === "scatter" && (
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">X metric (optional)</Label>
-                    <Select value={cartesian.xMetric ?? "__none"} onValueChange={(v) => patchCartesian({ xMetric: v === "__none" ? undefined : v })}>
-                      <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="__none">None — use the dimension</SelectItem>
-                        {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                )}
-                <FieldZone label="Y-axis" selected={cartesian.yMetrics} onChange={(v) => patchCartesian({ yMetrics: v })}
-                  options={metrics.map((m) => m.metric_name)} />
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Series</Label>
-                  <Select value={cartesian.series ?? "__none"} onValueChange={(v) => patchCartesian({ series: v === "__none" ? undefined : v })}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none">None</SelectItem>
-                      {columns.filter((c) => c.column_name !== cartesian.xAxis).map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                  {cartesian.series && cartesian.yMetrics.length > 1 && (
-                    <p className="text-xs text-muted-foreground">With a series, only the first metric is plotted.</p>
-                  )}
-                </div>
-              </>
+              <CartesianDataControls viz={viz} config={cartesian} onChange={patchCartesian}
+                columns={columns} metrics={metrics} renderUnitRow={unitRow} />
             )}
 
             {viz === "pie" && (

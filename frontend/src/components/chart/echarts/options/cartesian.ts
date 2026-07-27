@@ -398,7 +398,10 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     (series[0] as Record<string, unknown>).markLine = {
       silent: true,
       symbol: "none",
-      data: [{ yAxis: cfg.goalValue }],
+      // The goal is a constant on the VALUE axis — that's the y-axis on a vertical
+      // chart but the x-axis on a horizontal/row chart, so the reference line stays
+      // perpendicular to the bars either way.
+      data: [horizontal ? { xAxis: cfg.goalValue } : { yAxis: cfg.goalValue }],
       label: { formatter: cfg.goalLabel ?? "Goal", position: "insideEndTop", color: axisLabelColor },
       lineStyle: { color: axisLabelColor, type: "dashed" },
     };

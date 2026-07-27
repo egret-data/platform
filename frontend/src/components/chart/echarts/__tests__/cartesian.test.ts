@@ -497,3 +497,26 @@ describe("cartesianSeriesNames helper", () => {
     expect(cartesianSeriesNames(cols, rows, { yMetrics: ["rev"], series: "yr" })).toEqual(["2023", "(empty)"]);
   });
 });
+
+describe("buildCartesianOption — goal line axis (regression)", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }];
+  const rows = [["EU", 10], ["US", 20]];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const markLine = (o: any) => o.series[0].markLine.data;
+
+  it("vertical chart draws the goal on the y (value) axis", () => {
+    const o = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev"], goalValue: 15 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(markLine(o as any)).toEqual([{ yAxis: 15 }]);
+  });
+  it("horizontal bar draws the goal on the x (value) axis", () => {
+    const o = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev"], horizontal: true, goalValue: 15 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(markLine(o as any)).toEqual([{ xAxis: 15 }]);
+  });
+  it("row chart (always horizontal) draws the goal on the x axis", () => {
+    const o = buildCartesianOption(cols, rows, { kind: "row", xAxis: "region", yMetrics: ["rev"], goalValue: 15 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(markLine(o as any)).toEqual([{ xAxis: 15 }]);
+  });
+});
