@@ -14,6 +14,8 @@ vi.mock("@/api/sqllab", () => ({
   useSchemas: () => ({ data: [] }),
   useTables: () => ({ data: [] }),
   useColumns: () => ({ data: [] }),
+  useSearchObjects: () => ({ data: [], isLoading: false, isError: false }),
+  fqnOf: (h: { catalog: string; schema: string; table: string }) => (h.catalog ? `${h.catalog}.${h.schema}.${h.table}` : `${h.schema}.${h.table}`),
 }));
 
 import { DataPanel } from "@/components/sqllab/DataPanel";

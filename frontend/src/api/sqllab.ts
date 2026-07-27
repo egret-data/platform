@@ -159,6 +159,28 @@ export function useColumns(ws: string, db: string | null, catalog: string, schem
   return useQuery<SchemaColumn[]>({ queryKey: qk.schema(ws, db ?? "", "columns", catalog, schema, table), enabled: !!db && enabled, staleTime: SCHEMA_STALE,
     queryFn: async () => (await sqllabColumns(ws, db!, { catalog, schema, table })).data as unknown as SchemaColumn[] });
 }
+// ── global object search (egret-bi) ──
+export interface SearchHit { catalog: string; schema: string; table: string }
+export function fqnOf(h: SearchHit): string {
+  return h.catalog ? `${h.catalog}.${h.schema}.${h.table}` : `${h.schema}.${h.table}`;
+}
+export function useSearchObjects(ws: string, db: string | null, query: string) {
+  const q = query.trim();
+  return useQuery<SearchHit[]>({
+    queryKey: ["sqllab", ws, "search", db ?? "", q],
+    enabled: !!db && q.length >= 2,
+    staleTime: 30_000,
+    queryFn: async () => {
+      const r = await fetch(
+        `/api/ws/${encodeURIComponent(ws)}/sqllab/databases/${db}/search?q=${encodeURIComponent(q)}`,
+        { credentials: "same-origin" },
+      );
+      if (!r.ok) throw new Error(`search failed: ${r.status}`);
+      return (await r.json()) as SearchHit[];
+    },
+  });
+}
+
 export function useRefreshSchema(ws: string) {
   const qc = useQueryClient();
   return (db: string) => qc.invalidateQueries({ queryKey: ["sqllab", ws, "schema", db] });

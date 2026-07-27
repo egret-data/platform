@@ -23,6 +23,8 @@ vi.mock("@/api/sqllab", () => ({
   useTables: () => ({ data: [] }),
   useColumns: () => ({ data: [] }),
   useRefreshSchema: () => ({ mutate: vi.fn() }),
+  useSearchObjects: () => ({ data: [], isLoading: false, isError: false }),
+  fqnOf: (h: { catalog: string; schema: string; table: string }) => (h.catalog ? `${h.catalog}.${h.schema}.${h.table}` : `${h.schema}.${h.table}`),
   csvUrl: () => "",
 }));
 

@@ -39,6 +39,15 @@ pub struct SchemaColumn {
     pub ty: String,
 }
 
+/// A schema-object search hit (a table/view matched by the SQL Lab global
+/// object search). `catalog` is empty for engines without a catalog level.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SearchHit {
+    pub catalog: String,
+    pub schema: String,
+    pub table: String,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct FolderDto {
     pub id: String,

@@ -102,6 +102,7 @@ pub fn sqllab_router() -> Router<BiState> {
             "/ws/{workspace}/sqllab/databases/{db}/columns",
             get(columns),
         )
+        .route("/ws/{workspace}/sqllab/databases/{db}/search", get(search))
 }
 
 fn dto(q: crate::saved::SavedQuery) -> SavedQueryDto {
@@ -519,6 +520,44 @@ async fn columns(
                 q.schema.as_deref().unwrap_or(""),
                 q.table.as_deref().unwrap_or(""),
             )
+            .await
+            .map_err(BiApiError::from)?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct SearchQ {
+    q: Option<String>,
+}
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/sqllab/databases/{db}/search",
+    tag = "sqllab",
+    params(
+        WorkspacePath,
+        ("db" = Uuid, Path, description = "Granted database id"),
+        ("q" = Option<String>, Query, description = "Object-name search term"),
+    ),
+    responses(
+        (status = 200, description = "Matching tables/views across the database", body = Vec<crate::model::SearchHit>),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 404, description = "Database not granted to this workspace", body = ErrorBody),
+    ),
+)]
+async fn search(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, db)): Path<(String, Uuid)>,
+    AxQuery(q): AxQuery<SearchQ>,
+) -> Result<Json<Vec<crate::model::SearchHit>>, BiApiError> {
+    let term = q.q.unwrap_or_default();
+    if term.trim().is_empty() {
+        return Ok(Json(vec![]));
+    }
+    let spec = conn_spec(&st, &ctx, db).await?;
+    Ok(Json(
+        st.schema
+            .search(&spec, term.trim())
             .await
             .map_err(BiApiError::from)?,
     ))
@@ -3012,11 +3051,13 @@ pub struct BiFolderApi;
         schemas,
         tables,
         columns,
+        search,
     ),
     components(schemas(
         SaveQuery,
         SavedQueryDto,
         SchemaColumn,
+        crate::model::SearchHit,
         SetFolder,
         Ack,
         ErrorBody,
