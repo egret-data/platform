@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate, useSearchParams, Link } from "react-router-dom";
 import { toast } from "sonner";
-import { BarChart3, Columns3, Database, Pencil, RefreshCw, Sigma, Table2, Trash2 } from "lucide-react";
+import { BarChart3, Clock, Columns3, Pencil, RefreshCw, Sigma, Table2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +9,7 @@ import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SqlEditor } from "@/components/sqllab/SqlEditor";
 import { useDataset, useRefreshDataset, useDeleteDataset, useUpdateDataset } from "@/api/datasets";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
@@ -84,7 +85,6 @@ export default function DatasetDetail() {
   if (!ds) return <div className="p-4">Not found. <Link className="underline" to={listHref}>Back</Link></div>;
 
   const source = ds.kind === "virtual" ? (ds.sql ?? "") : [ds.catalog, ds.schema, ds.table].filter(Boolean).join(".");
-  const updated = new Date(ds.updated_at).toLocaleString();
 
   function startEdit() {
     if (!ds) return;
@@ -143,11 +143,11 @@ export default function DatasetDetail() {
               <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
                 <Stat icon={<Columns3 className="h-3.5 w-3.5" />}>{ds.columns.length} columns</Stat>
                 <Stat icon={<Sigma className="h-3.5 w-3.5" />}>{ds.metrics.length} metrics</Stat>
-                <Stat icon={<Database className="h-3.5 w-3.5" />}>updated {updated}</Stat>
+                <Stat icon={<Clock className="h-3.5 w-3.5" />}>updated <RelativeTime iso={ds.updated_at} /></Stat>
               </div>
               <div className="mt-2 flex items-start gap-1.5 text-xs text-muted-foreground">
                 {ds.kind === "virtual" ? <Sigma className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : <Table2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
-                <code className="min-w-0 max-w-2xl truncate rounded bg-muted px-1.5 py-0.5 font-mono">{source || "—"}</code>
+                <code title={source} className="min-w-0 max-w-2xl truncate rounded bg-muted px-1.5 py-0.5 font-mono">{source || "—"}</code>
               </div>
             </div>
             <div className="flex shrink-0 flex-wrap items-center gap-2">

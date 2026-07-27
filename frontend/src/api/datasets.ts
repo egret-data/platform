@@ -140,17 +140,45 @@ export function useDatasetListMutations(ws: string) {
 export interface MetricInput { metric_name: string; expression: string; verbose_name?: string; description?: string; format?: string; certified?: boolean }
 export interface ColumnUpdate { verbose_name?: string; description?: string; expression?: string; groupby?: boolean; filterable?: boolean; is_temporal?: boolean; format?: string }
 
+// The detail query caches orval's envelope (`{ status, data, headers }`); the
+// `select` in useDataset only transforms the hook's return, not the cache.
+type DetailEnvelope = { data: DatasetDetail } & Record<string, unknown>;
+
 export function useDatasetMutations(ws: string, id: string) {
   const qc = useQueryClient();
-  const inval = () => qc.invalidateQueries({ queryKey: getDatasetsDsGetQueryKey(ws, id) });
+  const key = getDatasetsDsGetQueryKey(ws, id);
+  const inval = () => qc.invalidateQueries({ queryKey: key });
+
+  // Optimistically patch the cached detail so semantic-layer toggles/inputs
+  // respond instantly instead of waiting for the round-trip + refetch (the
+  // Switch is server-controlled, so without this the thumb wouldn't move until
+  // the mutation settled). Returns the prior envelope for rollback on error.
+  const optimistic = async (mut: (d: DatasetDetail) => DatasetDetail) => {
+    await qc.cancelQueries({ queryKey: key });
+    const prev = qc.getQueryData<DetailEnvelope>(key);
+    if (prev?.data) qc.setQueryData<DetailEnvelope>(key, { ...prev, data: mut(prev.data) });
+    return prev;
+  };
+  const rollback = (ctx: DetailEnvelope | undefined) => { if (ctx) qc.setQueryData(key, ctx); };
+
   return {
     // Bodies carry the semantic-layer fields (format/certified, groupby/filterable/
     // is_temporal); the generated client forwards them as JSON.
     addMetric: useMutation({ mutationFn: (b: MetricInput) => datasetsDsAddMetric(ws, id, b), onSuccess: inval }),
-    updateMetric: useMutation({ mutationFn: (a: { metricId: string; body: MetricInput }) => datasetsDsUpdateMetric(ws, id, a.metricId, a.body), onSuccess: inval }),
+    updateMetric: useMutation({
+      mutationFn: (a: { metricId: string; body: MetricInput }) => datasetsDsUpdateMetric(ws, id, a.metricId, a.body),
+      onMutate: (a) => optimistic((d) => ({ ...d, metrics: d.metrics.map((m) => (m.id === a.metricId ? { ...m, ...a.body } : m)) })),
+      onError: (_e, _v, ctx) => rollback(ctx as DetailEnvelope | undefined),
+      onSettled: inval,
+    }),
     deleteMetric: useMutation({ mutationFn: (metricId: string) => datasetsDsDeleteMetric(ws, id, metricId), onSuccess: inval }),
     addColumn: useMutation({ mutationFn: (b: { column_name: string; expression: string; verbose_name?: string; description?: string }) => datasetsDsAddColumn(ws, id, b), onSuccess: inval }),
-    updateColumn: useMutation({ mutationFn: (a: { name: string; body: ColumnUpdate }) => datasetsDsUpdateColumn(ws, id, a.name, a.body), onSuccess: inval }),
+    updateColumn: useMutation({
+      mutationFn: (a: { name: string; body: ColumnUpdate }) => datasetsDsUpdateColumn(ws, id, a.name, a.body),
+      onMutate: (a) => optimistic((d) => ({ ...d, columns: d.columns.map((c) => (c.column_name === a.name ? { ...c, ...a.body } : c)) })),
+      onError: (_e, _v, ctx) => rollback(ctx as DetailEnvelope | undefined),
+      onSettled: inval,
+    }),
     deleteColumn: useMutation({ mutationFn: (name: string) => datasetsDsDeleteColumn(ws, id, name), onSuccess: inval }),
   };
 }
