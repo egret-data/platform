@@ -116,6 +116,9 @@ export default function ChartExplore() {
     setDatasetId(c.dataset_id);
     setViz(c.viz_type);
     const p = c.params;
+    // Auto-run a freshly-opened saved chart so it renders immediately (Metabase/
+    // Superset both show the result on open — no need to click Run first).
+    if (p.spec) setRanSpec(p.spec);
     if (c.viz_type === "pivot_table") {
       setPRows(p.rows ?? []);
       setPCols(p.cols ?? []);
