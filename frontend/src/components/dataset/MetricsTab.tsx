@@ -6,8 +6,26 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
+import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { HelpCircle } from "lucide-react";
 import { useDatasetMutations, type DatasetMetric, type MetricInput } from "@/api/datasets";
+
+/** A column header with an info icon that explains the field in plain language. */
+function HeaderHint({ label, hint, center }: { label: string; hint: string; center?: boolean }) {
+  return (
+    <span className={`inline-flex items-center gap-1 ${center ? "justify-center" : ""}`}>
+      {label}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <HelpCircle className="h-3 w-3 cursor-help opacity-50 hover:opacity-100" />
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-[240px] text-left font-normal normal-case">{hint}</TooltipContent>
+      </Tooltip>
+    </span>
+  );
+}
 
 interface Props {
   ws: string;
@@ -48,13 +66,16 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
   }
 
   return (
-    <div>
-      <div className="mb-3 flex items-center gap-2">
+    <TooltipProvider delayDuration={200}>
+      <div className="mb-2 flex items-center gap-2">
         <span className="text-xs text-muted-foreground">{metrics.length} metric{metrics.length === 1 ? "" : "s"}</span>
         <Button size="sm" variant="outline" className="ml-auto gap-1" onClick={() => setEditing({ metric_name: "", expression: "" })}>
           <Sigma className="h-3.5 w-3.5" /> + Metric
         </Button>
       </div>
+      <p className="mb-3 text-xs text-muted-foreground">
+        Metrics are reusable aggregations (like total sales) that charts can measure. Changes save automatically.
+      </p>
 
       {metrics.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-2 rounded-md border py-8 text-center text-sm text-muted-foreground">
@@ -66,9 +87,9 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
             <thead className="border-b bg-secondary text-left text-xs text-muted-foreground">
               <tr>
                 <th className="px-3 py-2 font-medium">Metric</th>
-                <th className="px-2 py-2 font-medium">Expression</th>
-                <th className="px-2 py-2 font-medium">Format</th>
-                <th className="px-2 py-2 text-center font-medium" title="Trusted / certified metric">Certified</th>
+                <th className="px-2 py-2 font-medium"><HeaderHint label="Expression" hint="The SQL aggregation, e.g. SUM(amount) or COUNT(*)." /></th>
+                <th className="px-2 py-2 font-medium"><HeaderHint label="Format" hint="How the value is shown. Examples: $0.00 for money, 0.0% for percent." /></th>
+                <th className="px-2 py-2 text-center font-medium"><HeaderHint center label="Certified" hint="Mark as trusted/official so people know it's the approved metric." /></th>
                 <th className="px-2 py-2 font-medium">Display name</th>
                 <th className="w-8" />
               </tr>
@@ -85,7 +106,7 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
                   </td>
                   <td className="px-2 py-1.5 font-mono text-xs text-muted-foreground">{m.expression}</td>
                   <td className="px-2 py-1.5">
-                    <Input key={`fmt-${m.format}`} defaultValue={m.format} placeholder="—" className="h-7 w-20 font-mono text-xs"
+                    <Input key={`fmt-${m.format}`} defaultValue={m.format} placeholder="e.g. $0.00" className="h-7 w-24 font-mono text-xs"
                       onBlur={(e) => { if (e.target.value !== m.format) patchMetric(m, { format: e.target.value }); }} />
                   </td>
                   <td className="px-2 py-1.5 text-center"><Switch checked={m.certified} onCheckedChange={(v) => patchMetric(m, { certified: v })} aria-label={`Certified ${m.metric_name}`} /></td>
@@ -105,19 +126,36 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
       )}
 
       <Dialog open={editing != null} onOpenChange={(o) => { if (!o) setEditing(null); }}>
-        <DialogContent>
+        <DialogContent className="sm:max-w-lg">
           <DialogHeader><DialogTitle>{editing?.id ? "Edit metric" : "Add metric"}</DialogTitle></DialogHeader>
           {editing && (
-            <div className="space-y-3 pt-1">
-              <Input placeholder="Metric name" value={editing.metric_name} onChange={(e) => setEditing({ ...editing, metric_name: e.target.value })} />
-              <Input className="font-mono" placeholder="Expression (e.g. SUM(revenue))" value={editing.expression} onChange={(e) => setEditing({ ...editing, expression: e.target.value })} />
-              <div className="flex gap-2">
-                <Input placeholder="Display name (optional)" value={editing.verbose_name ?? ""} onChange={(e) => setEditing({ ...editing, verbose_name: e.target.value })} />
-                <Input className="w-28 font-mono" placeholder="Format" value={editing.format ?? ""} onChange={(e) => setEditing({ ...editing, format: e.target.value })} />
+            <div className="space-y-4 pt-1">
+              <div className="space-y-1.5">
+                <Label htmlFor="m-name">Metric name</Label>
+                <Input id="m-name" placeholder="e.g. total_sales" value={editing.metric_name} onChange={(e) => setEditing({ ...editing, metric_name: e.target.value })} />
               </div>
-              <Textarea placeholder="Description (optional)" value={editing.description ?? ""} onChange={(e) => setEditing({ ...editing, description: e.target.value })} />
+              <div className="space-y-1.5">
+                <Label htmlFor="m-expr">Expression</Label>
+                <Input id="m-expr" className="font-mono" placeholder="e.g. SUM(amount)" value={editing.expression} onChange={(e) => setEditing({ ...editing, expression: e.target.value })} />
+                <p className="text-xs text-muted-foreground">A SQL aggregation over the dataset's columns — SUM, COUNT, AVG, MIN, MAX…</p>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="m-vn">Display name <span className="font-normal text-muted-foreground">(optional)</span></Label>
+                  <Input id="m-vn" placeholder="e.g. Total Sales" value={editing.verbose_name ?? ""} onChange={(e) => setEditing({ ...editing, verbose_name: e.target.value })} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="m-fmt">Format <span className="font-normal text-muted-foreground">(optional)</span></Label>
+                  <Input id="m-fmt" className="font-mono" placeholder="e.g. $0.00" value={editing.format ?? ""} onChange={(e) => setEditing({ ...editing, format: e.target.value })} />
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="m-desc">Description <span className="font-normal text-muted-foreground">(optional)</span></Label>
+                <Textarea id="m-desc" placeholder="What this metric measures" value={editing.description ?? ""} onChange={(e) => setEditing({ ...editing, description: e.target.value })} />
+              </div>
               <label className="flex items-center gap-2 text-sm">
-                <Switch checked={editing.certified ?? false} onCheckedChange={(v) => setEditing({ ...editing, certified: v })} /> Certified
+                <Switch checked={editing.certified ?? false} onCheckedChange={(v) => setEditing({ ...editing, certified: v })} />
+                Certified <span className="text-muted-foreground">— mark as the trusted, official metric</span>
               </label>
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={() => setEditing(null)}>Cancel</Button>
@@ -127,6 +165,6 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
           )}
         </DialogContent>
       </Dialog>
-    </div>
+    </TooltipProvider>
   );
 }

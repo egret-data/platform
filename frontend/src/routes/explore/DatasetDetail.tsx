@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { BarChart3, Clock, Columns3, Pencil, RefreshCw, Sigma, Table2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -116,15 +117,29 @@ export default function DatasetDetail() {
       {/* Header card */}
       <div className="mt-2 rounded-lg border bg-card p-4">
         {editing ? (
-          <div className="max-w-2xl space-y-2">
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Dataset name" />
-            <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description (optional)" />
+          <div className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="ds-name">Name</Label>
+                <Input id="ds-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Dataset name" />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="ds-desc">Description</Label>
+                <Input id="ds-desc" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What this dataset is for (optional)" />
+              </div>
+            </div>
             {ds.kind === "virtual" && (
-              <div className="h-56 overflow-hidden rounded-md border">
-                <SqlEditor value={sql} onChange={setSql} schemaWords={[]} />
+              <div className="space-y-1.5">
+                <Label>SQL query</Label>
+                <div className="h-64 overflow-hidden rounded-md border">
+                  <SqlEditor value={sql} onChange={setSql} schemaWords={[]} />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  The query result becomes the dataset. After changing it, click <span className="font-medium">Refresh</span> to re-sync the columns.
+                </p>
               </div>
             )}
-            <div className="flex gap-2 pt-1">
+            <div className="flex gap-2">
               <Button disabled={update.isPending} onClick={save}>{update.isPending ? "Saving…" : "Save"}</Button>
               <Button variant="outline" onClick={() => { if (dirty && !window.confirm("Discard unsaved changes?")) return; setEditing(false); }}>Cancel</Button>
             </div>
