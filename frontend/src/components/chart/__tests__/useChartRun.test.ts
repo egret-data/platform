@@ -12,7 +12,7 @@ afterEach(() => vi.useRealTimers());
 describe("useChartRun", () => {
   it("does not run while required fields are missing", () => {
     const { result } = renderHook(() =>
-      useChartRun({ datasetId: "d1", autoRun: true, buildSpec: () => SPEC_A, missing: ["a metric"] }),
+      useChartRun({ datasetId: "d1", autoRun: true, buildSpec: () => SPEC_A, missing: () => ["a metric"] }),
     );
     act(() => { vi.advanceTimersByTime(1000); });
     expect(result.current.ranSpec).toBeNull();
@@ -20,7 +20,7 @@ describe("useChartRun", () => {
 
   it("auto-runs after the debounce when the query signature changes", () => {
     const { result } = renderHook(() =>
-      useChartRun({ datasetId: "d1", autoRun: true, buildSpec: () => SPEC_A, missing: [] }),
+      useChartRun({ datasetId: "d1", autoRun: true, buildSpec: () => SPEC_A, missing: () => [] }),
     );
     act(() => { vi.advanceTimersByTime(600); });
     expect(result.current.ranSpec).toEqual(SPEC_A);
@@ -28,7 +28,7 @@ describe("useChartRun", () => {
 
   it("does not auto-run when auto is off, and runs on demand", () => {
     const { result } = renderHook(() =>
-      useChartRun({ datasetId: "d1", autoRun: false, buildSpec: () => SPEC_A, missing: [] }),
+      useChartRun({ datasetId: "d1", autoRun: false, buildSpec: () => SPEC_A, missing: () => [] }),
     );
     act(() => { vi.advanceTimersByTime(1000); });
     expect(result.current.ranSpec).toBeNull();
@@ -38,7 +38,7 @@ describe("useChartRun", () => {
 
   it("reports the query as stale once the spec changes without a run", () => {
     const { result, rerender } = renderHook(
-      ({ spec }) => useChartRun({ datasetId: "d1", autoRun: false, buildSpec: () => spec, missing: [] }),
+      ({ spec }) => useChartRun({ datasetId: "d1", autoRun: false, buildSpec: () => spec, missing: () => [] }),
       { initialProps: { spec: SPEC_A } },
     );
     act(() => { result.current.run(); });
@@ -50,7 +50,7 @@ describe("useChartRun", () => {
 
   it("bumps the nonce on every run so an identical spec still refetches", () => {
     const { result } = renderHook(() =>
-      useChartRun({ datasetId: "d1", autoRun: false, buildSpec: () => SPEC_A, missing: [] }),
+      useChartRun({ datasetId: "d1", autoRun: false, buildSpec: () => SPEC_A, missing: () => [] }),
     );
     act(() => { result.current.run(); });
     const first = result.current.runNonce;
