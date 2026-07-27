@@ -99,8 +99,8 @@ interface VizDescriptor<Cfg> {
   prefix: string;                            // namespace settings, ví dụ "cartesian"
   defaultConfig: Cfg;
 
-  fromSettings(settings: Settings, spec: QuerySpec): Cfg;  // đọc được cả v2 lẫn v1
-  toSettings(cfg: Cfg): Settings;                          // ghi v2
+  fromParams(params: AnyChartParams): Cfg;   // đọc v2, và fallback sang v1
+  toSettings(cfg: Cfg): VizSettings;         // ghi các khoá `<prefix>.*` của chính nó
   buildSpec(cfg: Cfg, shared: SharedQueryState): QuerySpec;
   requiredFields(cfg: Cfg): string[];        // "X-axis", "a metric" — chuyển từ requiredFields.ts
 
@@ -213,12 +213,13 @@ Ba PR tuần tự, mỗi PR đều deploy lên kind và live check, đúng chi�
 
 | PR | Nội dung | Live check |
 |---|---|---|
-| 1 | type v2 + adapter + registry + shell (`StudioPanel`, `VizSwitcher`, `PreviewPane`, `useChartRun`) + họ cartesian. 13 viz còn lại giữ code inline hiện tại sau một bridge tạm. | một chart cartesian mới, và một chart v1 cũ mở lên |
-| 2 | `table`, `pivot_table`, `object`, `map` — bốn loại nhiều state nhất | chart pivot + table đã lưu |
+| 1 | type v2 + adapter + registry + `StudioPanel` + `useChartRun` + họ cartesian. 13 viz còn lại giữ code inline hiện tại sau một bridge tạm. | một chart cartesian mới, và một chart v1 cũ mở lên |
+| 2 | `table`, `pivot_table`, `object`, `map` — bốn loại nhiều state nhất — cộng phần bóc tách `VizSwitcher` và `PreviewPane` | chart pivot + table đã lưu |
 | 3 | chín viz còn lại; xoá bridge, `ChartSettingsSections` và `requiredFields.ts`; migration `0099` | mỗi viz một chart, cộng một dashboard có card override |
 
 Backfill nằm ở PR 3 vì chỉ khi đó mọi descriptor mới đọc và ghi v2; chạy sớm hơn
-sẽ đá nhau với bridge.
+sẽ đá nhau với bridge. `VizSwitcher` và `PreviewPane` chỉ là bóc tách cơ học, không
+liên quan tới registry, nên đi cùng PR 2 thay vì phình PR 1 — nơi gánh toàn bộ rủi ro.
 
 ## Kiểm thử
 

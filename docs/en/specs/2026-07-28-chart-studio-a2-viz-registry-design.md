@@ -103,8 +103,8 @@ interface VizDescriptor<Cfg> {
   prefix: string;                            // settings namespace, e.g. "cartesian"
   defaultConfig: Cfg;
 
-  fromSettings(settings: Settings, spec: QuerySpec): Cfg;  // reads v2 and v1
-  toSettings(cfg: Cfg): Settings;                          // writes v2
+  fromParams(params: AnyChartParams): Cfg;   // reads v2, and falls back to v1
+  toSettings(cfg: Cfg): VizSettings;         // writes this descriptor's `<prefix>.*` keys
   buildSpec(cfg: Cfg, shared: SharedQueryState): QuerySpec;
   requiredFields(cfg: Cfg): string[];        // "X-axis", "a metric" — moved from requiredFields.ts
 
@@ -218,12 +218,14 @@ spec's always-shippable migration:
 
 | PR | Contents | Live check |
 |---|---|---|
-| 1 | v2 types + adapter + registry + shell (`StudioPanel`, `VizSwitcher`, `PreviewPane`, `useChartRun`) + the cartesian family. The other 13 viz types keep their current inline code behind a temporary bridge. | a new cartesian chart, and an existing v1 chart opened |
-| 2 | `table`, `pivot_table`, `object`, `map` — the four with the most state | saved pivot + table charts |
+| 1 | v2 types + adapter + registry + `StudioPanel` + `useChartRun` + the cartesian family. The other 13 viz types keep their current inline code behind a temporary bridge. | a new cartesian chart, and an existing v1 chart opened |
+| 2 | `table`, `pivot_table`, `object`, `map` — the four with the most state — plus the `VizSwitcher` and `PreviewPane` extractions | saved pivot + table charts |
 | 3 | the nine remaining viz types; delete the bridge, `ChartSettingsSections` and `requiredFields.ts`; migration `0099` | one chart per viz type, plus a dashboard with a card override |
 
 The backfill lands in PR 3 because only then does every descriptor read and write
-v2; running it earlier would fight the bridge.
+v2; running it earlier would fight the bridge. `VizSwitcher` and `PreviewPane` are
+mechanical extractions with no bearing on the registry, so they ride in PR 2 rather
+than inflating PR 1, which carries all the risk.
 
 ## Testing
 
