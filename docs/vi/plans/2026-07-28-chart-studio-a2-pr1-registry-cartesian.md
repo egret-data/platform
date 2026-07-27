@@ -1190,3 +1190,18 @@ gh pr create --base main --title "feat(charts): A2 PR1 — viz registry, studio 
 - Nếu `tsc` đẩy bạn tới chỗ phải sửa `ChartRenderer` hay bất cứ thứ gì dưới `echarts/`, hãy dừng: adapter đang thiếu một khoá. Sửa `toRenderParams`.
 - Chart v1 đã lưu là đường rủi ro cao nhất trong PR này. Khi phân vân, hãy test với `A1 studio smoke` (một row v1 thật trên cụm kind) thay vì fixture tự dựng.
 - Không merge sau khi mở PR — chương trình này chờ duyệt tường minh theo yêu cầu thường trực của người dùng.
+
+## Hai chỗ plan sai, phát hiện khi thực thi
+
+Ghi lại cho PR2 và PR3 vì sẽ vấp đúng hai cái bẫy này.
+
+- **Chạy test bằng `npm test -- <path>`, không dùng `npx vitest run <path>`.** `npx` đôi khi
+  lấy bản vitest cache global (`~/.npm/_npx/...`) bỏ qua config của repo, nên thiếu jsdom và
+  mọi test DOM fail với "document is not defined" — trông hệt như lỗi của code đang test.
+- **Helper mà run hook chạm tới phải là function declaration.** `useChartRun` nằm phía trên
+  `specForRun` / `paramsForSave` / `missingNow` / `validationInput` trong thân component và
+  gọi chúng lúc render, nên arrow `const` sẽ rơi vào temporal dead zone. `validationInput`
+  bị bỏ sót và mọi viz trên bridge trắng màn hình với "Cannot access 'validationInput'
+  before initialization"; cartesian che mất lỗi vì descriptor của nó trả lời thay cho helper
+  đó. Chốt chặn là `src/routes/explore/__tests__/ChartExplore.mount.test.tsx`, mount một viz
+  bridge và một viz đã chuyển — giữ nó xanh trong lúc dọn sạch bridge.

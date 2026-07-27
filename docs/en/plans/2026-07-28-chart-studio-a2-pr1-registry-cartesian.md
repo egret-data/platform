@@ -1188,3 +1188,20 @@ gh pr create --base main --title "feat(charts): A2 PR1 — viz registry, studio 
 - If `tsc` pushes you toward editing `ChartRenderer` or anything under `echarts/`, stop: the adapter is missing a key. Fix `toRenderParams`.
 - Saved v1 charts are the highest-risk path in this PR. When in doubt, test against `A1 studio smoke` (a real v1 row on the kind cluster) rather than a hand-built fixture.
 - Do not merge after opening the PR — this program awaits explicit approval per the user's standing instruction.
+
+## Corrections found while executing this plan
+
+Recorded for PR2 and PR3, which will hit the same two traps.
+
+- **Run the tests with `npm test -- <path>`, not `npx vitest run <path>`.** `npx` sometimes
+  resolves a cached global vitest (`~/.npm/_npx/...`) that ignores this repo's config, so
+  jsdom is missing and every DOM test fails with "document is not defined" — a failure that
+  looks like a bug in the code under test.
+- **Helpers the run hook reaches must be function declarations.** `useChartRun` sits above
+  `specForRun` / `paramsForSave` / `missingNow` / `validationInput` in the component body
+  and calls them during render, so a `const` arrow puts them in the temporal dead zone.
+  `validationInput` was missed and every bridge viz white-screened with "Cannot access
+  'validationInput' before initialization"; cartesian hid it, because its descriptor
+  answers instead of that helper. The guard is
+  `src/routes/explore/__tests__/ChartExplore.mount.test.tsx`, which mounts one bridge viz
+  and one migrated viz — keep it passing while emptying the bridge.
