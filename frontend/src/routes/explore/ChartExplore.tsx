@@ -20,6 +20,7 @@ import { ChartSettingsSections } from "@/components/chart/settings/ChartSettings
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
+import { StudioToolbar } from "@/components/chart/StudioToolbar";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 import { parseFormat } from "@/components/dataset/FormatPicker";
 import { Button } from "@/components/ui/button";
@@ -281,9 +282,7 @@ export default function ChartExplore() {
   }, [activeDims.join("|"), columns]);
 
   const [ranSpec, setRanSpec] = useState<QuerySpec | null>(null);
-  // setAutoRun is wired to a toolbar toggle in a later task; not built yet.
   const [autoRun, setAutoRun] = useState(true);
-  void setAutoRun;
   const [runNonce, setRunNonce] = useState(0);
   const data = useSpecData(ws, datasetId, ranSpec, !!ranSpec, runNonce);
   const finished = !data.isLoading && !data.error && !!ranSpec;
@@ -932,35 +931,24 @@ export default function ChartExplore() {
       {/* Main area (full-width preview) */}
       <div className="flex-1 overflow-auto p-4 space-y-3">
         <h1 className="sr-only">{saveName || "New chart"}</h1>
-        <div className="flex items-center gap-2">
-          <Button onClick={run} disabled={data.isLoading} size="sm">
-            {data.isLoading ? "Running…" : "Run"}
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => setSaveOpen(true)}>{id ? "Update" : "Save"}</Button>
-          <ChartExportMenu
-            title={saveName || undefined}
-            columns={resultColumns}
-            rows={data.rows}
-            containerRef={previewRef}
-            disabled={!finished || resultColumns.length === 0}
-          />
-          {ranSpec && (
-            <details
-              className="ml-auto text-xs text-muted-foreground"
-              open={sqlOpen}
-              onToggle={(e) => setSqlOpen(e.currentTarget.open)}
-            >
+        <StudioToolbar
+          name={saveName} onName={setSaveName}
+          autoRun={autoRun} onAutoRun={setAutoRun}
+          onRun={run} onSave={() => setSaveOpen(true)}
+          running={data.isLoading} saveLabel={id ? "Update" : "Save"}
+          exportMenu={
+            <ChartExportMenu title={saveName || undefined} columns={resultColumns} rows={data.rows}
+              containerRef={previewRef} disabled={!finished || resultColumns.length === 0} />
+          }
+          sqlDisclosure={ranSpec && (
+            <details className="text-xs text-muted-foreground" open={sqlOpen} onToggle={(e) => setSqlOpen(e.currentTarget.open)}>
               <summary className="cursor-pointer select-none hover:text-foreground">View SQL</summary>
               {sqlOpen && chartSql.isLoading && <p className="mt-1 text-xs">Loading…</p>}
-              {sqlOpen && chartSql.error && (
-                <p className="mt-1 text-xs text-destructive">{String(chartSql.error)}</p>
-              )}
-              {chartSql.data?.sql && (
-                <pre className="mt-1 max-h-40 overflow-auto rounded bg-muted p-2 text-xs">{chartSql.data.sql}</pre>
-              )}
+              {sqlOpen && chartSql.error && <p className="mt-1 text-xs text-destructive">{String(chartSql.error)}</p>}
+              {chartSql.data?.sql && <pre className="mt-1 max-h-40 overflow-auto rounded bg-muted p-2 text-xs">{chartSql.data.sql}</pre>}
             </details>
           )}
-        </div>
+        />
 
         {filters.length > 0 && (
           <FilterChips filters={filters} onRemove={(i) => setFilters((prev) => prev.filter((_, j) => j !== i))} />
