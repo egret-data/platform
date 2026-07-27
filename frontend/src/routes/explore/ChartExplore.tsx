@@ -41,6 +41,7 @@ import { SectionLabel } from "@/components/chart/settings/SectionLabel";
 import { pruneUnits } from "@/components/chart/temporal-units";
 import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
 import { MAPS } from "@/components/chart/echarts/maps/registry";
+import { missingFields } from "@/components/chart/requiredFields";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 
 const UNDERLINE_LIST = "h-auto w-full justify-start gap-4 rounded-none border-b bg-transparent p-0";
@@ -313,44 +314,18 @@ export default function ChartExplore() {
   const [sqlOpen, setSqlOpen] = useState(false);
   const chartSql = useBuildChartData(ws, datasetId, ranSpec, sqlOpen);
 
+  const validationInput = () => ({
+    cartesian: { xAxis: cartesian.xAxis, yMetrics: cartesian.yMetrics },
+    pie, scalar, progress, gauge, funnel, waterfall, smart, box, sankey, map: mapCfg,
+    pivot: { rows: pRows, vals: pVals },
+    objectCols: tableCols,
+  });
+
   function run() {
     setRanSpec(null);
     if (!datasetId) { toast.error("Pick a dataset first"); return; }
-    if (viz === "pivot_table" && (pRows.length === 0 || pVals.length === 0)) {
-      toast.error("Pivot needs at least one row dimension and one value"); return;
-    }
-    if (isCartesianViz(viz) && (!cartesian.xAxis || cartesian.yMetrics.length === 0)) {
-      toast.error("This chart needs an X-axis and at least one metric"); return;
-    }
-    if (viz === "pie" && (!pie.dimension || !pie.metric)) {
-      toast.error("Pie needs a dimension and a metric"); return;
-    }
-    if (viz === "scalar" && !scalar.metric) {
-      toast.error("Big number needs a metric"); return;
-    }
-    if (viz === "progress" && !progress.metric) {
-      toast.error("Progress needs a metric"); return;
-    }
-    if (viz === "gauge" && !gauge.metric) {
-      toast.error("Gauge needs a metric"); return;
-    }
-    if (viz === "funnel" && (!funnel.dimension || !funnel.metric)) {
-      toast.error("Funnel needs a dimension and a metric"); return;
-    }
-    if (viz === "waterfall" && (!waterfall.xAxis || !waterfall.metric)) {
-      toast.error("Waterfall needs an x-axis and a metric"); return;
-    }
-    if (viz === "smartscalar" && (!smart.dimension || !smart.metric)) {
-      toast.error("Trend needs a time dimension and a metric"); return;
-    }
-    if (viz === "boxplot" && (!box.category || !box.value)) {
-      toast.error("Box plot needs a category and a value column"); return;
-    }
-    if (viz === "sankey" && (!sankey.source || !sankey.target || !sankey.metric)) {
-      toast.error("Sankey needs source, target and a metric"); return;
-    }
-    if (viz === "map" && (!mapCfg.region || !mapCfg.metric)) { toast.error("Map needs a region and a metric"); return; }
-    if (viz === "object" && tableCols.length === 0) { toast.error("Object detail needs at least one column"); return; }
+    const missing = missingFields(viz, validationInput());
+    if (missing.length) { toast.error(`This chart needs ${missing.join(" and ")}`); return; }
     // No try/catch here (unlike the validation guards above, which are
     // synchronous toasts): the actual request now runs inside useSpecData's
     // useQuery, and its failure surfaces through `data.error` (rendered as the
