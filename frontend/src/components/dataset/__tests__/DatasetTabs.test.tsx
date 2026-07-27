@@ -40,6 +40,9 @@ const physicalColumn: DatasetColumn = {
   verbose_name: "",
   description: "",
   is_calculated: false,
+  groupby: true,
+  filterable: true,
+  format: "",
 };
 
 const calculatedColumn: DatasetColumn = {
@@ -52,6 +55,9 @@ const calculatedColumn: DatasetColumn = {
   verbose_name: "Revenue",
   description: "Total revenue",
   is_calculated: true,
+  groupby: true,
+  filterable: true,
+  format: "",
 };
 
 const sampleMetric: DatasetMetric = {
@@ -63,6 +69,8 @@ const sampleMetric: DatasetMetric = {
   verbose_name: "Total Revenue",
   description: "Sum of revenue",
   ordinal: 1,
+  format: "",
+  certified: false,
 };
 
 test("ColumnsTab: calculated column shows 'calculated' badge", () => {

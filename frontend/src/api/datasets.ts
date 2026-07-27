@@ -11,7 +11,7 @@
  * loosely (plain `string`) than the FE unions (`DatasetKind`, `CreateSource`),
  * so aliasing to the generated DTOs would widen them and churn call sites.
  */
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { ApiError } from "./client";
 import {
@@ -47,11 +47,13 @@ export interface DatasetSummary {
 export interface DatasetColumn {
   column_name: string; data_type: string; type_generic: string; is_temporal: boolean; ordinal: number;
   expression: string | null; verbose_name: string; description: string; is_calculated: boolean;
+  groupby: boolean; filterable: boolean; format: string;
 }
 export interface DatasetMetric {
   id: string; metric_name: string; expression: string; data_type: string; type_generic: string;
-  verbose_name: string; description: string; ordinal: number;
+  verbose_name: string; description: string; ordinal: number; format: string; certified: boolean;
 }
+export interface DatasetUsage { id: string; name: string }
 export interface DatasetDetail {
   id: string; name: string; description: string; database_id: string; kind: DatasetKind;
   catalog: string | null; schema: string | null; table: string | null; sql: string | null;
@@ -135,15 +137,32 @@ export function useDatasetListMutations(ws: string) {
   return { trash, restore, addBookmark, removeBookmark };
 }
 
+export interface MetricInput { metric_name: string; expression: string; verbose_name?: string; description?: string; format?: string; certified?: boolean }
+export interface ColumnUpdate { verbose_name?: string; description?: string; expression?: string; groupby?: boolean; filterable?: boolean; is_temporal?: boolean; format?: string }
+
 export function useDatasetMutations(ws: string, id: string) {
   const qc = useQueryClient();
   const inval = () => qc.invalidateQueries({ queryKey: getDatasetsDsGetQueryKey(ws, id) });
   return {
-    addMetric: useMutation({ mutationFn: (b: { metric_name: string; expression: string; verbose_name?: string; description?: string }) => datasetsDsAddMetric(ws, id, b), onSuccess: inval }),
-    updateMetric: useMutation({ mutationFn: (a: { metricId: string; body: { metric_name: string; expression: string; verbose_name?: string; description?: string } }) => datasetsDsUpdateMetric(ws, id, a.metricId, a.body), onSuccess: inval }),
+    // Bodies carry the semantic-layer fields (format/certified, groupby/filterable/
+    // is_temporal); the generated client forwards them as JSON.
+    addMetric: useMutation({ mutationFn: (b: MetricInput) => datasetsDsAddMetric(ws, id, b), onSuccess: inval }),
+    updateMetric: useMutation({ mutationFn: (a: { metricId: string; body: MetricInput }) => datasetsDsUpdateMetric(ws, id, a.metricId, a.body), onSuccess: inval }),
     deleteMetric: useMutation({ mutationFn: (metricId: string) => datasetsDsDeleteMetric(ws, id, metricId), onSuccess: inval }),
     addColumn: useMutation({ mutationFn: (b: { column_name: string; expression: string; verbose_name?: string; description?: string }) => datasetsDsAddColumn(ws, id, b), onSuccess: inval }),
-    updateColumn: useMutation({ mutationFn: (a: { name: string; body: { verbose_name?: string; description?: string; expression?: string } }) => datasetsDsUpdateColumn(ws, id, a.name, a.body), onSuccess: inval }),
+    updateColumn: useMutation({ mutationFn: (a: { name: string; body: ColumnUpdate }) => datasetsDsUpdateColumn(ws, id, a.name, a.body), onSuccess: inval }),
     deleteColumn: useMutation({ mutationFn: (name: string) => datasetsDsDeleteColumn(ws, id, name), onSuccess: inval }),
   };
+}
+
+export function useDatasetUsage(ws: string, id: string | null) {
+  return useQuery<DatasetUsage[]>({
+    queryKey: ["datasets", ws, "usage", id ?? ""],
+    enabled: !!id,
+    queryFn: async () => {
+      const r = await fetch(`/api/ws/${encodeURIComponent(ws)}/datasets/${id}/usage`, { credentials: "same-origin" });
+      if (!r.ok) throw new Error(`usage failed: ${r.status}`);
+      return (await r.json()) as DatasetUsage[];
+    },
+  });
 }
