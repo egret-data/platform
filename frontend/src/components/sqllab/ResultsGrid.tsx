@@ -174,7 +174,7 @@ export function ResultsGrid({ page, csvHref, truncated, error, statusLine, loadi
         <table className="w-full border-separate border-spacing-0 text-sm">
           <thead>
             <tr>
-              <th className="sticky left-0 top-0 z-20 w-10 border-b border-r bg-muted px-2 py-1.5 text-right font-mono text-[11px] font-normal text-muted-foreground">#</th>
+              <th className="sticky left-0 top-0 z-20 w-10 border-b border-r bg-secondary px-2 py-1.5 text-right font-mono text-[11px] font-normal text-muted-foreground">#</th>
               {cols.map((c, i) => {
                 const numeric = isNumeric(c.type);
                 const active = sortCol === i;
@@ -182,7 +182,7 @@ export function ResultsGrid({ page, csvHref, truncated, error, statusLine, loadi
                 return (
                   <th key={c.name} aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : "none"}
                     style={widths[i] ? { width: widths[i], minWidth: widths[i], maxWidth: widths[i] } : undefined}
-                    className={`group/th sticky top-0 z-10 border-b bg-muted px-3 py-1.5 font-semibold whitespace-nowrap ${numeric ? "text-right" : "text-left"}`}>
+                    className={`group/th sticky top-0 z-10 border-b bg-secondary px-3 py-1.5 font-semibold whitespace-nowrap ${numeric ? "text-right" : "text-left"}`}>
                     <span className={`inline-flex items-baseline gap-1.5 ${numeric ? "flex-row-reverse" : ""}`}>
                       <button onClick={() => toggleSort(i)} className="inline-flex items-baseline gap-1 hover:text-primary" title="Sort">
                         <span>{c.name}</span>
