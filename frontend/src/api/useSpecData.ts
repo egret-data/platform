@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { chartsChRunSpec } from "@/api/generated/charts/charts";
 import type { ChartDataBody, ChartRunResponse } from "@/api/generated/model";
 import type { QuerySpec } from "@/api/charts";
@@ -53,12 +53,24 @@ export function useSpecData(
       // non-2xx, so `.data` is always the success shape at runtime.
       return (await chartsChRunSpec(ws, body as ChartDataBody)).data as ChartRunResponse;
     },
+    // Keep the previous result on screen across auto-run refetches (only the
+    // very first load shows the loading skeleton) instead of flashing back to
+    // it on every debounced edit.
+    placeholderData: keepPreviousData,
   });
 
   return {
     columns: q.data?.columns ?? [],
     rows: q.data?.rows ?? [],
-    isLoading: q.isFetching,
+    // `q.isLoading` (TanStack's `isPending && isFetching`) rather than
+    // `q.isFetching`: with `placeholderData: keepPreviousData` the previous
+    // key's data is treated as present during a refetch, so `isPending` (and
+    // thus `isLoading`) goes false immediately — callers keep rendering the
+    // prior chart instead of unmounting it for a loading skeleton on every
+    // debounced auto-run. `isFetching` alone would stay true across every
+    // refetch and defeat that. First-ever load (no data yet) is unaffected:
+    // isPending is true until the first response lands.
+    isLoading: q.isLoading,
     error: q.error ? String(q.error) : null,
     hasResult: q.data !== undefined,
   };

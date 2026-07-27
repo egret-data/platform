@@ -284,6 +284,9 @@ export default function ChartExplore() {
   const [ranSpec, setRanSpec] = useState<QuerySpec | null>(null);
   const [autoRun, setAutoRun] = useState(true);
   const [runNonce, setRunNonce] = useState(0);
+  // Signature of the last spec actually run (manual or auto), shared with
+  // useAutoRun so a manual Run cancels a pending auto-fire for the same query.
+  const lastRunSig = useRef("");
   const data = useSpecData(ws, datasetId, ranSpec, !!ranSpec, runNonce);
   const finished = !data.isLoading && !data.error && !!ranSpec;
   const resultColumns = data.columns.filter((c) => !c.name.startsWith("__grp_"));
@@ -339,6 +342,9 @@ export default function ChartExplore() {
     // restoring it would just double-report the same failure.
     setRanSpec(specForRun());
     setRunNonce((n) => n + 1);
+    // Stamp the signature so a pending auto-run timer for this same query
+    // (e.g. the user clicked Run before the debounce elapsed) won't re-fire it.
+    lastRunSig.current = datasetId ? JSON.stringify({ datasetId, spec: specForRun() }) : "";
   }
 
   // Serialized "is this chart runnable, and with what config" signature. Empty
@@ -349,7 +355,7 @@ export default function ChartExplore() {
     datasetId && missingFields(viz, validationInput()).length === 0
       ? JSON.stringify({ datasetId, spec: specForRun() })
       : "";
-  useAutoRun({ enabled: autoRun, signature: querySignature, onRun: run });
+  useAutoRun({ enabled: autoRun, signature: querySignature, onRun: run, lastRunRef: lastRunSig });
 
   function addFilter(f: ChartFilter) {
     setFilters((prev) => [...prev.filter((x) => x.col !== f.col), f]);
