@@ -36,6 +36,7 @@ export interface CartesianBuildConfig {
   yMax?: number;                 // manual value-axis maximum
   showMarkers?: boolean;         // line/area: show the point symbols (off by default, like Metabase)
   xScale?: "ordinal" | "linear" | "timeseries";  // x-axis scale (default ordinal/category)
+  sort?: "category" | "asc" | "desc";  // category order (row defaults to desc-by-value)
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
   xAxisUnit?: string;            // temporal extraction unit for the x-axis dimension (e.g. "day_of_week")
@@ -137,6 +138,24 @@ function normalizeStacks(series: { data: (number | null)[] }[]) {
   }
 }
 
+// Sort categories by their total value across the value series (Metabase/Superset
+// "sort by value") — reorders the shared category list and every series' aligned
+// data in place, returning the new category order. Only meaningful on an ordinal axis.
+function applyValueSort(categories: unknown[], series: { data: (number | null)[] }[], dir: "asc" | "desc"): unknown[] {
+  const n = categories.length;
+  const total = (i: number) => series.reduce((s, sr) => s + (typeof sr.data[i] === "number" ? (sr.data[i] as number) : 0), 0);
+  const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => (dir === "asc" ? total(a) - total(b) : total(b) - total(a)));
+  for (const sr of series) sr.data = order.map((i) => sr.data[i]);
+  return order.map((i) => categories[i]);
+}
+
+// Effective category sort. Default is the axis-type order for every kind
+// (Metabase keeps the dimension order even for row charts); value sorting is
+// opt-in via the Display "Sort" control.
+function effectiveSort(cfg: CartesianBuildConfig): "category" | "asc" | "desc" {
+  return cfg.sort ?? "category";
+}
+
 // Right-axis is active only when it splits the metrics (≥1 left and ≥1 right) on a
 // vertical chart — clean-room of Metabase's left/right axis split.
 function rightMetrics(cfg: CartesianBuildConfig): string[] {
@@ -236,7 +255,9 @@ export function buildCartesianOption(
   const xType = columns[xi].type;
   const xrows = rows.filter((r) => r[xi] != null);
   const catKey = (v: unknown) => String(v);
-  const categories = sortCategories(distinct(xrows.map((r) => r[xi])), xType);
+  let categories = sortCategories(distinct(xrows.map((r) => r[xi])), xType);
+  const sortDir = effectiveSort(cfg);
+  const doValueSort = (sortDir === "asc" || sortDir === "desc") && !usesXScale(cfg);
 
 
   // Breakout: one ECharts series per distinct series value (first y-metric only).
@@ -257,6 +278,7 @@ export function buildCartesianOption(
       const name = sv == null || sv === "" ? "(empty)" : String(sv);
       return decorateSeries({ name, data }, metric, si, cfg, fmt, grouped);
     });
+    if (doValueSort) categories = applyValueSort(categories, series as unknown as { data: (number | null)[] }[], sortDir as "asc" | "desc");
     if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
     if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
     if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
@@ -278,6 +300,7 @@ export function buildCartesianOption(
     });
     return decorateSeries({ name: metric, data }, metric, si, cfg, fmt, grouped, singleColor);
   });
+  if (doValueSort) categories = applyValueSort(categories, series as unknown as { data: (number | null)[] }[], sortDir as "asc" | "desc");
   if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
   if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
   if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
@@ -352,7 +375,9 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   const categoryAxis = {
     type: "category" as const, data: categories,
     name: cfg.xLabel, nameLocation: "middle" as const, nameGap: 28,
-    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor },
+    // hideOverlap lets ECharts drop labels that would collide instead of letting
+    // long category names overlap into an unreadable smear (skill: axis-readability).
+    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, hideOverlap: true },
     axisLine: { lineStyle: { color: gridLine } },
   };
   // Non-ordinal x: a value (linear) or time (timeseries) axis positioning points by

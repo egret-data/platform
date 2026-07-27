@@ -46,6 +46,20 @@ export function CartesianDisplaySection({
       {kind !== "scatter" && <Toggle id="cz-trend" label="Trend line" checked={!!config.trendLine} onChange={(v) => onChange({ trendLine: v })} />}
       {kind !== "scatter" && <Toggle id="cz-log" label="Log scale" checked={!!config.logScale} onChange={(v) => onChange({ logScale: v })} />}
 
+      {kind !== "scatter" && (
+        <div className="flex items-center justify-between gap-2">
+          <Label className="text-sm font-normal">Sort</Label>
+          <Select value={config.sort ?? "category"} onValueChange={(v) => onChange({ sort: v as CartesianConfig["sort"] })}>
+            <SelectTrigger aria-label="Sort order" className="h-7 w-36"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="category">By category</SelectItem>
+              <SelectItem value="desc">Value: high → low</SelectItem>
+              <SelectItem value="asc">Value: low → high</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
       {kind !== "scatter" && kind !== "row" && !config.horizontal && (
         <div className="flex items-center justify-between gap-2">
           <Label className="text-sm font-normal">X axis scale</Label>

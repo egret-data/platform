@@ -520,3 +520,29 @@ describe("buildCartesianOption — goal line axis (regression)", () => {
     expect(markLine(o as any)).toEqual([{ xAxis: 15 }]);
   });
 });
+
+describe("buildCartesianOption — sort by value (Bar/Row parity)", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }];
+  const rows = [["A", 10], ["B", 30], ["C", 20]];
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  it("bar defaults to category (first-seen) order", () => {
+    const o = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev"] }) as any;
+    expect(o.xAxis.data).toEqual(["A", "B", "C"]);
+  });
+  it("sort=desc orders categories high→low by value", () => {
+    const o = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev"], sort: "desc" }) as any;
+    expect(o.xAxis.data).toEqual(["B", "C", "A"]);
+    expect(o.series[0].data).toEqual([30, 20, 10]);
+  });
+  it("sort=asc orders low→high", () => {
+    const o = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev"], sort: "asc" }) as any;
+    expect(o.xAxis.data).toEqual(["A", "C", "B"]);
+  });
+  it("row chart keeps dimension order by default (Metabase parity), but honours sort", () => {
+    const def = buildCartesianOption(cols, rows, { kind: "row", xAxis: "region", yMetrics: ["rev"] }) as any;
+    expect(def.yAxis.data).toEqual(["A", "B", "C"]); // horizontal → category on the y-axis
+    const sorted = buildCartesianOption(cols, rows, { kind: "row", xAxis: "region", yMetrics: ["rev"], sort: "desc" }) as any;
+    expect(sorted.yAxis.data).toEqual(["B", "C", "A"]);
+  });
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+});

@@ -121,7 +121,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
               showStackTotal: cartesian.showStackTotal,
               seriesColors: cartesian.seriesColors, seriesLabels: cartesian.seriesLabels,
               yMin: cartesian.yMin, yMax: cartesian.yMax,
-              showMarkers: cartesian.showMarkers, xScale: cartesian.xScale,
+              showMarkers: cartesian.showMarkers, xScale: cartesian.xScale, sort: cartesian.sort,
               columnSettings, metricTypes,
               xAxisUnit: params.spec.temporal_units?.[cartesian.xAxis ?? ""],
             })}
