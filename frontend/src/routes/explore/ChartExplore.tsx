@@ -15,9 +15,7 @@ import { DrillMenu } from "@/components/chart/DrillMenu";
 import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
 import type { DrillContext } from "@/components/chart/drill";
 import { ChartTypeGallery } from "@/components/chart/ChartTypeGallery";
-import { ArrowLeftRight } from "lucide-react";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
-import { ChartEmptyState, ChartLoadingState, ChartErrorState } from "@/components/chart/ChartPreviewStates";
 import { ChartSettingsSections } from "@/components/chart/settings/ChartSettingsSections";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
@@ -39,7 +37,6 @@ import {
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { FieldZone } from "@/components/chart/config/FieldZone";
-import { CartesianDataControls } from "@/components/chart/controls/CartesianDataControls";
 import { SectionLabel } from "@/components/chart/settings/SectionLabel";
 import { pruneUnits } from "@/components/chart/temporal-units";
 import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
@@ -483,10 +480,6 @@ export default function ChartExplore() {
   const isRunning = data.isLoading;
   const vizMeta = CHART_TYPES.find((t) => t.key === viz);
   const previewRef = useRef<HTMLDivElement>(null);
-  // "View as table" — an accessible data-table alternative for any non-table viz
-  // (Superset parity; canvas charts are opaque to screen readers).
-  const [viewAsTable, setViewAsTable] = useState(false);
-  const isTabular = viz === "table" || viz === "pivot_table";
 
   // ── New-chart gallery: shown when creating a chart with no type chosen yet ──
   if (!id && !typeParam) {
@@ -526,17 +519,19 @@ export default function ChartExplore() {
   return (
     <div className="flex h-full min-h-0 gap-0">
       {/* Left panel */}
-      <div className="w-80 shrink-0 overflow-y-auto border-r p-4 space-y-4">
+      <div className="w-72 shrink-0 overflow-y-auto border-r p-4 space-y-4">
         <Link className="text-xs text-muted-foreground hover:underline" to={`/explore/${ws}/charts`}>← Charts</Link>
 
-        {/* Visualization switcher — the whole chip opens the type picker */}
-        <button type="button" onClick={() => setVizPickerOpen(true)}
-          className="flex w-full items-center gap-2 rounded-md border bg-card px-2.5 py-2 text-sm transition-colors hover:bg-accent"
-          aria-label={`Visualization: ${vizMeta?.name ?? viz}. Change type`}>
-          {vizMeta && <vizMeta.icon className="h-4 w-4 shrink-0 text-primary" />}
-          <span className="flex-1 text-left font-medium">{vizMeta?.name ?? viz}</span>
-          <ArrowLeftRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        </button>
+        {/* Viz header + change */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            {vizMeta && <vizMeta.icon className="h-4 w-4 text-primary" />}
+            <span className="text-sm font-medium">{vizMeta?.name ?? viz}</span>
+          </div>
+          <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setVizPickerOpen(true)}>
+            Change
+          </Button>
+        </div>
 
         <Tabs value={builderTab} onValueChange={setBuilderTab}>
           <TabsList className={UNDERLINE_LIST}>
@@ -649,8 +644,45 @@ export default function ChartExplore() {
             )}
 
             {isCartesianViz(viz) && (
-              <CartesianDataControls viz={viz} config={cartesian} onChange={patchCartesian}
-                columns={columns} metrics={metrics} renderUnitRow={unitRow} />
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">X-axis</Label>
+                  <Select value={cartesian.xAxis ?? ""} onValueChange={(v) => patchCartesian({ xAxis: v || undefined })}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
+                    <SelectContent>
+                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {unitRow(cartesian.xAxis)}
+                {viz === "scatter" && (
+                  <div className="space-y-1">
+                    <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">X metric (optional)</Label>
+                    <Select value={cartesian.xMetric ?? "__none"} onValueChange={(v) => patchCartesian({ xMetric: v === "__none" ? undefined : v })}>
+                      <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__none">None — use the dimension</SelectItem>
+                        {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                <FieldZone label="Y-axis" selected={cartesian.yMetrics} onChange={(v) => patchCartesian({ yMetrics: v })}
+                  options={metrics.map((m) => m.metric_name)} />
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Series</Label>
+                  <Select value={cartesian.series ?? "__none"} onValueChange={(v) => patchCartesian({ series: v === "__none" ? undefined : v })}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none">None</SelectItem>
+                      {columns.filter((c) => c.column_name !== cartesian.xAxis).map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                  {cartesian.series && cartesian.yMetrics.length > 1 && (
+                    <p className="text-xs text-muted-foreground">With a series, only the first metric is plotted.</p>
+                  )}
+                </div>
+              </>
             )}
 
             {viz === "pie" && (
@@ -913,49 +945,42 @@ export default function ChartExplore() {
       <div className="flex-1 overflow-auto p-4 space-y-3">
         <h1 className="sr-only">{saveName || "New chart"}</h1>
         <div className="flex items-center gap-2">
-          {/* Inline chart title — borderless until hover/focus, like Metabase */}
-          <input
-            aria-label="Chart name"
-            value={saveName}
-            onChange={(e) => setSaveName(e.target.value)}
-            placeholder={id ? "Chart name" : "Untitled chart"}
-            className="h-8 min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-1.5 text-base font-semibold outline-none transition-colors placeholder:font-normal placeholder:text-muted-foreground hover:border-input focus:border-ring focus:bg-background"
+          <Button onClick={run} disabled={data.isLoading} size="sm">
+            {data.isLoading ? "Running…" : "Run"}
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setSaveOpen(true)}>{id ? "Update" : "Save"}</Button>
+          <ChartExportMenu
+            title={saveName || undefined}
+            columns={resultColumns}
+            rows={data.rows}
+            containerRef={previewRef}
+            disabled={!finished || resultColumns.length === 0}
           />
-          <div className="flex shrink-0 items-center gap-2">
-            <Button onClick={run} disabled={data.isLoading} size="sm">
-              {data.isLoading ? "Running…" : "Run"}
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => setSaveOpen(true)}>{id ? "Update" : "Save"}</Button>
-            <ChartExportMenu
-              title={saveName || undefined}
-              columns={resultColumns}
-              rows={data.rows}
-              containerRef={previewRef}
-              disabled={!finished || resultColumns.length === 0}
-            />
-            {!isTabular && (
-              <Button variant={viewAsTable ? "secondary" : "outline"} size="sm" aria-pressed={viewAsTable}
-                disabled={!finished || resultColumns.length === 0}
-                onClick={() => setViewAsTable((v) => !v)}>
-                {viewAsTable ? "View chart" : "View as table"}
-              </Button>
-            )}
-          </div>
+          {ranSpec && (
+            <details
+              className="ml-auto text-xs text-muted-foreground"
+              open={sqlOpen}
+              onToggle={(e) => setSqlOpen(e.currentTarget.open)}
+            >
+              <summary className="cursor-pointer select-none hover:text-foreground">View SQL</summary>
+              {sqlOpen && chartSql.isLoading && <p className="mt-1 text-xs">Loading…</p>}
+              {sqlOpen && chartSql.error && (
+                <p className="mt-1 text-xs text-destructive">{String(chartSql.error)}</p>
+              )}
+              {chartSql.data?.sql && (
+                <pre className="mt-1 max-h-40 overflow-auto rounded bg-muted p-2 text-xs">{chartSql.data.sql}</pre>
+              )}
+            </details>
+          )}
         </div>
-        {ranSpec && (
-          <details className="text-xs text-muted-foreground" open={sqlOpen} onToggle={(e) => setSqlOpen(e.currentTarget.open)}>
-            <summary className="cursor-pointer select-none hover:text-foreground">View SQL</summary>
-            {sqlOpen && chartSql.isLoading && <p className="mt-1 text-xs">Loading…</p>}
-            {sqlOpen && chartSql.error && <p className="mt-1 text-xs text-destructive">{String(chartSql.error)}</p>}
-            {chartSql.data?.sql && <pre className="mt-1 max-h-40 overflow-auto rounded bg-muted p-2 text-xs">{chartSql.data.sql}</pre>}
-          </details>
-        )}
 
         {filters.length > 0 && (
           <FilterChips filters={filters} onRemove={(i) => setFilters((prev) => prev.filter((_, j) => j !== i))} />
         )}
-        {data.error && <ChartErrorState message={data.error} onRetry={run} />}
-        {isRunning && <ChartLoadingState />}
+        {data.error && (
+          <p className="rounded bg-destructive/10 p-3 text-sm text-destructive">{data.error}</p>
+        )}
+        {isRunning && <p className="text-sm text-muted-foreground">Running…</p>}
 
         <div ref={previewRef} className="contents">
         {finished && viz === "pivot_table" && (
@@ -997,14 +1022,11 @@ export default function ChartExplore() {
             dimensionColumns={tableMetrics.length > 0 ? tableCols : []}
             onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })} />
         )}
-        {finished && !isTabular && viewAsTable && (
-          <ChartTable columns={data.columns} rows={data.rows} columnSettings={effCS} />
-        )}
-        {finished && !isTabular && !viewAsTable && (
+        {finished && viz !== "table" && viz !== "pivot_table" && (
           <ChartErrorBoundary resetKey={`${viz}:${data.columns.length}:${data.rows.length}`}>
             {/* ChartRenderer fills its parent; the preview owns the height + frame
                 (dashboard cards size it to the grid cell instead). */}
-            <div className="min-h-[60vh] flex-1 rounded-lg border p-2">
+            <div className="h-[70vh] rounded-md border p-2">
               <ChartRenderer
                 vizType={viz}
                 params={{ ...paramsForSave(), columnSettings: effCS }}
@@ -1017,8 +1039,7 @@ export default function ChartExplore() {
         )}
         </div>
         {!ranSpec && !data.isLoading && (
-          <ChartEmptyState icon={vizMeta?.icon} title={`Set up your ${vizMeta?.name ?? "chart"}`}
-            hint="Choose the fields on the left, then click Run to preview it here." />
+          <p className="text-sm text-muted-foreground">Configure the controls on the left and click Run.</p>
         )}
       </div>
 
