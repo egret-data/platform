@@ -289,6 +289,9 @@ export default function ChartExplore() {
   const lastRunSig = useRef("");
   // Params of the last run, rendered while the query is stale (see previewParams).
   const ranParams = useRef<ChartParams | null>(null);
+  // Table grouping columns of the last run — the one preview input that ChartParams
+  // doesn't carry (see previewTableDims).
+  const ranTableDims = useRef<string[] | null>(null);
   const data = useSpecData(ws, datasetId, ranSpec, !!ranSpec, runNonce);
   const finished = !data.isLoading && !data.error && !!ranSpec;
   const resultColumns = data.columns.filter((c) => !c.name.startsWith("__grp_"));
@@ -344,8 +347,9 @@ export default function ChartExplore() {
     // restoring it would just double-report the same failure.
     setRanSpec(specForRun());
     setRunNonce((n) => n + 1);
-    // Snapshot the params this run renders with (see previewParams).
+    // Snapshot what this run renders with (see previewParams / previewTableDims).
     ranParams.current = paramsForSave();
+    ranTableDims.current = tableMetrics.length > 0 ? tableCols : [];
     // Stamp the signature so a pending auto-run timer for this same query
     // (e.g. the user clicked Run before the debounce elapsed) won't re-fire it.
     lastRunSig.current = datasetId ? JSON.stringify({ datasetId, spec: specForRun() }) : "";
@@ -366,12 +370,25 @@ export default function ChartExplore() {
   // — edited but not re-run, the normal state with Auto off — we keep rendering the
   // params that produced that result. Pairing freshly edited field names with the old
   // columns finds nothing and renders an empty chart, which reads as "you broke it"
-  // rather than "not run yet". Display-only edits don't change the signature, so they
-  // still preview live.
+  // rather than "not run yet". Display-only edits don't change the signature, so a fresh
+  // query previews them live; while it's stale the whole snapshot holds (a colour changed
+  // mid-edit lands on the next Run).
+  const isStale = () => querySignature !== lastRunSig.current;
   const previewParams = (): ChartParams => {
-    const stale = querySignature !== lastRunSig.current;
-    const base = stale && ranParams.current ? ranParams.current : paramsForSave();
+    const base = isStale() && ranParams.current ? ranParams.current : paramsForSave();
     return { ...base, columnSettings: effCS };
+  };
+
+  // Same rule for the two previews that don't take a ChartParams. Only the fields that
+  // name result columns are frozen — the interactive ones (collapse, sort, totals, column
+  // widths) keep working on the result that's on screen.
+  const previewPivotDims = () => {
+    const p = previewParams();
+    return { rowDims: p.rows ?? [], colDims: p.cols ?? [], metrics: p.metrics ?? [] };
+  };
+  const previewTableDims = (): string[] => {
+    const live = tableMetrics.length > 0 ? tableCols : [];
+    return isStale() && ranTableDims.current ? ranTableDims.current : live;
   };
 
   function addFilter(f: ChartFilter) {
@@ -985,7 +1002,7 @@ export default function ChartExplore() {
             input={{
               columns: data.columns.map((c) => c.name),
               rows: data.rows,
-              rowDims: pRows, colDims: pCols, metrics: pVals,
+              ...previewPivotDims(),
               showRowTotals, showColTotals, condense, collapsed,
               sortDims: pivotSort,
             }}
@@ -1016,7 +1033,7 @@ export default function ChartExplore() {
           <ChartTable columns={data.columns} rows={data.rows}
             columnSettings={effCS} conditionalFormatting={conditionalFormatting}
             tableState={tableState} onTableStateChange={setTableState}
-            dimensionColumns={tableMetrics.length > 0 ? tableCols : []}
+            dimensionColumns={previewTableDims()}
             onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })} />
         )}
         {finished && viz !== "table" && viz !== "pivot_table" && (
