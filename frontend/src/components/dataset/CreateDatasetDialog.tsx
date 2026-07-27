@@ -25,9 +25,13 @@ export function CreateDatasetDialog({ ws, open, onOpenChange, initialSql, initia
   const [catalog, setCatalog] = useState("");
   const [schema, setSchema] = useState("");
   const [table, setTable] = useState("");
-  const cats = useCatalogs(ws, isTrino ? (dbId || null) : null);
-  const schemas = useSchemas(ws, dbId || null, isTrino ? catalog : "");
-  const tables = useTables(ws, dbId || null, catalog, schema);
+  // Only hit the engine while the dialog is actually open (it stays mounted-but-
+  // closed inside SQL Lab), and — on Trino — not until a catalog is chosen: a
+  // `schemas?catalog=` with an empty catalog is invalid and 502s. Passing a null
+  // db id disables the query via each hook's `enabled: !!db` gate.
+  const cats = useCatalogs(ws, open && isTrino ? (dbId || null) : null);
+  const schemas = useSchemas(ws, open && dbId && !(isTrino && !catalog) ? dbId : null, isTrino ? catalog : "");
+  const tables = useTables(ws, open ? (dbId || null) : null, catalog, schema);
   const [sql, setSql] = useState(initialSql ?? "");
   const [tab, setTab] = useState<"table" | "sql">(initialTab ?? "table");
 

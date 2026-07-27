@@ -101,10 +101,14 @@ export function useCancelQuery(ws: string) {
 export function useHistory(ws: string) {
   return useQuery<HistoryItem[]>({ queryKey: qk.history(ws), queryFn: async () => (await queriesHistory(ws)).data as unknown as HistoryItem[] });
 }
-export function useResults(ws: string, queryId: string | null, page: number, enabled: boolean) {
+/** Max rows pulled into the browser for client-side sort/filter/expand. The
+ *  results endpoint clamps `page_size` to 1000; larger result sets show the
+ *  first `GRID_ROW_CAP` interactively and point to CSV for the full download. */
+export const GRID_ROW_CAP = 1000;
+export function useResults(ws: string, queryId: string | null, enabled: boolean) {
   return useQuery<ResultsPage>({
-    queryKey: ["sqllab", ws, "results", queryId, page],
-    queryFn: () => fetchResults(ws, queryId!, page, 100),
+    queryKey: ["sqllab", ws, "results", queryId],
+    queryFn: () => fetchResults(ws, queryId!, 0, GRID_ROW_CAP),
     enabled: !!queryId && enabled,
   });
 }
