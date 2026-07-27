@@ -18,9 +18,9 @@ pub use egret_analytics_api::bi::{
     AddColumnBody, CardInput, ChartDataResponse, ChartDto, ChartRunResponse, CreateChart,
     CreateDashboard, CreateDataset, CreateFolder, CreateSource, DashboardCardDto,
     DashboardDetailDto, DashboardSummaryDto, DashboardTabDto, DatasetColumnDto, DatasetDetailDto,
-    DatasetSummaryDto, FolderDto, MetricBody, MetricDto, NewTabInput, RenameFolder, SaveQuery,
-    SavedQueryDto, SchemaColumn, SearchHit, SetFolder, SnippetBody, SnippetDto, UpdateChart,
-    UpdateColumnBody, UpdateDashboard, UpdateDataset,
+    DatasetSummaryDto, DatasetUsageDto, FolderDto, MetricBody, MetricDto, NewTabInput,
+    RenameFolder, SaveQuery, SavedQueryDto, SchemaColumn, SearchHit, SetFolder, SnippetBody,
+    SnippetDto, UpdateChart, UpdateColumnBody, UpdateDashboard, UpdateDataset,
 };
 
 pub fn folder_dto(f: crate::folder::Folder) -> FolderDto {
@@ -48,6 +48,8 @@ pub fn metric_dto(m: Metric) -> MetricDto {
         verbose_name: m.verbose_name,
         description: m.description,
         ordinal: m.ordinal,
+        format: m.format,
+        certified: m.certified,
     }
 }
 
@@ -117,6 +119,9 @@ pub fn detail_dto(
                     expression: c.expression,
                     verbose_name: c.verbose_name,
                     description: c.description,
+                    groupby: c.groupby,
+                    filterable: c.filterable,
+                    format: c.format,
                 }
             })
             .collect(),

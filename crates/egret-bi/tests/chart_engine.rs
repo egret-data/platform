@@ -36,6 +36,9 @@ fn dim(name: &str) -> DatasetColumn {
         expression: None,
         verbose_name: String::new(),
         description: String::new(),
+        groupby: true,
+        filterable: true,
+        format: String::new(),
     }
 }
 
@@ -49,6 +52,8 @@ fn revenue() -> Metric {
         verbose_name: String::new(),
         description: String::new(),
         ordinal: 0,
+        format: String::new(),
+        certified: false,
     }
 }
 

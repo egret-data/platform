@@ -332,9 +332,19 @@ async fn reconcile_preserves_calculated_columns_and_metadata() {
         .await
         .unwrap();
 
-    repo.update_column(ds.id, "id", Some("Order ID"), Some("the id"), None)
-        .await
-        .unwrap();
+    repo.update_column(
+        ds.id,
+        "id",
+        Some("Order ID"),
+        Some("the id"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     repo.add_calc_column(ds.id, "id_x2", "id * 2", "bigint", "numeric", false, "", "")
         .await
         .unwrap();
@@ -403,18 +413,22 @@ async fn metric_and_calc_column_crud() {
         .await
         .unwrap();
 
-    repo.add_metric(ds.id, "total", "SUM(n)", "bigint", "numeric", "Total", "")
-        .await
-        .unwrap();
+    repo.add_metric(
+        ds.id, "total", "SUM(n)", "bigint", "numeric", "Total", "", "", false,
+    )
+    .await
+    .unwrap();
     assert!(repo
-        .add_metric(ds.id, "total", "COUNT(*)", "bigint", "numeric", "", "")
+        .add_metric(ds.id, "total", "COUNT(*)", "bigint", "numeric", "", "", "", false)
         .await
         .is_err());
     let ms = repo.metrics(ds.id).await.unwrap();
     assert_eq!(ms.len(), 1);
-    repo.update_metric(ms[0].id, "total2", "COUNT(*)", "bigint", "numeric", "", "")
-        .await
-        .unwrap();
+    repo.update_metric(
+        ms[0].id, "total2", "COUNT(*)", "bigint", "numeric", "", "", "", false,
+    )
+    .await
+    .unwrap();
     assert_eq!(repo.metric_dataset(ms[0].id).await.unwrap(), Some(ds.id));
     repo.delete_metric(ms[0].id).await.unwrap();
     assert!(repo.metrics(ds.id).await.unwrap().is_empty());

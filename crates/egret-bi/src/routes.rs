@@ -697,6 +697,7 @@ pub fn dataset_router() -> Router<BiState> {
             put(ds_update_column).delete(ds_delete_column),
         )
         .route("/ws/{workspace}/datasets/{id}/data", post(ds_data))
+        .route("/ws/{workspace}/datasets/{id}/usage", get(ds_usage))
         .route("/ws/{workspace}/datasets/{id}/folder", patch(ds_set_folder))
         .route("/ws/{workspace}/datasets/{id}/trash", post(ds_trash))
         .route("/ws/{workspace}/datasets/{id}/restore", post(ds_restore))
@@ -1321,6 +1322,8 @@ async fn ds_add_metric(
             &d.type_generic,
             &b.verbose_name,
             &b.description,
+            &b.format,
+            b.certified,
         )
         .await
         .map_err(BiApiError::from)?;
@@ -1376,6 +1379,8 @@ async fn ds_update_metric(
             &d.type_generic,
             &b.verbose_name,
             &b.description,
+            &b.format,
+            b.certified,
         )
         .await
         .map_err(BiApiError::from)?;
@@ -1539,11 +1544,47 @@ async fn ds_update_column(
             &column_name,
             b.verbose_name.as_deref(),
             b.description.as_deref(),
+            b.groupby,
+            b.filterable,
+            b.is_temporal,
+            b.format.as_deref(),
             eu,
         )
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(load_detail(&st, id).await?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/datasets/{id}/usage",
+    tag = "datasets",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "Dataset id")),
+    responses(
+        (status = 200, description = "Charts that use this dataset", body = Vec<crate::model::DatasetUsageDto>),
+        (status = 403, description = "Missing dataset:read permission", body = ErrorBody),
+        (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+    ),
+)]
+async fn ds_usage(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<Vec<crate::model::DatasetUsageDto>>, BiApiError> {
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_READ, obj)
+        .await
+        .map_err(BiApiError::from)?;
+    let items = st.datasets.usage(id).await.map_err(BiApiError::from)?;
+    Ok(Json(
+        items
+            .into_iter()
+            .map(|u| crate::model::DatasetUsageDto {
+                id: u.id.to_string(),
+                name: u.name,
+            })
+            .collect(),
+    ))
 }
 
 #[utoipa::path(
@@ -3079,6 +3120,7 @@ async fn require_folder(
         ds_restore,
         ds_bookmark_add,
         ds_bookmark_remove,
+        ds_usage,
     ),
     components(schemas(
         CreateDataset,
@@ -3091,6 +3133,7 @@ async fn require_folder(
         MetricBody,
         AddColumnBody,
         UpdateColumnBody,
+        crate::model::DatasetUsageDto,
         DatasetDataBody,
         ChartRunResponse,
         egret_core::ColumnMeta,
