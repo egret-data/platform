@@ -96,6 +96,44 @@ describe("missing values", () => {
   });
 });
 
+const manyRows = Array.from({ length: 60 }, (_, i) => [`d${i}`, i + 1]);
+const optMany = (cfg: Record<string, unknown>) =>
+  buildCartesianOption(columns, manyRows, {
+    kind: "line", xAxis: "d", yMetrics: ["rev"], ...cfg,
+  } as never) as never as { series: { showSymbol: boolean }[] };
+
+describe("markers", () => {
+  it("shows them on a short series under auto", () => {
+    expect(opt({}).series[0].showSymbol).toBe(true);
+  });
+
+  it("hides them on a long series under auto — they would read as a lumpy line", () => {
+    expect(optMany({}).series[0].showSymbol).toBe(false);
+  });
+
+  it("obeys an explicit choice in both directions", () => {
+    expect(opt({ markers: "off" }).series[0].showSymbol).toBe(false);
+    expect(optMany({ markers: "on" }).series[0].showSymbol).toBe(true);
+  });
+
+  it("lets a series override the chart", () => {
+    expect(opt({ markers: "off", seriesLine: { rev: { markers: "on" } } }).series[0].showSymbol).toBe(true);
+    expect(optMany({ markers: "on", seriesLine: { rev: { markers: "off" } } }).series[0].showSymbol).toBe(false);
+  });
+
+  it("counts the points actually plotted, not the rows fetched", () => {
+    // A breakout splits rows across series, so each series is shorter than the result set.
+    const cols = [{ name: "d", type: "varchar" }, { name: "cat", type: "varchar" }, { name: "rev", type: "double" }];
+    const rs = Array.from({ length: 60 }, (_, i) => [`d${i % 20}`, i % 3 === 0 ? "x" : "y", i]);
+    const o = buildCartesianOption(cols, rs, {
+      kind: "line", xAxis: "d", series: "cat", yMetrics: ["rev"],
+    } as never) as never as { series: { showSymbol: boolean; data: unknown[] }[] };
+    // Each series has 20 points, well under the threshold, even though 60 rows came back.
+    expect(o.series[0].data.length).toBeLessThanOrEqual(20);
+    expect(o.series[0].showSymbol).toBe(true);
+  });
+});
+
 describe("missing zero and stacking", () => {
   const cols = [...columns, { name: "qty", type: "double" }];
   const rs = [["a", 1, 4], ["b", null, 4], ["c", 3, 4]];

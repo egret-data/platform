@@ -76,6 +76,8 @@ export function cartesianSeriesNames(
 }
 
 const BAR_MIN_HEIGHT = 1; // keep sub-pixel bars visible, like Metabase's barMinHeight
+/** Above this many points on one line, markers merge into the line rather than marking it. */
+const MARKER_AUTO_MAX = 30;
 
 interface SeriesLike { name?: string; data: (number | null)[]; yAxisIndex?: number; itemStyle?: { color?: string }; __trend?: boolean; __total?: boolean; __metric?: string }
 
@@ -395,11 +397,12 @@ function decorateSeries(
     const shape = ln.shape ?? cfg.lineShape ?? "linear";
     out.smooth = shape === "smooth";
     if (shape === "step") out.step = "middle";   // egret's existing step mode, not Metabase's step-after
-    // Shim over the old boolean shape, preserving today's rendered output byte-for-byte
-    // until task 4-6 rewrites this properly against missing/markers directly.
-    // NOTE: `markers ?? "on"` (not "auto") — "auto" doesn't exist as real behavior yet;
-    // that's task 5.
-    out.showSymbol = (cfg.markers ?? "on") !== "off";
+    // Markers stop reading as points and start reading as a lumpy line once they touch. The
+    // count is the series' own points, not the result set: a breakout splits the rows across
+    // several shorter lines, each of which can still carry markers comfortably.
+    const markers = ln.markers ?? cfg.markers ?? "auto";
+    out.showSymbol =
+      markers === "on" || (markers === "auto" && (s.data?.length ?? 0) <= MARKER_AUTO_MAX);
     // Chart-wide only: `LineSeriesStyle` has no `missing`, because how a gap is read is a
     // statement about the data, and two series disagreeing would make the chart say two
     // things at once.
