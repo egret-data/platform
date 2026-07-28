@@ -388,12 +388,17 @@ function decorateSeries(
   }
   if (cfg.kind === "area") out.areaStyle = { opacity: CHART_THEME.areaOpacity };
   if (type === "line") {
+    // A series may depart from the chart-wide line appearance. Metabase keeps these settings
+    // per-series only; egret keeps a chart-wide default and lets a series override it, so the
+    // common case stays one control instead of one per line.
+    const ln = cfg.seriesLine?.[s.name] ?? {};
+    const shape = ln.shape ?? cfg.lineShape ?? "linear";
+    out.smooth = shape === "smooth";
+    if (shape === "step") out.step = "middle";   // egret's existing step mode, not Metabase's step-after
     // Shim over the old boolean shape, preserving today's rendered output byte-for-byte
-    // until task 3-6 rewrites this properly against lineShape/missing/markers directly.
+    // until task 4-6 rewrites this properly against missing/markers directly.
     // NOTE: `markers ?? "on"` (not "auto") — "auto" doesn't exist as real behavior yet;
     // that's task 5.
-    out.smooth = (cfg.lineShape ?? "linear") === "smooth";
-    if ((cfg.lineShape ?? "linear") === "step") out.step = "middle";
     out.showSymbol = (cfg.markers ?? "on") !== "off";
     out.connectNulls = (cfg.missing ?? "interpolate") === "interpolate";
     // Cycle the dash style + marker shape per series so lines are distinguishable
