@@ -16,15 +16,14 @@ function Toggle({ id, label, checked, onChange }: { id: string; label: string; c
   );
 }
 
-export function CartesianDisplaySection({
-  kind, config, onChange, seriesNames = [],
-}: {
+interface SectionProps {
   kind: CartesianViz;
   config: CartesianConfig;
   onChange: (patch: Partial<CartesianConfig>) => void;
-  seriesNames?: string[];
-}) {
-  const isBar = kind === "bar";   // Horizontal toggle is for vertical bar only (row is always horizontal)
+}
+
+/** Stacking, per-series colour/label, and the kind-specific series toggles (smooth line, combo type). */
+export function SeriesOptions({ kind, config, onChange, seriesNames = [] }: SectionProps & { seriesNames?: string[] }) {
   const isLineish = kind === "line" || kind === "area";
   const canStack = kind === "bar" || kind === "row" || kind === "area";
   // Default colour a series shows before any override: lone (non-breakout) metric gets the
@@ -32,57 +31,15 @@ export function CartesianDisplaySection({
   const defaultColor = (i: number) =>
     !config.series && seriesNames.length === 1 ? SUMMARIZE_COLOR : seriesColor(i);
   return (
-    <div className="space-y-2.5 pt-1.5">
+    <div className="space-y-2.5">
       <Toggle id="cz-legend" label="Legend" checked={!!config.showLegend} onChange={(v) => onChange({ showLegend: v })} />
-      <Toggle id="cz-labels" label="Data labels" checked={!!config.showLabels} onChange={(v) => onChange({ showLabels: v })} />
       {canStack && <Toggle id="cz-stacked" label="Stacked" checked={!!config.stacked} onChange={(v) => onChange({ stacked: v })} />}
       {canStack && config.stacked && <Toggle id="cz-normalized" label="100% stacked" checked={!!config.normalized} onChange={(v) => onChange({ normalized: v })} />}
       {canStack && config.stacked && !config.normalized && <Toggle id="cz-stacktotal" label="Stack totals" checked={!!config.showStackTotal} onChange={(v) => onChange({ showStackTotal: v })} />}
-      {isBar && <Toggle id="cz-horizontal" label="Horizontal" checked={!!config.horizontal} onChange={(v) => onChange({ horizontal: v })} />}
       {isLineish && <Toggle id="cz-smooth" label="Smooth" checked={!!config.smooth} onChange={(v) => onChange({ smooth: v })} />}
       {isLineish && <Toggle id="cz-connect" label="Connect gaps" checked={!!config.connectNulls} onChange={(v) => onChange({ connectNulls: v })} />}
       {isLineish && <Toggle id="cz-step" label="Step" checked={!!config.step} onChange={(v) => onChange({ step: v })} />}
       {isLineish && <Toggle id="cz-markers" label="Show markers" checked={config.showMarkers !== false} onChange={(v) => onChange({ showMarkers: v })} />}
-      {kind !== "scatter" && <Toggle id="cz-trend" label="Trend line" checked={!!config.trendLine} onChange={(v) => onChange({ trendLine: v })} />}
-      {kind !== "scatter" && <Toggle id="cz-log" label="Log scale" checked={!!config.logScale} onChange={(v) => onChange({ logScale: v })} />}
-
-      {kind !== "scatter" && kind !== "row" && !config.horizontal && (
-        <div className="flex items-center justify-between gap-2">
-          <Label className="text-sm font-normal">X axis scale</Label>
-          <Select value={config.xScale ?? "ordinal"} onValueChange={(v) => onChange({ xScale: v as CartesianConfig["xScale"] })}>
-            <SelectTrigger aria-label="X axis scale" className="h-7 w-28"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="ordinal">Ordinal</SelectItem>
-              <SelectItem value="linear">Linear</SelectItem>
-              <SelectItem value="timeseries">Timeseries</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-      )}
-
-      {config.yMetrics.length > 1 && !config.horizontal && kind !== "row" && (
-        <div className="space-y-1.5 border-t pt-2">
-          <div className="text-xs text-muted-foreground">Y axis</div>
-          {config.yMetrics.map((m) => {
-            const onRight = (config.rightAxisMetrics ?? []).includes(m);
-            return (
-              <div key={m} className="flex items-center justify-between gap-2">
-                <Label className="truncate text-sm font-normal">{m}</Label>
-                <Select value={onRight ? "right" : "left"} onValueChange={(v) => {
-                  const rest = (config.rightAxisMetrics ?? []).filter((x) => x !== m);
-                  onChange({ rightAxisMetrics: v === "right" ? [...rest, m] : rest });
-                }}>
-                  <SelectTrigger aria-label={`axis ${m}`} className="h-7 w-24"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="left">Left</SelectItem>
-                    <SelectItem value="right">Right</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            );
-          })}
-        </div>
-      )}
 
       {seriesNames.length > 0 && (
         <div className="space-y-1.5 border-t pt-2">
@@ -129,19 +86,51 @@ export function CartesianDisplaySection({
           ))}
         </div>
       )}
+    </div>
+  );
+}
 
-      <div className="grid grid-cols-2 gap-2 border-t pt-2">
-        <label className="space-y-1">
-          <span className="text-xs text-muted-foreground">Goal value</span>
-          <Input className="h-8" type="number" placeholder="none"
-            value={config.goalValue ?? ""}
-            onChange={(e) => { const n = Number(e.target.value); onChange({ goalValue: e.target.value === "" || Number.isNaN(n) ? undefined : n }); }} />
-        </label>
-        <label className="space-y-1">
-          <span className="text-xs text-muted-foreground">Goal label</span>
-          <Input className="h-8" placeholder="Goal" value={config.goalLabel ?? ""} onChange={(e) => onChange({ goalLabel: e.target.value || undefined })} />
-        </label>
-      </div>
+/** X-axis scale, the left/right axis split for multi-metric charts, and the axis titles. */
+export function AxesOptions({ kind, config, onChange }: SectionProps) {
+  return (
+    <div className="space-y-2.5">
+      {kind !== "scatter" && kind !== "row" && !config.horizontal && (
+        <div className="flex items-center justify-between gap-2">
+          <Label className="text-sm font-normal">X axis scale</Label>
+          <Select value={config.xScale ?? "ordinal"} onValueChange={(v) => onChange({ xScale: v as CartesianConfig["xScale"] })}>
+            <SelectTrigger aria-label="X axis scale" className="h-7 w-28"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ordinal">Ordinal</SelectItem>
+              <SelectItem value="linear">Linear</SelectItem>
+              <SelectItem value="timeseries">Timeseries</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
+      {config.yMetrics.length > 1 && !config.horizontal && kind !== "row" && (
+        <div className="space-y-1.5 border-t pt-2">
+          <div className="text-xs text-muted-foreground">Y axis</div>
+          {config.yMetrics.map((m) => {
+            const onRight = (config.rightAxisMetrics ?? []).includes(m);
+            return (
+              <div key={m} className="flex items-center justify-between gap-2">
+                <Label className="truncate text-sm font-normal">{m}</Label>
+                <Select value={onRight ? "right" : "left"} onValueChange={(v) => {
+                  const rest = (config.rightAxisMetrics ?? []).filter((x) => x !== m);
+                  onChange({ rightAxisMetrics: v === "right" ? [...rest, m] : rest });
+                }}>
+                  <SelectTrigger aria-label={`axis ${m}`} className="h-7 w-24"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="left">Left</SelectItem>
+                    <SelectItem value="right">Right</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-2 border-t pt-2">
         <label className="space-y-1">
@@ -153,7 +142,23 @@ export function CartesianDisplaySection({
           <Input className="h-8" value={config.yLabel ?? ""} onChange={(e) => onChange({ yLabel: e.target.value })} />
         </label>
       </div>
+    </div>
+  );
+}
 
+/** Horizontal toggle — vertical bar only; row is always horizontal so has nothing to toggle. */
+export function OrientationOption({ kind, config, onChange }: SectionProps) {
+  const isBar = kind === "bar";
+  return isBar ? (
+    <Toggle id="cz-horizontal" label="Horizontal" checked={!!config.horizontal} onChange={(v) => onChange({ horizontal: v })} />
+  ) : null;
+}
+
+/** Manual axis bounds and log scale — not meaningful on a scatter's continuous axes. */
+export function AxisRangeOptions({ kind, config, onChange }: SectionProps) {
+  return (
+    <div className="space-y-2.5">
+      {kind !== "scatter" && <Toggle id="cz-log" label="Log scale" checked={!!config.logScale} onChange={(v) => onChange({ logScale: v })} />}
       {kind !== "scatter" && (
         <div className="grid grid-cols-2 gap-2 border-t pt-2">
           <label className="space-y-1">
@@ -170,6 +175,62 @@ export function CartesianDisplaySection({
           </label>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Data labels, and shortening large axis/label numbers (25.5K instead of 25,468). */
+export function FormatOptions({ config, onChange }: SectionProps) {
+  return (
+    <div className="space-y-2.5">
+      <Toggle id="cz-labels" label="Data labels" checked={!!config.showLabels} onChange={(v) => onChange({ showLabels: v })} />
+      <Toggle id="cz-compact" label="Shorten large numbers" checked={!!config.compactValues} onChange={(v) => onChange({ compactValues: v })} />
+    </div>
+  );
+}
+
+/** Goal (reference line) value and its label. */
+export function GoalOptions({ config, onChange }: SectionProps) {
+  return (
+    <div className="grid grid-cols-2 gap-2 pt-2">
+      <label className="space-y-1">
+        <span className="text-xs text-muted-foreground">Goal value</span>
+        <Input className="h-8" type="number" placeholder="none"
+          value={config.goalValue ?? ""}
+          onChange={(e) => { const n = Number(e.target.value); onChange({ goalValue: e.target.value === "" || Number.isNaN(n) ? undefined : n }); }} />
+      </label>
+      <label className="space-y-1">
+        <span className="text-xs text-muted-foreground">Goal label</span>
+        <Input className="h-8" placeholder="Goal" value={config.goalLabel ?? ""} onChange={(e) => onChange({ goalLabel: e.target.value || undefined })} />
+      </label>
+    </div>
+  );
+}
+
+/** Least-squares trend line overlay — not offered on scatter (no series to fit along an axis). */
+export function TrendOption({ kind, config, onChange }: SectionProps) {
+  return kind !== "scatter" ? (
+    <Toggle id="cz-trend" label="Trend line" checked={!!config.trendLine} onChange={(v) => onChange({ trendLine: v })} />
+  ) : null;
+}
+
+export function CartesianDisplaySection({
+  kind, config, onChange, seriesNames = [],
+}: {
+  kind: CartesianViz;
+  config: CartesianConfig;
+  onChange: (patch: Partial<CartesianConfig>) => void;
+  seriesNames?: string[];
+}) {
+  return (
+    <div className="space-y-2.5 pt-1.5">
+      <SeriesOptions kind={kind} config={config} onChange={onChange} seriesNames={seriesNames} />
+      <OrientationOption kind={kind} config={config} onChange={onChange} />
+      <TrendOption kind={kind} config={config} onChange={onChange} />
+      <AxisRangeOptions kind={kind} config={config} onChange={onChange} />
+      <AxesOptions kind={kind} config={config} onChange={onChange} />
+      <GoalOptions kind={kind} config={config} onChange={onChange} />
+      <FormatOptions kind={kind} config={config} onChange={onChange} />
     </div>
   );
 }
