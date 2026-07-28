@@ -16,6 +16,30 @@ function Toggle({ id, label, checked, onChange }: { id: string; label: string; c
   );
 }
 
+/**
+ * Auto / On / Off — for a setting that now defaults from the data at render time (see
+ * buildCartesianOption), so `undefined` is a real, visible third state rather than "off".
+ * A two-state Switch can't represent that without contradicting the chart it controls.
+ */
+function AutoToggle({
+  id, label, value, onChange, autoHint,
+}: { id: string; label: string; value: boolean | undefined; onChange: (v: boolean | undefined) => void; autoHint: string }) {
+  const current = value === undefined ? "auto" : value ? "on" : "off";
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <Label htmlFor={id} className="text-sm font-normal">{label}</Label>
+      <Select value={current} onValueChange={(v) => onChange(v === "auto" ? undefined : v === "on")}>
+        <SelectTrigger id={id} aria-label={label} className="h-7 w-24"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="auto" title={autoHint}>Auto</SelectItem>
+          <SelectItem value="on">On</SelectItem>
+          <SelectItem value="off">Off</SelectItem>
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
 interface SectionProps {
   kind: CartesianViz;
   config: CartesianConfig;
@@ -186,9 +210,21 @@ export function AxisRangeOptions({ kind, config, onChange }: SectionProps) {
 export function FormatOptions({ config, onChange }: SectionProps) {
   return (
     <div className="space-y-2.5">
-      <Toggle id="cz-legend" label="Legend" checked={!!config.showLegend} onChange={(v) => onChange({ showLegend: v })} />
+      <AutoToggle
+        id="cz-legend"
+        label="Legend"
+        value={config.showLegend}
+        onChange={(v) => onChange({ showLegend: v })}
+        autoHint="Auto shows the legend once there's a breakout or more than one metric"
+      />
       <Toggle id="cz-labels" label="Data labels" checked={!!config.showLabels} onChange={(v) => onChange({ showLabels: v })} />
-      <Toggle id="cz-compact" label="Shorten large numbers" checked={!!config.compactValues} onChange={(v) => onChange({ compactValues: v })} />
+      <AutoToggle
+        id="cz-compact"
+        label="Shorten large numbers"
+        value={config.compactValues}
+        onChange={(v) => onChange({ compactValues: v })}
+        autoHint="Auto shortens once the axis numbers get wide"
+      />
     </div>
   );
 }
