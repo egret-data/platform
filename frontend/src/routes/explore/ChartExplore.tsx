@@ -471,6 +471,7 @@ export default function ChartExplore() {
           running={data.isLoading} saveLabel={id ? "Update" : "Save"}
           exportMenu={
             <ChartExportMenu title={saveName || undefined} columns={resultColumns} rows={data.rows}
+              columnSettings={effCS}
               containerRef={previewRef} disabled={!finished || resultColumns.length === 0} />
           }
           sqlDisclosure={ranSpec && (

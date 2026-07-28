@@ -15,6 +15,16 @@ describe("rowsToCsv", () => {
     expect(rowsToCsv(cols, [[null, undefined as unknown]])).toBe('region,rev\r\n,');
     expect(rowsToCsv([{ name: "n", type: "x" }], [[0], [false]])).toBe('n\r\n0\r\nfalse');
   });
+  it("uses column_title in the header when set, alongside a column with none", () => {
+    expect(
+      rowsToCsv(cols, [["EU", 10]], { rev: { column_title: "Revenue" } }),
+    ).toBe('region,Revenue\r\nEU,10');
+  });
+  it("falls back to the raw name for an empty-string column_title", () => {
+    expect(
+      rowsToCsv(cols, [["EU", 10]], { rev: { column_title: "" } }),
+    ).toBe('region,rev\r\nEU,10');
+  });
 });
 
 describe("exportFilename", () => {

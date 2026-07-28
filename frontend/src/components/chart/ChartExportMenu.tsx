@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import type { ResultColumn } from "@/components/chart/ChartTable";
+import type { ColumnFormat } from "@/components/chart/format-types";
 import { downloadCsv, downloadPng } from "./export-chart";
 
 interface Props {
@@ -17,9 +18,10 @@ interface Props {
   rows: unknown[][];
   containerRef: React.RefObject<HTMLElement>;
   disabled?: boolean;
+  columnSettings?: Record<string, ColumnFormat>;
 }
 
-export function ChartExportMenu({ title, columns, rows, containerRef, disabled }: Props) {
+export function ChartExportMenu({ title, columns, rows, containerRef, disabled, columnSettings }: Props) {
   // PNG availability is read from the DOM when the menu opens (reflects the currently-rendered viz).
   const [hasSvg, setHasSvg] = useState(false);
 
@@ -35,7 +37,7 @@ export function ChartExportMenu({ title, columns, rows, containerRef, disabled }
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem onSelect={() => downloadCsv(title, columns, rows)}>
+        <DropdownMenuItem onSelect={() => downloadCsv(title, columns, rows, columnSettings)}>
           Download CSV
         </DropdownMenuItem>
         {hasSvg && (
