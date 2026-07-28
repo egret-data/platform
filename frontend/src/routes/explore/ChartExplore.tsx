@@ -5,7 +5,7 @@ import { useDatasets, useDataset } from "@/api/datasets";
 import {
   useBuildChartData, useChart, useChartMutations,
   type QuerySpec, type VizType, type ChartParams, type TableState, type ChartFilter,
-  type CartesianConfig, type PieConfig, type ScalarConfig, type ProgressConfig, type GaugeConfig, type FunnelConfig, type WaterfallConfig, type SmartScalarConfig, type BoxplotConfig, type SankeyConfig, isCartesianViz,
+  type PieConfig, type ScalarConfig, type ProgressConfig, type GaugeConfig, type FunnelConfig, type WaterfallConfig, type SmartScalarConfig, type BoxplotConfig, type SankeyConfig,
   type AnyChartParams, type VizSettings, isParamsV2,
 } from "@/api/charts";
 import { useSpecData } from "@/api/useSpecData";
@@ -28,7 +28,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
@@ -38,14 +37,14 @@ import {
 } from "@/components/ui/dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import { FieldZone } from "@/components/chart/config/FieldZone";
-import { SectionLabel } from "@/components/chart/settings/SectionLabel";
 import { pruneUnits } from "@/components/chart/temporal-units";
 import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
-import { MAPS } from "@/components/chart/echarts/maps/registry";
 import { missingFields } from "@/components/chart/requiredFields";
 import { useChartRun } from "@/components/chart/useChartRun";
 import { getDescriptor } from "@/components/chart/viz/registry";
+import { pivotDescriptor } from "@/components/chart/viz/pivot";
+import { tableDescriptor } from "@/components/chart/viz/table";
+import type { VizDescriptor } from "@/components/chart/viz/types";
 import { toRenderParams } from "@/components/chart/viz/renderParams";
 import { StudioPanel } from "@/components/chart/StudioPanel";
 import { ChartEmptyState, ChartLoadingState, ChartErrorState } from "@/components/chart/ChartPreviewStates";
@@ -72,25 +71,11 @@ export default function ChartExplore() {
   const [viz, setViz] = useState<VizType>(!id && isValidViz(typeParam) ? typeParam : "table");
   const [vizPickerOpen, setVizPickerOpen] = useState(false);
 
-  // table-mode controls
-  const [tableMetrics, setTableMetrics] = useState<string[]>([]);
-  // Shared by the table and object-detail viz (both pick raw columns); cleared on dataset change.
-  const [tableCols, setTableCols] = useState<string[]>([]);
   const [temporalUnits, setTemporalUnits] = useState<Record<string, string>>({});
-  // pivot-mode controls (multi-dim ordered)
-  const [pRows, setPRows] = useState<string[]>([]);
-  const [pCols, setPCols] = useState<string[]>([]);
-  const [pVals, setPVals] = useState<string[]>([]);
-  const [showRowTotals, setShowRowTotals] = useState(true);
-  const [showColTotals, setShowColTotals] = useState(true);
-  const [condense, setCondense] = useState(true);
   const [rowLimit, setRowLimit] = useState(1000);
   const [columnSettings, setColumnSettings] = useState<Record<string, ColumnFormat>>({});
   const [conditionalFormatting, setConditionalFormatting] = useState<Rule[]>([]);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [pivotSort, setPivotSort] = useState<Record<string, "asc" | "desc">>({});
   const [tableState, setTableState] = useState<TableState>({});
-  const [cartesian, setCartesian] = useState<CartesianConfig>({ yMetrics: [] });
   const [pie, setPie] = useState<PieConfig>({});
   const [scalar, setScalar] = useState<ScalarConfig>({});
   const [progress, setProgress] = useState<ProgressConfig>({});
@@ -100,15 +85,16 @@ export default function ChartExplore() {
   const [smart, setSmart] = useState<SmartScalarConfig>({});
   const [box, setBox] = useState<BoxplotConfig>({});
   const [sankey, setSankey] = useState<SankeyConfig>({});
-  const [mapCfg, setMapCfg] = useState<{ mapKey: string; region?: string; metric?: string }>({ mapKey: "us_states" });
-  const patchCartesian = (p: Partial<CartesianConfig>) => setCartesian((c) => ({ ...c, ...p }));
   const patchPie = (p: Partial<PieConfig>) => setPie((c) => ({ ...c, ...p }));
   // The descriptor for the active viz, or undefined while it is still on the bridge —
-  // i.e. still driven by the inline branches below. PR2/PR3 empty that bridge out.
+  // i.e. still driven by the inline branches below. PR3 empties that bridge out.
   const descriptor = getDescriptor(viz);
-  // Config the active descriptor works with; cartesian is the only migrated family in PR1.
-  const descConfig = cartesian as never;
-  const patchDescConfig = patchCartesian as (p: never) => void;
+  // One opaque config for whichever viz is active. Only its descriptor reads inside it;
+  // null means "not seeded yet", so the descriptor's own default applies.
+  const [descState, setDescState] = useState<unknown>(null);
+  const descConfig = (descState ?? descriptor?.defaultConfig) as never;
+  const patchDescConfig = ((p: object) =>
+    setDescState((c: unknown) => ({ ...((c ?? descriptor?.defaultConfig) as object), ...p }))) as (p: never) => void;
   // v2 settings carried over from a saved chart, so keys owned by other descriptors (or
   // by a future PR's namespace) survive a round-trip through this builder untouched.
   const [settings, setSettings] = useState<VizSettings>({});
@@ -135,16 +121,9 @@ export default function ChartExplore() {
     const v1 = toRenderParams(c.viz_type, p);
     const desc = getDescriptor(c.viz_type);
     if (desc) {
-      setCartesian(desc.fromParams(p) as CartesianConfig);
+      setDescState(desc.fromParams(p));
       // Carry every stored key forward, including namespaces this build doesn't own yet.
       if (isParamsV2(p)) setSettings(p.settings);
-    } else if (c.viz_type === "pivot_table") {
-      setPRows(v1.rows ?? []);
-      setPCols(v1.cols ?? []);
-      setPVals(v1.metrics ?? []);
-      setShowRowTotals(v1.showRowTotals ?? true);
-      setShowColTotals(v1.showColTotals ?? true);
-      setCondense(v1.condense ?? true);
     } else if (c.viz_type === "pie") {
       setPie(v1.pie ?? {});
     } else if (c.viz_type === "scalar") {
@@ -163,20 +142,11 @@ export default function ChartExplore() {
       setBox(v1.boxplot ?? { category: v1.spec?.columns?.[0], value: v1.spec?.columns?.[1] });
     } else if (c.viz_type === "sankey") {
       setSankey(v1.sankey ?? { source: v1.spec?.dimensions?.[0], target: v1.spec?.dimensions?.[1], metric: v1.spec?.metrics?.[0] });
-    } else if (c.viz_type === "object") {
-      setTableCols(v1.spec?.columns ?? []);
-    } else if (c.viz_type === "map") {
-      setMapCfg(v1.map ?? { mapKey: "us_states" });
-    } else {
-      setTableMetrics(v1.spec?.metrics ?? []);
-      setTableCols([...(v1.spec?.dimensions ?? []), ...(v1.spec?.columns ?? [])]);
     }
     setRowLimit(v1.spec?.row_limit ?? 1000);
     setTemporalUnits(v1.spec?.temporal_units ?? {});
     setColumnSettings(v1.columnSettings ?? {});
     setConditionalFormatting(v1.conditionalFormatting ?? []);
-    setCollapsed(new Set(v1.collapsedRows ?? []));
-    setPivotSort(v1.pivotSort ?? {});
     setTableState(v1.tableState ?? {});
     setFilters(v1.spec?.filters ?? []);
     setSaveName(c.name);
@@ -205,21 +175,6 @@ export default function ChartExplore() {
         <TemporalUnitSelect value={temporalUnits[col]} onChange={(u) => setUnit(col, u)} />
       </div>
     ) : null;
-  const unitList = (dims: string[]) => {
-    const temporal = dims.filter((d) => columns.find((c) => c.column_name === d)?.is_temporal);
-    if (temporal.length === 0) return null;
-    return (
-      <div className="space-y-1">
-        <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Date grouping</Label>
-        {temporal.map((col) => (
-          <div key={col} className="flex items-center justify-between gap-2">
-            <span className="truncate text-xs">{col}</span>
-            <TemporalUnitSelect value={temporalUnits[col]} onChange={(u) => setUnit(col, u)} />
-          </div>
-        ))}
-      </div>
-    );
-  };
 
   function specForRun(): QuerySpec {
     if (descriptor) return descriptor.buildSpec(descConfig, { filters, rowLimit, temporalUnits });
@@ -256,27 +211,8 @@ export default function ChartExplore() {
       const dims = [sankey.source, sankey.target].filter((d): d is string => !!d);
       return { metrics: sankey.metric ? [sankey.metric] : [], dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [], temporal_units: pruneUnits(temporalUnits, dims) };
     }
-    if (viz === "pivot_table") {
-      const dims = [...pRows, ...pCols];
-      const groups = [pRows, pCols].filter((g) => g.length > 0);
-      return {
-        metrics: pVals, dimensions: dims, columns: [], filters, orderby: [],
-        row_limit: rowLimit, rollup_groups: groups, temporal_units: pruneUnits(temporalUnits, dims),
-      };
-    }
-    if (viz === "object") {
-      return { metrics: [], dimensions: [], columns: tableCols, filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
-    }
-    if (viz === "map") {
-      return { metrics: mapCfg.metric ? [mapCfg.metric] : [], dimensions: mapCfg.region ? [mapCfg.region] : [], columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
-    }
-    const agg = tableMetrics.length > 0;
-    const dims = agg ? tableCols : [];
-    return {
-      metrics: tableMetrics, dimensions: dims, columns: agg ? [] : tableCols,
-      filters, orderby: [], row_limit: rowLimit, rollup_groups: [],
-      temporal_units: pruneUnits(temporalUnits, dims),
-    };
+    // Unreachable: every viz without a branch above has a descriptor, which answered first.
+    throw new Error(`no spec builder for viz ${viz}`);
   }
 
   // A temporal dimension defaults to monthly grouping (Metabase-style) until the user changes it.
@@ -299,9 +235,6 @@ export default function ChartExplore() {
   const [autoRun, setAutoRun] = useState(true);
   // Params of the last run, rendered while the query is stale (see previewParams).
   const ranParams = useRef<AnyChartParams | null>(null);
-  // Table grouping columns of the last run — the one preview input that ChartParams
-  // doesn't carry (see previewTableDims).
-  const ranTableDims = useRef<string[] | null>(null);
   // Run state lives in the hook: what ran, the refetch nonce, and whether the current
   // config has drifted from it. `missingNow`/`specForRun`/`paramsForSave` are function
   // declarations, so this can sit above them.
@@ -311,9 +244,8 @@ export default function ChartExplore() {
     buildSpec: specForRun,
     missing: missingNow,
     afterRun: () => {
-      // Snapshot what this run renders with (see previewParams / previewTableDims).
+      // Snapshot what this run renders with (see previewParams / previewConfig).
       ranParams.current = paramsForSave();
-      ranTableDims.current = tableMetrics.length > 0 ? tableCols : [];
     },
   });
   const data = useSpecData(ws, datasetId, ranSpec, !!ranSpec, runNonce);
@@ -354,12 +286,7 @@ export default function ChartExplore() {
   // which sits above it in the body, so an arrow const would be in its temporal dead zone
   // and every bridge viz would crash on open.
   function validationInput() {
-    return {
-      cartesian: { xAxis: cartesian.xAxis, yMetrics: cartesian.yMetrics },
-      pie, scalar, progress, gauge, funnel, waterfall, smart, box, sankey, map: mapCfg,
-      pivot: { rows: pRows, vals: pVals },
-      objectCols: tableCols,
-    };
+    return { pie, scalar, progress, gauge, funnel, waterfall, smart, box, sankey };
   }
 
   /** Fields the active viz still needs — from its descriptor, or the bridge's table. */
@@ -381,17 +308,13 @@ export default function ChartExplore() {
     return { ...toRenderParams(viz, base), columnSettings: effCS };
   };
 
-  // Same rule for the two previews that don't take a ChartParams. Only the fields that
-  // name result columns are frozen — the interactive ones (collapse, sort, totals, column
-  // widths) keep working on the result that's on screen.
-  const previewPivotDims = () => {
-    const p = previewParams();
-    return { rowDims: p.rows ?? [], colDims: p.cols ?? [], metrics: p.metrics ?? [] };
-  };
-  const previewTableDims = (): string[] => {
-    const live = tableMetrics.length > 0 ? tableCols : [];
-    return isStale && ranTableDims.current ? ranTableDims.current : live;
-  };
+  // Same rule for the previews that take a config instead of a ChartParams: frozen at what
+  // last ran while the query is stale, because the field names inside a config address the
+  // columns of the result on screen.
+  function previewConfig<Cfg>(desc: VizDescriptor<Cfg>): Cfg {
+    const base = isStale && ranParams.current ? ranParams.current : paramsForSave();
+    return desc.fromParams(base);
+  }
 
   function addFilter(f: ChartFilter) {
     setFilters((prev) => [...prev.filter((x) => x.col !== f.col), f]);
@@ -417,10 +340,6 @@ export default function ChartExplore() {
         },
       };
     }
-    if (viz === "pivot_table") {
-      return { spec: specForRun(), rows: pRows, cols: pCols, metrics: pVals, showRowTotals, showColTotals, condense, columnSettings, conditionalFormatting, collapsedRows: [...collapsed], pivotSort };
-    }
-    if (isCartesianViz(viz)) return { spec: specForRun(), cartesian, columnSettings };
     if (viz === "pie") return { spec: specForRun(), pie };
     if (viz === "scalar") return { spec: specForRun(), scalar, columnSettings };
     if (viz === "progress") return { spec: specForRun(), progress, columnSettings };
@@ -430,9 +349,8 @@ export default function ChartExplore() {
     if (viz === "smartscalar") return { spec: specForRun(), smartscalar: smart, columnSettings };
     if (viz === "boxplot") return { spec: specForRun(), boxplot: box, columnSettings };
     if (viz === "sankey") return { spec: specForRun(), sankey, columnSettings };
-    if (viz === "object") return { spec: specForRun(), columnSettings };
-    if (viz === "map") return { spec: specForRun(), map: mapCfg };
-    return { spec: specForRun(), columnSettings, conditionalFormatting, tableState };
+    // Unreachable: the remaining viz types all have a descriptor, handled above.
+    throw new Error(`no params builder for viz ${viz}`);
   }
 
   // Serialize the full builder config exactly as it would be persisted — the same
@@ -445,7 +363,6 @@ export default function ChartExplore() {
   // so we only fan those out (everything else in ChartExplore's state model is
   // left untouched).
   function applyParamsBack(next: ChartParams) {
-    if (next.cartesian) setCartesian(next.cartesian);
     if (next.pie) setPie(next.pie);
     if (next.tableState) setTableState(next.tableState);
     if (next.columnSettings) setColumnSettings(next.columnSettings);
@@ -455,11 +372,8 @@ export default function ChartExplore() {
   async function save() {
     if (!datasetId) { toast.error("Pick a dataset"); return; }
     if (!saveName.trim()) { toast.error("Name required"); return; }
-    if (viz === "pivot_table" && (pRows.length === 0 || pVals.length === 0)) {
-      toast.error("Pivot needs at least one row dimension and one value"); return;
-    }
-    if (viz === "map" && (!mapCfg.region || !mapCfg.metric)) { toast.error("Map needs a region and a metric"); return; }
-    if (viz === "object" && tableCols.length === 0) { toast.error("Object detail needs at least one column"); return; }
+    const gaps = missingNow();
+    if (gaps.length) { toast.error(`This chart needs ${gaps.join(" and ")}`); return; }
     try {
       if (id) {
         await mutations.update.mutateAsync({ id, dataset_id: datasetId, name: saveName.trim(), description: saveDesc, viz_type: viz, params: paramsForSave() });
@@ -480,20 +394,18 @@ export default function ChartExplore() {
   function changeViz(v: VizType) {
     setViz(v);
     resetRun();
+    // A different viz means a different config shape; its descriptor's default applies.
+    setDescState(null);
     if (!id) setSearchParams({ type: v });
   }
 
-  function toggleTableMetric(name: string) {
-    setTableMetrics((prev) => prev.includes(name) ? prev.filter((m) => m !== name) : [...prev, name]);
-  }
-  function toggleTableCol(name: string) {
-    setTableCols((prev) => prev.includes(name) ? prev.filter((c) => c !== name) : [...prev, name]);
-  }
 
   function resetControls() {
-    setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]);
-    setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setFilters([]); resetRun();
-    setCartesian({ yMetrics: [] }); setPie({}); setScalar({}); setProgress({}); setGauge({}); setFunnel({}); setWaterfall({}); setSmart({}); setBox({}); setSankey({});
+    // `null` drops back to the active descriptor's defaultConfig; the bridge types still
+    // need their own hooks cleared by hand until PR3 retires them.
+    setDescState(null); setSettings({});
+    setColumnSettings({}); setConditionalFormatting([]); setTableState({}); setFilters([]); resetRun();
+    setPie({}); setScalar({}); setProgress({}); setGauge({}); setFunnel({}); setWaterfall({}); setSmart({}); setBox({}); setSankey({});
     setTemporalUnits({});
   }
 
@@ -596,95 +508,9 @@ export default function ChartExplore() {
               </Select>
             </div>
 
-            {viz === "table" && (
-              <>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metrics</Label>
-                  <p className="text-xs text-muted-foreground">Pick metrics for an aggregated table, or just columns for raw rows.</p>
-                  <div className="space-y-1 pt-1">
-                    {metrics.length === 0 && <p className="text-xs italic text-muted-foreground">No metrics on this dataset.</p>}
-                    {metrics.map((m) => (
-                      <div key={m.metric_name} className="flex items-center gap-2">
-                        <Checkbox id={`metric-${m.metric_name}`} checked={tableMetrics.includes(m.metric_name)} onCheckedChange={() => toggleTableMetric(m.metric_name)} />
-                        <Label htmlFor={`metric-${m.metric_name}`} className="cursor-pointer text-sm font-normal">{m.metric_name}</Label>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Columns</Label>
-                  <div className="space-y-1 pt-1">
-                    {columns.length === 0 && <p className="text-xs italic text-muted-foreground">Select a dataset to see columns.</p>}
-                    {columns.map((col) => (
-                      <div key={col.column_name} className="flex items-center gap-2">
-                        <Checkbox id={`col-${col.column_name}`} checked={tableCols.includes(col.column_name)} onCheckedChange={() => toggleTableCol(col.column_name)} />
-                        <Label htmlFor={`col-${col.column_name}`} className="cursor-pointer text-sm font-normal">{col.column_name}</Label>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                {unitList(tableMetrics.length > 0 ? tableCols : [])}
-              </>
-            )}
 
-            {viz === "object" && (
-              <div className="space-y-1">
-                <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Fields</Label>
-                <div className="space-y-1 pt-1">
-                  {columns.length === 0 && <p className="text-xs italic text-muted-foreground">Select a dataset to see columns.</p>}
-                  {columns.map((col) => (
-                    <div key={col.column_name} className="flex items-center gap-2">
-                      <Checkbox id={`obj-${col.column_name}`} checked={tableCols.includes(col.column_name)} onCheckedChange={() => toggleTableCol(col.column_name)} />
-                      <Label htmlFor={`obj-${col.column_name}`} className="cursor-pointer text-sm font-normal">{col.column_name}</Label>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
 
-            {viz === "map" && (
-              <>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Map</Label>
-                  <Select value={mapCfg.mapKey} onValueChange={(v) => setMapCfg((m) => ({ ...m, mapKey: v }))}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {Object.values(MAPS).map((d) => <SelectItem key={d.key} value={d.key}>{d.label}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Region</Label>
-                  <Select value={mapCfg.region ?? ""} onValueChange={(v) => setMapCfg((m) => ({ ...m, region: v || undefined }))}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a region column…" /></SelectTrigger>
-                    <SelectContent>
-                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
-                  <Select value={mapCfg.metric ?? ""} onValueChange={(v) => setMapCfg((m) => ({ ...m, metric: v || undefined }))}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
-                    <SelectContent>
-                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </>
-            )}
 
-            {viz === "pivot_table" && (
-              <>
-                <FieldZone label="Rows" selected={pRows} onChange={setPRows}
-                  options={columns.map((c) => c.column_name).filter((n) => !pCols.includes(n))} />
-                <FieldZone label="Columns" selected={pCols} onChange={setPCols}
-                  options={columns.map((c) => c.column_name).filter((n) => !pRows.includes(n))} />
-                {unitList([...pRows, ...pCols])}
-                <FieldZone label="Values" selected={pVals} onChange={setPVals}
-                  options={metrics.map((m) => m.metric_name)} />
-              </>
-            )}
 
             {descriptor && (
               <StudioPanel descriptor={descriptor} config={descConfig} onConfigChange={patchDescConfig}
@@ -917,25 +743,6 @@ export default function ChartExplore() {
 
           {/* ── DISPLAY TAB ── */}
           <TabsContent value="display" className="space-y-4">
-            {viz === "pivot_table" && (
-              <div className="space-y-1">
-                <SectionLabel>Totals</SectionLabel>
-                <div className="space-y-2.5 pt-1.5">
-                  <div className="flex items-center justify-between">
-                    <Label htmlFor="show-row-totals" className="text-sm font-normal">Row totals</Label>
-                    <Switch id="show-row-totals" checked={showRowTotals} onCheckedChange={(v) => setShowRowTotals(v)} />
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <Label htmlFor="show-col-totals" className="text-sm font-normal">Column totals</Label>
-                    <Switch id="show-col-totals" checked={showColTotals} onCheckedChange={(v) => setShowColTotals(v)} />
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <Label htmlFor="condense-totals" className="text-sm font-normal">Condense duplicate totals</Label>
-                    <Switch id="condense-totals" checked={condense} onCheckedChange={(v) => setCondense(v)} />
-                  </div>
-                </div>
-              </div>
-            )}
 
             {descriptor ? (
               <StudioPanel descriptor={descriptor} config={descConfig} onConfigChange={patchDescConfig}
@@ -983,43 +790,50 @@ export default function ChartExplore() {
         {isRunning && <ChartLoadingState />}
 
         <div ref={previewRef} className="contents">
-        {finished && viz === "pivot_table" && (
+        {finished && viz === "pivot_table" && (() => {
+          const pivotCfg = descConfig as unknown as import("@/components/chart/viz/pivot").PivotConfig;
+          return (
           <PivotTable
             input={{
               columns: data.columns.map((c) => c.name),
               rows: data.rows,
-              ...previewPivotDims(),
-              showRowTotals, showColTotals, condense, collapsed,
-              sortDims: pivotSort,
+              ...(() => {
+                const c = previewConfig(pivotDescriptor());
+                return { rowDims: c.rows, colDims: c.cols, metrics: c.metrics };
+              })(),
+              showRowTotals: pivotCfg.showRowTotals ?? true,
+              showColTotals: pivotCfg.showColTotals ?? true,
+              condense: pivotCfg.condense ?? true,
+              collapsed: new Set(pivotCfg.collapsedRows ?? []),
+              sortDims: pivotCfg.sort ?? {},
             }}
             columnSettings={effCS}
             conditionalFormatting={conditionalFormatting}
             metricTypes={metricTypes}
-            onToggleCollapse={(path) =>
-              setCollapsed((prev) => {
-                const next = new Set(prev);
-                if (next.has(path)) next.delete(path); else next.add(path);
-                return next;
-              })
-            }
-            onCycleSort={(dim) =>
-              setPivotSort((prev) => {
-                const cur = prev[dim];
-                const next = { ...prev };
-                if (cur === undefined) next[dim] = "asc";
-                else if (cur === "asc") next[dim] = "desc";
-                else delete next[dim];
-                return next;
-              })
-            }
+            onToggleCollapse={(path) => {
+              const cur = pivotCfg.collapsedRows ?? [];
+              patchDescConfig({ collapsedRows: cur.includes(path) ? cur.filter((x) => x !== path) : [...cur, path] } as never);
+            }}
+            onCycleSort={(dim) => {
+              const cur = (pivotCfg.sort ?? {})[dim];
+              const next = { ...(pivotCfg.sort ?? {}) };
+              if (cur === undefined) next[dim] = "asc";
+              else if (cur === "asc") next[dim] = "desc";
+              else delete next[dim];
+              patchDescConfig({ sort: next } as never);
+            }}
             onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })}
           />
-        )}
+          );
+        })()}
         {finished && viz === "table" && (
           <ChartTable columns={data.columns} rows={data.rows}
             columnSettings={effCS} conditionalFormatting={conditionalFormatting}
             tableState={tableState} onTableStateChange={setTableState}
-            dimensionColumns={previewTableDims()}
+            dimensionColumns={(() => {
+              const c = previewConfig(tableDescriptor());
+              return c.metrics.length > 0 ? c.columns : [];
+            })()}
             onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })} />
         )}
         {finished && viz !== "table" && viz !== "pivot_table" && (
