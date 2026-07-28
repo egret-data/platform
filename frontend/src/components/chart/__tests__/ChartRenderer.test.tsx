@@ -1,13 +1,20 @@
 // src/components/chart/__tests__/ChartRenderer.test.tsx
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { ChartRenderer } from "../ChartRenderer";
 import type { ChartParams } from "@/api/charts";
 
+// Captures the `option` prop each render passes to EChartsRenderer, so tests can assert on
+// what actually reaches the renderer — the exact seam where four settings (maxCategories,
+// compactValues, seriesOrder, hiddenSeries) were once silently dropped by a hand-maintained
+// field whitelist in ChartRenderer.
+let mockLastOption: unknown;
+
 vi.mock("@/components/chart/echarts/EChartsRenderer", () => ({
-  EChartsRenderer: ({ onPointClick }: { onPointClick?: (p: { name?: string; seriesName?: string; value?: unknown; x: number; y: number }) => void }) => (
-    <button data-testid="echarts" onClick={() => onPointClick?.({ name: "EU", seriesName: "rev", value: 10, x: 3, y: 4 })} />
-  ),
+  EChartsRenderer: ({ option, onPointClick }: { option: unknown; onPointClick?: (p: { name?: string; seriesName?: string; value?: unknown; x: number; y: number }) => void }) => {
+    mockLastOption = option;
+    return <button data-testid="echarts" onClick={() => onPointClick?.({ name: "EU", seriesName: "rev", value: 10, x: 3, y: 4 })} />;
+  },
 }));
 
 const params = (p: Partial<ChartParams> = {}): ChartParams => ({
@@ -16,6 +23,10 @@ const params = (p: Partial<ChartParams> = {}): ChartParams => ({
 });
 
 describe("ChartRenderer", () => {
+  beforeEach(() => {
+    mockLastOption = undefined;
+  });
+
   it("renders a table viz with formatted cells", () => {
     render(
       <ChartRenderer
@@ -154,5 +165,40 @@ describe("ChartRenderer", () => {
     expect(cell.className).toContain("cursor-pointer");
     fireEvent.click(cell);
     expect(onValueClick).toHaveBeenCalled();
+  });
+
+  // These two pin the ChartRenderer -> buildCartesianOption seam itself: every field on
+  // CartesianConfig must reach the option, not just the ones someone remembered to list.
+  it("forwards cartesian.maxCategories through to the built option", () => {
+    render(
+      <ChartRenderer
+        vizType="bar"
+        params={params({ cartesian: { xAxis: "region", yMetrics: ["revenue"], maxCategories: 3 } })}
+        columns={[{ name: "region", type: "varchar" }, { name: "revenue", type: "double" }]}
+        rows={[["a", 10], ["b", 8], ["c", 6], ["d", 4], ["e", 2]]}
+      />,
+    );
+    const data = (mockLastOption as { xAxis: { data: string[] } }).xAxis.data;
+    expect(data[data.length - 1]).toBe("Other");
+  });
+
+  it("forwards cartesian.hiddenSeries through to the built option", () => {
+    render(
+      <ChartRenderer
+        vizType="bar"
+        params={params({
+          cartesian: { xAxis: "region", series: "cat", yMetrics: ["revenue"], hiddenSeries: ["B"] },
+        })}
+        columns={[
+          { name: "region", type: "varchar" },
+          { name: "cat", type: "varchar" },
+          { name: "revenue", type: "double" },
+        ]}
+        rows={[["a", "A", 10], ["a", "B", 5], ["b", "A", 20], ["b", "B", 15]]}
+      />,
+    );
+    const names = (mockLastOption as { series: { name?: string }[] }).series.map((s) => s.name);
+    expect(names).not.toContain("B");
+    expect(names).toContain("A");
   });
 });
