@@ -62,7 +62,7 @@ function ControlGroup<Cfg>({ title, controls, controlProps }: {
         <Control key={id} {...controlProps} />
       ))}
       {advanced.length > 0 && (
-        <Collapsible open={open} onOpenChange={setOpen}>
+        <Collapsible open={open} onOpenChange={setOpen} className="space-y-1.5">
           <CollapsibleContent className="space-y-1.5">
             {advanced.map(({ id, render: Control }) => <Control key={id} {...controlProps} />)}
           </CollapsibleContent>
