@@ -14,6 +14,13 @@ interface Props<Cfg> {
   rows: unknown[][];
   unitRow: (col?: string) => ReactNode;
   tab: "data" | "display";
+  /**
+   * The caller renders more content in this tab after this panel — e.g. the shell-owned
+   * `SharedDisplaySections` that always follows the Display tab. A descriptor declaring no
+   * controls of its own is not the same as the tab being empty, so when this is set we stay
+   * silent instead of telling the user "no options" right above the options that follow.
+   */
+  hasMoreBelow?: boolean;
 }
 
 /**
@@ -21,10 +28,11 @@ interface Props<Cfg> {
  * any specific viz — which is the whole point of the registry.
  */
 export function StudioPanel<Cfg>({
-  descriptor, config, onConfigChange, columns, metrics, resultColumns, rows, unitRow, tab,
+  descriptor, config, onConfigChange, columns, metrics, resultColumns, rows, unitRow, tab, hasMoreBelow,
 }: Props<Cfg>) {
   const shown = descriptor.controls.filter((c) => c.section === tab);
   if (shown.length === 0) {
+    if (hasMoreBelow) return null;
     return <p className="text-xs text-muted-foreground">No {tab} options for this chart type.</p>;
   }
   const controlProps = { config, onChange: onConfigChange, columns, metrics, resultColumns, rows, unitRow };

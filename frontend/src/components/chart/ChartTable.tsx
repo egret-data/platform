@@ -4,11 +4,11 @@ import {
   type ColumnDef, type ColumnSizingState, type SortingState,
 } from "@tanstack/react-table";
 import {
-  DndContext, PointerSensor, useSensor, useSensors,
+  DndContext, PointerSensor, KeyboardSensor, useSensor, useSensors,
   closestCenter, type DragEndEvent,
 } from "@dnd-kit/core";
 import {
-  SortableContext, horizontalListSortingStrategy, useSortable, arrayMove,
+  SortableContext, horizontalListSortingStrategy, useSortable, arrayMove, sortableKeyboardCoordinates,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { formatValue } from "./format";
@@ -246,7 +246,14 @@ export function ChartTable({
     wasResizing.current = isResizing;
   }, [isResizing]);
 
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    // Without this, reordering a column is reachable only by dragging with a mouse. Its
+    // activator only listens on keydown (Space/Enter start a drag, arrows move it, Space/Enter
+    // again drop it) — sorting is wired to onClick alone, on a wholly separate event, so the
+    // two never fire off the same keypress.
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
   function handleDragEnd(e: DragEndEvent) {
     const { active, over } = e;
     if (!over || active.id === over.id) return;
