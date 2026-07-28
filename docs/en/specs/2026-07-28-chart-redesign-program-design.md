@@ -22,22 +22,24 @@ deck.gl. Even with Metabase (egret lacks pin/grid maps, has everything else).
 Behind Superset on distribution (histogram, heatmap), hierarchy (treemap,
 sunburst), and relationship (graph, tree, bubble) charts.
 
-**Depth, cartesian.** egret already carries 27 settings — stacking,
+**Depth, cartesian.** egret carries a deep cartesian config — stacking,
 normalisation, dual axis, log scale, trend line, goal line, per-series colour and
-label, step/smooth/markers, ordinal/linear/timeseries x. Metabase has six things
-egret does not, all of which matter when real data is messy:
+label, line shape/markers/missing-values, ordinal/linear/timeseries x. Of the six
+Metabase settings this spec originally listed as missing, **four have since shipped**
+in charts 01 and 02:
 
 | Metabase setting | What it does | egret |
 |---|---|---|
-| `graph.max_categories` + `other_category_aggregation_fn` | folds a long tail into "Other" | pie only (`sliceThreshold`) |
-| `graph.series_order` | reorder / hide individual series | — |
-| `graph.tooltip_columns` | extra columns in the tooltip | — |
-| `graph.y_axis.auto_split` | split to a second axis when scales diverge | manual only |
-| `graph.label_value_frequency` | label every Nth point | — |
-| `graph.label_value_formatting` | compact labels (25.5K) | — |
+| `graph.max_categories` | folds a long tail into "Other" | **shipped** #354 (`maxCategories`, opt-in) |
+| `graph.series_order` | reorder / hide individual series | **shipped** #354 (`seriesOrder`, `hiddenSeries`) |
+| `graph.label_value_frequency` | label every Nth point | **shipped** #354 (`labelDensity`) |
+| `graph.label_value_formatting` | compact labels (25.5K) | **shipped** #354 (`compactValues`, auto by magnitude) |
+| `graph.tooltip_columns` | extra columns in the tooltip | still absent (verified 2026-07-29) |
+| `graph.y_axis.auto_split` | split to a second axis when scales diverge | still manual only (verified 2026-07-29) |
 
 **Depth, pie.** egret is ahead: donut, centre total, slice threshold, per-slice
-colour, percent visibility. Metabase adds `pie.decimal_places`.
+colour, percent visibility — plus `sortRows`, `showLegend` and `showLabels`, which
+this spec previously left out. Metabase adds `pie.decimal_places`.
 
 **Depth, table.** ~~The widest gap.~~ **Corrected 2026-07-28, when chart 03 began:
 this row was wrong.** It claimed egret had "no pagination, no freezing". Reading
@@ -52,9 +54,42 @@ The lesson generalises past table: this comparison was written by reading Metaba
 and *recalling* egret. Every remaining per-chart spec must re-check its own row
 against the code before designing from it.
 
-**Depth, trend (smartscalar).** Metabase compares against several baselines
-(previous period, same period last year, a fixed value); egret only compares with
-the immediately previous period.
+**Depth, trend (smartscalar).** Metabase compares against five baselines
+(`COMPARISON_TYPES`: previous period, previous value, N periods ago, a static
+number, another column) and can invert good/bad with
+`scalar.switch_positive_negative`. egret's `SmartScalarConfig` is
+`{ dimension, metric }` — no baseline choice at all. Verified both sides
+2026-07-29.
+
+### The comparison's real defect: it covered four types, not nineteen
+
+**Audited 2026-07-29, after the table row turned out to be wrong.** The sections
+above discuss the cartesian family, pie, table and trend. That is four of nineteen.
+For the other fifteen this spec asserted a one-line summary and no detail — and
+spot-checking egret's own config types found gaps it never mentioned:
+
+| Type | egret's whole config | Not mentioned above |
+|---|---|---|
+| scalar | `{ metric }` | — |
+| progress | `{ metric, goal }` | Metabase has `progress.color` |
+| gauge | `{ metric, min, max }` | Metabase has `gauge.segments` — coloured ranges, the point of a gauge |
+| funnel | `{ dimension, metric }` | egret-side verified only |
+| waterfall | `{ xAxis, metric, showTotal }` | Metabase has increase / decrease / total colours |
+| boxplot | `{ category, value }` | egret-side verified only |
+| sankey | `{ source, target, metric }` | egret-side verified only |
+| map | `{ mapKey, region, metric }` | egret-side verified only |
+| object | `{ columns }` | egret-side verified only |
+
+**Read that table's last column carefully.** Rows marked "egret-side verified only"
+mean the egret config was read from `frontend/src/api/charts.ts`, and Metabase was
+**not** checked for that type. They are not claims that no gap exists — they are
+claims that nobody has looked. The rows naming a Metabase setting were verified in
+the Metabase checkout on 2026-07-29.
+
+So the correction is not "one row was wrong". It is that this was a comparison of
+four types wearing the title of nineteen. Each remaining per-chart spec opens by
+reading both sides for its own type, and records what it verified and what it did
+not.
 
 ## Goal
 
