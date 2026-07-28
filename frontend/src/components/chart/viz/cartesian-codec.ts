@@ -10,7 +10,7 @@ const KEYS = [
   "showLabels", "showLegend", "xLabel", "yLabel", "seriesTypes", "rightAxisMetrics",
   "logScale", "normalized", "goalValue", "goalLabel", "trendLine", "connectNulls",
   "step", "showStackTotal", "seriesColors", "seriesLabels", "yMin", "yMax",
-  "showMarkers", "xScale",
+  "showMarkers", "xScale", "compactValues", "maxCategories",
 ] as const satisfies readonly (keyof CartesianConfig)[];
 
 /** The `cartesian.*` slice of a v2 settings map. Undefined values are dropped, not stored as null. */

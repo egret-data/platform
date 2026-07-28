@@ -43,4 +43,9 @@ describe("cartesianFromParams", () => {
   it("round-trips config → settings → config", () => {
     expect(cartesianFromParams({ version: 2, spec: EMPTY_SPEC, settings: cartesianToSettings(CFG) })).toEqual(CFG);
   });
+
+  it("round-trips maxCategories and compactValues", () => {
+    const cfg: CartesianConfig = { yMetrics: ["total_revenue"], maxCategories: 8, compactValues: true };
+    expect(cartesianFromParams({ version: 2, spec: EMPTY_SPEC, settings: cartesianToSettings(cfg) })).toEqual(cfg);
+  });
 });

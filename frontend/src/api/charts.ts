@@ -86,6 +86,8 @@ export interface CartesianConfig {
   yMax?: number;                 // manual value-axis maximum
   showMarkers?: boolean;         // line/area: show point symbols (default true)
   xScale?: "ordinal" | "linear" | "timeseries";  // x-axis scale (default ordinal)
+  compactValues?: boolean;       // short value-axis labels (25.5K); defaults to on once numbers are wide
+  maxCategories?: number;        // fold all but the largest `maxCategories - 1` into "Other" (unset = off)
 }
 export interface PieConfig {
   dimension?: string;

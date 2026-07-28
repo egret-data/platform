@@ -6,6 +6,7 @@ import { formatValue } from "../../format";
 import { ariaDescription } from "../base";
 import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
+import { foldTail } from "../fold";
 
 export interface ResultColumn { name: string; type: string }
 export interface CartesianBuildConfig {
@@ -42,6 +43,8 @@ export interface CartesianBuildConfig {
   xAxisUnit?: string;            // temporal extraction unit for the x-axis dimension (e.g. "day_of_week")
   /** Short value-axis labels (25.5K). Defaults to on once the numbers are wide. */
   compactValues?: boolean;
+  /** Fold all but the largest `maxCategories - 1` into "Other". Unset keeps every category. */
+  maxCategories?: number;
 }
 
 // The series names a cartesian chart will render — its y-metrics, or the distinct
@@ -239,7 +242,7 @@ export function buildCartesianOption(
   const xType = columns[xi].type;
   const xrows = rows.filter((r) => r[xi] != null);
   const catKey = (v: unknown) => String(v);
-  const categories = sortCategories(distinct(xrows.map((r) => r[xi])), xType);
+  let categories = sortCategories(distinct(xrows.map((r) => r[xi])), xType);
 
 
   // Breakout: one ECharts series per distinct series value (first y-metric only).
@@ -281,6 +284,29 @@ export function buildCartesianOption(
     });
     return decorateSeries({ name: metric, data }, metric, si, cfg, fmt, grouped, singleColor);
   });
+
+  // Folding is offered only where "Other" means one clear thing: a single metric, no
+  // breakout, and a plain category axis. With a breakout the bucket would have to merge
+  // series as well, which changes what the chart says; on a value or time axis "Other" has
+  // no coordinate to sit at; and a temporal extract axis is already a fixed small domain
+  // (twelve months, seven weekdays) that nobody needs folded. Those are separate decisions,
+  // taken when the charts that need them are redesigned.
+  const foldable =
+    cfg.maxCategories != null &&
+    !cfg.series &&
+    cfg.yMetrics.length === 1 &&
+    !usesXScale(cfg) &&
+    !isExtractUnit(cfg.xAxisUnit);
+  if (foldable) {
+    const s = series[0] as unknown as SeriesLike;
+    const folded = foldTail(
+      categories.map((c, i) => ({ name: String(c), value: s.data?.[i] })),
+      cfg.maxCategories,
+    );
+    categories = folded.map((p) => p.name);
+    s.data = folded.map((p) => (typeof p.value === "number" ? p.value : null));
+  }
+
   if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
   if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
   if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
