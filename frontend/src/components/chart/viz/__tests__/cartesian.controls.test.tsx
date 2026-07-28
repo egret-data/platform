@@ -30,6 +30,18 @@ describe("cartesian controls are grouped and per-kind", () => {
     expect(ctrls("row").map((c) => c.id)).not.toContain("orientation");
   });
 
+  it("offers per-series line style to line and area only, grouped under Series and hidden behind advanced", () => {
+    for (const k of ["line", "area"] as const) {
+      const control = ctrls(k).find((c) => c.id === "seriesLineStyle");
+      expect(control, `${k} is missing seriesLineStyle`).toBeTruthy();
+      expect(control!.group).toBe("Series");
+      expect(control!.advanced).toBe(true);
+    }
+    for (const k of ["bar", "row", "scatter", "combo"] as const) {
+      expect(ctrls(k).map((c) => c.id), `${k} should not offer seriesLineStyle`).not.toContain("seriesLineStyle");
+    }
+  });
+
   it("gives every control a unique id, for every kind", () => {
     for (const k of ["bar", "line", "area", "scatter", "combo", "row"] as const) {
       const ids = ctrls(k).map((c) => c.id);

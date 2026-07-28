@@ -5,6 +5,7 @@ import {
   SeriesOptions, AxesOptions, OrientationOption, AxisRangeOptions, FormatOptions, GoalOptions, TrendOption,
 } from "@/components/chart/settings/CartesianDisplaySection";
 import { SeriesOrderSection } from "@/components/chart/settings/SeriesOrderSection";
+import { SeriesLineStyleSection } from "@/components/chart/settings/SeriesLineStyleSection";
 import { cartesianSeriesNames } from "@/components/chart/echarts/options/cartesian";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -101,6 +102,15 @@ function SeriesOrderControl({ config, onChange, resultColumns, rows }: VizContro
   );
 }
 
+// Per-series dash style and width — declared for line/area only (see displayControls) and
+// marked advanced there, so an unbounded per-series list of Selects hides behind "More
+// options" instead of always taking panel space.
+function SeriesLineStyleControl({ config, onChange, resultColumns, rows }: VizControlProps<CartesianConfig>) {
+  const names = cartesianSeriesNames(resultColumns, rows, config);
+  if (names.length === 0) return null;
+  return <SeriesLineStyleSection names={names} seriesLine={config.seriesLine} onChange={onChange} />;
+}
+
 /**
  * The Display tab's controls, grouped under named headings and scoped to what this kind
  * actually plots — bar gets orientation and stacking, line does not get orientation.
@@ -110,6 +120,7 @@ function displayControls(kind: CartesianViz): VizControl<CartesianConfig>[] {
   // OrientationOption's internal isBar gate (which just renders nothing for row), the control
   // itself is not declared for row at all.
   const showOrientation = kind === "bar";
+  const isLineish = kind === "line" || kind === "area";
   return [
     {
       id: "seriesOptions", section: "display", group: "Series",
@@ -119,6 +130,10 @@ function displayControls(kind: CartesianViz): VizControl<CartesianConfig>[] {
       ),
     },
     { id: "seriesOrder", section: "display", group: "Series", render: SeriesOrderControl },
+    ...(isLineish ? [{
+      id: "seriesLineStyle", section: "display" as const, group: "Series", advanced: true,
+      render: SeriesLineStyleControl,
+    }] : []),
     ...(showOrientation ? [{
       id: "orientation", section: "display" as const, group: "Axes",
       render: ({ config, onChange }: VizControlProps<CartesianConfig>) => (

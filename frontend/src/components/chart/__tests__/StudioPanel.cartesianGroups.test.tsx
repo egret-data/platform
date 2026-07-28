@@ -49,3 +49,43 @@ describe("StudioPanel renders bar's grouped Display controls", () => {
     expect(screen.getByLabelText("Trend line")).toBeInTheDocument();
   });
 });
+
+/**
+ * The per-series style/size control (seriesLineStyle) was extracted out of the always-open
+ * "Series" section and marked advanced so an unbounded per-series list of Selects doesn't
+ * swamp the panel. Extracting a control behind a disclosure is only safe if it stays
+ * reachable — this proves it does, mounted through the real descriptor + StudioPanel for
+ * "line", the kind it's declared for.
+ */
+describe("StudioPanel: per-series line style is reachable behind Series' More options", () => {
+  const props = {
+    descriptor: cartesianDescriptor("line"),
+    config: { xAxis: "region", yMetrics: ["revenue", "cost"] },
+    onConfigChange: vi.fn(),
+    columns: [],
+    metrics: [],
+    resultColumns: [
+      { name: "region", type: "varchar" },
+      { name: "revenue", type: "double" },
+      { name: "cost", type: "double" },
+    ],
+    rows: [
+      ["west", 1, 1],
+      ["east", 2, 2],
+    ],
+    unitRow: () => null,
+    tab: "display" as const,
+  };
+
+  it("hides style/size until Series' More options opens, then shows one row per series", async () => {
+    render(<StudioPanel {...props} />);
+    expect(screen.queryByLabelText("style revenue")).not.toBeInTheDocument();
+    for (const trigger of screen.getAllByRole("button", { name: /more options/i })) {
+      await userEvent.click(trigger);
+    }
+    expect(screen.getByLabelText("style revenue")).toBeInTheDocument();
+    expect(screen.getByLabelText("size revenue")).toBeInTheDocument();
+    expect(screen.getByLabelText("style cost")).toBeInTheDocument();
+    expect(screen.getByLabelText("size cost")).toBeInTheDocument();
+  });
+});

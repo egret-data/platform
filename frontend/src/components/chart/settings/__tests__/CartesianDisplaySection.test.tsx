@@ -130,9 +130,10 @@ describe("CartesianDisplaySection", () => {
     expect(onChange).toHaveBeenCalledWith({ yMax: undefined });
   });
 
-  // Task 7: line shape, missing-value and marker controls, gated on isLineish (line/area),
-  // plus per-series style/size. shape and markers stay chart-wide-only in the panel; only
-  // style and size get per-series overrides here (see task doc for the deliberate gap).
+  // Task 7: line shape, missing-value and marker controls, gated on isLineish (line/area).
+  // Per-series style/size live in their own control (SeriesLineStyleSection, tested
+  // separately) so they can hide behind "More options"; shape and markers stay
+  // chart-wide-only everywhere (see task doc for the deliberate gap).
   describe("line shape / missing values / markers (isLineish only)", () => {
     it("all three render for line", () => {
       render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
@@ -197,23 +198,14 @@ describe("CartesianDisplaySection", () => {
       render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
       expect(within(screen.getByLabelText("Markers")).getByText("Auto")).toBeInTheDocument();
     });
-  });
 
-  it("setting one series' style preserves the other series' entry (seriesLine merges, does not replace)", async () => {
-    const user = userEvent.setup();
-    const onChange = vi.fn();
-    render(
-      <CartesianDisplaySection
-        kind="line"
-        config={{ yMetrics: ["a", "b"], seriesLine: { a: { style: "dashed" }, b: { size: "L" } } }}
-        onChange={onChange}
-        seriesNames={["a", "b"]}
-      />,
-    );
-    await user.click(screen.getByLabelText("style b"));
-    await user.click(await screen.findByRole("option", { name: "Dotted" }));
-    expect(onChange).toHaveBeenCalledWith({
-      seriesLine: { a: { style: "dashed" }, b: { size: "L", style: "dotted" } },
+    // The regression a plain string Select must not repeat: AutoToggle translates through a
+    // boolean, so a stored literal "auto" (permitted by the type, though nothing writes it
+    // today) would map to `false` and read as "Off". Binding directly to the string means
+    // "auto" always means Auto, whatever wrote it.
+    it("Markers: a stored literal \"auto\" displays as Auto, not Off", () => {
+      render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"], markers: "auto" }} onChange={() => {}} />);
+      expect(within(screen.getByLabelText("Markers")).getByText("Auto")).toBeInTheDocument();
     });
   });
 });
