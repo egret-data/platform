@@ -82,9 +82,9 @@ export function SeriesOptions({ kind, config, onChange, seriesNames = [] }: Sect
           <Select value={config.missing ?? "interpolate"} onValueChange={(v) => onChange({ missing: v as CartesianConfig["missing"] })}>
             <SelectTrigger aria-label="Missing values" className="h-7 w-28"><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="interpolate">Interpolate</SelectItem>
+              <SelectItem value="interpolate">Connect</SelectItem>
               <SelectItem value="zero">Zero</SelectItem>
-              <SelectItem value="none">None</SelectItem>
+              <SelectItem value="none">Gap</SelectItem>
             </SelectContent>
           </Select>
         </div>
