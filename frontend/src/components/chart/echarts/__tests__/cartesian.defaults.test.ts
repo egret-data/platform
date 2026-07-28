@@ -90,4 +90,24 @@ describe("cartesian defaults, applied at render time", () => {
   it("treats an empty yLabel as 'no title' too", () => {
     expect(opt({ kind: "bar", xAxis: "region", yMetrics: ["total_revenue"], yLabel: "" }).yAxis.name).toBe("");
   });
+
+  it("titles the axis in the same colour as its labels, on every axis kind", () => {
+    // Plain category/value axes.
+    const o = opt({ kind: "bar", xAxis: "region", yMetrics: ["total_revenue"] });
+    expect(o.xAxis.nameTextStyle.color).toBe(o.xAxis.axisLabel.color);
+    expect(o.yAxis.nameTextStyle.color).toBe(o.yAxis.axisLabel.color);
+
+    // A non-ordinal (linear/timeseries) x-axis uses scaleAxis instead of categoryAxis.
+    const scaled = opt({ kind: "bar", xAxis: "total_revenue", yMetrics: ["order_count"], xScale: "linear" });
+    expect(scaled.xAxis.nameTextStyle.color).toBe(scaled.xAxis.axisLabel.color);
+
+    // A dual axis builds its right side through the same mkValueAxis helper.
+    const dual = opt({
+      kind: "combo", xAxis: "region",
+      yMetrics: ["order_count", "total_revenue"],
+      rightAxisMetrics: ["order_count"],
+    });
+    expect(dual.yAxis[0].nameTextStyle.color).toBe(dual.yAxis[0].axisLabel.color);
+    expect(dual.yAxis[1].nameTextStyle.color).toBe(dual.yAxis[1].axisLabel.color);
+  });
 });

@@ -479,6 +479,9 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   const categoryAxis = {
     type: "category" as const, data: categories,
     name: xTitle, nameLocation: "middle" as const, nameGap: 28,
+    // The title matches the label colour — an axis name is not a lesser piece of chrome
+    // than the values beneath it, and ECharts' default nameTextStyle colour reads paler.
+    nameTextStyle: { color: axisLabelColor },
     axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, interval: step, rotate },
     axisLine: { lineStyle: { color: gridLine } },
   };
@@ -487,6 +490,7 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   const scaleAxis = {
     type: cfg.xScale === "timeseries" ? ("time" as const) : ("value" as const),
     name: xTitle, nameLocation: "middle" as const, nameGap: 28,
+    nameTextStyle: { color: axisLabelColor },
     axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor },
     axisLine: { lineStyle: { color: gridLine } },
     splitLine: { show: false as const },
@@ -496,6 +500,7 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     type: cfg.logScale ? ("log" as const) : ("value" as const),
     name: position === "right" ? undefined : yTitle,
     nameLocation: "middle" as const,
+    nameTextStyle: { color: axisLabelColor },
     // Clear of the tick labels: a vertical axis's numbers are far wider than a horizontal
     // axis's are tall.
     nameGap: horizontal ? 28 : 44,
