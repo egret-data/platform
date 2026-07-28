@@ -46,10 +46,14 @@ interface SectionProps {
   onChange: (patch: Partial<CartesianConfig>) => void;
 }
 
-/** Stacking, per-series colour/label, and the kind-specific series toggles (smooth line, combo type). */
+/**
+ * Stacking, the chart-wide line-shape/missing-value/marker choices (line and area only),
+ * per-series colour/label, and the combo per-metric series type. Per-series style and size
+ * live in their own control (SeriesLineStyleSection) so they can hide behind "More options".
+ */
 export function SeriesOptions({ kind, config, onChange, seriesNames = [] }: SectionProps & { seriesNames?: string[] }) {
-  const isLineish = kind === "line" || kind === "area";
   const canStack = kind === "bar" || kind === "row" || kind === "area";
+  const isLineish = kind === "line" || kind === "area";
   // Default colour a series shows before any override: lone (non-breakout) metric gets the
   // summarize green, everything else cycles the accent palette — mirrors the renderer.
   const defaultColor = (i: number) =>
@@ -59,10 +63,49 @@ export function SeriesOptions({ kind, config, onChange, seriesNames = [] }: Sect
       {canStack && <Toggle id="cz-stacked" label="Stacked" checked={!!config.stacked} onChange={(v) => onChange({ stacked: v })} />}
       {canStack && config.stacked && <Toggle id="cz-normalized" label="100% stacked" checked={!!config.normalized} onChange={(v) => onChange({ normalized: v })} />}
       {canStack && config.stacked && !config.normalized && <Toggle id="cz-stacktotal" label="Stack totals" checked={!!config.showStackTotal} onChange={(v) => onChange({ showStackTotal: v })} />}
-      {isLineish && <Toggle id="cz-smooth" label="Smooth" checked={!!config.smooth} onChange={(v) => onChange({ smooth: v })} />}
-      {isLineish && <Toggle id="cz-connect" label="Connect gaps" checked={!!config.connectNulls} onChange={(v) => onChange({ connectNulls: v })} />}
-      {isLineish && <Toggle id="cz-step" label="Step" checked={!!config.step} onChange={(v) => onChange({ step: v })} />}
-      {isLineish && <Toggle id="cz-markers" label="Show markers" checked={config.showMarkers !== false} onChange={(v) => onChange({ showMarkers: v })} />}
+      {isLineish && (
+        <div className="flex items-center justify-between gap-2">
+          <Label className="text-sm font-normal">Line shape</Label>
+          <Select value={config.lineShape ?? "linear"} onValueChange={(v) => onChange({ lineShape: v as CartesianConfig["lineShape"] })}>
+            <SelectTrigger aria-label="Line shape" className="h-7 w-24"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="linear">Linear</SelectItem>
+              <SelectItem value="smooth">Smooth</SelectItem>
+              <SelectItem value="step">Step</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+      {isLineish && (
+        <div className="flex items-center justify-between gap-2">
+          <Label className="text-sm font-normal">Missing values</Label>
+          <Select value={config.missing ?? "interpolate"} onValueChange={(v) => onChange({ missing: v as CartesianConfig["missing"] })}>
+            <SelectTrigger aria-label="Missing values" className="h-7 w-28"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="interpolate">Connect</SelectItem>
+              <SelectItem value="zero">Zero</SelectItem>
+              <SelectItem value="none">Gap</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+      {isLineish && (
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="cz-markers" className="text-sm font-normal">Markers</Label>
+          {/* A plain three-option Select bound directly to the string, like Line shape and
+              Missing values above — NOT AutoToggle. AutoToggle's value is boolean|undefined;
+              translating "auto" through it maps that literal to `false` ("Off"), and nothing
+              ever un-writes a value that was never wrong to store in the first place. */}
+          <Select value={config.markers ?? "auto"} onValueChange={(v) => onChange({ markers: v === "auto" ? undefined : (v as CartesianConfig["markers"]) })}>
+            <SelectTrigger id="cz-markers" aria-label="Markers" className="h-7 w-24"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="auto" title="Auto shows markers only when there are few enough points to read">Auto</SelectItem>
+              <SelectItem value="on">On</SelectItem>
+              <SelectItem value="off">Off</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
 
       {seriesNames.length > 0 && (
         <div className="space-y-1.5 border-t pt-2">

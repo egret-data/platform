@@ -1,5 +1,5 @@
 import type { EChartsCoreOption } from "echarts/core";
-import type { CartesianViz } from "@/api/charts";
+import type { CartesianViz, LineSeriesStyle } from "@/api/charts";
 import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue } from "../../format";
@@ -17,7 +17,6 @@ export interface CartesianBuildConfig {
   series?: string;
   stacked?: boolean;
   horizontal?: boolean;
-  smooth?: boolean;
   showLabels?: boolean;
   showLegend?: boolean;
   xLabel?: string;
@@ -29,14 +28,11 @@ export interface CartesianBuildConfig {
   goalValue?: number;            // horizontal reference (goal) line
   goalLabel?: string;
   trendLine?: boolean;           // overlay a least-squares trend line per series
-  connectNulls?: boolean;        // line: bridge gaps across null points
-  step?: boolean;                // line: step interpolation
   showStackTotal?: boolean;      // label the total atop each stacked column
   seriesColors?: Record<string, string>;  // series name -> colour override (Metabase series settings)
   seriesLabels?: Record<string, string>;  // series name -> display label override
   yMin?: number;                 // manual value-axis minimum (auto when undefined)
   yMax?: number;                 // manual value-axis maximum
-  showMarkers?: boolean;         // line/area: show the point symbols (off by default, like Metabase)
   xScale?: "ordinal" | "linear" | "timeseries";  // x-axis scale (default ordinal/category)
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
@@ -51,6 +47,14 @@ export interface CartesianBuildConfig {
   hiddenSeries?: string[];
   /** Data-label density: "fit" drops labels that would collide, "all" draws every one. */
   labelDensity?: "fit" | "all";
+  /** Line shape. One choice, because a line cannot be both smoothed and stepped. */
+  lineShape?: "linear" | "smooth" | "step";
+  /** What a null becomes: bridged, dropped to zero, or left as a break in the line. */
+  missing?: "interpolate" | "zero" | "none";
+  /** Point markers. "auto" shows them only when there are few enough points to read. */
+  markers?: "auto" | "on" | "off";
+  /** Per-series overrides of the chart-wide line appearance, keyed by series name. */
+  seriesLine?: Record<string, LineSeriesStyle>;
 }
 
 // The series names a cartesian chart will render — its y-metrics, or the distinct
@@ -72,8 +76,29 @@ export function cartesianSeriesNames(
 }
 
 const BAR_MIN_HEIGHT = 1; // keep sub-pixel bars visible, like Metabase's barMinHeight
+/** Above this many points on one line, markers merge into the line rather than marking it. */
+const MARKER_AUTO_MAX = 30;
 
-interface SeriesLike { name?: string; data: (number | null)[]; yAxisIndex?: number; itemStyle?: { color?: string }; __trend?: boolean; __total?: boolean; __metric?: string }
+/** Metabase's S/M/L line sizes. M is the theme's own width, so an unset size renders unchanged.
+ * S is 1.5, not ECharts' own 1px default — gridlines/axis lines already render at 1px, and a
+ * data line that weighs the same as the chrome around it undercuts the point of drawing it. */
+const LINE_WIDTHS = { S: 1.5, M: CHART_THEME.lineWidth, L: 4 } as const;
+
+interface SeriesLike { name?: string; data: (number | null)[]; yAxisIndex?: number; itemStyle?: { color?: string }; __trend?: boolean; __total?: boolean; __metric?: string; __markers?: "auto" | "on" | "off" }
+
+/**
+ * Markers stop reading as points and start reading as a lumpy line once they touch. Applied after
+ * folding and x-scaling, because "auto" is a question about the points that end up drawn — and it
+ * counts only the ones that exist: a null draws nothing, so a sparse series is not crowded.
+ */
+function applyMarkers(series: SeriesLike[]): void {
+  for (const s of series) {
+    if (s.__markers == null) continue;
+    const drawn = (s.data ?? []).filter((v) => v != null).length;
+    (s as unknown as Record<string, unknown>).showSymbol =
+      s.__markers === "on" || (s.__markers === "auto" && drawn <= MARKER_AUTO_MAX);
+  }
+}
 
 // A transparent overlay bar whose top label shows each column's stack total —
 // clean-room of Metabase's getStackTotalsSeries.
@@ -302,6 +327,7 @@ export function buildCartesianOption(
     if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
     if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
     if (usesXScale(cfg)) applyXScale(categories, series, cfg);
+    applyMarkers(series as unknown as SeriesLike[]);
     const displayCats = isExtractUnit(cfg.xAxisUnit) ? categories.map((v) => temporalLabel(cfg.xAxisUnit, v)) : categories;
     return baseOption(cfg, displayCats as (string | number)[], series);
   }
@@ -351,6 +377,7 @@ export function buildCartesianOption(
   if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
   if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
   if (usesXScale(cfg)) applyXScale(categories, series, cfg);
+  applyMarkers(series as unknown as SeriesLike[]);
   const displayCats = isExtractUnit(cfg.xAxisUnit) ? categories.map((v) => temporalLabel(cfg.xAxisUnit, v)) : categories;
   return baseOption(cfg, displayCats as (string | number)[], series);
 }
@@ -384,15 +411,50 @@ function decorateSeries(
   }
   if (cfg.kind === "area") out.areaStyle = { opacity: CHART_THEME.areaOpacity };
   if (type === "line") {
-    out.smooth = !!cfg.smooth;
+    // A series may depart from the chart-wide line appearance. Metabase keeps these settings
+    // per-series only; egret keeps a chart-wide default and lets a series override it, so the
+    // common case stays one control instead of one per line.
+    const ln = cfg.seriesLine?.[s.name] ?? {};
+    const shape = ln.shape ?? cfg.lineShape ?? "linear";
+    out.smooth = shape === "smooth";
+    if (shape === "step") out.step = "middle";   // egret's existing step mode, not Metabase's step-after
+    // Resolved here, applied at the end of buildCartesianOption: folding and x-scaling both
+    // rewrite the data afterwards, and "auto" is a question about the points that actually get
+    // drawn.
+    out.__markers = ln.markers ?? cfg.markers ?? "auto";
+    // Chart-wide only: `LineSeriesStyle` has no `missing`, because how a gap is read is a
+    // statement about the data, and two series disagreeing would make the chart say two
+    // things at once.
+    // A log axis has no zero, so filling with one cannot mean what it says — ECharts would drop
+    // the point and break the line at exactly the place the user asked to have filled. Leaving
+    // the gap is the honest version of "this value cannot be shown here".
+    const missing = cfg.logScale && (cfg.missing ?? "interpolate") === "zero"
+      ? "none"
+      : (cfg.missing ?? "interpolate");
+    out.connectNulls = missing === "interpolate";
+    if (missing === "zero") {
+      // ECharts can bridge a null or break at it, but it has no notion of treating one as
+      // zero — that has to be the data, not an option. Safe to rewrite here as plain numbers:
+      // applyXScale (which re-keys onto [x, y] pairs) runs after decorateSeries, never before.
+      // This is not a rendering nicety: the zero becomes a real data point downstream too — it
+      // counts in stack totals, in normalisation, and in a trend fit — because `missing: "zero"`
+      // means the user is asserting what the absent value WAS, not just how to draw it.
+      out.data = (s.data ?? []).map((v) => (v == null ? 0 : v));
+    }
     // Cycle the dash style + marker shape per series so lines are distinguishable
-    // without relying on colour alone (a11y: colour-blind users).
-    out.lineStyle = { width: CHART_THEME.lineWidth, type: lineType(colorIdx) };
+    // without relying on colour alone (a11y: colour-blind users). The dash cycle is an
+    // accessibility feature — it lets lines be told apart without colour — so a per-series
+    // style REPLACES it for that one series only and leaves the rest cycling.
+    // Settings JSON is not whitelisted server-side, so `ln.size` may be a value the type
+    // never promised (e.g. a stored "XL"). `in` guards the lookup so an unknown size falls
+    // back to the theme width instead of `LINE_WIDTHS[unknown]` silently overwriting
+    // ECharts' default width with `undefined`.
+    out.lineStyle = {
+      width: ln.size && ln.size in LINE_WIDTHS ? LINE_WIDTHS[ln.size] : CHART_THEME.lineWidth,
+      type: ln.style ?? lineType(colorIdx),
+    };
     out.symbol = symbolShape(colorIdx);
     out.symbolSize = CHART_THEME.symbolSize;
-    out.showSymbol = cfg.showMarkers !== false;  // markers shown unless explicitly turned off
-    out.connectNulls = cfg.connectNulls ?? true; // Metabase connects across nulls by default
-    if (cfg.step) out.step = "middle";
   }
   // Scatter series get a distinct marker shape per series (shape, not colour).
   if (type === "scatter") { out.symbol = symbolShape(colorIdx); out.symbolSize = CHART_THEME.symbolSize; out.itemStyle = { color, opacity: CHART_THEME.scatterOpacity }; }

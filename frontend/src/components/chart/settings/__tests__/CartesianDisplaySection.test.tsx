@@ -129,4 +129,83 @@ describe("CartesianDisplaySection", () => {
     fireEvent.change(screen.getByLabelText("Y max"), { target: { value: "" } });
     expect(onChange).toHaveBeenCalledWith({ yMax: undefined });
   });
+
+  // Task 7: line shape, missing-value and marker controls, gated on isLineish (line/area).
+  // Per-series style/size live in their own control (SeriesLineStyleSection, tested
+  // separately) so they can hide behind "More options"; shape and markers stay
+  // chart-wide-only everywhere (see task doc for the deliberate gap).
+  describe("line shape / missing values / markers (isLineish only)", () => {
+    it("all three render for line", () => {
+      render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+      expect(screen.getByLabelText("Line shape")).toBeInTheDocument();
+      expect(screen.getByLabelText("Missing values")).toBeInTheDocument();
+      expect(screen.getByLabelText("Markers")).toBeInTheDocument();
+    });
+
+    it("none of the three render for bar", () => {
+      render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+      expect(screen.queryByLabelText("Line shape")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Missing values")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Markers")).not.toBeInTheDocument();
+    });
+
+    it("choosing a line shape emits lineShape", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={onChange} />);
+      await user.click(screen.getByLabelText("Line shape"));
+      await user.click(await screen.findByRole("option", { name: "Step" }));
+      expect(onChange).toHaveBeenCalledWith({ lineShape: "step" });
+    });
+
+    it("choosing a missing-value mode emits missing", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={onChange} />);
+      await user.click(screen.getByLabelText("Missing values"));
+      await user.click(await screen.findByRole("option", { name: "Zero" }));
+      expect(onChange).toHaveBeenCalledWith({ missing: "zero" });
+    });
+
+    it("Markers: choosing Auto emits undefined", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"], markers: "on" }} onChange={onChange} />);
+      await user.click(screen.getByLabelText("Markers"));
+      await user.click(await screen.findByRole("option", { name: "Auto" }));
+      expect(onChange).toHaveBeenCalledWith({ markers: undefined });
+    });
+
+    it("Markers: choosing On emits \"on\"", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={onChange} />);
+      await user.click(screen.getByLabelText("Markers"));
+      await user.click(await screen.findByRole("option", { name: "On" }));
+      expect(onChange).toHaveBeenCalledWith({ markers: "on" });
+    });
+
+    it("Markers: choosing Off emits \"off\"", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={onChange} />);
+      await user.click(screen.getByLabelText("Markers"));
+      await user.click(await screen.findByRole("option", { name: "Off" }));
+      expect(onChange).toHaveBeenCalledWith({ markers: "off" });
+    });
+
+    it("Markers: an unset value shows Auto selected, not On or Off", () => {
+      render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+      expect(within(screen.getByLabelText("Markers")).getByText("Auto")).toBeInTheDocument();
+    });
+
+    // The regression a plain string Select must not repeat: AutoToggle translates through a
+    // boolean, so a stored literal "auto" (permitted by the type, though nothing writes it
+    // today) would map to `false` and read as "Off". Binding directly to the string means
+    // "auto" always means Auto, whatever wrote it.
+    it("Markers: a stored literal \"auto\" displays as Auto, not Off", () => {
+      render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"], markers: "auto" }} onChange={() => {}} />);
+      expect(within(screen.getByLabelText("Markers")).getByText("Auto")).toBeInTheDocument();
+    });
+  });
 });

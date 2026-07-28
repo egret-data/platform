@@ -58,6 +58,12 @@ export interface TableState {
   columnOrder?: string[];   // table viz only: column names in display order
 }
 
+export interface LineSeriesStyle {
+  shape?: "linear" | "smooth" | "step";
+  style?: "solid" | "dashed" | "dotted";
+  size?: "S" | "M" | "L";
+  markers?: "auto" | "on" | "off";
+}
 export interface CartesianConfig {
   xAxis?: string;            // single dimension (category / x)
   xMetric?: string;          // scatter only: a metric on the x-axis (metric-vs-metric)
@@ -65,7 +71,6 @@ export interface CartesianConfig {
   series?: string;           // optional 2nd dimension (breakout)
   stacked?: boolean;         // bar/area
   horizontal?: boolean;      // bar
-  smooth?: boolean;          // line/area
   showLabels?: boolean;      // data labels
   showLegend?: boolean;      // legend visibility
   xLabel?: string;
@@ -77,14 +82,11 @@ export interface CartesianConfig {
   goalValue?: number;            // horizontal goal/reference line
   goalLabel?: string;
   trendLine?: boolean;           // overlay a least-squares trend line
-  connectNulls?: boolean;        // line: bridge null gaps
-  step?: boolean;                // line: step interpolation
   showStackTotal?: boolean;      // label the total atop each stacked column
   seriesColors?: Record<string, string>;  // series name -> colour override
   seriesLabels?: Record<string, string>;  // series name -> display label override
   yMin?: number;                 // manual value-axis minimum (auto when undefined)
   yMax?: number;                 // manual value-axis maximum
-  showMarkers?: boolean;         // line/area: show point symbols (default true)
   xScale?: "ordinal" | "linear" | "timeseries";  // x-axis scale (default ordinal)
   compactValues?: boolean;       // short value-axis labels (25.5K); defaults to on once numbers are wide
   maxCategories?: number;        // fold all but the largest `maxCategories - 1` into "Other" (unset = off)
@@ -92,6 +94,14 @@ export interface CartesianConfig {
   hiddenSeries?: string[];       // series names to leave out of the chart entirely
   /** Data-label density: "fit" drops labels that would collide, "all" draws every one. */
   labelDensity?: "fit" | "all";
+  /** Line shape. One choice, because a line cannot be both smoothed and stepped. */
+  lineShape?: "linear" | "smooth" | "step";
+  /** What a null becomes: bridged, dropped to zero, or left as a break in the line. */
+  missing?: "interpolate" | "zero" | "none";
+  /** Point markers. "auto" shows them only when there are few enough points to read. */
+  markers?: "auto" | "on" | "off";
+  /** Per-series overrides of the chart-wide line appearance, keyed by series name. */
+  seriesLine?: Record<string, LineSeriesStyle>;
 }
 export interface PieConfig {
   dimension?: string;
