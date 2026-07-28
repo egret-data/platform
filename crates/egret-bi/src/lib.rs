@@ -2,6 +2,7 @@
 
 pub mod catalog_tags;
 pub mod chart;
+pub mod chartparams;
 pub mod chartquery;
 mod dashboard;
 mod dataset;

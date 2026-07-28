@@ -144,8 +144,10 @@ async fn update_chart(
     dataset_id: Uuid,
     name: &str,
 ) -> StatusCode {
+    // Params must be a valid v2 body since sub-project C validates the write path; this
+    // test is about authorization, so it sends the smallest thing that passes validation.
     let body = format!(
-        r#"{{"dataset_id":"{dataset_id}","name":"{name}","description":"","viz_type":"table","params":{{}}}}"#
+        r#"{{"dataset_id":"{dataset_id}","name":"{name}","description":"","viz_type":"table","params":{{"version":2,"spec":{{"metrics":[],"dimensions":[],"columns":[],"filters":[],"orderby":[],"row_limit":1000,"rollup_groups":[]}},"settings":{{}}}}}}"#
     );
     app.clone()
         .oneshot(
@@ -155,6 +157,29 @@ async fn update_chart(
                 .header("Cookie", format!("egret_session={tok}"))
                 .header("Content-Type", "application/json")
                 .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+/// PUT a chart update with a caller-supplied body, for the params-validation cases.
+async fn update_chart_raw(
+    app: &axum::Router,
+    slug: &str,
+    ch: Uuid,
+    tok: &str,
+    body: &str,
+) -> StatusCode {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/ws/{slug}/charts/{ch}"))
+                .header("Cookie", format!("egret_session={tok}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
                 .unwrap(),
         )
         .await
@@ -371,5 +396,41 @@ async fn chart_per_object_handlers_are_object_scoped() {
     assert!(
         member_update.is_success(),
         "ws_editor member must update a chart they do NOT own (role-based, 2xx); got {member_update}"
+    );
+
+    // 4. Sub-project C: the write path validates params. A pre-A2 (v1) body — the shape
+    //    this app itself wrote before migration 0099 — is refused rather than stored for
+    //    someone else's browser to choke on. Authorization is not the thing failing here:
+    //    the same principal's valid update above succeeded.
+    let v1_update = update_chart_raw(
+        &app,
+        &slug,
+        ch2,
+        &editor_tok,
+        &format!(
+            r#"{{"dataset_id":"{ds}","name":"v1_body","description":"","viz_type":"table","params":{{"spec":{{"metrics":[],"dimensions":[],"columns":[],"filters":[],"orderby":[],"row_limit":100,"rollup_groups":[]}},"cartesian":{{"yMetrics":[]}}}}}}"#
+        ),
+    )
+    .await;
+    assert_eq!(
+        v1_update,
+        StatusCode::BAD_REQUEST,
+        "a v1 params body must be refused at the write path (400), not stored"
+    );
+
+    let bad_viz = update_chart_raw(
+        &app,
+        &slug,
+        ch2,
+        &editor_tok,
+        &format!(
+            r#"{{"dataset_id":"{ds}","name":"bad_viz","description":"","viz_type":"Bar","params":{{"version":2,"spec":{{"metrics":[],"dimensions":[],"columns":[],"filters":[],"orderby":[],"row_limit":100,"rollup_groups":[]}},"settings":{{}}}}}}"#
+        ),
+    )
+    .await;
+    assert_eq!(
+        bad_viz,
+        StatusCode::BAD_REQUEST,
+        "a viz_type that only looks right (\"Bar\") must be refused (400)"
     );
 }
