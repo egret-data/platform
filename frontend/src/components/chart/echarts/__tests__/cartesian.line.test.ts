@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildCartesianOption } from "../options/cartesian";
+import { CHART_THEME } from "../palette";
 
 const columns = [{ name: "d", type: "varchar" }, { name: "rev", type: "double" }];
 const rows = [["a", 1], ["b", 2], ["c", 3]];
@@ -200,13 +201,16 @@ describe("per-series line appearance", () => {
   });
 
   it("overrides only the series it names, leaving the cycle for the rest", () => {
+    // rev is colorIdx 0, whose natural cycle value is already "solid" — asserting "solid"
+    // here would pass even with the override deleted. Pick a value the cycle would not
+    // produce, so the assertion can only pass because the override actually applied.
     const cols = [{ name: "d", type: "varchar" }, { name: "rev", type: "double" }, { name: "qty", type: "double" }];
     const rs = [["a", 1, 2], ["b", 2, 3]];
     const o = buildCartesianOption(cols, rs, {
-      kind: "line", xAxis: "d", yMetrics: ["rev", "qty"], seriesLine: { rev: { style: "solid" } },
+      kind: "line", xAxis: "d", yMetrics: ["rev", "qty"], seriesLine: { rev: { style: "dotted" } },
     } as never) as never as { series: { lineStyle: { type: string } }[] };
-    expect(o.series[0].lineStyle.type).toBe("solid");
-    expect(o.series[1].lineStyle.type).not.toBe("solid");
+    expect(o.series[0].lineStyle.type).toBe("dotted");
+    expect(o.series[1].lineStyle.type).toBe("dashed");
   });
 
   it("maps size to a width, with M unchanged from the theme", () => {
@@ -215,5 +219,13 @@ describe("per-series line appearance", () => {
     expect(w({ seriesLine: { rev: { size: "M" } } })).toBe(w({}));
     expect(w({ seriesLine: { rev: { size: "L" } } })).toBeGreaterThan(w({}));
     expect(w({ seriesLine: { rev: { size: "S" } } })).toBeLessThan(w({}));
+  });
+
+  it("falls back to the theme width for an unknown size, rather than an undefined one", () => {
+    // Settings JSON isn't whitelisted server-side, so a stored size the type never promised
+    // (e.g. a stale "XL") must not reach zrender's merge as `undefined` — that would silently
+    // overwrite ECharts' own default width.
+    const s = opt({ seriesLine: { rev: { size: "XL" as never } } }).series[0] as { lineStyle: { width: number } };
+    expect(s.lineStyle.width).toBe(CHART_THEME.lineWidth);
   });
 });

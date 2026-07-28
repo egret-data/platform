@@ -79,8 +79,10 @@ const BAR_MIN_HEIGHT = 1; // keep sub-pixel bars visible, like Metabase's barMin
 /** Above this many points on one line, markers merge into the line rather than marking it. */
 const MARKER_AUTO_MAX = 30;
 
-/** Metabase's S/M/L line sizes. M is the theme's own width, so an unset size renders unchanged. */
-const LINE_WIDTHS = { S: 1, M: CHART_THEME.lineWidth, L: 4 } as const;
+/** Metabase's S/M/L line sizes. M is the theme's own width, so an unset size renders unchanged.
+ * S is 1.5, not ECharts' own 1px default — gridlines/axis lines already render at 1px, and a
+ * data line that weighs the same as the chrome around it undercuts the point of drawing it. */
+const LINE_WIDTHS = { S: 1.5, M: CHART_THEME.lineWidth, L: 4 } as const;
 
 interface SeriesLike { name?: string; data: (number | null)[]; yAxisIndex?: number; itemStyle?: { color?: string }; __trend?: boolean; __total?: boolean; __metric?: string; __markers?: "auto" | "on" | "off" }
 
@@ -443,8 +445,12 @@ function decorateSeries(
     // without relying on colour alone (a11y: colour-blind users). The dash cycle is an
     // accessibility feature — it lets lines be told apart without colour — so a per-series
     // style REPLACES it for that one series only and leaves the rest cycling.
+    // Settings JSON is not whitelisted server-side, so `ln.size` may be a value the type
+    // never promised (e.g. a stored "XL"). `in` guards the lookup so an unknown size falls
+    // back to the theme width instead of `LINE_WIDTHS[unknown]` silently overwriting
+    // ECharts' default width with `undefined`.
     out.lineStyle = {
-      width: ln.size ? LINE_WIDTHS[ln.size] : CHART_THEME.lineWidth,
+      width: ln.size && ln.size in LINE_WIDTHS ? LINE_WIDTHS[ln.size] : CHART_THEME.lineWidth,
       type: ln.style ?? lineType(colorIdx),
     };
     out.symbol = symbolShape(colorIdx);
