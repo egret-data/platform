@@ -400,7 +400,18 @@ function decorateSeries(
     // NOTE: `markers ?? "on"` (not "auto") — "auto" doesn't exist as real behavior yet;
     // that's task 5.
     out.showSymbol = (cfg.markers ?? "on") !== "off";
-    out.connectNulls = (cfg.missing ?? "interpolate") === "interpolate";
+    // Chart-wide only: `LineSeriesStyle` has no `missing`, because how a gap is read is a
+    // statement about the data, and two series disagreeing would make the chart say two
+    // things at once.
+    const missing = cfg.missing ?? "interpolate";
+    out.connectNulls = missing === "interpolate";
+    if (missing === "zero") {
+      // ECharts can bridge a null or break at it, but it has no notion of treating one as
+      // zero — that has to be the data, not an option. Safe to rewrite here as plain
+      // numbers: applyXScale (which re-keys onto [x, y] pairs) runs after decorateSeries,
+      // never before.
+      out.data = (s.data ?? []).map((v) => (v == null ? 0 : v));
+    }
     // Cycle the dash style + marker shape per series so lines are distinguishable
     // without relying on colour alone (a11y: colour-blind users).
     out.lineStyle = { width: CHART_THEME.lineWidth, type: lineType(colorIdx) };

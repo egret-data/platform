@@ -47,3 +47,34 @@ describe("line shape", () => {
     expect(o.series[1].step).toBeUndefined();
   });
 });
+
+const gappy = [["a", 1], ["b", null], ["c", 3]];
+const optG = (cfg: Record<string, unknown>) =>
+  buildCartesianOption(columns, gappy, {
+    kind: "line", xAxis: "d", yMetrics: ["rev"], ...cfg,
+  } as never) as never as { series: { data: unknown[]; connectNulls?: boolean }[] };
+
+describe("missing values", () => {
+  it("bridges the gap by default, as it always has", () => {
+    const s = optG({}).series[0];
+    expect(s.connectNulls).toBe(true);
+    expect(s.data).toEqual([1, null, 3]);
+  });
+
+  it("leaves a break when asked", () => {
+    const s = optG({ missing: "none" }).series[0];
+    expect(s.connectNulls).toBe(false);
+    expect(s.data).toEqual([1, null, 3]);
+  });
+
+  it("drops to zero when asked — ECharts has no such mode, so the data changes", () => {
+    expect(optG({ missing: "zero" }).series[0].data).toEqual([1, 0, 3]);
+  });
+
+  it("never rewrites a bar's nulls — a missing bar and a zero bar say different things", () => {
+    const o = buildCartesianOption(columns, gappy, {
+      kind: "bar", xAxis: "d", yMetrics: ["rev"], missing: "zero",
+    } as never) as never as { series: { data: unknown[] }[] };
+    expect(o.series[0].data).toEqual([1, null, 3]);
+  });
+});
