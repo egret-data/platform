@@ -118,7 +118,7 @@ describe("buildCartesianOption — Metabase-parity styling & axes", () => {
     expect(stacked.series[0].barWidth).toBe(CHART_THEME.barWidth);
   });
   it("line series are smooth when configured and carry a lineStyle width", () => {
-    const opt = buildCartesianOption(cols, rows, { ...base, kind: "line", smooth: true }) as any;
+    const opt = buildCartesianOption(cols, rows, { ...base, kind: "line", lineShape: "smooth" }) as any;
     expect(opt.series[0].smooth).toBe(true);
     expect(opt.series[0].lineStyle.width).toBe(CHART_THEME.lineWidth);
   });
@@ -292,7 +292,7 @@ describe("buildCartesianOption — series polish & trend (Metabase parity 2a)", 
     expect(opt.series[0].barMinHeight).toBeGreaterThan(0);
   });
   it("line connectNulls + step come from config", () => {
-    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"], connectNulls: false, step: true }) as any;
+    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"], missing: "none", lineShape: "step" }) as any;
     expect(opt.series[0].connectNulls).toBe(false);
     expect(opt.series[0].step).toBe("middle");
   });
@@ -458,10 +458,10 @@ describe("buildCartesianOption — series rename (Metabase parity)", () => {
 describe("buildCartesianOption — point markers (Metabase parity)", () => {
   const cols = [{ name: "m", type: "varchar" }, { name: "rev", type: "double" }];
   const rows = [["Jan", 10], ["Feb", 20]];
-  it("shows symbols by default and hides them when showMarkers=false", () => {
+  it("shows symbols by default and hides them when markers=off", () => {
     const shown = buildCartesianOption(cols, rows, { kind: "line", xAxis: "m", yMetrics: ["rev"] }) as any;
     expect(shown.series[0].showSymbol).toBe(true);
-    const hidden = buildCartesianOption(cols, rows, { kind: "line", xAxis: "m", yMetrics: ["rev"], showMarkers: false }) as any;
+    const hidden = buildCartesianOption(cols, rows, { kind: "line", xAxis: "m", yMetrics: ["rev"], markers: "off" }) as any;
     expect(hidden.series[0].showSymbol).toBe(false);
   });
 });

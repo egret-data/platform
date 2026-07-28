@@ -6,12 +6,13 @@ export const CARTESIAN_PREFIX = "cartesian.";
 
 /** Config keys persisted for the cartesian family. Order is irrelevant; completeness is not. */
 const KEYS = [
-  "xAxis", "xMetric", "yMetrics", "series", "stacked", "horizontal", "smooth",
+  "xAxis", "xMetric", "yMetrics", "series", "stacked", "horizontal",
   "showLabels", "showLegend", "xLabel", "yLabel", "seriesTypes", "rightAxisMetrics",
-  "logScale", "normalized", "goalValue", "goalLabel", "trendLine", "connectNulls",
-  "step", "showStackTotal", "seriesColors", "seriesLabels", "yMin", "yMax",
-  "showMarkers", "xScale", "compactValues", "maxCategories",
+  "logScale", "normalized", "goalValue", "goalLabel", "trendLine",
+  "showStackTotal", "seriesColors", "seriesLabels", "yMin", "yMax",
+  "xScale", "compactValues", "maxCategories",
   "seriesOrder", "hiddenSeries", "labelDensity",
+  "lineShape", "missing", "markers", "seriesLine",
 ] as const satisfies readonly (keyof CartesianConfig)[];
 
 /** The `cartesian.*` slice of a v2 settings map. Undefined values are dropped, not stored as null. */

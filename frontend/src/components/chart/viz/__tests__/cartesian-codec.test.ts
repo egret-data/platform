@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { cartesianFromParams, cartesianToSettings } from "../cartesian-codec";
+import { cartesianFromParams, cartesianFromSettings, cartesianToSettings } from "../cartesian-codec";
 import { EMPTY_SPEC } from "@/api/charts";
 import type { CartesianConfig } from "@/api/charts";
 
@@ -61,5 +61,25 @@ describe("cartesianFromParams", () => {
   it("round-trips labelDensity", () => {
     const cfg: CartesianConfig = { yMetrics: ["total_revenue"], labelDensity: "all" };
     expect(cartesianFromParams({ version: 2, spec: EMPTY_SPEC, settings: cartesianToSettings(cfg) })).toEqual(cfg);
+  });
+
+  it("round-trips the line settings", () => {
+    const cfg = {
+      yMetrics: ["rev"],
+      lineShape: "step" as const,
+      missing: "zero" as const,
+      markers: "off" as const,
+      seriesLine: { rev: { style: "dashed" as const, size: "L" as const } },
+    };
+    expect(cartesianFromSettings(cartesianToSettings(cfg))).toEqual(cfg);
+  });
+
+  it("no longer carries the booleans the line settings replaced", () => {
+    const settings = cartesianToSettings({
+      yMetrics: [], lineShape: "linear",
+    } as never);
+    for (const dead of ["cartesian.smooth", "cartesian.step", "cartesian.connectNulls", "cartesian.showMarkers"]) {
+      expect(Object.keys(settings)).not.toContain(dead);
+    }
   });
 });

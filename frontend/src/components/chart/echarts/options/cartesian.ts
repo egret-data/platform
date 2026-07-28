@@ -1,5 +1,5 @@
 import type { EChartsCoreOption } from "echarts/core";
-import type { CartesianViz } from "@/api/charts";
+import type { CartesianViz, LineSeriesStyle } from "@/api/charts";
 import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue } from "../../format";
@@ -17,7 +17,6 @@ export interface CartesianBuildConfig {
   series?: string;
   stacked?: boolean;
   horizontal?: boolean;
-  smooth?: boolean;
   showLabels?: boolean;
   showLegend?: boolean;
   xLabel?: string;
@@ -29,14 +28,11 @@ export interface CartesianBuildConfig {
   goalValue?: number;            // horizontal reference (goal) line
   goalLabel?: string;
   trendLine?: boolean;           // overlay a least-squares trend line per series
-  connectNulls?: boolean;        // line: bridge gaps across null points
-  step?: boolean;                // line: step interpolation
   showStackTotal?: boolean;      // label the total atop each stacked column
   seriesColors?: Record<string, string>;  // series name -> colour override (Metabase series settings)
   seriesLabels?: Record<string, string>;  // series name -> display label override
   yMin?: number;                 // manual value-axis minimum (auto when undefined)
   yMax?: number;                 // manual value-axis maximum
-  showMarkers?: boolean;         // line/area: show the point symbols (off by default, like Metabase)
   xScale?: "ordinal" | "linear" | "timeseries";  // x-axis scale (default ordinal/category)
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
@@ -51,6 +47,14 @@ export interface CartesianBuildConfig {
   hiddenSeries?: string[];
   /** Data-label density: "fit" drops labels that would collide, "all" draws every one. */
   labelDensity?: "fit" | "all";
+  /** Line shape. One choice, because a line cannot be both smoothed and stepped. */
+  lineShape?: "linear" | "smooth" | "step";
+  /** What a null becomes: bridged, dropped to zero, or left as a break in the line. */
+  missing?: "interpolate" | "zero" | "none";
+  /** Point markers. "auto" shows them only when there are few enough points to read. */
+  markers?: "auto" | "on" | "off";
+  /** Per-series overrides of the chart-wide line appearance, keyed by series name. */
+  seriesLine?: Record<string, LineSeriesStyle>;
 }
 
 // The series names a cartesian chart will render — its y-metrics, or the distinct
@@ -384,15 +388,19 @@ function decorateSeries(
   }
   if (cfg.kind === "area") out.areaStyle = { opacity: CHART_THEME.areaOpacity };
   if (type === "line") {
-    out.smooth = !!cfg.smooth;
+    // Shim over the old boolean shape, preserving today's rendered output byte-for-byte
+    // until task 3-6 rewrites this properly against lineShape/missing/markers directly.
+    // NOTE: `markers ?? "on"` (not "auto") — "auto" doesn't exist as real behavior yet;
+    // that's task 5.
+    out.smooth = (cfg.lineShape ?? "linear") === "smooth";
+    if ((cfg.lineShape ?? "linear") === "step") out.step = "middle";
+    out.showSymbol = (cfg.markers ?? "on") !== "off";
+    out.connectNulls = (cfg.missing ?? "interpolate") === "interpolate";
     // Cycle the dash style + marker shape per series so lines are distinguishable
     // without relying on colour alone (a11y: colour-blind users).
     out.lineStyle = { width: CHART_THEME.lineWidth, type: lineType(colorIdx) };
     out.symbol = symbolShape(colorIdx);
     out.symbolSize = CHART_THEME.symbolSize;
-    out.showSymbol = cfg.showMarkers !== false;  // markers shown unless explicitly turned off
-    out.connectNulls = cfg.connectNulls ?? true; // Metabase connects across nulls by default
-    if (cfg.step) out.step = "middle";
   }
   // Scatter series get a distinct marker shape per series (shape, not colour).
   if (type === "scatter") { out.symbol = symbolShape(colorIdx); out.symbolSize = CHART_THEME.symbolSize; out.itemStyle = { color, opacity: CHART_THEME.scatterOpacity }; }

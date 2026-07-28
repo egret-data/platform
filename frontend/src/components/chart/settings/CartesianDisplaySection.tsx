@@ -48,7 +48,6 @@ interface SectionProps {
 
 /** Stacking, per-series colour/label, and the kind-specific series toggles (smooth line, combo type). */
 export function SeriesOptions({ kind, config, onChange, seriesNames = [] }: SectionProps & { seriesNames?: string[] }) {
-  const isLineish = kind === "line" || kind === "area";
   const canStack = kind === "bar" || kind === "row" || kind === "area";
   // Default colour a series shows before any override: lone (non-breakout) metric gets the
   // summarize green, everything else cycles the accent palette — mirrors the renderer.
@@ -59,10 +58,10 @@ export function SeriesOptions({ kind, config, onChange, seriesNames = [] }: Sect
       {canStack && <Toggle id="cz-stacked" label="Stacked" checked={!!config.stacked} onChange={(v) => onChange({ stacked: v })} />}
       {canStack && config.stacked && <Toggle id="cz-normalized" label="100% stacked" checked={!!config.normalized} onChange={(v) => onChange({ normalized: v })} />}
       {canStack && config.stacked && !config.normalized && <Toggle id="cz-stacktotal" label="Stack totals" checked={!!config.showStackTotal} onChange={(v) => onChange({ showStackTotal: v })} />}
-      {isLineish && <Toggle id="cz-smooth" label="Smooth" checked={!!config.smooth} onChange={(v) => onChange({ smooth: v })} />}
-      {isLineish && <Toggle id="cz-connect" label="Connect gaps" checked={!!config.connectNulls} onChange={(v) => onChange({ connectNulls: v })} />}
-      {isLineish && <Toggle id="cz-step" label="Step" checked={!!config.step} onChange={(v) => onChange({ step: v })} />}
-      {isLineish && <Toggle id="cz-markers" label="Show markers" checked={config.showMarkers !== false} onChange={(v) => onChange({ showMarkers: v })} />}
+      {/* The line-shape/missing-value/markers controls that used to live here (Smooth,
+          Connect gaps, Step, Show markers) are gone with the four booleans they were bound
+          to (see CartesianConfig.lineShape/missing/markers). Task 7 puts back the right
+          controls once rendering (tasks 3-6) has real semantics for them. */}
 
       {seriesNames.length > 0 && (
         <div className="space-y-1.5 border-t pt-2">
