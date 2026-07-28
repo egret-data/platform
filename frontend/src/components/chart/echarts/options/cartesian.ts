@@ -79,6 +79,9 @@ const BAR_MIN_HEIGHT = 1; // keep sub-pixel bars visible, like Metabase's barMin
 /** Above this many points on one line, markers merge into the line rather than marking it. */
 const MARKER_AUTO_MAX = 30;
 
+/** Metabase's S/M/L line sizes. M is the theme's own width, so an unset size renders unchanged. */
+const LINE_WIDTHS = { S: 1, M: CHART_THEME.lineWidth, L: 4 } as const;
+
 interface SeriesLike { name?: string; data: (number | null)[]; yAxisIndex?: number; itemStyle?: { color?: string }; __trend?: boolean; __total?: boolean; __metric?: string; __markers?: "auto" | "on" | "off" }
 
 /**
@@ -437,8 +440,13 @@ function decorateSeries(
       out.data = (s.data ?? []).map((v) => (v == null ? 0 : v));
     }
     // Cycle the dash style + marker shape per series so lines are distinguishable
-    // without relying on colour alone (a11y: colour-blind users).
-    out.lineStyle = { width: CHART_THEME.lineWidth, type: lineType(colorIdx) };
+    // without relying on colour alone (a11y: colour-blind users). The dash cycle is an
+    // accessibility feature — it lets lines be told apart without colour — so a per-series
+    // style REPLACES it for that one series only and leaves the rest cycling.
+    out.lineStyle = {
+      width: ln.size ? LINE_WIDTHS[ln.size] : CHART_THEME.lineWidth,
+      type: ln.style ?? lineType(colorIdx),
+    };
     out.symbol = symbolShape(colorIdx);
     out.symbolSize = CHART_THEME.symbolSize;
   }

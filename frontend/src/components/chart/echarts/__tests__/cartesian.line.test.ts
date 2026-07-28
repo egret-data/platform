@@ -182,3 +182,38 @@ describe("missing zero and stacking", () => {
     expect(total!.data[1]).toBe(0);
   });
 });
+
+describe("per-series line appearance", () => {
+  it("keeps the automatic dash cycle when nothing overrides it", () => {
+    // The cycle lets colour-blind users tell lines apart; it is not decoration.
+    const cols = [{ name: "d", type: "varchar" }, { name: "rev", type: "double" }, { name: "qty", type: "double" }];
+    const rs = [["a", 1, 2], ["b", 2, 3]];
+    const o = buildCartesianOption(cols, rs, {
+      kind: "line", xAxis: "d", yMetrics: ["rev", "qty"],
+    } as never) as never as { series: { lineStyle: { type: string } }[] };
+    expect(o.series[0].lineStyle.type).not.toBe(o.series[1].lineStyle.type);
+  });
+
+  it("lets a series choose its own dash style", () => {
+    const s = opt({ seriesLine: { rev: { style: "dotted" } } }).series[0] as { lineStyle: { type: string } };
+    expect(s.lineStyle.type).toBe("dotted");
+  });
+
+  it("overrides only the series it names, leaving the cycle for the rest", () => {
+    const cols = [{ name: "d", type: "varchar" }, { name: "rev", type: "double" }, { name: "qty", type: "double" }];
+    const rs = [["a", 1, 2], ["b", 2, 3]];
+    const o = buildCartesianOption(cols, rs, {
+      kind: "line", xAxis: "d", yMetrics: ["rev", "qty"], seriesLine: { rev: { style: "solid" } },
+    } as never) as never as { series: { lineStyle: { type: string } }[] };
+    expect(o.series[0].lineStyle.type).toBe("solid");
+    expect(o.series[1].lineStyle.type).not.toBe("solid");
+  });
+
+  it("maps size to a width, with M unchanged from the theme", () => {
+    const w = (cfg: Record<string, unknown>) =>
+      (opt(cfg).series[0] as { lineStyle: { width: number } }).lineStyle.width;
+    expect(w({ seriesLine: { rev: { size: "M" } } })).toBe(w({}));
+    expect(w({ seriesLine: { rev: { size: "L" } } })).toBeGreaterThan(w({}));
+    expect(w({ seriesLine: { rev: { size: "S" } } })).toBeLessThan(w({}));
+  });
+});
