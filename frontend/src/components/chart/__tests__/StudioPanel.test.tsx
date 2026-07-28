@@ -59,4 +59,39 @@ describe("StudioPanel", () => {
     render(<StudioPanel {...props} descriptor={bare} tab="display" />);
     expect(screen.getByText(/no display options/i)).toBeInTheDocument();
   });
+
+  it("renders controls under their group heading, in first-appearance order", () => {
+    const grouped = {
+      ...desc,
+      controls: [
+        { id: "a", section: "display", group: "Series", render: () => <div>A</div> },
+        { id: "b", section: "display", group: "Axes", render: () => <div>B</div> },
+        { id: "c", section: "display", group: "Series", render: () => <div>C</div> },
+      ],
+    } as unknown as VizDescriptor<{ yMetrics: string[] }>;
+    render(<StudioPanel {...props} descriptor={grouped} tab="display" />);
+    const headings = screen.getAllByRole("heading").map((h) => h.textContent);
+    expect(headings).toEqual(["Series", "Axes"]);
+  });
+
+  it("puts advanced controls behind a disclosure that starts closed", async () => {
+    const withAdvanced = {
+      ...desc,
+      controls: [
+        { id: "a", section: "display", group: "Axes", render: () => <div>Always</div> },
+        { id: "b", section: "display", group: "Axes", advanced: true, render: () => <div>Rare</div> },
+      ],
+    } as unknown as VizDescriptor<{ yMetrics: string[] }>;
+    render(<StudioPanel {...props} descriptor={withAdvanced} tab="display" />);
+    expect(screen.getByText("Always")).toBeInTheDocument();
+    expect(screen.queryByText("Rare")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /more options/i }));
+    expect(screen.getByText("Rare")).toBeInTheDocument();
+  });
+
+  it("still renders ungrouped controls, with no heading", () => {
+    render(<StudioPanel {...props} tab="data" />);
+    expect(screen.getByText("X-axis control")).toBeInTheDocument();
+    expect(screen.queryByRole("heading")).not.toBeInTheDocument();
+  });
 });

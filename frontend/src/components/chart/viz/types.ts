@@ -31,6 +31,10 @@ export interface VizControlProps<Cfg> {
 export interface VizControl<Cfg> {
   id: string;
   section: "data" | "display";
+  /** Heading this control sits under; ungrouped controls render before any group. */
+  group?: string;
+  /** Hidden behind the group's "More options" disclosure. */
+  advanced?: boolean;
   render: FC<VizControlProps<Cfg>>;
 }
 
