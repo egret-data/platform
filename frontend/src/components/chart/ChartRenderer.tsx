@@ -60,7 +60,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
   }
 
   if (vizType === "map") {
-    return <MapChart columns={columns} rows={rows} params={params} />;
+    return <MapChart columns={columns} rows={rows} params={params} metricTypes={metricTypes} />;
   }
 
   if (vizType === "table") {

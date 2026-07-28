@@ -1,7 +1,8 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
-import { ARIA_A11Y, CHART_THEME, SERIES_PALETTE, COLOR_FALLBACK, resolveColor } from "../palette";
+import { baseOption } from "../base";
+import { CHART_THEME, SERIES_PALETTE, COLOR_FALLBACK, resolveColor } from "../palette";
 
 export interface ResultColumn { name: string; type: string }
 export interface BoxplotBuildConfig {
@@ -60,7 +61,7 @@ export function buildBoxplotOption(columns: ResultColumn[], rows: unknown[][], c
     cfg.value ? formatValue(v, cfg.metricTypes?.[cfg.value] ?? "double", cfg.columnSettings?.[cfg.value]) : String(v);
 
   return {
-    aria: ARIA_A11Y, // screen-reader data description (non-visual fallback)
+    ...baseOption(),
     grid: CHART_THEME.grid,
     tooltip: { trigger: "item" },
     xAxis: {

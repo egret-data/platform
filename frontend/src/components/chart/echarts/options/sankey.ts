@@ -1,7 +1,8 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
-import { ARIA_A11Y, SERIES_PALETTE } from "../palette";
+import { baseOption, itemTooltip } from "../base";
+
 
 export interface ResultColumn { name: string; type: string }
 export interface SankeyBuildConfig {
@@ -38,9 +39,13 @@ export function buildSankeyOption(columns: ResultColumn[], rows: unknown[][], cf
     cfg.metric ? formatValue(v, cfg.metricTypes?.[cfg.metric] ?? "double", cfg.columnSettings?.[cfg.metric]) : String(v);
 
   return {
-    aria: ARIA_A11Y, // screen-reader data description (non-visual fallback)
-    color: SERIES_PALETTE,
-    tooltip: { trigger: "item", formatter: (p: { dataType: string; name: string; value: unknown }) => (p.dataType === "edge" ? `${p.name}: ${fmt(p.value)}` : p.name) },
+    ...baseOption(),
+    // A node has no value of its own, so only edges show one.
+    tooltip: {
+      ...itemTooltip(fmt),
+      formatter: (p: { dataType?: string; name?: string; value?: unknown }) =>
+        (p.dataType === "edge" ? `${p.name}: ${fmt(p.value)}` : String(p.name ?? "")),
+    },
     series: [{
       type: "sankey",
       data,
