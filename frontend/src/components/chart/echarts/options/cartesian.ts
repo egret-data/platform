@@ -40,6 +40,8 @@ export interface CartesianBuildConfig {
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
   xAxisUnit?: string;            // temporal extraction unit for the x-axis dimension (e.g. "day_of_week")
+  /** Short value-axis labels (25.5K). Defaults to on once the numbers are wide. */
+  compactValues?: boolean;
 }
 
 // The series names a cartesian chart will render — its y-metrics, or the distinct
@@ -359,15 +361,42 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   const rightSide = isDualAxis(cfg) ? rightMetrics(cfg) : [];
   const leftSide = cfg.yMetrics.filter((m) => !rightSide.includes(m));
   const yTitle = cfg.yLabel ?? metricTitle(leftSide);
+
+  // Compact labels are for wide numbers, not for many bars — three bars of revenue in the
+  // millions crowd the axis just as badly as forty do. Measure the values, not the count.
+  const plotted = (series as SeriesLike[]).filter((s) => !s.__trend && !s.__total);
+  let widest = 0;
+  for (const s of plotted) {
+    for (const d of (s.data ?? []) as unknown[]) {
+      // On a value/time x-axis the datum is an [x, y] pair — the y is what the axis shows.
+      const n = Math.abs(Number(Array.isArray(d) ? d[1] : d));
+      if (Number.isFinite(n) && n > widest) widest = n;
+    }
+  }
+  // 10,000 is where a grouped number reaches six characters and "10K" starts winning.
+  const compact = cfg.compactValues ?? widest >= 10_000;
+
   const fmtFor = (metrics: string[]) => (v: number) => {
     if (normalized) return `${Math.round(v)}%`;
     const m = metrics[0];
-    return m ? formatValue(v, cfg.metricTypes?.[m] ?? "double", cfg.columnSettings?.[m]) : String(v);
+    if (!m) return String(v);
+    const col = cfg.columnSettings?.[m];
+    // A column that states its own `compact` preference outranks the chart-wide default.
+    return formatValue(v, cfg.metricTypes?.[m] ?? "double", { ...col, compact: col?.compact ?? compact });
   };
+
+  // ECharts' `interval` counts labels to SKIP: 0 draws every one, 1 draws every other.
+  const step = categories.length > 12 ? Math.ceil(categories.length / 12) - 1 : 0;
+  const longest = categories.reduce((n: number, c) => Math.max(n, String(c).length), 0);
+  // Thinning alone does not save long names — the survivors are still too wide to sit side
+  // by side. Only upright labels on a bottom axis have that problem; a horizontal chart
+  // stacks its categories down the left, where length costs nothing.
+  const rotate = !horizontal && longest > 10 && categories.length > 6 ? 30 : 0;
+
   const categoryAxis = {
     type: "category" as const, data: categories,
     name: xTitle, nameLocation: "middle" as const, nameGap: 28,
-    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor },
+    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, interval: step, rotate },
     axisLine: { lineStyle: { color: gridLine } },
   };
   // Non-ordinal x: a value (linear) or time (timeseries) axis positioning points by
@@ -429,7 +458,7 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   const grid = {
     ...CHART_THEME.grid,
     top: (CHART_THEME.grid.top as number) + (showLegend ? 24 : 0),
-    bottom: (CHART_THEME.grid.bottom as number) + (bottomTitle ? 22 : 0),
+    bottom: (CHART_THEME.grid.bottom as number) + (bottomTitle ? 22 : 0) + (rotate ? 18 : 0),
     left: (CHART_THEME.grid.left as number) + (leftTitle ? 26 : 0),
   };
 

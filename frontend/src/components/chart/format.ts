@@ -73,24 +73,3 @@ export function formatValue(value: unknown, columnType: string, fmt: ColumnForma
   const s = String(value);
   return fmt.prefix || fmt.suffix ? `${fmt.prefix ?? ""}${s}${fmt.suffix ?? ""}` : s;
 }
-
-// Singleton to avoid allocating Intl.NumberFormat on every axis tick.
-const compactFormatter = new Intl.NumberFormat("en", {
-  notation: "compact",
-  maximumFractionDigits: 1,
-});
-
-/**
- * A short axis label: 25,468 → "25.5K". Used where the axis is too narrow for the full
- * number; the tooltip and data labels keep the exact value. Compact notation and separators
- * are independent: the notation decides HOW SHORT the label is, and separators decide WHICH
- * CHARACTERS separate the digits. So compactNumber(1234.5, ", ") → "1,2K" (compacted with
- * European decimal separator).
- */
-export function compactNumber(v: number, separators?: string): string {
-  if (!Number.isFinite(v)) return "";
-  if (v === 0) return "0";
-
-  const out = compactFormatter.format(v);
-  return applySeparators(out, separators);
-}
