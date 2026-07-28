@@ -56,6 +56,13 @@ describe("toRenderParams", () => {
     expect(out.map).toEqual({ mapKey: "world", region: "country", metric: "m" });
   });
 
+  it("un-flattens a simple viz's nested key", () => {
+    const out = toRenderParams("funnel", {
+      version: 2, spec: SPEC, settings: { "funnel.dimension": "region", "funnel.metric": "m" },
+    });
+    expect(out.funnel).toEqual({ dimension: "region", metric: "m" });
+  });
+
   it("omits the cartesian key for a non-cartesian viz", () => {
     const out = toRenderParams("pie", { version: 2, spec: SPEC, settings: { "cartesian.xAxis": "region" } });
     expect(out.cartesian).toBeUndefined();

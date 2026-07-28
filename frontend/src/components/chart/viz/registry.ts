@@ -4,12 +4,10 @@ import { cartesianDescriptor } from "./cartesian";
 import { pivotDescriptor } from "./pivot";
 import { tableDescriptor, objectDescriptor } from "./table";
 import { mapDescriptor } from "./map";
+import { SIMPLE_DESCRIPTORS } from "./simple";
 import type { VizDescriptor } from "./types";
 
-/**
- * Viz types that have moved onto a descriptor. Everything absent here still runs on
- * ChartExplore's inline code via the bridge; PR3 empties out the last nine.
- */
+/** Every viz type, each owning its own configuration. The bridge is gone. */
 /**
  * Erases a descriptor's config type at the registry boundary: the shell treats every
  * config as opaque, so the registry stores them uniformly and only the descriptor itself
@@ -23,6 +21,7 @@ const REGISTRY: Partial<Record<VizType, VizDescriptor<never>>> = {
   table: entry(tableDescriptor()),
   object: entry(objectDescriptor()),
   map: entry(mapDescriptor()),
+  ...Object.fromEntries(SIMPLE_DESCRIPTORS.map((d) => [d.key, entry(d)])),
 };
 
 export const getDescriptor = (viz: VizType) => REGISTRY[viz];
