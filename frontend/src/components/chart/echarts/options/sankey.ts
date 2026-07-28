@@ -1,7 +1,7 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
-import { baseOption, itemTooltip } from "../base";
+import { ariaDescription, baseOption, itemTooltip } from "../base";
 
 
 export interface ResultColumn { name: string; type: string }
@@ -40,6 +40,13 @@ export function buildSankeyOption(columns: ResultColumn[], rows: unknown[][], cf
 
   return {
     ...baseOption(),
+    // Flows, not categories: read the biggest ones rather than every node.
+    aria: ariaDescription({
+      kind: "Sankey diagram", metric: cfg.metric, format: fmt,
+      points: [...links]
+        .sort((a, b) => b.value - a.value)
+        .map((l) => ({ name: `${l.source} to ${l.target}`, value: l.value })),
+    }),
     // A node has no value of its own, so only edges show one.
     tooltip: {
       ...itemTooltip(fmt),

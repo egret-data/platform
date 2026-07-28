@@ -39,7 +39,14 @@ export function ProgressChart({
   const fmt = (v: number) => formatValue(v, type, format);
 
   return (
-    <div className="flex h-full min-h-[5rem] flex-col justify-center px-10">
+    // A progress bar is exactly what ARIA's progressbar role describes; without it a screen
+    // reader gets a number and two loose axis labels.
+    <div className="flex h-full min-h-[5rem] flex-col justify-center px-10"
+      role="progressbar"
+      aria-valuenow={hasValue ? value : undefined}
+      aria-valuemin={0}
+      aria-valuemax={hasGoal ? goal : undefined}
+      aria-valuetext={hasValue ? `${fmt(value)}${hasGoal ? ` of ${fmt(goal)}` : ""}` : "no value"}>
       <div className="relative">
         {/* The value floats above the fill end, like Metabase. */}
         <div data-progress-value className="absolute -top-7 -translate-x-1/2 whitespace-nowrap text-sm font-semibold tabular-nums text-foreground"

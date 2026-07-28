@@ -44,7 +44,15 @@ export function SmartScalarChart({
   const curLabel = curRow && di >= 0 ? formatValue(curRow[di], dimType) : "";
 
   return (
-    <div className="flex h-full min-h-[5rem] flex-col items-center justify-center gap-1">
+    <div className="flex h-full min-h-[5rem] flex-col items-center justify-center gap-1"
+      role="img"
+      aria-label={[
+        curLabel ? `${curLabel}: ` : "",
+        hasCur ? fmt(current) : "no value",
+        hasComparison
+          ? `, ${up ? "up" : down ? "down" : "unchanged"}${Number.isFinite(pct) ? ` ${(Math.abs(pct) * 100).toFixed(2)}%` : ""} versus previous ${fmt(previous)}`
+          : "",
+      ].join("")}>
       <div className="text-[2.5rem] font-bold leading-none tabular-nums text-foreground">{hasCur ? fmt(current) : "—"}</div>
       {curLabel && <div className="text-sm text-muted-foreground">{curLabel}</div>}
       {hasComparison && (

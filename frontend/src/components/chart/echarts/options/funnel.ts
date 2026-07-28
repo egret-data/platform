@@ -1,7 +1,7 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
-import { baseOption, itemTooltip } from "../base";
+import { ariaDescription, baseOption, itemTooltip } from "../base";
 
 
 export interface ResultColumn { name: string; type: string }
@@ -31,6 +31,10 @@ export function buildFunnelOption(columns: ResultColumn[], rows: unknown[][], cf
 
   return {
     ...baseOption(),
+    aria: ariaDescription({
+      kind: "Funnel chart", metric: cfg.metric, dimension: cfg.dimension, format: fmt,
+      points: data.map((d) => ({ name: String(d.name), value: d.value })),
+    }),
     tooltip: itemTooltip(fmt, { percent: true }),
     series: [{
       type: "funnel",

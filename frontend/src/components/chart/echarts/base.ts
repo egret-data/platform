@@ -53,3 +53,29 @@ export function axisTooltip() {
 export function bottomLegend(show: boolean | undefined) {
   return show ? { bottom: 0, type: "scroll" as const, textStyle: baseTextStyle } : undefined;
 }
+
+/**
+ * A screen-reader description of the chart, replacing the one ECharts generates.
+ *
+ * The generated one enumerates every dimension of each datum, so a bar chart reads "the
+ * data for Books is 0, 29825" — the category index and then the value. This says what a
+ * sighted user sees, with the chart's own number formatting.
+ */
+export function ariaDescription(d: {
+  kind: string;
+  metric?: string;
+  dimension?: string;
+  points: { name: string; value: unknown }[];
+  format: (v: unknown) => string;
+  /** More than one plotted series; the points then belong to the first. */
+  seriesCount?: number;
+}) {
+  const of = d.metric ? ` of ${d.metric}` : "";
+  const by = d.dimension ? ` by ${d.dimension}` : "";
+  const series = d.seriesCount && d.seriesCount > 1 ? ` ${d.seriesCount} series;` : "";
+  const shown = d.points.slice(0, 20);
+  const items = shown.map((p) => `${p.name} ${d.format(p.value)}`).join(", ");
+  const more = d.points.length > shown.length ? `, and ${d.points.length - shown.length} more` : "";
+  const body = d.points.length ? `${d.points.length} values:${series} ${items}${more}.` : "No data.";
+  return { ...ARIA_A11Y, label: { description: `${d.kind}${of}${by}. ${body}` } };
+}

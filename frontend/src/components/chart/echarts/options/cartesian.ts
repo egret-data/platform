@@ -3,7 +3,8 @@ import type { CartesianViz } from "@/api/charts";
 import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue } from "../../format";
-import { ARIA_A11Y, CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
+import { ariaDescription } from "../base";
+import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
 
 export interface ResultColumn { name: string; type: string }
@@ -441,8 +442,19 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     return `${header}<br/>${lines.join("<br/>")}`;
   };
 
+  // The first plotted series carries the values a screen reader hears; the rest are named
+  // in the count, since reading every series of a multi-series chart is worse than useless.
+  const described = (series as SeriesLike[]).filter((s) => !s.__trend && !s.__total);
+  const first = described[0];
   return {
-    aria: ARIA_A11Y, // screen-reader data description (non-visual fallback)
+    aria: ariaDescription({
+      kind: `${cfg.kind === "line" ? "Line" : cfg.kind === "area" ? "Area" : cfg.kind === "scatter" ? "Scatter" : cfg.kind === "combo" ? "Combo" : "Bar"} chart`,
+      metric: first?.name ?? cfg.yMetrics[0],
+      dimension: cfg.xAxis,
+      seriesCount: described.length,
+      format: (v) => fmtFor(cfg.yMetrics)(Number(v)),
+      points: categories.map((c, i) => ({ name: String(c), value: first?.data?.[i] })),
+    }),
     color: undefined,
     grid,
     tooltip: { trigger: cfg.kind === "scatter" ? "item" : "axis", formatter: tooltipFormatter },

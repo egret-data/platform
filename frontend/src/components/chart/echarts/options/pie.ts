@@ -1,7 +1,7 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
-import { baseOption, itemTooltip, bottomLegend } from "../base";
+import { ariaDescription, baseOption, itemTooltip, bottomLegend } from "../base";
 import { OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor } from "../palette";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
 
@@ -105,6 +105,10 @@ export function buildPieOption(columns: ResultColumn[], rows: unknown[][], cfg: 
 
   return {
     ...baseOption(),
+    aria: ariaDescription({
+      kind: "Pie chart", metric: cfg.metric, dimension: cfg.dimension, format: fmt,
+      points: data.map((d) => ({ name: String(d.name), value: d.value })),
+    }),
     tooltip: itemTooltip(fmt, { percent: true }),
     legend: bottomLegend(cfg.showLegend),
     graphic,
