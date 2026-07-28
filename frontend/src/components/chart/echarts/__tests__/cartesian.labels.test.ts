@@ -72,3 +72,26 @@ describe("category-axis labels", () => {
     expect(opt(base).xAxis.axisLabel.rotate).toBe(0);
   });
 });
+
+describe("data label density", () => {
+  it("hides colliding labels when density is unset (the default)", () => {
+    const o = opt({ ...base, showLabels: true });
+    expect(o.series[0].labelLayout).toEqual({ hideOverlap: true });
+  });
+
+  it("hides colliding labels when density is explicitly \"fit\"", () => {
+    const o = opt({ ...base, showLabels: true, labelDensity: "fit" });
+    expect(o.series[0].labelLayout).toEqual({ hideOverlap: true });
+  });
+
+  it("draws every label when density is \"all\"", () => {
+    const o = opt({ ...base, showLabels: true, labelDensity: "all" });
+    expect(o.series[0].labelLayout).toBeUndefined();
+  });
+
+  it("never sets labelLayout when labels are off, regardless of density", () => {
+    expect(opt({ ...base, showLabels: false, labelDensity: "all" }).series[0].labelLayout).toBeUndefined();
+    expect(opt({ ...base, showLabels: false, labelDensity: "fit" }).series[0].labelLayout).toBeUndefined();
+    expect(opt(base).series[0].labelLayout).toBeUndefined();
+  });
+});

@@ -218,6 +218,18 @@ export function FormatOptions({ config, onChange }: SectionProps) {
         autoHint="Auto shows the legend once there's a breakout or more than one metric"
       />
       <Toggle id="cz-labels" label="Data labels" checked={!!config.showLabels} onChange={(v) => onChange({ showLabels: v })} />
+      {config.showLabels && (
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="cz-label-density" className="text-sm font-normal">Data label density</Label>
+          <Select value={config.labelDensity === "all" ? "all" : "fit"} onValueChange={(v) => onChange({ labelDensity: v as "fit" | "all" })}>
+            <SelectTrigger id="cz-label-density" aria-label="Data label density" className="h-7 w-24"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="fit">Fit</SelectItem>
+              <SelectItem value="all">All</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
       <AutoToggle
         id="cz-compact"
         label="Shorten large numbers"

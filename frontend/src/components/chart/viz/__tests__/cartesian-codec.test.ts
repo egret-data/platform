@@ -57,4 +57,9 @@ describe("cartesianFromParams", () => {
     };
     expect(cartesianFromParams({ version: 2, spec: EMPTY_SPEC, settings: cartesianToSettings(cfg) })).toEqual(cfg);
   });
+
+  it("round-trips labelDensity", () => {
+    const cfg: CartesianConfig = { yMetrics: ["total_revenue"], labelDensity: "all" };
+    expect(cartesianFromParams({ version: 2, spec: EMPTY_SPEC, settings: cartesianToSettings(cfg) })).toEqual(cfg);
+  });
 });

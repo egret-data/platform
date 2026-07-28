@@ -49,6 +49,8 @@ export interface CartesianBuildConfig {
   seriesOrder?: string[];
   /** Series names to leave out of the chart entirely. */
   hiddenSeries?: string[];
+  /** Data-label density: "fit" drops labels that would collide, "all" draws every one. */
+  labelDensity?: "fit" | "all";
 }
 
 // The series names a cartesian chart will render — its y-metrics, or the distinct
@@ -402,9 +404,10 @@ function decorateSeries(
       // On a value/time x-axis the datum is an [x, y] pair — label the y.
       formatter: (p: { value: unknown }) => fmt(metric, Array.isArray(p.value) ? p.value[1] : p.value),
     };
-    // Labels are drawn per point; at a card's width there is not room for all of them, and
-    // a pile of overlapping numbers is worse than showing fewer.
-    out.labelLayout = { hideOverlap: true };
+    // "fit" is the default: at a dashboard card's width there is no room for a label per
+    // bar, and a pile of overlapping numbers is worse than showing fewer. "all" is for
+    // someone who would rather have every number and accept the crowding.
+    if (cfg.labelDensity !== "all") out.labelLayout = { hideOverlap: true };
   }
   return out;
 }

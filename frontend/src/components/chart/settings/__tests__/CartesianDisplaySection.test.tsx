@@ -93,6 +93,34 @@ describe("CartesianDisplaySection", () => {
     fireEvent.change(screen.getByLabelText("label rev"), { target: { value: "" } });
     expect(onChange).toHaveBeenLastCalledWith({ seriesLabels: {} });
   });
+  it("Data label density is hidden when data labels are off", () => {
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    expect(screen.queryByLabelText("Data label density")).not.toBeInTheDocument();
+  });
+
+  it("Data label density: choosing All emits \"all\"", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], showLabels: true }} onChange={onChange} />);
+    await user.click(screen.getByLabelText("Data label density"));
+    await user.click(await screen.findByRole("option", { name: "All" }));
+    expect(onChange).toHaveBeenCalledWith({ labelDensity: "all" });
+  });
+
+  it("Data label density: choosing Fit emits \"fit\"", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], showLabels: true, labelDensity: "all" }} onChange={onChange} />);
+    await user.click(screen.getByLabelText("Data label density"));
+    await user.click(await screen.findByRole("option", { name: "Fit" }));
+    expect(onChange).toHaveBeenCalledWith({ labelDensity: "fit" });
+  });
+
+  it("Data label density: shows Fit selected when the config leaves it unset", () => {
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], showLabels: true }} onChange={() => {}} />);
+    expect(within(screen.getByLabelText("Data label density")).getByText("Fit")).toBeInTheDocument();
+  });
+
   it("Y min/max inputs patch yMin/yMax (undefined when cleared)", () => {
     const onChange = vi.fn();
     render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], yMax: 50 }} onChange={onChange} />);

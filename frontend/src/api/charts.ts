@@ -90,6 +90,8 @@ export interface CartesianConfig {
   maxCategories?: number;        // fold all but the largest `maxCategories - 1` into "Other" (unset = off)
   seriesOrder?: string[];        // series names in display order; unlisted ones keep natural order after them
   hiddenSeries?: string[];       // series names to leave out of the chart entirely
+  /** Data-label density: "fit" drops labels that would collide, "all" draws every one. */
+  labelDensity?: "fit" | "all";
 }
 export interface PieConfig {
   dimension?: string;
