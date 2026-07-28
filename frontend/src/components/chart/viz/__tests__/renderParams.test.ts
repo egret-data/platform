@@ -34,6 +34,28 @@ describe("toRenderParams", () => {
     expect(out.conditionalFormatting).toEqual([{ id: "r1" }]);
   });
 
+  it("un-flattens the pivot keys back to v1's loose top-level fields", () => {
+    const out = toRenderParams("pivot_table", {
+      version: 2, spec: SPEC,
+      settings: {
+        "pivot.rows": ["region"], "pivot.cols": [], "pivot.metrics": ["m"],
+        "pivot.showRowTotals": false, "pivot.collapsedRows": ["x"], "pivot.sort": { region: "asc" },
+      },
+    });
+    expect(out.rows).toEqual(["region"]);
+    expect(out.metrics).toEqual(["m"]);
+    expect(out.showRowTotals).toBe(false);
+    expect(out.collapsedRows).toEqual(["x"]);
+    expect(out.pivotSort).toEqual({ region: "asc" });
+  });
+
+  it("un-flattens the map keys", () => {
+    const out = toRenderParams("map", {
+      version: 2, spec: SPEC, settings: { "map.key": "world", "map.region": "country", "map.metric": "m" },
+    });
+    expect(out.map).toEqual({ mapKey: "world", region: "country", metric: "m" });
+  });
+
   it("omits the cartesian key for a non-cartesian viz", () => {
     const out = toRenderParams("pie", { version: 2, spec: SPEC, settings: { "cartesian.xAxis": "region" } });
     expect(out.cartesian).toBeUndefined();

@@ -2,6 +2,8 @@ import { isCartesianViz, isParamsV2 } from "@/api/charts";
 import type { AnyChartParams, ChartParams, VizType } from "@/api/charts";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 import { cartesianFromSettings } from "./cartesian-codec";
+import { pivotFromParams } from "./pivot";
+import { mapDescriptor } from "./map";
 
 /**
  * The shape every renderer still speaks. v1 params pass through; v2 params are
@@ -20,5 +22,15 @@ export function toRenderParams(viz: VizType, params: AnyChartParams): ChartParam
     conditionalFormatting: s.conditional_formatting as Rule[] | undefined,
   };
   if (isCartesianViz(viz)) out.cartesian = cartesianFromSettings(s);
+  if (viz === "pivot_table") {
+    // v1 kept the pivot layout loose at the top level; PivotTable still reads it there.
+    const p = pivotFromParams(params);
+    out.rows = p.rows; out.cols = p.cols; out.metrics = p.metrics;
+    out.showRowTotals = p.showRowTotals; out.showColTotals = p.showColTotals; out.condense = p.condense;
+    out.collapsedRows = p.collapsedRows; out.pivotSort = p.sort;
+  }
+  if (viz === "map") out.map = mapDescriptor().fromParams(params);
+  // `table` and `object` need nothing here: v1 carried no config for them, and ChartTable
+  // and ObjectDetail take their columns as props from the result, not from params.
   return out;
 }

@@ -219,13 +219,14 @@ spec's always-shippable migration:
 | PR | Contents | Live check |
 |---|---|---|
 | 1 | v2 types + adapter + registry + `StudioPanel` + `useChartRun` + the cartesian family. The other 13 viz types keep their current inline code behind a temporary bridge. | a new cartesian chart, and an existing v1 chart opened |
-| 2 | `table`, `pivot_table`, `object`, `map` — the four with the most state — plus the `VizSwitcher` and `PreviewPane` extractions | saved pivot + table charts |
+| 2 | `table`, `pivot_table`, `object`, `map` — the four with the most state — plus the `VizSwitcher` extraction | saved pivot + table charts |
 | 3 | the nine remaining viz types; delete the bridge, `ChartSettingsSections` and `requiredFields.ts`; migration `0099` | one chart per viz type, plus a dashboard with a card override |
 
 The backfill lands in PR 3 because only then does every descriptor read and write
-v2; running it earlier would fight the bridge. `VizSwitcher` and `PreviewPane` are
-mechanical extractions with no bearing on the registry, so they ride in PR 2 rather
-than inflating PR 1, which carries all the risk.
+v2; running it earlier would fight the bridge. `VizSwitcher` is a mechanical extraction with no bearing on the
+registry, so it rides in PR 2 rather than inflating PR 1, which carries all the risk.
+`PreviewPane` waits for PR 3: while the preview still branches per viz, extracting it
+means a fourteen-prop interface that PR 3 would immediately rewrite.
 
 ## Testing
 

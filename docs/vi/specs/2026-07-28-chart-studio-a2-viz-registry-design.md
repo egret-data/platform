@@ -214,12 +214,14 @@ Ba PR tuần tự, mỗi PR đều deploy lên kind và live check, đúng chi�
 | PR | Nội dung | Live check |
 |---|---|---|
 | 1 | type v2 + adapter + registry + `StudioPanel` + `useChartRun` + họ cartesian. 13 viz còn lại giữ code inline hiện tại sau một bridge tạm. | một chart cartesian mới, và một chart v1 cũ mở lên |
-| 2 | `table`, `pivot_table`, `object`, `map` — bốn loại nhiều state nhất — cộng phần bóc tách `VizSwitcher` và `PreviewPane` | chart pivot + table đã lưu |
+| 2 | `table`, `pivot_table`, `object`, `map` — bốn loại nhiều state nhất — cộng phần bóc tách `VizSwitcher` | chart pivot + table đã lưu |
 | 3 | chín viz còn lại; xoá bridge, `ChartSettingsSections` và `requiredFields.ts`; migration `0099` | mỗi viz một chart, cộng một dashboard có card override |
 
 Backfill nằm ở PR 3 vì chỉ khi đó mọi descriptor mới đọc và ghi v2; chạy sớm hơn
-sẽ đá nhau với bridge. `VizSwitcher` và `PreviewPane` chỉ là bóc tách cơ học, không
-liên quan tới registry, nên đi cùng PR 2 thay vì phình PR 1 — nơi gánh toàn bộ rủi ro.
+sẽ đá nhau với bridge. `VizSwitcher` chỉ là bóc tách cơ học, không liên quan tới
+registry, nên đi cùng PR 2 thay vì phình PR 1 — nơi gánh toàn bộ rủi ro. `PreviewPane`
+đợi PR 3: khi preview còn rẽ nhánh theo viz, bóc nó ra sẽ tạo một interface mười bốn
+prop mà PR 3 phải viết lại ngay.
 
 ## Kiểm thử
 
