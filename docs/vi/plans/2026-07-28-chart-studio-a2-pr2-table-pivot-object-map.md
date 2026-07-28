@@ -4,28 +4,28 @@
 
 **Bản canonical (tiếng Anh):** `docs/en/plans/2026-07-28-chart-studio-a2-pr2-table-pivot-object-map.md` — code trong hai bản giống hệt nhau; bản này dịch phần diễn giải.
 
-**Mục tiêu:** Move the four most stateful viz types — `table`, `pivot_table`, `object`, `map` — onto descriptors, extend the render adapter to their namespaces, and extract `VizSwitcher` and `PreviewPane` from the shell.
+**Mục tiêu:** Chuyển bốn loại viz nhiều state nhất — `table`, `pivot_table`, `object`, `map` — sang descriptor, mở rộng adapter render cho namespace của chúng, và bóc `VizSwitcher` cùng `PreviewPane` ra khỏi shell.
 
-**Kiến trúc:** Exactly the pattern PR1 established (`docs/en/plans/2026-07-28-chart-studio-a2-pr1-registry-cartesian.md`): one module per viz under `components/chart/viz/`, a codec for its `<prefix>.*` settings, `buildSpec`, `requiredFields`, and controls tagged `data` / `display`. The one new piece is `previewConfig()`, which replaces `previewPivotDims` / `previewTableDims` — the stale-freeze rule from #345 now works off the descriptor's config rather than per-viz shell state.
+**Kiến trúc:** Đúng pattern PR1 đã dựng (`docs/vi/plans/2026-07-28-chart-studio-a2-pr1-registry-cartesian.md`): mỗi viz một module dưới `components/chart/viz/`, một codec cho settings `<prefix>.*`, `buildSpec`, `requiredFields`, và control gắn nhãn `data` / `display`. Phần mới duy nhất là `previewConfig()` thay cho `previewPivotDims` / `previewTableDims` — quy tắc đóng băng khi stale của #345 nay chạy trên config của descriptor thay vì state theo từng viz trong shell.
 
 **Tech stack:** React 18, TypeScript, Vite, TanStack Query, shadcn/ui, Vitest + Testing Library.
 
-**Spec:** `docs/en/specs/2026-07-28-chart-studio-a2-viz-registry-design.md` — this is PR 2 of its three.
+**Spec:** `docs/vi/specs/2026-07-28-chart-studio-a2-viz-registry-design.md` — đây là PR 2 trong ba PR.
 
-**Điểm xuất phát:** branch `feat/chart-studio-a2-pr2` off `main` at `0fb7ff58` (PR1 merged). `npm run typecheck` clean, `npm test` green (1305 tests / 233 files).
+**Điểm xuất phát:** branch `feat/chart-studio-a2-pr2` tách từ `main` tại `0fb7ff58` (PR1 đã merge). `npm run typecheck` sạch, `npm test` xanh (1305 test / 233 file).
 
 **Đọc trước — hai cái bẫy PR1 đã vấp, ghi ở cuối plan PR1:**
 
-1. Run tests with `npm test -- <path>`, **never** `npx vitest run <path>` (npx may resolve a cached global vitest with no jsdom).
-2. Any helper `useChartRun` reaches during render must be a **function declaration**, not a `const` arrow, or the shell white-screens from the temporal dead zone. `ChartExplore.mount.test.tsx` guards this — keep it green.
+1. Chạy test bằng `npm test -- <path>`, **không bao giờ** dùng `npx vitest run <path>` (npx có thể lấy bản vitest cache global không có jsdom).
+2. Mọi helper mà `useChartRun` chạm tới lúc render phải là **function declaration**, không phải arrow `const`, nếu không shell trắng màn hình vì temporal dead zone. `ChartExplore.mount.test.tsx` là chốt chặn — giữ nó xanh.
 
-**Luật:** no renderer changes (`ChartRenderer`, `echarts/**`, `PivotTable`, `ChartTable`, `MapChart`); no SQL migration (that is PR3); the nine remaining viz types stay on the bridge.
+**Luật:** không sửa renderer (`ChartRenderer`, `echarts/**`, `PivotTable`, `ChartTable`, `MapChart`); không có migration SQL (đó là PR3); chín viz còn lại vẫn ở trên bridge.
 
 ---
 
 ### Task 1: Descriptor pivot
 
-Pivot is the biggest v1 clean-up: eight of its fields sit loose at the top level of v1 params and move under `pivot.`.
+Pivot là chỗ dọn dẹp v1 lớn nhất: tám field của nó nằm rời rạc ở top level của params v1, nay dồn vào `pivot.`.
 
 **Files:**
 - Tạo: `frontend/src/components/chart/viz/pivot.tsx`
@@ -92,7 +92,7 @@ describe("pivotDescriptor", () => {
 - [ ] **Step 2: Chạy test để xác nhận nó fail**
 
 Chạy: `cd frontend && npm test -- src/components/chart/viz/__tests__/pivot.test.tsx`
-Mong đợi: FAIL — cannot resolve `../pivot`.
+Mong đợi: FAIL — không resolve được `../pivot`.
 
 - [ ] **Step 3: Viết descriptor**
 
@@ -247,7 +247,7 @@ git commit -m "feat(charts): pivot viz descriptor"
 
 ### Task 2: Descriptor table và object
 
-Both pick raw columns, and in v1 neither stored a config at all — their columns were re-derived from the spec on hydration. They now store them explicitly.
+Cả hai đều chọn cột thô, và ở v1 không loại nào lưu config — cột của chúng được suy lại từ spec lúc hydrate. Nay lưu tường minh.
 
 **Files:**
 - Tạo: `frontend/src/components/chart/viz/table.tsx`
@@ -323,7 +323,7 @@ describe("objectDescriptor", () => {
 - [ ] **Step 2: Chạy test để xác nhận nó fail**
 
 Chạy: `cd frontend && npm test -- src/components/chart/viz/__tests__/table.test.tsx`
-Mong đợi: FAIL — cannot resolve `../table`.
+Mong đợi: FAIL — không resolve được `../table`.
 
 - [ ] **Step 3: Viết các descriptor**
 
@@ -524,7 +524,7 @@ describe("mapDescriptor", () => {
 - [ ] **Step 2: Chạy test để xác nhận nó fail**
 
 Chạy: `cd frontend && npm test -- src/components/chart/viz/__tests__/map.test.tsx`
-Mong đợi: FAIL — cannot resolve `../map`.
+Mong đợi: FAIL — không resolve được `../map`.
 
 - [ ] **Step 3: Viết descriptor**
 
@@ -633,9 +633,9 @@ git commit -m "feat(charts): map viz descriptor"
 - Sửa: `frontend/src/components/chart/viz/renderParams.ts`
 - Sửa: `frontend/src/components/chart/viz/__tests__/renderParams.test.ts`
 
-- [ ] **Step 1: Extend the adapter test**
+- [ ] **Step 1: Mở rộng test của adapter**
 
-Add to `renderParams.test.ts`:
+Thêm vào `renderParams.test.ts`:
 
 ```ts
   it("un-flattens the pivot keys back to v1's loose top-level fields", () => {
@@ -658,14 +658,14 @@ Add to `renderParams.test.ts`:
   });
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Chạy để xác nhận nó fail**
 
 Chạy: `cd frontend && npm test -- src/components/chart/viz/__tests__/renderParams.test.ts`
-Mong đợi: FAIL — `out.rows` and `out.map` are undefined.
+Mong đợi: FAIL — `out.rows` và `out.map` đều undefined.
 
-- [ ] **Step 3: Extend `toRenderParams`**
+- [ ] **Step 3: Mở rộng `toRenderParams`**
 
-Replace the body's tail (after the shared `out` object) with:
+Thay phần đuôi của hàm (sau object `out` dùng chung) bằng:
 
 ```ts
   if (isCartesianViz(viz)) out.cartesian = cartesianFromSettings(s);
@@ -679,11 +679,11 @@ Replace the body's tail (after the shared `out` object) with:
   return out;
 ```
 
-with imports for `pivotFromParams` and `mapDescriptor`. `table` and `object` need nothing here: v1 carried no config for them, and `ChartTable` / `ObjectDetail` read their columns from the result, not from params.
+kèm import `pivotFromParams` và `mapDescriptor`. `table` và `object` không cần gì ở đây: v1 không mang config cho chúng, và `ChartTable` / `ObjectDetail` lấy cột từ kết quả chứ không từ params.
 
-- [ ] **Step 4: Register the descriptors**
+- [ ] **Step 4: Đăng ký các descriptor**
 
-In `registry.ts`, replace the `REGISTRY` initialiser with:
+Trong `registry.ts`, thay phần khởi tạo `REGISTRY` bằng:
 
 ```ts
 const REGISTRY: Partial<Record<VizType, VizDescriptor<never>>> = {
@@ -695,9 +695,9 @@ const REGISTRY: Partial<Record<VizType, VizDescriptor<never>>> = {
 } as Partial<Record<VizType, VizDescriptor<never>>>;
 ```
 
-and update `registry.test.ts`: `hasDescriptor("pie")` stays `false` (pie is PR3), and add `for (const k of ["table", "pivot_table", "object", "map"]) expect(hasDescriptor(k)).toBe(true)`.
+và cập nhật `registry.test.ts`: `hasDescriptor("pie")` stays `false` (pie is PR3), and add `for (const k of ["table", "pivot_table", "object", "map"]) expect(hasDescriptor(k)).toBe(true)`.
 
-- [ ] **Step 5: Run the viz tests**
+- [ ] **Step 5: Chạy test viz**
 
 Chạy: `cd frontend && npm test -- src/components/chart/viz`
 Mong đợi: all PASS.
@@ -713,14 +713,14 @@ git commit -m "feat(charts): register table/pivot/object/map + adapter for their
 
 ### Task 5: `previewConfig` thay hai helper freeze theo viz
 
-`previewPivotDims` and `previewTableDims` exist only because pivot and table read shell state instead of a config. With descriptors they collapse into one rule.
+`previewPivotDims` và `previewTableDims` tồn tại chỉ vì pivot và table đọc state của shell thay vì một config. Có descriptor rồi thì chúng gộp làm một quy tắc.
 
 **Files:**
 - Sửa: `frontend/src/routes/explore/ChartExplore.tsx`
 
-- [ ] **Step 1: Add the helper**
+- [ ] **Step 1: Thêm helper**
 
-Next to `previewParams`, add:
+Cạnh `previewParams`, thêm:
 
 ```tsx
   // The config the preview renders with: frozen at what last ran while the query is stale,
@@ -733,9 +733,9 @@ Next to `previewParams`, add:
   }
 ```
 
-- [ ] **Step 2: Use it for the pivot and table previews**
+- [ ] **Step 2: Dùng nó cho preview pivot và table**
 
-Replace `...previewPivotDims(),` in the `PivotTable` input with:
+Thay `...previewPivotDims(),` trong input của `PivotTable` bằng:
 
 ```tsx
               ...(() => {
@@ -753,12 +753,12 @@ and `dimensionColumns={previewTableDims()}` with:
             })()}
 ```
 
-Then delete `previewPivotDims`, `previewTableDims` and the `ranTableDims` ref along with its assignment in the `afterRun` callback.
+Rồi xoá `previewPivotDims`, `previewTableDims` và ref `ranTableDims` cùng dòng gán nó trong callback `afterRun`.
 
-- [ ] **Step 3: Verify**
+- [ ] **Step 3: Kiểm chứng**
 
 Chạy: `cd frontend && npx tsc --noEmit && npm test -- src/routes/explore`
-Mong đợi: clean and green.
+Mong đợi: sạch và xanh.
 
 - [ ] **Step 4: Commit**
 
@@ -774,9 +774,9 @@ git commit -m "refactor(charts): one preview-freeze rule via previewConfig"
 **Files:**
 - Sửa: `frontend/src/routes/explore/ChartExplore.tsx`
 
-- [ ] **Step 1: Route the four configs through the descriptor**
+- [ ] **Step 1: Cho bốn config đi qua descriptor**
 
-`descConfig` currently hard-codes `cartesian`. Replace it and `patchDescConfig` with a config the shell keeps per active viz:
+`descConfig` hiện hard-code `cartesian`. Thay nó và `patchDescConfig` bằng một config shell giữ theo viz đang hoạt động:
 
 ```tsx
   // One opaque config for whichever viz is active; the descriptor is the only thing that
@@ -786,11 +786,11 @@ git commit -m "refactor(charts): one preview-freeze rule via previewConfig"
   const patchDescConfig = (p: object) => setDescState((c) => ({ ...(c as object ?? descriptor?.defaultConfig), ...p })) as never;
 ```
 
-Hydration sets it with `setDescState(desc.fromParams(p))`; `changeViz` resets it with `setDescState(null)`; `resetControls` does the same. Delete `setCartesian(... as CartesianConfig)` from the hydration branch — `descState` replaces it.
+Hydration set nó bằng `setDescState(desc.fromParams(p))`; `changeViz` reset bằng `setDescState(null)`; `resetControls` cũng vậy. Xoá `setCartesian(... as CartesianConfig)` khỏi nhánh hydration — `descState` thay thế nó.
 
-- [ ] **Step 2: Delete the inline branches**
+- [ ] **Step 2: Xoá các nhánh inline**
 
-Remove these blocks whole (they are now the descriptors' controls):
+Xoá trọn các block sau (nay là control của descriptor):
 
 - the `{viz === "table" && ( … )}` data block
 - the `{viz === "object" && ( … )}` data block
@@ -798,14 +798,14 @@ Remove these blocks whole (they are now the descriptors' controls):
 - the `{viz === "pivot_table" && ( … )}` data block
 - the `{viz === "pivot_table" && ( … )}` **display** block (Totals)
 
-Then delete the state and helpers only they used: `tableMetrics`, `tableCols`, `pRows`, `pCols`, `pVals`, `showRowTotals`, `showColTotals`, `condense`, `collapsed`, `pivotSort`, `mapCfg`, `cartesian`, `toggleTableMetric`, `toggleTableCol`, `unitList`, and the branches for those five viz types in `specForRun`, `paramsForSave`, `validationInput` and the hydration effect.
+Rồi xoá state và helper chỉ chúng dùng: `tableMetrics`, `tableCols`, `pRows`, `pCols`, `pVals`, `showRowTotals`, `showColTotals`, `condense`, `collapsed`, `pivotSort`, `mapCfg`, `cartesian`, `toggleTableMetric`, `toggleTableCol`, `unitList`, cùng các nhánh của năm loại viz đó trong `specForRun`, `paramsForSave`, `validationInput` và effect hydration.
 
-`collapsed` and `pivotSort` move into the pivot config: the `onToggleCollapse` / `onCycleSort` handlers on `PivotTable` become `patchDescConfig` calls on `collapsedRows` / `sort`.
+`collapsed` và `pivotSort` chuyển vào config của pivot: handler `onToggleCollapse` / `onCycleSort` của `PivotTable` trở thành lời gọi `patchDescConfig` lên `collapsedRows` / `sort`.
 
-- [ ] **Step 3: Verify**
+- [ ] **Step 3: Kiểm chứng**
 
 Chạy: `cd frontend && npx tsc --noEmit && npx eslint src/routes/explore/ChartExplore.tsx && npm test`
-Mong đợi: clean, clean, all green. `ChartExplore.mount.test.tsx` must still pass — it now exercises a v1 pie (still bridged) and a v2 bar.
+Mong đợi: sạch, sạch, tất cả xanh. `ChartExplore.mount.test.tsx` vẫn phải pass — nó đang chạy một pie v1 (còn trên bridge) và một bar v2.
 
 - [ ] **Step 4: Commit**
 
@@ -818,14 +818,14 @@ git commit -m "feat(charts): drop the table/pivot/object/map inline branches"
 
 ### Task 7: Bóc tách `VizSwitcher` và `PreviewPane`
 
-Mechanical moves, deferred here from PR1.
+Bóc tách cơ học, hoãn từ PR1 sang.
 
 **Files:**
 - Tạo: `frontend/src/components/chart/VizSwitcher.tsx`, `frontend/src/components/chart/PreviewPane.tsx`
 - Test: `frontend/src/components/chart/__tests__/VizSwitcher.test.tsx`
 - Sửa: `frontend/src/routes/explore/ChartExplore.tsx`
 
-- [ ] **Step 1: Write the VizSwitcher test**
+- [ ] **Step 1: Viết test cho VizSwitcher**
 
 ```tsx
 // frontend/src/components/chart/__tests__/VizSwitcher.test.tsx
@@ -850,14 +850,14 @@ describe("VizSwitcher", () => {
 });
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 2: Chạy để xác nhận nó fail**
 
 Chạy: `cd frontend && npm test -- src/components/chart/__tests__/VizSwitcher.test.tsx`
-Mong đợi: FAIL — cannot resolve `../VizSwitcher`.
+Mong đợi: FAIL — không resolve được `../VizSwitcher`.
 
-- [ ] **Step 3: Write both components**
+- [ ] **Step 3: Viết cả hai component**
 
-`VizSwitcher` owns the chip, the `Change` button and the gallery dialog — move the chip markup near `ChartExplore.tsx:560` and the `<Dialog open={vizPickerOpen}>` block at the end of the file:
+`VizSwitcher` sở hữu chip, nút `Change` và dialog gallery — chuyển markup chip quanh `ChartExplore.tsx:560` và block `<Dialog open={vizPickerOpen}>` ở cuối file:
 
 ```tsx
 // frontend/src/components/chart/VizSwitcher.tsx
@@ -890,16 +890,16 @@ export function VizSwitcher({ viz, onChange }: { viz: VizType; onChange: (v: Viz
 }
 ```
 
-`PreviewPane` takes the preview block as props and renders the states or the right renderer. Move the JSX from `<div ref={previewRef} className="contents">` through the end of that div, and pass in: `finished`, `isRunning`, `error`, `onRetry`, `viz`, `params`, `columns`, `rows`, `metricTypes`, `emptyState`, plus the pivot/table handlers. Keep the props explicit; do not pass the whole shell.
+`PreviewPane` nhận block preview qua props và vẽ ra trạng thái hoặc renderer phù hợp. Chuyển JSX từ `<div ref={previewRef} className="contents">` tới hết div đó, và truyền vào: `finished`, `isRunning`, `error`, `onRetry`, `viz`, `params`, `columns`, `rows`, `metricTypes`, `emptyState`, cộng các handler của pivot/table. Giữ props tường minh; đừng truyền cả shell.
 
-- [ ] **Step 4: Use them in the shell**
+- [ ] **Step 4: Dùng chúng trong shell**
 
-Replace the chip markup with `<VizSwitcher viz={viz} onChange={changeViz} />`, delete the gallery `Dialog` and the `vizPickerOpen` state, and replace the preview block with `<PreviewPane … />`.
+Thay markup của chip bằng `<VizSwitcher viz={viz} onChange={changeViz} />`, xoá `Dialog` gallery và state `vizPickerOpen`, và thay block preview bằng `<PreviewPane … />`.
 
-- [ ] **Step 5: Verify**
+- [ ] **Step 5: Kiểm chứng**
 
 Chạy: `cd frontend && npx tsc --noEmit && npm test`
-Mong đợi: clean and green.
+Mong đợi: sạch và xanh.
 
 - [ ] **Step 6: Commit**
 
@@ -912,14 +912,14 @@ git commit -m "refactor(charts): extract VizSwitcher and PreviewPane from the sh
 
 ### Task 8: Verify đầy đủ, deploy, live check, PR
 
-**Files:** none (verification only)
+**Files:** không có (chỉ kiểm chứng)
 
-- [ ] **Step 1: Full FE gate**
+- [ ] **Step 1: Cổng FE đầy đủ**
 
 Chạy: `cd frontend && npm run lint && npm run typecheck && npm test && npm run build`
-Mong đợi: all green; test count at least 1305 plus the ~25 this plan adds.
+Mong đợi: tất cả xanh; số test tối thiểu 1305 cộng khoảng 25 test plan này thêm vào.
 
-- [ ] **Step 2: Deploy to kind**
+- [ ] **Step 2: Deploy lên kind**
 
 ```bash
 cd /Users/1pro-l4r8/Documents/github/data-portal/egret
@@ -931,7 +931,7 @@ kubectl rollout status deploy/egret-frontend -n egret-system --timeout=180s
 
 - [ ] **Step 3: Live check**
 
-On the Demo Sales dataset at `http://egret.localtest.me`:
+Trên dataset Demo Sales tại `http://egret.localtest.me`:
 
 1. **Pivot** — new pivot chart, rows `region`, values `total_revenue`: it runs, totals row shows, the Display tab's three totals toggles work, and collapsing a row group still works.
 2. **Pivot freeze** — Auto off, swap rows to `category`: the previous result stays (it must NOT collapse into one blank row — that was #345's bug), then Run switches it.
@@ -943,7 +943,7 @@ On the Demo Sales dataset at `http://egret.localtest.me`:
    `kubectl exec -n egret-system deploy/postgres -- psql -U egret -d egret -t -c "select params->>'version', (select string_agg(k,',' order by k) from jsonb_object_keys(params->'settings') k) from analytics.charts where name='A2 PR2 pivot';"`
    Mong đợi: `2` and keys beginning `pivot.`.
 
-- [ ] **Step 4: Open the PR (do not merge; await approval)**
+- [ ] **Step 4: Mở PR (không merge; chờ duyệt)**
 
 ```bash
 git -c http.version=HTTP/1.1 push -u origin feat/chart-studio-a2-pr2
@@ -954,7 +954,7 @@ gh pr create --base main --title "feat(charts): A2 PR2 — table, pivot, object,
 
 ## Ghi chú cho người triển khai
 
-- The nine remaining viz types (pie, scalar, progress, gauge, funnel, waterfall, smartscalar, boxplot, sankey) stay inline. `ChartSettingsSections` and `requiredFields.ts` therefore stay too — PR3 deletes them.
-- `collapsedRows` and `sort` are interactive pivot state, not query state: they must not enter the query signature, or clicking a row group would re-run the query. They are in the config but `buildSpec` ignores them, which keeps the signature stable.
-- Switching table→object keeps the column selection via `object.columns`' fallback to `table.columns`; that mirrors the shared `tableCols` state this PR deletes.
-- If `tsc` pushes you toward editing a renderer, the adapter is missing a key — fix `toRenderParams`.
+- Chín viz còn lại (pie, scalar, progress, gauge, funnel, waterfall, smartscalar, boxplot, sankey) vẫn inline. Nên `ChartSettingsSections` và `requiredFields.ts` cũng còn — PR3 mới xoá.
+- `collapsedRows` và `sort` là state tương tác của pivot, không phải state truy vấn: chúng không được vào query signature, nếu không bấm gập một nhóm dòng sẽ chạy lại query. Chúng nằm trong config nhưng `buildSpec` bỏ qua, nhờ vậy signature ổn định.
+- Đổi table→object vẫn giữ cột đã chọn nhờ `object.columns` fallback sang `table.columns`; đúng như state `tableCols` dùng chung mà PR này xoá đi.
+- Nếu `tsc` đẩy bạn tới chỗ sửa renderer thì adapter đang thiếu khoá — sửa `toRenderParams`.
