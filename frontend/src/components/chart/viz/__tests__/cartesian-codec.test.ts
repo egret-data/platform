@@ -48,4 +48,13 @@ describe("cartesianFromParams", () => {
     const cfg: CartesianConfig = { yMetrics: ["total_revenue"], maxCategories: 8, compactValues: true };
     expect(cartesianFromParams({ version: 2, spec: EMPTY_SPEC, settings: cartesianToSettings(cfg) })).toEqual(cfg);
   });
+
+  it("round-trips seriesOrder and hiddenSeries", () => {
+    const cfg: CartesianConfig = {
+      yMetrics: ["total_revenue", "order_count"],
+      seriesOrder: ["order_count", "total_revenue"],
+      hiddenSeries: ["total_revenue"],
+    };
+    expect(cartesianFromParams({ version: 2, spec: EMPTY_SPEC, settings: cartesianToSettings(cfg) })).toEqual(cfg);
+  });
 });

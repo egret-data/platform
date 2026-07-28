@@ -88,6 +88,8 @@ export interface CartesianConfig {
   xScale?: "ordinal" | "linear" | "timeseries";  // x-axis scale (default ordinal)
   compactValues?: boolean;       // short value-axis labels (25.5K); defaults to on once numbers are wide
   maxCategories?: number;        // fold all but the largest `maxCategories - 1` into "Other" (unset = off)
+  seriesOrder?: string[];        // series names in display order; unlisted ones keep natural order after them
+  hiddenSeries?: string[];       // series names to leave out of the chart entirely
 }
 export interface PieConfig {
   dimension?: string;

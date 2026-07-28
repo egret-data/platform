@@ -45,6 +45,10 @@ export interface CartesianBuildConfig {
   compactValues?: boolean;
   /** Fold all but the largest `maxCategories - 1` into "Other". Unset keeps every category. */
   maxCategories?: number;
+  /** Series names in display order; any not listed keep their natural order after them. */
+  seriesOrder?: string[];
+  /** Series names to leave out of the chart entirely. */
+  hiddenSeries?: string[];
 }
 
 // The series names a cartesian chart will render — its y-metrics, or the distinct
@@ -124,6 +128,31 @@ function trendSeries(series: SeriesLike[]): SeriesLike[] {
         lineStyle: { type: "dashed", width: 1.5, color: s.itemStyle?.color },
         tooltip: { show: false } },
     } as SeriesLike);
+  }
+  return out;
+}
+
+/**
+ * Metabase's `graph.series_order`: hide individual series and set their draw order.
+ *
+ * Runs before the overlays are built, so a hidden series is genuinely absent — not counted
+ * in a stack total, not normalised against, and with no orphaned trend line left behind.
+ * Order matters beyond the legend: it is also the stacking order and the draw order.
+ */
+function applySeriesOrder(series: SeriesLike[], cfg: CartesianBuildConfig): SeriesLike[] {
+  const hidden = cfg.hiddenSeries;
+  const order = cfg.seriesOrder;
+  if (!hidden?.length && !order?.length) return series;
+  const out = hidden?.length ? series.filter((s) => !hidden.includes(s.name ?? "")) : [...series];
+  if (order?.length) {
+    const rank = new Map(order.map((n, i) => [n, i]));
+    // A name that is no longer plotted simply ranks nowhere; anything the stored order does
+    // not mention keeps its natural position after the ones it does.
+    out.sort(
+      (a, b) =>
+        (rank.get(a.name ?? "") ?? Number.MAX_SAFE_INTEGER) -
+        (rank.get(b.name ?? "") ?? Number.MAX_SAFE_INTEGER),
+    );
   }
   return out;
 }
@@ -254,7 +283,7 @@ export function buildCartesianOption(
     const cell = new Map(xrows.map((r) => [`${catKey(r[xi])} ${catKey(r[gi])}`, r[mi] as number | null]));
     // Grouped bars (>1 series, not stacked) must auto-size to sit side by side.
     const grouped = !cfg.stacked && seriesTypeFor(cfg.kind, metric, cfg.seriesTypes) === "bar" && seriesValues.length > 1;
-    const series = seriesValues.map((sv, si) => {
+    const builtSeries = seriesValues.map((sv, si) => {
       const data = categories.map((c) => {
         const v = cell.get(`${catKey(c)} ${catKey(sv)}`);
         return v === undefined ? null : v;
@@ -263,6 +292,7 @@ export function buildCartesianOption(
       const name = sv == null || sv === "" ? "(empty)" : String(sv);
       return decorateSeries({ name, data }, metric, si, cfg, fmt, grouped);
     });
+    const series = applySeriesOrder(builtSeries as unknown as SeriesLike[], cfg) as unknown as typeof builtSeries;
     if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
     if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
     if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
@@ -276,7 +306,7 @@ export function buildCartesianOption(
   const grouped = !cfg.stacked && barMetrics > 1;
   // Metabase tints a lone series with its summarize green rather than accent blue.
   const singleColor = cfg.yMetrics.length === 1 ? SUMMARIZE_COLOR : undefined;
-  const series = cfg.yMetrics.map((metric, si) => {
+  let series = cfg.yMetrics.map((metric, si) => {
     const mi = idx[metric];
     const data = categories.map((c) => {
       const r = rowByCat.get(catKey(c));
@@ -309,6 +339,8 @@ export function buildCartesianOption(
     categories = folded.map((p) => p.name);
     s.data = folded.map((p) => (typeof p.value === "number" ? p.value : null));
   }
+
+  series = applySeriesOrder(series as unknown as SeriesLike[], cfg) as unknown as typeof series;
 
   if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
   if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
