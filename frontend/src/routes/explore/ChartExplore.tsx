@@ -5,7 +5,6 @@ import { useDatasets, useDataset } from "@/api/datasets";
 import {
   useBuildChartData, useChart, useChartMutations,
   type QuerySpec, type VizType, type ChartParams, type TableState, type ChartFilter,
-  type PieConfig, type ScalarConfig, type ProgressConfig, type GaugeConfig, type FunnelConfig, type WaterfallConfig, type SmartScalarConfig, type BoxplotConfig, type SankeyConfig,
   type AnyChartParams, type VizSettings, isParamsV2,
 } from "@/api/charts";
 import { useSpecData } from "@/api/useSpecData";
@@ -17,7 +16,6 @@ import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
 import type { DrillContext } from "@/components/chart/drill";
 import { ChartTypeGallery } from "@/components/chart/ChartTypeGallery";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
-import { ChartSettingsSections } from "@/components/chart/settings/ChartSettingsSections";
 import { SharedDisplaySections, styleColumnsFor } from "@/components/chart/settings/SharedDisplaySections";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
@@ -28,7 +26,6 @@ import { parseFormat } from "@/components/dataset/FormatPicker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
@@ -38,9 +35,7 @@ import {
 } from "@/components/ui/dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import { pruneUnits } from "@/components/chart/temporal-units";
 import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
-import { missingFields } from "@/components/chart/requiredFields";
 import { useChartRun } from "@/components/chart/useChartRun";
 import { getDescriptor } from "@/components/chart/viz/registry";
 import { pivotDescriptor } from "@/components/chart/viz/pivot";
@@ -77,16 +72,6 @@ export default function ChartExplore() {
   const [columnSettings, setColumnSettings] = useState<Record<string, ColumnFormat>>({});
   const [conditionalFormatting, setConditionalFormatting] = useState<Rule[]>([]);
   const [tableState, setTableState] = useState<TableState>({});
-  const [pie, setPie] = useState<PieConfig>({});
-  const [scalar, setScalar] = useState<ScalarConfig>({});
-  const [progress, setProgress] = useState<ProgressConfig>({});
-  const [gauge, setGauge] = useState<GaugeConfig>({});
-  const [funnel, setFunnel] = useState<FunnelConfig>({});
-  const [waterfall, setWaterfall] = useState<WaterfallConfig>({});
-  const [smart, setSmart] = useState<SmartScalarConfig>({});
-  const [box, setBox] = useState<BoxplotConfig>({});
-  const [sankey, setSankey] = useState<SankeyConfig>({});
-  const patchPie = (p: Partial<PieConfig>) => setPie((c) => ({ ...c, ...p }));
   // The descriptor for the active viz, or undefined while it is still on the bridge —
   // i.e. still driven by the inline branches below. PR3 empties that bridge out.
   const descriptor = getDescriptor(viz);
@@ -123,26 +108,8 @@ export default function ChartExplore() {
     const desc = getDescriptor(c.viz_type);
     if (desc) {
       setDescState(desc.fromParams(p));
-      // Carry every stored key forward, including namespaces this build doesn't own yet.
+      // Carry every stored key forward, including ones this build doesn't read.
       if (isParamsV2(p)) setSettings(p.settings);
-    } else if (c.viz_type === "pie") {
-      setPie(v1.pie ?? {});
-    } else if (c.viz_type === "scalar") {
-      setScalar(v1.scalar ?? { metric: v1.spec?.metrics?.[0] });
-    } else if (c.viz_type === "progress") {
-      setProgress(v1.progress ?? { metric: v1.spec?.metrics?.[0] });
-    } else if (c.viz_type === "gauge") {
-      setGauge(v1.gauge ?? { metric: v1.spec?.metrics?.[0] });
-    } else if (c.viz_type === "funnel") {
-      setFunnel(v1.funnel ?? { dimension: v1.spec?.dimensions?.[0], metric: v1.spec?.metrics?.[0] });
-    } else if (c.viz_type === "waterfall") {
-      setWaterfall(v1.waterfall ?? { xAxis: v1.spec?.dimensions?.[0], metric: v1.spec?.metrics?.[0] });
-    } else if (c.viz_type === "smartscalar") {
-      setSmart(v1.smartscalar ?? { dimension: v1.spec?.dimensions?.[0], metric: v1.spec?.metrics?.[0] });
-    } else if (c.viz_type === "boxplot") {
-      setBox(v1.boxplot ?? { category: v1.spec?.columns?.[0], value: v1.spec?.columns?.[1] });
-    } else if (c.viz_type === "sankey") {
-      setSankey(v1.sankey ?? { source: v1.spec?.dimensions?.[0], target: v1.spec?.dimensions?.[1], metric: v1.spec?.metrics?.[0] });
     }
     setRowLimit(v1.spec?.row_limit ?? 1000);
     setTemporalUnits(v1.spec?.temporal_units ?? {});
@@ -179,40 +146,7 @@ export default function ChartExplore() {
 
   function specForRun(): QuerySpec {
     if (descriptor) return descriptor.buildSpec(descConfig, { filters, rowLimit, temporalUnits });
-    if (viz === "pie") {
-      const dims = pie.dimension ? [pie.dimension] : [];
-      return { metrics: pie.metric ? [pie.metric] : [], dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [], temporal_units: pruneUnits(temporalUnits, dims) };
-    }
-    if (viz === "scalar") {
-      return { metrics: scalar.metric ? [scalar.metric] : [], dimensions: [], columns: [], filters, orderby: [], row_limit: 1, rollup_groups: [] };
-    }
-    if (viz === "progress") {
-      return { metrics: progress.metric ? [progress.metric] : [], dimensions: [], columns: [], filters, orderby: [], row_limit: 1, rollup_groups: [] };
-    }
-    if (viz === "gauge") {
-      return { metrics: gauge.metric ? [gauge.metric] : [], dimensions: [], columns: [], filters, orderby: [], row_limit: 1, rollup_groups: [] };
-    }
-    if (viz === "funnel") {
-      const dims = funnel.dimension ? [funnel.dimension] : [];
-      return { metrics: funnel.metric ? [funnel.metric] : [], dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [], temporal_units: pruneUnits(temporalUnits, dims) };
-    }
-    if (viz === "waterfall") {
-      const dims = waterfall.xAxis ? [waterfall.xAxis] : [];
-      return { metrics: waterfall.metric ? [waterfall.metric] : [], dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [], temporal_units: pruneUnits(temporalUnits, dims) };
-    }
-    if (viz === "smartscalar") {
-      const dims = smart.dimension ? [smart.dimension] : [];
-      return { metrics: smart.metric ? [smart.metric] : [], dimensions: dims, columns: [], filters, orderby: smart.dimension ? [{ field: smart.dimension, desc: false }] : [], row_limit: rowLimit, rollup_groups: [], temporal_units: pruneUnits(temporalUnits, dims) };
-    }
-    if (viz === "boxplot") {
-      // Raw rows (no aggregation) — quartiles are computed client-side.
-      return { metrics: [], dimensions: [], columns: [box.category, box.value].filter((c): c is string => !!c), filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
-    }
-    if (viz === "sankey") {
-      const dims = [sankey.source, sankey.target].filter((d): d is string => !!d);
-      return { metrics: sankey.metric ? [sankey.metric] : [], dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [], temporal_units: pruneUnits(temporalUnits, dims) };
-    }
-    // Unreachable: every viz without a branch above has a descriptor, which answered first.
+    // Unreachable: every viz type is in the registry.
     throw new Error(`no spec builder for viz ${viz}`);
   }
 
@@ -283,16 +217,9 @@ export default function ChartExplore() {
   const [sqlOpen, setSqlOpen] = useState(false);
   const chartSql = useBuildChartData(ws, datasetId, ranSpec, sqlOpen);
 
-  // A function declaration, not a const: `missingNow` reaches this while useChartRun runs,
-  // which sits above it in the body, so an arrow const would be in its temporal dead zone
-  // and every bridge viz would crash on open.
-  function validationInput() {
-    return { pie, scalar, progress, gauge, funnel, waterfall, smart, box, sankey };
-  }
-
-  /** Fields the active viz still needs — from its descriptor, or the bridge's table. */
+  /** Fields the active viz still needs, straight from its descriptor. */
   function missingNow(): string[] {
-    return descriptor ? descriptor.requiredFields(descConfig) : missingFields(viz, validationInput());
+    return descriptor ? descriptor.requiredFields(descConfig) : [];
   }
 
   // Params the preview renders from. The field names inside them (x-axis, metrics,
@@ -327,8 +254,6 @@ export default function ChartExplore() {
   const [saveDesc, setSaveDesc] = useState("");
 
   function paramsForSave(): AnyChartParams {
-    // Migrated viz types persist v2: the query, plus this descriptor's namespaced keys
-    // merged over whatever settings the saved chart already carried.
     if (descriptor) {
       return {
         version: 2,
@@ -341,16 +266,6 @@ export default function ChartExplore() {
         },
       };
     }
-    if (viz === "pie") return { spec: specForRun(), pie };
-    if (viz === "scalar") return { spec: specForRun(), scalar, columnSettings };
-    if (viz === "progress") return { spec: specForRun(), progress, columnSettings };
-    if (viz === "gauge") return { spec: specForRun(), gauge, columnSettings };
-    if (viz === "funnel") return { spec: specForRun(), funnel, columnSettings };
-    if (viz === "waterfall") return { spec: specForRun(), waterfall, columnSettings };
-    if (viz === "smartscalar") return { spec: specForRun(), smartscalar: smart, columnSettings };
-    if (viz === "boxplot") return { spec: specForRun(), boxplot: box, columnSettings };
-    if (viz === "sankey") return { spec: specForRun(), sankey, columnSettings };
-    // Unreachable: the remaining viz types all have a descriptor, handled above.
     throw new Error(`no params builder for viz ${viz}`);
   }
 
@@ -359,16 +274,6 @@ export default function ChartExplore() {
   // live outside ChartParams. Used only for dirty-tracking (never gates Save).
   const serializeConfig = () => JSON.stringify({ datasetId, viz, params: paramsForSave() });
 
-  // Distribute a ChartParams emitted by ChartSettingsSections back into the local
-  // display state. The settings component only edits these five display fields,
-  // so we only fan those out (everything else in ChartExplore's state model is
-  // left untouched).
-  function applyParamsBack(next: ChartParams) {
-    if (next.pie) setPie(next.pie);
-    if (next.tableState) setTableState(next.tableState);
-    if (next.columnSettings) setColumnSettings(next.columnSettings);
-    if (next.conditionalFormatting) setConditionalFormatting(next.conditionalFormatting);
-  }
 
   async function save() {
     if (!datasetId) { toast.error("Pick a dataset"); return; }
@@ -406,7 +311,6 @@ export default function ChartExplore() {
     // need their own hooks cleared by hand until PR3 retires them.
     setDescState(null); setSettings({});
     setColumnSettings({}); setConditionalFormatting([]); setTableState({}); setFilters([]); resetRun();
-    setPie({}); setScalar({}); setProgress({}); setGauge({}); setFunnel({}); setWaterfall({}); setSmart({}); setBox({}); setSankey({});
     setTemporalUnits({});
   }
 
@@ -510,220 +414,14 @@ export default function ChartExplore() {
                 unitRow={unitRow} tab="data" />
             )}
 
-            {viz === "pie" && (
-              <>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Dimension</Label>
-                  <Select value={pie.dimension ?? ""} onValueChange={(v) => patchPie({ dimension: v || undefined })}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
-                    <SelectContent>
-                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                {unitRow(pie.dimension)}
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
-                  <Select value={pie.metric ?? ""} onValueChange={(v) => patchPie({ metric: v || undefined })}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
-                    <SelectContent>
-                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </>
-            )}
 
-            {viz === "scalar" && (
-              <div className="space-y-1">
-                <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
-                <Select value={scalar.metric ?? ""} onValueChange={(v) => setScalar({ metric: v || undefined })}>
-                  <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
-                  <SelectContent>
-                    {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
 
-            {viz === "progress" && (
-              <>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
-                  <Select value={progress.metric ?? ""} onValueChange={(v) => setProgress((p) => ({ ...p, metric: v || undefined }))}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
-                    <SelectContent>
-                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="progress-goal" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Goal</Label>
-                  <Input id="progress-goal" type="number" value={progress.goal ?? ""}
-                    onChange={(e) => { const n = Number(e.target.value); setProgress((p) => ({ ...p, goal: e.target.value === "" || Number.isNaN(n) ? undefined : n })); }}
-                    className="h-8 text-sm" placeholder="Target value" />
-                </div>
-              </>
-            )}
 
-            {viz === "gauge" && (
-              <>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
-                  <Select value={gauge.metric ?? ""} onValueChange={(v) => setGauge((g) => ({ ...g, metric: v || undefined }))}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
-                    <SelectContent>
-                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1">
-                    <Label htmlFor="gauge-min" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Min</Label>
-                    <Input id="gauge-min" type="number" value={gauge.min ?? ""}
-                      onChange={(e) => { const n = Number(e.target.value); setGauge((g) => ({ ...g, min: e.target.value === "" || Number.isNaN(n) ? undefined : n })); }}
-                      className="h-8 text-sm" placeholder="0" />
-                  </div>
-                  <div className="space-y-1">
-                    <Label htmlFor="gauge-max" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Max</Label>
-                    <Input id="gauge-max" type="number" value={gauge.max ?? ""}
-                      onChange={(e) => { const n = Number(e.target.value); setGauge((g) => ({ ...g, max: e.target.value === "" || Number.isNaN(n) ? undefined : n })); }}
-                      className="h-8 text-sm" placeholder="auto" />
-                  </div>
-                </div>
-              </>
-            )}
 
-            {viz === "funnel" && (
-              <>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Stage (dimension)</Label>
-                  <Select value={funnel.dimension ?? ""} onValueChange={(v) => setFunnel((f) => ({ ...f, dimension: v || undefined }))}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
-                    <SelectContent>
-                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                {unitRow(funnel.dimension)}
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
-                  <Select value={funnel.metric ?? ""} onValueChange={(v) => setFunnel((f) => ({ ...f, metric: v || undefined }))}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
-                    <SelectContent>
-                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </>
-            )}
 
-            {viz === "waterfall" && (
-              <>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">X-axis (steps)</Label>
-                  <Select value={waterfall.xAxis ?? ""} onValueChange={(v) => setWaterfall((w) => ({ ...w, xAxis: v || undefined }))}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
-                    <SelectContent>
-                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                {unitRow(waterfall.xAxis)}
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric (delta)</Label>
-                  <Select value={waterfall.metric ?? ""} onValueChange={(v) => setWaterfall((w) => ({ ...w, metric: v || undefined }))}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
-                    <SelectContent>
-                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Checkbox id="wf-total" checked={!!waterfall.showTotal} onCheckedChange={() => setWaterfall((w) => ({ ...w, showTotal: !w.showTotal }))} />
-                  <Label htmlFor="wf-total" className="cursor-pointer text-sm font-normal">Show total bar</Label>
-                </div>
-              </>
-            )}
 
-            {viz === "smartscalar" && (
-              <>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Time / order dimension</Label>
-                  <Select value={smart.dimension ?? ""} onValueChange={(v) => setSmart((s) => ({ ...s, dimension: v || undefined }))}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
-                    <SelectContent>
-                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                {unitRow(smart.dimension)}
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
-                  <Select value={smart.metric ?? ""} onValueChange={(v) => setSmart((s) => ({ ...s, metric: v || undefined }))}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
-                    <SelectContent>
-                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </>
-            )}
 
-            {viz === "boxplot" && (
-              <>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Category</Label>
-                  <Select value={box.category ?? ""} onValueChange={(v) => setBox((b) => ({ ...b, category: v || undefined }))}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a column…" /></SelectTrigger>
-                    <SelectContent>
-                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Value column</Label>
-                  <Select value={box.value ?? ""} onValueChange={(v) => setBox((b) => ({ ...b, value: v || undefined }))}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a numeric column…" /></SelectTrigger>
-                    <SelectContent>
-                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </>
-            )}
 
-            {viz === "sankey" && (
-              <>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Source</Label>
-                  <Select value={sankey.source ?? ""} onValueChange={(v) => setSankey((s) => ({ ...s, source: v || undefined }))}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
-                    <SelectContent>
-                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Target</Label>
-                  <Select value={sankey.target ?? ""} onValueChange={(v) => setSankey((s) => ({ ...s, target: v || undefined }))}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
-                    <SelectContent>
-                      {columns.filter((c) => c.column_name !== sankey.source).map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
-                  <Select value={sankey.metric ?? ""} onValueChange={(v) => setSankey((s) => ({ ...s, metric: v || undefined }))}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
-                    <SelectContent>
-                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </>
-            )}
 
             <div className="space-y-1">
               <Label htmlFor="row-limit" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Row limit</Label>
@@ -736,7 +434,7 @@ export default function ChartExplore() {
           {/* ── DISPLAY TAB ── */}
           <TabsContent value="display" className="space-y-4">
 
-            {descriptor ? (
+            {descriptor && (
               <>
                 <StudioPanel descriptor={descriptor} config={descConfig} onConfigChange={patchDescConfig}
                   columns={columns} metrics={metrics} resultColumns={resultColumns} rows={data.rows}
@@ -756,14 +454,6 @@ export default function ChartExplore() {
                   onConditionalFormatting={setConditionalFormatting}
                 />
               </>
-            ) : (
-              <ChartSettingsSections
-                vizType={viz}
-                params={toRenderParams(viz, paramsForSave())}
-                columns={resultColumns}
-                rows={data.rows}
-                onChange={applyParamsBack}
-              />
             )}
           </TabsContent>
         </Tabs>
@@ -861,7 +551,7 @@ export default function ChartExplore() {
         )}
         </div>
         {!ranSpec && !data.isLoading && (() => {
-          const missing = datasetId ? missingFields(viz, validationInput()) : ["a dataset"];
+          const missing = datasetId ? missingNow() : ["a dataset"];
           return (
             <ChartEmptyState icon={vizMeta?.icon} title={`Set up your ${vizMeta?.name ?? "chart"}`}
               hint={missing.length ? `Add: ${missing.join(", ")}${autoRun ? "" : ", then Run"}` : (autoRun ? "Ready — adjust the fields on the left." : "Ready — click Run to preview.")} />
