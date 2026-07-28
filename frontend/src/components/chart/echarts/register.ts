@@ -4,6 +4,11 @@ import { BarChart, LineChart, ScatterChart, PieChart, GaugeChart, FunnelChart, B
 import {
   GridComponent, TooltipComponent, LegendComponent, DatasetComponent, GraphicComponent, MarkLineComponent, VisualMapComponent,
 } from "echarts/components";
+// The aria component is not re-exported from "echarts/components", and this deep entry
+// self-registers on import. Without it every `aria` option — the screen-reader description
+// AND the decal patterns — is silently ignored, which is exactly what happened here until
+// the accessibility audit went looking for the label and found none.
+import "echarts/lib/component/aria";
 
 let registered = false;
 
