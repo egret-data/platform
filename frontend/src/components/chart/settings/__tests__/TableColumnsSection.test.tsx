@@ -48,6 +48,18 @@ describe("TableColumnsSection", () => {
       expect(screen.queryByLabelText(/search columns/i)).not.toBeInTheDocument();
     });
 
+    // Pin the threshold boundary itself — COLUMN_FILTER_MIN gets tuned in task 7 against the
+    // panel's real width, and these two make that a one-line, safely-tested change.
+    it("does not appear at 11 columns, one below the threshold", () => {
+      render(<TableColumnsSection columns={manyCols(11)} value={{}} onChange={() => {}} />);
+      expect(screen.queryByLabelText(/search columns/i)).not.toBeInTheDocument();
+    });
+
+    it("appears at 12 columns, exactly the threshold", () => {
+      render(<TableColumnsSection columns={manyCols(12)} value={{}} onChange={() => {}} />);
+      expect(screen.getByLabelText(/search columns/i)).toBeInTheDocument();
+    });
+
     it("narrows the list to matching columns when typing", () => {
       const cols = [
         { name: "revenue", type: "double" },
@@ -59,6 +71,19 @@ describe("TableColumnsSection", () => {
       expect(screen.getByLabelText("revenue")).toBeInTheDocument();
       expect(screen.queryByLabelText("region")).not.toBeInTheDocument();
       expect(screen.queryByLabelText("col_0")).not.toBeInTheDocument();
+    });
+
+    it("shows a no-match message when the filter matches no column, instead of a bare empty list", () => {
+      const cols = [{ name: "revenue", type: "double" }, ...manyCols(15)];
+      render(<TableColumnsSection columns={cols} value={{}} onChange={() => {}} />);
+      fireEvent.change(screen.getByLabelText(/search columns/i), { target: { value: "zzz-nope" } });
+      expect(screen.getByText(/no column matches/i)).toBeInTheDocument();
+      expect(screen.getByText(/zzz-nope/)).toBeInTheDocument();
+    });
+
+    it("does not show the no-match message when the filter is empty", () => {
+      render(<TableColumnsSection columns={manyCols(15)} value={{}} onChange={() => {}} />);
+      expect(screen.queryByText(/no column matches/i)).not.toBeInTheDocument();
     });
   });
 

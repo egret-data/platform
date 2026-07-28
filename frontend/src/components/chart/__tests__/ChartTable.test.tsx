@@ -170,6 +170,16 @@ describe("ChartTable interactions", () => {
   });
 });
 
+describe("ChartTable — every column hidden", () => {
+  it("shows a message instead of an empty grid when every column is hidden", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(3)} tableState={{ hiddenColumns: ["a", "b"] }} />);
+    expect(screen.getByText(/every column is hidden/i)).toBeInTheDocument();
+    expect(document.querySelector("table")).not.toBeInTheDocument();
+    expect(document.querySelector("th")).not.toBeInTheDocument();
+    expect(document.querySelector("td")).not.toBeInTheDocument();
+  });
+});
+
 describe("ChartTable — column_title header rename", () => {
   const REV_COLS = [{ name: "region", type: "varchar" }, { name: "total_revenue", type: "double" }];
   const REV_ROWS = [["EU", 30], ["US", 10], ["APAC", 20]];

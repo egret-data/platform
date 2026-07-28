@@ -263,6 +263,19 @@ export function ChartTable({
   const totalRows = rows.length;
   const start = paginationEnabled ? pageIndex * pageSize : 0;
 
+  // Reachable before only by unchecking every box by hand; "Hide all" makes it one click, so a
+  // blank grid (no <th>, no <td>) now needs to read as "this is what you asked for", not a bug.
+  // "Columns" (not "Display → Columns") because this section also renders in a dashboard card's
+  // per-card panel, which has no Display tab to point at — only the CardVizPanel composes the
+  // same "Columns" heading, so that name is the one thing true in both places.
+  if (table.getVisibleLeafColumns().length === 0) {
+    return (
+      <p className="p-4 text-sm text-muted-foreground">
+        Every column is hidden. Turn one back on under Columns.
+      </p>
+    );
+  }
+
   return (
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
     <div className="rounded-md border">

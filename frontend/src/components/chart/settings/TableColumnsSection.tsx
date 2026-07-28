@@ -75,6 +75,9 @@ export function TableColumnsSection({
             className="h-8 text-sm"
           />
         )}
+        {q && visibleColumns.length === 0 && (
+          <p className="text-xs text-muted-foreground">No column matches “{filter}”.</p>
+        )}
         <div className="flex flex-col gap-1">
           {visibleColumns.map((c) => (
             <div key={c.name} className="flex items-center gap-2">
