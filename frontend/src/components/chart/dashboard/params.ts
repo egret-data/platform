@@ -1,4 +1,5 @@
-import type { ChartFilter, ValueFilterOp, Chart, ChartParams, VizType, QuerySpec } from "@/api/charts";
+import type { ChartFilter, ValueFilterOp, Chart, AnyChartParams, VizType, QuerySpec } from "@/api/charts";
+import { isParamsV2 } from "@/api/charts";
 import type { DashboardParameter } from "@/api/dashboards";
 import { TEMPORAL_UNITS } from "@/components/chart/temporal-units";
 
@@ -361,27 +362,52 @@ export function interpolateParams(
 }
 
 /**
- * Merge a display-only override over a chart's params (never the query `spec`); optionally
- * override viz_type. Takes params already put through `toRenderParams`, because stored
- * overrides address the pre-A2 (v1) keys.
+ * Merge a per-card override onto a chart's settings. In v2 an override is a flat partial
+ * of `settings`, so merging is by key and needs no per-viz knowledge — the reason A2 chose
+ * flat settings in the first place. The query `spec` is never overridden.
+ *
+ * Overrides stored before migration 0100 are v1-shaped (nested `cartesian`/`pie` objects,
+ * `columnSettings`, …); `flattenLegacyOverride` accepts those so a dashboard opened during
+ * a deploy cannot break.
  */
 export function applyVizOverride(
-  chart: { viz_type: VizType; params: ChartParams },
+  chart: { viz_type: VizType; params: AnyChartParams },
   override?: Record<string, unknown>,
-): { viz_type: VizType; params: ChartParams } {
+): { viz_type: VizType; params: AnyChartParams } {
   if (!override) return { viz_type: chart.viz_type, params: chart.params };
-  const { viz_type: ovViz, spec: _ignoredSpec, ...display } = override as { viz_type?: VizType; spec?: unknown };
-  const params: ChartParams = { ...chart.params };
-  const baseParams = chart.params as unknown as Record<string, unknown>;
-  const target = params as unknown as Record<string, unknown>;
-  for (const [k, v] of Object.entries(display)) {
-    const baseVal = baseParams[k];
-    // deep-merge plain objects (config sub-objects like cartesian/pie); replace arrays/primitives
-    target[k] =
-      baseVal && typeof baseVal === "object" && !Array.isArray(baseVal) && v && typeof v === "object" && !Array.isArray(v)
-        ? { ...(baseVal as object), ...(v as object) }
-        : v;
+  const { viz_type: ovViz, spec: _ignoredSpec, ...rest } = override as { viz_type?: VizType; spec?: unknown };
+  const settings = flattenLegacyOverride(rest);
+  const base = isParamsV2(chart.params)
+    ? chart.params
+    : { version: 2 as const, spec: chart.params.spec, settings: {} };
+  return {
+    viz_type: ovViz ?? chart.viz_type,
+    params: { ...base, settings: { ...base.settings, ...settings } },
+  };
+}
+
+/** The v1 nested config keys an override could carry, one per viz family. */
+const LEGACY_VIZ_KEYS = new Set([
+  "cartesian", "pie", "scalar", "progress", "gauge", "funnel", "waterfall",
+  "smartscalar", "boxplot", "sankey", "map",
+]);
+
+/** v1 override keys → flat settings keys; already-flat keys pass through untouched. */
+export function flattenLegacyOverride(override: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(override)) {
+    if (k === "columnSettings") { out.column_settings = v; continue; }
+    if (k === "conditionalFormatting") { out.conditional_formatting = v; continue; }
+    if (k === "tableState") { out["table.state"] = v; continue; }
+    // A nested v1 config object becomes `<viz>.<field>`. Matched against the known v1
+    // keys, not "is an object": `column_settings` is a flat key that happens to hold one.
+    if (LEGACY_VIZ_KEYS.has(k) && v && typeof v === "object" && !Array.isArray(v)) {
+      for (const [ik, iv] of Object.entries(v as Record<string, unknown>)) {
+        out[`${k}.${ik === "mapKey" ? "key" : ik}`] = iv;
+      }
+      continue;
+    }
+    out[k] = v;
   }
-  params.spec = chart.params.spec; // query is always the chart's spec (+ dashboard injection upstream)
-  return { viz_type: ovViz ?? chart.viz_type, params };
+  return out;
 }

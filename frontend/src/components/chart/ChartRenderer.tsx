@@ -1,6 +1,11 @@
 // src/components/chart/ChartRenderer.tsx
-import type { ChartParams, VizType } from "@/api/charts";
+import type {
+  AnyChartParams, BoxplotConfig, CartesianConfig, FunnelConfig, GaugeConfig,
+  PieConfig, ProgressConfig, SankeyConfig, ScalarConfig, SmartScalarConfig, VizType,
+} from "@/api/charts";
+import type { PivotConfig } from "@/components/chart/viz/pivot";
 import { isCartesianViz } from "@/api/charts";
+import { vizConfig, shellSettings } from "@/components/chart/viz/renderConfig";
 import type { DrillContext } from "@/components/chart/drill";
 import { EChartsRenderer } from "@/components/chart/echarts/EChartsRenderer";
 import { buildCartesianOption } from "@/components/chart/echarts/options/cartesian";
@@ -24,7 +29,8 @@ const EmptyState = () => (
 
 export interface ChartRendererProps {
   vizType: VizType;
-  params: ChartParams;
+  /** Either stored shape — the config is resolved through the viz's descriptor. */
+  params: AnyChartParams;
   columns: ResultColumn[];
   rows: unknown[][];
   /** metric_name -> data_type, for metric value formatting. Optional; defaults to {}. */
@@ -33,19 +39,20 @@ export interface ChartRendererProps {
 }
 
 export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}, onValueClick }: ChartRendererProps) {
-  const cartesian = params.cartesian ?? { yMetrics: [] };
-  const pie = params.pie ?? {};
-  const scalar = params.scalar ?? {};
-  const progress = params.progress ?? {};
-  const gauge = params.gauge ?? {};
-  const funnel = params.funnel ?? {};
-  const waterfall = params.waterfall ?? {};
-  const smart = params.smartscalar ?? {};
-  const box = params.boxplot ?? {};
-  const sankey = params.sankey ?? {};
-  const columnSettings = params.columnSettings ?? {};
-  const conditionalFormatting = params.conditionalFormatting ?? [];
-  const tableState = params.tableState ?? {};
+  // One config, from the viz's own descriptor; each branch below reads it as its type.
+  const cfg = vizConfig(vizType, params);
+  const cartesian = { yMetrics: [], ...cfg } as CartesianConfig;
+  const pie = cfg as PieConfig;
+  const scalar = cfg as ScalarConfig;
+  const progress = cfg as ProgressConfig;
+  const gauge = cfg as GaugeConfig;
+  const funnel = cfg as FunnelConfig;
+  const waterfall = cfg as { xAxis?: string; metric?: string; showTotal?: boolean };
+  const smart = cfg as SmartScalarConfig;
+  const box = cfg as BoxplotConfig;
+  const sankey = cfg as SankeyConfig;
+  const pivot = cfg as unknown as PivotConfig;
+  const { columnSettings, conditionalFormatting, tableState } = shellSettings(params);
   const dimensionColumns = params.spec.metrics.length > 0 ? params.spec.dimensions : [];
 
   if (vizType === "object") {
@@ -76,14 +83,14 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
         input={{
           columns: columns.map((c) => c.name),
           rows,
-          rowDims: params.rows ?? [],
-          colDims: params.cols ?? [],
-          metrics: params.metrics ?? [],
-          showRowTotals: params.showRowTotals ?? true,
-          showColTotals: params.showColTotals ?? true,
-          condense: params.condense ?? false,
-          collapsed: new Set(params.collapsedRows ?? []),
-          sortDims: params.pivotSort ?? {},
+          rowDims: pivot.rows ?? [],
+          colDims: pivot.cols ?? [],
+          metrics: pivot.metrics ?? [],
+          showRowTotals: pivot.showRowTotals ?? true,
+          showColTotals: pivot.showColTotals ?? true,
+          condense: pivot.condense ?? false,
+          collapsed: new Set(pivot.collapsedRows ?? []),
+          sortDims: pivot.sort ?? {},
         }}
         columnSettings={columnSettings}
         conditionalFormatting={conditionalFormatting}

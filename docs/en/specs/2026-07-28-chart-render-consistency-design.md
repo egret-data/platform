@@ -52,6 +52,10 @@ through the adapter, every render change has to be made twice.
   starts from it instead of restating it.
 - Number formatting applied uniformly (tooltip, axis, data label), including the
   map, through one formatter.
+- **The dashboard card editor offers no number formatting at all** — `DashboardView`
+  hands it `[...spec.dimensions, ...spec.columns]`, so a cartesian chart's metrics
+  are never in the list and the Formatting section has nothing to show. Found while
+  verifying B1; it predates A2 and belongs with the formatting work.
 - Canvas accessibility audited per viz: `ARIA_A11Y` is already applied everywhere,
   but the generated descriptions and decal patterns are unverified.
 
