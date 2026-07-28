@@ -6,6 +6,7 @@ import { formatValue } from "../../format";
 import { ariaDescription } from "../base";
 import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
+import { foldTail } from "../fold";
 
 export interface ResultColumn { name: string; type: string }
 export interface CartesianBuildConfig {
@@ -40,6 +41,16 @@ export interface CartesianBuildConfig {
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
   xAxisUnit?: string;            // temporal extraction unit for the x-axis dimension (e.g. "day_of_week")
+  /** Short value-axis labels (25.5K). Defaults to on once the numbers are wide. */
+  compactValues?: boolean;
+  /** Fold all but the largest `maxCategories - 1` into "Other". Unset keeps every category. */
+  maxCategories?: number;
+  /** Series names in display order; any not listed keep their natural order after them. */
+  seriesOrder?: string[];
+  /** Series names to leave out of the chart entirely. */
+  hiddenSeries?: string[];
+  /** Data-label density: "fit" drops labels that would collide, "all" draws every one. */
+  labelDensity?: "fit" | "all";
 }
 
 // The series names a cartesian chart will render — its y-metrics, or the distinct
@@ -119,6 +130,34 @@ function trendSeries(series: SeriesLike[]): SeriesLike[] {
         lineStyle: { type: "dashed", width: 1.5, color: s.itemStyle?.color },
         tooltip: { show: false } },
     } as SeriesLike);
+  }
+  return out;
+}
+
+/**
+ * Metabase's `graph.series_order`: filters out hidden series and reorders the rest.
+ *
+ * Called before the overlays are built, so anything it drops is never counted in a stack
+ * total, never normalised against, and leaves no orphaned trend line — but that guarantee
+ * only holds as far downstream as every consumer keys off the series that reach it (see the
+ * axis-shape logic in baseOption, which had to be re-derived from the surviving series
+ * rather than from cfg for the same reason). Order matters beyond the legend: it is also the
+ * stacking order and the draw order.
+ */
+function applySeriesOrder(series: SeriesLike[], cfg: CartesianBuildConfig): SeriesLike[] {
+  const hidden = cfg.hiddenSeries;
+  const order = cfg.seriesOrder;
+  if (!hidden?.length && !order?.length) return series;
+  const out = hidden?.length ? series.filter((s) => !hidden.includes(s.name ?? "")) : [...series];
+  if (order?.length) {
+    const rank = new Map(order.map((n, i) => [n, i]));
+    // A name that is no longer plotted simply ranks nowhere; anything the stored order does
+    // not mention keeps its natural position after the ones it does.
+    out.sort(
+      (a, b) =>
+        (rank.get(a.name ?? "") ?? Number.MAX_SAFE_INTEGER) -
+        (rank.get(b.name ?? "") ?? Number.MAX_SAFE_INTEGER),
+    );
   }
   return out;
 }
@@ -237,7 +276,7 @@ export function buildCartesianOption(
   const xType = columns[xi].type;
   const xrows = rows.filter((r) => r[xi] != null);
   const catKey = (v: unknown) => String(v);
-  const categories = sortCategories(distinct(xrows.map((r) => r[xi])), xType);
+  let categories = sortCategories(distinct(xrows.map((r) => r[xi])), xType);
 
 
   // Breakout: one ECharts series per distinct series value (first y-metric only).
@@ -249,7 +288,7 @@ export function buildCartesianOption(
     const cell = new Map(xrows.map((r) => [`${catKey(r[xi])} ${catKey(r[gi])}`, r[mi] as number | null]));
     // Grouped bars (>1 series, not stacked) must auto-size to sit side by side.
     const grouped = !cfg.stacked && seriesTypeFor(cfg.kind, metric, cfg.seriesTypes) === "bar" && seriesValues.length > 1;
-    const series = seriesValues.map((sv, si) => {
+    const builtSeries = seriesValues.map((sv, si) => {
       const data = categories.map((c) => {
         const v = cell.get(`${catKey(c)} ${catKey(sv)}`);
         return v === undefined ? null : v;
@@ -258,6 +297,7 @@ export function buildCartesianOption(
       const name = sv == null || sv === "" ? "(empty)" : String(sv);
       return decorateSeries({ name, data }, metric, si, cfg, fmt, grouped);
     });
+    const series = applySeriesOrder(builtSeries as unknown as SeriesLike[], cfg) as unknown as typeof builtSeries;
     if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
     if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
     if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
@@ -271,7 +311,7 @@ export function buildCartesianOption(
   const grouped = !cfg.stacked && barMetrics > 1;
   // Metabase tints a lone series with its summarize green rather than accent blue.
   const singleColor = cfg.yMetrics.length === 1 ? SUMMARIZE_COLOR : undefined;
-  const series = cfg.yMetrics.map((metric, si) => {
+  let series = cfg.yMetrics.map((metric, si) => {
     const mi = idx[metric];
     const data = categories.map((c) => {
       const r = rowByCat.get(catKey(c));
@@ -279,6 +319,34 @@ export function buildCartesianOption(
     });
     return decorateSeries({ name: metric, data }, metric, si, cfg, fmt, grouped, singleColor);
   });
+
+  // Folding is offered only where "Other" means one clear thing: a single metric, no
+  // breakout, and a plain category axis. With a breakout the bucket would have to merge
+  // series as well, which changes what the chart says; on a value or time axis "Other" has
+  // no coordinate to sit at; and a temporal extract axis is already a fixed small domain
+  // (twelve months, seven weekdays) that nobody needs folded. And a trend line fitted
+  // through an "Other" bucket would describe where the user set the cutoff rather than the
+  // data, since the bucket's size moves with it. Those are separate decisions, taken when
+  // the charts that need them are redesigned.
+  const foldable =
+    cfg.maxCategories != null &&
+    !cfg.series &&
+    cfg.yMetrics.length === 1 &&
+    !usesXScale(cfg) &&
+    !isExtractUnit(cfg.xAxisUnit) &&
+    !cfg.trendLine;
+  if (foldable) {
+    const s = series[0] as unknown as SeriesLike;
+    const folded = foldTail(
+      categories.map((c, i) => ({ name: String(c), value: s.data?.[i] })),
+      cfg.maxCategories,
+    );
+    categories = folded.map((p) => p.name);
+    s.data = folded.map((p) => (typeof p.value === "number" ? p.value : null));
+  }
+
+  series = applySeriesOrder(series as unknown as SeriesLike[], cfg) as unknown as typeof series;
+
   if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
   if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
   if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
@@ -336,6 +404,10 @@ function decorateSeries(
       // On a value/time x-axis the datum is an [x, y] pair — label the y.
       formatter: (p: { value: unknown }) => fmt(metric, Array.isArray(p.value) ? p.value[1] : p.value),
     };
+    // "fit" is the default: at a dashboard card's width there is no room for a label per
+    // bar, and a pile of overlapping numbers is worse than showing fewer. "all" is for
+    // someone who would rather have every number and accept the crowding.
+    if (cfg.labelDensity !== "all") out.labelLayout = { hideOverlap: true };
   }
   return out;
 }
@@ -345,22 +417,88 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   const gridLine = resolveColor(CHART_THEME.gridLine, COLOR_FALLBACK.gridLine);
   const axisLabelColor = resolveColor(CHART_THEME.axisLabel, COLOR_FALLBACK.axisLabel);
   const normalized = isNormalized(cfg);
-  const fmtFor = (metrics: string[]) => (v: number) => {
-    if (normalized) return `${Math.round(v)}%`;
-    const m = metrics[0];
-    return m ? formatValue(v, cfg.metricTypes?.[m] ?? "double", cfg.columnSettings?.[m]) : String(v);
+  // Defaults are decided here and never stored, so a chart saved before this change picks
+  // them up too. `??` keeps an explicit choice winning — including `false` and `""`.
+  const hasBreakout = cfg.series != null && cfg.series !== "";
+  const showLegend = cfg.showLegend ?? (hasBreakout || cfg.yMetrics.length > 1);
+  // A renamed series is what the legend and tooltip already show, so the axis follows it
+  // first; `column_title` is the per-column rename the Formatting panel will write.
+  const titleOf = (col: string | undefined) =>
+    col == null ? undefined : (cfg.seriesLabels?.[col] ?? cfg.columnSettings?.[col]?.column_title ?? col);
+  // An axis plotting several metrics has no one name — the legend names them instead.
+  const metricTitle = (metrics: string[]) => (metrics.length === 1 ? titleOf(metrics[0]) : undefined);
+  const xTitle = cfg.xLabel ?? titleOf(cfg.xAxis);
+
+  // Compact labels are for wide numbers, not for many bars — three bars of revenue in the
+  // millions crowd an axis just as badly as forty do. Measured per axis: a dual-axis chart
+  // has two scales on purpose, and the small one should not inherit the big one's shorthand.
+  const plotted = (series as SeriesLike[]).filter((s) => !s.__trend && !s.__total);
+
+  // Axis shape follows the series that survived hiding, not the config: hiding the only
+  // right-axis metric should take its axis with it. Keyed on yAxisIndex rather than on the
+  // metric names because that index was baked into each series before hiding ran — an axis
+  // a surviving series still points at has to exist. The Set matters: a breakout splits one
+  // metric across many series, so without deduping, leftSide would list it once per series
+  // and metricTitle (single-metric only) would stop titling breakout charts' axis.
+  const dual = plotted.some((s) => s.yAxisIndex === 1);
+  const rightSide = dual ? rightMetrics(cfg) : [];
+  const leftSide = [...new Set(plotted.filter((s) => s.yAxisIndex !== 1).map((s) => s.__metric ?? s.name ?? ""))]
+    .filter(Boolean);
+  const yTitle = cfg.yLabel ?? metricTitle(leftSide);
+  const widestOf = (metrics: string[]) => {
+    let widest = 0;
+    for (const s of plotted) {
+      // A breakout splits one metric into many series, each still tagged with __metric.
+      // An untagged series predates that and is counted against whichever axis asks.
+      if (s.__metric != null && !metrics.includes(s.__metric)) continue;
+      for (const d of (s.data ?? []) as unknown[]) {
+        // On a value/time x-axis the datum is an [x, y] pair — the y is what the axis shows.
+        const n = Math.abs(Number(Array.isArray(d) ? d[1] : d));
+        if (Number.isFinite(n) && n > widest) widest = n;
+      }
+    }
+    return widest;
   };
+
+  const fmtFor = (metrics: string[]) => {
+    // 10,000 is where a grouped number reaches six characters and "10K" starts winning.
+    const compact = normalized ? false : (cfg.compactValues ?? widestOf(metrics) >= 10_000);
+    return (v: number) => {
+      if (normalized) return `${Math.round(v)}%`;
+      const m = metrics[0];
+      if (!m) return String(v);
+      const col = cfg.columnSettings?.[m];
+      // A column that states its own `compact` preference outranks the chart-wide default.
+      return formatValue(v, cfg.metricTypes?.[m] ?? "double", { ...col, compact: col?.compact ?? compact });
+    };
+  };
+
+  // Always ECharts' own `'auto'`: it measures the rendered labels and drops the ones that
+  // would collide. Any rule of ours is a function of the category COUNT, and the thing that
+  // decides whether labels fit is the axis WIDTH — which the option builder never sees. An
+  // evenly-spaced every-Nth rule looks tidier on a wide builder canvas and is illegible on a
+  // dashboard card.
+  const longest = categories.reduce((n: number, c) => Math.max(n, String(c).length), 0);
+  // Long names are unreadable upright regardless of how many survive thinning (there is no
+  // thinning any more) — only on a bottom axis; a horizontal chart stacks categories down
+  // the left, where length costs nothing.
+  const rotate = !horizontal && longest > 10 && categories.length > 6 ? 30 : 0;
+
   const categoryAxis = {
     type: "category" as const, data: categories,
-    name: cfg.xLabel, nameLocation: "middle" as const, nameGap: 28,
-    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor },
+    name: xTitle, nameLocation: "middle" as const, nameGap: 28,
+    // The title matches the label colour — an axis name is not a lesser piece of chrome
+    // than the values beneath it, and ECharts' default nameTextStyle colour reads paler.
+    nameTextStyle: { color: axisLabelColor },
+    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, interval: "auto" as const, rotate },
     axisLine: { lineStyle: { color: gridLine } },
   };
   // Non-ordinal x: a value (linear) or time (timeseries) axis positioning points by
   // their real coordinate. Series carry [x, y] pairs (see applyXScale).
   const scaleAxis = {
     type: cfg.xScale === "timeseries" ? ("time" as const) : ("value" as const),
-    name: cfg.xLabel, nameLocation: "middle" as const, nameGap: 28,
+    name: xTitle, nameLocation: "middle" as const, nameGap: 28,
+    nameTextStyle: { color: axisLabelColor },
     axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor },
     axisLine: { lineStyle: { color: gridLine } },
     splitLine: { show: false as const },
@@ -368,7 +506,12 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   const xCategory = usesXScale(cfg) ? scaleAxis : categoryAxis;
   const mkValueAxis = (metrics: string[], position?: "left" | "right") => ({
     type: cfg.logScale ? ("log" as const) : ("value" as const),
-    name: position === "right" ? undefined : cfg.yLabel,
+    name: position === "right" ? undefined : yTitle,
+    nameLocation: "middle" as const,
+    nameTextStyle: { color: axisLabelColor },
+    // Clear of the tick labels: a vertical axis's numbers are far wider than a horizontal
+    // axis's are tall.
+    nameGap: horizontal ? 28 : 44,
     position,
     ...(normalized ? { max: 100 } : {}),
     // Manual axis range (Metabase y-axis min/max) overrides the auto extent.
@@ -382,16 +525,14 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   let xAxis: unknown;
   let yAxis: unknown;
   if (horizontal) {
-    xAxis = mkValueAxis(cfg.yMetrics);
+    xAxis = mkValueAxis(leftSide);
     yAxis = categoryAxis;
-  } else if (isDualAxis(cfg)) {
-    const right = rightMetrics(cfg);
-    const left = cfg.yMetrics.filter((m) => !right.includes(m));
+  } else if (dual) {
     xAxis = xCategory;
-    yAxis = [mkValueAxis(left, "left"), mkValueAxis(right, "right")];
+    yAxis = [mkValueAxis(leftSide, "left"), mkValueAxis(rightSide, "right")];
   } else {
     xAxis = xCategory;
-    yAxis = mkValueAxis(cfg.yMetrics);
+    yAxis = mkValueAxis(leftSide);
   }
 
   // Goal line — a horizontal reference at goalValue, drawn via the first series' markLine.
@@ -405,17 +546,21 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     };
   }
 
-  // Metabase puts the legend along the top; reserve room there for it, and below
-  // only for the x-axis title.
+  // Metabase puts the legend along the top; reserve room there for it. The category axis
+  // sits at the bottom normally and on the left when horizontal — the value axis is the
+  // other one — so reserve room on whichever edge each title actually renders on.
+  const bottomTitle = horizontal ? yTitle : xTitle;
+  const leftTitle = horizontal ? xTitle : yTitle;
   const grid = {
     ...CHART_THEME.grid,
-    top: (CHART_THEME.grid.top as number) + (cfg.showLegend ? 24 : 0),
-    bottom: (CHART_THEME.grid.bottom as number) + (cfg.xLabel ? 22 : 0),
+    top: (CHART_THEME.grid.top as number) + (showLegend ? 24 : 0),
+    bottom: (CHART_THEME.grid.bottom as number) + (bottomTitle ? 22 : 0) + (rotate ? 18 : 0),
+    left: (CHART_THEME.grid.left as number) + (leftTitle ? 26 : 0),
   };
 
   // Trend series stay out of the legend.
   const legendNames = series.filter((s) => !(s as SeriesLike).__trend && !(s as SeriesLike).__total).map((s) => (s as SeriesLike).name);
-  const legend = cfg.showLegend
+  const legend = showLegend
     ? { top: 0, left: "center" as const, type: "scroll" as const, ...(legendNames.length !== series.length ? { data: legendNames } : {}) }
     : undefined;
 
@@ -449,11 +594,13 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   return {
     aria: ariaDescription({
       kind: `${cfg.kind === "line" ? "Line" : cfg.kind === "area" ? "Area" : cfg.kind === "scatter" ? "Scatter" : cfg.kind === "combo" ? "Combo" : "Bar"} chart`,
-      metric: first?.name ?? cfg.yMetrics[0],
+      // No fallback to cfg.yMetrics[0]: with every series hidden there is no metric being
+      // described, and naming one would tell a screen reader about a chart nobody can see.
+      metric: first?.name,
       dimension: cfg.xAxis,
       seriesCount: described.length,
       format: (v) => fmtFor(cfg.yMetrics)(Number(v)),
-      points: categories.map((c, i) => ({ name: String(c), value: first?.data?.[i] })),
+      points: first ? categories.map((c, i) => ({ name: String(c), value: first.data?.[i] })) : [],
     }),
     color: undefined,
     grid,

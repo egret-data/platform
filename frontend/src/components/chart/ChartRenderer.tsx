@@ -106,18 +106,13 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
         {rows.length === 0
           ? <EmptyState />
           : <EChartsRenderer option={buildCartesianOption(columns, rows, {
-              kind: vizType, xAxis: cartesian.xAxis, xMetric: cartesian.xMetric, yMetrics: cartesian.yMetrics, series: cartesian.series,
-              stacked: cartesian.stacked, horizontal: cartesian.horizontal, smooth: cartesian.smooth,
-              showLabels: cartesian.showLabels, showLegend: cartesian.showLegend,
-              xLabel: cartesian.xLabel, yLabel: cartesian.yLabel, seriesTypes: cartesian.seriesTypes,
-              rightAxisMetrics: cartesian.rightAxisMetrics, logScale: cartesian.logScale,
-              normalized: cartesian.normalized, goalValue: cartesian.goalValue, goalLabel: cartesian.goalLabel,
-              trendLine: cartesian.trendLine, connectNulls: cartesian.connectNulls, step: cartesian.step,
-              showStackTotal: cartesian.showStackTotal,
-              seriesColors: cartesian.seriesColors, seriesLabels: cartesian.seriesLabels,
-              yMin: cartesian.yMin, yMax: cartesian.yMax,
-              showMarkers: cartesian.showMarkers, xScale: cartesian.xScale,
-              columnSettings, metricTypes,
+              // Spread rather than list the fields: this used to be a hand-maintained whitelist, and
+              // four settings added in one branch were silently dropped between the panel and the
+              // chart because nobody remembered to extend it.
+              ...cartesian,
+              kind: vizType,
+              columnSettings,
+              metricTypes,
               xAxisUnit: params.spec.temporal_units?.[cartesian.xAxis ?? ""],
             })}
             onPointClick={onValueClick && cartesian.xAxis ? (p) => {

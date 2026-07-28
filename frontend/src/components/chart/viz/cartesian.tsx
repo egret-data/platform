@@ -1,9 +1,13 @@
 import { pruneUnits } from "@/components/chart/temporal-units";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { FieldZone } from "@/components/chart/config/FieldZone";
-import { CartesianDisplaySection } from "@/components/chart/settings/CartesianDisplaySection";
+import {
+  SeriesOptions, AxesOptions, OrientationOption, AxisRangeOptions, FormatOptions, GoalOptions, TrendOption,
+} from "@/components/chart/settings/CartesianDisplaySection";
+import { SeriesOrderSection } from "@/components/chart/settings/SeriesOrderSection";
 import { cartesianSeriesNames } from "@/components/chart/echarts/options/cartesian";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 import type { CartesianConfig, CartesianViz, QuerySpec } from "@/api/charts";
 import { cartesianFromParams, cartesianToSettings, CARTESIAN_PREFIX } from "./cartesian-codec";
@@ -69,22 +73,101 @@ function SeriesControl({ config, onChange, columns }: VizControlProps<CartesianC
   );
 }
 
+function MaxCategoriesControl({ config, onChange }: VizControlProps<CartesianConfig>) {
+  return (
+    <div className="space-y-1">
+      <Label htmlFor="cz-maxcat" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        Max categories
+      </Label>
+      <Input id="cz-maxcat" type="number" min={2} className="h-8 text-sm"
+        placeholder="Keep every category"
+        value={config.maxCategories ?? ""}
+        onChange={(e) => {
+          const n = Number(e.target.value);
+          onChange({ maxCategories: e.target.value === "" || Number.isNaN(n) ? undefined : n });
+        }} />
+      <p className="text-xs text-muted-foreground">The rest are summed into “Other”.</p>
+    </div>
+  );
+}
+
+// Series list draws its names the same way the per-series colour/label control does: from the
+// last result, not from anything precomputed — the shell must not know cartesian-specific shape.
+function SeriesOrderControl({ config, onChange, resultColumns, rows }: VizControlProps<CartesianConfig>) {
+  const names = cartesianSeriesNames(resultColumns, rows, config);
+  if (names.length === 0) return null;
+  return (
+    <SeriesOrderSection names={names} order={config.seriesOrder} hidden={config.hiddenSeries} onChange={onChange} />
+  );
+}
+
+/**
+ * The Display tab's controls, grouped under named headings and scoped to what this kind
+ * actually plots — bar gets orientation and stacking, line does not get orientation.
+ */
+function displayControls(kind: CartesianViz): VizControl<CartesianConfig>[] {
+  // Row is already the horizontal cartesian kind — it has no orientation to choose, so unlike
+  // OrientationOption's internal isBar gate (which just renders nothing for row), the control
+  // itself is not declared for row at all.
+  const showOrientation = kind === "bar";
+  return [
+    {
+      id: "seriesOptions", section: "display", group: "Series",
+      render: ({ config, onChange, resultColumns, rows }: VizControlProps<CartesianConfig>) => (
+        <SeriesOptions kind={kind} config={config} onChange={onChange}
+          seriesNames={cartesianSeriesNames(resultColumns, rows, config)} />
+      ),
+    },
+    { id: "seriesOrder", section: "display", group: "Series", render: SeriesOrderControl },
+    ...(showOrientation ? [{
+      id: "orientation", section: "display" as const, group: "Axes",
+      render: ({ config, onChange }: VizControlProps<CartesianConfig>) => (
+        <OrientationOption kind={kind} config={config} onChange={onChange} />
+      ),
+    }] : []),
+    {
+      id: "axes", section: "display", group: "Axes",
+      render: ({ config, onChange }: VizControlProps<CartesianConfig>) => (
+        <AxesOptions kind={kind} config={config} onChange={onChange} />
+      ),
+    },
+    {
+      id: "range", section: "display", group: "Axes", advanced: true,
+      render: ({ config, onChange }: VizControlProps<CartesianConfig>) => (
+        <AxisRangeOptions kind={kind} config={config} onChange={onChange} />
+      ),
+    },
+    {
+      id: "format", section: "display", group: "Format",
+      render: ({ config, onChange }: VizControlProps<CartesianConfig>) => (
+        <FormatOptions kind={kind} config={config} onChange={onChange} />
+      ),
+    },
+    {
+      id: "goal", section: "display", group: "Format", advanced: true,
+      render: ({ config, onChange }: VizControlProps<CartesianConfig>) => (
+        <GoalOptions kind={kind} config={config} onChange={onChange} />
+      ),
+    },
+    {
+      id: "trend", section: "display", group: "Format", advanced: true,
+      render: ({ config, onChange }: VizControlProps<CartesianConfig>) => (
+        <TrendOption kind={kind} config={config} onChange={onChange} />
+      ),
+    },
+  ];
+}
+
 export function cartesianDescriptor(kind: CartesianViz): VizDescriptor<CartesianConfig> {
   const controls: VizControl<CartesianConfig>[] = [
     { id: "x", section: "data", render: XAxisControl },
     ...(kind === "scatter" ? [{ id: "xMetric", section: "data" as const, render: XMetricControl }] : []),
     { id: "y", section: "data", render: YAxisControl },
     { id: "series", section: "data", render: SeriesControl },
-    {
-      id: "display",
-      section: "display",
-      // The series list is derived here, not handed down: it is cartesian-specific, and
-      // ChartSettingsSections.tsx (which computes it today) goes away in PR3.
-      render: ({ config, onChange, resultColumns, rows }: VizControlProps<CartesianConfig>) => (
-        <CartesianDisplaySection kind={kind} config={config} onChange={onChange}
-          seriesNames={cartesianSeriesNames(resultColumns, rows, config)} />
-      ),
-    },
+    // Scatter's x-axis is a metric, not a category to fold into "Other" — nothing to bind
+    // maxCategories to there, and the fold code is never reached for a metric-vs-metric plot.
+    ...(kind !== "scatter" ? [{ id: "maxCategories", section: "data" as const, render: MaxCategoriesControl }] : []),
+    ...displayControls(kind),
   ];
 
   return {
