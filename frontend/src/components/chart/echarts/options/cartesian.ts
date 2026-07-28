@@ -289,14 +289,17 @@ export function buildCartesianOption(
   // breakout, and a plain category axis. With a breakout the bucket would have to merge
   // series as well, which changes what the chart says; on a value or time axis "Other" has
   // no coordinate to sit at; and a temporal extract axis is already a fixed small domain
-  // (twelve months, seven weekdays) that nobody needs folded. Those are separate decisions,
-  // taken when the charts that need them are redesigned.
+  // (twelve months, seven weekdays) that nobody needs folded. And a trend line fitted
+  // through an "Other" bucket would describe where the user set the cutoff rather than the
+  // data, since the bucket's size moves with it. Those are separate decisions, taken when
+  // the charts that need them are redesigned.
   const foldable =
     cfg.maxCategories != null &&
     !cfg.series &&
     cfg.yMetrics.length === 1 &&
     !usesXScale(cfg) &&
-    !isExtractUnit(cfg.xAxisUnit);
+    !isExtractUnit(cfg.xAxisUnit) &&
+    !cfg.trendLine;
   if (foldable) {
     const s = series[0] as unknown as SeriesLike;
     const folded = foldTail(

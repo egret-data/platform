@@ -25,7 +25,7 @@ describe("max categories", () => {
     expect(o.series[0].data).toEqual([10, 8, 12]);
   });
 
-  it("leaves a breakout chart alone — Other would have to merge series too", () => {
+  it("a breakout chart returns before the fold is reached", () => {
     const o = opt({ ...base, series: "cat", maxCategories: 3 }) as never as { xAxis: { data: string[] } };
     expect(o.xAxis.data).toEqual(["a", "b", "c", "d", "e"]);
   });
@@ -37,9 +37,18 @@ describe("max categories", () => {
     expect(o.xAxis.data).toEqual(["a", "b", "c", "d", "e"]);
   });
 
-  it("leaves a value-scaled x-axis alone — Other has no coordinate", () => {
-    const o = opt({ ...base, maxCategories: 3, xScale: "linear" }) as never as { xAxis: unknown };
-    expect(JSON.stringify(o.xAxis)).not.toContain("Other");
+  it("leaves a value-scaled x-axis alone — Other has no coordinate to sit at", () => {
+    const cols = [{ name: "x", type: "double" }, { name: "rev", type: "double" }];
+    const rs = [[1, 10], [2, 8], [3, 6], [4, 4], [5, 2]];
+    const o = buildCartesianOption(cols, rs, {
+      kind: "bar", xAxis: "x", yMetrics: ["rev"], xScale: "linear", maxCategories: 3,
+    } as never) as never as { series: { data: unknown[] }[] };
+    expect(o.series[0].data).toHaveLength(5);
+  });
+
+  it("leaves a chart with a trend line alone — the fit would describe the cutoff", () => {
+    const o = opt({ ...base, maxCategories: 3, trendLine: true }) as never as { xAxis: { data: string[] } };
+    expect(o.xAxis.data).toEqual(["a", "b", "c", "d", "e"]);
   });
 
   it("still folds when the axis title and legend defaults are in play", () => {

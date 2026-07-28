@@ -19,6 +19,9 @@ export function foldTail(points: FoldPoint[], max: number | undefined): FoldPoin
   if (limit == null || limit < 2 || points.length <= limit) return points;
 
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  // Ranked by value, not by magnitude — "top n" the way Superset's series limit and
+  // Metabase's grouping both read it. The cost is that one large negative bar can fold
+  // away while smaller positive ones stay, which is surprising on a profit-and-loss chart.
   // Ranked by index rather than by name: two points can carry the same name, and a
   // name-keyed lookup would keep both, making the result longer than the limit asked for.
   const keep = new Set(
