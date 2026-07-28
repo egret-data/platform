@@ -349,11 +349,16 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   // them up too. `??` keeps an explicit choice winning — including `false` and `""`.
   const hasBreakout = cfg.series != null && cfg.series !== "";
   const showLegend = cfg.showLegend ?? (hasBreakout || cfg.yMetrics.length > 1);
-  // A column the user renamed in Formatting should carry that name onto the axis.
+  // A renamed series is what the legend and tooltip already show, so the axis follows it
+  // first; `column_title` is the per-column rename the Formatting panel will write.
   const titleOf = (col: string | undefined) =>
-    col == null ? undefined : (cfg.columnSettings?.[col]?.column_title ?? col);
+    col == null ? undefined : (cfg.seriesLabels?.[col] ?? cfg.columnSettings?.[col]?.column_title ?? col);
+  // An axis plotting several metrics has no one name — the legend names them instead.
+  const metricTitle = (metrics: string[]) => (metrics.length === 1 ? titleOf(metrics[0]) : undefined);
   const xTitle = cfg.xLabel ?? titleOf(cfg.xAxis);
-  const yTitle = cfg.yLabel ?? titleOf(cfg.yMetrics[0]);
+  const rightSide = isDualAxis(cfg) ? rightMetrics(cfg) : [];
+  const leftSide = cfg.yMetrics.filter((m) => !rightSide.includes(m));
+  const yTitle = cfg.yLabel ?? metricTitle(leftSide);
   const fmtFor = (metrics: string[]) => (v: number) => {
     if (normalized) return `${Math.round(v)}%`;
     const m = metrics[0];
@@ -378,6 +383,10 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   const mkValueAxis = (metrics: string[], position?: "left" | "right") => ({
     type: cfg.logScale ? ("log" as const) : ("value" as const),
     name: position === "right" ? undefined : yTitle,
+    nameLocation: "middle" as const,
+    // Clear of the tick labels: a vertical axis's numbers are far wider than a horizontal
+    // axis's are tall.
+    nameGap: horizontal ? 28 : 44,
     position,
     ...(normalized ? { max: 100 } : {}),
     // Manual axis range (Metabase y-axis min/max) overrides the auto extent.
@@ -394,10 +403,8 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     xAxis = mkValueAxis(cfg.yMetrics);
     yAxis = categoryAxis;
   } else if (isDualAxis(cfg)) {
-    const right = rightMetrics(cfg);
-    const left = cfg.yMetrics.filter((m) => !right.includes(m));
     xAxis = xCategory;
-    yAxis = [mkValueAxis(left, "left"), mkValueAxis(right, "right")];
+    yAxis = [mkValueAxis(leftSide, "left"), mkValueAxis(rightSide, "right")];
   } else {
     xAxis = xCategory;
     yAxis = mkValueAxis(cfg.yMetrics);
@@ -414,12 +421,16 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     };
   }
 
-  // Metabase puts the legend along the top; reserve room there for it, and below
-  // only for the x-axis title.
+  // Metabase puts the legend along the top; reserve room there for it. The category axis
+  // sits at the bottom normally and on the left when horizontal — the value axis is the
+  // other one — so reserve room on whichever edge each title actually renders on.
+  const bottomTitle = horizontal ? yTitle : xTitle;
+  const leftTitle = horizontal ? xTitle : yTitle;
   const grid = {
     ...CHART_THEME.grid,
     top: (CHART_THEME.grid.top as number) + (showLegend ? 24 : 0),
-    bottom: (CHART_THEME.grid.bottom as number) + (xTitle ? 22 : 0),
+    bottom: (CHART_THEME.grid.bottom as number) + (bottomTitle ? 22 : 0),
+    left: (CHART_THEME.grid.left as number) + (leftTitle ? 26 : 0),
   };
 
   // Trend series stay out of the legend.

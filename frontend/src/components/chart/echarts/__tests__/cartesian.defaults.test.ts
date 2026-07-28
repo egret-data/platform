@@ -56,4 +56,38 @@ describe("cartesian defaults, applied at render time", () => {
     expect(opt({ kind: "bar", xAxis: "region", yMetrics: ["total_revenue"], xLabel: "" }).xAxis.name)
       .toBe("");
   });
+
+  it("leaves the value axis untitled when it plots more than one metric", () => {
+    const o = opt({ kind: "bar", xAxis: "region", yMetrics: ["total_revenue", "order_count"] });
+    expect(o.yAxis.name).toBeUndefined();
+  });
+
+  it("titles a dual axis from the metrics that axis actually plots", () => {
+    const o = opt({
+      kind: "combo", xAxis: "region",
+      yMetrics: ["order_count", "total_revenue"],
+      rightAxisMetrics: ["order_count"],
+    });
+    expect(o.yAxis[0].name).toBe("total_revenue");
+    expect(o.yAxis[1].name).toBeUndefined();
+  });
+
+  it("follows a renamed series, which is what the legend already shows", () => {
+    const o = opt({
+      kind: "bar", xAxis: "region", yMetrics: ["total_revenue"],
+      seriesLabels: { total_revenue: "Revenue" },
+    });
+    expect(o.yAxis.name).toBe("Revenue");
+  });
+
+  it("puts each title on the edge it renders on when horizontal", () => {
+    const o = opt({ kind: "row", xAxis: "region", yMetrics: ["total_revenue"] });
+    expect(o.yAxis.name).toBe("region");
+    expect(o.xAxis.name).toBe("total_revenue");
+    expect(o.grid.left).toBeGreaterThan(o.grid.right);
+  });
+
+  it("treats an empty yLabel as 'no title' too", () => {
+    expect(opt({ kind: "bar", xAxis: "region", yMetrics: ["total_revenue"], yLabel: "" }).yAxis.name).toBe("");
+  });
 });
