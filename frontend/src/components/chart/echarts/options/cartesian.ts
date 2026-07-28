@@ -133,11 +133,14 @@ function trendSeries(series: SeriesLike[]): SeriesLike[] {
 }
 
 /**
- * Metabase's `graph.series_order`: hide individual series and set their draw order.
+ * Metabase's `graph.series_order`: filters out hidden series and reorders the rest.
  *
- * Runs before the overlays are built, so a hidden series is genuinely absent — not counted
- * in a stack total, not normalised against, and with no orphaned trend line left behind.
- * Order matters beyond the legend: it is also the stacking order and the draw order.
+ * Called before the overlays are built, so anything it drops is never counted in a stack
+ * total, never normalised against, and leaves no orphaned trend line — but that guarantee
+ * only holds as far downstream as every consumer keys off the series that reach it (see the
+ * axis-shape logic in baseOption, which had to be re-derived from the surviving series
+ * rather than from cfg for the same reason). Order matters beyond the legend: it is also the
+ * stacking order and the draw order.
  */
 function applySeriesOrder(series: SeriesLike[], cfg: CartesianBuildConfig): SeriesLike[] {
   const hidden = cfg.hiddenSeries;
@@ -419,14 +422,23 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   // An axis plotting several metrics has no one name — the legend names them instead.
   const metricTitle = (metrics: string[]) => (metrics.length === 1 ? titleOf(metrics[0]) : undefined);
   const xTitle = cfg.xLabel ?? titleOf(cfg.xAxis);
-  const rightSide = isDualAxis(cfg) ? rightMetrics(cfg) : [];
-  const leftSide = cfg.yMetrics.filter((m) => !rightSide.includes(m));
-  const yTitle = cfg.yLabel ?? metricTitle(leftSide);
 
   // Compact labels are for wide numbers, not for many bars — three bars of revenue in the
   // millions crowd an axis just as badly as forty do. Measured per axis: a dual-axis chart
   // has two scales on purpose, and the small one should not inherit the big one's shorthand.
   const plotted = (series as SeriesLike[]).filter((s) => !s.__trend && !s.__total);
+
+  // Axis shape follows the series that survived hiding, not the config: hiding the only
+  // right-axis metric should take its axis with it. Keyed on yAxisIndex rather than on the
+  // metric names because that index was baked into each series before hiding ran — an axis
+  // a surviving series still points at has to exist. The Set matters: a breakout splits one
+  // metric across many series, so without deduping, leftSide would list it once per series
+  // and metricTitle (single-metric only) would stop titling breakout charts' axis.
+  const dual = plotted.some((s) => s.yAxisIndex === 1);
+  const rightSide = dual ? rightMetrics(cfg) : [];
+  const leftSide = [...new Set(plotted.filter((s) => s.yAxisIndex !== 1).map((s) => s.__metric ?? s.name ?? ""))]
+    .filter(Boolean);
+  const yTitle = cfg.yLabel ?? metricTitle(leftSide);
   const widestOf = (metrics: string[]) => {
     let widest = 0;
     for (const s of plotted) {
@@ -500,14 +512,14 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   let xAxis: unknown;
   let yAxis: unknown;
   if (horizontal) {
-    xAxis = mkValueAxis(cfg.yMetrics);
+    xAxis = mkValueAxis(leftSide);
     yAxis = categoryAxis;
-  } else if (isDualAxis(cfg)) {
+  } else if (dual) {
     xAxis = xCategory;
     yAxis = [mkValueAxis(leftSide, "left"), mkValueAxis(rightSide, "right")];
   } else {
     xAxis = xCategory;
-    yAxis = mkValueAxis(cfg.yMetrics);
+    yAxis = mkValueAxis(leftSide);
   }
 
   // Goal line — a horizontal reference at goalValue, drawn via the first series' markLine.
@@ -569,11 +581,13 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   return {
     aria: ariaDescription({
       kind: `${cfg.kind === "line" ? "Line" : cfg.kind === "area" ? "Area" : cfg.kind === "scatter" ? "Scatter" : cfg.kind === "combo" ? "Combo" : "Bar"} chart`,
-      metric: first?.name ?? cfg.yMetrics[0],
+      // No fallback to cfg.yMetrics[0]: with every series hidden there is no metric being
+      // described, and naming one would tell a screen reader about a chart nobody can see.
+      metric: first?.name,
       dimension: cfg.xAxis,
       seriesCount: described.length,
       format: (v) => fmtFor(cfg.yMetrics)(Number(v)),
-      points: categories.map((c, i) => ({ name: String(c), value: first?.data?.[i] })),
+      points: first ? categories.map((c, i) => ({ name: String(c), value: first.data?.[i] })) : [],
     }),
     color: undefined,
     grid,

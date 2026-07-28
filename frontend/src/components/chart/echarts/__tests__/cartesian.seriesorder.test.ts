@@ -66,4 +66,32 @@ describe("series order and visibility", () => {
     };
     expect(o.series.map((s) => s.name)).toEqual(["y", "x"]);
   });
+
+  it("does not describe a metric to a screen reader when every series is hidden", () => {
+    const o = opt({ ...base, yMetrics: ["rev", "cnt"], hiddenSeries: ["rev", "cnt"] }) as never as {
+      series: unknown[]; aria: { label: { description: string } };
+    };
+    expect(o.series).toHaveLength(0);
+    expect(o.aria.label.description).not.toContain("NaN");
+    expect(o.aria.label.description).not.toContain("rev");
+  });
+
+  it("drops the right axis when its only metric is hidden", () => {
+    const o = opt({
+      ...base, yMetrics: ["rev", "cnt"], rightAxisMetrics: ["cnt"], hiddenSeries: ["cnt"],
+    }) as never as { yAxis: unknown };
+    expect(Array.isArray(o.yAxis)).toBe(false);
+  });
+
+  it("keeps both axes when a series still sits on the right one", () => {
+    const o = opt({
+      ...base, yMetrics: ["rev", "cnt"], rightAxisMetrics: ["cnt"], hiddenSeries: ["rev"],
+    }) as never as { yAxis: unknown[] };
+    expect(Array.isArray(o.yAxis)).toBe(true);
+  });
+
+  it("still titles a breakout chart's axis", () => {
+    const o = opt({ ...base, series: "cat", yMetrics: ["rev"] }) as never as { yAxis: { name?: string } };
+    expect(o.yAxis.name).toBe("rev");
+  });
 });
