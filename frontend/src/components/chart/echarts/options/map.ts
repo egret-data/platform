@@ -1,12 +1,14 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ResultColumn } from "@/components/chart/ChartTable";
-import { ARIA_A11Y } from "../palette";
+import { baseOption, itemTooltip } from "../base";
 
 export interface MapBuildConfig {
   echartsName: string;
   region?: string;
   metric?: string;
   normalize: (v: unknown) => string;
+  /** Formats the metric for the tooltip; defaults to a plain locale number. */
+  format?: (v: unknown) => string;
   /** Fixed text labels at geo coordinates [lon, lat] (e.g. archipelagos). */
   annotations?: { name: string; coord: [number, number] }[];
 }
@@ -32,13 +34,10 @@ export function buildMapOption(columns: ResultColumn[], rows: unknown[][], cfg: 
   // label points land in the right place.
   const layout = { layoutCenter: ["50%", "50%"], layoutSize: "92%" };
   return {
-    aria: ARIA_A11Y, // screen-reader data description (non-visual fallback)
-    tooltip: {
-      trigger: "item",
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      formatter: (p: any) =>
-        p.value == null || Number.isNaN(p.value) ? String(p.name ?? "") : `${p.name}: ${Number(p.value).toLocaleString()}`,
-    },
+    ...baseOption(),
+    // The map used to print raw `toLocaleString()` numbers, ignoring the chart's column
+    // formats entirely — it is the one builder that never formatted its metric.
+    tooltip: itemTooltip(cfg.format ?? ((v) => Number(v).toLocaleString())),
     visualMap: {
       min,
       max,

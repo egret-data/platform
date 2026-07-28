@@ -1,7 +1,8 @@
 import { useEffect, useReducer, useState } from "react";
 import { registerMap } from "echarts/core";
 import type { AnyChartParams, MapConfig } from "@/api/charts";
-import { vizConfig } from "@/components/chart/viz/renderConfig";
+import { vizConfig, shellSettings } from "@/components/chart/viz/renderConfig";
+import { formatValue } from "@/components/chart/format";
 import { EChartsRenderer } from "@/components/chart/echarts/EChartsRenderer";
 import { buildMapOption } from "@/components/chart/echarts/options/map";
 import { MAPS } from "@/components/chart/echarts/maps/registry";
@@ -10,8 +11,13 @@ import type { ResultColumn } from "@/components/chart/ChartTable";
 const registered = new Set<string>();
 
 /** Choropleth map. Lazy-loads + registers the selected geojson, then renders via EChartsRenderer. */
-export function MapChart({ columns, rows, params }: { columns: ResultColumn[]; rows: unknown[][]; params: AnyChartParams }) {
+export function MapChart({ columns, rows, params, metricTypes = {} }: {
+  columns: ResultColumn[]; rows: unknown[][]; params: AnyChartParams; metricTypes?: Record<string, string>;
+}) {
   const map = vizConfig<MapConfig>("map", params);
+  const { columnSettings } = shellSettings(params);
+  const fmt = (v: unknown) =>
+    map.metric ? formatValue(v, metricTypes[map.metric] ?? "double", columnSettings[map.metric]) : String(v);
   const def = MAPS[map.mapKey ?? "us_states"] ?? MAPS.us_states;
   const [, forceUpdate] = useReducer((n: number) => n + 1, 0);
   const [error, setError] = useState(false);
@@ -49,6 +55,7 @@ export function MapChart({ columns, rows, params }: { columns: ResultColumn[]; r
           region: map.region,
           metric: map.metric,
           normalize: def.normalize,
+          format: fmt,
           annotations: def.annotations,
         })}
       />

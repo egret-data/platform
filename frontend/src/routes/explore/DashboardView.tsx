@@ -334,7 +334,13 @@ export default function DashboardView() {
     return {
       chart,
       override: card.options.vizOverride as Record<string, unknown> | undefined,
-      columns: [...chart.params.spec.dimensions, ...chart.params.spec.columns].map((name) => ({ name, type: "" })),
+      // Metrics belong here too: without them a cartesian card's Formatting section has
+      // nothing to offer, since it lists exactly the plotted metrics.
+      columns: [
+        ...chart.params.spec.dimensions.map((name) => ({ name, type: "" })),
+        ...chart.params.spec.columns.map((name) => ({ name, type: "" })),
+        ...chart.params.spec.metrics.map((name) => ({ name, type: "double" })),
+      ],
     };
   })();
 
