@@ -8,8 +8,6 @@ import {
   type AnyChartParams, type VizSettings, isParamsV2,
 } from "@/api/charts";
 import { useSpecData } from "@/api/useSpecData";
-import { ChartTable } from "@/components/chart/ChartTable";
-import { PivotTable } from "@/components/chart/pivot/PivotTable";
 import { FilterChips } from "@/components/chart/FilterChips";
 import { DrillMenu } from "@/components/chart/DrillMenu";
 import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
@@ -17,8 +15,6 @@ import type { DrillContext } from "@/components/chart/drill";
 import { ChartTypeGallery } from "@/components/chart/ChartTypeGallery";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { SharedDisplaySections, styleColumnsFor } from "@/components/chart/settings/SharedDisplaySections";
-import { ChartRenderer } from "@/components/chart/ChartRenderer";
-import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
 import { StudioToolbar } from "@/components/chart/StudioToolbar";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
@@ -38,13 +34,13 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
 import { useChartRun } from "@/components/chart/useChartRun";
 import { getDescriptor } from "@/components/chart/viz/registry";
-import { pivotDescriptor } from "@/components/chart/viz/pivot";
+import { pivotDescriptor, type PivotConfig } from "@/components/chart/viz/pivot";
 import { tableDescriptor } from "@/components/chart/viz/table";
 import type { VizDescriptor } from "@/components/chart/viz/types";
 import { toRenderParams } from "@/components/chart/viz/renderParams";
 import { StudioPanel } from "@/components/chart/StudioPanel";
+import { PreviewPane } from "@/components/chart/PreviewPane";
 import { VizSwitcher } from "@/components/chart/VizSwitcher";
-import { ChartEmptyState, ChartLoadingState, ChartErrorState } from "@/components/chart/ChartPreviewStates";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 
 const UNDERLINE_LIST = "h-auto w-full justify-start gap-4 rounded-none border-b bg-transparent p-0";
@@ -481,80 +477,61 @@ export default function ChartExplore() {
           )}
         />
 
-        {filters.length > 0 && (
-          <FilterChips filters={filters} onRemove={(i) => setFilters((prev) => prev.filter((_, j) => j !== i))} />
-        )}
-        {data.error && <ChartErrorState message={data.error} onRetry={run} />}
-        {isRunning && <ChartLoadingState />}
-
-        <div ref={previewRef} className="contents">
-        {finished && viz === "pivot_table" && (() => {
-          const pivotCfg = descConfig as unknown as import("@/components/chart/viz/pivot").PivotConfig;
-          return (
-          <PivotTable
-            input={{
-              columns: data.columns.map((c) => c.name),
-              rows: data.rows,
-              ...(() => {
-                const c = previewConfig(pivotDescriptor());
-                return { rowDims: c.rows, colDims: c.cols, metrics: c.metrics };
-              })(),
-              showRowTotals: pivotCfg.showRowTotals ?? true,
-              showColTotals: pivotCfg.showColTotals ?? true,
-              condense: pivotCfg.condense ?? true,
-              collapsed: new Set(pivotCfg.collapsedRows ?? []),
-              sortDims: pivotCfg.sort ?? {},
-            }}
-            columnSettings={effCS}
-            conditionalFormatting={conditionalFormatting}
-            metricTypes={metricTypes}
-            onToggleCollapse={(path) => {
-              const cur = pivotCfg.collapsedRows ?? [];
-              patchDescConfig({ collapsedRows: cur.includes(path) ? cur.filter((x) => x !== path) : [...cur, path] } as never);
-            }}
-            onCycleSort={(dim) => {
-              const cur = (pivotCfg.sort ?? {})[dim];
-              const next = { ...(pivotCfg.sort ?? {}) };
-              if (cur === undefined) next[dim] = "asc";
-              else if (cur === "asc") next[dim] = "desc";
-              else delete next[dim];
-              patchDescConfig({ sort: next } as never);
-            }}
-            onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })}
-          />
-          );
-        })()}
-        {finished && viz === "table" && (
-          <ChartTable columns={data.columns} rows={data.rows}
-            columnSettings={effCS} conditionalFormatting={conditionalFormatting}
-            tableState={tableState} onTableStateChange={setTableState}
-            dimensionColumns={(() => {
-              const c = previewConfig(tableDescriptor());
-              return c.metrics.length > 0 ? c.columns : [];
-            })()}
-            onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })} />
-        )}
-        {finished && viz !== "table" && viz !== "pivot_table" && (
-          <ChartErrorBoundary resetKey={`${viz}:${data.columns.length}:${data.rows.length}`}>
-            {/* ChartRenderer fills its parent; the preview owns the height + frame
-                (dashboard cards size it to the grid cell instead). */}
-            <div className="h-[60vh] rounded-lg border p-2">
-              <ChartRenderer
-                vizType={viz}
-                params={previewParams()}
-                columns={data.columns}
-                rows={data.rows}
-                metricTypes={metricTypes}
-              />
-            </div>
-          </ChartErrorBoundary>
-        )}
-        </div>
-        {!ranSpec && !data.isLoading && (() => {
+        {(() => {
+          const pivotCfg = descConfig as unknown as PivotConfig;
           const missing = datasetId ? missingNow() : ["a dataset"];
+          const frozenPivot = previewConfig(pivotDescriptor());
+          const frozenTable = previewConfig(tableDescriptor());
           return (
-            <ChartEmptyState icon={vizMeta?.icon} title={`Set up your ${vizMeta?.name ?? "chart"}`}
-              hint={missing.length ? `Add: ${missing.join(", ")}${autoRun ? "" : ", then Run"}` : (autoRun ? "Ready — adjust the fields on the left." : "Ready — click Run to preview.")} />
+            <PreviewPane
+              viz={viz}
+              params={previewParams()}
+              columns={data.columns}
+              rows={data.rows}
+              metricTypes={metricTypes}
+              columnSettings={effCS}
+              conditionalFormatting={conditionalFormatting}
+              isRunning={isRunning}
+              error={data.error}
+              finished={finished}
+              onRetry={run}
+              onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })}
+              emptyIcon={vizMeta?.icon}
+              emptyTitle={`Set up your ${vizMeta?.name ?? "chart"}`}
+              emptyHint={missing.length
+                ? `Add: ${missing.join(", ")}${autoRun ? "" : ", then Run"}`
+                : (autoRun ? "Ready — adjust the fields on the left." : "Ready — click Run to preview.")}
+              containerRef={previewRef}
+              pivot={viz === "pivot_table" ? {
+                rowDims: frozenPivot.rows, colDims: frozenPivot.cols, metrics: frozenPivot.metrics,
+                showRowTotals: pivotCfg.showRowTotals ?? true,
+                showColTotals: pivotCfg.showColTotals ?? true,
+                condense: pivotCfg.condense ?? true,
+                collapsed: new Set(pivotCfg.collapsedRows ?? []),
+                sortDims: pivotCfg.sort ?? {},
+                onToggleCollapse: (path) => {
+                  const cur = pivotCfg.collapsedRows ?? [];
+                  patchDescConfig({ collapsedRows: cur.includes(path) ? cur.filter((x) => x !== path) : [...cur, path] } as never);
+                },
+                onCycleSort: (dim) => {
+                  const cur = (pivotCfg.sort ?? {})[dim];
+                  const next = { ...(pivotCfg.sort ?? {}) };
+                  if (cur === undefined) next[dim] = "asc";
+                  else if (cur === "asc") next[dim] = "desc";
+                  else delete next[dim];
+                  patchDescConfig({ sort: next } as never);
+                },
+              } : undefined}
+              table={viz === "table" ? {
+                state: tableState,
+                onStateChange: setTableState,
+                dimensionColumns: frozenTable.metrics.length > 0 ? frozenTable.columns : [],
+              } : undefined}
+            >
+              {filters.length > 0 && (
+                <FilterChips filters={filters} onRemove={(i) => setFilters((prev) => prev.filter((_, j) => j !== i))} />
+              )}
+            </PreviewPane>
           );
         })()}
       </div>
