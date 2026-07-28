@@ -33,7 +33,6 @@ and failing later in someone's browser.
 
 **In scope**
 - Validate `params` on `POST /charts` and `PUT /charts/{id}`: shape only.
-- The same validation for the chart-duplicate path, which copies params.
 - A typed error that names the offending field.
 
 **Out of scope — deliberately**
@@ -44,6 +43,10 @@ and failing later in someone's browser.
   survive a round-trip through an older client; enforcing a vocabulary here would
   break that on purpose.
 - Backfilling or repairing rows already stored (migration `0099` did that).
+- **The duplicate path.** `ch_duplicate` copies the row in SQL and never takes params
+  from the client, so it cannot introduce a bad one. Validating there would only
+  refuse to duplicate a chart that predates the backfill — a usability loss for no
+  safety gain.
 - The query pipeline: it is already validated, limited and timed out.
 
 ## Design

@@ -1772,6 +1772,7 @@ async fn ch_list(
     request_body = CreateChart,
     responses(
         (status = 200, description = "Chart created", body = ChartDto),
+        (status = 400, description = "Malformed params (see the message)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing chart:manage permission", body = ErrorBody),
         (status = 404, description = "Referenced dataset not in this workspace", body = ErrorBody),
@@ -1795,6 +1796,9 @@ async fn ch_create(
     if ds.workspace_id != ctx.workspace_id.0 {
         return Err(Error::NotFound("dataset".into()).into());
     }
+    // Reject a params body the frontend could not open, rather than storing it and
+    // failing later in whoever's browser opens the chart.
+    crate::chartparams::validate(&b.viz_type, &b.params).map_err(BiApiError::from)?;
     let c = st
         .charts
         .create(
@@ -1856,6 +1860,7 @@ async fn ch_get(
     request_body = UpdateChart,
     responses(
         (status = 200, description = "Chart updated", body = ChartDto),
+        (status = 400, description = "Malformed params (see the message)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing chart:manage permission", body = ErrorBody),
         (status = 404, description = "No such chart, or referenced dataset not in this workspace", body = ErrorBody),
@@ -1882,6 +1887,7 @@ async fn ch_update(
     if ds.workspace_id != ctx.workspace_id.0 {
         return Err(Error::NotFound("dataset".into()).into());
     }
+    crate::chartparams::validate(&b.viz_type, &b.params).map_err(BiApiError::from)?;
     st.charts
         .update(
             id,
