@@ -6,6 +6,7 @@ import {
   useBuildChartData, useChart, useChartMutations,
   type QuerySpec, type VizType, type ChartParams, type TableState, type ChartFilter,
   type CartesianConfig, type PieConfig, type ScalarConfig, type ProgressConfig, type GaugeConfig, type FunnelConfig, type WaterfallConfig, type SmartScalarConfig, type BoxplotConfig, type SankeyConfig, isCartesianViz,
+  type AnyChartParams, type VizSettings, isParamsV2,
 } from "@/api/charts";
 import { useSpecData } from "@/api/useSpecData";
 import { ChartTable } from "@/components/chart/ChartTable";
@@ -43,7 +44,10 @@ import { pruneUnits } from "@/components/chart/temporal-units";
 import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
 import { MAPS } from "@/components/chart/echarts/maps/registry";
 import { missingFields } from "@/components/chart/requiredFields";
-import { useAutoRun } from "@/components/chart/useAutoRun";
+import { useChartRun } from "@/components/chart/useChartRun";
+import { getDescriptor } from "@/components/chart/viz/registry";
+import { toRenderParams } from "@/components/chart/viz/renderParams";
+import { StudioPanel } from "@/components/chart/StudioPanel";
 import { ChartEmptyState, ChartLoadingState, ChartErrorState } from "@/components/chart/ChartPreviewStates";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 
@@ -99,6 +103,15 @@ export default function ChartExplore() {
   const [mapCfg, setMapCfg] = useState<{ mapKey: string; region?: string; metric?: string }>({ mapKey: "us_states" });
   const patchCartesian = (p: Partial<CartesianConfig>) => setCartesian((c) => ({ ...c, ...p }));
   const patchPie = (p: Partial<PieConfig>) => setPie((c) => ({ ...c, ...p }));
+  // The descriptor for the active viz, or undefined while it is still on the bridge —
+  // i.e. still driven by the inline branches below. PR2/PR3 empty that bridge out.
+  const descriptor = getDescriptor(viz);
+  // Config the active descriptor works with; cartesian is the only migrated family in PR1.
+  const descConfig = cartesian as never;
+  const patchDescConfig = patchCartesian as (p: never) => void;
+  // v2 settings carried over from a saved chart, so keys owned by other descriptors (or
+  // by a future PR's namespace) survive a round-trip through this builder untouched.
+  const [settings, setSettings] = useState<VizSettings>({});
   const [filters, setFilters] = useState<ChartFilter[]>([]);
   const [drillMenu, setDrillMenu] = useState<{ ctx: DrillContext; x: number; y: number } | null>(null);
   const [recordsFilters, setRecordsFilters] = useState<ChartFilter[] | null>(null);
@@ -117,49 +130,55 @@ export default function ChartExplore() {
     setDatasetId(c.dataset_id);
     setViz(c.viz_type);
     const p = c.params;
-    if (c.viz_type === "pivot_table") {
-      setPRows(p.rows ?? []);
-      setPCols(p.cols ?? []);
-      setPVals(p.metrics ?? []);
-      setShowRowTotals(p.showRowTotals ?? true);
-      setShowColTotals(p.showColTotals ?? true);
-      setCondense(p.condense ?? true);
-    } else if (isCartesianViz(c.viz_type)) {
-      setCartesian(p.cartesian ?? { yMetrics: p.spec?.metrics ?? [] });
+    // The bridge branches below still read the pre-A2 keys, so they hydrate from the
+    // adapted view; a migrated viz reads its own config through its descriptor instead.
+    const v1 = toRenderParams(c.viz_type, p);
+    const desc = getDescriptor(c.viz_type);
+    if (desc) {
+      setCartesian(desc.fromParams(p) as CartesianConfig);
+      // Carry every stored key forward, including namespaces this build doesn't own yet.
+      if (isParamsV2(p)) setSettings(p.settings);
+    } else if (c.viz_type === "pivot_table") {
+      setPRows(v1.rows ?? []);
+      setPCols(v1.cols ?? []);
+      setPVals(v1.metrics ?? []);
+      setShowRowTotals(v1.showRowTotals ?? true);
+      setShowColTotals(v1.showColTotals ?? true);
+      setCondense(v1.condense ?? true);
     } else if (c.viz_type === "pie") {
-      setPie(p.pie ?? {});
+      setPie(v1.pie ?? {});
     } else if (c.viz_type === "scalar") {
-      setScalar(p.scalar ?? { metric: p.spec?.metrics?.[0] });
+      setScalar(v1.scalar ?? { metric: v1.spec?.metrics?.[0] });
     } else if (c.viz_type === "progress") {
-      setProgress(p.progress ?? { metric: p.spec?.metrics?.[0] });
+      setProgress(v1.progress ?? { metric: v1.spec?.metrics?.[0] });
     } else if (c.viz_type === "gauge") {
-      setGauge(p.gauge ?? { metric: p.spec?.metrics?.[0] });
+      setGauge(v1.gauge ?? { metric: v1.spec?.metrics?.[0] });
     } else if (c.viz_type === "funnel") {
-      setFunnel(p.funnel ?? { dimension: p.spec?.dimensions?.[0], metric: p.spec?.metrics?.[0] });
+      setFunnel(v1.funnel ?? { dimension: v1.spec?.dimensions?.[0], metric: v1.spec?.metrics?.[0] });
     } else if (c.viz_type === "waterfall") {
-      setWaterfall(p.waterfall ?? { xAxis: p.spec?.dimensions?.[0], metric: p.spec?.metrics?.[0] });
+      setWaterfall(v1.waterfall ?? { xAxis: v1.spec?.dimensions?.[0], metric: v1.spec?.metrics?.[0] });
     } else if (c.viz_type === "smartscalar") {
-      setSmart(p.smartscalar ?? { dimension: p.spec?.dimensions?.[0], metric: p.spec?.metrics?.[0] });
+      setSmart(v1.smartscalar ?? { dimension: v1.spec?.dimensions?.[0], metric: v1.spec?.metrics?.[0] });
     } else if (c.viz_type === "boxplot") {
-      setBox(p.boxplot ?? { category: p.spec?.columns?.[0], value: p.spec?.columns?.[1] });
+      setBox(v1.boxplot ?? { category: v1.spec?.columns?.[0], value: v1.spec?.columns?.[1] });
     } else if (c.viz_type === "sankey") {
-      setSankey(p.sankey ?? { source: p.spec?.dimensions?.[0], target: p.spec?.dimensions?.[1], metric: p.spec?.metrics?.[0] });
+      setSankey(v1.sankey ?? { source: v1.spec?.dimensions?.[0], target: v1.spec?.dimensions?.[1], metric: v1.spec?.metrics?.[0] });
     } else if (c.viz_type === "object") {
-      setTableCols(p.spec?.columns ?? []);
+      setTableCols(v1.spec?.columns ?? []);
     } else if (c.viz_type === "map") {
-      setMapCfg(p.map ?? { mapKey: "us_states" });
+      setMapCfg(v1.map ?? { mapKey: "us_states" });
     } else {
-      setTableMetrics(p.spec?.metrics ?? []);
-      setTableCols([...(p.spec?.dimensions ?? []), ...(p.spec?.columns ?? [])]);
+      setTableMetrics(v1.spec?.metrics ?? []);
+      setTableCols([...(v1.spec?.dimensions ?? []), ...(v1.spec?.columns ?? [])]);
     }
-    setRowLimit(p.spec?.row_limit ?? 1000);
-    setTemporalUnits(p.spec?.temporal_units ?? {});
-    setColumnSettings(p.columnSettings ?? {});
-    setConditionalFormatting(p.conditionalFormatting ?? []);
-    setCollapsed(new Set(p.collapsedRows ?? []));
-    setPivotSort(p.pivotSort ?? {});
-    setTableState(p.tableState ?? {});
-    setFilters(p.spec?.filters ?? []);
+    setRowLimit(v1.spec?.row_limit ?? 1000);
+    setTemporalUnits(v1.spec?.temporal_units ?? {});
+    setColumnSettings(v1.columnSettings ?? {});
+    setConditionalFormatting(v1.conditionalFormatting ?? []);
+    setCollapsed(new Set(v1.collapsedRows ?? []));
+    setPivotSort(v1.pivotSort ?? {});
+    setTableState(v1.tableState ?? {});
+    setFilters(v1.spec?.filters ?? []);
     setSaveName(c.name);
     setSaveDesc(c.description);
   }, [existing.data]);
@@ -203,11 +222,7 @@ export default function ChartExplore() {
   };
 
   function specForRun(): QuerySpec {
-    if (isCartesianViz(viz)) {
-      const dims = [cartesian.xAxis, cartesian.series].filter((d): d is string => !!d);
-      const mets = viz === "scatter" && cartesian.xMetric ? [cartesian.xMetric, ...cartesian.yMetrics] : cartesian.yMetrics;
-      return { metrics: mets, dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [], temporal_units: pruneUnits(temporalUnits, dims) };
-    }
+    if (descriptor) return descriptor.buildSpec(descConfig, { filters, rowLimit, temporalUnits });
     if (viz === "pie") {
       const dims = pie.dimension ? [pie.dimension] : [];
       return { metrics: pie.metric ? [pie.metric] : [], dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [], temporal_units: pruneUnits(temporalUnits, dims) };
@@ -281,17 +296,26 @@ export default function ChartExplore() {
     });
   }, [activeDims.join("|"), columns]);
 
-  const [ranSpec, setRanSpec] = useState<QuerySpec | null>(null);
   const [autoRun, setAutoRun] = useState(true);
-  const [runNonce, setRunNonce] = useState(0);
-  // Signature of the last spec actually run (manual or auto), shared with
-  // useAutoRun so a manual Run cancels a pending auto-fire for the same query.
-  const lastRunSig = useRef("");
   // Params of the last run, rendered while the query is stale (see previewParams).
-  const ranParams = useRef<ChartParams | null>(null);
+  const ranParams = useRef<AnyChartParams | null>(null);
   // Table grouping columns of the last run — the one preview input that ChartParams
   // doesn't carry (see previewTableDims).
   const ranTableDims = useRef<string[] | null>(null);
+  // Run state lives in the hook: what ran, the refetch nonce, and whether the current
+  // config has drifted from it. `missingNow`/`specForRun`/`paramsForSave` are function
+  // declarations, so this can sit above them.
+  const { ranSpec, runNonce, run, isStale, reset: resetRun } = useChartRun({
+    datasetId: datasetId ?? "",
+    autoRun,
+    buildSpec: specForRun,
+    missing: missingNow,
+    afterRun: () => {
+      // Snapshot what this run renders with (see previewParams / previewTableDims).
+      ranParams.current = paramsForSave();
+      ranTableDims.current = tableMetrics.length > 0 ? tableCols : [];
+    },
+  });
   const data = useSpecData(ws, datasetId, ranSpec, !!ranSpec, runNonce);
   const finished = !data.isLoading && !data.error && !!ranSpec;
   const resultColumns = data.columns.filter((c) => !c.name.startsWith("__grp_"));
@@ -326,44 +350,22 @@ export default function ChartExplore() {
   const [sqlOpen, setSqlOpen] = useState(false);
   const chartSql = useBuildChartData(ws, datasetId, ranSpec, sqlOpen);
 
-  const validationInput = () => ({
-    cartesian: { xAxis: cartesian.xAxis, yMetrics: cartesian.yMetrics },
-    pie, scalar, progress, gauge, funnel, waterfall, smart, box, sankey, map: mapCfg,
-    pivot: { rows: pRows, vals: pVals },
-    objectCols: tableCols,
-  });
-
-  function run() {
-    setRanSpec(null);
-    if (!datasetId) { toast.error("Pick a dataset first"); return; }
-    const missing = missingFields(viz, validationInput());
-    if (missing.length) { toast.error(`This chart needs ${missing.join(" and ")}`); return; }
-    // No try/catch here (unlike the validation guards above, which are
-    // synchronous toasts): the actual request now runs inside useSpecData's
-    // useQuery, and its failure surfaces through `data.error` (rendered as the
-    // destructive banner below), deliberately, as the single error surface for
-    // request-level failures. Don't reintroduce a toast here — the old
-    // build->submit pipeline's catch is gone on purpose, not by oversight, and
-    // restoring it would just double-report the same failure.
-    setRanSpec(specForRun());
-    setRunNonce((n) => n + 1);
-    // Snapshot what this run renders with (see previewParams / previewTableDims).
-    ranParams.current = paramsForSave();
-    ranTableDims.current = tableMetrics.length > 0 ? tableCols : [];
-    // Stamp the signature so a pending auto-run timer for this same query
-    // (e.g. the user clicked Run before the debounce elapsed) won't re-fire it.
-    lastRunSig.current = datasetId ? JSON.stringify({ datasetId, spec: specForRun() }) : "";
+  // A function declaration, not a const: `missingNow` reaches this while useChartRun runs,
+  // which sits above it in the body, so an arrow const would be in its temporal dead zone
+  // and every bridge viz would crash on open.
+  function validationInput() {
+    return {
+      cartesian: { xAxis: cartesian.xAxis, yMetrics: cartesian.yMetrics },
+      pie, scalar, progress, gauge, funnel, waterfall, smart, box, sankey, map: mapCfg,
+      pivot: { rows: pRows, vals: pVals },
+      objectCols: tableCols,
+    };
   }
 
-  // Serialized "is this chart runnable, and with what config" signature. Empty
-  // whenever the chart isn't ready (no dataset or missing required fields) so
-  // auto-run never fires an invalid query. Filters are part of specForRun(),
-  // so changing them changes this signature too.
-  const querySignature =
-    datasetId && missingFields(viz, validationInput()).length === 0
-      ? JSON.stringify({ datasetId, spec: specForRun() })
-      : "";
-  useAutoRun({ enabled: autoRun, signature: querySignature, onRun: run, lastRunRef: lastRunSig });
+  /** Fields the active viz still needs — from its descriptor, or the bridge's table. */
+  function missingNow(): string[] {
+    return descriptor ? descriptor.requiredFields(descConfig) : missingFields(viz, validationInput());
+  }
 
   // Params the preview renders from. The field names inside them (x-axis, metrics,
   // breakout…) address columns of the result on screen, so while the query is stale
@@ -373,10 +375,10 @@ export default function ChartExplore() {
   // rather than "not run yet". Display-only edits don't change the signature, so a fresh
   // query previews them live; while it's stale the whole snapshot holds (a colour changed
   // mid-edit lands on the next Run).
-  const isStale = () => querySignature !== lastRunSig.current;
   const previewParams = (): ChartParams => {
-    const base = isStale() && ranParams.current ? ranParams.current : paramsForSave();
-    return { ...base, columnSettings: effCS };
+    const base = isStale && ranParams.current ? ranParams.current : paramsForSave();
+    // Renderers still speak v1, so a migrated viz's v2 params go through the adapter here.
+    return { ...toRenderParams(viz, base), columnSettings: effCS };
   };
 
   // Same rule for the two previews that don't take a ChartParams. Only the fields that
@@ -388,7 +390,7 @@ export default function ChartExplore() {
   };
   const previewTableDims = (): string[] => {
     const live = tableMetrics.length > 0 ? tableCols : [];
-    return isStale() && ranTableDims.current ? ranTableDims.current : live;
+    return isStale && ranTableDims.current ? ranTableDims.current : live;
   };
 
   function addFilter(f: ChartFilter) {
@@ -400,7 +402,21 @@ export default function ChartExplore() {
   const [saveName, setSaveName] = useState("");
   const [saveDesc, setSaveDesc] = useState("");
 
-  function paramsForSave(): ChartParams {
+  function paramsForSave(): AnyChartParams {
+    // Migrated viz types persist v2: the query, plus this descriptor's namespaced keys
+    // merged over whatever settings the saved chart already carried.
+    if (descriptor) {
+      return {
+        version: 2,
+        spec: specForRun(),
+        settings: {
+          ...settings,
+          ...descriptor.toSettings(descConfig),
+          column_settings: columnSettings,
+          conditional_formatting: conditionalFormatting,
+        },
+      };
+    }
     if (viz === "pivot_table") {
       return { spec: specForRun(), rows: pRows, cols: pCols, metrics: pVals, showRowTotals, showColTotals, condense, columnSettings, conditionalFormatting, collapsedRows: [...collapsed], pivotSort };
     }
@@ -463,7 +479,7 @@ export default function ChartExplore() {
 
   function changeViz(v: VizType) {
     setViz(v);
-    setRanSpec(null);
+    resetRun();
     if (!id) setSearchParams({ type: v });
   }
 
@@ -476,7 +492,7 @@ export default function ChartExplore() {
 
   function resetControls() {
     setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]);
-    setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setFilters([]); setRanSpec(null);
+    setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setFilters([]); resetRun();
     setCartesian({ yMetrics: [] }); setPie({}); setScalar({}); setProgress({}); setGauge({}); setFunnel({}); setWaterfall({}); setSmart({}); setBox({}); setSankey({});
     setTemporalUnits({});
   }
@@ -670,46 +686,10 @@ export default function ChartExplore() {
               </>
             )}
 
-            {isCartesianViz(viz) && (
-              <>
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">X-axis</Label>
-                  <Select value={cartesian.xAxis ?? ""} onValueChange={(v) => patchCartesian({ xAxis: v || undefined })}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
-                    <SelectContent>
-                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                {unitRow(cartesian.xAxis)}
-                {viz === "scatter" && (
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">X metric (optional)</Label>
-                    <Select value={cartesian.xMetric ?? "__none"} onValueChange={(v) => patchCartesian({ xMetric: v === "__none" ? undefined : v })}>
-                      <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="__none">None — use the dimension</SelectItem>
-                        {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                )}
-                <FieldZone label="Y-axis" selected={cartesian.yMetrics} onChange={(v) => patchCartesian({ yMetrics: v })}
-                  options={metrics.map((m) => m.metric_name)} />
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Series</Label>
-                  <Select value={cartesian.series ?? "__none"} onValueChange={(v) => patchCartesian({ series: v === "__none" ? undefined : v })}>
-                    <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none">None</SelectItem>
-                      {columns.filter((c) => c.column_name !== cartesian.xAxis).map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                  {cartesian.series && cartesian.yMetrics.length > 1 && (
-                    <p className="text-xs text-muted-foreground">With a series, only the first metric is plotted.</p>
-                  )}
-                </div>
-              </>
+            {descriptor && (
+              <StudioPanel descriptor={descriptor} config={descConfig} onConfigChange={patchDescConfig}
+                columns={columns} metrics={metrics} resultColumns={resultColumns} rows={data.rows}
+                unitRow={unitRow} tab="data" />
             )}
 
             {viz === "pie" && (
@@ -957,13 +937,19 @@ export default function ChartExplore() {
               </div>
             )}
 
-            <ChartSettingsSections
-              vizType={viz}
-              params={paramsForSave()}
-              columns={resultColumns}
-              rows={data.rows}
-              onChange={applyParamsBack}
-            />
+            {descriptor ? (
+              <StudioPanel descriptor={descriptor} config={descConfig} onConfigChange={patchDescConfig}
+                columns={columns} metrics={metrics} resultColumns={resultColumns} rows={data.rows}
+                unitRow={unitRow} tab="display" />
+            ) : (
+              <ChartSettingsSections
+                vizType={viz}
+                params={toRenderParams(viz, paramsForSave())}
+                columns={resultColumns}
+                rows={data.rows}
+                onChange={applyParamsBack}
+              />
+            )}
           </TabsContent>
         </Tabs>
       </div>

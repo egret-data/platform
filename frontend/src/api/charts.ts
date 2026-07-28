@@ -166,13 +166,35 @@ export interface ChartParams {
   map?: MapConfig;               // map viz only
 }
 
+/** Flat, namespaced viz settings — the v2 storage shape (see the A2 spec). */
+export type VizSettings = Record<string, unknown>;
+
+/** Params as stored from A2 onwards: the query, plus flat namespaced settings. */
+export interface ChartParamsV2 {
+  version: 2;
+  spec: QuerySpec;
+  settings: VizSettings;
+}
+
+/** What a stored chart may hold: pre-A2 rows are v1, new writes are v2. */
+export type AnyChartParams = ChartParams | ChartParamsV2;
+
+export const isParamsV2 = (p: AnyChartParams | undefined | null): p is ChartParamsV2 =>
+  !!p && (p as ChartParamsV2).version === 2;
+
+/** A spec that selects nothing — used as the starting point for a new chart. */
+export const EMPTY_SPEC: QuerySpec = {
+  metrics: [], dimensions: [], columns: [], filters: [], orderby: [],
+  row_limit: 1000, rollup_groups: [],
+};
+
 export interface Chart {
   id: string;
   dataset_id: string;
   name: string;
   description: string;
   viz_type: VizType;
-  params: ChartParams;
+  params: AnyChartParams;
   created_by: string | null;
   updated_at: string;
   folder_id: string | null;
