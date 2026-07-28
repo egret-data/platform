@@ -282,7 +282,7 @@ describe("buildCartesianOption — overlays (Metabase parity 1e)", () => {
 });
 
 // Phase 2a — trend line + series polish, clean-room from Metabase's cartesian
-// model/trend-line.ts (least-squares) + option/series.ts (barMinHeight, connectNulls/step).
+// model/trend-line.ts (least-squares) + option/series.ts (barMinHeight, missing/lineShape).
 describe("buildCartesianOption — series polish & trend (Metabase parity 2a)", () => {
   const cols = [{ name: "x", type: "varchar" }, { name: "rev", type: "double" }];
   const rows = [["A", 10], ["B", 20], ["C", 30]];
@@ -291,7 +291,7 @@ describe("buildCartesianOption — series polish & trend (Metabase parity 2a)", 
     const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "x", yMetrics: ["rev"] }) as any;
     expect(opt.series[0].barMinHeight).toBeGreaterThan(0);
   });
-  it("line connectNulls + step come from config", () => {
+  it("missing and lineShape drive connectNulls and step on the series", () => {
     const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"], missing: "none", lineShape: "step" }) as any;
     expect(opt.series[0].connectNulls).toBe(false);
     expect(opt.series[0].step).toBe("middle");
