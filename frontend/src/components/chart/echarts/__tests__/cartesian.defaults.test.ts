@@ -80,6 +80,15 @@ describe("cartesian defaults, applied at render time", () => {
     expect(o.yAxis.name).toBe("Revenue");
   });
 
+  it("prefers a renamed series over a renamed column — the more specific rename wins", () => {
+    const o = opt({
+      kind: "bar", xAxis: "region", yMetrics: ["total_revenue"],
+      seriesLabels: { total_revenue: "Series name" },
+      columnSettings: { total_revenue: { column_title: "Column name" } },
+    });
+    expect(o.yAxis.name).toBe("Series name");
+  });
+
   it("puts each title on the edge it renders on when horizontal", () => {
     const o = opt({ kind: "row", xAxis: "region", yMetrics: ["total_revenue"] });
     expect(o.yAxis.name).toBe("region");

@@ -152,7 +152,7 @@ export function ChartTable({
             }
             return v;
           },
-          header: c.name,
+          header: columnSettings[c.name]?.column_title || c.name,
           cell: (ctx) => {
             const v = ctx.getValue();
             const fmt = columnSettings[c.name];

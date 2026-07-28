@@ -169,3 +169,52 @@ describe("ChartTable interactions", () => {
     expect(headers[1]).toHaveTextContent("a");
   });
 });
+
+describe("ChartTable — column_title header rename", () => {
+  const REV_COLS = [{ name: "region", type: "varchar" }, { name: "total_revenue", type: "double" }];
+  const REV_ROWS = [["EU", 30], ["US", 10], ["APAC", 20]];
+
+  it("shows column_title as the header instead of the raw name", () => {
+    render(
+      <ChartTable
+        columns={REV_COLS}
+        rows={REV_ROWS}
+        columnSettings={{ total_revenue: { column_title: "Revenue" } }}
+      />,
+    );
+    expect(screen.getByText("Revenue")).toBeInTheDocument();
+    expect(screen.queryByText("total_revenue")).not.toBeInTheDocument();
+  });
+
+  it("still sorts by clicking a renamed header", () => {
+    render(
+      <ChartTable
+        columns={REV_COLS}
+        rows={REV_ROWS}
+        columnSettings={{ total_revenue: { column_title: "Revenue" } }}
+      />,
+    );
+    const header = screen.getByText("Revenue");
+    // Numeric columns default to a descending first click in TanStack table.
+    fireEvent.click(header);
+    const bodyRowsDesc = within(document.querySelector("tbody")!).getAllByRole("row");
+    expect(bodyRowsDesc[0]).toHaveTextContent("EU");
+    expect(bodyRowsDesc[0]).toHaveTextContent("30");
+    fireEvent.click(header);
+    const bodyRowsAsc = within(document.querySelector("tbody")!).getAllByRole("row");
+    expect(bodyRowsAsc[0]).toHaveTextContent("US");
+    expect(bodyRowsAsc[0]).toHaveTextContent("10");
+  });
+
+  it("falls back to the raw name for a column with no column_title, alongside a renamed one", () => {
+    render(
+      <ChartTable
+        columns={REV_COLS}
+        rows={REV_ROWS}
+        columnSettings={{ total_revenue: { column_title: "Revenue" } }}
+      />,
+    );
+    expect(screen.getByText("region")).toBeInTheDocument();
+    expect(screen.getByText("Revenue")).toBeInTheDocument();
+  });
+});
