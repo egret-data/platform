@@ -37,4 +37,14 @@ describe("SeriesOrderSection", () => {
     expect(screen.getByLabelText("Move a down")).not.toBeDisabled();
     expect(screen.getByLabelText("Move b up")).not.toBeDisabled();
   });
+
+  it("reordering visible series does not forget a series absent from this run", () => {
+    const onChange = vi.fn();
+    // "b" is in the stored order but not in this run's names (e.g. filtered out).
+    render(<SeriesOrderSection names={["a", "c"]} order={["a", "b", "c"]} onChange={onChange} />);
+    fireEvent.click(screen.getByLabelText("Move c up"));
+    const [{ seriesOrder }] = onChange.mock.calls[0];
+    expect(seriesOrder).toContain("b");
+    expect(seriesOrder.indexOf("c")).toBeLessThan(seriesOrder.indexOf("a"));
+  });
 });

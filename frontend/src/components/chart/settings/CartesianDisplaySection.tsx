@@ -32,7 +32,6 @@ export function SeriesOptions({ kind, config, onChange, seriesNames = [] }: Sect
     !config.series && seriesNames.length === 1 ? SUMMARIZE_COLOR : seriesColor(i);
   return (
     <div className="space-y-2.5">
-      <Toggle id="cz-legend" label="Legend" checked={!!config.showLegend} onChange={(v) => onChange({ showLegend: v })} />
       {canStack && <Toggle id="cz-stacked" label="Stacked" checked={!!config.stacked} onChange={(v) => onChange({ stacked: v })} />}
       {canStack && config.stacked && <Toggle id="cz-normalized" label="100% stacked" checked={!!config.normalized} onChange={(v) => onChange({ normalized: v })} />}
       {canStack && config.stacked && !config.normalized && <Toggle id="cz-stacktotal" label="Stack totals" checked={!!config.showStackTotal} onChange={(v) => onChange({ showStackTotal: v })} />}
@@ -179,10 +178,15 @@ export function AxisRangeOptions({ kind, config, onChange }: SectionProps) {
   );
 }
 
-/** Data labels, and shortening large axis/label numbers (25.5K instead of 25,468). */
+/**
+ * Chart chrome: whether a legend renders, data labels, and shortening large axis/label
+ * numbers (25.5K instead of 25,468). Legend lives here rather than in Series because it's
+ * about whether a piece of chrome renders at all, not about an individual series.
+ */
 export function FormatOptions({ config, onChange }: SectionProps) {
   return (
     <div className="space-y-2.5">
+      <Toggle id="cz-legend" label="Legend" checked={!!config.showLegend} onChange={(v) => onChange({ showLegend: v })} />
       <Toggle id="cz-labels" label="Data labels" checked={!!config.showLabels} onChange={(v) => onChange({ showLabels: v })} />
       <Toggle id="cz-compact" label="Shorten large numbers" checked={!!config.compactValues} onChange={(v) => onChange({ compactValues: v })} />
     </div>

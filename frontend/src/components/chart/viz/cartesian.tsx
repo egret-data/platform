@@ -106,7 +106,10 @@ function SeriesOrderControl({ config, onChange, resultColumns, rows }: VizContro
  * actually plots — bar gets orientation and stacking, line does not get orientation.
  */
 function displayControls(kind: CartesianViz): VizControl<CartesianConfig>[] {
-  const showOrientation = kind === "bar" || kind === "row";
+  // Row is already the horizontal cartesian kind — it has no orientation to choose, so unlike
+  // OrientationOption's internal isBar gate (which just renders nothing for row), the control
+  // itself is not declared for row at all.
+  const showOrientation = kind === "bar";
   return [
     {
       id: "seriesOptions", section: "display", group: "Series",
@@ -161,7 +164,9 @@ export function cartesianDescriptor(kind: CartesianViz): VizDescriptor<Cartesian
     ...(kind === "scatter" ? [{ id: "xMetric", section: "data" as const, render: XMetricControl }] : []),
     { id: "y", section: "data", render: YAxisControl },
     { id: "series", section: "data", render: SeriesControl },
-    { id: "maxCategories", section: "data", render: MaxCategoriesControl },
+    // Scatter's x-axis is a metric, not a category to fold into "Other" — nothing to bind
+    // maxCategories to there, and the fold code is never reached for a metric-vs-metric plot.
+    ...(kind !== "scatter" ? [{ id: "maxCategories", section: "data" as const, render: MaxCategoriesControl }] : []),
     ...displayControls(kind),
   ];
 

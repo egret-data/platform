@@ -21,9 +21,17 @@ export function SeriesOrderSection({ names, order, hidden, onChange }: {
   const move = (i: number, delta: number) => {
     const j = i + delta;
     if (j < 0 || j >= ranked.length) return;
-    const next = [...ranked];
-    [next[i], next[j]] = [next[j], next[i]];
-    onChange({ seriesOrder: next });
+    const a = ranked[i];
+    const b = ranked[j];
+    // Swap inside the STORED order, not inside the visible list: a series a filter excluded
+    // from this run still has a remembered place, and reordering two other series must not
+    // throw it away.
+    const base = order?.length ? [...order] : [...ranked];
+    for (const n of [a, b]) if (!base.includes(n)) base.push(n);
+    const ia = base.indexOf(a);
+    const ib = base.indexOf(b);
+    [base[ia], base[ib]] = [base[ib], base[ia]];
+    onChange({ seriesOrder: base });
   };
   return (
     <div className="space-y-1">
