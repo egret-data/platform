@@ -26,7 +26,17 @@ const BAR_V2 = {
   },
 };
 
-const CHARTS: Record<string, unknown> = { "c-pie": PIE_V1, "c-bar": BAR_V2 };
+const TABLE_V2 = {
+  ...PIE_V1,
+  id: "c-table", name: "Table v2", viz_type: "table",
+  params: {
+    version: 2,
+    spec: { metrics: ["total_revenue"], dimensions: ["region"], columns: [], filters: [], orderby: [], row_limit: 1000, rollup_groups: [] },
+    settings: { "table.columns": ["region"], "table.metrics": ["total_revenue"] },
+  },
+};
+
+const CHARTS: Record<string, unknown> = { "c-pie": PIE_V1, "c-bar": BAR_V2, "c-table": TABLE_V2 };
 
 vi.mock("@/api/charts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/api/charts")>()),
@@ -39,7 +49,11 @@ vi.mock("@/api/charts", async (importOriginal) => ({
 }));
 
 vi.mock("@/api/useSpecData", () => ({
-  useSpecData: () => ({ columns: [], rows: [], isLoading: false, error: null, hasResult: false }),
+  useSpecData: () => ({
+    columns: [{ name: "region", type: "varchar" }, { name: "total_revenue", type: "double" }],
+    rows: [["North", 1]],
+    isLoading: false, error: null, hasResult: true,
+  }),
 }));
 
 vi.mock("@/api/datasets", () => ({
@@ -57,12 +71,12 @@ vi.mock("@/api/datasets", () => ({
   }),
 }));
 
-async function mountChart(id: string) {
+async function mountChart(id: string, tab?: "display") {
   const { default: ChartExplore } = await import("../ChartExplore");
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <TooltipProvider>
-        <MemoryRouter initialEntries={[`/explore/demo/charts/${id}`]}>
+        <MemoryRouter initialEntries={[`/explore/demo/charts/${id}${tab ? `?tab=${tab}` : ""}`]}>
           <Routes>
             <Route path="/explore/:workspace/charts/:id" element={<ChartExplore />} />
           </Routes>
@@ -86,5 +100,19 @@ describe("ChartExplore mounts", () => {
     await mountChart("c-bar");
     expect(await screen.findByDisplayValue("Bar v2")).toBeInTheDocument();
     expect(screen.getByText("X-axis")).toBeInTheDocument();
+  });
+
+  // A2 PR1/PR2 replaced ChartSettingsSections with the descriptor's controls for migrated
+  // viz types and silently dropped the shared display sections with it. They are shell-owned
+  // settings, so they must show up next to the descriptor's own controls.
+  it("keeps the shared formatting sections on a migrated viz's Display tab", async () => {
+    await mountChart("c-bar", "display");
+    expect(await screen.findByText("Formatting")).toBeInTheDocument();
+  });
+
+  it("keeps the table's column and conditional-formatting sections", async () => {
+    await mountChart("c-table", "display");
+    expect(await screen.findByText("Columns")).toBeInTheDocument();
+    expect(screen.getByText("Conditional formatting")).toBeInTheDocument();
   });
 });

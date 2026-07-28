@@ -1,0 +1,77 @@
+import { type VizType, type ChartParams, isCartesianViz } from "@/api/charts";
+import type { ColumnFormat, Rule } from "@/components/chart/format-types";
+import type { TableState } from "@/api/charts";
+import { TableColumnsSection } from "./TableColumnsSection";
+import { FormatSection } from "./FormatSection";
+import { ConditionalFormattingSection } from "./ConditionalFormattingSection";
+import { SectionLabel } from "./SectionLabel";
+
+export interface ResultColumn { name: string; type: string }
+
+/**
+ * Which result columns a viz offers for number formatting and conditional colouring.
+ * In a pivot only the value cells; for cartesian only the plotted metrics; for scalar the
+ * single metric; pie has no column formatting; everything else offers all columns.
+ */
+export function styleColumnsFor(
+  vizType: VizType,
+  params: ChartParams,
+  resultColumns: ResultColumn[],
+): ResultColumn[] {
+  if (vizType === "pivot_table") return resultColumns.filter((c) => (params.metrics ?? []).includes(c.name));
+  if (isCartesianViz(vizType)) {
+    const yMetrics = params.cartesian?.yMetrics ?? [];
+    return resultColumns.filter((c) => yMetrics.includes(c.name));
+  }
+  if (vizType === "scalar") return resultColumns.filter((c) => c.name === params.scalar?.metric);
+  if (vizType === "pie") return [];
+  return resultColumns;
+}
+
+/**
+ * The display controls that belong to no single viz: table column layout, number
+ * formatting and conditional formatting. They edit settings the shell owns
+ * (`column_settings`, `conditional_formatting`, table state), so both the builder's
+ * Display tab and the dashboard's per-card override editor compose them.
+ */
+export function SharedDisplaySections({
+  vizType, resultColumns, styleColumns, tableState, columnSettings, conditionalFormatting,
+  onTableState, onColumnSettings, onConditionalFormatting,
+}: {
+  vizType: VizType;
+  resultColumns: ResultColumn[];
+  styleColumns: ResultColumn[];
+  tableState: TableState;
+  columnSettings: Record<string, ColumnFormat>;
+  conditionalFormatting: Rule[];
+  onTableState: (next: TableState) => void;
+  onColumnSettings: (next: Record<string, ColumnFormat>) => void;
+  onConditionalFormatting: (next: Rule[]) => void;
+}) {
+  if (resultColumns.length === 0) {
+    return <p className="text-xs text-muted-foreground">Run the chart to configure column formatting.</p>;
+  }
+  return (
+    <>
+      {vizType === "table" && (
+        <div className="space-y-1.5">
+          <SectionLabel>Columns</SectionLabel>
+          <TableColumnsSection columns={resultColumns} value={tableState} onChange={onTableState} />
+        </div>
+      )}
+      {styleColumns.length > 0 && (
+        <div className="space-y-1.5">
+          <SectionLabel>Formatting</SectionLabel>
+          <FormatSection columns={styleColumns} value={columnSettings} onChange={onColumnSettings} />
+        </div>
+      )}
+      {(vizType === "table" || vizType === "pivot_table") && (
+        <div className="space-y-1.5">
+          <SectionLabel>Conditional formatting</SectionLabel>
+          <ConditionalFormattingSection columns={styleColumns} rules={conditionalFormatting}
+            isPivot={vizType === "pivot_table"} onChange={onConditionalFormatting} />
+        </div>
+      )}
+    </>
+  );
+}

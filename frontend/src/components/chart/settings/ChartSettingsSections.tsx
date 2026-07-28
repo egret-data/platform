@@ -2,10 +2,8 @@ import { type VizType, type ChartParams, isCartesianViz } from "@/api/charts";
 import { cartesianSeriesNames } from "@/components/chart/echarts/options/cartesian";
 import { CartesianDisplaySection } from "./CartesianDisplaySection";
 import { PieDisplaySection } from "./PieDisplaySection";
-import { TableColumnsSection } from "./TableColumnsSection";
-import { FormatSection } from "./FormatSection";
-import { ConditionalFormattingSection } from "./ConditionalFormattingSection";
 import { SectionLabel } from "./SectionLabel";
+import { SharedDisplaySections, styleColumnsFor } from "./SharedDisplaySections";
 
 interface ResultColumn { name: string; type: string }
 
@@ -35,15 +33,8 @@ export function ChartSettingsSections({ vizType, params, columns, rows = [], onC
   // Result columns offered to formatting (mirrors ChartExplore's resultColumns).
   const resultColumns = columns;
 
-  // In a pivot, only value (metric) cells are formatted/colored. For cartesian,
-  // only the plotted metrics; for scalar, the single metric; pie has no column
-  // formatting UI. Everything else: all columns. (Mirrors ChartExplore.)
-  const styleColumns =
-    vizType === "pivot_table" ? resultColumns.filter((c) => (params.metrics ?? []).includes(c.name))
-    : isCartesianViz(vizType) ? resultColumns.filter((c) => cartesian.yMetrics.includes(c.name))
-    : vizType === "scalar" ? resultColumns.filter((c) => c.name === params.scalar?.metric)
-    : vizType === "pie" ? []
-    : resultColumns;
+  // Shared with the builder's Display tab so both offer the same formatting columns.
+  const styleColumns = styleColumnsFor(vizType, params, resultColumns);
 
   // Series the cartesian chart will draw — used for per-series colour/rename.
   // Empty until results (rows) arrive, mirroring ChartExplore's `results.data`
@@ -87,30 +78,17 @@ export function ChartSettingsSections({ vizType, params, columns, rows = [], onC
         </div>
       )}
 
-      {resultColumns.length === 0 ? (
-        <p className="text-xs text-muted-foreground">Run the chart to configure column formatting.</p>
-      ) : (
-        <>
-          {vizType === "table" && (
-            <div className="space-y-1.5">
-              <SectionLabel>Columns</SectionLabel>
-              <TableColumnsSection columns={resultColumns} value={tableState} onChange={(next) => onChange({ ...params, tableState: next })} />
-            </div>
-          )}
-          {styleColumns.length > 0 && (
-            <div className="space-y-1.5">
-              <SectionLabel>Formatting</SectionLabel>
-              <FormatSection columns={styleColumns} value={columnSettings} onChange={(value) => onChange({ ...params, columnSettings: value })} />
-            </div>
-          )}
-          {(vizType === "table" || vizType === "pivot_table") && (
-            <div className="space-y-1.5">
-              <SectionLabel>Conditional formatting</SectionLabel>
-              <ConditionalFormattingSection columns={styleColumns} rules={conditionalFormatting} isPivot={vizType === "pivot_table"} onChange={(rules) => onChange({ ...params, conditionalFormatting: rules })} />
-            </div>
-          )}
-        </>
-      )}
+      <SharedDisplaySections
+        vizType={vizType}
+        resultColumns={resultColumns}
+        styleColumns={styleColumns}
+        tableState={tableState}
+        columnSettings={columnSettings}
+        conditionalFormatting={conditionalFormatting}
+        onTableState={(next) => onChange({ ...params, tableState: next })}
+        onColumnSettings={(value) => onChange({ ...params, columnSettings: value })}
+        onConditionalFormatting={(rules) => onChange({ ...params, conditionalFormatting: rules })}
+      />
     </>
   );
 }
