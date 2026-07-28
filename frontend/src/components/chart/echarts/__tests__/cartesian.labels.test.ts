@@ -54,16 +54,13 @@ describe("value-axis labels", () => {
 });
 
 describe("category-axis labels", () => {
-  it("leaves label spacing to ECharts when the axis is short — a count cannot know the width", () => {
+  it("leaves label spacing to ECharts at any length, because only ECharts knows the width", () => {
     expect(opt(base, small).xAxis.axisLabel.interval).toBe("auto");
+    expect(opt(base).xAxis.axisLabel.interval).toBe("auto"); // 40 categories — still auto
   });
 
-  it("thins them when there are many", () => {
-    expect(opt(base).xAxis.axisLabel.interval).toBeGreaterThan(0);
-  });
-
-  it("thins the category axis in horizontal mode too, wherever it sits", () => {
-    expect(opt({ ...base, kind: "row" }).yAxis.axisLabel.interval).toBeGreaterThan(0);
+  it("leaves spacing to ECharts in horizontal mode too, wherever the category axis sits", () => {
+    expect(opt({ ...base, kind: "row" }).yAxis.axisLabel.interval).toBe("auto");
   });
 
   it("rotates long labels rather than only dropping them", () => {

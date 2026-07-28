@@ -470,18 +470,16 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     };
   };
 
-  // ECharts' `interval` counts labels to SKIP: 0 draws every one, 1 draws every other.
-  // ECharts' own `'auto'` measures the rendered labels and drops the ones that would
-  // collide, which is width-aware in a way a category count can never be — at a dashboard
-  // card's width even eight labels overlap. Only override it when the axis is long enough
-  // that we want evenly-spaced thinning rather than whatever survives the measurement.
-  const step: number | "auto" = categories.length > 12 ? Math.ceil(categories.length / 12) - 1 : "auto";
+  // Always ECharts' own `'auto'`: it measures the rendered labels and drops the ones that
+  // would collide. Any rule of ours is a function of the category COUNT, and the thing that
+  // decides whether labels fit is the axis WIDTH — which the option builder never sees. An
+  // evenly-spaced every-Nth rule looks tidier on a wide builder canvas and is illegible on a
+  // dashboard card.
   const longest = categories.reduce((n: number, c) => Math.max(n, String(c).length), 0);
-  const shown = typeof step === "number" && step > 0 ? Math.ceil(categories.length / (step + 1)) : categories.length;
-  // Thinning alone does not save long names — the survivors are still too wide to sit side
-  // by side. Only upright labels on a bottom axis have that problem; a horizontal chart
-  // stacks its categories down the left, where length costs nothing.
-  const rotate = !horizontal && longest > 10 && shown > 6 ? 30 : 0;
+  // Long names are unreadable upright regardless of how many survive thinning (there is no
+  // thinning any more) — only on a bottom axis; a horizontal chart stacks categories down
+  // the left, where length costs nothing.
+  const rotate = !horizontal && longest > 10 && categories.length > 6 ? 30 : 0;
 
   const categoryAxis = {
     type: "category" as const, data: categories,
@@ -489,7 +487,7 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     // The title matches the label colour — an axis name is not a lesser piece of chrome
     // than the values beneath it, and ECharts' default nameTextStyle colour reads paler.
     nameTextStyle: { color: axisLabelColor },
-    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, interval: step, rotate },
+    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, interval: "auto" as const, rotate },
     axisLine: { lineStyle: { color: gridLine } },
   };
   // Non-ordinal x: a value (linear) or time (timeseries) axis positioning points by
