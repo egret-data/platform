@@ -1,6 +1,6 @@
 import type { ReactNode, Ref } from "react";
 import type { LucideIcon } from "lucide-react";
-import type { ChartParams, TableState, VizType } from "@/api/charts";
+import type { AnyChartParams, TableState, VizType } from "@/api/charts";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 import type { DrillContext } from "@/components/chart/drill";
 import { ChartRenderer } from "./ChartRenderer";
@@ -32,8 +32,8 @@ interface TableProps {
 
 interface Props {
   viz: VizType;
-  /** Already through `toRenderParams` — the pane never sees the v2 shape. */
-  params: ChartParams;
+  /** Either stored shape; ChartRenderer resolves the config through the descriptor. */
+  params: AnyChartParams;
   columns: ResultColumn[];
   rows: unknown[][];
   metricTypes: Record<string, string>;

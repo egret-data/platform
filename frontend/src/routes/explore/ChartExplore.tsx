@@ -37,7 +37,7 @@ import { getDescriptor } from "@/components/chart/viz/registry";
 import { pivotDescriptor, type PivotConfig } from "@/components/chart/viz/pivot";
 import { tableDescriptor } from "@/components/chart/viz/table";
 import type { VizDescriptor } from "@/components/chart/viz/types";
-import { toRenderParams } from "@/components/chart/viz/renderParams";
+import { shellSettings } from "@/components/chart/viz/renderConfig";
 import { StudioPanel } from "@/components/chart/StudioPanel";
 import { PreviewPane } from "@/components/chart/PreviewPane";
 import { VizSwitcher } from "@/components/chart/VizSwitcher";
@@ -100,19 +100,19 @@ export default function ChartExplore() {
     const p = c.params;
     // The bridge branches below still read the pre-A2 keys, so they hydrate from the
     // adapted view; a migrated viz reads its own config through its descriptor instead.
-    const v1 = toRenderParams(c.viz_type, p);
     const desc = getDescriptor(c.viz_type);
     if (desc) {
       setDescState(desc.fromParams(p));
       // Carry every stored key forward, including ones this build doesn't read.
       if (isParamsV2(p)) setSettings(p.settings);
     }
-    setRowLimit(v1.spec?.row_limit ?? 1000);
-    setTemporalUnits(v1.spec?.temporal_units ?? {});
-    setColumnSettings(v1.columnSettings ?? {});
-    setConditionalFormatting(v1.conditionalFormatting ?? []);
-    setTableState(v1.tableState ?? {});
-    setFilters(v1.spec?.filters ?? []);
+    setRowLimit(p.spec?.row_limit ?? 1000);
+    setTemporalUnits(p.spec?.temporal_units ?? {});
+    const shell = shellSettings(p);
+    setColumnSettings(shell.columnSettings);
+    setConditionalFormatting(shell.conditionalFormatting);
+    setTableState(shell.tableState);
+    setFilters(p.spec?.filters ?? []);
     setSaveName(c.name);
     setSaveDesc(c.description);
   }, [existing.data]);
@@ -226,10 +226,11 @@ export default function ChartExplore() {
   // rather than "not run yet". Display-only edits don't change the signature, so a fresh
   // query previews them live; while it's stale the whole snapshot holds (a colour changed
   // mid-edit lands on the next Run).
-  const previewParams = (): ChartParams => {
+  const previewParams = (): AnyChartParams => {
     const base = isStale && ranParams.current ? ranParams.current : paramsForSave();
-    // Renderers still speak v1, so a migrated viz's v2 params go through the adapter here.
-    return { ...toRenderParams(viz, base), columnSettings: effCS };
+    // Renderers resolve their own config from these params; only the effective column
+    // formats (dataset defaults under the chart's own) are layered on here.
+    return { ...base, settings: { ...(isParamsV2(base) ? base.settings : {}), column_settings: effCS } };
   };
 
   // Same rule for the previews that take a config instead of a ChartParams: frozen at what
@@ -441,7 +442,12 @@ export default function ChartExplore() {
                 <SharedDisplaySections
                   vizType={viz}
                   resultColumns={resultColumns}
-                  styleColumns={styleColumnsFor(viz, toRenderParams(viz, paramsForSave()), resultColumns)}
+                  styleColumns={styleColumnsFor(viz, {
+                    spec: specForRun(),
+                    cartesian: descConfig as { yMetrics: string[] },
+                    scalar: descConfig as { metric?: string },
+                    metrics: (descConfig as { metrics?: string[] }).metrics,
+                  } as ChartParams, resultColumns)}
                   tableState={tableState}
                   columnSettings={columnSettings}
                   conditionalFormatting={conditionalFormatting}

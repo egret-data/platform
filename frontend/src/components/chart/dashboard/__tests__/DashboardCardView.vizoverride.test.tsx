@@ -21,18 +21,22 @@ import { DashboardCardView } from "../DashboardCardView";
 
 const chart = {
   id: "c", dataset_id: "d", name: "C", description: "", created_by: null, updated_at: "", viz_type: "bar",
-  params: { spec: { metrics: ["rev"], dimensions: [], columns: [], filters: [], orderby: [], row_limit: 100, rollup_groups: [] }, cartesian: { yMetrics: ["rev"], stacked: false } },
+  params: {
+    version: 2,
+    spec: { metrics: ["rev"], dimensions: [], columns: [], filters: [], orderby: [], row_limit: 100, rollup_groups: [] },
+    settings: { "cartesian.yMetrics": ["rev"], "cartesian.stacked": false },
+  },
 } as never;
 const card = {
   id: "k", card_type: "chart", chart_id: "c",
-  options: { vizOverride: { viz_type: "line", cartesian: { stacked: true } } },
+  options: { vizOverride: { viz_type: "line", "cartesian.stacked": true } },
 } as never;
 
 describe("DashboardCardView vizOverride", () => {
   it("renders ChartRenderer with the overridden viz_type + merged display, spec intact", () => {
     render(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} refreshNonce={0} parameters={[]} paramValues={{}} />);
     expect(seen.vizType).toBe("line");
-    expect((seen.params as { cartesian: { stacked: boolean } }).cartesian.stacked).toBe(true);
+    expect((seen.params as { settings: Record<string, unknown> }).settings["cartesian.stacked"]).toBe(true);
     expect((seen.params as { spec: unknown }).spec).toEqual((chart as { params: { spec: unknown } }).params.spec);
   });
 });
