@@ -79,7 +79,21 @@ const BAR_MIN_HEIGHT = 1; // keep sub-pixel bars visible, like Metabase's barMin
 /** Above this many points on one line, markers merge into the line rather than marking it. */
 const MARKER_AUTO_MAX = 30;
 
-interface SeriesLike { name?: string; data: (number | null)[]; yAxisIndex?: number; itemStyle?: { color?: string }; __trend?: boolean; __total?: boolean; __metric?: string }
+interface SeriesLike { name?: string; data: (number | null)[]; yAxisIndex?: number; itemStyle?: { color?: string }; __trend?: boolean; __total?: boolean; __metric?: string; __markers?: "auto" | "on" | "off" }
+
+/**
+ * Markers stop reading as points and start reading as a lumpy line once they touch. Applied after
+ * folding and x-scaling, because "auto" is a question about the points that end up drawn — and it
+ * counts only the ones that exist: a null draws nothing, so a sparse series is not crowded.
+ */
+function applyMarkers(series: SeriesLike[]): void {
+  for (const s of series) {
+    if (s.__markers == null) continue;
+    const drawn = (s.data ?? []).filter((v) => v != null).length;
+    (s as unknown as Record<string, unknown>).showSymbol =
+      s.__markers === "on" || (s.__markers === "auto" && drawn <= MARKER_AUTO_MAX);
+  }
+}
 
 // A transparent overlay bar whose top label shows each column's stack total —
 // clean-room of Metabase's getStackTotalsSeries.
@@ -308,6 +322,7 @@ export function buildCartesianOption(
     if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
     if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
     if (usesXScale(cfg)) applyXScale(categories, series, cfg);
+    applyMarkers(series as unknown as SeriesLike[]);
     const displayCats = isExtractUnit(cfg.xAxisUnit) ? categories.map((v) => temporalLabel(cfg.xAxisUnit, v)) : categories;
     return baseOption(cfg, displayCats as (string | number)[], series);
   }
@@ -357,6 +372,7 @@ export function buildCartesianOption(
   if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
   if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
   if (usesXScale(cfg)) applyXScale(categories, series, cfg);
+  applyMarkers(series as unknown as SeriesLike[]);
   const displayCats = isExtractUnit(cfg.xAxisUnit) ? categories.map((v) => temporalLabel(cfg.xAxisUnit, v)) : categories;
   return baseOption(cfg, displayCats as (string | number)[], series);
 }
@@ -397,12 +413,10 @@ function decorateSeries(
     const shape = ln.shape ?? cfg.lineShape ?? "linear";
     out.smooth = shape === "smooth";
     if (shape === "step") out.step = "middle";   // egret's existing step mode, not Metabase's step-after
-    // Markers stop reading as points and start reading as a lumpy line once they touch. The
-    // count is the series' own points, not the result set: a breakout splits the rows across
-    // several shorter lines, each of which can still carry markers comfortably.
-    const markers = ln.markers ?? cfg.markers ?? "auto";
-    out.showSymbol =
-      markers === "on" || (markers === "auto" && (s.data?.length ?? 0) <= MARKER_AUTO_MAX);
+    // Resolved here, applied at the end of buildCartesianOption: folding and x-scaling both
+    // rewrite the data afterwards, and "auto" is a question about the points that actually get
+    // drawn.
+    out.__markers = ln.markers ?? cfg.markers ?? "auto";
     // Chart-wide only: `LineSeriesStyle` has no `missing`, because how a gap is read is a
     // statement about the data, and two series disagreeing would make the chart say two
     // things at once.

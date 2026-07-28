@@ -132,6 +132,23 @@ describe("markers", () => {
     expect(o.series[0].data.length).toBeLessThanOrEqual(20);
     expect(o.series[0].showSymbol).toBe(true);
   });
+
+  it("decides on the folded point count, not the count before folding", () => {
+    const rs = Array.from({ length: 60 }, (_, i) => [`d${i}`, i + 1]);
+    const o = buildCartesianOption(columns, rs, {
+      kind: "line", xAxis: "d", yMetrics: ["rev"], maxCategories: 8,
+    } as never) as never as { series: { showSymbol: boolean; data: unknown[] }[] };
+    expect(o.series[0].data.length).toBe(8);
+    expect(o.series[0].showSymbol).toBe(true);
+  });
+
+  it("does not count nulls — a sparse line is not a crowded one", () => {
+    const rs = Array.from({ length: 60 }, (_, i) => [`d${i}`, i % 12 === 0 ? i + 1 : null]);
+    const o = buildCartesianOption(columns, rs, {
+      kind: "line", xAxis: "d", yMetrics: ["rev"],
+    } as never) as never as { series: { showSymbol: boolean }[] };
+    expect(o.series[0].showSymbol).toBe(true);
+  });
 });
 
 describe("missing zero and stacking", () => {
