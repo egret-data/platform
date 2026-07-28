@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import type { DatasetColumn, DatasetMetric } from "@/api/datasets";
 import { SectionLabel } from "@/components/chart/settings/SectionLabel";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import type { VizControl, VizControlProps, VizDescriptor } from "./viz/types";
 
 interface Props<Cfg> {
@@ -37,7 +38,10 @@ export function StudioPanel<Cfg>({
     <>
       {ungrouped.map(({ id, render: Control }) => <Control key={id} {...controlProps} />)}
       {groups.map((g) => (
-        <ControlGroup key={g} title={g}
+        // Two descriptors can share a group name (e.g. "Axes"), so the key must include
+        // the viz too — otherwise React reuses the ControlGroup instance across a chart-type
+        // switch and its disclosure state leaks along with it.
+        <ControlGroup key={`${descriptor.key}:${g}`} title={g}
           controls={shown.filter((c) => c.group === g)} controlProps={controlProps} />
       ))}
     </>
@@ -58,13 +62,14 @@ function ControlGroup<Cfg>({ title, controls, controlProps }: {
         <Control key={id} {...controlProps} />
       ))}
       {advanced.length > 0 && (
-        <>
-          {open && advanced.map(({ id, render: Control }) => <Control key={id} {...controlProps} />)}
-          <button type="button" onClick={() => setOpen((o) => !o)}
-            className="text-xs text-muted-foreground hover:text-foreground">
+        <Collapsible open={open} onOpenChange={setOpen}>
+          <CollapsibleContent className="space-y-1.5">
+            {advanced.map(({ id, render: Control }) => <Control key={id} {...controlProps} />)}
+          </CollapsibleContent>
+          <CollapsibleTrigger className="text-xs text-muted-foreground hover:text-foreground">
             {open ? "Fewer options" : `More options (${advanced.length})`}
-          </button>
-        </>
+          </CollapsibleTrigger>
+        </Collapsible>
       )}
     </div>
   );

@@ -85,8 +85,35 @@ describe("StudioPanel", () => {
     render(<StudioPanel {...props} descriptor={withAdvanced} tab="display" />);
     expect(screen.getByText("Always")).toBeInTheDocument();
     expect(screen.queryByText("Rare")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /more options/i }));
+    const trigger = screen.getByRole("button", { name: /more options/i });
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(trigger);
     expect(screen.getByText("Rare")).toBeInTheDocument();
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("resets a group's disclosure when the active viz changes", async () => {
+    const descA = {
+      ...desc,
+      key: "bar",
+      controls: [
+        { id: "a", section: "display", group: "Axes", render: () => <div>Always</div> },
+        { id: "b", section: "display", group: "Axes", advanced: true, render: () => <div>RareA</div> },
+      ],
+    } as unknown as VizDescriptor<{ yMetrics: string[] }>;
+    const descB = {
+      ...desc,
+      key: "line",
+      controls: [
+        { id: "a", section: "display", group: "Axes", render: () => <div>Always</div> },
+        { id: "b", section: "display", group: "Axes", advanced: true, render: () => <div>RareB</div> },
+      ],
+    } as unknown as VizDescriptor<{ yMetrics: string[] }>;
+    const { rerender } = render(<StudioPanel {...props} descriptor={descA} tab="display" />);
+    await userEvent.click(screen.getByRole("button", { name: /more options/i }));
+    expect(screen.getByText("RareA")).toBeInTheDocument();
+    rerender(<StudioPanel {...props} descriptor={descB} tab="display" />);
+    expect(screen.queryByText("RareB")).not.toBeInTheDocument();
   });
 
   it("still renders ungrouped controls, with no heading", () => {
