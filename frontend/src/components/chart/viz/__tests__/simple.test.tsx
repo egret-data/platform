@@ -76,6 +76,15 @@ describe("the nine simple descriptors", () => {
       .toEqual({ category: "c", value: "v" });
   });
 
+  // The pie's display settings are edited by PieDisplaySection, not by a declared field,
+  // so a descriptor that only round-tripped its `fields` would drop them — and a saved
+  // donut would come back as a plain pie.
+  it("round-trips display settings that no field declares", () => {
+    const cfg = { dimension: "category", metric: "m", donut: true, showLegend: true, sliceColors: { A: "#fff" } };
+    const back = byKey.pie.fromParams({ version: 2, spec: EMPTY_SPEC, settings: byKey.pie.toSettings(cfg) });
+    expect(back).toEqual(cfg);
+  });
+
   it("gives pie a display control and the others none", () => {
     expect(byKey.pie.controls.some((c) => c.section === "display")).toBe(true);
     expect(byKey.scalar.controls.every((c) => c.section === "data")).toBe(true);

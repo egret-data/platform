@@ -127,10 +127,12 @@ export function fieldDescriptor(spec: FieldDescriptorSpec): VizDescriptor<Cfg> {
     defaultConfig: {},
     fromParams: (p: AnyChartParams): Cfg => {
       if (isParamsV2(p)) {
+        // Every key under this prefix, not just the declared fields: a viz's display
+        // settings (pie's donut, legend, slice colours…) are edited by its display
+        // control and never appear in `fields`, which only drives the pickers.
         const out: Cfg = {};
-        for (const f of fields) {
-          const v = p.settings[prefix + f.id];
-          if (v !== undefined) out[f.id] = v;
+        for (const [k, v] of Object.entries(p.settings)) {
+          if (k.startsWith(prefix) && v !== undefined) out[k.slice(prefix.length)] = v;
         }
         return out;
       }
@@ -140,7 +142,7 @@ export function fieldDescriptor(spec: FieldDescriptorSpec): VizDescriptor<Cfg> {
     },
     toSettings: (cfg) => {
       const out: VizSettings = {};
-      for (const f of fields) if (cfg[f.id] !== undefined) out[prefix + f.id] = cfg[f.id];
+      for (const [k, v] of Object.entries(cfg)) if (v !== undefined) out[prefix + k] = v;
       return out;
     },
     requiredFields: (cfg) => fields.filter((f) => f.required && !cfg[f.id]).map((f) => f.required!),
