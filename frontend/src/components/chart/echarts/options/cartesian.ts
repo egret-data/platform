@@ -363,35 +363,45 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   const yTitle = cfg.yLabel ?? metricTitle(leftSide);
 
   // Compact labels are for wide numbers, not for many bars — three bars of revenue in the
-  // millions crowd the axis just as badly as forty do. Measure the values, not the count.
+  // millions crowd an axis just as badly as forty do. Measured per axis: a dual-axis chart
+  // has two scales on purpose, and the small one should not inherit the big one's shorthand.
   const plotted = (series as SeriesLike[]).filter((s) => !s.__trend && !s.__total);
-  let widest = 0;
-  for (const s of plotted) {
-    for (const d of (s.data ?? []) as unknown[]) {
-      // On a value/time x-axis the datum is an [x, y] pair — the y is what the axis shows.
-      const n = Math.abs(Number(Array.isArray(d) ? d[1] : d));
-      if (Number.isFinite(n) && n > widest) widest = n;
+  const widestOf = (metrics: string[]) => {
+    let widest = 0;
+    for (const s of plotted) {
+      // A breakout splits one metric into many series, each still tagged with __metric.
+      // An untagged series predates that and is counted against whichever axis asks.
+      if (s.__metric != null && !metrics.includes(s.__metric)) continue;
+      for (const d of (s.data ?? []) as unknown[]) {
+        // On a value/time x-axis the datum is an [x, y] pair — the y is what the axis shows.
+        const n = Math.abs(Number(Array.isArray(d) ? d[1] : d));
+        if (Number.isFinite(n) && n > widest) widest = n;
+      }
     }
-  }
-  // 10,000 is where a grouped number reaches six characters and "10K" starts winning.
-  const compact = cfg.compactValues ?? widest >= 10_000;
+    return widest;
+  };
 
-  const fmtFor = (metrics: string[]) => (v: number) => {
-    if (normalized) return `${Math.round(v)}%`;
-    const m = metrics[0];
-    if (!m) return String(v);
-    const col = cfg.columnSettings?.[m];
-    // A column that states its own `compact` preference outranks the chart-wide default.
-    return formatValue(v, cfg.metricTypes?.[m] ?? "double", { ...col, compact: col?.compact ?? compact });
+  const fmtFor = (metrics: string[]) => {
+    // 10,000 is where a grouped number reaches six characters and "10K" starts winning.
+    const compact = normalized ? false : (cfg.compactValues ?? widestOf(metrics) >= 10_000);
+    return (v: number) => {
+      if (normalized) return `${Math.round(v)}%`;
+      const m = metrics[0];
+      if (!m) return String(v);
+      const col = cfg.columnSettings?.[m];
+      // A column that states its own `compact` preference outranks the chart-wide default.
+      return formatValue(v, cfg.metricTypes?.[m] ?? "double", { ...col, compact: col?.compact ?? compact });
+    };
   };
 
   // ECharts' `interval` counts labels to SKIP: 0 draws every one, 1 draws every other.
   const step = categories.length > 12 ? Math.ceil(categories.length / 12) - 1 : 0;
   const longest = categories.reduce((n: number, c) => Math.max(n, String(c).length), 0);
+  const shown = step > 0 ? Math.ceil(categories.length / (step + 1)) : categories.length;
   // Thinning alone does not save long names — the survivors are still too wide to sit side
   // by side. Only upright labels on a bottom axis have that problem; a horizontal chart
   // stacks its categories down the left, where length costs nothing.
-  const rotate = !horizontal && longest > 10 && categories.length > 6 ? 30 : 0;
+  const rotate = !horizontal && longest > 10 && shown > 6 ? 30 : 0;
 
   const categoryAxis = {
     type: "category" as const, data: categories,

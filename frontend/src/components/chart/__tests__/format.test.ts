@@ -46,6 +46,10 @@ describe("formatValue numbers", () => {
   it("compact notation", () => {
     expect(formatValue(1500000, "double", { compact: true })).toBe("1.5M");
   });
+  it("keeps the currency symbol when compacting", () => {
+    expect(formatValue(1_234_567, "double", { compact: true, number_style: "currency", currency: "USD" }))
+      .toBe("$1.2M");
+  });
   it("negative in parentheses", () => {
     expect(formatValue(-42, "double", { negative_in_parentheses: true })).toBe("(42)");
   });

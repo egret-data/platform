@@ -18,10 +18,19 @@ function formatNumber(value: number, fmt: ColumnFormat): string {
   if (fmt.number_style === "scientific") {
     out = abs.toExponential(fmt.decimals ?? 2);
   } else if (fmt.compact) {
-    out = new Intl.NumberFormat("en", {
+    const opts: Intl.NumberFormatOptions = {
       notation: "compact",
       maximumFractionDigits: fmt.decimals ?? 1,
-    }).format(abs);
+    };
+    // Compacting shortens the number; it should not also strip what the number MEANS.
+    if (fmt.number_style === "currency") {
+      opts.style = "currency";
+      opts.currency = fmt.currency ?? "USD";
+      opts.currencyDisplay = fmt.currency_style ?? "symbol";
+    } else if (fmt.number_style === "percent") {
+      opts.style = "percent";
+    }
+    out = new Intl.NumberFormat("en", opts).format(abs);
   } else {
     const style = fmt.number_style ?? "decimal";
     const opts: Intl.NumberFormatOptions = { useGrouping: true };

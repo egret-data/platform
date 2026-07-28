@@ -4,7 +4,6 @@ import { buildCartesianOption } from "../options/cartesian";
 const columns = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }];
 const big = Array.from({ length: 40 }, (_, i) => [`r${i}`, (i + 1) * 25_468]);
 const small = [["a", 12], ["b", 34]];
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const opt = (cfg: any, rows: unknown[][] = big) => buildCartesianOption(columns, rows, cfg) as any;
 const base = { kind: "bar", xAxis: "region", yMetrics: ["rev"] };
 
@@ -35,6 +34,22 @@ describe("value-axis labels", () => {
   it("shows percentages unchanged when the chart is 100% stacked", () => {
     const o = opt({ ...base, normalized: true, stacked: true });
     expect(o.yAxis.axisLabel.formatter(42)).toBe("42%");
+  });
+
+  it("decides per axis, so a small left axis is not shortened by a large right one", () => {
+    const cols = [
+      { name: "region", type: "varchar" },
+      { name: "orders", type: "double" },
+      { name: "revenue", type: "double" },
+    ];
+    const rows = [["N", 300, 2_000_000], ["S", 1200, 9_000_000], ["E", 2400, 16_000_000]];
+    const o = buildCartesianOption(cols, rows, {
+      kind: "combo", xAxis: "region",
+      yMetrics: ["orders", "revenue"],
+      rightAxisMetrics: ["revenue"],
+    } as any) as any;
+    expect(o.yAxis[0].axisLabel.formatter(2100)).toBe("2,100");
+    expect(o.yAxis[1].axisLabel.formatter(2_000_000)).toBe("2M");
   });
 });
 
