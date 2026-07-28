@@ -39,9 +39,18 @@ egret does not, all of which matter when real data is messy:
 **Depth, pie.** egret is ahead: donut, centre total, slice threshold, per-slice
 colour, percent visibility. Metabase adds `pie.decimal_places`.
 
-**Depth, table.** The widest gap. Metabase has pagination, frozen columns and
-rows, column widths, column show/hide and reorder. egret has sort, width and
-conditional formatting — no pagination, no freezing.
+**Chiều sâu, table.** ~~Khoảng cách lớn nhất.~~ **Đã sửa ngày 2026-07-28, khi bắt
+đầu chart 03: dòng này viết sai.** Nó nói egret "không có phân trang, không đóng
+băng cột". Đọc code thay vì nhớ lại thì `TableState` đã có sẵn `pagination`,
+`pinnedLeft`, `columnWidths`, `hiddenColumns` và `columnOrder`, còn `ChartTable`
+hiện thực cả năm, cộng header dính khi cuộn và kéo-thả đổi thứ tự cột. Khoảng
+cách thật hẹp hơn nhiều: **`ColumnFormat.column_title` là code chết** — trường này
+tồn tại và tiêu đề trục cartesian có đọc nó, nhưng không UI nào ghi, và bảng render
+`header: c.name` thô, nên đổi tên một cột là việc người dùng không làm được ở đâu cả.
+
+Bài học không dừng ở table: bảng so sánh này được viết bằng cách đọc Metabase và
+*nhớ lại* egret. Mọi spec từng chart còn lại phải đối chiếu dòng của mình với code
+thật trước khi thiết kế dựa trên nó.
 
 **Depth, trend (smartscalar).** Metabase compares against several baselines
 (previous period, same period last year, a fixed value); egret only compares with
