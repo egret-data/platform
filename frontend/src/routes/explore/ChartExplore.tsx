@@ -18,6 +18,7 @@ import type { DrillContext } from "@/components/chart/drill";
 import { ChartTypeGallery } from "@/components/chart/ChartTypeGallery";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { ChartSettingsSections } from "@/components/chart/settings/ChartSettingsSections";
+import { SharedDisplaySections, styleColumnsFor } from "@/components/chart/settings/SharedDisplaySections";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
@@ -736,9 +737,25 @@ export default function ChartExplore() {
           <TabsContent value="display" className="space-y-4">
 
             {descriptor ? (
-              <StudioPanel descriptor={descriptor} config={descConfig} onConfigChange={patchDescConfig}
-                columns={columns} metrics={metrics} resultColumns={resultColumns} rows={data.rows}
-                unitRow={unitRow} tab="display" />
+              <>
+                <StudioPanel descriptor={descriptor} config={descConfig} onConfigChange={patchDescConfig}
+                  columns={columns} metrics={metrics} resultColumns={resultColumns} rows={data.rows}
+                  unitRow={unitRow} tab="display" />
+                {/* Formatting, table columns and conditional formatting edit settings the
+                    shell owns, not any one viz — so they sit beside the descriptor's own
+                    controls rather than inside it. */}
+                <SharedDisplaySections
+                  vizType={viz}
+                  resultColumns={resultColumns}
+                  styleColumns={styleColumnsFor(viz, toRenderParams(viz, paramsForSave()), resultColumns)}
+                  tableState={tableState}
+                  columnSettings={columnSettings}
+                  conditionalFormatting={conditionalFormatting}
+                  onTableState={setTableState}
+                  onColumnSettings={setColumnSettings}
+                  onConditionalFormatting={setConditionalFormatting}
+                />
+              </>
             ) : (
               <ChartSettingsSections
                 vizType={viz}
