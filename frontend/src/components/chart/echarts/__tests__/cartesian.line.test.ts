@@ -77,4 +77,53 @@ describe("missing values", () => {
     } as never) as never as { series: { data: unknown[] }[] };
     expect(o.series[0].data).toEqual([1, null, 3]);
   });
+
+  it("cannot zero-fill on a log axis, so it leaves the gap instead", () => {
+    const s = optG({ missing: "zero", logScale: true }).series[0];
+    expect(s.data).toEqual([1, null, 3]);
+    expect(s.connectNulls).toBe(false);
+  });
+
+  it("fits a trend through zero-filled points, because zero is what the user said the value was", () => {
+    const s = optG({ missing: "zero", trendLine: true }) as never as { series: { name: string; data: unknown[] }[] };
+    const trend = s.series.find((x) => x.name?.endsWith(" trend"));
+    expect(trend).toBeDefined();
+    // Least squares through the real (0,1) and (2,3) points alone — as if the gap were still
+    // absent rather than a real 0 — fits exactly 1 at i=0. Through (0,1),(1,0),(2,3) it fits
+    // 1/3 instead. Asserting the latter pins the decision that a zero-filled point is a real
+    // data point to the fit, not a value the trend is allowed to see through.
+    expect(trend!.data[0]).toBeCloseTo(1 / 3, 5);
+  });
+});
+
+describe("missing zero and stacking", () => {
+  const cols = [...columns, { name: "qty", type: "double" }];
+  const rs = [["a", 1, 4], ["b", null, 4], ["c", 3, 4]];
+
+  it("counts a zero-filled point in a normalized stack, rather than leaving it absent", () => {
+    const o = buildCartesianOption(cols, rs, {
+      kind: "area", xAxis: "d", yMetrics: ["rev", "qty"],
+      missing: "zero", stacked: true, normalized: true,
+    } as never) as never as { series: { name?: string; data: unknown[] }[] };
+    const rev = o.series.find((x) => x.name === "rev")!;
+    const qty = o.series.find((x) => x.name === "qty")!;
+    // Without the zero-fill, rev's gap stays null and normalizeStacks leaves it null too
+    // (it only rewrites numeric values). With the fill it is 0% of the b-column total,
+    // not an absent slice.
+    expect(rev.data[1]).toBe(0);
+    expect(qty.data[1]).toBe(100);
+  });
+
+  it("contributes 0 to the stack total, not null as if the point were absent", () => {
+    const o = buildCartesianOption(columns, gappy, {
+      kind: "area", xAxis: "d", yMetrics: ["rev"],
+      missing: "zero", stacked: true, showStackTotal: true,
+    } as never) as never as { series: { __total?: boolean; data: unknown[] }[] };
+    const total = o.series.find((x) => x.__total);
+    expect(total).toBeDefined();
+    // With a single series, an unfilled null contributes nothing and stackTotalSeries would
+    // record the column's total as null (no numeric value seen). A filled 0 is numeric, so
+    // the total is 0 — present and countable, not skipped.
+    expect(total!.data[1]).toBe(0);
+  });
 });

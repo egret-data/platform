@@ -403,13 +403,20 @@ function decorateSeries(
     // Chart-wide only: `LineSeriesStyle` has no `missing`, because how a gap is read is a
     // statement about the data, and two series disagreeing would make the chart say two
     // things at once.
-    const missing = cfg.missing ?? "interpolate";
+    // A log axis has no zero, so filling with one cannot mean what it says — ECharts would drop
+    // the point and break the line at exactly the place the user asked to have filled. Leaving
+    // the gap is the honest version of "this value cannot be shown here".
+    const missing = cfg.logScale && (cfg.missing ?? "interpolate") === "zero"
+      ? "none"
+      : (cfg.missing ?? "interpolate");
     out.connectNulls = missing === "interpolate";
     if (missing === "zero") {
       // ECharts can bridge a null or break at it, but it has no notion of treating one as
-      // zero — that has to be the data, not an option. Safe to rewrite here as plain
-      // numbers: applyXScale (which re-keys onto [x, y] pairs) runs after decorateSeries,
-      // never before.
+      // zero — that has to be the data, not an option. Safe to rewrite here as plain numbers:
+      // applyXScale (which re-keys onto [x, y] pairs) runs after decorateSeries, never before.
+      // This is not a rendering nicety: the zero becomes a real data point downstream too — it
+      // counts in stack totals, in normalisation, and in a trend fit — because `missing: "zero"`
+      // means the user is asserting what the absent value WAS, not just how to draw it.
       out.data = (s.data ?? []).map((v) => (v == null ? 0 : v));
     }
     // Cycle the dash style + marker shape per series so lines are distinguishable
