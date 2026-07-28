@@ -579,6 +579,14 @@ kubectl rollout status deploy/egret-frontend -n egret-system --timeout=180s
 The backend also changed (new migration), so rebuild and roll `deploy/egret` too, and confirm the
 migration actually ran — check the chart settings in the database afterwards, do not assume.
 
+**Roll the backend BEFORE the frontend.** Task 1 removed the four legacy keys from the codec, so a
+chart still storing `cartesian.smooth` reads back as `lineShape: undefined` and renders unsmoothed.
+Migration 0101 is what closes that gap. In a squash-merged release the two are one commit and the
+question never arises, but this manual two-deployment sequence can put the new frontend in front of
+an unmigrated database — and the symptom (every line chart quietly loses its shape) looks exactly
+like a rendering bug in task 3. Roll `deploy/egret`, confirm the migration ran, then roll the
+frontend.
+
 Read the docker build output before trusting the rollout: a failed build leaves the old image
 loadable and `rollout status` still reports success.
 

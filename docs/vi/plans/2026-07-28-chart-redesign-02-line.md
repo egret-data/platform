@@ -83,6 +83,8 @@ Có test ghim đúng lỗi này — đặt cho một series không được xoá
 ### Task 8: Verify đầy đủ, deploy, kiểm tra thật, mở PR
 Khác chart 01: đơn vị này **có migration**, nên cổng backend cũng nằm trong phạm vi — `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets`, `cargo test --workspace`. Đừng chạy hai `cargo test --workspace` cùng lúc. Backend cũng phải build và roll lại, rồi **kiểm tra trong database xem migration đã chạy chưa**, đừng đoán.
 
+**Roll backend TRƯỚC frontend.** Task 1 đã gỡ bốn key cũ khỏi codec, nên chart còn lưu `cartesian.smooth` sẽ đọc ra `lineShape: undefined` và vẽ mất độ mượt. Migration 0101 mới là thứ bịt khoảng đó. Khi squash-merge thì hai thứ là một commit nên không có vấn đề, nhưng quy trình deploy tay hai bước này có thể đặt frontend mới trước database chưa migrate — và triệu chứng (mọi line chart lặng lẽ mất hình dạng) trông **y hệt** lỗi render của task 3. Roll `deploy/egret`, xác nhận migration đã chạy, rồi mới roll frontend.
+
 Sau khi deploy, mở app kèm tham số cache-busting — trình duyệt cache `index.html`, chart 01 đã mất một vòng vì chụp nhầm bundle cũ trông y hệt.
 
 Ca số 5 của kiểm tra thật — mở **Revenue over time (line)** đã lưu từ trước — chính là bài kiểm tra thật sự của migration.
