@@ -64,7 +64,7 @@ export function SharedDisplaySections({
       {vizType === "table" && (
         <div className="space-y-1.5">
           <SectionLabel>Columns</SectionLabel>
-          <TableColumnsSection columns={resultColumns} value={tableState} onChange={onTableState} />
+          <TableColumnsSection columns={resultColumns} value={tableState} onChange={onTableState} columnSettings={columnSettings} />
         </div>
       )}
       {styleColumns.length > 0 && (
