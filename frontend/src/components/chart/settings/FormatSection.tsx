@@ -93,7 +93,12 @@ export function FormatSection({
                     className="h-8"
                     placeholder={c.name}
                     value={fmt.column_title ?? ""}
-                    onChange={(e) => patch({ column_title: e.target.value || undefined })}
+                    onChange={(e) =>
+                      // Blank means "use the column's own name", so a title of only spaces stores
+                      // nothing. The RAW value is kept otherwise — trimming on every keystroke
+                      // would eat the space in "Rev Total" as the user typed it.
+                      patch({ column_title: e.target.value.trim() ? e.target.value : undefined })
+                    }
                   />
                 </Field>
 
