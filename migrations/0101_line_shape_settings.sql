@@ -15,6 +15,10 @@
 -- `params->'settings' - 'key'` actually parses as `params -> ('settings' - 'key')` and fails
 -- with "operator is not unique" -- confirmed against the real database while testing this
 -- migration. Binding the extracted object to `s` first sidesteps the whole precedence question.
+--
+-- One-way: the old booleans are removed, not archived. If a mapping above turns out wrong the
+-- only recovery is a database restore -- which is why each one is chosen to preserve what the
+-- chart already draws rather than to be tidy.
 
 -- `analytics.charts.params->'settings'` is the chart's OWN full settings map (not a partial),
 -- so every cartesian-family row gets all three new keys written explicitly, computed against
@@ -40,9 +44,14 @@ FROM (
              CASE WHEN s->>'cartesian.showMarkers' = 'false' THEN 'off'
                   ELSE 'on' END
          ) AS new_settings
-  FROM analytics.charts ch, LATERAL (SELECT ch.params->'settings' AS s) x
-  WHERE jsonb_typeof(ch.params->'settings') = 'object'
-    AND EXISTS (SELECT 1 FROM jsonb_object_keys(ch.params->'settings') AS k WHERE k LIKE 'cartesian.%')
+  FROM analytics.charts ch, LATERAL (
+    -- Normalised here rather than guarded in the WHERE: `jsonb_object_keys` errors on a
+    -- non-object, and Postgres does not promise to evaluate an AND left to right, so a
+    -- type check sitting beside the call is a planner convention rather than a guarantee.
+    SELECT CASE WHEN jsonb_typeof(ch.params->'settings') = 'object'
+                THEN ch.params->'settings' ELSE '{}'::jsonb END AS s
+  ) x
+  WHERE EXISTS (SELECT 1 FROM jsonb_object_keys(s) AS k WHERE k LIKE 'cartesian.%')
     AND NOT (s ?| array['cartesian.lineShape', 'cartesian.missing', 'cartesian.markers'])
 ) AS migrated
 WHERE c.id = migrated.id;
@@ -75,8 +84,12 @@ FROM (
                    CASE WHEN o->>'cartesian.showMarkers' = 'false' THEN 'off'
                         ELSE 'on' END)
             ELSE '{}'::jsonb END) AS new_override
-  FROM analytics.dashboard_cards card, LATERAL (SELECT card.options->'vizOverride' AS o) x
-  WHERE jsonb_typeof(card.options->'vizOverride') = 'object'
-    AND o ?| array['cartesian.smooth', 'cartesian.step', 'cartesian.connectNulls', 'cartesian.showMarkers']
+  FROM analytics.dashboard_cards card, LATERAL (
+    -- Normalised here rather than guarded in the WHERE, for the same reason as the charts
+    -- statement above: no operator here should depend on AND being evaluated left to right.
+    SELECT CASE WHEN jsonb_typeof(card.options->'vizOverride') = 'object'
+                THEN card.options->'vizOverride' ELSE '{}'::jsonb END AS o
+  ) x
+  WHERE o ?| array['cartesian.smooth', 'cartesian.step', 'cartesian.connectNulls', 'cartesian.showMarkers']
 ) AS migrated
 WHERE dc.id = migrated.id;
