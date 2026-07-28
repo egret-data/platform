@@ -7,6 +7,10 @@ describe("vizRegistry", () => {
     for (const k of CARTESIAN_VIZ) expect(hasDescriptor(k)).toBe(true);
   });
 
+  it("has a descriptor for the four PR2 viz types", () => {
+    for (const k of ["table", "pivot_table", "object", "map"] as const) expect(hasDescriptor(k)).toBe(true);
+  });
+
   it("reports no descriptor for a viz still on the bridge", () => {
     expect(hasDescriptor("pie")).toBe(false);
   });
