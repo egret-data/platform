@@ -15,11 +15,26 @@ export const OTHER_LABEL = "Other";
  * setting is switched on.
  */
 export function foldTail(points: FoldPoint[], max: number | undefined): FoldPoint[] {
-  if (max == null || max < 2 || points.length <= max) return points;
+  const limit = max == null ? undefined : Math.floor(max);
+  if (limit == null || limit < 2 || points.length <= limit) return points;
+
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-  const ranked = [...points].sort((a, b) => num(b.value) - num(a.value));
-  const keep = new Set(ranked.slice(0, max - 1).map((p) => p.name));
-  const kept = points.filter((p) => keep.has(p.name));
-  const rest = points.filter((p) => !keep.has(p.name)).reduce((t, p) => t + num(p.value), 0);
+  // Ranked by index rather than by name: two points can carry the same name, and a
+  // name-keyed lookup would keep both, making the result longer than the limit asked for.
+  const keep = new Set(
+    points
+      .map((_, i) => i)
+      .sort((a, b) => num(points[b].value) - num(points[a].value))
+      .slice(0, limit - 1),
+  );
+  const rest = points.reduce((t, p, i) => (keep.has(i) ? t : t + num(p.value)), 0);
+  const kept = points.filter((_, i) => keep.has(i));
+
+  // A column can already have a category called "Other". Add the tail to it rather than
+  // drawing a second bar with the same name.
+  const existing = kept.findIndex((p) => p.name === OTHER_LABEL);
+  if (existing >= 0) {
+    return kept.map((p, i) => (i === existing ? { ...p, value: num(p.value) + rest } : p));
+  }
   return [...kept, { name: OTHER_LABEL, value: rest }];
 }
