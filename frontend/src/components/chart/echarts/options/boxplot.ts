@@ -1,7 +1,7 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
-import { baseOption } from "../base";
+import { ariaDescription, baseOption } from "../base";
 import { CHART_THEME, SERIES_PALETTE, COLOR_FALLBACK, resolveColor } from "../palette";
 
 export interface ResultColumn { name: string; type: string }
@@ -62,6 +62,11 @@ export function buildBoxplotOption(columns: ResultColumn[], rows: unknown[][], c
 
   return {
     ...baseOption(),
+    // A box is five numbers; the median is the one worth reading aloud per category.
+    aria: ariaDescription({
+      kind: "Box plot", metric: cfg.value, dimension: cfg.category, format: fmt,
+      points: categories.map((c, i) => ({ name: String(c), value: stats[i]?.box?.[2] })),
+    }),
     grid: CHART_THEME.grid,
     tooltip: { trigger: "item" },
     xAxis: {

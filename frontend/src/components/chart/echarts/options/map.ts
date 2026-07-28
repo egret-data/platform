@@ -1,6 +1,6 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ResultColumn } from "@/components/chart/ChartTable";
-import { baseOption, itemTooltip } from "../base";
+import { ariaDescription, baseOption, itemTooltip } from "../base";
 
 export interface MapBuildConfig {
   echartsName: string;
@@ -35,6 +35,11 @@ export function buildMapOption(columns: ResultColumn[], rows: unknown[][], cfg: 
   const layout = { layoutCenter: ["50%", "50%"], layoutSize: "92%" };
   return {
     ...baseOption(),
+    aria: ariaDescription({
+      kind: "Map", metric: cfg.metric, dimension: cfg.region,
+      format: cfg.format ?? ((v) => Number(v).toLocaleString()),
+      points: data.map((d) => ({ name: d.name, value: d.value })),
+    }),
     // The map used to print raw `toLocaleString()` numbers, ignoring the chart's column
     // formats entirely — it is the one builder that never formatted its metric.
     tooltip: itemTooltip(cfg.format ?? ((v) => Number(v).toLocaleString())),

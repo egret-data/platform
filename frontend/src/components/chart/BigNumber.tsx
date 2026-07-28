@@ -18,7 +18,11 @@ export function BigNumber({
   const text = raw == null ? "—" : formatValue(raw, type, format);
 
   return (
-    <div className="flex h-full min-h-[5rem] flex-col items-center justify-center">
+    // role="img" + a single label: a screen reader announces "total_revenue: 25,468" as one
+    // thing, instead of a bare number followed by an unrelated-sounding word.
+    <div className="flex h-full min-h-[5rem] flex-col items-center justify-center"
+      role="img"
+      aria-label={raw == null ? (metric ? `${metric}: no value` : "No value") : metric ? `${metric}: ${text}` : text}>
       <div className="text-[2.5rem] font-bold leading-none tabular-nums text-foreground">{text}</div>
       {metric && <div className="mt-2 text-sm text-muted-foreground">{metric}</div>}
     </div>

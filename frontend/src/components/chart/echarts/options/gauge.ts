@@ -2,6 +2,7 @@ import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
 import { baseOption, itemTooltip } from "../base";
+import { ARIA_A11Y } from "../palette";
 import { SERIES_PALETTE, COLOR_FALLBACK, resolveColor } from "../palette";
 
 export interface ResultColumn { name: string; type: string }
@@ -32,6 +33,11 @@ export function buildGaugeOption(columns: ResultColumn[], rows: unknown[][], cfg
 
   return {
     ...baseOption(),
+    // One reading on an arc; what matters is the value and the range it sits in.
+    aria: {
+      ...ARIA_A11Y,
+      label: { description: `Gauge${cfg.metric ? ` of ${cfg.metric}` : ""}. ${fmt(value)}, on a scale from ${fmt(min)} to ${fmt(max)}.` },
+    },
     tooltip: itemTooltip(fmt),
     series: [{
       type: "gauge",
