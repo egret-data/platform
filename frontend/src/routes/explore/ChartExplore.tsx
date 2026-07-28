@@ -47,6 +47,7 @@ import { tableDescriptor } from "@/components/chart/viz/table";
 import type { VizDescriptor } from "@/components/chart/viz/types";
 import { toRenderParams } from "@/components/chart/viz/renderParams";
 import { StudioPanel } from "@/components/chart/StudioPanel";
+import { VizSwitcher } from "@/components/chart/VizSwitcher";
 import { ChartEmptyState, ChartLoadingState, ChartErrorState } from "@/components/chart/ChartPreviewStates";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 
@@ -69,7 +70,6 @@ export default function ChartExplore() {
   const [datasetId, setDatasetId] = useState<string | null>(() => (!id ? searchParams.get("dataset") : null));
   const detail = useDataset(ws, datasetId);
   const [viz, setViz] = useState<VizType>(!id && isValidViz(typeParam) ? typeParam : "table");
-  const [vizPickerOpen, setVizPickerOpen] = useState(false);
 
   const [temporalUnits, setTemporalUnits] = useState<Record<string, string>>({});
   const [rowLimit, setRowLimit] = useState(1000);
@@ -477,16 +477,7 @@ export default function ChartExplore() {
       <div className="w-72 shrink-0 overflow-y-auto border-r p-4 space-y-4">
         <Link className="text-xs text-muted-foreground hover:underline" to={`/explore/${ws}/charts`}>← Charts</Link>
 
-        {/* Viz header + change */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            {vizMeta && <vizMeta.icon className="h-4 w-4 text-primary" />}
-            <span className="text-sm font-medium">{vizMeta?.name ?? viz}</span>
-          </div>
-          <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setVizPickerOpen(true)}>
-            Change
-          </Button>
-        </div>
+        <VizSwitcher viz={viz} onChange={changeViz} />
 
         <Tabs value={builderTab} onValueChange={setBuilderTab}>
           <TabsList className={UNDERLINE_LIST}>
@@ -862,15 +853,6 @@ export default function ChartExplore() {
       </div>
 
       {/* Change-visualization dialog */}
-      <Dialog open={vizPickerOpen} onOpenChange={setVizPickerOpen}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Change visualization</DialogTitle></DialogHeader>
-          <div className="py-2">
-            <ChartTypeGallery selected={viz} onSelect={(k) => { changeViz(k); setVizPickerOpen(false); }} />
-          </div>
-        </DialogContent>
-      </Dialog>
-
       {/* Save dialog */}
       <Dialog open={saveOpen} onOpenChange={setSaveOpen}>
         <DialogContent>
