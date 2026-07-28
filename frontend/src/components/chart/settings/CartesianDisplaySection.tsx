@@ -49,43 +49,107 @@ interface SectionProps {
 /** Stacking, per-series colour/label, and the kind-specific series toggles (smooth line, combo type). */
 export function SeriesOptions({ kind, config, onChange, seriesNames = [] }: SectionProps & { seriesNames?: string[] }) {
   const canStack = kind === "bar" || kind === "row" || kind === "area";
+  const isLineish = kind === "line" || kind === "area";
   // Default colour a series shows before any override: lone (non-breakout) metric gets the
   // summarize green, everything else cycles the accent palette — mirrors the renderer.
   const defaultColor = (i: number) =>
     !config.series && seriesNames.length === 1 ? SUMMARIZE_COLOR : seriesColor(i);
+  // Merge a single field into one series' seriesLine entry without disturbing the others —
+  // seriesLine is a map keyed by series name, so both spreads matter: the outer one keeps
+  // every other series' entry, the inner one keeps this series' other fields.
+  const patchSeriesLine = (name: string, field: "style" | "size", value: string | undefined) =>
+    onChange({ seriesLine: { ...config.seriesLine, [name]: { ...config.seriesLine?.[name], [field]: value } } });
   return (
     <div className="space-y-2.5">
       {canStack && <Toggle id="cz-stacked" label="Stacked" checked={!!config.stacked} onChange={(v) => onChange({ stacked: v })} />}
       {canStack && config.stacked && <Toggle id="cz-normalized" label="100% stacked" checked={!!config.normalized} onChange={(v) => onChange({ normalized: v })} />}
       {canStack && config.stacked && !config.normalized && <Toggle id="cz-stacktotal" label="Stack totals" checked={!!config.showStackTotal} onChange={(v) => onChange({ showStackTotal: v })} />}
-      {/* The line-shape/missing-value/markers controls that used to live here (Smooth,
-          Connect gaps, Step, Show markers) are gone with the four booleans they were bound
-          to (see CartesianConfig.lineShape/missing/markers). Task 7 puts back the right
-          controls once rendering (tasks 3-6) has real semantics for them. */}
+      {isLineish && (
+        <div className="flex items-center justify-between gap-2">
+          <Label className="text-sm font-normal">Line shape</Label>
+          <Select value={config.lineShape ?? "linear"} onValueChange={(v) => onChange({ lineShape: v as CartesianConfig["lineShape"] })}>
+            <SelectTrigger aria-label="Line shape" className="h-7 w-24"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="linear">Linear</SelectItem>
+              <SelectItem value="smooth">Smooth</SelectItem>
+              <SelectItem value="step">Step</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+      {isLineish && (
+        <div className="flex items-center justify-between gap-2">
+          <Label className="text-sm font-normal">Missing values</Label>
+          <Select value={config.missing ?? "interpolate"} onValueChange={(v) => onChange({ missing: v as CartesianConfig["missing"] })}>
+            <SelectTrigger aria-label="Missing values" className="h-7 w-28"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="interpolate">Interpolate</SelectItem>
+              <SelectItem value="zero">Zero</SelectItem>
+              <SelectItem value="none">None</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+      {isLineish && (
+        <AutoToggle
+          id="cz-markers"
+          label="Markers"
+          value={config.markers === undefined ? undefined : config.markers === "on"}
+          onChange={(v) => onChange({ markers: v === undefined ? undefined : v ? "on" : "off" })}
+          autoHint="Auto shows markers only when there are few enough points to read"
+        />
+      )}
 
       {seriesNames.length > 0 && (
         <div className="space-y-1.5 border-t pt-2">
           <div className="text-xs text-muted-foreground">Series</div>
           {seriesNames.map((name, i) => (
-            <div key={name} className="flex items-center gap-2">
-              <input
-                type="color"
-                aria-label={`color ${name}`}
-                className="h-7 w-8 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
-                value={config.seriesColors?.[name] ?? defaultColor(i)}
-                onChange={(e) => onChange({ seriesColors: { ...config.seriesColors, [name]: e.target.value } })}
-              />
-              <Input
-                className="h-7 flex-1"
-                aria-label={`label ${name}`}
-                placeholder={name}
-                value={config.seriesLabels?.[name] ?? ""}
-                onChange={(e) => {
-                  const next = { ...config.seriesLabels };
-                  if (e.target.value) next[name] = e.target.value; else delete next[name];
-                  onChange({ seriesLabels: next });
-                }}
-              />
+            <div key={name} className="space-y-1">
+              <div className="flex items-center gap-2">
+                <input
+                  type="color"
+                  aria-label={`color ${name}`}
+                  className="h-7 w-8 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+                  value={config.seriesColors?.[name] ?? defaultColor(i)}
+                  onChange={(e) => onChange({ seriesColors: { ...config.seriesColors, [name]: e.target.value } })}
+                />
+                <Input
+                  className="h-7 flex-1"
+                  aria-label={`label ${name}`}
+                  placeholder={name}
+                  value={config.seriesLabels?.[name] ?? ""}
+                  onChange={(e) => {
+                    const next = { ...config.seriesLabels };
+                    if (e.target.value) next[name] = e.target.value; else delete next[name];
+                    onChange({ seriesLabels: next });
+                  }}
+                />
+              </div>
+              {/* Style and size only — shape and markers render correctly per-series (see
+                  decorateSeries) but stay chart-wide-only in this panel: a third and fourth
+                  control per row would swamp what is already a colour swatch + rename field. */}
+              {isLineish && (
+                <div className="flex items-center gap-2 pl-10">
+                  <Select value={config.seriesLine?.[name]?.style ?? "auto"} onValueChange={(v) => patchSeriesLine(name, "style", v === "auto" ? undefined : v)}>
+                    <SelectTrigger aria-label={`style ${name}`} className="h-7 flex-1"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="auto">Auto</SelectItem>
+                      <SelectItem value="solid">Solid</SelectItem>
+                      <SelectItem value="dashed">Dashed</SelectItem>
+                      <SelectItem value="dotted">Dotted</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Select value={config.seriesLine?.[name]?.size ?? "auto"} onValueChange={(v) => patchSeriesLine(name, "size", v === "auto" ? undefined : v)}>
+                    <SelectTrigger aria-label={`size ${name}`} className="h-7 flex-1"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="auto">Auto</SelectItem>
+                      <SelectItem value="S">S</SelectItem>
+                      <SelectItem value="M">M</SelectItem>
+                      <SelectItem value="L">L</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
             </div>
           ))}
         </div>
