@@ -345,6 +345,15 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   const gridLine = resolveColor(CHART_THEME.gridLine, COLOR_FALLBACK.gridLine);
   const axisLabelColor = resolveColor(CHART_THEME.axisLabel, COLOR_FALLBACK.axisLabel);
   const normalized = isNormalized(cfg);
+  // Defaults are decided here and never stored, so a chart saved before this change picks
+  // them up too. `??` keeps an explicit choice winning — including `false` and `""`.
+  const hasBreakout = cfg.series != null && cfg.series !== "";
+  const showLegend = cfg.showLegend ?? (hasBreakout || cfg.yMetrics.length > 1);
+  // A column the user renamed in Formatting should carry that name onto the axis.
+  const titleOf = (col: string | undefined) =>
+    col == null ? undefined : (cfg.columnSettings?.[col]?.column_title ?? col);
+  const xTitle = cfg.xLabel ?? titleOf(cfg.xAxis);
+  const yTitle = cfg.yLabel ?? titleOf(cfg.yMetrics[0]);
   const fmtFor = (metrics: string[]) => (v: number) => {
     if (normalized) return `${Math.round(v)}%`;
     const m = metrics[0];
@@ -352,7 +361,7 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   };
   const categoryAxis = {
     type: "category" as const, data: categories,
-    name: cfg.xLabel, nameLocation: "middle" as const, nameGap: 28,
+    name: xTitle, nameLocation: "middle" as const, nameGap: 28,
     axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor },
     axisLine: { lineStyle: { color: gridLine } },
   };
@@ -360,7 +369,7 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   // their real coordinate. Series carry [x, y] pairs (see applyXScale).
   const scaleAxis = {
     type: cfg.xScale === "timeseries" ? ("time" as const) : ("value" as const),
-    name: cfg.xLabel, nameLocation: "middle" as const, nameGap: 28,
+    name: xTitle, nameLocation: "middle" as const, nameGap: 28,
     axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor },
     axisLine: { lineStyle: { color: gridLine } },
     splitLine: { show: false as const },
@@ -368,7 +377,7 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   const xCategory = usesXScale(cfg) ? scaleAxis : categoryAxis;
   const mkValueAxis = (metrics: string[], position?: "left" | "right") => ({
     type: cfg.logScale ? ("log" as const) : ("value" as const),
-    name: position === "right" ? undefined : cfg.yLabel,
+    name: position === "right" ? undefined : yTitle,
     position,
     ...(normalized ? { max: 100 } : {}),
     // Manual axis range (Metabase y-axis min/max) overrides the auto extent.
@@ -409,13 +418,13 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   // only for the x-axis title.
   const grid = {
     ...CHART_THEME.grid,
-    top: (CHART_THEME.grid.top as number) + (cfg.showLegend ? 24 : 0),
-    bottom: (CHART_THEME.grid.bottom as number) + (cfg.xLabel ? 22 : 0),
+    top: (CHART_THEME.grid.top as number) + (showLegend ? 24 : 0),
+    bottom: (CHART_THEME.grid.bottom as number) + (xTitle ? 22 : 0),
   };
 
   // Trend series stay out of the legend.
   const legendNames = series.filter((s) => !(s as SeriesLike).__trend && !(s as SeriesLike).__total).map((s) => (s as SeriesLike).name);
-  const legend = cfg.showLegend
+  const legend = showLegend
     ? { top: 0, left: "center" as const, type: "scroll" as const, ...(legendNames.length !== series.length ? { data: legendNames } : {}) }
     : undefined;
 
