@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StudioPanel } from "../StudioPanel";
+import { tableDescriptor } from "../viz/table";
 import type { VizDescriptor } from "../viz/types";
 
 const desc = {
@@ -58,6 +59,38 @@ describe("StudioPanel", () => {
     const bare = { ...desc, controls: [] } as unknown as VizDescriptor<{ yMetrics: string[] }>;
     render(<StudioPanel {...props} descriptor={bare} tab="display" />);
     expect(screen.getByText(/no display options/i)).toBeInTheDocument();
+  });
+
+  it("stays silent instead of saying 'no options' when the caller has more content below", () => {
+    // Every real Display-tab caller (ChartExplore, CardVizPanel) always renders
+    // SharedDisplaySections right after this panel, so a bare descriptor must not print
+    // a sentence that a Formatting/Columns section directly contradicts once data arrives.
+    // No viz in the app is genuinely empty on the Display tab today — both callers always
+    // compose SharedDisplaySections after it — so this synthetic bare descriptor is the
+    // only way to exercise the branch; the case above pins that the underlying "say so"
+    // behavior still exists for a caller that has nothing else to show.
+    const bare = { ...desc, controls: [] } as unknown as VizDescriptor<{ yMetrics: string[] }>;
+    render(<StudioPanel {...props} descriptor={bare} tab="display" hasMoreBelow />);
+    expect(screen.queryByText(/no display options/i)).not.toBeInTheDocument();
+  });
+
+  it("a table's Display tab never claims there are no display options", () => {
+    // Regression pin for the live-check finding: table declares zero display controls by
+    // design (its Display tab is entirely shell-owned Columns/Formatting), but the shell
+    // always renders those sections right after — so with hasMoreBelow set, the panel
+    // must render nothing here rather than a sentence the sections below contradict.
+    render(
+      <StudioPanel
+        descriptor={tableDescriptor()}
+        config={{ columns: [], metrics: [] }}
+        onConfigChange={vi.fn()}
+        columns={[]} metrics={[]} resultColumns={[]} rows={[]}
+        unitRow={() => null}
+        tab="display"
+        hasMoreBelow
+      />,
+    );
+    expect(screen.queryByText(/no display options/i)).not.toBeInTheDocument();
   });
 
   it("renders controls under their group heading, in first-appearance order", () => {

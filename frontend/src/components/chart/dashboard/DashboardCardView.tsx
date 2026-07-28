@@ -6,6 +6,7 @@ import { useDashboardCardData } from "@/api/useSavedChartData";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
+import { shellSettings } from "@/components/chart/viz/renderConfig";
 import type { DrillContext } from "@/components/chart/drill";
 import { TextCard } from "./TextCard";
 import { HeadingCard } from "./HeadingCard";
@@ -56,11 +57,15 @@ function ChartCardTileBody({ card, chart, onValueClick, blocked, editing, autoHe
   const showHeader = titleOverride !== "" && headerText !== "";
   const canExport = !editing && !blocked && !data.isLoading && !data.error && (data.columns?.length ?? 0) > 0;
   if (!chart) return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Chart not found</div>;
+  // Computed once the chart is known to exist, so both the export menu (which needs the
+  // rename that's actually in effect) and the render branch below share the same override.
+  const eff = applyVizOverride(chart, card.options.vizOverride as Record<string, unknown> | undefined);
   return (
     <div className="group relative flex h-full flex-col">
       {canExport && (
         <div className="dash-nodrag absolute right-1 top-1 z-10 opacity-0 transition-opacity group-hover:opacity-100">
-          <ChartExportMenu title={headerText || chart?.name} columns={data.columns} rows={data.rows} containerRef={chartRef} />
+          <ChartExportMenu title={headerText || chart?.name} columns={data.columns} rows={data.rows}
+            columnSettings={shellSettings(eff.params).columnSettings} containerRef={chartRef} />
         </div>
       )}
       {showHeader && <div className="px-4 pt-3 pb-2 text-sm font-medium text-foreground">{headerText}</div>}
@@ -70,7 +75,6 @@ function ChartCardTileBody({ card, chart, onValueClick, blocked, editing, autoHe
             : data.error ? <div className="text-sm text-destructive">{data.error}</div>
             : data.isLoading ? <div className="text-sm text-muted-foreground">Loading…</div>
             : (() => {
-              const eff = applyVizOverride(chart, card.options.vizOverride as Record<string, unknown> | undefined);
               return (
                 <ChartErrorBoundary resetKey={`${chart.id}:${eff.viz_type}:${data.columns?.length ?? 0}:${data.rows?.length ?? 0}`}>
                   <ChartRenderer vizType={eff.viz_type} params={eff.params} columns={data.columns} rows={data.rows} onValueClick={onValueClick} />

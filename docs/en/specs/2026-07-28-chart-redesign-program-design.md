@@ -39,9 +39,18 @@ egret does not, all of which matter when real data is messy:
 **Depth, pie.** egret is ahead: donut, centre total, slice threshold, per-slice
 colour, percent visibility. Metabase adds `pie.decimal_places`.
 
-**Depth, table.** The widest gap. Metabase has pagination, frozen columns and
-rows, column widths, column show/hide and reorder. egret has sort, width and
-conditional formatting — no pagination, no freezing.
+**Depth, table.** ~~The widest gap.~~ **Corrected 2026-07-28, when chart 03 began:
+this row was wrong.** It claimed egret had "no pagination, no freezing". Reading
+the code rather than recalling it, `TableState` already carries `pagination`,
+`pinnedLeft`, `columnWidths`, `hiddenColumns` and `columnOrder`, and `ChartTable`
+implements all five plus a sticky header and drag-to-reorder. The real remaining
+gap is far narrower: **`ColumnFormat.column_title` is dead** — the field exists and
+the cartesian axis titles read it, but nothing writes it and the table renders
+`header: c.name` raw, so renaming a column is something a user cannot do anywhere.
+
+The lesson generalises past table: this comparison was written by reading Metabase
+and *recalling* egret. Every remaining per-chart spec must re-check its own row
+against the code before designing from it.
 
 **Depth, trend (smartscalar).** Metabase compares against several baselines
 (previous period, same period last year, a fixed value); egret only compares with

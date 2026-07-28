@@ -12,14 +12,14 @@ vi.mock("../export-chart", () => ({
 
 import { ChartExportMenu } from "../ChartExportMenu";
 
-function Harness({ withSvg, disabled }: { withSvg: boolean; disabled?: boolean }) {
+function Harness({ withSvg, disabled, columnSettings }: { withSvg: boolean; disabled?: boolean; columnSettings?: Record<string, { column_title?: string }> }) {
   const ref = useRef<HTMLDivElement>(null);
   return (
     <div>
       <div ref={ref} data-testid="container">
         {withSvg ? <svg data-testid="thesvg" /> : <span>table</span>}
       </div>
-      <ChartExportMenu title="My Chart" columns={[{ name: "a", type: "x" }]} rows={[["1"]]} containerRef={ref} disabled={disabled} />
+      <ChartExportMenu title="My Chart" columns={[{ name: "a", type: "x" }]} rows={[["1"]]} containerRef={ref} disabled={disabled} columnSettings={columnSettings} />
     </div>
   );
 }
@@ -46,7 +46,14 @@ describe("ChartExportMenu", () => {
     render(<Harness withSvg />);
     await user.click(screen.getByRole("button", { name: /export chart/i }));
     await user.click(await screen.findByText("Download CSV"));
-    expect(downloadCsv).toHaveBeenCalledWith("My Chart", [{ name: "a", type: "x" }], [["1"]]);
+    expect(downloadCsv).toHaveBeenCalledWith("My Chart", [{ name: "a", type: "x" }], [["1"]], undefined);
+  });
+  it("Download CSV forwards columnSettings so the export can follow a renamed column", async () => {
+    const user = userEvent.setup();
+    render(<Harness withSvg columnSettings={{ a: { column_title: "Column A" } }} />);
+    await user.click(screen.getByRole("button", { name: /export chart/i }));
+    await user.click(await screen.findByText("Download CSV"));
+    expect(downloadCsv).toHaveBeenCalledWith("My Chart", [{ name: "a", type: "x" }], [["1"]], { a: { column_title: "Column A" } });
   });
   it("Download PNG calls downloadPng with the title and the svg element", async () => {
     const user = userEvent.setup();

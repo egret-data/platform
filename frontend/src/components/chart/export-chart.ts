@@ -1,4 +1,5 @@
 import type { ResultColumn } from "@/components/chart/ChartTable";
+import type { ColumnFormat } from "@/components/chart/format-types";
 
 function csvCell(v: unknown): string {
   if (v === null || v === undefined) return "";
@@ -6,9 +7,16 @@ function csvCell(v: unknown): string {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-/** RFC-4180 CSV: a header row of column names, then one row per data row (CRLF-separated). */
-export function rowsToCsv(columns: ResultColumn[], rows: unknown[][]): string {
-  const header = columns.map((c) => csvCell(c.name)).join(",");
+/**
+ * RFC-4180 CSV: a header row of column names, then one row per data row (CRLF-separated).
+ * The header follows the same rename the table shows (`column_title`), so a downloaded
+ * file reads the same as the screen it came from — the machine name is still one click
+ * away via "View SQL". `||`, not `??`: settings are never key-whitelisted server-side, so
+ * a legacy/hand-edited `column_title: ""` is reachable, and `??` would emit a blank header
+ * cell instead of falling back to the real name.
+ */
+export function rowsToCsv(columns: ResultColumn[], rows: unknown[][], columnSettings?: Record<string, ColumnFormat>): string {
+  const header = columns.map((c) => csvCell(columnSettings?.[c.name]?.column_title || c.name)).join(",");
   const body = rows.map((r) => r.map(csvCell).join(",")).join("\r\n");
   return body ? `${header}\r\n${body}` : header;
 }
@@ -31,8 +39,8 @@ export function downloadBlob(filename: string, blob: Blob): void {
   URL.revokeObjectURL(url);
 }
 
-export function downloadCsv(title: string | undefined, columns: ResultColumn[], rows: unknown[][]): void {
-  downloadBlob(exportFilename(title, "csv"), new Blob([rowsToCsv(columns, rows)], { type: "text/csv;charset=utf-8" }));
+export function downloadCsv(title: string | undefined, columns: ResultColumn[], rows: unknown[][], columnSettings?: Record<string, ColumnFormat>): void {
+  downloadBlob(exportFilename(title, "csv"), new Blob([rowsToCsv(columns, rows, columnSettings)], { type: "text/csv;charset=utf-8" }));
 }
 
 /** Rasterise an <svg> element to a PNG Blob via Image → canvas. ECharts SVG has no foreignObject, so no taint. */

@@ -50,7 +50,8 @@ export function PivotTable({
                       onClick={onCycleSort ? () => onCycleSort(name) : undefined}
                       className={`w-px sticky top-0 z-30 ${GRID} bg-accent px-4 py-1.5 text-left font-semibold whitespace-nowrap ${di === 0 ? "left-0" : ""} ${onCycleSort ? "cursor-pointer select-none" : ""}`}
                     >
-                      {name}{dir === "asc" ? " ▲" : dir === "desc" ? " ▼" : ""}
+                      {columnSettings[name]?.column_title || name}
+                      {dir === "asc" ? " ▲" : dir === "desc" ? " ▼" : ""}
                     </th>
                   );
                 })}
@@ -61,7 +62,7 @@ export function PivotTable({
                   colSpan={c.colSpan}
                   rowSpan={c.rowSpan ?? 1}
                 >
-                  {c.label}
+                  {c.metric ? (columnSettings[c.metric]?.column_title || c.label) : c.label}
                 </th>
               ))}
             </tr>

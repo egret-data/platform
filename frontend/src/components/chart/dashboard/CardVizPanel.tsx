@@ -59,6 +59,7 @@ export function CardVizPanel({ chart, override, columns, rows = [], onChange }: 
           rows={rows}
           unitRow={() => null}
           tab="display"
+          hasMoreBelow
         />
       )}
       <SharedDisplaySections

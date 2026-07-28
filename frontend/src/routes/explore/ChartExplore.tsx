@@ -435,7 +435,7 @@ export default function ChartExplore() {
               <>
                 <StudioPanel descriptor={descriptor} config={descConfig} onConfigChange={patchDescConfig}
                   columns={columns} metrics={metrics} resultColumns={resultColumns} rows={data.rows}
-                  unitRow={unitRow} tab="display" />
+                  unitRow={unitRow} tab="display" hasMoreBelow />
                 {/* Formatting, table columns and conditional formatting edit settings the
                     shell owns, not any one viz — so they sit beside the descriptor's own
                     controls rather than inside it. */}
@@ -471,6 +471,7 @@ export default function ChartExplore() {
           running={data.isLoading} saveLabel={id ? "Update" : "Save"}
           exportMenu={
             <ChartExportMenu title={saveName || undefined} columns={resultColumns} rows={data.rows}
+              columnSettings={effCS}
               containerRef={previewRef} disabled={!finished || resultColumns.length === 0} />
           }
           sqlDisclosure={ranSpec && (

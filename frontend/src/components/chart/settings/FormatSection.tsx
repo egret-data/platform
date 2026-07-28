@@ -76,13 +76,32 @@ export function FormatSection({
               className={`flex w-full items-center gap-2 px-2 py-1.5 text-left ${isOpen ? "bg-muted/40" : "hover:bg-muted/30"}`}
             >
               <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-              <span className="flex-1 truncate">{c.name}</span>
+              <span className="flex-1 truncate">
+                {value[c.name]?.column_title || c.name}
+                {value[c.name]?.column_title && (
+                  <span className="ml-1.5 text-xs text-muted-foreground">{c.name}</span>
+                )}
+              </span>
               <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground">{colKind(c.type)}</span>
               <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform ${isOpen ? "" : "-rotate-90"}`} />
             </button>
 
             {isOpen && (
               <div className="space-y-3 border-t p-3">
+                <Field label="Column title">
+                  <Input
+                    className="h-8"
+                    placeholder={c.name}
+                    value={fmt.column_title ?? ""}
+                    onChange={(e) =>
+                      // Blank means "use the column's own name", so a title of only spaces stores
+                      // nothing. The RAW value is kept otherwise — trimming on every keystroke
+                      // would eat the space in "Rev Total" as the user typed it.
+                      patch({ column_title: e.target.value.trim() ? e.target.value : undefined })
+                    }
+                  />
+                </Field>
+
                 {isNumericType(c.type) && (
                   <div className="space-y-3">
                     <Field label="Number style">

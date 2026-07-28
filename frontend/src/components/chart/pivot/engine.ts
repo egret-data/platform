@@ -83,6 +83,7 @@ export interface TopCell {
   label: string;
   colSpan: number;
   rowSpan?: number;
+  metric?: string;    // set when this cell is a metric sub-header, for column_title lookup
 }
 export interface RowHeaderCell {
   label: string;
@@ -206,7 +207,7 @@ export function buildPivot(input: PivotInput): Pivot {
   }
   // metric sub-header (only when more than one metric) — one cell per colLeaf, aligned to values.
   if (nMetric > 1 || C === 0) {
-    topHeader.push(colLeaves.map((cl) => ({ label: cl.metric, colSpan: 1 })));
+    topHeader.push(colLeaves.map((cl) => ({ label: cl.metric, colSpan: 1, metric: cl.metric })));
   }
 
   // ----- body rows (depth-first over row tree, inserting subtotals; collapse-aware) -----

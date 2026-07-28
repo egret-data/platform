@@ -4,11 +4,11 @@ import {
   type ColumnDef, type ColumnSizingState, type SortingState,
 } from "@tanstack/react-table";
 import {
-  DndContext, PointerSensor, useSensor, useSensors,
+  DndContext, PointerSensor, KeyboardSensor, useSensor, useSensors,
   closestCenter, type DragEndEvent,
 } from "@dnd-kit/core";
 import {
-  SortableContext, horizontalListSortingStrategy, useSortable, arrayMove,
+  SortableContext, horizontalListSortingStrategy, useSortable, arrayMove, sortableKeyboardCoordinates,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { formatValue } from "./format";
@@ -152,7 +152,7 @@ export function ChartTable({
             }
             return v;
           },
-          header: c.name,
+          header: columnSettings[c.name]?.column_title || c.name,
           cell: (ctx) => {
             const v = ctx.getValue();
             const fmt = columnSettings[c.name];
@@ -246,7 +246,14 @@ export function ChartTable({
     wasResizing.current = isResizing;
   }, [isResizing]);
 
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    // Without this, reordering a column is reachable only by dragging with a mouse. Its
+    // activator only listens on keydown (Space/Enter start a drag, arrows move it, Space/Enter
+    // again drop it) — sorting is wired to onClick alone, on a wholly separate event, so the
+    // two never fire off the same keypress.
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
   function handleDragEnd(e: DragEndEvent) {
     const { active, over } = e;
     if (!over || active.id === over.id) return;
@@ -262,6 +269,19 @@ export function ChartTable({
 
   const totalRows = rows.length;
   const start = paginationEnabled ? pageIndex * pageSize : 0;
+
+  // Reachable before only by unchecking every box by hand; "Hide all" makes it one click, so a
+  // blank grid (no <th>, no <td>) now needs to read as "this is what you asked for", not a bug.
+  // "Columns" (not "Display → Columns") because this section also renders in a dashboard card's
+  // per-card panel, which has no Display tab to point at — only the CardVizPanel composes the
+  // same "Columns" heading, so that name is the one thing true in both places.
+  if (table.getVisibleLeafColumns().length === 0) {
+    return (
+      <p className="p-4 text-sm text-muted-foreground">
+        Every column is hidden. Turn one back on under Columns.
+      </p>
+    );
+  }
 
   return (
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>

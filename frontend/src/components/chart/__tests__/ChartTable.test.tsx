@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen, within, fireEvent } from "@testing-library/react";
 import { ChartTable } from "../ChartTable";
 
@@ -167,5 +167,112 @@ describe("ChartTable interactions", () => {
     const headers = within(document.querySelector("thead")!).getAllByRole("columnheader");
     expect(headers[0]).toHaveTextContent("b");
     expect(headers[1]).toHaveTextContent("a");
+  });
+
+  it("reorders a column from the keyboard: focus, Space, ArrowRight, Space", async () => {
+    // dnd-kit's keyboard sensor picks a target purely from measured DOM rects
+    // (getBoundingClientRect, normally kept fresh by ResizeObserver). jsdom returns an
+    // all-zero rect for everything and the project's ResizeObserver shim is a no-op
+    // (vitest.setup.ts), so without this, every header collapses to the same rect and no
+    // direction ever reads as "further right" — give each <th> a distinct, ordered rect so
+    // the sensor has real geometry to act on, exactly as it would in a browser.
+    const orig = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+      if (this.tagName === "TH") {
+        const row = this.closest("tr");
+        const ths = row ? Array.from(row.querySelectorAll<HTMLElement>("th")) : [];
+        const i = Math.max(0, ths.indexOf(this));
+        const left = i * 100;
+        return { x: left, y: 0, left, top: 0, right: left + 100, bottom: 30, width: 100, height: 30, toJSON() {} } as DOMRect;
+      }
+      return orig.call(this);
+    };
+    try {
+      const onTableStateChange = vi.fn();
+      render(<ChartTable columns={COLS} rows={mkRows(2)} onTableStateChange={onTableStateChange} />);
+      const header = screen.getByText("a").closest("th")!;
+      // Focusable: dnd-kit's useSortable attributes (tabIndex from `attributes`) are spread
+      // onto the header, same element the click-to-sort handler lives on.
+      expect(header).toHaveAttribute("tabIndex", "0");
+      header.focus();
+      expect(header).toHaveFocus();
+      fireEvent.keyDown(header, { code: "Space", key: " " });
+      // KeyboardSensor.attach() wires its real keydown listener via a setTimeout(0) so it
+      // doesn't steal the very keydown that activated it; yield a macrotask so it's attached
+      // before the next key, same as it would be after any real gap between keypresses.
+      await new Promise((r) => setTimeout(r, 0));
+      fireEvent.keyDown(header, { code: "ArrowRight", key: "ArrowRight" });
+      fireEvent.keyDown(header, { code: "Space", key: " " });
+      expect(onTableStateChange).toHaveBeenCalledWith(expect.objectContaining({ columnOrder: ["b", "a"] }));
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = orig;
+    }
+  });
+
+  it("clicking a header still sorts after the keyboard sensor is wired up (no cross-talk)", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(3)} />);
+    const header = screen.getByText("b").closest("th")!;
+    fireEvent.click(header);
+    const firstCellDesc = within(document.querySelector("tbody")!).getAllByRole("row")[0];
+    expect(firstCellDesc).toHaveTextContent("2");
+  });
+});
+
+describe("ChartTable — every column hidden", () => {
+  it("shows a message instead of an empty grid when every column is hidden", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(3)} tableState={{ hiddenColumns: ["a", "b"] }} />);
+    expect(screen.getByText(/every column is hidden/i)).toBeInTheDocument();
+    expect(document.querySelector("table")).not.toBeInTheDocument();
+    expect(document.querySelector("th")).not.toBeInTheDocument();
+    expect(document.querySelector("td")).not.toBeInTheDocument();
+  });
+});
+
+describe("ChartTable — column_title header rename", () => {
+  const REV_COLS = [{ name: "region", type: "varchar" }, { name: "total_revenue", type: "double" }];
+  const REV_ROWS = [["EU", 30], ["US", 10], ["APAC", 20]];
+
+  it("shows column_title as the header instead of the raw name", () => {
+    render(
+      <ChartTable
+        columns={REV_COLS}
+        rows={REV_ROWS}
+        columnSettings={{ total_revenue: { column_title: "Revenue" } }}
+      />,
+    );
+    expect(screen.getByText("Revenue")).toBeInTheDocument();
+    expect(screen.queryByText("total_revenue")).not.toBeInTheDocument();
+  });
+
+  it("still sorts by clicking a renamed header", () => {
+    render(
+      <ChartTable
+        columns={REV_COLS}
+        rows={REV_ROWS}
+        columnSettings={{ total_revenue: { column_title: "Revenue" } }}
+      />,
+    );
+    const header = screen.getByText("Revenue");
+    // Numeric columns default to a descending first click in TanStack table.
+    fireEvent.click(header);
+    const bodyRowsDesc = within(document.querySelector("tbody")!).getAllByRole("row");
+    expect(bodyRowsDesc[0]).toHaveTextContent("EU");
+    expect(bodyRowsDesc[0]).toHaveTextContent("30");
+    fireEvent.click(header);
+    const bodyRowsAsc = within(document.querySelector("tbody")!).getAllByRole("row");
+    expect(bodyRowsAsc[0]).toHaveTextContent("US");
+    expect(bodyRowsAsc[0]).toHaveTextContent("10");
+  });
+
+  it("falls back to the raw name for a column with no column_title, alongside a renamed one", () => {
+    render(
+      <ChartTable
+        columns={REV_COLS}
+        rows={REV_ROWS}
+        columnSettings={{ total_revenue: { column_title: "Revenue" } }}
+      />,
+    );
+    expect(screen.getByText("region")).toBeInTheDocument();
+    expect(screen.getByText("Revenue")).toBeInTheDocument();
   });
 });

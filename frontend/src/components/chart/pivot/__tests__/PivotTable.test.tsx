@@ -56,3 +56,52 @@ describe("PivotTable interactions", () => {
     expect(onCycleSort).toHaveBeenCalledWith("region");
   });
 });
+
+describe("PivotTable — column_title header rename", () => {
+  it("shows column_title as the metric header instead of the raw name", () => {
+    // metric sub-header only renders with >1 metric or no column dims; `grouped` has colDims: []
+    // so its single-metric sub-header row is present and shows the raw metric name "revenue".
+    render(<PivotTable input={grouped} columnSettings={{ revenue: { column_title: "Revenue" } }} />);
+    expect(screen.getByText("Revenue")).toBeInTheDocument();
+    expect(screen.queryByText("revenue")).not.toBeInTheDocument();
+  });
+
+  it("shows column_title as a row-dimension header instead of the raw name", () => {
+    render(<PivotTable input={grouped} columnSettings={{ region: { column_title: "Region" } }} />);
+    expect(screen.getByText("Region")).toBeInTheDocument();
+    expect(screen.queryByText("region")).not.toBeInTheDocument();
+  });
+
+  it("still sorts by the raw row-dimension name when its header is renamed", () => {
+    const onCycleSort = vi.fn();
+    render(
+      <PivotTable
+        input={grouped}
+        columnSettings={{ region: { column_title: "Region" } }}
+        onCycleSort={onCycleSort}
+      />,
+    );
+    fireEvent.click(screen.getByText("Region"));
+    expect(onCycleSort).toHaveBeenCalledWith("region");
+  });
+
+  it("keeps the row-dimension and metric column_title lookups independent", () => {
+    // Both a metric entry and a same-key-space dimension entry are set; each header must read
+    // only its own key — a shared/merged lookup would leak one title into the other's header.
+    render(
+      <PivotTable
+        input={grouped}
+        columnSettings={{ revenue: { column_title: "Metric Title" }, region: { column_title: "Dim Title" } }}
+      />,
+    );
+    expect(screen.getByText("Dim Title")).toBeInTheDocument();
+    expect(screen.getByText("Metric Title")).toBeInTheDocument();
+    expect(screen.queryByText("region")).not.toBeInTheDocument();
+    expect(screen.queryByText("revenue")).not.toBeInTheDocument();
+  });
+
+  it("falls back to the raw name for unset columns", () => {
+    render(<PivotTable input={grouped} columnSettings={{}} />);
+    expect(screen.getByText("region")).toBeInTheDocument();
+  });
+});

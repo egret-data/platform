@@ -49,14 +49,22 @@ export function SharedDisplaySections({
   onConditionalFormatting: (next: Rule[]) => void;
 }) {
   if (resultColumns.length === 0) {
-    return <p className="text-xs text-muted-foreground">Run the chart to configure column formatting.</p>;
+    // Name what THIS viz needs, not a generic "column formatting" sentence — for a table that
+    // sat exactly where the column list belongs.
+    const empty =
+      vizType === "table" || vizType === "object"
+        ? "Pick columns and run the query — they appear here once there is data."
+        : vizType === "pivot_table"
+          ? "Pick rows, columns and a metric, then run the query."
+          : "Run the chart to format its values.";
+    return <p className="text-xs text-muted-foreground">{empty}</p>;
   }
   return (
     <>
       {vizType === "table" && (
         <div className="space-y-1.5">
           <SectionLabel>Columns</SectionLabel>
-          <TableColumnsSection columns={resultColumns} value={tableState} onChange={onTableState} />
+          <TableColumnsSection columns={resultColumns} value={tableState} onChange={onTableState} columnSettings={columnSettings} />
         </div>
       )}
       {styleColumns.length > 0 && (
