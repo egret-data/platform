@@ -54,8 +54,8 @@ describe("value-axis labels", () => {
 });
 
 describe("category-axis labels", () => {
-  it("draws every label when there are few", () => {
-    expect(opt(base, small).xAxis.axisLabel.interval).toBe(0);
+  it("leaves label spacing to ECharts when the axis is short — a count cannot know the width", () => {
+    expect(opt(base, small).xAxis.axisLabel.interval).toBe("auto");
   });
 
   it("thins them when there are many", () => {

@@ -402,6 +402,9 @@ function decorateSeries(
       // On a value/time x-axis the datum is an [x, y] pair — label the y.
       formatter: (p: { value: unknown }) => fmt(metric, Array.isArray(p.value) ? p.value[1] : p.value),
     };
+    // Labels are drawn per point; at a card's width there is not room for all of them, and
+    // a pile of overlapping numbers is worse than showing fewer.
+    out.labelLayout = { hideOverlap: true };
   }
   return out;
 }
@@ -468,9 +471,13 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   };
 
   // ECharts' `interval` counts labels to SKIP: 0 draws every one, 1 draws every other.
-  const step = categories.length > 12 ? Math.ceil(categories.length / 12) - 1 : 0;
+  // ECharts' own `'auto'` measures the rendered labels and drops the ones that would
+  // collide, which is width-aware in a way a category count can never be — at a dashboard
+  // card's width even eight labels overlap. Only override it when the axis is long enough
+  // that we want evenly-spaced thinning rather than whatever survives the measurement.
+  const step: number | "auto" = categories.length > 12 ? Math.ceil(categories.length / 12) - 1 : "auto";
   const longest = categories.reduce((n: number, c) => Math.max(n, String(c).length), 0);
-  const shown = step > 0 ? Math.ceil(categories.length / (step + 1)) : categories.length;
+  const shown = typeof step === "number" && step > 0 ? Math.ceil(categories.length / (step + 1)) : categories.length;
   // Thinning alone does not save long names — the survivors are still too wide to sit side
   // by side. Only upright labels on a bottom axis have that problem; a horizontal chart
   // stacks its categories down the left, where length costs nothing.

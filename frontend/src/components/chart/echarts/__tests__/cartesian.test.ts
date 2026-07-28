@@ -156,6 +156,12 @@ describe("buildCartesianOption — Metabase-parity styling & axes", () => {
     expect(opt.series[0].label.show).toBe(true);
     expect(opt.series[0].label.formatter({ value: 10 })).toBe("$10");
   });
+  it("showLabels also hides overlapping data labels, since a card's width has no room for all of them", () => {
+    const withLabels = buildCartesianOption(cols, rows, { ...base, showLabels: true }) as any;
+    expect(withLabels.series[0].labelLayout).toEqual({ hideOverlap: true });
+    const without = buildCartesianOption(cols, rows, base) as any;
+    expect(without.series[0].labelLayout).toBeUndefined();
+  });
 });
 
 describe("buildCartesianOption — metric-vs-metric scatter (Metabase parity)", () => {
