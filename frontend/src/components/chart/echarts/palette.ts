@@ -253,20 +253,36 @@ function contrastRatio(a: [number, number, number], b: [number, number, number])
   return (lighter + 0.05) / (darker + 0.05);
 }
 
-// We intentionally want to return the light text colour more often than raw contrast alone
-// would pick — ported from Metabase's ui/colors/palette.ts getTextColorForBackground
-// ("We intentionally want to return white text color more frequently", citing internal design
-// notes): dark text on a saturated fill often still LOOKS legible while numerically clearing
-// AA by only a hair, whereas the light alternative tends to clear it by a wide margin — so a
-// borderline call is deliberately biased toward the safer, more-legible side.
-const WHITE_TEXT_PRIORITY_FACTOR = 3;
+// Metabase's ui/colors/palette.ts getTextColorForBackground biases its pick toward white by a
+// flat 3x factor on top of raw contrast ("We intentionally want to return white text color more
+// frequently", per its own internal design notes) — the dark candidate loses even when it's the
+// objectively better read, as long as light's contrast times 3 still edges it out.
+//
+// This port does NOT carry that bias over. Porting it faithfully was tried first and measurably
+// made egret's own palette worse: for both `#509EE3` and `#A989C5`, dark text clears WCAG AA
+// (4.5:1) comfortably — 6.20 and 5.97 against egret's real dark-text token — while the 3x bias
+// picked white anyway, whose contrast against these fills is capped by the fill's OWN luminance
+// (~0.32/0.30) at ~2.86/2.97, nowhere near 4.5. That's not a borderline call the bias nudged in
+// a debatable direction; it moved a passing label to a failing one. The bias is a look
+// preference Metabase made deliberately, not a legibility law, and 4.5:1 is egret's higher-
+// priority rule, so where they conflict the bias loses.
+//
+// The rule implemented instead: pick whichever candidate actually has the higher raw contrast
+// against the fill. Apply the white preference ONLY as a tie-break between two candidates that
+// BOTH already clear 4.5:1 — at that point neither reading is at risk, so Metabase's white-
+// leaning look is free to win. This keeps Metabase's look everywhere it was always safe
+// (saturated dark fills, where white genuinely has the better raw contrast too — no tie-break
+// even needed) and stops it exactly where it would have picked a fill-out label over a legible
+// one.
+const WCAG_AA_CONTRAST = 4.5;
 
 /**
  * Picks whichever of `textColor` / `textColorInverse` reads better against `backgroundColor`,
- * biased toward `textColorInverse` by `WHITE_TEXT_PRIORITY_FACTOR` — ported from Metabase's
- * `getTextColorForBackground` (ui/colors/palette.ts). Reuses this file's own `srgbToLinear`
- * (the sRGB electro-optical transfer function, also used by `lightenOklch`) rather than
- * duplicating the gamma maths for the WCAG relative-luminance formula.
+ * with `textColorInverse` preferred only as a tie-break once both already clear WCAG AA (see the
+ * comment above `WCAG_AA_CONTRAST`) — adapted from Metabase's `getTextColorForBackground`
+ * (ui/colors/palette.ts), minus its 3x white bias. Reuses this file's own `srgbToLinear` (the
+ * sRGB electro-optical transfer function, also used by `lightenOklch`) rather than duplicating
+ * the gamma maths for the WCAG relative-luminance formula.
  *
  * `backgroundColor` failing to parse (a CSS colour keyword, an unresolved `var()`, ...) falls
  * back to `textColor` — the same "leave it alone / pick the safe default" degradation this
@@ -283,8 +299,11 @@ export function getTextColorForBackground(
   const fg = parseColor(textColor) ?? [0, 0, 0];
   const fgInverse = parseColor(textColorInverse) ?? [255, 255, 255];
 
-  const whiteContrast = contrastRatio(bg, fgInverse) * WHITE_TEXT_PRIORITY_FACTOR;
   const darkContrast = contrastRatio(bg, fg);
+  const whiteContrast = contrastRatio(bg, fgInverse);
 
+  if (darkContrast >= WCAG_AA_CONTRAST && whiteContrast >= WCAG_AA_CONTRAST) {
+    return textColorInverse; // both safe — Metabase's white-leaning look wins the tie-break
+  }
   return whiteContrast > darkContrast ? textColorInverse : textColor;
 }
