@@ -125,3 +125,133 @@ describe("buildPieOption — donut total & percent (Metabase parity 1b)", () => 
     expect(labelText(o, { name: "A", percent: 33.333 })).toBe("33.33%");
   });
 });
+
+// Task 4 — nested rings: pie.dimensions draws up to three nested rings, inner to outer,
+// each ring going through buildSlices' own robustness rules (sign handling, sort, Other-fold).
+describe("buildPieOption — nested rings (task 4)", () => {
+  it("one dimension still renders exactly one series, unchanged", () => {
+    const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
+    expect(opt.series).toHaveLength(1);
+    expect(opt.series[0].data).toEqual([{ name: "US", value: 30 }, { name: "EU", value: 10 }]);
+    expect(opt.series[0].radius).toEqual(["0%", "70%"]);
+  });
+
+  it("two dimensions render two series, at different radii, inner first", () => {
+    const cols2 = [
+      { name: "region", type: "varchar" }, { name: "category", type: "varchar" }, { name: "rev", type: "double" },
+    ];
+    const rows2 = [
+      ["US", "Widgets", 30], ["US", "Gadgets", 10],
+      ["EU", "Widgets", 5], ["EU", "Gadgets", 5],
+    ];
+    const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "rev" }) as any;
+    expect(opt.series).toHaveLength(2);
+    const [inner, outer] = opt.series;
+    expect(parseFloat(inner.radius[0])).toBeLessThan(parseFloat(outer.radius[0]));
+    expect(parseFloat(inner.radius[1])).toBeLessThanOrEqual(parseFloat(outer.radius[1]));
+    // inner ring = region totals (US 40, EU 10), sorted desc
+    expect(inner.data.map((d: any) => ({ name: d.name, value: d.value }))).toEqual([
+      { name: "US", value: 40 }, { name: "EU", value: 10 },
+    ]);
+  });
+
+  it("the outer ring's slices are contiguous per parent, in the parent's own order", () => {
+    const cols2 = [
+      { name: "region", type: "varchar" }, { name: "category", type: "varchar" }, { name: "rev", type: "double" },
+    ];
+    // Region totals: EU=21, US=8 -> parent order EU, US.
+    // A naive global sort-by-value on the outer ring would interleave: EU Widgets(20), US Widgets(5), US Gadgets(3), EU Gadgets(1).
+    const rows2 = [
+      ["US", "Widgets", 5], ["US", "Gadgets", 3],
+      ["EU", "Widgets", 20], ["EU", "Gadgets", 1],
+    ];
+    const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "rev" }) as any;
+    const outer = opt.series[1].data;
+    expect(outer.map((d: any) => d.name)).toEqual(["Widgets", "Gadgets", "Widgets", "Gadgets"]);
+    expect(outer.map((d: any) => d.value)).toEqual([20, 1, 5, 3]);
+  });
+
+  it("buildSlices' sign/zero rules apply to the outer ring exactly like the inner", () => {
+    const cols2 = [
+      { name: "region", type: "varchar" }, { name: "cat", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    // Outer ring values across both parents: 10, -5 (mixed sign -> dropped), 5, 0 (dropped).
+    const rows2 = [["R1", "A", 10], ["R1", "B", -5], ["R2", "C", 5], ["R2", "D", 0]];
+    const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "cat"], metric: "m" }) as any;
+    const outer = opt.series[1].data;
+    expect(outer.map((d: any) => d.name)).toEqual(["A", "C"]);
+    expect(outer.map((d: any) => d.value)).toEqual([10, 5]);
+  });
+
+  it("the Other fold applies per ring, independently, and only when it merges 2+ slices", () => {
+    const cols2 = [
+      { name: "region", type: "varchar" }, { name: "cat", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    // Inner ring: R1=995, R2=1000 -- both well above the 2.5% threshold, no Other.
+    // Outer ring (total 2000, threshold cut at 50): R1 -> A(990) big, B(5) small;
+    // R2 -> C(985) big, D(5) E(5) F(5) small. 4 small slices ring-wide -> one Other(20).
+    const rows2 = [
+      ["R1", "A", 990], ["R1", "B", 5],
+      ["R2", "C", 985], ["R2", "D", 5], ["R2", "E", 5], ["R2", "F", 5],
+    ];
+    const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "cat"], metric: "m" }) as any;
+    const inner = opt.series[0].data;
+    expect(inner.map((d: any) => d.name)).toEqual(["R2", "R1"]);
+    expect(inner.some((d: any) => d.name === "Other")).toBe(false);
+
+    const outer = opt.series[1].data;
+    expect(outer.map((d: any) => d.name)).toEqual(["C", "A", "Other"]);
+    expect(outer.find((d: any) => d.name === "Other").value).toBe(20);
+  });
+
+  it("does not fold the outer ring's Other when only one slice is sub-threshold", () => {
+    const cols2 = [
+      { name: "region", type: "varchar" }, { name: "cat", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    const rows2 = [["R1", "A", 50], ["R1", "B", 49], ["R1", "C", 1]]; // only C < 2.5% of 100
+    const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "cat"], metric: "m" }) as any;
+    expect(opt.series[1].data.map((d: any) => d.name)).toEqual(["A", "B", "C"]);
+  });
+
+  it("a null outer dimension value does not break or drop its parent's slice", () => {
+    const cols2 = [
+      { name: "region", type: "varchar" }, { name: "cat", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    const rows2 = [["R1", null, 10], ["R2", "X", 5]];
+    expect(() => buildPieOption(cols2, rows2, { dimensions: ["region", "cat"], metric: "m" })).not.toThrow();
+    const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "cat"], metric: "m" }) as any;
+    const inner = opt.series[0].data;
+    expect(inner).toHaveLength(2);
+    expect(inner.map((d: any) => ({ name: d.name, value: d.value }))).toEqual(
+      expect.arrayContaining([{ name: "R1", value: 10 }, { name: "R2", value: 5 }]),
+    );
+  });
+
+  it("three dimensions render three series", () => {
+    const cols3 = [
+      { name: "region", type: "varchar" }, { name: "category", type: "varchar" },
+      { name: "brand", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    const rows3 = [
+      ["US", "Widgets", "Acme", 10], ["US", "Widgets", "Zenith", 5], ["EU", "Gadgets", "Acme", 3],
+    ];
+    const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any;
+    expect(opt.series).toHaveLength(3);
+  });
+
+  it("donut hollows the centre with one ring, and with three rings the centre stays clear", () => {
+    const one = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", donut: true }) as any;
+    expect(one.series[0].radius[0]).toBe("45%");
+
+    const cols3 = [
+      { name: "region", type: "varchar" }, { name: "category", type: "varchar" },
+      { name: "brand", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    const rows3 = [
+      ["US", "Widgets", "Acme", 10], ["US", "Widgets", "Zenith", 5], ["EU", "Gadgets", "Acme", 3],
+    ];
+    const three = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m", donut: true }) as any;
+    expect(three.series).toHaveLength(3);
+    expect(three.series[0].radius[0]).toBe("45%");
+  });
+});

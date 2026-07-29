@@ -134,14 +134,15 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
         {rows.length === 0
           ? <EmptyState />
           : <EChartsRenderer option={buildPieOption(columns, rows, {
-              // TODO(task 4): only the first dimension renders as a ring; nested rings come next.
               dimensions: pie.dimensions, metric: pie.metric, donut: pie.donut,
               showLegend: pie.showLegend, showLabels: pie.showLabels,
               sliceThreshold: pie.sliceThreshold, sortRows: pie.sortRows,
               showTotal: pie.showTotal, percentVisibility: pie.percentVisibility,
               sliceColors: pie.sliceColors,
               columnSettings, metricTypes,
-              dimensionUnit: params.spec.temporal_units?.[pie.dimensions?.[0] ?? ""],
+              // Keyed by column name, same shape as the spec map itself — each ring looks up its
+              // own dimension's unit rather than ChartRenderer resolving just the first one.
+              dimensionUnits: params.spec.temporal_units,
             })}
             onPointClick={onValueClick && pie.dimensions?.[0] ? (p) => onValueClick({ dims: [{ col: pie.dimensions![0], value: p.name }] }, p.x, p.y) : undefined}
           />}
