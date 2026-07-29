@@ -24,8 +24,11 @@ export function buildGaugeOption(columns: ResultColumn[], rows: unknown[][], cfg
   const mi = cfg.metric != null ? columns.findIndex((c) => c.name === cfg.metric) : -1;
   const raw = mi >= 0 && rows.length > 0 ? rows[0][mi] : undefined;
   const value = raw != null && Number.isFinite(Number(raw)) ? Number(raw) : 0;
-  // Task 3 derives these from cfg.segments. Until then, today's auto-range verbatim, so this
-  // commit changes types only and nothing a user can see.
+  // Task 3 derives these from cfg.segments. Until then, today's auto-range verbatim — which is
+  // identical to the old expression ONLY when no min/max was configured. A gauge that had them
+  // set renders on the auto-range from this commit onward; migration 0102 (task 2) is what
+  // converts those into segments, and it ships in the same PR, so no release sees one without
+  // the other.
   const min = 0;
   const max = value > 0 ? value * 2 : 100;
 
