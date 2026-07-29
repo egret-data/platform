@@ -1,7 +1,8 @@
 import { isParamsV2 } from "@/api/charts";
-import type { AnyChartParams, TableState, VizType } from "@/api/charts";
+import type { AnyChartParams, TableState, VizSettings, VizType } from "@/api/charts";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 import { getDescriptor } from "./registry";
+import type { VizDescriptor } from "./types";
 
 /**
  * A viz's own configuration, taken from its descriptor. Descriptors read both stored
@@ -11,6 +12,35 @@ import { getDescriptor } from "./registry";
 export function vizConfig<Cfg = Record<string, unknown>>(viz: VizType, params: AnyChartParams): Cfg {
   const desc = getDescriptor(viz);
   return (desc ? desc.fromParams(params) : {}) as Cfg;
+}
+
+/**
+ * The write-side counterpart of `vizConfig`: fold a viz's edited config back into the
+ * settings a chart was loaded with.
+ *
+ * The subtlety this exists for is REMOVAL. Several display controls have an explicit "Auto"
+ * state, and Auto is the *absence* of a stored key — the chart applies its own rule instead.
+ * The control emits `undefined` for it, `toSettings` correctly omits an undefined key, and
+ * then a plain `{ ...settings, ...toSettings(cfg) }` merge quietly re-asserts whatever
+ * explicit value was stored before: the control shows Auto, the chart renders as Auto, and
+ * saving writes the old value straight back. Auto was reachable but unsavable.
+ *
+ * A spread cannot express a removal, so the cleared keys are deleted after it. They are
+ * derived from the config's own explicitly-undefined entries, namespaced with the
+ * descriptor's `prefix` — so this holds for every viz type and every descriptor, not just
+ * the ones built by `fieldDescriptor`, and it can never reach a key the shell or another
+ * descriptor owns.
+ */
+export function mergeVizSettings<Cfg>(
+  settings: VizSettings,
+  descriptor: VizDescriptor<Cfg>,
+  cfg: Cfg,
+): VizSettings {
+  const out: VizSettings = { ...settings, ...descriptor.toSettings(cfg) };
+  for (const [k, v] of Object.entries(cfg as Record<string, unknown>)) {
+    if (v === undefined) delete out[descriptor.prefix + k];
+  }
+  return out;
 }
 
 /**

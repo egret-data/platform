@@ -37,7 +37,7 @@ import { getDescriptor } from "@/components/chart/viz/registry";
 import { pivotDescriptor, type PivotConfig } from "@/components/chart/viz/pivot";
 import { tableDescriptor } from "@/components/chart/viz/table";
 import type { VizDescriptor } from "@/components/chart/viz/types";
-import { shellSettings } from "@/components/chart/viz/renderConfig";
+import { shellSettings, mergeVizSettings } from "@/components/chart/viz/renderConfig";
 import { StudioPanel } from "@/components/chart/StudioPanel";
 import { PreviewPane } from "@/components/chart/PreviewPane";
 import { VizSwitcher } from "@/components/chart/VizSwitcher";
@@ -256,8 +256,9 @@ export default function ChartExplore() {
         version: 2,
         spec: specForRun(),
         settings: {
-          ...settings,
-          ...descriptor.toSettings(descConfig),
+          // mergeVizSettings, not a bare spread: a setting the user has put back to "Auto"
+          // must LEAVE the stored settings, and a spread can only add or overwrite.
+          ...mergeVizSettings(settings, descriptor, descConfig),
           column_settings: columnSettings,
           conditional_formatting: conditionalFormatting,
         },
