@@ -28,5 +28,9 @@ describe("chart palette", () => {
       // fallback must be used — guaranteeing ECharts never receives a raw var().
       expect(resolveColor("var(--border)", "#e5e7eb")).toBe("#e5e7eb");
     });
+    it("falls back for a value that isn't a colour at all, rather than painting nothing", () => {
+      expect(resolveColor("not-a-real-color", "#000")).toBe("#000");
+      expect(resolveColor("banana", "#000")).toBe("#000");
+    });
   });
 });

@@ -160,7 +160,9 @@ describe("buildGaugeOption", () => {
       expect(opt.series[0].axisLine.lineStyle.color).toEqual([[1, "green"]]);
     });
 
-    it("drops a segment whose colour isn't a colour", () => {
+    it("keeps a segment whose colour isn't a colour, resolving it to a palette fallback rather than dropping the zone", () => {
+      // A bad colour is a rendering problem, not a reason to throw away the bounds the user
+      // configured — resolveColor guarantees a drawable value, so the segment survives.
       const opt = buildGaugeOption(cols, [[60]], {
         metric: "rev",
         segments: [
@@ -168,7 +170,20 @@ describe("buildGaugeOption", () => {
           { min: 50, max: 100, color: "green" },
         ],
       }) as any;
-      expect(opt.series[0].axisLine.lineStyle.color).toEqual([[1, "green"]]);
+      const stops = opt.series[0].axisLine.lineStyle.color;
+      expect(stops).toHaveLength(2);
+      expect(stops[0][0]).toBe(0.5);
+      expect(stops[0][1]).not.toBe("not-a-real-color");
+      expect(stops[1]).toEqual([1, "green"]);
+    });
+
+    it("resolves a var(--token) segment colour rather than passing the literal through unresolved", () => {
+      const opt = buildGaugeOption(cols, [[60]], {
+        metric: "rev",
+        segments: [{ min: 0, max: 100, color: "var(--some-brand-token)" }],
+      }) as any;
+      const [, color] = opt.series[0].axisLine.lineStyle.color[0];
+      expect(color).not.toContain("var(");
     });
 
     it("falls back to the default zones when every segment is invalid", () => {
@@ -192,6 +207,44 @@ describe("buildGaugeOption", () => {
       const opt = buildGaugeOption(cols, [[60]], { metric: "rev", segments: [] }) as any;
       expect(opt.series[0].min).toBe(0);
       expect(opt.series[0].max).toBe(120);
+    });
+
+    it.each([
+      ["an empty string", ""],
+      ["a numeric string", "12"],
+      ["undefined", undefined],
+      ["null", null],
+      ["NaN", NaN],
+    ])("drops a segment whose min is %s rather than coercing it to a number", (_label, badMin) => {
+      const opt = buildGaugeOption(cols, [[60]], {
+        metric: "rev",
+        segments: [
+          { min: badMin as any, max: 50, color: "purple" },
+          { min: 50, max: 100, color: "green" },
+        ],
+      }) as any;
+      // Only the valid segment survives, so the range is that segment's own bounds.
+      expect(opt.series[0].min).toBe(50);
+      expect(opt.series[0].max).toBe(100);
+      expect(opt.series[0].axisLine.lineStyle.color).toEqual([[1, "green"]]);
+    });
+
+    it("resolves an overlap by upper bound: the smaller max claims the disputed range, the larger max gets what's left", () => {
+      // [0,60] green and [40,100] red overlap on 40-60. ECharts' stop model has no notion of
+      // a segment's own floor — sorted by max, each entry paints up to its own max and the
+      // next entry starts there — so green (max 60, sorted first) silently wins the whole
+      // 0-60 stretch including the part red's min=40 meant to own; red only gets 60-100. A
+      // value of 45 (which the red segment was configured to call dangerous) therefore
+      // renders inside the green zone. Task 4's editor keeps authored ranges contiguous so
+      // this can't be created from the UI; this pins what happens if it arrives anyway.
+      const opt = buildGaugeOption(cols, [[45]], {
+        metric: "rev",
+        segments: [
+          { min: 0, max: 60, color: "green" },
+          { min: 40, max: 100, color: "red" },
+        ],
+      }) as any;
+      expect(opt.series[0].axisLine.lineStyle.color).toEqual([[0.6, "green"], [1, "red"]]);
     });
   });
 });
