@@ -960,6 +960,41 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
       }
     });
 
+    // SLICE_LABEL_PADDING (Metabase's DIMENSIONS.slice.label.padding) subtracts a 2px margin from
+    // each side of the space a label is allowed, so text never butts up against its slice's own
+    // border. It IS load-bearing — it changes which labels survive whole — but nothing pinned
+    // that: setting it to 0 changed no assertion, which would have let a future reader delete it
+    // as decorative. This nails it to an outcome, with a label engineered to sit exactly in the
+    // 4px the padding takes away.
+    //
+    // The radial branch makes the arithmetic exact: a multi-ring label's room is the ring's
+    // thickness outright, no chord/rectangle minimum involved. Two rings in a 400px container ->
+    // radii 28%-70% split in two, so ring 0 spans 28%-49% = 56px to 98px: exactly 42px thick, and
+    // "ABCDEF" is exactly 42px under the 7px-per-character measurer.
+    it("keeps the slice label clear of its own border: a label that fits the ring exactly is still truncated", () => {
+      const pCols = [
+        { name: "d", type: "varchar" }, { name: "c", type: "varchar" }, { name: "m", type: "double" },
+      ];
+      const opt = buildPieOption(
+        pCols,
+        [["ABCDEF", "x", 50], ["Zed", "y", 50]],
+        { dimensions: ["d", "c"], metric: "m", showLabels: true },
+        stubMeasure,
+        { width: 400, height: 400 },
+      ) as any;
+
+      const ringThickness = (49 - 28) * (400 / 2 / 100);
+      expect(stubMeasure("ABCDEF")).toBe(ringThickness); // fits the bare geometry to the pixel
+
+      // ...and is still cut back, because the padding is subtracted before the fit is judged: 38px
+      // of usable room leaves 31px once the ellipsis is paid for, i.e. four characters.
+      const label = opt.series[0].data.find((d: any) => d.name === "ABCDEF").label.formatter();
+      expect(label).toBe("ABCD…");
+
+      // A shorter label in the same ring is untouched — the padding trims the margin, not the text.
+      expect(opt.series[0].data.find((d: any) => d.name === "Zed").label.formatter()).toBe("Zed");
+    });
+
     it("each slice's label colour contrasts with ITS OWN fill, not one fixed colour for the whole ring", () => {
       const opt = buildPieOption(cols, rows, {
         dimensions: ["region"], metric: "rev",
