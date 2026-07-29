@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { buildPieOption } from "../options/pie";
 import { SERIES_PALETTE, seriesColor, lightenOklch } from "../palette";
+import { calcAvailableDonutSliceLabelLength } from "../sliceLabel";
 
 const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }];
 const rows = [["EU", 10], ["US", 30]];
@@ -762,6 +763,48 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
     // matters). 300x300 here specifically reproduces the exact pixel math this file's tests
     // already relied on before containerSize existed as an explicit input.
     const containerSize = { width: 300, height: 300 };
+
+    // The POINT of fix 1a, not just its cosmetic half. `label.rotate: "radial"` (asserted above)
+    // only tells ECharts how to DRAW the text; what actually makes a narrow multi-ring slice able
+    // to hold a label is that its available space is MEASURED radially — bounded by the ring's own
+    // thickness rather than by the inner chord the text would have to span horizontally. So this
+    // picks a slice where the two branches disagree outright: the arc is narrow enough that a
+    // horizontal label is rejected (and truncation can't rescue it either), while the ring is
+    // thick enough that a radial one fits in full.
+    it("measures a multi-ring label radially, not just rotates it: a slice a horizontal label could not fit keeps its label in full", () => {
+      const rCols = [
+        { name: "region", type: "varchar" }, { name: "cat", type: "varchar" }, { name: "m", type: "double" },
+      ];
+      // sortRows: false keeps "EMEA" first so its arc starts at 12 o'clock, well clear of
+      // isNearXAxis's ±π/8 band around 3 and 9 o'clock (where the horizontal branch is ALSO
+      // allowed the donut thickness, and the two branches would agree). sliceThreshold: 0 keeps
+      // the 20/360 slice out of the "Other" fold. Two rings -> holeStart 28%, ring 0 spans
+      // 28-49% of a 530px container's radius: inner 74.2px, outer 129.85px.
+      const rRows = [["EMEA", "x", 20], ["Rest", "y", 340]];
+      const opt = buildPieOption(
+        rCols,
+        rRows,
+        { dimensions: ["region", "cat"], metric: "m", showLabels: true, sortRows: false, sliceThreshold: 0 },
+        stubMeasure,
+        { width: 530, height: 530 },
+      ) as any;
+
+      // The premise, stated against the geometry itself: for THIS slice's ring and arc, a
+      // horizontal label has less room than "EMEA" needs (4 * 7 = 28px) and a radial one has more.
+      const ringInner = 28 * 2.65;
+      const ringOuter = 49 * 2.65;
+      const arc = (20 / 360) * 2 * Math.PI; // "EMEA"'s nominal share of the ring
+      const emeaWidth = stubMeasure("EMEA");
+      expect(calcAvailableDonutSliceLabelLength(ringInner, ringOuter, 0, arc, 12, "horizontal"))
+        .toBeLessThan(emeaWidth);
+      expect(calcAvailableDonutSliceLabelLength(ringInner, ringOuter, 0, arc, 12, "radial"))
+        .toBeGreaterThan(emeaWidth);
+
+      // ...and the chart keeps the label, which is only possible via the radial branch: measured
+      // horizontally there isn't even room for a 3-character truncation, so it would be dropped.
+      const emea = opt.series[0].data.find((d: any) => d.name === "EMEA");
+      expect(emea.label.formatter()).toBe("EMEA");
+    });
 
     it("a slice too small for its label gets NO label, rather than a bare ellipsis", () => {
       // donut: true so this ring actually has a hole — calcAvailableDonutSliceLabelLength is a
