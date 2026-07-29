@@ -31,39 +31,23 @@ function defaultSegments(value: number): GaugeSegment[] {
 }
 
 /**
- * `color` is free-form JSONB — chartparams.rs deliberately does not whitelist settings values
- * — so a hand-edited round-trip can hand this anything. Probe it the way `resolveColor` probes
- * CSS custom properties: an invalid value is silently rejected by the CSSOM setter, leaving the
- * property empty, which tells us it isn't a colour without maintaining our own colour grammar.
- */
-function isValidColor(color: unknown): boolean {
-  if (typeof color !== "string" || color.trim() === "") return false;
-  if (typeof document === "undefined" || !document.body) return true; // non-DOM: best effort
-  const probe = document.createElement("span");
-  probe.style.color = "";
-  probe.style.color = color;
-  return probe.style.color !== "";
-}
-
-/**
- * A segment survives only if both bounds are finite numbers with min <= max and the colour is
- * one the renderer can actually draw. Each clause guards a distinct way stored JSONB can be
- * broken: non-finite/missing/stringly bounds, min past max, or a colour that isn't one.
+ * A segment's bounds come from JSON, where a number is a number — a bound that arrives as a
+ * string, `null`, or missing is malformed data, not a value to rescue by coercion (a prior
+ * version of this function used `Number(s.min)`, which happily turned `null` into `0` and
+ * `"12"` into `12`; both are dropped now). `color` is not checked here — it goes through
+ * `resolveColor` unconditionally when building stops, which always returns something the
+ * renderer can draw, so a bad colour no longer needs to cost the segment its bounds.
  */
 function isValidSegment(s: GaugeSegment | null | undefined): s is GaugeSegment {
-  if (s == null || s.min == null || s.max == null) return false; // Number(null) is 0, not "missing"
-  const min = Number(s.min);
-  const max = Number(s.max);
-  return Number.isFinite(min) && Number.isFinite(max) && min <= max && isValidColor(s.color);
+  if (s == null) return false;
+  return typeof s.min === "number" && typeof s.max === "number"
+    && Number.isFinite(s.min) && Number.isFinite(s.max) && s.min <= s.max;
 }
 
 /** Sanitised segments, sorted low to high by their upper bound — or today's three zones if
  * nothing usable survives (an empty array or one where every entry is invalid). */
 function sanitizeSegments(value: number, segments: GaugeSegment[] | undefined): GaugeSegment[] {
-  const valid = (segments ?? [])
-    .filter(isValidSegment)
-    .map((s) => ({ ...s, min: Number(s.min), max: Number(s.max) }))
-    .sort((a, b) => a.max - b.max);
+  const valid = (segments ?? []).filter(isValidSegment).sort((a, b) => a.max - b.max);
   return valid.length > 0 ? valid : defaultSegments(value);
 }
 
@@ -78,8 +62,20 @@ export function buildGaugeOption(columns: ResultColumn[], rows: unknown[][], cfg
   const min = Math.min(...segments.map((s) => s.min));
   const max = Math.max(...segments.map((s) => s.max));
   const span = max - min;
+  // ECharts' axisLine colour stops are cumulative upper bounds — [[0.3, A], [0.6, B], [1, C]]
+  // reads as "A from 0 to 0.3, B from 0.3 to 0.6, C from 0.6 to 1", not as independent
+  // per-segment ranges. Sorted by `max` (sanitizeSegments), each segment therefore paints
+  // from the *previous* segment's `max` up to its own — its own declared `min` never enters
+  // the calculation. That means an overlap resolves silently in favour of the lower `max`:
+  // given [0,60] green and [40,100] red, green claims the whole 0-0.6 stretch (including the
+  // 40-60 the red segment meant to own) and red only gets what's left, 0.6-1. Task 4's editor
+  // keeps authored ranges contiguous so this can't be created from the UI; this is what
+  // happens if it arrives anyway (e.g. hand-edited JSONB).
   // Guard span === 0 (degenerate range, e.g. a single point segment) rather than produce NaN.
-  const stops: [number, string][] = segments.map((s) => [span > 0 ? (s.max - min) / span : 1, s.color]);
+  const stops: [number, string][] = segments.map((s, i) => [
+    span > 0 ? (s.max - min) / span : 1,
+    resolveColor(s.color, SERIES_PALETTE[i % SERIES_PALETTE.length]),
+  ]);
 
   const fmt = (v: unknown) =>
     cfg.metric ? formatValue(v, cfg.metricTypes?.[cfg.metric] ?? "double", cfg.columnSettings?.[cfg.metric]) : String(v);
