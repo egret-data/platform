@@ -749,3 +749,91 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
     });
   });
 });
+
+// Reversal — an outer ring's slice percentage is a share of its PARENT slice, not of that
+// ring's own total (see the comment above buildPieOption's `series` map for the full
+// before/after reasoning: this was the deliberate share-of-ring decision, reversed after a real
+// three-ring chart showed it reads as noise). Ring 0 has no parent, so its share of the chart
+// already IS its share of its own ring — nothing changes there, and it must stay untouched.
+//
+// ECharts computes `percent` once per SERIES (i.e. per ring) with no per-datum override, so the
+// parent-relative number for level > 0 is precomputed here and stashed on the datum itself as
+// `parentPercent`; both the label formatter (below) and the shared tooltip formatter (base.ts,
+// see base.test.ts) prefer it over ECharts' own `percent` whenever a datum carries one.
+describe("buildPieOption — outer-ring percentage is a share of its parent (reversal)", () => {
+  it("a single-ring pie's percentage is unchanged: share of the ring, i.e. share of the whole", () => {
+    const cols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+    const rows = [["A", 25], ["B", 75]];
+    const opt = buildPieOption(cols, rows, { dimensions: ["d"], metric: "m" }) as any;
+    const a = opt.series[0].data.find((d: any) => d.name === "A");
+    // Ring 0 never carries a parentPercent — the formatters fall back to ECharts' own percent.
+    expect(a.parentPercent).toBeUndefined();
+    expect(opt.tooltip.formatter({ name: "A", value: 25, percent: 25, data: a })).toContain("25%");
+  });
+
+  it("two rings: an outer slice's percentage is its value over its PARENT's total, not the ring's", () => {
+    const cols2 = [
+      { name: "segment", type: "varchar" }, { name: "channel", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    // 12 segments, each totalling 1000 (500 + 310 + 190) -> the channel ring's own total is
+    // 12000. Worked example from the spec: a 500 channel slice is 500/12000 = 4.17% of the ring
+    // but 500/1000 = 50% of its own segment.
+    const segments = Array.from({ length: 12 }, (_, i) => `S${i + 1}`);
+    const rows2: unknown[][] = [];
+    for (const seg of segments) rows2.push([seg, "C1", 500], [seg, "C2", 310], [seg, "C3", 190]);
+    const opt = buildPieOption(cols2, rows2, { dimensions: ["segment", "channel"], metric: "m" }) as any;
+    const outer = opt.series[1].data;
+    const c1Items = outer.filter((d: any) => d.name === "C1" && d.value === 500);
+    expect(c1Items).toHaveLength(12);
+    for (const item of c1Items) expect(item.parentPercent).toBeCloseTo(50, 9); // NOT 4.1(6)%
+    // The tooltip formatter actually reaches 50% when fed the real datum, not the ring-share number.
+    const tooltip = opt.tooltip.formatter({ name: "C1", value: 500, percent: 4.17, data: c1Items[0] });
+    expect(tooltip).toContain("50%");
+    expect(tooltip).not.toContain("4.17%");
+  });
+
+  it("three rings: each level is a share of its OWN parent, not of ring 0 or the grand total", () => {
+    const cols3 = [
+      { name: "region", type: "varchar" }, { name: "product", type: "varchar" },
+      { name: "channel", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    const rows3 = [
+      ["R1", "P1", "C1", 1200], ["R1", "P1", "C2", 300], // P1 = 1500
+      ["R1", "P2", "C3", 500],                            // P2 = 500; R1 = 2000
+      ["R2", "P3", "C4", 400], ["R2", "P3", "C5", 600],   // P3 = 1000; R2 = 1000
+    ];
+    const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "product", "channel"], metric: "m" }) as any;
+    const [, middle, outer] = opt.series;
+
+    // Middle ring (product): share of its own region — NOT of the 3000 grand total.
+    expect(middle.data.find((d: any) => d.name === "P1").parentPercent).toBeCloseTo((1500 / 2000) * 100, 9); // 75%, not 50%
+    expect(middle.data.find((d: any) => d.name === "P3").parentPercent).toBeCloseTo(100, 9); // R2's only product
+
+    // Outer ring (channel): share of its own PRODUCT — not of region (60%) or the grand total (40%).
+    expect(outer.data.find((d: any) => d.name === "C1").parentPercent).toBeCloseTo((1200 / 1500) * 100, 9); // 80%
+    expect(outer.data.find((d: any) => d.name === "C4").parentPercent).toBeCloseTo((400 / 1000) * 100, 9); // 40%
+  });
+
+  it("decimals still controls the displayed precision at every level", () => {
+    const cols2 = [
+      { name: "segment", type: "varchar" }, { name: "channel", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    const rows2 = [["S1", "C1", 1], ["S1", "C2", 2]]; // C1 = 1/3 of its segment = 33.333...%
+    const withDefault = buildPieOption(cols2, rows2, { dimensions: ["segment", "channel"], metric: "m" }) as any;
+    const withZero = buildPieOption(cols2, rows2, { dimensions: ["segment", "channel"], metric: "m", decimals: 0 }) as any;
+    expect(withDefault.series[1].data.find((d: any) => d.name === "C1").parentPercent).toBeCloseTo(33.33, 9);
+    expect(withZero.series[1].data.find((d: any) => d.name === "C1").parentPercent).toBe(33);
+  });
+
+  it('a parent\'s own "Other" bucket reports its share of that same parent', () => {
+    const cols2 = [
+      { name: "grp", type: "varchar" }, { name: "item", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    // P1 totals 1000: two big (800, 180) + two small (10, 10) -> P1's OWN Other = 20 = 2% of P1.
+    const rows2 = [["P1", "A1", 800], ["P1", "A2", 180], ["P1", "b1", 10], ["P1", "b2", 10]];
+    const opt = buildPieOption(cols2, rows2, { dimensions: ["grp", "item"], metric: "m" }) as any;
+    const other = opt.series[1].data.find((d: any) => d.name === "Other");
+    expect(other.value).toBe(20);
+    expect(other.parentPercent).toBeCloseTo(2, 9); // 20 / 1000 (P1's own total)
+  });
+});

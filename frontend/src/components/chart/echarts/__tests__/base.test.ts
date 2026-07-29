@@ -31,6 +31,17 @@ describe("itemTooltip", () => {
   it("uses the shared text style", () => {
     expect(itemTooltip(fmt).textStyle).toEqual(baseTextStyle);
   });
+
+  // Pie's outer rings (see pie.ts buildPieOption) stash a parent-relative percentage on the
+  // datum itself (`data.parentPercent`) because ECharts' own per-series `percent` is always
+  // share-of-that-series (share of the ring), with no per-datum override. When a datum carries
+  // one, it wins over ECharts' own percent; charts that never set it (every non-pie series, and
+  // pie's own ring 0) are unaffected — `percent` still comes straight from ECharts.
+  it("prefers a per-datum parentPercent over ECharts' own percent, when the datum carries one", () => {
+    expect(
+      itemTooltip(fmt, { percent: true }).formatter({ name: "North", value: 10, percent: 4.17, data: { parentPercent: 50 } }),
+    ).toBe("North: $10 (50%)");
+  });
 });
 
 describe("axisTooltip", () => {

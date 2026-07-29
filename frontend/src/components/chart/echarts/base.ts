@@ -31,11 +31,14 @@ export function itemTooltip(format: (v: unknown) => string, opts: { percent?: bo
   return {
     trigger: "item" as const,
     textStyle: baseTextStyle,
-    formatter: (p: { name?: string; value?: unknown; percent?: number }) => {
+    formatter: (p: { name?: string; value?: unknown; percent?: number; data?: { parentPercent?: number } }) => {
       const name = String(p.name ?? "");
       if (p.value == null || (typeof p.value === "number" && Number.isNaN(p.value))) return name;
       const value = format(p.value);
-      return opts.percent && p.percent != null ? `${name}: ${value} (${p.percent}%)` : `${name}: ${value}`;
+      // ECharts' own `percent` is always share-of-that-series (share of the ring); a datum that
+      // carries a parent-relative override (pie's outer rings — see pie.ts buildPieOption) wins.
+      const percent = p.data?.parentPercent ?? p.percent;
+      return opts.percent && percent != null ? `${name}: ${value} (${percent}%)` : `${name}: ${value}`;
     },
   };
 }
