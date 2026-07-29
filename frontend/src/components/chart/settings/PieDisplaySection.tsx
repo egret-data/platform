@@ -16,7 +16,10 @@ function Toggle({ id, label, checked, onChange }: { id: string; label: string; c
   );
 }
 
-export function PieDisplaySection({ config, onChange, sliceNames = [] }: { config: PieConfig; onChange: (patch: Partial<PieConfig>) => void; sliceNames?: string[] }) {
+// `slices` here is the distinct slice VALUES present in the current result (for the colour
+// pickers below) — not to be confused with `PieConfig.sliceNames`, which is a value -> label
+// rename map. Same-sounding names, different shapes; keep them apart.
+export function PieDisplaySection({ config, onChange, slices = [] }: { config: PieConfig; onChange: (patch: Partial<PieConfig>) => void; slices?: string[] }) {
   return (
     <div className="space-y-2.5 pt-1.5">
       <Toggle id="pz-legend" label="Legend" checked={!!config.showLegend} onChange={(v) => onChange({ showLegend: v })} />
@@ -48,10 +51,10 @@ export function PieDisplaySection({ config, onChange, sliceNames = [] }: { confi
         </div>
       </div>
 
-      {sliceNames.length > 0 && (
+      {slices.length > 0 && (
         <div className="space-y-1.5 border-t pt-2">
           <div className="text-xs text-muted-foreground">Slice colors</div>
-          {sliceNames.map((name, i) => (
+          {slices.map((name, i) => (
             <div key={name} className="flex items-center gap-2">
               <input
                 type="color"

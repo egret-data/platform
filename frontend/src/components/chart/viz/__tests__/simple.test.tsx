@@ -45,6 +45,32 @@ describe("the nine simple descriptors", () => {
     expect(byKey.pie.buildSpec({ dimensions: ["region"], metric: "m" }, SHARED).temporal_units).toEqual({});
   });
 
+  // `dimensions` comes from stored settings, not typed input — a pre-migration row (or
+  // anything else that slipped past a server-side check) can hand back a bare string, a
+  // number, or an object instead of an array. Every one of those must degrade to "no
+  // dimensions" rather than reaching `strs()`, which assumes an array and throws on `.map`.
+  it("degrades a malformed stored `dimensions` value to an empty list instead of crashing", () => {
+    for (const bad of ["region", 5, { region: true }]) {
+      const spec = byKey.pie.buildSpec({ dimensions: bad, metric: "m" }, SHARED);
+      expect(spec.dimensions).toEqual([]);
+    }
+  });
+
+  // Migration 0099 flattened the legacy `pie.dimension` (singular) into settings under
+  // that exact key; migration 0103 (task 3, same PR) renames it to the plural `pie.dimensions`
+  // array. Until 0103 runs, `fromParams` reads the old key back as `cfg.dimension`, which
+  // nothing downstream reads any more — so a pre-0103 pie compiles a spec with no
+  // dimensions and renders blank (rows still come back, so the empty-state guard never
+  // fires). This pins that gap; it is expected to flip to a non-empty `["region"]` once
+  // task 3's migration lands in this same PR, at which point this assertion inverts.
+  it("a pre-0103 pie has no dimensions until the migration lifts its key", () => {
+    const cfg = byKey.pie.fromParams({
+      version: 2, spec: EMPTY_SPEC, settings: { "pie.dimension": "region", "pie.metric": "rev" },
+    });
+    const spec = byKey.pie.buildSpec(cfg, SHARED);
+    expect(spec.dimensions).toEqual([]);
+  });
+
   it("round-trips every descriptor's config through settings", () => {
     const sample: Record<string, Record<string, unknown>> = {
       pie: { dimensions: ["region"], metric: "m" },
