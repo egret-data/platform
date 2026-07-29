@@ -115,6 +115,14 @@ export function resolveColor(expr: string, fallback: string): string {
 // slice out to near-white.
 const OKLCH_STEP_L = 0.12;
 
+// Cap the TARGET lightness at 0.9 rather than 1.0. OKLab's gamut boundary curves inward as L
+// approaches 1 (physically: not every hue can reach pure white at full saturation), so
+// `linearToSrgb`'s per-channel clamp increasingly has to clip individual channels rather than
+// scale them together — which is exactly what erodes chroma. Stopping short of that edge at
+// 0.9 keeps every SERIES_PALETTE colour's chroma comfortably above a "still visibly tinted"
+// floor even after 3 lightening steps (see the palette.test.ts sweep over the whole palette).
+const OKLCH_MAX_L = 0.9;
+
 function srgbToLinear(c: number): number {
   return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
 }
@@ -168,7 +176,11 @@ export function lightenOklch(color: string, steps: number): string {
 
   // Raise L only; a/b (so chroma + hue) are untouched — the whole point of doing this in
   // OKLab rather than a naive sRGB blend toward white, which desaturates and shifts hue.
-  const L2 = Math.min(1, Math.max(0, L + OKLCH_STEP_L * steps));
+  // Capped at OKLCH_MAX_L (see above), but never DARKENED below the input: a colour that
+  // starts out brighter than the cap already (rare for this codebase's palette, but possible
+  // for an arbitrary sliceColors override) is left at its own lightness rather than dimmed.
+  const target = L + OKLCH_STEP_L * steps;
+  const L2 = Math.max(L, Math.min(target, OKLCH_MAX_L));
 
   // OKLab -> LMS' (inverse of the forward matrix above)
   const l2_ = L2 + 0.3963377774 * a + 0.2158037573 * bb;
