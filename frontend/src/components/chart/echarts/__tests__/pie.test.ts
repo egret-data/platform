@@ -38,13 +38,18 @@ describe("buildPieOption — Metabase-parity", () => {
     expect(opt.tooltip.trigger).toBe("item");
     expect(opt.tooltip.formatter({ name: "EU", value: 10, percent: 25 })).toContain("25%");
   });
-  it("showLegend toggles the legend", () => {
+  // Both default ON, resolved here at render time rather than stored — so an already-saved
+  // chart with no showLegend/showLabels picks up the fix too. `?? true`, not `|| true`: an
+  // explicit `false` must still turn each off, not be treated as "unset".
+  it("showLegend defaults on; an explicit false turns it off", () => {
+    expect((buildPieOption(cols, rows, base) as any).legend).toMatchObject({ type: "scroll" });
     expect((buildPieOption(cols, rows, { ...base, showLegend: true }) as any).legend).toMatchObject({ type: "scroll" });
-    expect((buildPieOption(cols, rows, base) as any).legend).toBeUndefined();
+    expect((buildPieOption(cols, rows, { ...base, showLegend: false }) as any).legend).toBeUndefined();
   });
-  it("showLabels toggles slice labels", () => {
+  it("showLabels defaults on; an explicit false turns it off", () => {
+    expect((buildPieOption(cols, rows, base) as any).series[0].label.show).toBe(true);
     expect((buildPieOption(cols, rows, { ...base, showLabels: true }) as any).series[0].label.show).toBe(true);
-    expect((buildPieOption(cols, rows, base) as any).series[0].label.show).toBe(false);
+    expect((buildPieOption(cols, rows, { ...base, showLabels: false }) as any).series[0].label.show).toBe(false);
   });
 });
 
@@ -120,7 +125,9 @@ describe("buildPieOption — donut total & percent (Metabase parity 1b)", () => 
     expect(labelText(o, { name: "A", percent: 30 })).toBe("A: 30%");
   });
   it("percent without labels shows just the percent", () => {
-    const o = opt({ percentVisibility: "inside" });
+    // showLabels now defaults on, so it must be explicitly turned off here to isolate
+    // percentVisibility's own contribution to `label.show`.
+    const o = opt({ percentVisibility: "inside", showLabels: false });
     expect(o.series[0].label.show).toBe(true);
     expect(labelText(o, { name: "A", percent: 33.333 })).toBe("33.33%");
   });
@@ -551,9 +558,11 @@ describe("buildPieOption — slice curation (task 6)", () => {
   });
 
   it("decimals changes what a percentage label shows", () => {
+    // showLabels defaults on now, so it's turned off explicitly to isolate the percent text
+    // (otherwise the name would be prefixed too, which isn't what this test is about).
     const rows = [["A", 10], ["B", 20]];
-    const withDefault = buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", percentVisibility: "inside" }) as any;
-    const withZero = buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", percentVisibility: "inside", decimals: 0 }) as any;
+    const withDefault = buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", percentVisibility: "inside", showLabels: false }) as any;
+    const withZero = buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", percentVisibility: "inside", decimals: 0, showLabels: false }) as any;
     expect(withDefault.series[0].label.formatter({ name: "A", percent: 33.333 })).toBe("33.33%");
     expect(withZero.series[0].label.formatter({ name: "A", percent: 33.333 })).toBe("33%");
   });
@@ -716,8 +725,10 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
       expect(opt.legend.data).toEqual(["US", "EU"]);
     });
 
-    it("the legend is still absent when showLegend is off", () => {
-      const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m" }) as any;
+    it("the legend is still absent when showLegend is explicitly off", () => {
+      // showLegend now defaults on — this must set it to false explicitly to actually test
+      // the off case (a bare config, with no showLegend at all, now shows a legend instead).
+      const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m", showLegend: false }) as any;
       expect(opt.legend).toBeUndefined();
     });
   });

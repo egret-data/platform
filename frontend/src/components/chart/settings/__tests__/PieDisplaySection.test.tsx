@@ -1,8 +1,84 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { PieDisplaySection } from "../PieDisplaySection";
 
 describe("PieDisplaySection", () => {
+  // Legend and Show labels both default from buildPieOption at render time (a pie's colours
+  // and slices are unreadable without them), so they are a three-way Auto/On/Off select
+  // rather than a Switch — `undefined` is a real, visible state, not "off". A two-state
+  // Switch bound to `!!config.showLegend` would show OFF while the chart draws ON, the same
+  // "switch that lies" bug already fixed for chart 01's legend/compact-numbers and chart 02's
+  // connect-gaps. Each interaction starts from a value that differs from the target, since a
+  // Radix Select does not fire onValueChange when the already-selected item is re-clicked.
+  describe("Legend (Auto/On/Off)", () => {
+    it("choosing On emits true", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(<PieDisplaySection config={{}} onChange={onChange} />);
+      await user.click(screen.getByLabelText("Legend"));
+      await user.click(await screen.findByRole("option", { name: "On" }));
+      expect(onChange).toHaveBeenCalledWith({ showLegend: true });
+    });
+
+    it("choosing Off emits false", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(<PieDisplaySection config={{}} onChange={onChange} />);
+      await user.click(screen.getByLabelText("Legend"));
+      await user.click(await screen.findByRole("option", { name: "Off" }));
+      expect(onChange).toHaveBeenCalledWith({ showLegend: false });
+    });
+
+    it("choosing Auto emits undefined", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(<PieDisplaySection config={{ showLegend: true }} onChange={onChange} />);
+      await user.click(screen.getByLabelText("Legend"));
+      await user.click(await screen.findByRole("option", { name: "Auto" }));
+      expect(onChange).toHaveBeenCalledWith({ showLegend: undefined });
+    });
+
+    it("shows Auto selected when the config leaves it unset", () => {
+      render(<PieDisplaySection config={{}} onChange={() => {}} />);
+      expect(within(screen.getByLabelText("Legend")).getByText("Auto")).toBeInTheDocument();
+    });
+  });
+
+  describe("Show labels (Auto/On/Off)", () => {
+    it("choosing On emits true", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(<PieDisplaySection config={{}} onChange={onChange} />);
+      await user.click(screen.getByLabelText("Show labels"));
+      await user.click(await screen.findByRole("option", { name: "On" }));
+      expect(onChange).toHaveBeenCalledWith({ showLabels: true });
+    });
+
+    it("choosing Off emits false", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(<PieDisplaySection config={{}} onChange={onChange} />);
+      await user.click(screen.getByLabelText("Show labels"));
+      await user.click(await screen.findByRole("option", { name: "Off" }));
+      expect(onChange).toHaveBeenCalledWith({ showLabels: false });
+    });
+
+    it("choosing Auto emits undefined", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(<PieDisplaySection config={{ showLabels: true }} onChange={onChange} />);
+      await user.click(screen.getByLabelText("Show labels"));
+      await user.click(await screen.findByRole("option", { name: "Auto" }));
+      expect(onChange).toHaveBeenCalledWith({ showLabels: undefined });
+    });
+
+    it("shows Auto selected when the config leaves it unset", () => {
+      render(<PieDisplaySection config={{}} onChange={() => {}} />);
+      expect(within(screen.getByLabelText("Show labels")).getByText("Auto")).toBeInTheDocument();
+    });
+  });
+
   it("per-slice colour swatch patches sliceColors by (raw) name", () => {
     const onChange = vi.fn();
     render(<PieDisplaySection config={{}} onChange={onChange} slices={["A", "B"]} />);

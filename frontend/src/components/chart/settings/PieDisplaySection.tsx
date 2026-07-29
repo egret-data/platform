@@ -16,6 +16,32 @@ function Toggle({ id, label, checked, onChange }: { id: string; label: string; c
   );
 }
 
+/**
+ * Auto / On / Off — for a setting that now defaults on at render time (see buildPieOption:
+ * a pie's colours/slices are unreadable without it), so `undefined` is a real, visible third
+ * state rather than "off". A two-state Switch can't represent that without contradicting the
+ * chart it controls (the exact "switch that lies" bug this fixes) — same shape as
+ * CartesianDisplaySection's AutoToggle.
+ */
+function AutoToggle({
+  id, label, value, onChange, autoHint,
+}: { id: string; label: string; value: boolean | undefined; onChange: (v: boolean | undefined) => void; autoHint: string }) {
+  const current = value === undefined ? "auto" : value ? "on" : "off";
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <Label htmlFor={id} className="text-sm font-normal">{label}</Label>
+      <Select value={current} onValueChange={(v) => onChange(v === "auto" ? undefined : v === "on")}>
+        <SelectTrigger id={id} aria-label={label} className="h-7 w-24"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="auto" title={autoHint}>Auto</SelectItem>
+          <SelectItem value="on">On</SelectItem>
+          <SelectItem value="off">Off</SelectItem>
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
 // `slices` here is the distinct slice VALUES present in the current result (for the rows
 // below) — not to be confused with `PieConfig.sliceNames`, which is a value -> label rename
 // map. Same-sounding names, different shapes; keep them apart.
@@ -45,12 +71,24 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
   };
   return (
     <div className="space-y-2.5 pt-1.5">
-      <Toggle id="pz-legend" label="Legend" checked={!!config.showLegend} onChange={(v) => onChange({ showLegend: v })} />
+      <AutoToggle
+        id="pz-legend"
+        label="Legend"
+        value={config.showLegend}
+        onChange={(v) => onChange({ showLegend: v })}
+        autoHint="Auto shows the legend — a pie's colours are meaningless without it"
+      />
       <Toggle id="pz-donut" label="Donut" checked={!!config.donut} onChange={(v) => onChange({ donut: v })} />
       {config.donut && (
         <Toggle id="pz-total" label="Show total" checked={!!config.showTotal} onChange={(v) => onChange({ showTotal: v })} />
       )}
-      <Toggle id="pz-labels" label="Show labels" checked={!!config.showLabels} onChange={(v) => onChange({ showLabels: v })} />
+      <AutoToggle
+        id="pz-labels"
+        label="Show labels"
+        value={config.showLabels}
+        onChange={(v) => onChange({ showLabels: v })}
+        autoHint="Auto shows slice labels, hiding whichever ones would overlap"
+      />
       <div className="flex items-center justify-between gap-2">
         <Label className="text-sm font-normal">Percentages</Label>
         <Select value={config.percentVisibility ?? "off"} onValueChange={(v) => onChange({ percentVisibility: v as PieConfig["percentVisibility"] })}>
