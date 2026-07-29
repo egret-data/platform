@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { baseOption, itemTooltip, axisTooltip, bottomLegend, baseTextStyle } from "../base";
+import { baseOption, itemTooltip, axisTooltip, bottomLegend, sideLegend, baseTextStyle } from "../base";
 import { ARIA_A11Y, SERIES_PALETTE } from "../palette";
 
 describe("baseOption", () => {
@@ -81,5 +81,35 @@ describe("bottomLegend", () => {
       bottom: 0, type: "scroll", textStyle: baseTextStyle, data: ["North"], formatter,
     });
     expect(bottomLegend(true, ["North"])).not.toHaveProperty("formatter");
+  });
+});
+
+// The same legend as a left-hand COLUMN, for a chart whose host is wide enough that a column
+// costs it less than a row does (pie — see options/pie.ts, the only caller of either).
+describe("sideLegend", () => {
+  it("is a scrollable left column when shown, and nothing when not", () => {
+    expect(sideLegend(true)).toEqual({
+      orient: "vertical", left: 0, top: "middle", type: "scroll", textStyle: baseTextStyle,
+    });
+    expect(sideLegend(false)).toBeUndefined();
+    expect(sideLegend(undefined)).toBeUndefined();
+  });
+
+  it("takes the same explicit data list and formatter as the bottom row", () => {
+    const formatter = (name: string) => `${name} 50%`;
+    expect(sideLegend(true, ["North", "South"], formatter)).toMatchObject({
+      data: ["North", "South"], formatter,
+    });
+    expect(sideLegend(true)).not.toHaveProperty("data");
+    expect(sideLegend(true)).not.toHaveProperty("formatter");
+  });
+
+  // A column can align a name left and a percentage right, which a single run of text cannot:
+  // ECharts parses a legend formatter's output as rich text once the textStyle declares `rich`
+  // styles, and each fragment carries its own width/align.
+  it("merges rich-text fragment styles into the shared text style when given them", () => {
+    const rich = { n: { width: 97, align: "left" as const }, p: { width: 44, align: "right" as const } };
+    expect(sideLegend(true, ["North"], undefined, rich)?.textStyle).toEqual({ ...baseTextStyle, rich });
+    expect(sideLegend(true, ["North"])?.textStyle).toEqual(baseTextStyle);
   });
 });

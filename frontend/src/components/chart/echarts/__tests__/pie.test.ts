@@ -1370,3 +1370,162 @@ describe("buildPieOption — outer-ring percentage is a share of its parent (rev
     expect(other.parentPercent).toBeCloseTo(2, 9); // 20 / 1000 (P1's own total)
   });
 });
+
+// Measured side by side against a real Metabase (docker, sample question 7 "Product breakdown",
+// a genuine 3-level sunburst) at 1440x920: Metabase drew 69px-thick rings in a 735x735 host,
+// egret 58px in an 830x661 one, and Metabase's legend was a LEFT COLUMN where egret's was a
+// bottom row.
+//
+// The arithmetic behind the layout choice, stated once here because every test below is a
+// consequence of it. A pie's outer radius is a percentage of `min(width, height) / 2` (ECharts'
+// own convention), so its DIAMETER is a fraction of the host's shorter side:
+//
+//   bottom row : 0.70 * min(w, h)                   — what this file already drew, unchanged
+//   side column: 0.85 * min(w - 190, h)             — the box a 190px legend column leaves
+//
+// and the layout that draws the bigger circle wins. On the measured 830x661 host that is the
+// column (0.85 * min(640, 661) = 544px, against the row's 0.70 * 661 = 462.7px), which lifts the
+// rings from 58px to 68px — the gap this was measured against. On a narrow, tall host the same
+// arithmetic says the opposite (360x720: a row draws 252px, a column 144.5px), because taking
+// 190px of width from a 360px host costs far more than a legend row costs in height.
+describe("a pie's legend goes beside it when that leaves the rings more room", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }];
+  const rows = [["EU", 10], ["US", 30]];
+  const base = { dimensions: ["region"], metric: "rev" };
+  // The real measured host from the Metabase comparison, and a host shaped the opposite way.
+  const wideShort = { width: 830, height: 661 };
+  const narrowTall = { width: 360, height: 720 };
+  const outerRadiusPct = (opt: any) => parseFloat(String(opt.series[0].radius[1]));
+  const diameterPx = (opt: any, size: { width: number; height: number }) =>
+    (outerRadiusPct(opt) / 100) * Math.min(size.width, size.height);
+
+  it("a wide, short host puts the legend in a column beside the chart", () => {
+    const opt = buildPieOption(cols, rows, base, undefined, wideShort) as any;
+    expect(opt.legend).toMatchObject({ orient: "vertical", left: 0, top: "middle", type: "scroll" });
+    expect(opt.legend).not.toHaveProperty("bottom");
+  });
+
+  it("a narrow, tall host keeps the bottom row", () => {
+    const opt = buildPieOption(cols, rows, base, undefined, narrowTall) as any;
+    expect(opt.legend).toMatchObject({ bottom: 0, type: "scroll" });
+    expect(opt.legend).not.toHaveProperty("orient");
+  });
+
+  // ECharts gives a pie series no automatic awareness of the legend: it centres on the whole
+  // canvas whatever else is drawn there. So the column has to be paid for explicitly, in the
+  // series' own `center` — the middle of the box LEFT of the legend, expressed as a percentage
+  // of the canvas width (the unit `center` already used), not the canvas middle.
+  it("the side layout shifts the pie's centre clear of the legend column", () => {
+    const opt = buildPieOption(cols, rows, base, undefined, wideShort) as any;
+    // (190 + 830) / 2 = 505px... measured from the left edge: the column's 190px plus half of
+    // the 640px that remains = 510px, i.e. 61.45% of 830.
+    expect(opt.series[0].center).toEqual(["61.45%", "50%"]);
+
+    // ...and the circle drawn around that centre genuinely clears the column rather than merely
+    // being off-centre: left edge = 510 - 544/2 = 238px, outside the 190px legend.
+    const leftEdge = 0.6145 * wideShort.width - diameterPx(opt, wideShort) / 2;
+    expect(leftEdge).toBeGreaterThan(190);
+  });
+
+  it("the bottom layout's centre is untouched", () => {
+    const opt = buildPieOption(cols, rows, base, undefined, narrowTall) as any;
+    expect(opt.series[0].center).toEqual(["50%", "48%"]);
+  });
+
+  // The assertion that makes the threshold load-bearing rather than decorative: on each host the
+  // layout actually chosen is the one that draws the BIGGER circle. Without this, the choice
+  // could be inverted and every other test here would still pass.
+  it("each host gets whichever layout draws the bigger pie", () => {
+    const wide = buildPieOption(cols, rows, base, undefined, wideShort) as any;
+    // Chosen: the column. 0.85 * min(830 - 190, 661) = 544px.
+    expect(diameterPx(wide, wideShort)).toBeCloseTo(544, 1);
+    // Rejected: the row, 0.70 * 661 = 462.7px.
+    expect(diameterPx(wide, wideShort)).toBeGreaterThan(0.7 * 661);
+
+    const narrow = buildPieOption(cols, rows, base, undefined, narrowTall) as any;
+    // Chosen: the row. 0.70 * min(360, 720) = 252px.
+    expect(diameterPx(narrow, narrowTall)).toBeCloseTo(252, 1);
+    // Rejected: the column, 0.85 * min(360 - 190, 720) = 144.5px.
+    expect(diameterPx(narrow, narrowTall)).toBeGreaterThan(0.85 * Math.min(360 - 190, 720));
+  });
+
+  // The documented "no DOM" path (see buildPieOption's `containerSize`): with no real measurement
+  // there is no aspect to judge, so nothing moves and nothing resizes.
+  it("an unknown container size keeps the bottom legend and today's geometry", () => {
+    for (const size of [undefined, { width: 0, height: 0 }]) {
+      const opt = buildPieOption(cols, rows, base, undefined, size) as any;
+      expect(opt.legend).toMatchObject({ bottom: 0 });
+      expect(opt.series[0].radius).toEqual(["0%", "70%"]);
+      expect(opt.series[0].center).toEqual(["50%", "48%"]);
+    }
+  });
+
+  // No legend, no column to make room for: a chart with `showLegend: false` on the same wide,
+  // short host keeps exactly the geometry it has today.
+  it("a hidden legend reserves nothing", () => {
+    const opt = buildPieOption(cols, rows, { ...base, showLegend: false }, undefined, wideShort) as any;
+    expect(opt.legend).toBeUndefined();
+    expect(opt.series[0].radius).toEqual(["0%", "70%"]);
+    expect(opt.series[0].center).toEqual(["50%", "48%"]);
+  });
+
+  // Metabase's column aligns the name left and the percentage right (`Doohickey    23.88%`).
+  // ECharts' legend can express exactly that — its formatter output is parsed as rich text when
+  // the legend's textStyle declares `rich` styles, and a rich fragment takes its own `width` and
+  // `align` — so the two fragments are a fixed-width left column and a fixed-width right one.
+  describe("the percentages survive the move, aligned as a column", () => {
+    const cols2 = [
+      { name: "region", type: "varchar" }, { name: "category", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    const rows2 = [["US", "Widgets", 80], ["EU", "Gadgets", 20]];
+    const cfg = { dimensions: ["region", "category"], metric: "m", percentVisibility: "legend" as const };
+
+    it("keeps each ring-0 slice's share, in a name-left/percent-right pair of fragments", () => {
+      const opt = buildPieOption(cols2, rows2, cfg, undefined, wideShort) as any;
+      expect(opt.legend.data).toEqual(["US", "EU"]);
+      expect(opt.legend.formatter("US")).toBe("{n|US}{p|80%}");
+      expect(opt.legend.formatter("EU")).toBe("{n|EU}{p|20%}");
+      expect(opt.legend.textStyle.rich.n).toMatchObject({ align: "left" });
+      expect(opt.legend.textStyle.rich.p).toMatchObject({ align: "right" });
+      // Two fixed-width fragments that together fit inside the 190px the centre shift reserved.
+      expect(opt.legend.textStyle.rich.n.width + opt.legend.textStyle.rich.p.width).toBeLessThan(190);
+    });
+
+    it("truncates a name too long for the column instead of overflowing into the chart", () => {
+      const long = [["A very long region name indeed", "Widgets", 80], ["EU", "Gadgets", 20]];
+      const opt = buildPieOption(cols2, long, cfg, undefined, wideShort) as any;
+      expect(opt.legend.textStyle.rich.n).toMatchObject({ overflow: "truncate", ellipsis: "…" });
+    });
+
+    // ECharts' rich text has no escape sequence, so a name containing its markup characters
+    // cannot be put in a fragment without either corrupting the layout or silently rewriting the
+    // user's own data. Such an entry falls back to plain text — the name is still true, it just
+    // loses the alignment.
+    it("a name carrying rich-text markup falls back to plain text rather than corrupting it", () => {
+      const braces = [["Batch {A|B}", "Widgets", 80], ["EU", "Gadgets", 20]];
+      const opt = buildPieOption(cols2, braces, cfg, undefined, wideShort) as any;
+      expect(opt.legend.formatter("Batch {A|B}")).toBe("Batch {A|B} 80%");
+    });
+
+    it("the bottom row is unchanged: plain text, no fragments", () => {
+      const opt = buildPieOption(cols2, rows2, cfg, undefined, narrowTall) as any;
+      expect(opt.legend.formatter("US")).toBe("US 80%");
+      expect(opt.legend.textStyle).not.toHaveProperty("rich");
+    });
+  });
+
+  // The donut's centre total is a `graphic` text element, positioned against the CANVAS, not the
+  // series — so a shifted pie leaves it stranded in the middle of the canvas, overlapping the
+  // rings, unless it is shifted with it.
+  it("the donut's centre total follows the pie's shifted centre", () => {
+    const opt = buildPieOption(
+      cols, rows, { ...base, donut: true, showTotal: true }, undefined, wideShort,
+    ) as any;
+    const [value, caption] = opt.graphic;
+    expect(value.x).toBeCloseTo(510, 6); // the same 510px the series centres on
+    expect(caption.x).toBeCloseTo(510, 6);
+    expect(value.y).toBeCloseTo(0.43 * 661, 6); // the 43%/53% of the canvas height it already used
+    expect(caption.y).toBeCloseTo(0.53 * 661, 6);
+    expect(value.left).toBeUndefined();
+  });
+});

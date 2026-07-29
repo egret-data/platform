@@ -74,6 +74,33 @@ export function bottomLegend(
 }
 
 /**
+ * The same legend as a left-hand COLUMN rather than a bottom row — for a chart whose host is
+ * wide and short, where a column costs less of the shape the chart actually needs than a row
+ * does (pie is the only caller; see options/pie.ts, which decides between the two from the
+ * chart's real measured size and shifts its own centre to clear this column).
+ *
+ * `data` and `formatter` mean exactly what they mean on `bottomLegend`. `rich` is the one
+ * addition a column can use and a row cannot: ECharts parses a legend formatter's output as
+ * rich text once the legend's own textStyle declares rich styles, and each fragment takes its
+ * own `width`/`align` — which is how a column gets Metabase's name-left, percentage-right pair
+ * ("Doohickey    23.88%") instead of one indivisible run of text.
+ */
+export function sideLegend(
+  show: boolean | undefined,
+  data?: string[],
+  formatter?: (name: string) => string,
+  rich?: Record<string, Record<string, unknown>>,
+) {
+  if (!show) return undefined;
+  return {
+    orient: "vertical" as const, left: 0, top: "middle" as const, type: "scroll" as const,
+    textStyle: rich ? { ...baseTextStyle, rich } : baseTextStyle,
+    ...(data ? { data } : {}),
+    ...(formatter ? { formatter } : {}),
+  };
+}
+
+/**
  * A screen-reader description of the chart, replacing the one ECharts generates.
  *
  * The generated one enumerates every dimension of each datum, so a bar chart reads "the
