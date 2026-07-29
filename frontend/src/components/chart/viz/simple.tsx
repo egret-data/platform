@@ -1,5 +1,6 @@
 import { PieDisplaySection } from "@/components/chart/settings/PieDisplaySection";
-import type { PieConfig } from "@/api/charts";
+import { GaugeSegmentsSection } from "@/components/chart/settings/GaugeSegmentsSection";
+import type { GaugeSegment, PieConfig } from "@/api/charts";
 import { fieldDescriptor } from "./fields";
 import type { VizControl, VizControlProps, VizDescriptor } from "./types";
 
@@ -18,6 +19,23 @@ function PieDisplayControl({ config, onChange, resultColumns, rows }: VizControl
 }
 
 const pieDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display", render: PieDisplayControl }];
+
+/** The gauge's current value, derived the same way `buildGaugeOption` does, so the editor's
+ * default three zones (when nothing is stored) size themselves to what actually renders. */
+function GaugeDisplayControl({ config, onChange, resultColumns, rows }: VizControlProps<Cfg>) {
+  const mi = typeof config.metric === "string" ? resultColumns.findIndex((c) => c.name === config.metric) : -1;
+  const raw = mi >= 0 && rows.length > 0 ? (rows[0] as unknown[])[mi] : undefined;
+  const value = raw != null && Number.isFinite(Number(raw)) ? Number(raw) : 0;
+  return (
+    <GaugeSegmentsSection
+      segments={config.segments as GaugeSegment[] | undefined}
+      value={value}
+      onChange={(segments) => onChange({ segments } as Partial<Cfg>)}
+    />
+  );
+}
+
+const gaugeDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display", render: GaugeDisplayControl }];
 
 /**
  * The nine viz types whose configuration is just a handful of field pickers. Declared
@@ -49,11 +67,9 @@ export const SIMPLE_DESCRIPTORS: VizDescriptor<Cfg>[] = [
     legacyFromSpec: (spec) => ({ metric: spec.metrics?.[0] }),
   }),
   fieldDescriptor({
-    key: "gauge", prefix: "gauge.", legacyKey: "gauge",
+    key: "gauge", prefix: "gauge.", legacyKey: "gauge", display: gaugeDisplay,
     fields: [
       { id: "metric", label: "Metric", kind: "metric", required: "a metric" },
-      { id: "min", label: "Min", kind: "number", placeholder: "0" },
-      { id: "max", label: "Max", kind: "number", placeholder: "auto" },
     ],
     buildSpec: (c, s, h) => h.oneRow(c.metric, s),
     legacyFromSpec: (spec) => ({ metric: spec.metrics?.[0] }),

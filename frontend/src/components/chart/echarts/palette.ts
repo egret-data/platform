@@ -63,15 +63,42 @@ export const OTHER_SLICE_COLOR = "var(--muted-foreground)";
 // `var()` does NOT resolve (and egret's tokens are oklch(), so a wrapping hsl()
 // would be invalid anyway). Resolve a `var(--x)` expression to a concrete computed
 // color via a probe element; fall back to a fixed color in non-DOM (vitest/SSR).
+//
+// Also doubles as the one place that validates a colour that came from somewhere less
+// trusted than this file's own constants (e.g. chart settings JSONB, which is never
+// whitelisted server-side): the same probe element that resolves `var()` also tells us,
+// via whether the CSSOM setter accepted the assignment at all, whether `expr` is a colour
+// in the first place. A concrete, valid colour is returned verbatim — not run through
+// getComputedStyle — because that would normalize it (e.g. "#fff" -> "rgb(255, 255, 255)",
+// "rgb(1,2,3)" -> "rgb(1, 2, 3)") and callers that pass a literal expect it back unchanged.
 const colorCache = new Map<string, string>();
 export function resolveColor(expr: string, fallback: string): string {
-  const m = /var\((--[\w-]+)\)/.exec(expr);
-  if (!m) return expr;
-  if (typeof document === "undefined" || !document.body) return fallback;
   const cached = colorCache.get(expr);
   if (cached) return cached;
+
+  const isVar = /var\((--[\w-]+)\)/.test(expr);
+  if (typeof document === "undefined" || !document.body) {
+    // No DOM to probe with (SSR/non-browser tests): a var() can't be resolved at all here,
+    // so fall back rather than risk shipping the literal "var(...)"; a plain literal is
+    // passed through, same as always — there's simply no probe available to check it.
+    const out = isVar ? fallback : expr;
+    colorCache.set(expr, out);
+    return out;
+  }
+
   const probe = document.createElement("span");
-  probe.style.color = `var(${m[1]})`;
+  probe.style.color = "";
+  probe.style.color = expr;
+  if (probe.style.color === "") {
+    // The CSSOM setter rejected it outright: not a colour the renderer can draw at all.
+    colorCache.set(expr, fallback);
+    return fallback;
+  }
+  if (!isVar) {
+    colorCache.set(expr, expr);
+    return expr;
+  }
+
   probe.style.display = "none";
   document.body.appendChild(probe);
   const resolved = getComputedStyle(probe).color;

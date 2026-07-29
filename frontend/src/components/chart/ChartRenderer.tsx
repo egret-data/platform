@@ -181,7 +181,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
         {rows.length === 0
           ? <EmptyState />
           : <EChartsRenderer option={buildGaugeOption(columns, rows, {
-              metric: gauge.metric, min: gauge.min, max: gauge.max, columnSettings, metricTypes,
+              metric: gauge.metric, segments: gauge.segments, columnSettings, metricTypes,
             })} />}
       </div>
     );
