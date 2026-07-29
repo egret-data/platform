@@ -183,13 +183,16 @@ describe("buildPieOption — nested rings (task 4)", () => {
     expect(outer.map((d: any) => d.value)).toEqual([10, 5]);
   });
 
-  it("the Other fold applies per ring, independently, and only when it merges 2+ slices", () => {
+  it("the Other fold applies per PARENT, independently, and only when it merges 2+ slices within that parent", () => {
     const cols2 = [
       { name: "region", type: "varchar" }, { name: "cat", type: "varchar" }, { name: "m", type: "double" },
     ];
     // Inner ring: R1=995, R2=1000 -- both well above the 2.5% threshold, no Other.
-    // Outer ring (total 2000, threshold cut at 50): R1 -> A(990) big, B(5) small;
-    // R2 -> C(985) big, D(5) E(5) F(5) small. 4 small slices ring-wide -> one Other(20).
+    // Outer ring, judged per PARENT (not ring-wide): R1's own total is 995, threshold cut at
+    // ~24.9 -> A(990) big, B(5) is the ONLY small slice under R1, so the merge-2+ rule blocks a
+    // fold there and B survives on its own. R2's own total is 1000, threshold cut at 25 ->
+    // C(985) big, D(5) E(5) F(5) are 3 small slices under R2 -> R2 gets its OWN Other(15). There
+    // is no ring-wide Other merging both parents' small slices together.
     const rows2 = [
       ["R1", "A", 990], ["R1", "B", 5],
       ["R2", "C", 985], ["R2", "D", 5], ["R2", "E", 5], ["R2", "F", 5],
@@ -200,8 +203,12 @@ describe("buildPieOption — nested rings (task 4)", () => {
     expect(inner.some((d: any) => d.name === "Other")).toBe(false);
 
     const outer = opt.series[1].data;
-    expect(outer.map((d: any) => d.name)).toEqual(["C", "A", "Other"]);
-    expect(outer.find((d: any) => d.name === "Other").value).toBe(20);
+    // Contiguous per parent, in the parent's own order (R2 first, then R1): C, R2's Other(15),
+    // then A, B (B unfolded — only one small slice under R1).
+    expect(outer.map((d: any) => d.name)).toEqual(["C", "Other", "A", "B"]);
+    expect(outer.find((d: any) => d.name === "Other")!.value).toBe(15);
+    // Exactly one "Other" wedge in the ring, and it belongs to R2 alone — not a ring-wide bucket.
+    expect(outer.filter((d: any) => d.name === "Other")).toHaveLength(1);
   });
 
   it("does not fold the outer ring's Other when only one slice is sub-threshold", () => {
@@ -302,6 +309,113 @@ describe("buildPieOption — nested rings (task 4)", () => {
   it("does not add a divergence note when every ring's total matches", () => {
     const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
     expect(opt.aria.label.description).not.toContain("Note:");
+  });
+});
+
+// Bug fix — a nested ring's Other threshold folds within each PARENT's own children, not
+// across the whole ring. Before this fix, buildSlices judged every slice at a given ring depth
+// against that RING's total, all at once, regardless of which parent it belonged to — so a ring
+// with many parents (each individually fine) could still see its small-but-real slices, scattered
+// across every parent, merged into one "Other" wedge that belonged to none of them (it carried no
+// parentKey, so reorderByParent's "no resolvable group" fallback shoved it to the very end of the
+// ring instead of sitting inside any parent's arc). Ring 0 is unaffected: its items have no
+// parentKey (one implicit parent, the whole chart), so grouping by parentKey there degenerates
+// to the old ring-wide behaviour — see the "single-ring pie is unchanged" tests above.
+describe("buildPieOption — per-parent Other fold (bug fix)", () => {
+  const cols2 = [
+    { name: "grp", type: "varchar" }, { name: "item", type: "varchar" }, { name: "m", type: "double" },
+  ];
+  // Three parents, each totalling 1000 (so ring 0 never folds — no parent is remotely
+  // sub-threshold of the 3000 grand total):
+  //  P1: two big (A1 800, A2 180) + two small (b1 10, b2 10) -- 2 small -> P1 gets its OWN Other(20).
+  //  P2: two big (C1 700, C2 290) + ONE small (c_small 10) -- only 1 small -> merge-2+ rule
+  //      blocks the fold, c_small survives as itself (this is test 3).
+  //  P3: two big (D1 900, D2 70) + two small (d1 15, d2 15) -- 2 small -> P3 gets its OWN
+  //      Other(30), a DIFFERENT value from P1's (this is what proves test 4: each Other sums only
+  //      its own parent's small children, not another parent's).
+  const rows2 = [
+    ["P1", "A1", 800], ["P1", "A2", 180], ["P1", "b1", 10], ["P1", "b2", 10],
+    ["P2", "C1", 700], ["P2", "C2", 290], ["P2", "c_small", 10],
+    ["P3", "D1", 900], ["P3", "D2", 70], ["P3", "d1", 15], ["P3", "d2", 15],
+  ];
+  const outer = () =>
+    (buildPieOption(cols2, rows2, { dimensions: ["grp", "item"], metric: "m" }) as any).series[1].data;
+
+  it("each parent with 2+ sub-threshold children gets its OWN Other, and there is no chart-wide Other merging every parent's small slices together", () => {
+    const data = outer();
+    const others = data.filter((d: any) => d.name === "Other");
+    // Two Others (P1's and P3's) — never one ring-wide bucket collapsing all five originally-small
+    // slices (b1, b2, c_small, d1, d2) into a single wedge with no parent.
+    expect(others).toHaveLength(2);
+    expect(others.map((o: any) => o.value).sort((a: number, b: number) => a - b)).toEqual([20, 30]);
+  });
+
+  it("a parent with only ONE sub-threshold child does not get an Other — the merge-2+ rule holds per parent", () => {
+    const data = outer();
+    expect(data.map((d: any) => d.name)).toContain("c_small");
+    expect(data.find((d: any) => d.name === "c_small").value).toBe(10);
+    // P2 contributes exactly its 3 real children, no Other of its own.
+    const p2Names = ["C1", "C2", "c_small"];
+    expect(data.filter((d: any) => p2Names.includes(d.name))).toHaveLength(3);
+  });
+
+  it("each Other sums only its own parent's small children, not another parent's", () => {
+    const data = outer();
+    const p1Other = data.find((d: any) => d.name === "Other" && d.value === 20); // b1 + b2
+    const p3Other = data.find((d: any) => d.name === "Other" && d.value === 30); // d1 + d2
+    expect(p1Other).toBeTruthy();
+    expect(p3Other).toBeTruthy();
+    // Neither Other is 60 (the old ring-wide bug: b1+b2+c_small+d1+d2) or any other cross-parent mix.
+    expect(data.filter((d: any) => d.name === "Other").map((d: any) => d.value)).not.toContain(60);
+  });
+
+  it("each Other sits contiguous with that parent's other children, in the ring's ordering", () => {
+    const data = outer().map((d: any) => d.name);
+    // P1 (A1, A2, Other), then P2 (C1, C2, c_small), then P3 (D1, D2, Other) — each Other directly
+    // adjacent to its own parent's real children, never separated out to the end of the ring.
+    expect(data).toEqual(["A1", "A2", "Other", "C1", "C2", "c_small", "D1", "D2", "Other"]);
+  });
+
+  // Task 6 reproduction — the live bug: a 3 x 4 x 3 nested pie (e.g. region -> product ->
+  // channel). The outer (channel) ring has 36 slices; each is only ~4-42% of its own (region,
+  // product) parent's total (well above the 2.5% threshold there) but a much smaller sliver
+  // (as little as ~1.6%) of the RING's 12000 grand total. The old ring-wide fold judged every
+  // channel slice against the ring total and swallowed the smallest ones into one parentless
+  // "Other"; the fix judges each channel against its OWN (region, product) parent's total, where
+  // none of them are actually small.
+  it("a 3 x 4 x 3 pie produces no ring-wide Other on the outer ring — every real slice survives", () => {
+    const cols3 = [
+      { name: "region", type: "varchar" }, { name: "product", type: "varchar" },
+      { name: "channel", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    const regions = ["R1", "R2", "R3"];
+    const products = ["P1", "P2", "P3", "P4"];
+    // Every (region, product) parent totals 1000, split 500/310/190 across 3 channels — each
+    // channel is 19-50% of ITS OWN parent (nowhere near sub-threshold there), but 500/12000=4.2%,
+    // 310/12000=2.58%, and 190/12000=1.58% of the ring's grand total: under the old ring-wide
+    // rule, every "190" channel slice (12 of them, a third of the ring) would have been below the
+    // 2.5% threshold and folded into one chart-wide Other belonging to no parent.
+    const rows3: unknown[][] = [];
+    for (const region of regions) {
+      for (const product of products) {
+        rows3.push([region, product, "C1", 500]);
+        rows3.push([region, product, "C2", 310]);
+        rows3.push([region, product, "C3", 190]);
+      }
+    }
+    const opt = buildPieOption(cols3, rows3, {
+      dimensions: ["region", "product", "channel"], metric: "m", sliceThreshold: 2.5,
+    }) as any;
+    expect(opt.series).toHaveLength(3);
+    const outerRing = opt.series[2].data;
+    // No ring-wide "Other" wedge...
+    expect(outerRing.some((d: any) => d.name === "Other")).toBe(false);
+    // ...and every one of the 36 real slices survived.
+    expect(outerRing).toHaveLength(36);
+    const values = outerRing.map((d: any) => d.value).sort((a: number, b: number) => a - b);
+    expect(values.filter((v: number) => v === 500)).toHaveLength(12);
+    expect(values.filter((v: number) => v === 310)).toHaveLength(12);
+    expect(values.filter((v: number) => v === 190)).toHaveLength(12);
   });
 });
 
