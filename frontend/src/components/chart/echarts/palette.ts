@@ -81,7 +81,44 @@ export const OTHER_SLICE_COLOR = "var(--muted-foreground)";
 // in the first place. A concrete, valid colour is returned verbatim — not run through
 // getComputedStyle — because that would normalize it (e.g. "#fff" -> "rgb(255, 255, 255)",
 // "rgb(1,2,3)" -> "rgb(1, 2, 3)") and callers that pass a literal expect it back unchanged.
+//
+// The cache below is module-level, so it outlives every chart on the page — which means it has
+// to be dropped when the theme changes, or `var(--foreground)` / `var(--background)` /
+// `var(--card)` keep whichever theme's value was resolved first until a full page reload. See
+// `onThemeChange` for the signal used and who listens to it.
 const colorCache = new Map<string, string>();
+
+// ThemeProvider (components/theme-provider.tsx) switches themes by swapping the `light`/`dark`
+// class on <html>, which is exactly what index.css's `.dark` variant keys off — so that class
+// attribute IS the theme signal, and watching it directly keeps this file free of any dependency
+// on React or on the provider itself. (A DOM watcher rather than a context subscription also
+// matters because ThemeProvider's `children` element is referentially stable, so a theme toggle
+// does NOT re-render the chart tree on its own — hence the listeners below.)
+const themeListeners = new Set<() => void>();
+
+/** Runs `listener` after every theme change, once the colour cache has already been dropped —
+ * so anything it rebuilds resolves against the new theme. Returns an unsubscribe. */
+export function onThemeChange(listener: () => void): () => void {
+  themeListeners.add(listener);
+  return () => {
+    themeListeners.delete(listener);
+  };
+}
+
+function handleThemeChange(): void {
+  colorCache.clear();
+  for (const listener of themeListeners) listener();
+}
+
+if (typeof document !== "undefined" && typeof MutationObserver !== "undefined") {
+  // Deliberately never disconnected: it lives as long as the module (and so the page) does,
+  // exactly like the cache it guards.
+  new MutationObserver(handleThemeChange).observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["class"],
+  });
+}
+
 export function resolveColor(expr: string, fallback: string): string {
   const cached = colorCache.get(expr);
   if (cached) return cached;

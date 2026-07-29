@@ -40,6 +40,36 @@ describe("EChartsRenderer", () => {
   });
 });
 
+// A theme toggle changes what every var()-backed colour resolves to, but ThemeProvider's
+// `children` element is referentially stable, so React never re-renders the chart tree for it —
+// the chart has to re-apply its own option, or it keeps the previous theme's colours until a
+// reload. Applies to every ECharts chart type, not just pie.
+describe("EChartsRenderer — theme changes", () => {
+  afterEach(() => {
+    document.documentElement.classList.remove("dark");
+  });
+
+  const flipTheme = async () => {
+    document.documentElement.classList.toggle("dark");
+    await new Promise((r) => setTimeout(r, 0));
+  };
+
+  it("re-applies the option when the theme changes", async () => {
+    render(<EChartsRenderer option={opt} />);
+    instance.setOption.mockClear();
+    await flipTheme();
+    expect(instance.setOption).toHaveBeenCalledWith(opt, true);
+  });
+
+  it("stops re-applying once unmounted", async () => {
+    const { unmount } = render(<EChartsRenderer option={opt} />);
+    unmount();
+    instance.setOption.mockClear();
+    await flipTheme();
+    expect(instance.setOption).not.toHaveBeenCalled();
+  });
+});
+
 describe("EChartsRenderer onPointClick", () => {
   it("forwards a click as { name, seriesName, value, x, y }", () => {
     const onPointClick = vi.fn();

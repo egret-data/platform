@@ -494,8 +494,11 @@ export function buildPieOption(
 
   // The two candidate label colours — WCAG AA contrast (fix 2): resolved once, not per slice,
   // since resolveColor's own cache would otherwise do this same var() lookup on every slice.
-  // Theme-aware by construction (light theme: dark-on-light; dark theme: light-on-dark), same
-  // as everything else in this file that reads a CSS custom property.
+  // Reads the theme's own tokens (light theme: dark-on-light; dark theme: light-on-dark), same
+  // as everything else in this file that reads a CSS custom property — but only because
+  // resolveColor's cache is dropped on a theme change and EChartsRenderer then re-applies the
+  // option. Neither is true "by construction": without both, these two resolve exactly once per
+  // page load and a light<->dark toggle leaves every label on the previous theme's ink.
   const labelTextDark = resolveColor("var(--foreground)", COLOR_FALLBACK.text);
   const labelTextLight = resolveColor("var(--background)", COLOR_FALLBACK.textInverse);
 

@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { SERIES_PALETTE, CHART_THEME, seriesColor, resolveColor, lightenOklch, getTextColorForBackground, COLOR_FALLBACK } from "../palette";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { SERIES_PALETTE, CHART_THEME, seriesColor, resolveColor, lightenOklch, getTextColorForBackground, COLOR_FALLBACK, onThemeChange } from "../palette";
 
 // Independent (deliberately duplicated) sRGB -> OKLab conversion, used ONLY to verify
 // lightenOklch's output from the outside — asserting on the hue/lightness the test itself
@@ -63,6 +63,48 @@ describe("chart palette", () => {
     it("falls back for a value that isn't a colour at all, rather than painting nothing", () => {
       expect(resolveColor("not-a-real-color", "#000")).toBe("#000");
       expect(resolveColor("banana", "#000")).toBe("#000");
+    });
+  });
+
+  // The resolved-colour cache is module-level and lives as long as the page does, so without
+  // invalidation every var()-backed colour (label text, ring border, donut total, axis labels —
+  // cartesian, waterfall, boxplot and gauge all go through the same function) keeps whichever
+  // theme's value happened to be resolved first until a full reload.
+  describe("theme changes", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      document.documentElement.classList.remove("dark");
+    });
+
+    // ThemeProvider swaps the `light`/`dark` class on <html>, which is what the `.dark` variant
+    // in index.css keys off — so that class attribute IS the theme signal.
+    const flipTheme = async () => {
+      document.documentElement.classList.toggle("dark");
+      // MutationObserver records are delivered in a microtask, not synchronously.
+      await new Promise((r) => setTimeout(r, 0));
+    };
+
+    it("re-resolves a var() colour after the theme class on <html> changes", async () => {
+      const computed = vi.spyOn(window, "getComputedStyle");
+      computed.mockReturnValue({ color: "rgb(17, 24, 39)" } as CSSStyleDeclaration);
+      expect(resolveColor("var(--test-fg)", "#fallback")).toBe("rgb(17, 24, 39)");
+
+      computed.mockReturnValue({ color: "rgb(250, 250, 250)" } as CSSStyleDeclaration);
+      // Still the light-theme value: that's the cache doing its job, not the bug.
+      expect(resolveColor("var(--test-fg)", "#fallback")).toBe("rgb(17, 24, 39)");
+
+      await flipTheme();
+      expect(resolveColor("var(--test-fg)", "#fallback")).toBe("rgb(250, 250, 250)");
+    });
+
+    it("notifies subscribers so a live chart can repaint, and stops after unsubscribe", async () => {
+      const listener = vi.fn();
+      const off = onThemeChange(listener);
+      await flipTheme();
+      expect(listener).toHaveBeenCalledTimes(1);
+      off();
+      await flipTheme();
+      expect(listener).toHaveBeenCalledTimes(1);
     });
   });
 

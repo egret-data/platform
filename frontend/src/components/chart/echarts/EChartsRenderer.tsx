@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { init, type EChartsCoreOption, type ECharts } from "echarts/core";
 import { registerEChartsModules } from "./register";
+import { onThemeChange } from "./palette";
 
 registerEChartsModules();
 
@@ -84,7 +85,18 @@ export function EChartsRenderer({ option, className, onPointClick }: {
       });
     });
     ro.observe(el);
+
+    // ECharts bakes concrete colours into the SVG it draws, so a theme switch does nothing to an
+    // already-drawn chart. React won't help here either: ThemeProvider's `children` element is
+    // referentially stable, so toggling the theme never re-renders the chart tree. Re-applying
+    // the option is what makes the switch land — by this point palette.ts has already dropped its
+    // resolved-colour cache, so the rebuild picks up the new theme's values.
+    const offTheme = onThemeChange(() => {
+      chart.setOption(resolveOption(optionRef.current), true);
+    });
+
     return () => {
+      offTheme();
       if (rafId != null) cancelAnimationFrame(rafId);
       ro.disconnect();
       if (!chart.isDisposed()) chart.dispose();
