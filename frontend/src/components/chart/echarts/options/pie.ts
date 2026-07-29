@@ -633,9 +633,21 @@ export function buildPieOption(
       data: ringData.map(({ name, value, itemStyle, parentKey }, i) => {
         const base = itemStyle ? { name, value, itemStyle } : { name, value };
         const { displayLabel, labelColor } = fits[i];
-        // Metabase's own sentinel for "nothing to show" (option.ts ~L269): a single space, not
-        // an empty string — ECharts renders neither, but a literal " " matches the reference
-        // implementation exactly rather than inventing an equivalent.
+        // Metabase's own sentinel for "nothing to show" (option.ts ~L269): a single space.
+        //
+        // Still REQUIRED even though a dropped label is now a proper `null`, and the null cannot
+        // simply be passed through: ECharts reads a formatter returning null/undefined as "no
+        // formatter ran" and falls back to its own default label text (label/labelStyle.ts'
+        // getLabelText — `if (baseText == null) { baseText = opt.defaultText }`), which for a pie
+        // datum is the slice's own name. Returning null would therefore resurrect the very label
+        // the fit decision just dropped. A non-null string is returned verbatim (dataFormat.ts'
+        // getFormattedLabel), so the sentinel is what actually suppresses the label.
+        //
+        // A space rather than "": an empty string is indistinguishable from a slice whose
+        // dimension value is genuinely blank, and telling those two apart is the whole point of
+        // fitSliceLabel's blank-label guard (see the tests that pin it). The cost is that this
+        // invisible label still carries a space's width into `labelLayout.hideOverlap` — accepted,
+        // and the reason a dropped label is a deliberate sentinel here rather than an accident.
         const withLabel = { ...base, label: { formatter: () => displayLabel ?? " ", color: labelColor } };
         if (!parentFold || !parentValues || parentKey == null) return withLabel;
         const parentFoldKey = parentFold.get(parentKey);
@@ -644,15 +656,14 @@ export function buildPieOption(
         const parentPercent = parseFloat(((value / parentValue) * 100).toFixed(decimals));
         return { ...withLabel, parentPercent };
       }),
-      // Series-level label: shared defaults every slice's own `label` (above) can override
-      // (formatter, color) or fall through to (show, position, fontSize, fontWeight, rotate).
-      // `formatter`/`rotate` here also serve as a generic, parameter-driven fallback for a
-      // caller that invokes `label.formatter` directly rather than through a real per-slice
-      // datum (e.g. this file's own tests) — unused at real render time, since every datum
-      // above always carries its own override.
+      // Series-level label: shared defaults every slice's own `label` (above) falls through to
+      // (show, position, fontSize, fontWeight, rotate). Deliberately carries NO `formatter`:
+      // every datum above always sets its own, so a series-level one could never run — it existed
+      // only as a callable convenience for tests, which then asserted the app's label composition
+      // against a function production never executes. Those tests now go through the per-datum
+      // formatter that actually renders (see pie.test.ts).
       label: {
         show: showName || showPercent,
-        formatter: labelFormatter,
         position: "inside" as const,
         fontSize: sliceFontSize,
         fontWeight: 700,

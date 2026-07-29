@@ -112,7 +112,14 @@ describe("buildPieOption — donut total & percent (Metabase parity 1b)", () => 
   const rows = [["A", 30], ["B", 70]];
   const opt = (extra: Record<string, unknown> = {}) =>
     buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", ...extra }) as any;
-  const labelText = (o: any, p: { name: string; percent: number }) => o.series[0].label.formatter(p);
+  // The label text a slice ACTUALLY renders. Each datum carries its own `label.formatter`, which
+  // always overrides the series-level one, so a series-level formatter could never run in the app
+  // — these tests used to assert against exactly that dead code path, leaving the real label
+  // composition (name / percent / decimals) with no direct test at all. Reading it per-datum also
+  // means the percentage under test is the one the chart computed from the fixture, not one the
+  // test handed in.
+  const labelText = (o: any, name: string) =>
+    o.series[0].data.find((d: any) => d.name === name).label.formatter();
 
   it("renders a centre total only for donut + showTotal", () => {
     expect(opt({ showTotal: true }).graphic).toBeFalsy();           // not a donut
@@ -128,18 +135,20 @@ describe("buildPieOption — donut total & percent (Metabase parity 1b)", () => 
   it("percentVisibility defaults off → label is the name only", () => {
     const o = opt({ showLabels: true });
     expect(o.series[0].label.show).toBe(true);
-    expect(labelText(o, { name: "A", percent: 30 })).toBe("A");
+    expect(labelText(o, "A")).toBe("A");
   });
   it("percentVisibility inside → name + percent", () => {
     const o = opt({ showLabels: true, percentVisibility: "inside" });
-    expect(labelText(o, { name: "A", percent: 30 })).toBe("A: 30%");
+    expect(labelText(o, "A")).toBe("A: 30%"); // A is 30 of the 100 this fixture totals
   });
   it("percent without labels shows just the percent", () => {
     // showLabels now defaults on, so it must be explicitly turned off here to isolate
     // percentVisibility's own contribution to `label.show`.
-    const o = opt({ percentVisibility: "inside", showLabels: false });
-    expect(o.series[0].label.show).toBe(true);
-    expect(labelText(o, { name: "A", percent: 33.333 })).toBe("33.33%");
+    const thirds = buildPieOption(cols, [["A", 1], ["B", 2]], {
+      dimensions: ["d"], metric: "m", percentVisibility: "inside", showLabels: false,
+    }) as any;
+    expect(thirds.series[0].label.show).toBe(true);
+    expect(labelText(thirds, "A")).toBe("33.33%"); // 1/3, rounded to the default 2 decimals
   });
 });
 
@@ -588,11 +597,14 @@ describe("buildPieOption — slice curation (task 6)", () => {
   it("decimals changes what a percentage label shows", () => {
     // showLabels defaults on now, so it's turned off explicitly to isolate the percent text
     // (otherwise the name would be prefixed too, which isn't what this test is about).
+    // Read from the per-datum formatter — the one that actually renders; A is 10 of 30, i.e.
+    // 33.333…%, so the two decimal settings genuinely differ.
     const rows = [["A", 10], ["B", 20]];
+    const labelOfA = (o: any) => o.series[0].data.find((d: any) => d.name === "A").label.formatter();
     const withDefault = buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", percentVisibility: "inside", showLabels: false }) as any;
     const withZero = buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", percentVisibility: "inside", decimals: 0, showLabels: false }) as any;
-    expect(withDefault.series[0].label.formatter({ name: "A", percent: 33.333 })).toBe("33.33%");
-    expect(withZero.series[0].label.formatter({ name: "A", percent: 33.333 })).toBe("33%");
+    expect(labelOfA(withDefault)).toBe("33.33%");
+    expect(labelOfA(withZero)).toBe("33%");
   });
 
   it("renaming does not change identity: colour, hidden and order still key on the raw value", () => {
@@ -822,7 +834,7 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
         containerSize,
       ) as any;
       const tiny = opt.series[0].data.find((d: any) => d.name === "Tiny");
-      expect(tiny.label.formatter()).toBe(" "); // Metabase's own "nothing to show" sentinel
+      expect(tiny.label.formatter()).toBe(" "); // the "nothing to show" sentinel
     });
 
     it("a label that almost fits is truncated with an ellipsis rather than dropped", () => {

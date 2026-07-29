@@ -241,8 +241,11 @@ describe("ChartRenderer", () => {
   describe("-> buildPieOption seam", () => {
     const pieCols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
     const pieRows = [["A", 10], ["B", 30], ["C", 5]];
+    // Each DATUM carries the label formatter that actually renders; the series-level label has
+    // none (it could never run — a datum's own always wins), so reading the built label text means
+    // reading it per slice.
     type BuiltPie = {
-      series: { data: { name: string }[]; label: { formatter: (p: { name: string; percent: number }) => string } }[];
+      series: { data: { name: string; label: { formatter: () => string } }[] }[];
     };
     const pieOption = (pie: Partial<PieConfig>): BuiltPie => {
       render(
@@ -274,8 +277,12 @@ describe("ChartRenderer", () => {
     });
 
     it("forwards pie.decimals to the built option", () => {
-      const opt = pieOption({ percentVisibility: "inside", showLabels: false, decimals: 0 });
-      expect(opt.series[0].label.formatter({ name: "A", percent: 33.333 })).toBe("33%");
+      // A is 10 of this fixture's 45, i.e. 22.22...% — so 0 decimals renders visibly differently
+      // from the default 2.
+      const labelOfA = (pie: Partial<PieConfig>) =>
+        pieOption(pie).series[0].data.find((d) => d.name === "A")!.label.formatter();
+      expect(labelOfA({ percentVisibility: "inside", showLabels: false })).toBe("22.22%");
+      expect(labelOfA({ percentVisibility: "inside", showLabels: false, decimals: 0 })).toBe("22%");
     });
   });
 });
