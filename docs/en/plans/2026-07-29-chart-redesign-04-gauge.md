@@ -287,6 +287,19 @@ Open the app with a cache-busting query parameter; the browser caches `index.htm
 Step 1 is the one that matters most — an unconfigured gauge must be pixel-identical to `main`.
 Step 4 is the point of the unit: red at the top, green at the bottom, for a less-is-better metric.
 
+**Spec step 2 needs data that does not exist yet.** Checked on 2026-07-29: the kind database has
+**zero** gauge charts, so migration 0102 is a no-op there and running it proves nothing. To verify it
+live you must create the fixture BEFORE deploying this branch:
+
+1. deploy `main`, and on it save a gauge chart with an explicit min and max — that is the only build
+   that can still write those keys;
+2. record what it looks like;
+3. deploy this branch, backend first;
+4. confirm the chart's settings became three segments and that it renders identically.
+
+Do this as part of the before/after screenshot pass rather than as a separate cycle. If you skip it,
+say so — an unverified migration is a real gap, not a formality.
+
 - [ ] **Step 4: Before/after screenshots at both sizes**
 
 Deploy `main` first for a genuine "before". For step 1 the two screenshots should be
