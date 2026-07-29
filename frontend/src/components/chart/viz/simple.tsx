@@ -48,8 +48,8 @@ export const SIMPLE_DESCRIPTORS: VizDescriptor<Cfg>[] = [
       { id: "dimension", label: "Dimension", kind: "dimension", required: "a dimension", temporal: true },
       { id: "metric", label: "Metric", kind: "metric", required: "a metric" },
     ],
-    buildSpec: (c, s, h) => h.dimsAndMetrics([c.dimension], [c.metric], s),
-    legacyFromSpec: (spec) => ({ dimension: spec.dimensions?.[0], metric: spec.metrics?.[0] }),
+    buildSpec: (c, s, h) => h.dimsAndMetrics((c.dimensions as unknown[] | undefined) ?? [], [c.metric], s),
+    legacyFromSpec: (spec) => ({ dimensions: spec.dimensions, metric: spec.metrics?.[0] }),
   }),
   fieldDescriptor({
     key: "scalar", prefix: "scalar.", legacyKey: "scalar",

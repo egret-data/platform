@@ -134,15 +134,16 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
         {rows.length === 0
           ? <EmptyState />
           : <EChartsRenderer option={buildPieOption(columns, rows, {
-              dimension: pie.dimension, metric: pie.metric, donut: pie.donut,
+              // TODO(task 4): only the first dimension renders as a ring; nested rings come next.
+              dimensions: pie.dimensions, metric: pie.metric, donut: pie.donut,
               showLegend: pie.showLegend, showLabels: pie.showLabels,
               sliceThreshold: pie.sliceThreshold, sortRows: pie.sortRows,
               showTotal: pie.showTotal, percentVisibility: pie.percentVisibility,
               sliceColors: pie.sliceColors,
               columnSettings, metricTypes,
-              dimensionUnit: params.spec.temporal_units?.[pie.dimension ?? ""],
+              dimensionUnit: params.spec.temporal_units?.[pie.dimensions?.[0] ?? ""],
             })}
-            onPointClick={onValueClick && pie.dimension ? (p) => onValueClick({ dims: [{ col: pie.dimension as string, value: p.name }] }, p.x, p.y) : undefined}
+            onPointClick={onValueClick && pie.dimensions?.[0] ? (p) => onValueClick({ dims: [{ col: pie.dimensions![0], value: p.name }] }, p.x, p.y) : undefined}
           />}
       </div>
     );

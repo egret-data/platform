@@ -40,14 +40,14 @@ describe("the nine simple descriptors", () => {
   });
 
   it("prunes temporal units to the grouped dimension", () => {
-    expect(byKey.pie.buildSpec({ dimension: "order_date", metric: "m" }, SHARED).temporal_units)
+    expect(byKey.pie.buildSpec({ dimensions: ["order_date"], metric: "m" }, SHARED).temporal_units)
       .toEqual({ order_date: "month" });
-    expect(byKey.pie.buildSpec({ dimension: "region", metric: "m" }, SHARED).temporal_units).toEqual({});
+    expect(byKey.pie.buildSpec({ dimensions: ["region"], metric: "m" }, SHARED).temporal_units).toEqual({});
   });
 
   it("round-trips every descriptor's config through settings", () => {
     const sample: Record<string, Record<string, unknown>> = {
-      pie: { dimension: "region", metric: "m" },
+      pie: { dimensions: ["region"], metric: "m" },
       scalar: { metric: "m" },
       progress: { metric: "m", goal: 10 },
       gauge: {
@@ -87,6 +87,16 @@ describe("the nine simple descriptors", () => {
   // donut would come back as a plain pie.
   it("round-trips display settings that no field declares", () => {
     const cfg = { dimension: "category", metric: "m", donut: true, showLegend: true, sliceColors: { A: "#fff" } };
+    const back = byKey.pie.fromParams({ version: 2, spec: EMPTY_SPEC, settings: byKey.pie.toSettings(cfg) });
+    expect(back).toEqual(cfg);
+  });
+
+  // Multi-dimension shape (task 1): `dimensions` and the slice-curation fields (e.g.
+  // `sliceNames`) are stored keys under the pie prefix like any other, so they need no
+  // codec change to round-trip — `fromParams` reads every key under the prefix, not
+  // only the ones `fields` declares.
+  it("round-trips the multi-dimension shape, including slice-curation fields", () => {
+    const cfg = { dimensions: ["region", "category"], metric: "m", sliceNames: { A: "Alpha" } };
     const back = byKey.pie.fromParams({ version: 2, spec: EMPTY_SPEC, settings: byKey.pie.toSettings(cfg) });
     expect(back).toEqual(cfg);
   });

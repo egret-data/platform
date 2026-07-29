@@ -48,7 +48,7 @@ describe("charts carry a description rather than ECharts' generated one", () => 
   const rows = [["North", 10], ["South", 20]];
 
   it("pie", () => {
-    const o = buildPieOption(columns, rows, { dimension: "region", metric: "rev" }) as {
+    const o = buildPieOption(columns, rows, { dimensions: ["region"], metric: "rev" }) as {
       aria: { label: { description: string } };
     };
     expect(o.aria.label.description).toContain("Pie chart of rev by region");

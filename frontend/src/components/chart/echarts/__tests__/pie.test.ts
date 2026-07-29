@@ -7,13 +7,13 @@ const rows = [["EU", 10], ["US", 30]];
 
 describe("buildPieOption", () => {
   it("maps rows to {name, value} slices, sorted by value desc", () => {
-    const opt = buildPieOption(cols, rows, { dimension: "region", metric: "rev" }) as any;
+    const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
     expect(opt.series[0].type).toBe("pie");
     expect(opt.series[0].data).toEqual([{ name: "US", value: 30 }, { name: "EU", value: 10 }]);
     expect(opt.series[0].radius).toEqual(["0%", "70%"]);
   });
   it("donut sets an inner radius", () => {
-    const opt = buildPieOption(cols, rows, { dimension: "region", metric: "rev", donut: true }) as any;
+    const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", donut: true }) as any;
     expect(opt.series[0].radius).toEqual(["45%", "70%"]);
   });
   it("empty when dimension or metric missing", () => {
@@ -28,7 +28,7 @@ describe("buildPieOption", () => {
 describe("buildPieOption — Metabase-parity", () => {
   const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }];
   const rows = [["EU", 10], ["US", 30]];
-  const base = { dimension: "region", metric: "rev" };
+  const base = { dimensions: ["region"], metric: "rev" };
 
   it("uses the categorical palette", () => {
     expect((buildPieOption(cols, rows, base) as any).color).toEqual(SERIES_PALETTE);
@@ -53,7 +53,7 @@ describe("buildPieOption — Metabase-parity", () => {
 describe("buildPieOption — data robustness (Metabase parity)", () => {
   const cols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
   const slices = (rows: unknown[][], extra: Record<string, unknown> = {}) =>
-    (buildPieOption(cols, rows, { dimension: "d", metric: "m", ...extra }) as any).series[0].data;
+    (buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", ...extra }) as any).series[0].data;
 
   it("drops zero-value slices", () => {
     expect(slices([["A", 10], ["B", 0], ["C", 5]]).map((s: any) => s.name)).toEqual(["A", "C"]);
@@ -96,7 +96,7 @@ describe("buildPieOption — donut total & percent (Metabase parity 1b)", () => 
   const cols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
   const rows = [["A", 30], ["B", 70]];
   const opt = (extra: Record<string, unknown> = {}) =>
-    buildPieOption(cols, rows, { dimension: "d", metric: "m", ...extra }) as any;
+    buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", ...extra }) as any;
   const labelText = (o: any, p: { name: string; percent: number }) => o.series[0].label.formatter(p);
 
   it("renders a centre total only for donut + showTotal", () => {

@@ -7,7 +7,9 @@ import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units"
 
 export interface ResultColumn { name: string; type: string }
 export interface PieBuildConfig {
-  dimension?: string;
+  /** Up to three, drawn as nested rings from the centre out. Task 4 makes rendering per-ring;
+   * for now only the first entry draws — see `buildPieOption`. */
+  dimensions?: string[];
   metric?: string;
   donut?: boolean;
   showLegend?: boolean;
@@ -68,7 +70,10 @@ function buildSlices(rows: unknown[][], di: number, mi: number, cfg: PieBuildCon
 
 export function buildPieOption(columns: ResultColumn[], rows: unknown[][], cfg: PieBuildConfig): EChartsCoreOption {
   const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
-  const di = cfg.dimension != null ? idx[cfg.dimension] : undefined;
+  // TODO(task 4): draws only the first dimension as a single ring; nested rings from
+  // dimensions[1] and dimensions[2] are added there.
+  const dimension = cfg.dimensions?.[0];
+  const di = dimension != null ? idx[dimension] : undefined;
   const mi = cfg.metric != null ? idx[cfg.metric] : undefined;
 
   const data = di == null || mi == null ? [] : buildSlices(rows, di, mi, cfg);
@@ -106,7 +111,7 @@ export function buildPieOption(columns: ResultColumn[], rows: unknown[][], cfg: 
   return {
     ...baseOption(),
     aria: ariaDescription({
-      kind: "Pie chart", metric: cfg.metric, dimension: cfg.dimension, format: fmt,
+      kind: "Pie chart", metric: cfg.metric, dimension, format: fmt,
       points: data.map((d) => ({ name: String(d.name), value: d.value })),
     }),
     tooltip: itemTooltip(fmt, { percent: true }),

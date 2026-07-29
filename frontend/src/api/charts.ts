@@ -104,7 +104,8 @@ export interface CartesianConfig {
   seriesLine?: Record<string, LineSeriesStyle>;
 }
 export interface PieConfig {
-  dimension?: string;
+  /** Up to three, drawn as nested rings from the centre out. */
+  dimensions?: string[];
   metric?: string;
   donut?: boolean;
   showLegend?: boolean;
@@ -114,6 +115,14 @@ export interface PieConfig {
   showTotal?: boolean;       // donut only: grand total in the centre
   percentVisibility?: "off" | "inside" | "both";  // percent in slice labels (default off)
   sliceColors?: Record<string, string>;  // per-slice colour override keyed by dimension value
+  /** Rename a slice of the FIRST dimension. */
+  sliceNames?: Record<string, string>;
+  /** Slices of the first dimension left out entirely. */
+  hiddenSlices?: string[];
+  /** Display order for the first dimension's slices. */
+  sliceOrder?: string[];
+  /** Decimal places on percentages. */
+  decimals?: number;
 }
 export interface ScalarConfig {
   metric?: string;
