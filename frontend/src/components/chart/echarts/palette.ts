@@ -222,5 +222,69 @@ export const COLOR_FALLBACK = {
   gridLine: "#e5e7eb",     // ≈ --border (very light gray)
   axisLabel: "#6b7280",    // ≈ --muted-foreground (slate)
   text: "#111827",         // ≈ --foreground (near-black)
+  textInverse: "#ffffff",  // ≈ --background in light mode — the "opposite ink" for getTextColorForBackground
   card: "#ffffff",         // ≈ --card (charts render inside a Card, not the page background)
 } as const;
+
+/** Parses `#rgb`/`#rrggbb` or `rgb()`/`rgba()` (alpha ignored) to 0-255 channels; anything
+ * else (a named CSS colour, `oklch()`, an unresolved `var()`, ...) is unparseable. Covers what
+ * this file's OWN outputs (SERIES_PALETTE, lightenOklch, resolveColor) can ever produce, plus
+ * what a real browser's `getComputedStyle` returns for a resolved `var()` (`rgb(r, g, b)`) —
+ * not a general CSS colour parser. */
+function parseColor(color: string): [number, number, number] | undefined {
+  const hex = parseHexColor(color);
+  if (hex) return hex;
+  const m = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*[\d.]+\s*)?\)$/i.exec(color.trim());
+  if (!m) return undefined;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+function relativeLuminance(rgb: [number, number, number]): number {
+  const [r, g, b] = rgb.map((c) => srgbToLinear(c / 255));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/** Standard WCAG contrast ratio between two colours' relative luminance (1:1 to 21:1). */
+function contrastRatio(a: [number, number, number], b: [number, number, number]): number {
+  const l1 = relativeLuminance(a);
+  const l2 = relativeLuminance(b);
+  const lighter = Math.max(l1, l2);
+  const darker = Math.min(l1, l2);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+// We intentionally want to return the light text colour more often than raw contrast alone
+// would pick — ported from Metabase's ui/colors/palette.ts getTextColorForBackground
+// ("We intentionally want to return white text color more frequently", citing internal design
+// notes): dark text on a saturated fill often still LOOKS legible while numerically clearing
+// AA by only a hair, whereas the light alternative tends to clear it by a wide margin — so a
+// borderline call is deliberately biased toward the safer, more-legible side.
+const WHITE_TEXT_PRIORITY_FACTOR = 3;
+
+/**
+ * Picks whichever of `textColor` / `textColorInverse` reads better against `backgroundColor`,
+ * biased toward `textColorInverse` by `WHITE_TEXT_PRIORITY_FACTOR` — ported from Metabase's
+ * `getTextColorForBackground` (ui/colors/palette.ts). Reuses this file's own `srgbToLinear`
+ * (the sRGB electro-optical transfer function, also used by `lightenOklch`) rather than
+ * duplicating the gamma maths for the WCAG relative-luminance formula.
+ *
+ * `backgroundColor` failing to parse (a CSS colour keyword, an unresolved `var()`, ...) falls
+ * back to `textColor` — the same "leave it alone / pick the safe default" degradation this
+ * file already uses elsewhere (e.g. `lightenOklch` on unparseable input) rather than throwing.
+ */
+export function getTextColorForBackground(
+  backgroundColor: string,
+  textColor: string,
+  textColorInverse: string,
+): string {
+  const bg = parseColor(backgroundColor);
+  if (!bg) return textColor;
+
+  const fg = parseColor(textColor) ?? [0, 0, 0];
+  const fgInverse = parseColor(textColorInverse) ?? [255, 255, 255];
+
+  const whiteContrast = contrastRatio(bg, fgInverse) * WHITE_TEXT_PRIORITY_FACTOR;
+  const darkContrast = contrastRatio(bg, fg);
+
+  return whiteContrast > darkContrast ? textColorInverse : textColor;
+}

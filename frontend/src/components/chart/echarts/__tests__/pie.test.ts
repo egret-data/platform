@@ -9,7 +9,13 @@ describe("buildPieOption", () => {
   it("maps rows to {name, value} slices, sorted by value desc", () => {
     const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
     expect(opt.series[0].type).toBe("pie");
-    expect(opt.series[0].data).toEqual([{ name: "US", value: 30 }, { name: "EU", value: 10 }]);
+    // Each datum also carries its own `label` (fix 1b/2 — per-slice fit + contrast colour, see
+    // the "slice label fit & colour" describe block below) — picked out here so this test stays
+    // about mapping/sorting, not label content.
+    expect(opt.series[0].data.map((d: any) => ({ name: d.name, value: d.value }))).toEqual([
+      { name: "US", value: 30 },
+      { name: "EU", value: 10 },
+    ]);
     expect(opt.series[0].radius).toEqual(["0%", "70%"]);
   });
   it("donut sets an inner radius", () => {
@@ -67,7 +73,10 @@ describe("buildPieOption — data robustness (Metabase parity)", () => {
     expect(slices([["A", 10], ["B", -3], ["C", 5]]).map((s: any) => s.name)).toEqual(["A", "C"]);
   });
   it("uses absolute values when every slice is negative", () => {
-    expect(slices([["A", -10], ["B", -30]])).toEqual([{ name: "B", value: 30 }, { name: "A", value: 10 }]);
+    expect(slices([["A", -10], ["B", -30]]).map((s: any) => ({ name: s.name, value: s.value }))).toEqual([
+      { name: "B", value: 30 },
+      { name: "A", value: 10 },
+    ]);
   });
   it("sorts slices by value descending by default", () => {
     expect(slices([["A", 5], ["B", 30], ["C", 10]]).map((s: any) => s.name)).toEqual(["B", "C", "A"]);
@@ -139,7 +148,10 @@ describe("buildPieOption — nested rings (task 4)", () => {
   it("one dimension still renders exactly one series, unchanged", () => {
     const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
     expect(opt.series).toHaveLength(1);
-    expect(opt.series[0].data).toEqual([{ name: "US", value: 30 }, { name: "EU", value: 10 }]);
+    expect(opt.series[0].data.map((d: any) => ({ name: d.name, value: d.value }))).toEqual([
+      { name: "US", value: 30 },
+      { name: "EU", value: 10 },
+    ]);
     expect(opt.series[0].radius).toEqual(["0%", "70%"]);
   });
 
@@ -708,6 +720,77 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
     it("degrades small/overlapping slices by hiding them (ECharts labelLayout.hideOverlap), not overlapping into mush", () => {
       const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m", showLabels: true }) as any;
       for (const s of opt.series) expect(s.labelLayout).toEqual({ hideOverlap: true });
+    });
+  });
+
+  // Fix 1a/1b/2 — the real anti-overlap mechanism (labelLayout.hideOverlap above is only a
+  // backstop): multi-ring labels run radial, each slice's label is measured against its own
+  // slice's geometry and truncated-or-dropped, and each slice's label colour contrasts with its
+  // own fill rather than one fixed colour for the whole chart. A stub measurer (`s.length * 7`)
+  // is injected as buildPieOption's 4th argument so expected numbers are obvious, per the
+  // ground rules — real text measurement is exercised for its own sake in sliceLabel.test.ts.
+  describe("fix 1a/1b/2 — slice labels are radial, fit their own slice, and contrast their own fill", () => {
+    const stubMeasure = (s: string) => s.length * 7;
+
+    it("a 3-ring pie's labels use radial rotation; a 1-ring pie's do not", () => {
+      const one = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
+      expect(one.series[0].label.rotate).toBe(0);
+
+      const three = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any;
+      for (const s of three.series) expect(s.label.rotate).toBe("radial");
+    });
+
+    const dCols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+
+    it("a slice too small for its label gets NO label, rather than a bare ellipsis", () => {
+      // donut: true so this ring actually has a hole — calcAvailableDonutSliceLabelLength is a
+      // DONUT formula (see the guard in buildPieOption); a plain, no-hole single ring skips the
+      // fit check entirely (a separate, deliberate exception — see "showLabels: false" test
+      // below for that case instead). A ~0.1%-of-the-ring sliver's available space is far too
+      // small for even a truncated "Tiny" — sliceThreshold: 0 keeps it out of the "Other" fold
+      // so it stays its own slice.
+      const rows = [["Tiny", 1], ["Big", 999]];
+      const opt = buildPieOption(
+        dCols,
+        rows,
+        { dimensions: ["d"], metric: "m", showLabels: true, sliceThreshold: 0, donut: true },
+        stubMeasure,
+      ) as any;
+      const tiny = opt.series[0].data.find((d: any) => d.name === "Tiny");
+      expect(tiny.label.formatter()).toBe(" "); // Metabase's own "nothing to show" sentinel
+    });
+
+    it("a label that almost fits is truncated with an ellipsis rather than dropped", () => {
+      // Two donut slices sharing the ring roughly evenly, so each gets a wide (not sliver) arc
+      // with real, nonzero available space — long enough that a moderately long name doesn't
+      // fit whole, short enough that a truncated prefix + ellipsis does.
+      const longName = "A very long region name that will not fit";
+      const opt = buildPieOption(
+        dCols,
+        [[longName, 55], ["Other region", 45]],
+        { dimensions: ["d"], metric: "m", showLabels: true, donut: true },
+        stubMeasure,
+      ) as any;
+      const label = opt.series[0].data.find((d: any) => d.name === longName).label.formatter();
+      expect(label).not.toBeNull();
+      expect(label).not.toBe(" ");
+      expect(label?.endsWith("…")).toBe(true);
+      expect(label?.length).toBeLessThan(longName.length);
+    });
+
+    it("showLabels: false still suppresses everything, per-slice fitting included", () => {
+      const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", showLabels: false }, stubMeasure) as any;
+      expect(opt.series[0].label.show).toBe(false);
+    });
+
+    it("each slice's label colour contrasts with ITS OWN fill, not one fixed colour for the whole ring", () => {
+      const opt = buildPieOption(cols, rows, {
+        dimensions: ["region"], metric: "rev",
+        sliceColors: { EU: "#111111", US: "#eeeeee" }, // one very dark fill, one very light fill
+      }) as any;
+      const eu = opt.series[0].data.find((d: any) => d.name === "EU");
+      const us = opt.series[0].data.find((d: any) => d.name === "US");
+      expect(eu.label.color).not.toBe(us.label.color);
     });
   });
 

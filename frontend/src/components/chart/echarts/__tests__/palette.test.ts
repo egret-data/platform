@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { SERIES_PALETTE, CHART_THEME, seriesColor, resolveColor, lightenOklch } from "../palette";
+import { SERIES_PALETTE, CHART_THEME, seriesColor, resolveColor, lightenOklch, getTextColorForBackground } from "../palette";
 
 // Independent (deliberately duplicated) sRGB -> OKLab conversion, used ONLY to verify
 // lightenOklch's output from the outside — asserting on the hue/lightness the test itself
@@ -158,6 +158,97 @@ describe("chart palette", () => {
         const lightened = lightenOklch(color, 3);
         expect(oklch(lightened).C, `${color} -> ${lightened}`).toBeGreaterThan(CHROMA_FLOOR);
       }
+    });
+  });
+
+  // getTextColorForBackground (fix 2 — WCAG AA label contrast): ported from Metabase's
+  // ui/colors/palette.ts. Verification here is INDEPENDENT of the implementation's own
+  // contrast maths — a second, separately-written WCAG relative-luminance/contrast formula,
+  // so a bug shared between the "real" code and its own self-check couldn't hide.
+  describe("getTextColorForBackground", () => {
+    const DARK_TEXT = "#000000";
+    const LIGHT_TEXT = "#ffffff";
+
+    function hexToRgb(hex: string): [number, number, number] {
+      const n = parseInt(hex.replace("#", ""), 16);
+      return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    }
+    function channelToLinear(c: number): number {
+      const x = c / 255;
+      return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+    }
+    function relativeLuminance(hex: string): number {
+      const [r, g, b] = hexToRgb(hex).map(channelToLinear);
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    }
+    function wcagContrast(hexA: string, hexB: string): number {
+      const l1 = relativeLuminance(hexA);
+      const l2 = relativeLuminance(hexB);
+      const lighter = Math.max(l1, l2);
+      const darker = Math.min(l1, l2);
+      return (lighter + 0.05) / (darker + 0.05);
+    }
+
+    // The two real failing colours measured live on a 3-ring sunburst (task write-up): both
+    // fail WCAG AA (4.5:1) against the OLD fixed dark label colour egret used before this fix
+    // (rgb(51,51,51), ECharts' own default — reproduced here as a sanity check that this test's
+    // independent contrast maths agrees with the write-up's own measurements).
+    //
+    // IMPORTANT / found while writing this test: for BOTH of these colours, the ported 3x-bias
+    // formula picks LIGHT text, but light text's contrast against them is capped by the
+    // background's OWN luminance (~0.30/~0.32) — (Lwhite+0.05)/(Lbg+0.05) with Lwhite=1 tops out
+    // around 2.9-3.0 for a background this bright, and no shade of "light" text can exceed that
+    // ceiling. Dark text, by contrast, WOULD clear 4.5 here (verified below) — the 3x bias
+    // overrides that in favour of the (objectively worse, still-failing) light option. This is
+    // not a bug in this port: it reproduces bit-for-bit against Metabase's own real default theme
+    // tokens (ui/colors/constants/base-colors.ts orion[80] for text-primary, "white" for
+    // text-primary-inverse — verified by hand against Metabase's source for this write-up), so
+    // Metabase's real pie chart has this same property for these same accent colours. Filed as a
+    // finding rather than "fixed", since the task's instruction was to port the bias as-is, not
+    // invent a corrective on top of it.
+    it("a saturated purple fill (#A989C5): the bias still picks light even though dark would have cleared 4.5:1", () => {
+      const chosen = getTextColorForBackground("#A989C5", DARK_TEXT, LIGHT_TEXT);
+      expect(chosen).toBe(LIGHT_TEXT);
+      expect(wcagContrast("#A989C5", DARK_TEXT)).toBeGreaterThanOrEqual(4.5); // the road not taken
+      expect(wcagContrast("#A989C5", LIGHT_TEXT)).toBeLessThan(4.5); // what the bias actually picks
+    });
+
+    it("a mid blue fill (#509EE3): the bias still picks light even though dark would have cleared 4.5:1", () => {
+      const chosen = getTextColorForBackground("#509EE3", DARK_TEXT, LIGHT_TEXT);
+      expect(chosen).toBe(LIGHT_TEXT);
+      expect(wcagContrast("#509EE3", DARK_TEXT)).toBeGreaterThanOrEqual(4.5);
+      expect(wcagContrast("#509EE3", LIGHT_TEXT)).toBeLessThan(4.5);
+    });
+
+    it("a light, already-passing fill keeps dark text", () => {
+      // #B9F381 — the outer-ring green from the write-up, measured 9.75 against dark text.
+      const chosen = getTextColorForBackground("#B9F381", DARK_TEXT, LIGHT_TEXT);
+      expect(chosen).toBe(DARK_TEXT);
+      expect(wcagContrast("#B9F381", chosen)).toBeGreaterThanOrEqual(4.5);
+    });
+
+    // The 3x white-bias is load-bearing: find (by computing, not guessing) a fill whose RAW
+    // contrast picks dark, but where the biased comparison flips to white. If no such colour
+    // existed, that would mean the bias never actually changes an outcome — so this searches
+    // for one and fails loudly, rather than asserting on a colour picked by eye, if none exists.
+    it("the 3x white bias flips a borderline call that raw contrast would have given to dark text", () => {
+      let found: { hex: string; rawDark: number; rawWhite: number } | undefined;
+      for (let v = 0; v < 256 && !found; v++) {
+        const hex = `#${[v, v, v].map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+        const rawDark = wcagContrast(hex, DARK_TEXT);
+        const rawWhite = wcagContrast(hex, LIGHT_TEXT);
+        if (rawDark > rawWhite && rawWhite * 3 > rawDark) {
+          found = { hex, rawDark, rawWhite };
+        }
+      }
+      expect(found, "expected some grey where raw contrast favours dark but the 3x bias favours light").toBeDefined();
+      const chosen = getTextColorForBackground(found!.hex, DARK_TEXT, LIGHT_TEXT);
+      expect(chosen).toBe(LIGHT_TEXT);
+    });
+
+    it("falls back to the dark candidate for a background it cannot parse, rather than throwing", () => {
+      expect(() => getTextColorForBackground("not-a-color", DARK_TEXT, LIGHT_TEXT)).not.toThrow();
+      expect(getTextColorForBackground("not-a-color", DARK_TEXT, LIGHT_TEXT)).toBe(DARK_TEXT);
     });
   });
 });
