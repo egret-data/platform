@@ -1,9 +1,10 @@
 -- Gauge `min`/`max` become coloured `segments`: the old renderer drew three zones at fixed
 -- thirds of [min, max] with a fixed direction (low red, high green) -- wrong for any metric
--- where less is better (p99 latency, error rate, churn...). Task 1 replaced the render-time
--- read with `gauge.segments`, an array of `{min, max, color, label?}`; this migration converts
--- what is already stored so no saved chart changes how it looks. See
--- docs/en/specs/2026-07-29-chart-redesign-04-gauge.md.
+-- where less is better (p99 latency, error rate, churn...). Task 1 introduced the new shape,
+-- `gauge.segments` (an array of `{min, max, color, label?}`), but the renderer still draws a
+-- hardcoded auto-range and does not read `segments` yet -- that lands in task 3. This migration
+-- only converts what is already stored, ahead of that render-time switch, so that once it lands
+-- no saved chart changes how it looks. See docs/en/specs/2026-07-29-chart-redesign-04-gauge.md.
 --
 -- Colours are the literal hex values behind SERIES_PALETTE[3] / [4] / [1] -- the exact indices
 -- the renderer already used for its three zones -- read from
@@ -32,7 +33,22 @@
 -- keeps the max following the data the way it always has; the cost taken is that the stored
 -- `min` is discarded and the range starts at 0 instead of the chart's chosen minimum. That is
 -- judged the smaller, more honest failure than a segment array that looks precise and is not.
--- So a min-only row gets NO segments -- only the stale `gauge.min` is removed.
+-- So a min-only row gets NO segments -- only the stale `gauge.min` is removed. (Checked against
+-- the live database before writing this migration: there are currently zero gauge charts on it,
+-- so today this trade-off costs nothing observed there -- a fact about that one database, not a
+-- guarantee about what anyone else's data holds.)
+--
+-- Both bound checks below test `jsonb_typeof(...) = 'number'`, not `?` (key exists) and not a
+-- bare cast: `s ? 'gauge.max'` is true even when the value is a JSON `null`, and `->>` of a JSON
+-- null is SQL NULL rather than an error, so a `?`-gated branch would happily build a segments
+-- array with `null` bounds. And `(s->>'gauge.min')::numeric` throws on any non-numeric string,
+-- array or boolean under that key -- fatal here because the whole table is rewritten inside one
+-- transaction, so one malformed row would abort the migration for every chart, not just its own
+-- (migration 0101 avoided casts for exactly this reason). A malformed bound is therefore treated
+-- as absent, same as a bound that was never set: a malformed `gauge.min` behaves like the old
+-- renderer's `cfg.min ?? 0`, and a malformed `gauge.max` takes the no-segments branch like an
+-- absent one. The API does not validate individual setting values (`chartparams.rs`), so this is
+-- a real shape a caller or older row can carry, not just a defensive nicety.
 --
 -- Same two points as migration 0101: `-` binds tighter than `->`, so the sub-object is extracted
 -- into a plain alias (`s` / `o`) before `-` is used on it; and a non-object `settings` /
@@ -41,9 +57,16 @@
 -- not promise left-to-right AND evaluation.
 --
 -- `vizOverride` (migration 0100) is a PARTIAL override: `gauge.segments` is written into it only
--- when the override itself carried `gauge.min` or `gauge.max` -- writing it unconditionally would
+-- when the override itself carried a numeric `gauge.max` -- writing it unconditionally would
 -- shadow the base chart's own segments for every card whose override never touched gauge
--- settings at all.
+-- settings at all. The min-only exception is the same rule as the charts statement above: an
+-- override with `gauge.min` but no (numeric) `gauge.max` gets its stale `gauge.min` stripped and
+-- no segments, for the identical reason -- the old max there was data-derived, not stored.
+--
+-- No `viz_type = 'gauge'` filter: harmless either way, since these keys are namespaced and a
+-- `gauge.*` key sitting dormant on a non-gauge chart is never read by that chart's renderer. Not
+-- filtering also means a chart later switched back to viz_type gauge finds its ranges already
+-- converted rather than reverting to the old fixed thirds.
 
 UPDATE analytics.charts c
 SET params = jsonb_set(c.params, '{settings}', migrated.new_settings)
@@ -51,7 +74,7 @@ FROM (
   SELECT
     ch.id,
     (s - 'gauge.min' - 'gauge.max')
-      || (CASE WHEN s ? 'gauge.max' THEN
+      || (CASE WHEN jsonb_typeof(s->'gauge.max') = 'number' THEN
             jsonb_build_object('gauge.segments', jsonb_build_array(
               jsonb_build_object('min', mn,                     'max', mn + (mx - mn) / 3,     'color', '#EF8C8C'),
               jsonb_build_object('min', mn + (mx - mn) / 3,      'max', mn + 2 * (mx - mn) / 3, 'color', '#F9D45C'),
@@ -66,10 +89,16 @@ FROM (
     SELECT CASE WHEN jsonb_typeof(ch.params->'settings') = 'object'
                 THEN ch.params->'settings' ELSE '{}'::jsonb END AS s
   ) x, LATERAL (
-    SELECT COALESCE((s->>'gauge.min')::numeric, 0) AS mn,
-           (s->>'gauge.max')::numeric AS mx
+    -- A malformed bound (wrong JSON type, or a JSON null) is treated as absent rather than cast
+    -- and allowed to abort the whole statement -- see the header comment.
+    SELECT COALESCE(CASE WHEN jsonb_typeof(s->'gauge.min') = 'number' THEN (s->>'gauge.min')::numeric END, 0) AS mn,
+           CASE WHEN jsonb_typeof(s->'gauge.max') = 'number' THEN (s->>'gauge.max')::numeric END AS mx
   ) y
-  WHERE s ?| array['gauge.min', 'gauge.max']
+  -- A raw `?|` key-existence test would still match (and strip) a row whose only signal is a
+  -- `gauge.max: null` -- harmless in effect (nothing gets converted either way, see the CASE
+  -- above) but not actually untouched. Testing the same `jsonb_typeof = 'number'` check here
+  -- keeps a row with no *numeric* min or max out of the UPDATE entirely.
+  WHERE jsonb_typeof(s->'gauge.min') = 'number' OR jsonb_typeof(s->'gauge.max') = 'number'
 ) AS migrated
 WHERE c.id = migrated.id;
 
@@ -79,7 +108,7 @@ FROM (
   SELECT
     card.id,
     (o - 'gauge.min' - 'gauge.max')
-      || (CASE WHEN o ? 'gauge.max' THEN
+      || (CASE WHEN jsonb_typeof(o->'gauge.max') = 'number' THEN
             jsonb_build_object('gauge.segments', jsonb_build_array(
               jsonb_build_object('min', mn,                     'max', mn + (mx - mn) / 3,     'color', '#EF8C8C'),
               jsonb_build_object('min', mn + (mx - mn) / 3,      'max', mn + 2 * (mx - mn) / 3, 'color', '#F9D45C'),
@@ -92,9 +121,12 @@ FROM (
     SELECT CASE WHEN jsonb_typeof(card.options->'vizOverride') = 'object'
                 THEN card.options->'vizOverride' ELSE '{}'::jsonb END AS o
   ) x, LATERAL (
-    SELECT COALESCE((o->>'gauge.min')::numeric, 0) AS mn,
-           (o->>'gauge.max')::numeric AS mx
+    -- A malformed bound is treated as absent, not cast and allowed to abort -- see the header.
+    SELECT COALESCE(CASE WHEN jsonb_typeof(o->'gauge.min') = 'number' THEN (o->>'gauge.min')::numeric END, 0) AS mn,
+           CASE WHEN jsonb_typeof(o->'gauge.max') = 'number' THEN (o->>'gauge.max')::numeric END AS mx
   ) y
-  WHERE o ?| array['gauge.min', 'gauge.max']
+  -- Same reason as the charts statement above: keeps an override whose only signal is a
+  -- `gauge.max: null` fully untouched instead of merely un-converted.
+  WHERE jsonb_typeof(o->'gauge.min') = 'number' OR jsonb_typeof(o->'gauge.max') = 'number'
 ) AS migrated
 WHERE dc.id = migrated.id;
