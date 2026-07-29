@@ -19,8 +19,12 @@ const ZONE_LOW = SERIES_PALETTE[3];  // red
 const ZONE_MID = SERIES_PALETTE[4];  // yellow
 const ZONE_HIGH = SERIES_PALETTE[1]; // green
 
-/** Today's three zones, derived rather than stored so an unconfigured gauge is unchanged. */
-function defaultSegments(value: number): GaugeSegment[] {
+/**
+ * Today's three zones, derived rather than stored so an unconfigured gauge is unchanged.
+ * Exported so the segment editor (task 4) can show exactly these three rows when nothing
+ * is stored yet, instead of re-deriving the thirds-of-[0, value*2] numbers a second time.
+ */
+export function defaultGaugeSegments(value: number): GaugeSegment[] {
   const max = value > 0 ? value * 2 : 100;
   const third = max / 3;
   return [
@@ -48,7 +52,7 @@ function isValidSegment(s: GaugeSegment | null | undefined): s is GaugeSegment {
  * nothing usable survives (an empty array or one where every entry is invalid). */
 function sanitizeSegments(value: number, segments: GaugeSegment[] | undefined): GaugeSegment[] {
   const valid = (segments ?? []).filter(isValidSegment).sort((a, b) => a.max - b.max);
-  return valid.length > 0 ? valid : defaultSegments(value);
+  return valid.length > 0 ? valid : defaultGaugeSegments(value);
 }
 
 // Metabase-style Gauge: one value on an arc between min and max.
