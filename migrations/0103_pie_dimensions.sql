@@ -41,13 +41,22 @@
 -- dormant on any renderer that isn't reading them. Not filtering also means a chart later switched
 -- back to viz_type pie finds its dimension already converted rather than reverting to the broken
 -- singular shape.
+--
+-- `||` on jsonb keeps the RIGHT-hand operand's value on a duplicate key, so the freshly-built
+-- `pie.dimensions` object is put on the LEFT: a hand-edited (or otherwise already-touched) row that
+-- somehow carries both the old `pie.dimension` and an already-populated `pie.dimensions` keeps that
+-- existing array rather than having it silently overwritten by a fabricated one-element one. The
+-- ordinary single-key case is unaffected either way, because `s - 'pie.dimension'` then carries no
+-- `pie.dimensions` to win the merge with.
+--
+-- See docs/en/specs/2026-07-29-chart-redesign-05-pie.md.
 
 UPDATE analytics.charts c
 SET params = jsonb_set(c.params, '{settings}', migrated.new_settings)
 FROM (
   SELECT
     ch.id,
-    (s - 'pie.dimension') || jsonb_build_object('pie.dimensions', jsonb_build_array(s->>'pie.dimension')) AS new_settings
+    jsonb_build_object('pie.dimensions', jsonb_build_array(s->>'pie.dimension')) || (s - 'pie.dimension') AS new_settings
   FROM analytics.charts ch, LATERAL (
     -- Normalised here rather than guarded in the WHERE -- see the header comment.
     SELECT CASE WHEN jsonb_typeof(ch.params->'settings') = 'object'
@@ -64,7 +73,7 @@ SET options = jsonb_set(dc.options, '{vizOverride}', migrated.new_override)
 FROM (
   SELECT
     card.id,
-    (o - 'pie.dimension') || jsonb_build_object('pie.dimensions', jsonb_build_array(o->>'pie.dimension')) AS new_override
+    jsonb_build_object('pie.dimensions', jsonb_build_array(o->>'pie.dimension')) || (o - 'pie.dimension') AS new_override
   FROM analytics.dashboard_cards card, LATERAL (
     -- Normalised here rather than guarded in the WHERE, for the same reason as the charts
     -- statement above.
