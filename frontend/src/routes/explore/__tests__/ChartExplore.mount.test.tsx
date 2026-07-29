@@ -73,7 +73,7 @@ vi.mock("@/api/datasets", () => ({
 
 async function mountChart(id: string, tab?: "display") {
   const { default: ChartExplore } = await import("../ChartExplore");
-  render(
+  return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <TooltipProvider>
         <MemoryRouter initialEntries={[`/explore/demo/charts/${id}${tab ? `?tab=${tab}` : ""}`]}>
@@ -109,6 +109,25 @@ describe("ChartExplore mounts", () => {
   it("keeps the shared formatting sections on a migrated viz's Display tab", async () => {
     await mountChart("c-bar", "display");
     expect(await screen.findByText("Formatting")).toBeInTheDocument();
+  });
+
+  // The other half of "the chart card uses the height it is given" (see PreviewPane's own
+  // test): the card's `flex-1` only resolves to pixels if the column it sits in is a flex
+  // column with a definite height. jsdom does no layout, so this pins the chain that
+  // produces the height rather than the height itself.
+  it("lays the preview column out as a flex column so the card can grow into it", async () => {
+    await mountChart("c-bar");
+    // The sr-only title is the column's first child, so it names the column without needing
+    // a run to have finished.
+    const column = (await screen.findByRole("heading", { name: "Bar v2" })).parentElement!;
+    expect(column.className).toContain("flex-col");
+    expect(column.className).toContain("flex-1");
+    // The row above it is what makes that column's own height definite.
+    expect(column.parentElement!.className).toContain("h-full");
+    expect(column.parentElement!.className).toContain("min-h-0");
+    // PreviewPane's output lands directly in that column — nothing in between re-introduces
+    // an auto-height wrapper that would swallow the card's `flex-1`.
+    expect(screen.getByText(/^Set up your/).parentElement!.parentElement).toBe(column);
   });
 
   it("keeps the table's column and conditional-formatting sections", async () => {

@@ -104,8 +104,20 @@ export function PreviewPane({
         {finished && viz !== "table" && viz !== "pivot_table" && (
           <ChartErrorBoundary resetKey={`${viz}:${columns.length}:${rows.length}`}>
             {/* ChartRenderer fills its parent; the preview owns the height + frame
-                (dashboard cards size it to the grid cell instead). */}
-            <div className="h-[60vh] rounded-lg border p-2">
+                (dashboard cards size it to the grid cell instead).
+
+                `flex-1`, not a viewport fraction. This was `h-[60vh]`, which at a 920px
+                viewport is 552px while the studio's main column already offers ~783px — a
+                third of the available height thrown away on every chart type, every time,
+                and the direct cause of a three-ring pie's rings measuring 47px against
+                Metabase's 69px. The chain that makes this resolve: the route's main column
+                is `flex flex-1 flex-col` inside `flex h-full min-h-0`, so it has a definite
+                height, and `display: contents` on the wrapper just above means THIS div is
+                the flex item that grows into it. `min-h-` is deliberately not doing the
+                sizing here — a `h-full` child under a bare `min-h-` parent resolves to 0
+                (the chart-studio bug this program already hit once); the floor below is only
+                a floor, so a short window still gets a usable chart. */}
+            <div data-chart-card className="min-h-[20rem] flex-1 rounded-lg border p-2">
               <ChartRenderer vizType={viz} params={params} columns={columns} rows={rows} metricTypes={metricTypes} />
             </div>
           </ChartErrorBoundary>

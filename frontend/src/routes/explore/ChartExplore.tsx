@@ -462,8 +462,13 @@ export default function ChartExplore() {
         </Tabs>
       </div>
 
-      {/* Main area (full-width preview) */}
-      <div className="flex-1 overflow-auto p-4 space-y-3">
+      {/* Main area (full-width preview). A flex COLUMN, so the chart card below can claim
+          the height left over after the toolbar instead of guessing at a viewport fraction
+          — the parent row is `flex h-full min-h-0`, which makes this column's own height
+          definite, which is what lets `flex-1` on the card resolve to real pixels. It keeps
+          `overflow-auto` for the short-window case, where the card's own min-height wins
+          and this scrolls. */}
+      <div className="flex flex-1 flex-col overflow-auto p-4 space-y-3">
         <h1 className="sr-only">{saveName || "New chart"}</h1>
         <StudioToolbar
           name={saveName} onName={setSaveName}

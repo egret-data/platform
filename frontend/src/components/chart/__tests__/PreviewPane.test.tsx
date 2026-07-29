@@ -3,6 +3,11 @@ import { render, screen } from "@testing-library/react";
 import { PreviewPane } from "../PreviewPane";
 import { EMPTY_SPEC } from "@/api/charts";
 
+// The card's geometry is what these tests are about, not what ECharts draws inside it.
+vi.mock("@/components/chart/echarts/EChartsRenderer", () => ({
+  EChartsRenderer: () => <div data-testid="echarts" />,
+}));
+
 const base = {
   viz: "bar" as const,
   params: { spec: EMPTY_SPEC },
@@ -43,6 +48,21 @@ describe("PreviewPane", () => {
   it("renders anything passed as children above the preview", () => {
     render(<PreviewPane {...base}>{<p>chips</p>}</PreviewPane>);
     expect(screen.getByText("chips")).toBeInTheDocument();
+  });
+
+  // jsdom does no layout, so the pixel height itself can't be asserted here — what CAN be
+  // pinned is the thing that decided it: the card sizes from the space its parent hands it
+  // (flex-1 inside ChartExplore's flex column, see that route's own test) rather than from a
+  // fraction of the viewport, which at 920px threw away ~230px of a 783px parent on every
+  // chart type.
+  it("sizes the chart card from its parent, not from a viewport fraction", () => {
+    const { container } = render(<PreviewPane {...base} finished />);
+    const card = container.querySelector("[data-chart-card]");
+    expect(card).not.toBeNull();
+    expect(card!.className).toContain("flex-1");
+    // A floor so a short window still gets a usable chart instead of a collapsed sliver.
+    expect(card!.className).toContain("min-h-[20rem]");
+    expect(card!.className).not.toMatch(/\bh-\[\d+vh\]/);
   });
 
   it("renders the table surface only when the table props are supplied", () => {
