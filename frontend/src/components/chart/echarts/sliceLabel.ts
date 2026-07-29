@@ -215,18 +215,41 @@ export function truncateLabelText(
   return bestFit + CHAR_ELLIPSIS;
 }
 
+/** Minimum number of REAL (non-ellipsis) characters a truncated label must keep to be worth
+ * showing at all — a judgement call beyond Metabase's own bare-ellipsis-only guard (Metabase
+ * never has to make this call: it measures against real pixels, so it essentially never
+ * produces a 1-2 character truncation in practice). Once egret ALSO measures against the
+ * chart's real size (see options/pie.ts's `containerSize`), a razor-thin truncation like "L…"
+ * becomes rare — but not impossible: a genuinely narrow slice (e.g. a thin donut ring, or a
+ * slice pinned just above the "Other" fold threshold) can still have real, if small, room.
+ *
+ * A 1-2 character prefix identifies nothing on its own AND is easily mistaken for a real, short,
+ * untruncated value — plenty of real dimension values ARE 2-letter codes ("US", "EU", "CA",
+ * region/country abbreviations…), so a bare "U…" reads as if it might BE one of those rather
+ * than a cut-off "United [something]". 3 is chosen so a kept truncation always shows strictly
+ * more characters than the shortest common real codes are wide, rather than a floor that would
+ * still let a 1- or 2-character prefix through looking like real, complete data.
+ */
+export const MIN_TRUNCATED_LABEL_CHARS = 3;
+
 /**
  * Decides what a single slice's label should actually say, given the space its own geometry
  * allows (`availableSpace`, from `calcAvailableDonutSliceLabelLength` minus this chart's label
  * padding) — ports the fit/truncate/drop decision embedded in Metabase's
- * `getSeriesDataFromSlices` (option.ts ~L237-253):
+ * `getSeriesDataFromSlices` (option.ts ~L237-253), extended with the MIN_TRUNCATED_LABEL_CHARS
+ * floor above (egret-specific — see its own comment for why):
+ *  - blank or all-whitespace label (no real dimension value) → dropped outright — there is
+ *    nothing to fit, and the trivial "an empty string fits any width" case would otherwise slip
+ *    through as a bare "" label without ever reaching the truncation logic below, which is
+ *    exactly what let this render as a content-less blank instead of the intentional
+ *    "nothing to show" signal every other dropped label already produces;
  *  - fits as-is → shown in full;
  *  - doesn't fit and labels are off entirely → dropped (no truncation attempted, matching
  *    Metabase's `else if (settings["pie.show_labels"])` guard);
  *  - doesn't fit, labels are on, but there's no room at all (`availableSpace <= 0`) → dropped;
  *  - doesn't fit, labels are on, some room → truncated with an ellipsis, UNLESS that truncation
- *    collapses to the bare ellipsis alone, which reads as noise rather than a label and is
- *    dropped too.
+ *    keeps fewer than MIN_TRUNCATED_LABEL_CHARS real characters (which subsumes the old
+ *    bare-ellipsis-only check — 0 real characters is just the smallest case of "too few").
  *
  * Pure and DOM-free: takes `measureText` as a parameter rather than calling a real rasteriser
  * itself, so it can be exercised with a deterministic stub in tests.
@@ -240,6 +263,10 @@ export function fitSliceLabel(params: {
 }): string | null {
   const { label, availableSpace, showLabels, measureText, fontStyle } = params;
 
+  if (label.trim() === "") {
+    return null;
+  }
+
   if (measureText(label, fontStyle) <= availableSpace) {
     return label;
   }
@@ -248,7 +275,8 @@ export function fitSliceLabel(params: {
   }
 
   const truncated = truncateLabelText(label, availableSpace, measureText, fontStyle);
-  return truncated === CHAR_ELLIPSIS ? null : truncated;
+  const survivingChars = truncated.endsWith(CHAR_ELLIPSIS) ? truncated.length - CHAR_ELLIPSIS.length : truncated.length;
+  return survivingChars < MIN_TRUNCATED_LABEL_CHARS ? null : truncated;
 }
 
 // Average glyph width, as a fraction of font size, for the jsdom fallback below. ~0.5 is a

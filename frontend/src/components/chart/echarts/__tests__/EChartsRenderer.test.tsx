@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render } from "@testing-library/react";
 import type { EChartsCoreOption } from "echarts/core";
 
@@ -46,5 +46,99 @@ describe("EChartsRenderer onPointClick", () => {
     render(<EChartsRenderer option={{}} onPointClick={onPointClick} />);
     handlers["click"]?.({ name: "EU", seriesName: "rev", value: 10, event: { event: { clientX: 5, clientY: 7 } } });
     expect(onPointClick).toHaveBeenCalledWith({ name: "EU", seriesName: "rev", value: 10, x: 5, y: 7 });
+  });
+});
+
+// A function-valued `option` (pie only — see options/pie.ts's `containerSize`) needs the chart's
+// REAL rendered pixel size, which this component is the one place with actual DOM access to
+// measure (via ResizeObserver, already used here for `chart.resize()`). These tests drive a
+// controllable ResizeObserver mock directly — jsdom has no ResizeObserver at all, and the plain
+// no-op stub in this file's own `beforeEach` (and the global one in vitest.setup.ts) never
+// invokes its callback, so a test that needs to simulate an actual resize tick has to supply its
+// own mock that captures and can invoke that callback on demand, the same way `instance.on`
+// above is already captured to simulate a click.
+describe("EChartsRenderer — function-valued option (real size plumbing)", () => {
+  let roCallback: ResizeObserverCallback | null = null;
+  let rectWidth = 530;
+  let rectHeight = 420;
+
+  beforeEach(() => {
+    roCallback = null;
+    rectWidth = 530;
+    rectHeight = 420;
+    class MockResizeObserver {
+      constructor(cb: ResizeObserverCallback) { roCallback = cb; }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    globalThis.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(
+      () => ({ width: rectWidth, height: rectHeight, top: 0, left: 0, right: rectWidth, bottom: rectHeight, x: 0, y: 0, toJSON() {} }) as DOMRect,
+    );
+    // Real rAF is timer-driven (~16ms) in jsdom; the resize-thrash guard below coalesces
+    // rebuilds to "the next animation frame", which these tests want to observe synchronously
+    // rather than await a real timer.
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => { cb(0); return 1; });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("calls a function-valued option with the measured size on init", () => {
+    const optionFn = vi.fn((size: { width: number; height: number }) => ({ size }));
+    render(<EChartsRenderer option={optionFn} />);
+    expect(optionFn).toHaveBeenCalledWith({ width: 530, height: 420 });
+    expect(instance.setOption).toHaveBeenCalledWith({ size: { width: 530, height: 420 } }, true);
+  });
+
+  it("calls the function again with the new size when the observed size changes", () => {
+    const optionFn = vi.fn((size: { width: number; height: number }) => ({ size }));
+    render(<EChartsRenderer option={optionFn} />);
+    // Mount already ran optionFn (asserted by the previous test) — clear so this test is only
+    // about the DELTA a resize tick adds, independent of exactly how many times mount itself
+    // calls it (the pre-existing init-effect + option-effect pair, unrelated to this fix).
+    optionFn.mockClear();
+    instance.setOption.mockClear();
+
+    rectWidth = 800;
+    rectHeight = 600;
+    roCallback?.([{ contentRect: { width: 800, height: 600 } }] as unknown as ResizeObserverEntry[], {} as ResizeObserver);
+
+    expect(optionFn).toHaveBeenCalledWith({ width: 800, height: 600 });
+    expect(instance.setOption).toHaveBeenLastCalledWith({ size: { width: 800, height: 600 } }, true);
+    // chart.resize() still runs every tick regardless — the cheap DOM-size-read/repaint this
+    // already did before function-valued options existed.
+    expect(instance.resize).toHaveBeenCalled();
+  });
+
+  it("does not rebuild the option when a resize tick reports the SAME size (thrash guard)", () => {
+    const optionFn = vi.fn((size: { width: number; height: number }) => ({ size }));
+    render(<EChartsRenderer option={optionFn} />);
+    optionFn.mockClear();
+    instance.setOption.mockClear();
+
+    roCallback?.([{ contentRect: { width: 530, height: 420 } }] as unknown as ResizeObserverEntry[], {} as ResizeObserver);
+
+    expect(optionFn).not.toHaveBeenCalled();
+    expect(instance.setOption).not.toHaveBeenCalled();
+    // resize() itself is harmless and still runs — only the (expensive) option rebuild is guarded.
+    expect(instance.resize).toHaveBeenCalled();
+  });
+
+  it("still accepts a plain object option and never calls it as a function", () => {
+    const opt = { series: [] } as EChartsCoreOption;
+    render(<EChartsRenderer option={opt} />);
+    expect(instance.setOption).toHaveBeenCalledWith(opt, true);
+    instance.setOption.mockClear();
+
+    rectWidth = 999;
+    roCallback?.([{ contentRect: { width: 999, height: 420 } }] as unknown as ResizeObserverEntry[], {} as ResizeObserver);
+    // A plain-object option never depends on size — no extra setOption call on resize.
+    expect(instance.setOption).not.toHaveBeenCalled();
+    expect(instance.resize).toHaveBeenCalled();
   });
 });

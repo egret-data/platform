@@ -741,6 +741,12 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
     });
 
     const dCols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+    // A stand-in "real container" size — buildPieOption has no DOM access, so every geometry-
+    // sensitive test below passes this explicitly instead of relying on any built-in guess (see
+    // the regression-guard and 530px-sunburst tests further down for why that distinction
+    // matters). 300x300 here specifically reproduces the exact pixel math this file's tests
+    // already relied on before containerSize existed as an explicit input.
+    const containerSize = { width: 300, height: 300 };
 
     it("a slice too small for its label gets NO label, rather than a bare ellipsis", () => {
       // donut: true so this ring actually has a hole — calcAvailableDonutSliceLabelLength is a
@@ -755,6 +761,7 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
         rows,
         { dimensions: ["d"], metric: "m", showLabels: true, sliceThreshold: 0, donut: true },
         stubMeasure,
+        containerSize,
       ) as any;
       const tiny = opt.series[0].data.find((d: any) => d.name === "Tiny");
       expect(tiny.label.formatter()).toBe(" "); // Metabase's own "nothing to show" sentinel
@@ -770,6 +777,7 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
         [[longName, 55], ["Other region", 45]],
         { dimensions: ["d"], metric: "m", showLabels: true, donut: true },
         stubMeasure,
+        containerSize,
       ) as any;
       const label = opt.series[0].data.find((d: any) => d.name === longName).label.formatter();
       expect(label).not.toBeNull();
@@ -781,6 +789,108 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
     it("showLabels: false still suppresses everything, per-slice fitting included", () => {
       const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", showLabels: false }, stubMeasure) as any;
       expect(opt.series[0].label.show).toBe(false);
+    });
+
+    // Regression guard for the sizing bug: buildPieOption used to convert its abstract 0-100%
+    // radii to pixels against a GUESSED, fixed 300px reference container (
+    // NOMINAL_CONTAINER_MIN_DIMENSION_PX) instead of the chart's real rendered size — so on any
+    // container meaningfully bigger than 300px (a real ~530px card, say), every label was
+    // measured against far less room than it actually had, truncating text that had plenty of
+    // space to render in full. Same data, same slice, same everything else — container size is
+    // the ONLY variable — so a real fix must show a full label at a large size where the exact
+    // same slice truncates at a small one.
+    it("the SAME slice's label survives in full at a large container size and truncates at a small one — size is the only variable", () => {
+      const longName = "A very long region name that will not fit";
+      const cfg = { dimensions: ["d"], metric: "m", showLabels: true, donut: true };
+      const rows2 = [[longName, 55], ["Other region", 45]];
+
+      const small = buildPieOption(dCols, rows2, cfg, stubMeasure, { width: 300, height: 300 }) as any;
+      const smallLabel = small.series[0].data.find((d: any) => d.name === longName).label.formatter();
+      expect(smallLabel).not.toBeNull();
+      expect(smallLabel).not.toBe(longName);
+      expect(smallLabel?.endsWith("…")).toBe(true);
+
+      const large = buildPieOption(dCols, rows2, cfg, stubMeasure, { width: 3000, height: 3000 }) as any;
+      const largeLabel = large.series[0].data.find((d: any) => d.name === longName).label.formatter();
+      expect(largeLabel).toBe(longName);
+    });
+
+    // Realistic reproduction of the reported live bug: a 3-ring sunburst (region -> segment ->
+    // channel) rendered in a ~530px card (the real measured size from EChartsRenderer's
+    // ResizeObserver, not a guess) — every ring-0 (region) label, including "LATAM", must
+    // survive IN FULL. Before the fix, the same chart measured against a fixed 300px reference
+    // and truncated "LATAM" down to "L…".
+    it("a realistic 3-ring sunburst at ~530px keeps ring 0's region labels in full, LATAM included", () => {
+      const cols3 = [
+        { name: "region", type: "varchar" }, { name: "segment", type: "varchar" },
+        { name: "channel", type: "varchar" }, { name: "revenue", type: "double" },
+      ];
+      const regions = ["EMEA", "LATAM", "APAC", "NA"];
+      const segments = ["Enterprise", "SMB", "Consumer"];
+      const channels = ["Direct", "Partner", "Online"];
+      const rows3: unknown[][] = [];
+      let v = 1000;
+      for (const r of regions) {
+        for (const s of segments) {
+          for (const c of channels) {
+            rows3.push([r, s, c, v]);
+            v += 37;
+          }
+        }
+      }
+      const opt = buildPieOption(
+        cols3,
+        rows3,
+        { dimensions: ["region", "segment", "channel"], metric: "revenue", donut: true, showLabels: true },
+        undefined, // real (canvas-fallback-to-average-glyph-width) measurer — the real app path
+        { width: 530, height: 530 },
+      ) as any;
+      const ring0 = opt.series[0].data;
+      for (const region of regions) {
+        const label = ring0.find((d: any) => d.name === region).label.formatter();
+        expect(label).toBe(region);
+      }
+    });
+
+    // Ground rule 3 — across a realistic, deliberately cramped chart (many thin outer-ring
+    // slices, on the OLD undersized-reference-container math this used to expose truncation and
+    // blank-label bugs), no surviving label is ever whitespace-only or a bare ellipsis: every
+    // label is either its full text, a real multi-character truncation, or the single-space
+    // "nothing to show" sentinel — never "", never "…" alone, never a truncation with no real
+    // characters.
+    it("no label is ever whitespace-only or a bare ellipsis, even under a cramped, many-slice ring", () => {
+      const cols3 = [
+        { name: "region", type: "varchar" }, { name: "segment", type: "varchar" },
+        { name: "channel", type: "varchar" }, { name: "revenue", type: "double" },
+      ];
+      const regions = ["EMEA", "LATAM", "APAC", "NA"];
+      const segments = Array.from({ length: 6 }, (_, i) => `Segment${i + 1}`);
+      const channels = Array.from({ length: 3 }, (_, i) => `Channel${i + 1}`);
+      const rows3: unknown[][] = [];
+      let v = 1000;
+      for (const r of regions) {
+        for (const s of segments) {
+          for (const c of channels) {
+            rows3.push([r, s, c, v]);
+            v += 13;
+          }
+        }
+      }
+      const opt = buildPieOption(
+        cols3,
+        rows3,
+        { dimensions: ["region", "segment", "channel"], metric: "revenue", donut: true, showLabels: true },
+        undefined,
+        { width: 300, height: 300 }, // deliberately cramped, so plenty of slices need to drop
+      ) as any;
+      for (const s of opt.series) {
+        for (const d of s.data) {
+          const text = d.label.formatter();
+          if (text === " ") continue; // the one legitimate "nothing to show" sentinel
+          expect(text.trim()).not.toBe("");
+          expect(text).not.toBe("…");
+        }
+      }
     });
 
     it("each slice's label colour contrasts with ITS OWN fill, not one fixed colour for the whole ring", () => {

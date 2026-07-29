@@ -6,6 +6,7 @@ import {
   fitSliceLabel,
   truncateLabelText,
   CHAR_ELLIPSIS,
+  MIN_TRUNCATED_LABEL_CHARS,
 } from "../sliceLabel";
 
 // A deterministic stub measurer so expected numbers are obvious: 7px per character, whatever
@@ -118,16 +119,17 @@ describe("fitSliceLabel", () => {
     expect(result).toBeNull();
   });
 
-  it("truncates with an ellipsis when the label almost fits and labels are on", () => {
-    // "EMEA" is 28px (7*4); give it just enough room for 2 chars + ellipsis (7*2 + 7 = 21).
+  it("truncates with an ellipsis when the label almost fits, keeps at least MIN_TRUNCATED_LABEL_CHARS, and labels are on", () => {
+    // "REGION" is 42px (7*6); give it just enough room for 3 chars + ellipsis (7*3 + 7 = 28) —
+    // exactly MIN_TRUNCATED_LABEL_CHARS survivors, the shortest truncation this function keeps.
     const result = fitSliceLabel({
-      label: "EMEA",
-      availableSpace: 21,
+      label: "REGION",
+      availableSpace: 28,
       showLabels: true,
       measureText: stubMeasure,
       fontStyle,
     });
-    expect(result).toBe(`EM${CHAR_ELLIPSIS}`);
+    expect(result).toBe(`REG${CHAR_ELLIPSIS}`);
   });
 
   it("drops the label rather than showing a bare ellipsis when there's no room for any character", () => {
@@ -150,6 +152,54 @@ describe("fitSliceLabel", () => {
       fontStyle,
     });
     expect(result).toBeNull();
+  });
+
+  // Judgement call (see MIN_TRUNCATED_LABEL_CHARS's own doc comment): a truncation that keeps
+  // FEWER than the minimum survives geometrically (there's room to draw it) but is dropped
+  // anyway, because 1-2 leading characters identify nothing and are easily mistaken for a real,
+  // short, untruncated value (many real dimension values ARE 2-letter codes: "US", "EU", "CA"…).
+  it("drops a truncation that keeps fewer than MIN_TRUNCATED_LABEL_CHARS real characters, even though it geometrically fits", () => {
+    // Same "REGION" label, one character less of room (availableSpace 21 -> availableWidth 14
+    // -> only "RE" (2 chars, 14px) fits) — geometrically valid, but below the floor.
+    const result = fitSliceLabel({
+      label: "REGION",
+      availableSpace: 21,
+      showLabels: true,
+      measureText: stubMeasure,
+      fontStyle,
+    });
+    expect(result).toBeNull();
+  });
+
+  it("keeps a truncation right at the MIN_TRUNCATED_LABEL_CHARS floor, drops one character below it", () => {
+    const atFloor = fitSliceLabel({
+      label: "REGION",
+      availableSpace: MIN_TRUNCATED_LABEL_CHARS * 7 + 7, // MIN chars + ellipsis, exactly
+      showLabels: true,
+      measureText: stubMeasure,
+      fontStyle,
+    });
+    expect(atFloor).toBe("REG…");
+
+    const belowFloor = fitSliceLabel({
+      label: "REGION",
+      availableSpace: (MIN_TRUNCATED_LABEL_CHARS - 1) * 7 + 7, // one char short of the floor
+      showLabels: true,
+      measureText: stubMeasure,
+      fontStyle,
+    });
+    expect(belowFloor).toBeNull();
+  });
+
+  // Bug fix — a slice whose dimension value is blank/missing (name === "", or all-whitespace)
+  // used to fall through the "already fits" fast path (an empty string trivially fits ANY
+  // availableSpace) and render as a bare "" — not caught by the bare-ellipsis guard at all,
+  // since it never reaches truncation. This is what actually produced the reported "renders as
+  // a blank ' '" symptom for some slices (see options/pie.ts's own "nothing to show" sentinel,
+  // which only ever gets a chance to run when fitSliceLabel returns null).
+  it("treats a blank or all-whitespace label as nothing to show, not a trivially-fitting empty string", () => {
+    expect(fitSliceLabel({ label: "", availableSpace: 100, showLabels: true, measureText: stubMeasure, fontStyle })).toBeNull();
+    expect(fitSliceLabel({ label: "   ", availableSpace: 100, showLabels: true, measureText: stubMeasure, fontStyle })).toBeNull();
   });
 });
 

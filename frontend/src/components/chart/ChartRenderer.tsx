@@ -133,7 +133,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildPieOption(columns, rows, {
+          : <EChartsRenderer option={(size) => buildPieOption(columns, rows, {
               dimensions: pie.dimensions, metric: pie.metric, donut: pie.donut,
               showLegend: pie.showLegend, showLabels: pie.showLabels,
               sliceThreshold: pie.sliceThreshold, sortRows: pie.sortRows,
@@ -143,7 +143,11 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
               // Keyed by column name, same shape as the spec map itself — each ring looks up its
               // own dimension's unit rather than ChartRenderer resolving just the first one.
               dimensionUnits: params.spec.temporal_units,
-            })}
+              // `undefined` here is buildPieOption's own measureText param (position 4) — its
+              // default (a real canvas measurer) is exactly what production wants; `size` (the
+              // measured container from EChartsRenderer) fills containerSize (position 5), the
+              // seam this fix closes — see that function's own doc comment.
+            }, undefined, size)}
             onPointClick={onValueClick && pie.dimensions?.[0] ? (p) => {
               // Each ring's ECharts series is named after its own dimension (see buildPieOption),
               // so `seriesName` tells us which ring fired the click — a slice from the outer ring
