@@ -150,7 +150,11 @@ export function resolveColor(expr: string, fallback: string): string {
   document.body.appendChild(probe);
   const resolved = getComputedStyle(probe).color;
   probe.remove();
-  // jsdom returns the literal "var(--x)" (no resolution); a real browser returns rgb().
+  // jsdom returns the literal "var(--x)" (no resolution); a real browser returns a resolved
+  // colour — and for egret's tokens that is an `oklch(...)` string, NOT `rgb()`: computed-value
+  // serialisation only collapses to rgb() for legacy sRGB colours (CSS Color 4). Assuming rgb()
+  // here is what left `parseColor` unable to read a single one of this app's own tokens, so every
+  // downstream consumer of this return value has to handle oklch too.
   const out = resolved && !resolved.includes("var(") ? resolved : fallback;
   colorCache.set(expr, out);
   return out;
@@ -195,25 +199,14 @@ function parseHexColor(color: string): [number, number, number] | undefined {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-/**
- * Lightens a hex colour by `steps` in OKLab space, keeping chroma (C) and hue (H) fixed —
- * i.e. moves straight up the L axis of OKLCH. Used to give an outer pie ring's slice a
- * lighter variant of its parent slice's colour (Metabase's `getRingColorAlias`), rather than
- * an unrelated palette colour.
- *
- * Conversion matrices are Björn Ottosson's OKLab (https://bottosson.github.io/posts/oklab/),
- * §"Converting from linear sRGB to OKLab" and its inverse.
- *
- * `steps <= 0` and unparseable input both return `color` unchanged (verbatim, not
- * round-tripped) — the former so "no lightening" is exact, the latter so a caller passing
- * something this function can't handle (e.g. an unresolved `var(--x)`) degrades to "leave it
- * alone" rather than throwing.
- */
-export function lightenOklch(color: string, steps: number): string {
-  if (!Number.isFinite(steps) || steps <= 0) return color;
-  const rgb = parseHexColor(color);
-  if (!rgb) return color;
+// The OKLab <-> sRGB pair below is the single copy of the colour-space maths in this file: it
+// backs BOTH `lightenOklch` (which moves a colour up the L axis) and `parseColor`'s `oklch()`
+// branch (which reads egret's design tokens). Conversion matrices are Björn Ottosson's OKLab
+// (https://bottosson.github.io/posts/oklab/), §"Converting from linear sRGB to OKLab" and its
+// inverse.
 
+/** sRGB 0-255 channels -> OKLab `[L, a, b]`. */
+function srgbToOklab(rgb: [number, number, number]): [number, number, number] {
   const [r, g, b] = rgb.map((c) => srgbToLinear(c / 255));
 
   // linear sRGB -> LMS -> LMS' (cube root)
@@ -225,9 +218,53 @@ export function lightenOklch(color: string, steps: number): string {
   const s_ = Math.cbrt(s);
 
   // LMS' -> OKLab
-  const L = 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_;
-  const a = 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_;
-  const bb = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_;
+  return [
+    0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+    1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+    0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
+  ];
+}
+
+/** OKLab `[L, a, b]` -> sRGB 0-255 channels, each clamped into gamut and rounded. */
+function oklabToSrgb(L: number, a: number, b: number): [number, number, number] {
+  // OKLab -> LMS' (inverse of the forward matrix above) -> LMS
+  const l_ = L + 0.3963377774 * a + 0.2158037573 * b;
+  const m_ = L - 0.1055613458 * a - 0.0638541728 * b;
+  const s_ = L - 0.0894841775 * a - 1.2914855480 * b;
+  const l = l_ * l_ * l_;
+  const m = m_ * m_ * m_;
+  const s = s_ * s_ * s_;
+
+  // LMS -> linear sRGB -> sRGB
+  const r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
+  const g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
+  const bl = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s;
+  return [r, g, bl].map((c) => Math.round(linearToSrgb(c) * 255)) as [number, number, number];
+}
+
+/**
+ * Lightens a colour by `steps` in OKLab space, keeping chroma (C) and hue (H) fixed —
+ * i.e. moves straight up the L axis of OKLCH. Used to give an outer pie ring's slice a
+ * lighter variant of its parent slice's colour (Metabase's `getRingColorAlias`), rather than
+ * an unrelated palette colour.
+ *
+ * Input goes through the shared `parseColor`, so a colour that arrived as a browser-resolved
+ * token (`oklch(...)`) or as `rgb()` lightens exactly like a hex literal does. That matters
+ * live rather than theoretically: the "Other" slice's colour is `var(--muted-foreground)`, which
+ * `resolveColor` turns into an `oklch()` string in a real browser — while this only read hex,
+ * every ring nested under Other came back unchanged and the whole sub-tree rendered one flat grey.
+ *
+ * `steps <= 0` and unparseable input both return `color` unchanged (verbatim, not
+ * round-tripped) — the former so "no lightening" is exact, the latter so a caller passing
+ * something this function can't handle (e.g. an unresolved `var(--x)`) degrades to "leave it
+ * alone" rather than throwing.
+ */
+export function lightenOklch(color: string, steps: number): string {
+  if (!Number.isFinite(steps) || steps <= 0) return color;
+  const rgb = parseColor(color);
+  if (!rgb) return color;
+
+  const [L, a, b] = srgbToOklab(rgb);
 
   // Raise L only; a/b (so chroma + hue) are untouched — the whole point of doing this in
   // OKLab rather than a naive sRGB blend toward white, which desaturates and shifts hue.
@@ -237,21 +274,8 @@ export function lightenOklch(color: string, steps: number): string {
   const target = L + OKLCH_STEP_L * steps;
   const L2 = Math.max(L, Math.min(target, OKLCH_MAX_L));
 
-  // OKLab -> LMS' (inverse of the forward matrix above)
-  const l2_ = L2 + 0.3963377774 * a + 0.2158037573 * bb;
-  const m2_ = L2 - 0.1055613458 * a - 0.0638541728 * bb;
-  const s2_ = L2 - 0.0894841775 * a - 1.2914855480 * bb;
-  const l2 = l2_ * l2_ * l2_;
-  const m2 = m2_ * m2_ * m2_;
-  const s2 = s2_ * s2_ * s2_;
-
-  // LMS -> linear sRGB
-  const r2 = 4.0767416621 * l2 - 3.3077115913 * m2 + 0.2309699292 * s2;
-  const g2 = -1.2684380046 * l2 + 2.6097574011 * m2 - 0.3413193965 * s2;
-  const b2 = -0.0041960863 * l2 - 0.7034186147 * m2 + 1.7076147010 * s2;
-
-  const toHex = (c: number) => Math.round(linearToSrgb(c) * 255).toString(16).padStart(2, "0");
-  return `#${toHex(r2)}${toHex(g2)}${toHex(b2)}`;
+  const toHex = (c: number) => c.toString(16).padStart(2, "0");
+  return `#${oklabToSrgb(L2, a, b).map(toHex).join("")}`;
 }
 
 /** Concrete fallbacks (≈ egret light-theme tokens) for non-DOM contexts. */
@@ -263,17 +287,58 @@ export const COLOR_FALLBACK = {
   card: "#ffffff",         // ≈ --card (charts render inside a Card, not the page background)
 } as const;
 
-/** Parses `#rgb`/`#rrggbb` or `rgb()`/`rgba()` (alpha ignored) to 0-255 channels; anything
- * else (a named CSS colour, `oklch()`, an unresolved `var()`, ...) is unparseable. Covers what
- * this file's OWN outputs (SERIES_PALETTE, lightenOklch, resolveColor) can ever produce, plus
- * what a real browser's `getComputedStyle` returns for a resolved `var()` (`rgb(r, g, b)`) —
- * not a general CSS colour parser. */
-function parseColor(color: string): [number, number, number] | undefined {
+// An oklch() component: a number (`0.14`), a percentage (`14%`), or the `none` keyword (which
+// CSS Color 4 defines as "missing", behaving as 0 in every calculation this file does).
+// `percentBasis` is what 100% means for that component — 1 for lightness, 0.4 for chroma
+// (CSS Color 4 §oklch()).
+function parseOklchComponent(raw: string | undefined, percentBasis: number): number | undefined {
+  if (raw == null || raw.toLowerCase() === "none") return 0;
+  const m = /^([+-]?(?:\d+\.?\d*|\.\d+))(%?)$/.exec(raw);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  return m[2] === "%" ? (n / 100) * percentBasis : n;
+}
+
+/** Parses `oklch(L C H)` — egret's design tokens (Tailwind v4) are all written this way, and a
+ * browser hands them back in the SAME space: `getComputedStyle().color` only serialises to
+ * `rgb()` for legacy-sRGB colours, so a resolved `var(--foreground)` arrives here as
+ * `oklch(...)`, not `rgb(...)`.
+ *
+ * Accepts both spellings of lightness (`oklch(14% ...)` and `oklch(0.14 ...)`), an omitted or
+ * `none` chroma/hue (achromatic grey), an optional `deg` unit on the hue, and an optional
+ * `/ alpha` which is ignored — the same way `rgba()`'s alpha already is. */
+function parseOklchColor(color: string): [number, number, number] | undefined {
+  const m = /^oklch\(\s*([^\s/)]+)(?:\s+([^\s/)]+))?(?:\s+([^\s/)]+))?\s*(?:\/\s*[^)]*)?\)$/i.exec(color.trim());
+  if (!m) return undefined;
+  const L = parseOklchComponent(m[1], 1);
+  const C = parseOklchComponent(m[2], 0.4);
+  // `%` is not actually valid on a <hue>, so the 360 basis is only a lenient reading of something
+  // CSS would reject outright — chosen over returning `undefined` because a nonsense hue on an
+  // otherwise-readable colour shouldn't cost the caller its lightness.
+  const H = parseOklchComponent(m[3]?.replace(/deg$/i, ""), 360);
+  if (L === undefined || C === undefined || H === undefined) return undefined;
+
+  const rad = (H * Math.PI) / 180;
+  // Out-of-gamut inputs are clamped per channel by `linearToSrgb`, so this always yields drawable
+  // 0-255 channels rather than an overflow.
+  return oklabToSrgb(L, C * Math.cos(rad), C * Math.sin(rad));
+}
+
+/** Parses `#rgb`/`#rrggbb`, `rgb()`/`rgba()` (alpha ignored) or `oklch()` to 0-255 channels;
+ * anything else (a named CSS colour, an unresolved `var()`, ...) is unparseable. Covers what this
+ * file's OWN outputs (SERIES_PALETTE, lightenOklch, resolveColor) can ever produce, plus what a
+ * real browser's `getComputedStyle` returns for a resolved `var()` — which for egret's tokens is
+ * `oklch(...)`, and only for a legacy colour `rgb(r, g, b)`. Not a general CSS colour parser.
+ *
+ * Exported so its contract can be asserted directly: the `oklch()` branch is the whole reason
+ * `getTextColorForBackground` works at all in dark mode, and testing it only through that
+ * function's chosen-candidate output is what let it stay broken. */
+export function parseColor(color: string): [number, number, number] | undefined {
   const hex = parseHexColor(color);
   if (hex) return hex;
   const m = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*[\d.]+\s*)?\)$/i.exec(color.trim());
-  if (!m) return undefined;
-  return [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (m) return [Number(m[1]), Number(m[2]), Number(m[3])];
+  return parseOklchColor(color);
 }
 
 function relativeLuminance(rgb: [number, number, number]): number {
