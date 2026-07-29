@@ -910,44 +910,53 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
       }
     });
 
-    // Ground rule 3 — across a realistic, deliberately cramped chart (many thin outer-ring
-    // slices, on the OLD undersized-reference-container math this used to expose truncation and
-    // blank-label bugs), no surviving label is ever whitespace-only or a bare ellipsis: every
-    // label is either its full text, a real multi-character truncation, or the single-space
-    // "nothing to show" sentinel — never "", never "…" alone, never a truncation with no real
-    // characters.
-    it("no label is ever whitespace-only or a bare ellipsis, even under a cramped, many-slice ring", () => {
-      const cols3 = [
-        { name: "region", type: "varchar" }, { name: "segment", type: "varchar" },
-        { name: "channel", type: "varchar" }, { name: "revenue", type: "double" },
-      ];
-      const regions = ["EMEA", "LATAM", "APAC", "NA"];
-      const segments = Array.from({ length: 6 }, (_, i) => `Segment${i + 1}`);
-      const channels = Array.from({ length: 3 }, (_, i) => `Channel${i + 1}`);
-      const rows3: unknown[][] = [];
-      let v = 1000;
-      for (const r of regions) {
-        for (const s of segments) {
-          for (const c of channels) {
-            rows3.push([r, s, c, v]);
-            v += 13;
-          }
-        }
-      }
+    // Ground rule 3 — no surviving label is ever whitespace-only or a bare ellipsis: every label
+    // is either its full text, a real multi-character truncation, or the "nothing to show"
+    // sentinel — never "", never "…" alone, never a truncation with no real characters.
+    //
+    // This test used to run against a big, cramped, many-slice 3-ring sunburst and sweep every
+    // label, on the assumption that SOME slice in there would land in each dangerous band. None
+    // did: deleting the MIN_TRUNCATED_LABEL_CHARS floor outright left the whole suite green,
+    // because no slice in that fixture ever had `0 < availableSpace <= ellipsisWidth` (the only
+    // band that yields a bare ellipsis) and no fixture row had a blank dimension value at all. A
+    // sweep only guards what its fixture actually reaches, so this now names the two cases and
+    // engineers a slice into each, with the deterministic 7px-per-character measurer so the
+    // bands are exact rather than hoped for.
+    //
+    // Geometry: a single-ring donut (radii 45%-70%) in a 300px container -> inner 67.5px, outer
+    // 105px, fontSize 14. Labels there are HORIZONTAL, so a slice's room is its inner chord —
+    // which, unlike the radial branch's donut thickness (always > 2 * fontSize or 0), can land
+    // anywhere, sub-ellipsis-width included. "Tiny" is 19/1000 of the ring: a ~6.8-degree arc,
+    // ~8px of chord, ~4px after the label padding — under the 7px ellipsis, so truncation can
+    // only return a bare "…", which the floor must turn into no label at all.
+    it("drops a label with nothing left to say: a blank dimension value, and a slice too narrow for even an ellipsis", () => {
+      const dc = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
       const opt = buildPieOption(
-        cols3,
-        rows3,
-        { dimensions: ["region", "segment", "channel"], metric: "revenue", donut: true, showLabels: true },
-        undefined,
-        { width: 300, height: 300 }, // deliberately cramped, so plenty of slices need to drop
+        dc,
+        [["", 500], ["Alpha", 481], ["Tiny", 19]],
+        { dimensions: ["d"], metric: "m", donut: true, showLabels: true, sliceThreshold: 0 },
+        stubMeasure,
+        { width: 300, height: 300 },
       ) as any;
-      for (const s of opt.series) {
-        for (const d of s.data) {
-          const text = d.label.formatter();
-          if (text === " ") continue; // the one legitimate "nothing to show" sentinel
-          expect(text.trim()).not.toBe("");
-          expect(text).not.toBe("…");
-        }
+      const labelOf = (name: string) => opt.series[0].data.find((d: any) => d.name === name).label.formatter();
+
+      // A row with no dimension value has nothing to fit — an empty string would otherwise sail
+      // through the "already fits" fast path (it fits ANY width) and render as a content-less "".
+      expect(labelOf("")).toBe(" ");
+
+      // A slice with real but sub-ellipsis room truncates to a bare "…", which identifies nothing
+      // — the MIN_TRUNCATED_LABEL_CHARS floor drops it instead.
+      expect(labelOf("Tiny")).toBe(" ");
+
+      // ...and the floor is not just dropping everything that doesn't fit whole: a slice with room
+      // for a real multi-character prefix still gets one.
+      expect(labelOf("Alpha")).toBe("Alp…");
+
+      for (const d of opt.series[0].data) {
+        const text = d.label.formatter();
+        if (text === " ") continue; // the one legitimate "nothing to show" sentinel
+        expect(text.trim()).not.toBe("");
+        expect(text).not.toBe("…");
       }
     });
 
