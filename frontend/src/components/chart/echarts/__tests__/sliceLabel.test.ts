@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   calcChordLength,
   calcAvailableDonutSliceLabelLength,
@@ -121,6 +121,58 @@ describe("calcAvailableDonutSliceLabelLength", () => {
     // Even a full circle can't rescue a too-thin ring.
     const fullCircle = calcAvailableDonutSliceLabelLength(inner, outer, 0, 2 * Math.PI, fontSize, "radial");
     expect(fullCircle).toBe(0);
+  });
+});
+
+// Both of this module's warnings sit inside a per-slice loop that a pie re-runs on every option
+// rebuild — including once per animation frame for the whole of a resize drag. Unguarded, one bad
+// chart logs at frame rate. They are kept (each names a caller-contract violation whose only
+// other symptom is a label silently vanishing) but reported once per CONDITION, not once per
+// slice: keying on the geometry instead would be no guard at all, since a drag hands them fresh
+// radii every frame.
+describe("degenerate geometry warns once per condition", () => {
+  // The once-per-condition memory is module state by design, so each test takes a fresh copy of
+  // the module rather than inheriting whatever an earlier test already tripped. This is also why
+  // the module exports no reset hook — nothing in the app needs one.
+  const freshModule = async () => {
+    vi.resetModules();
+    return import("../sliceLabel");
+  };
+
+  it("reports a whole drag's worth of degenerate slices once, not once each", async () => {
+    const { calcAvailableDonutSliceLabelLength } = await freshModule();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // Negative radii: the label's horizontal band misses the outer circle entirely, so the
+      // rectangle-within-donut maths throws and the slice falls back to "no room". 200 calls
+      // stands in for a per-slice loop re-running on every frame of a drag.
+      for (let i = 0; i < 200; i++) {
+        expect(calcAvailableDonutSliceLabelLength(-100, -50, 0, 0.4, 12, "horizontal")).toBe(0);
+      }
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toContain("Could not calculate max rectangle length");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps the two conditions apart — each still gets its own single report", async () => {
+    const { calcAvailableDonutSliceLabelLength } = await freshModule();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (let i = 0; i < 50; i++) {
+        calcAvailableDonutSliceLabelLength(-100, -50, 0, 0.4, 12, "horizontal");
+        // inner >= outer only survives the thickness guard ahead of it when the font size is
+        // negative — which is the point: both warnings mean the caller passed nonsense.
+        calcAvailableDonutSliceLabelLength(100, 50, 0, 0.4, -40, "horizontal");
+      }
+      expect(warn).toHaveBeenCalledTimes(2);
+      const messages = warn.mock.calls.map((c) => String(c[0]));
+      expect(messages.some((m) => m.includes("Could not calculate max rectangle length"))).toBe(true);
+      expect(messages.some((m) => m.includes("Outer radius must be bigger than inner"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

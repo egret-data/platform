@@ -62,6 +62,39 @@ export const calcCircleIntersectionByHorizontalLine = (
   ];
 };
 
+/**
+ * Conditions already warned about, so each one is reported once per page rather than once per
+ * slice per frame.
+ *
+ * The two warnings below sit inside a per-slice loop that runs on every option rebuild — and
+ * since a pie's option is rebuilt against the container's real measured size, that includes once
+ * per animation frame throughout a resize drag. A single chart with degenerate geometry could
+ * therefore flood the console at frame rate, which both drowns out everything else and makes the
+ * page slower exactly when it is already struggling. (Metabase's equivalent warnings can't do
+ * this: nothing there is resize-driven.)
+ *
+ * Both are kept rather than dropped, because both DO carry something actionable: each one names a
+ * CALLER CONTRACT VIOLATION that nothing else reveals. Given the thickness guard that runs ahead
+ * of them, neither is reachable from sane geometry at all — an inner radius at or past the outer
+ * is already short-circuited there for any positive font size, and a label band can only miss the
+ * outer circle if a radius or the font size is negative. So if either fires, the caller handed
+ * this module nonsense, and the only visible symptom otherwise is a label silently vanishing.
+ * What is NOT actionable is the same violation restated 60 times a second with slightly
+ * different radii.
+ *
+ * So the key is the CONDITION, not the numbers: keying on the geometry would defeat the point,
+ * since a resize drag produces fresh radii on every frame and every one of them would be
+ * "distinct". The first occurrence's numbers still go into the message, which is the one a
+ * developer would investigate anyway.
+ */
+const warnedConditions = new Set<string>();
+
+function warnOnce(condition: string, message: string): void {
+  if (warnedConditions.has(condition)) return;
+  warnedConditions.add(condition);
+  console.warn(message);
+}
+
 function getDonutHorizontalChordCoords(
   y: number,
   innerRadius: number,
@@ -92,7 +125,8 @@ function calcMaxRectLengthWithinDonut(
 
     return rightX - leftX;
   } catch {
-    console.warn(
+    warnOnce(
+      "maxRectLength",
       `Could not calculate max rectangle length for innerRadius=${innerRadius} outerRadius=${outerRadius} topY=${topY} bottomY=${bottomY}`,
     );
     return 0;
@@ -133,7 +167,10 @@ export function calcAvailableDonutSliceLabelLength(
   }
 
   if (innerRadius >= outerRadius) {
-    console.warn(`Outer radius must be bigger than inner. Outer: ${outerRadius} inner: ${innerRadius}`);
+    warnOnce(
+      "innerRadiusNotSmaller",
+      `Outer radius must be bigger than inner. Outer: ${outerRadius} inner: ${innerRadius}`,
+    );
     return 0;
   }
 
