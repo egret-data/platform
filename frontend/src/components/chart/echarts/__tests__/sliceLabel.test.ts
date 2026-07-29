@@ -62,6 +62,54 @@ describe("calcAvailableDonutSliceLabelLength", () => {
     expect(narrow).toBe(0);
   });
 
+  // The near-x-axis branch (Metabase's isNearXAxis, ported): a HORIZONTAL label on a slice whose
+  // mid-angle sits within ±π/8 of 3 or 9 o'clock runs ALONG the ring rather than across it, so it
+  // is allowed the donut's thickness instead of being pinned to the (much shorter) inner chord.
+  // Both sides of that branch were previously unexercised — hardcoding it to `true` AND to
+  // `false` each left every sliceLabel and pie test green.
+  //
+  // One slice shape, moved around the circle: inner 50, outer 100 (thickness 50), a 0.4rad arc
+  // (inner chord ~19.87, comfortably over the 12px font size the branch also requires). The two
+  // outcomes are far enough apart — 50 vs ~19.87 — that whichever way the branch is nailed shut,
+  // some position below reports the wrong number.
+  describe("near-x-axis slices are allowed the ring's thickness instead of their chord", () => {
+    const inner = 50;
+    const outer = 100;
+    const arc = 0.4;
+    const innerChord = calcChordLength(inner, arc);
+    const at = (midAngle: number) =>
+      calcAvailableDonutSliceLabelLength(inner, outer, midAngle - arc / 2, midAngle + arc / 2, fontSize, "horizontal");
+
+    it("a slice centred at 3 or 9 o'clock gets the full donut thickness", () => {
+      expect(at(Math.PI / 2)).toBeCloseTo(outer - inner, 9);
+      expect(at((3 * Math.PI) / 2)).toBeCloseTo(outer - inner, 9);
+    });
+
+    it("the same slice at 12 or 6 o'clock gets only its inner chord", () => {
+      expect(at(0)).toBeCloseTo(innerChord, 9);
+      expect(at(Math.PI)).toBeCloseTo(innerChord, 9);
+      expect(innerChord).toBeLessThan(outer - inner); // the two branches really do differ here
+    });
+
+    it("the allowance ends at the ±π/8 tolerance, not gradually", () => {
+      const justInside = at(Math.PI / 2 + Math.PI / 8 - 0.01);
+      const justOutside = at(Math.PI / 2 + Math.PI / 8 + 0.01);
+      expect(justInside).toBeGreaterThan(innerChord);
+      expect(justOutside).toBeCloseTo(innerChord, 9);
+    });
+
+    it("an arc too narrow to hold one character is pinned to its chord even at 3 o'clock", () => {
+      // The branch needs BOTH conditions: near the axis AND an inner chord wider than the font
+      // size. A 0.1rad arc's chord is ~5px, under the 12px font — no thickness allowance.
+      const narrow = 0.1;
+      const narrowChord = calcChordLength(inner, narrow);
+      expect(narrowChord).toBeLessThan(fontSize);
+      expect(
+        calcAvailableDonutSliceLabelLength(inner, outer, Math.PI / 2 - narrow / 2, Math.PI / 2 + narrow / 2, fontSize, "horizontal"),
+      ).toBeCloseTo(narrowChord, 9);
+    });
+  });
+
   it("a ring thinner than 2 font sizes returns 0 regardless of arc width", () => {
     const inner = 50;
     const outer = inner + 2 * fontSize; // exactly at the cutoff — donutThickness <= 2*fontSize
