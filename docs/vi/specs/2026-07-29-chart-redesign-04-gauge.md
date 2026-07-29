@@ -70,19 +70,25 @@ segment cho chúng sẽ đóng băng một thang tự động mà hiện đang b
 
 Cả hai key cũ bị xoá.
 
-## `fieldDescriptor` có thêm một lối thoát
+## Ô sửa dải nằm ở đâu — đã sửa trước khi viết plan
 
-Gauge là một trong chín loại khai báo qua `fieldDescriptor`, vốn chỉ hỗ trợ bốn kind vô hướng —
-dimension, metric, number, boolean. Một danh sách lặp `{min, max, color, label}` không thuộc kind nào.
+Spec này ban đầu đề xuất thêm kind `custom` cho `fieldDescriptor`, với lý lẽ rằng bốn kind vô hướng
+của nó — dimension, metric, number, boolean — không diễn tả nổi một danh sách lặp
+`{min, max, color, label}`.
 
-Lựa chọn là: viết tay descriptor cho gauge như cartesian và table, hay cho `fieldDescriptor` một kind
-`custom` render một component được truyền vào. **Spec này chọn cách thứ hai.** Viết tay là mở lại,
-cho riêng một loại, đúng phần code mà PR3 của A2 đã xoá; và gauge không phải loại cuối cần một
-control phi vô hướng — progress cần một màu, waterfall cần ba, trend cần mốc so sánh. Một lối thoát
-dùng bốn lần tốt hơn bốn descriptor viết tay.
+**Điều đó là thừa, và chính việc đọc `viz/fields.tsx` trước khi viết plan đã bắt được.**
+`FieldDescriptorSpec` **đã có** `display?: VizControl<Cfg>[]` — control tuỳ ý với hàm render riêng —
+và **pie đang dùng nó** (`display: pieDisplay`) cho đúng loại việc này. Chú thích ngay trong file nói
+thẳng: *"a viz's display settings (pie's donut, legend, slice colours…) are edited by its display
+controls"*. `fromParams` cũng đọc **mọi key dưới prefix** của viz chứ không chỉ các trường đã khai
+báo, nên `gauge.segments` tự round-trip mà không cần đụng codec.
 
-Lối thoát này hẹp một cách có chủ ý: `custom` cung cấp một hàm render và không gì khác. Nó không phải
-cách thứ hai để khai báo trường vô hướng.
+Vậy ô sửa dải là một control `display` trên descriptor của gauge, `fields.tsx` **không** bị đụng, và
+không phát minh lối thoát nào. Đó cũng là chỗ đúng hơn về bản chất: các dải màu là **trình bày**,
+không phải hình dạng truy vấn, và tab Data nên tiếp tục chỉ hỏi metric.
+
+Đây là lỗi cấp spec thứ ba mà quy tắc "đọc code trước khi thiết kế dựa trên nó" của chương trình bắt
+được — sau dòng table và dòng gauge. Quy tắc này đang chứng minh giá trị của nó.
 
 ## Chủ ý không làm
 

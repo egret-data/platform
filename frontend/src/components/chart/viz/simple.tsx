@@ -52,8 +52,6 @@ export const SIMPLE_DESCRIPTORS: VizDescriptor<Cfg>[] = [
     key: "gauge", prefix: "gauge.", legacyKey: "gauge",
     fields: [
       { id: "metric", label: "Metric", kind: "metric", required: "a metric" },
-      { id: "min", label: "Min", kind: "number", placeholder: "0" },
-      { id: "max", label: "Max", kind: "number", placeholder: "auto" },
     ],
     buildSpec: (c, s, h) => h.oneRow(c.metric, s),
     legacyFromSpec: (spec) => ({ metric: spec.metrics?.[0] }),
