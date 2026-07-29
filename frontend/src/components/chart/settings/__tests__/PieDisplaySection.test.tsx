@@ -79,6 +79,52 @@ describe("PieDisplaySection", () => {
     });
   });
 
+  // `showTotal` now defaults ON for a multi-ring pie (buildPieOption resolves it at render
+  // time), so a two-state Switch bound to `!!config.showTotal` would read OFF while the chart
+  // draws the total — the same "switch that lies" this section already fixed for Legend and
+  // Show labels. It also has to be REACHABLE on a multi-ring pie, which need not have `donut`
+  // set at all: the hole is there either way, and hiding the control behind `donut` would leave
+  // a newly-on-by-default total with no way to turn it off.
+  describe("Show total (Auto/On/Off)", () => {
+    it("is offered for a multi-ring pie even with donut unset", () => {
+      render(<PieDisplaySection config={{ dimensions: ["a", "b"] }} onChange={() => {}} />);
+      expect(screen.getByLabelText("Show total")).toBeInTheDocument();
+    });
+
+    it("is still offered for a single-ring donut", () => {
+      render(<PieDisplaySection config={{ donut: true, dimensions: ["a"] }} onChange={() => {}} />);
+      expect(screen.getByLabelText("Show total")).toBeInTheDocument();
+    });
+
+    it("is not offered for a single-ring pie with no hole to write in", () => {
+      render(<PieDisplaySection config={{ dimensions: ["a"] }} onChange={() => {}} />);
+      expect(screen.queryByLabelText("Show total")).not.toBeInTheDocument();
+    });
+
+    it("shows Auto when nothing is stored, rather than claiming Off", () => {
+      render(<PieDisplaySection config={{ dimensions: ["a", "b"] }} onChange={() => {}} />);
+      expect(within(screen.getByLabelText("Show total")).getByText("Auto")).toBeInTheDocument();
+    });
+
+    it("choosing Off emits false", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(<PieDisplaySection config={{ dimensions: ["a", "b"] }} onChange={onChange} />);
+      await user.click(screen.getByLabelText("Show total"));
+      await user.click(await screen.findByRole("option", { name: "Off" }));
+      expect(onChange).toHaveBeenCalledWith({ showTotal: false });
+    });
+
+    it("choosing Auto emits undefined", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(<PieDisplaySection config={{ dimensions: ["a", "b"], showTotal: true }} onChange={onChange} />);
+      await user.click(screen.getByLabelText("Show total"));
+      await user.click(await screen.findByRole("option", { name: "Auto" }));
+      expect(onChange).toHaveBeenCalledWith({ showTotal: undefined });
+    });
+  });
+
   it("per-slice colour swatch patches sliceColors by (raw) name", () => {
     const onChange = vi.fn();
     render(<PieDisplaySection config={{}} onChange={onChange} slices={["A", "B"]} />);

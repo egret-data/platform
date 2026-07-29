@@ -25,7 +25,9 @@ export interface PieBuildConfig {
   sliceThreshold?: number;
   /** Sort slices by value descending. Default true. */
   sortRows?: boolean;
-  /** Donut only: show the grand total in the centre. */
+  /** Show the grand total in the hole. Defaults ON once there is more than one ring (where the
+   * hole is large and an empty one reads as unfinished), off for a one-ring donut; ignored by a
+   * one-ring pie with no hole at all. */
   showTotal?: boolean;
   /** Whether the slice's percent appears in its label. Default "off". */
   percentVisibility?: "off" | "inside" | "both";
@@ -421,23 +423,6 @@ export function buildPieOption(
   // disappears instead of overlapping into mush; it is still reachable via the tooltip.
   const labelLayout = { hideOverlap: true };
 
-  // Donut centre total — Metabase getTotalGraphicOption (static total; no hover swap yet). The
-  // innermost ring's total is the grand total: it's summed over every outer dimension already.
-  //
-  // Font sizes are Metabase's total.* constants. The three-ring hole (1/4 of the outer edge,
-  // below) is tight enough that the regular valueFontSize (22) risks overflowing it, so that
-  // case alone drops to Metabase's own escape hatch, valueFontSizeSm (17); one and two rings keep
-  // the regular size. Metabase also bolds its "Total" caption (total.fontWeight 700) — the
-  // caption text here previously left fontWeight unset (a plain, unbolded caption); now matches.
-  const total = data.reduce((t, s) => t + s.value, 0);
-  const totalValueFontSize = ringCount >= 3 ? 17 : 22;
-  const graphic = cfg.donut && cfg.showTotal && data.length > 0
-    ? [
-        { type: "text", left: "center", top: "43%", style: { text: fmt(total), fontSize: totalValueFontSize, fontWeight: 700, fill: resolveColor("var(--foreground)", COLOR_FALLBACK.text), textAlign: "center" } },
-        { type: "text", left: "center", top: "53%", style: { text: "Total", fontSize: 14, fontWeight: 700, fill: resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel), textAlign: "center" } },
-      ]
-    : undefined;
-
   // Radii: Metabase's own ratios (constants.ts) — one ring 3/5, two rings 2/5, three rings 1/4 of
   // the outer radius. Applied on egret's existing 0-70% "outer edge" scale (unchanged) rather
   // than literally re-deriving Metabase's own side-length maths, which this file has no
@@ -452,10 +437,41 @@ export function buildPieOption(
   // the hole would change what a saved donut LOOKS LIKE as a shape rather than how it is
   // labelled. TWO OR MORE rings is where the ratio is unconditional: there is no sensible
   // multi-ring pie with no hole at all (task spec), so it always applies regardless of `donut`.
+  //
+  // Computed before the centre total below, which needs to know whether there is a hole at all.
   const outerEdge = 70;
   const HOLE_RATIO: Record<number, number> = { 2: 2 / 5, 3: 1 / 4 };
   const holeStart = multiRing ? outerEdge * HOLE_RATIO[Math.min(ringCount, 3)] : (cfg.donut ? 45 : 0);
   const fmtPct = (v: number) => `${parseFloat(v.toFixed(2))}%`;
+
+  // Donut centre total — Metabase getTotalGraphicOption (static total; no hover swap yet). The
+  // innermost ring's total is the grand total: it's summed over every outer dimension already.
+  //
+  // Font sizes are Metabase's total.* constants. The three-ring hole (1/4 of the outer edge,
+  // below) is tight enough that the regular valueFontSize (22) risks overflowing it, so that
+  // case alone drops to Metabase's own escape hatch, valueFontSizeSm (17); one and two rings keep
+  // the regular size. Metabase also bolds its "Total" caption (total.fontWeight 700) — the
+  // caption text here previously left fontWeight unset (a plain, unbolded caption); now matches.
+  //
+  // DEFAULTS ON FOR A MULTI-RING PIE. Measured against a real Metabase (question 7, "Product
+  // breakdown") at 1440x920: it renders `2,852` over `Total` in the hole, egret rendered
+  // nothing, and an empty void in the middle of three rings is what made the chart read as
+  // unfinished. A one-ring donut is left exactly as it was — its hole is small enough to read
+  // as deliberate, and changing it would change what every saved donut looks like. `??`, not
+  // `||`, so an explicit `false` still turns it off; resolved here at render time and never
+  // written into stored settings (this program's standing rule).
+  const showTotal = cfg.showTotal ?? multiRing;
+  const total = data.reduce((t, s) => t + s.value, 0);
+  const totalValueFontSize = ringCount >= 3 ? 17 : 22;
+  // Gated on there BEING a hole rather than on `cfg.donut`: a multi-ring pie always has one
+  // (see holeStart below), whatever `donut` says, so keying off `donut` would have hidden the
+  // total on exactly the charts this default exists for.
+  const graphic = holeStart > 0 && showTotal && data.length > 0
+    ? [
+        { type: "text", left: "center", top: "43%", style: { text: fmt(total), fontSize: totalValueFontSize, fontWeight: 700, fill: resolveColor("var(--foreground)", COLOR_FALLBACK.text), textAlign: "center" } },
+        { type: "text", left: "center", top: "53%", style: { text: "Total", fontSize: 14, fontWeight: 700, fill: resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel), textAlign: "center" } },
+      ]
+    : undefined;
 
   // calcAvailableDonutSliceLabelLength (sliceLabel.ts, ported from Metabase — see fix 1b below)
   // needs a real PIXEL radius to compare against a real pixel fontSize. ECharts' own `radius`

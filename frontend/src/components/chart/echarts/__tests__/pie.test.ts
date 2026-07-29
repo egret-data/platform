@@ -1108,6 +1108,50 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
       expect(value.style.fontSize).toBe(22);
     });
   });
+
+  // Measured against a real Metabase (question 7, "Product breakdown", a genuine three-level
+  // sunburst) at 1440x920: Metabase renders `2,852` over `Total` in the hole; egret rendered
+  // nothing there, because `showTotal` defaulted off. An empty hole in the middle of three
+  // rings is the single thing that made the chart read as unfinished — a one-ring donut's
+  // hole is small and reads as deliberate, a sunburst's is a large void asking to be filled.
+  //
+  // Resolved at RENDER time, never written into stored settings (this program's standing
+  // rule), and `??` not `||`, so an explicit `false` still turns it off.
+  describe("a multi-ring pie fills its hole with the total by default", () => {
+    it("two rings show the total with nothing stored at all", () => {
+      const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m" }) as any;
+      expect(opt.graphic).toBeTruthy();
+      expect(opt.graphic.map((g: any) => g.style?.text)).toEqual(["50", "Total"]);
+    });
+
+    it("three rings show it too", () => {
+      const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any;
+      expect(opt.graphic).toBeTruthy();
+      expect(opt.graphic.map((g: any) => g.style?.text)).toEqual(["18", "Total"]);
+    });
+
+    it("an explicit false still empties the hole", () => {
+      const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m", showTotal: false }) as any;
+      expect(opt.graphic).toBeFalsy();
+    });
+
+    it("multi-ring does not need donut set — the hole is there either way", () => {
+      const off = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m", donut: false }) as any;
+      expect(off.graphic).toBeTruthy();
+    });
+
+    // The single-ring side is deliberately untouched: a plain pie has no hole to write in,
+    // and a one-ring donut's hole stays empty unless it is asked for.
+    it("a single-ring donut still defaults to an empty hole", () => {
+      const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", donut: true }) as any;
+      expect(opt.graphic).toBeFalsy();
+    });
+
+    it("a single-ring pie with no hole never draws a total, even asked to", () => {
+      const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", showTotal: true }) as any;
+      expect(opt.graphic).toBeFalsy();
+    });
+  });
 });
 
 // Reversal — an outer ring's slice percentage is a share of its PARENT slice, not of that

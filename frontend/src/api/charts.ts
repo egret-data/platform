@@ -112,7 +112,7 @@ export interface PieConfig {
   showLabels?: boolean;
   sliceThreshold?: number;   // percent; slices below this fold into "Other" (default 2.5, 0 = off)
   sortRows?: boolean;        // sort slices by value desc (default true)
-  showTotal?: boolean;       // donut only: grand total in the centre
+  showTotal?: boolean;       // grand total in the hole; defaults ON for a multi-ring pie, off for a one-ring donut
   percentVisibility?: "off" | "inside" | "both";  // percent in slice labels (default off)
   sliceColors?: Record<string, string>;  // per-slice colour override keyed by dimension value
   /** Rename a slice of the FIRST dimension. */

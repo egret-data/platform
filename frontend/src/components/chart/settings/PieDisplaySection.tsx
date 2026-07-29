@@ -54,8 +54,20 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
         autoHint="Auto shows the legend — a pie's colours are meaningless without it"
       />
       <Toggle id="pz-donut" label="Donut" checked={!!config.donut} onChange={(v) => onChange({ donut: v })} />
-      {config.donut && (
-        <Toggle id="pz-total" label="Show total" checked={!!config.showTotal} onChange={(v) => onChange({ showTotal: v })} />
+      {/* Offered whenever the chart HAS a hole to write in — a multi-ring pie always does,
+          whatever `donut` says (buildPieOption's holeStart), so gating this on `donut` alone
+          would leave the multi-ring total, which now defaults on, with no way to turn it off.
+          Auto/On/Off rather than a Switch for that same reason: `undefined` genuinely means
+          "on for a sunburst, off for a one-ring donut", which a Switch would have to lie
+          about in one of the two cases. */}
+      {(config.donut || (config.dimensions?.length ?? 0) > 1) && (
+        <AutoToggle
+          id="pz-total"
+          label="Show total"
+          value={config.showTotal}
+          onChange={(v) => onChange({ showTotal: v })}
+          autoHint="Auto fills a multi-ring pie's hole with the grand total, and leaves a single-ring donut's hole empty"
+        />
       )}
       <AutoToggle
         id="pz-labels"
