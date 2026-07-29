@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { ChartRenderer } from "../ChartRenderer";
-import type { ChartParams } from "@/api/charts";
+import type { ChartParams, PieConfig } from "@/api/charts";
 
 // Captures the `option` prop each render passes to EChartsRenderer, so tests can assert on
 // what actually reaches the renderer — the exact seam where four settings (maxCategories,
@@ -231,5 +231,51 @@ describe("ChartRenderer", () => {
     const names = (mockLastOption as { series: { name?: string }[] }).series.map((s) => s.name);
     expect(names).not.toContain("B");
     expect(names).toContain("A");
+  });
+
+  // The pie branch has the same seam, and had the same defect: a hand-listed field whitelist in
+  // ChartRenderer meant decimals/sliceNames/hiddenSlices/sliceOrder never reached buildPieOption,
+  // so slice rename, hide, reorder and percent precision were unreachable from the app entirely.
+  // pie.test.ts missed it because it calls buildPieOption directly, bypassing this exact line.
+  // One test per field, so dropping any single one of them fails on its own.
+  describe("-> buildPieOption seam", () => {
+    const pieCols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+    const pieRows = [["A", 10], ["B", 30], ["C", 5]];
+    type BuiltPie = {
+      series: { data: { name: string }[]; label: { formatter: (p: { name: string; percent: number }) => string } }[];
+    };
+    const pieOption = (pie: Partial<PieConfig>): BuiltPie => {
+      render(
+        <ChartRenderer
+          vizType="pie"
+          params={params({ pie: { dimensions: ["d"], metric: "m", ...pie } })}
+          columns={pieCols}
+          rows={pieRows}
+        />,
+      );
+      // Pie is the one viz whose `option` prop is a function of the measured container size.
+      return (mockLastOption as (s: { width: number; height: number }) => BuiltPie)({ width: 400, height: 400 });
+    };
+
+    it("forwards pie.sliceNames to the built option", () => {
+      const data = pieOption({ sliceNames: { A: "Alpha" } }).series[0].data;
+      expect(data.map((d) => d.name)).toContain("Alpha");
+    });
+
+    it("forwards pie.hiddenSlices to the built option", () => {
+      const data = pieOption({ hiddenSlices: ["B"] }).series[0].data;
+      expect(data.map((d) => d.name)).not.toContain("B");
+    });
+
+    it("forwards pie.sliceOrder to the built option", () => {
+      // Natural (value-desc) order is B, A, C — sliceOrder must pull A to the front.
+      const data = pieOption({ sliceOrder: ["A"] }).series[0].data;
+      expect(data.map((d) => d.name)[0]).toBe("A");
+    });
+
+    it("forwards pie.decimals to the built option", () => {
+      const opt = pieOption({ percentVisibility: "inside", showLabels: false, decimals: 0 });
+      expect(opt.series[0].label.formatter({ name: "A", percent: 33.333 })).toBe("33%");
+    });
   });
 });

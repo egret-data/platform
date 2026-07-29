@@ -134,11 +134,12 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
         {rows.length === 0
           ? <EmptyState />
           : <EChartsRenderer option={(size) => buildPieOption(columns, rows, {
-              dimensions: pie.dimensions, metric: pie.metric, donut: pie.donut,
-              showLegend: pie.showLegend, showLabels: pie.showLabels,
-              sliceThreshold: pie.sliceThreshold, sortRows: pie.sortRows,
-              showTotal: pie.showTotal, percentVisibility: pie.percentVisibility,
-              sliceColors: pie.sliceColors,
+              // Spread rather than list the fields, for the same reason the cartesian branch
+              // above does: this was a hand-maintained whitelist and it silently dropped
+              // decimals, sliceNames, hiddenSlices and sliceOrder — making slice rename, hide,
+              // reorder and percent precision unreachable from the app despite being fully
+              // implemented and exposed in the panel.
+              ...pie,
               columnSettings, metricTypes,
               // Keyed by column name, same shape as the spec map itself — each ring looks up its
               // own dimension's unit rather than ChartRenderer resolving just the first one.
