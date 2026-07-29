@@ -227,7 +227,19 @@ describe("buildPieOption — nested rings (task 4)", () => {
     );
   });
 
-  it("three dimensions render three series", () => {
+  // Asserts a ring's radii are strictly increasing, non-overlapping (each ring's outer edge is
+  // exactly the next ring's inner edge), and together span [holeStart, 70%] with no gap.
+  function assertContiguousRadii(series: { radius: [string, string] }[], holeStart: number) {
+    const bounds = series.map((s) => s.radius.map((r) => parseFloat(r)));
+    expect(bounds[0][0]).toBe(holeStart);
+    for (let i = 0; i < bounds.length; i++) {
+      expect(bounds[i][0]).toBeLessThan(bounds[i][1]); // each ring itself has positive thickness
+      if (i > 0) expect(bounds[i][0]).toBe(bounds[i - 1][1]); // contiguous: no gap, no overlap
+    }
+    expect(bounds[bounds.length - 1][1]).toBe(70); // spans the full outer edge
+  }
+
+  it("three dimensions render three series at three strictly-increasing, non-overlapping radii", () => {
     const cols3 = [
       { name: "region", type: "varchar" }, { name: "category", type: "varchar" },
       { name: "brand", type: "varchar" }, { name: "m", type: "double" },
@@ -237,6 +249,7 @@ describe("buildPieOption — nested rings (task 4)", () => {
     ];
     const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any;
     expect(opt.series).toHaveLength(3);
+    assertContiguousRadii(opt.series, 0);
   });
 
   it("donut hollows the centre with one ring, and with three rings the centre stays clear", () => {
@@ -252,6 +265,38 @@ describe("buildPieOption — nested rings (task 4)", () => {
     ];
     const three = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m", donut: true }) as any;
     expect(three.series).toHaveLength(3);
-    expect(three.series[0].radius[0]).toBe("45%");
+    assertContiguousRadii(three.series, 45);
+  });
+
+  it("names each ring's series after its own dimension, so a click can be attributed to the right ring", () => {
+    const cols3 = [
+      { name: "region", type: "varchar" }, { name: "category", type: "varchar" },
+      { name: "brand", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    const rows3 = [
+      ["US", "Widgets", "Acme", 10], ["US", "Widgets", "Zenith", 5], ["EU", "Gadgets", "Acme", 3],
+    ];
+    const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any;
+    expect(opt.series.map((s: any) => s.name)).toEqual(["region", "category", "brand"]);
+  });
+
+  it("says so in the aria description when a ring's total diverges from the first ring's", () => {
+    const cols2 = [
+      { name: "region", type: "varchar" }, { name: "cat", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    // Region totals: R1 = 2 + (-7) = -5, R2 = 1 + (-4) = -3 -- BOTH negative -> the inner ring
+    // abs-converts them (5, 3; total 8). The outer ring's own items are NOT all negative (2 and 1
+    // are positive) -> mixed-sign drop instead of abs-convert -> keeps only 2 and 1 (total 3).
+    const rows2 = [["R1", "A", 2], ["R1", "B", -7], ["R2", "C", 1], ["R2", "D", -4]];
+    const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "cat"], metric: "m" }) as any;
+    expect(opt.series[0].data.reduce((t: number, s: any) => t + s.value, 0)).toBe(8);
+    expect(opt.series[1].data.reduce((t: number, s: any) => t + s.value, 0)).toBe(3);
+    expect(opt.aria.label.description).toContain("cat ring totals 3");
+    expect(opt.aria.label.description).toContain("not 8");
+  });
+
+  it("does not add a divergence note when every ring's total matches", () => {
+    const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
+    expect(opt.aria.label.description).not.toContain("Note:");
   });
 });

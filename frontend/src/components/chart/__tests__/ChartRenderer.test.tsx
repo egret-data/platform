@@ -9,11 +9,16 @@ import type { ChartParams } from "@/api/charts";
 // compactValues, seriesOrder, hiddenSeries) were once silently dropped by a hand-maintained
 // field whitelist in ChartRenderer.
 let mockLastOption: unknown;
+// Configurable so a test can simulate a click landing on a specific ring/series; defaults match
+// what every pre-existing test here expects.
+let mockClickPayload: { name?: string; seriesName?: string; value?: unknown; x: number; y: number } = {
+  name: "EU", seriesName: "rev", value: 10, x: 3, y: 4,
+};
 
 vi.mock("@/components/chart/echarts/EChartsRenderer", () => ({
   EChartsRenderer: ({ option, onPointClick }: { option: unknown; onPointClick?: (p: { name?: string; seriesName?: string; value?: unknown; x: number; y: number }) => void }) => {
     mockLastOption = option;
-    return <button data-testid="echarts" onClick={() => onPointClick?.({ name: "EU", seriesName: "rev", value: 10, x: 3, y: 4 })} />;
+    return <button data-testid="echarts" onClick={() => onPointClick?.(mockClickPayload)} />;
   },
 }));
 
@@ -25,6 +30,7 @@ const params = (p: Partial<ChartParams> = {}): ChartParams => ({
 describe("ChartRenderer", () => {
   beforeEach(() => {
     mockLastOption = undefined;
+    mockClickPayload = { name: "EU", seriesName: "rev", value: 10, x: 3, y: 4 };
   });
 
   it("renders a table viz with formatted cells", () => {
@@ -147,6 +153,31 @@ describe("ChartRenderer", () => {
     );
     fireEvent.click(screen.getByTestId("echarts"));
     expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "region", value: "EU" }] }, 3, 4);
+  });
+
+  it("drills a pie click on the clicked ring's own dimension, not always dimensions[0]", () => {
+    const onValueClick = vi.fn();
+    render(
+      <ChartRenderer
+        vizType="pie"
+        params={params({ pie: { dimensions: ["region", "category"], metric: "rev" } })}
+        columns={[
+          { name: "region", type: "varchar" }, { name: "category", type: "varchar" }, { name: "rev", type: "double" },
+        ]}
+        rows={[["EU", "Widgets", 10]]}
+        onValueClick={onValueClick}
+      />,
+    );
+    // Inner ring: its ECharts series is named after dimensions[0] ("region").
+    mockClickPayload = { name: "EU", seriesName: "region", value: 40, x: 1, y: 2 };
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).toHaveBeenLastCalledWith({ dims: [{ col: "region", value: "EU" }] }, 1, 2);
+
+    // Outer ring: its series is named after dimensions[1] ("category") -- must drill on
+    // "category", not "region", even though it's still dimensions[0] positionally.
+    mockClickPayload = { name: "Widgets", seriesName: "category", value: 10, x: 5, y: 6 };
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).toHaveBeenLastCalledWith({ dims: [{ col: "category", value: "Widgets" }] }, 5, 6);
   });
 
   it("wires onCellDrill on a table card when onValueClick is set", () => {

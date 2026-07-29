@@ -144,7 +144,13 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
               // own dimension's unit rather than ChartRenderer resolving just the first one.
               dimensionUnits: params.spec.temporal_units,
             })}
-            onPointClick={onValueClick && pie.dimensions?.[0] ? (p) => onValueClick({ dims: [{ col: pie.dimensions![0], value: p.name }] }, p.x, p.y) : undefined}
+            onPointClick={onValueClick && pie.dimensions?.[0] ? (p) => {
+              // Each ring's ECharts series is named after its own dimension (see buildPieOption),
+              // so `seriesName` tells us which ring fired the click — a slice from the outer ring
+              // must drill on ITS OWN column, not always dimensions[0].
+              const col = pie.dimensions!.find((d) => d === p.seriesName) ?? pie.dimensions![0];
+              onValueClick({ dims: [{ col, value: p.name }] }, p.x, p.y);
+            } : undefined}
           />}
       </div>
     );
