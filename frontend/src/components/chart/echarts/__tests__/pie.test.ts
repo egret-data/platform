@@ -375,3 +375,110 @@ describe("buildPieOption — ring colour inheritance (task 5)", () => {
     expect(y1.itemStyle.color).toBe(lightenOklch(otherColor, 1));
   });
 });
+
+// Task 6 — slice curation: rename / hide / reorder the FIRST dimension's slices only
+// (Metabase's pie.rows). All three key on the slice's RAW dimension value, never its display
+// text, so renaming never breaks a colour override, a hide, or a manual position.
+describe("buildPieOption — slice curation (task 6)", () => {
+  const cols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+
+  it("a renamed slice shows its new name in the chart data", () => {
+    const rows = [["EU", 10], ["US", 30]];
+    const opt = buildPieOption(cols, rows, {
+      dimensions: ["d"], metric: "m", sliceNames: { US: "United States" },
+    }) as any;
+    expect(opt.series[0].data.map((d: any) => d.name)).toEqual(["United States", "EU"]);
+  });
+
+  it("a hidden slice is absent and the remaining percentages re-base", () => {
+    const rows = [["A", 10], ["B", 30], ["C", 60]];
+    const opt = buildPieOption(cols, rows, {
+      dimensions: ["d"], metric: "m", hiddenSlices: ["B"],
+    }) as any;
+    const data = opt.series[0].data;
+    expect(data.map((d: any) => d.name)).toEqual(["C", "A"]);
+    const total = data.reduce((t: number, d: any) => t + d.value, 0);
+    // Must be 70 (A + C), NOT 100 — B's value must not still count toward the total.
+    expect(total).toBe(70);
+    const c = data.find((d: any) => d.name === "C");
+    expect((c.value / total) * 100).toBeCloseTo((60 / 70) * 100, 10);
+  });
+
+  it("hiding a parent removes its children too, and the outer ring re-bases as well", () => {
+    const cols2 = [
+      { name: "region", type: "varchar" }, { name: "cat", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    const rows2 = [
+      ["R1", "A", 10], ["R1", "B", 5],
+      ["R2", "C", 20], ["R2", "D", 5],
+    ];
+    const opt = buildPieOption(cols2, rows2, {
+      dimensions: ["region", "cat"], metric: "m", hiddenSlices: ["R1"],
+    }) as any;
+    const inner = opt.series[0].data;
+    expect(inner.map((d: any) => d.name)).toEqual(["R2"]);
+    const outer = opt.series[1].data;
+    expect(outer.map((d: any) => d.name)).toEqual(["C", "D"]);
+    const outerTotal = outer.reduce((t: number, d: any) => t + d.value, 0);
+    // Must be 25 (C + D), NOT 40 — R1's children (A, B) must not survive their hidden parent.
+    expect(outerTotal).toBe(25);
+  });
+
+  it("sliceOrder reorders; unlisted slices keep their natural order after the named ones", () => {
+    const rows = [["A", 5], ["B", 30], ["C", 10]]; // natural (value-desc) order: B, C, A
+    const opt = buildPieOption(cols, rows, {
+      dimensions: ["d"], metric: "m", sliceOrder: ["A"],
+    }) as any;
+    expect(opt.series[0].data.map((d: any) => d.name)).toEqual(["A", "B", "C"]);
+  });
+
+  it("decimals changes what a percentage label shows", () => {
+    const rows = [["A", 10], ["B", 20]];
+    const withDefault = buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", percentVisibility: "inside" }) as any;
+    const withZero = buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", percentVisibility: "inside", decimals: 0 }) as any;
+    expect(withDefault.series[0].label.formatter({ name: "A", percent: 33.333 })).toBe("33.33%");
+    expect(withZero.series[0].label.formatter({ name: "A", percent: 33.333 })).toBe("33%");
+  });
+
+  it("renaming does not change identity: colour, hidden and order still key on the raw value", () => {
+    const rows = [["A", 10], ["B", 30], ["C", 5]];
+    const opt = buildPieOption(cols, rows, {
+      dimensions: ["d"], metric: "m",
+      sliceNames: { A: "Alpha" },
+      sliceColors: { A: "#111111" },
+      hiddenSlices: ["C"],
+      sliceOrder: ["A", "B"],
+    }) as any;
+    const data = opt.series[0].data;
+    // C is hidden (by its raw value, even though never renamed).
+    expect(data.map((d: any) => d.name)).not.toContain("C");
+    // A is renamed for display...
+    const alpha = data.find((d: any) => d.value === 10);
+    expect(alpha.name).toBe("Alpha");
+    // ...but its sliceColors entry (keyed on raw "A") still applies...
+    expect(alpha.itemStyle.color).toBe("#111111");
+    // ...and sliceOrder (keyed on raw "A") still puts it first, ahead of B (value 30), even
+    // though natural value-desc order would put B first.
+    expect(data.map((d: any) => d.value)).toEqual([10, 30]);
+  });
+
+  it("curation applies to ring 0 only — a value that also appears in ring 1 is unaffected there", () => {
+    const cols2 = [
+      { name: "region", type: "varchar" }, { name: "category", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    // "US" is a ring-0 (region) value we hide, but it ALSO appears as a ring-1 (category) value
+    // nested under a different, non-hidden region (EU) — that ring-1 "US" must survive untouched.
+    const rows2 = [
+      ["EU", "US", 10],
+      ["US", "Widgets", 20],
+    ];
+    const opt = buildPieOption(cols2, rows2, {
+      dimensions: ["region", "category"], metric: "m", hiddenSlices: ["US"],
+    }) as any;
+    const inner = opt.series[0].data;
+    expect(inner.map((d: any) => d.name)).toEqual(["EU"]);
+    const outer = opt.series[1].data;
+    expect(outer.map((d: any) => d.name)).toEqual(["US"]);
+    expect(outer.find((d: any) => d.name === "US").value).toBe(10);
+  });
+});
