@@ -5,7 +5,19 @@ import { onThemeChange } from "./palette";
 
 registerEChartsModules();
 
-export interface EChartsPointClick { name?: string; seriesName?: string; value?: unknown; x: number; y: number }
+export interface EChartsPointClick {
+  name?: string;
+  seriesName?: string;
+  value?: unknown;
+  /** Root-to-node path, tree series only (`SunburstSeriesModel.getDataParams` adds it via
+   * `wrapTreePathInfo`). Its first entry is the sunburst's own VIRTUAL root — the node ECharts
+   * synthesises from `series.data` and never draws — so a clicked slice's ring index is
+   * `treePathInfo.length - 2`. The pie is the one chart that reads it (see ChartRenderer): with a
+   * single series there is no per-ring `seriesName` left to attribute a click by. */
+  treePathInfo?: { name?: string }[];
+  x: number;
+  y: number;
+}
 
 export interface EChartsSize { width: number; height: number }
 
@@ -54,8 +66,15 @@ export function EChartsRenderer({ option, className, onPointClick }: {
     chartRef.current = chart;
     chart.setOption(resolveOption(optionRef.current), true);
     chart.on("click", (params: unknown) => {
-      const p = params as { name?: string; seriesName?: string; value?: unknown; event?: { event?: { clientX?: number; clientY?: number } } };
-      clickRef.current?.({ name: p.name, seriesName: p.seriesName, value: p.value, x: p.event?.event?.clientX ?? 0, y: p.event?.event?.clientY ?? 0 });
+      const p = params as {
+        name?: string; seriesName?: string; value?: unknown;
+        treePathInfo?: { name?: string }[];
+        event?: { event?: { clientX?: number; clientY?: number } };
+      };
+      clickRef.current?.({
+        name: p.name, seriesName: p.seriesName, value: p.value, treePathInfo: p.treePathInfo,
+        x: p.event?.event?.clientX ?? 0, y: p.event?.event?.clientY ?? 0,
+      });
     });
 
     // A ResizeObserver tick fires on every layout change — including, during an active

@@ -12,12 +12,19 @@ import type { ChartParams, PieConfig } from "@/api/charts";
 let mockLastOption: unknown;
 // Configurable so a test can simulate a click landing on a specific ring/series; defaults match
 // what every pre-existing test here expects.
-let mockClickPayload: { name?: string; seriesName?: string; value?: unknown; x: number; y: number } = {
-  name: "EU", seriesName: "rev", value: 10, x: 3, y: 4,
+type MockClick = {
+  name?: string;
+  seriesName?: string;
+  value?: unknown;
+  /** Root-to-node path, as a sunburst click carries it — entry 0 is ECharts' virtual root. */
+  treePathInfo?: { name?: string }[];
+  x: number;
+  y: number;
 };
+let mockClickPayload: MockClick = { name: "EU", seriesName: "rev", value: 10, x: 3, y: 4 };
 
 vi.mock("@/components/chart/echarts/EChartsRenderer", () => ({
-  EChartsRenderer: ({ option, onPointClick }: { option: unknown; onPointClick?: (p: { name?: string; seriesName?: string; value?: unknown; x: number; y: number }) => void }) => {
+  EChartsRenderer: ({ option, onPointClick }: { option: unknown; onPointClick?: (p: MockClick) => void }) => {
     mockLastOption = option;
     return <button data-testid="echarts" onClick={() => onPointClick?.(mockClickPayload)} />;
   },
@@ -156,29 +163,53 @@ describe("ChartRenderer", () => {
     expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "region", value: "EU" }] }, 3, 4);
   });
 
+  // The pie is ONE `sunburst` series, so a click carries no per-ring `seriesName` to attribute it
+  // by — its ring comes from the depth of `treePathInfo`, whose first entry is the virtual root
+  // ECharts wraps `series.data` in. One case per ring, since getting the off-by-one wrong would
+  // drill every slice on the wrong column.
   it("drills a pie click on the clicked ring's own dimension, not always dimensions[0]", () => {
     const onValueClick = vi.fn();
     render(
       <ChartRenderer
         vizType="pie"
-        params={params({ pie: { dimensions: ["region", "category"], metric: "rev" } })}
+        params={params({ pie: { dimensions: ["region", "category", "channel"], metric: "rev" } })}
         columns={[
-          { name: "region", type: "varchar" }, { name: "category", type: "varchar" }, { name: "rev", type: "double" },
+          { name: "region", type: "varchar" }, { name: "category", type: "varchar" },
+          { name: "channel", type: "varchar" }, { name: "rev", type: "double" },
         ]}
-        rows={[["EU", "Widgets", 10]]}
+        rows={[["EU", "Widgets", "Direct", 10]]}
         onValueClick={onValueClick}
       />,
     );
-    // Inner ring: its ECharts series is named after dimensions[0] ("region").
-    mockClickPayload = { name: "EU", seriesName: "region", value: 40, x: 1, y: 2 };
+    const root = { name: "" };
+
+    // Ring 0 — path is [root, EU].
+    mockClickPayload = { name: "EU", value: 40, treePathInfo: [root, { name: "EU" }], x: 1, y: 2 };
     fireEvent.click(screen.getByTestId("echarts"));
     expect(onValueClick).toHaveBeenLastCalledWith({ dims: [{ col: "region", value: "EU" }] }, 1, 2);
 
-    // Outer ring: its series is named after dimensions[1] ("category") -- must drill on
-    // "category", not "region", even though it's still dimensions[0] positionally.
-    mockClickPayload = { name: "Widgets", seriesName: "category", value: 10, x: 5, y: 6 };
+    // Ring 1 — must drill on "category", not "region", even though the slice is still one level
+    // out from a ring-0 wedge.
+    mockClickPayload = {
+      name: "Widgets", value: 10,
+      treePathInfo: [root, { name: "EU" }, { name: "Widgets" }], x: 5, y: 6,
+    };
     fireEvent.click(screen.getByTestId("echarts"));
     expect(onValueClick).toHaveBeenLastCalledWith({ dims: [{ col: "category", value: "Widgets" }] }, 5, 6);
+
+    // Ring 2.
+    mockClickPayload = {
+      name: "Direct", value: 10,
+      treePathInfo: [root, { name: "EU" }, { name: "Widgets" }, { name: "Direct" }], x: 7, y: 8,
+    };
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).toHaveBeenLastCalledWith({ dims: [{ col: "channel", value: "Direct" }] }, 7, 8);
+
+    // A click with no path at all (nothing else in the app sends one) still drills the first
+    // dimension rather than throwing or indexing off the end.
+    mockClickPayload = { name: "EU", value: 40, x: 9, y: 10 };
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).toHaveBeenLastCalledWith({ dims: [{ col: "region", value: "EU" }] }, 9, 10);
   });
 
   it("wires onCellDrill on a table card when onValueClick is set", () => {
@@ -339,9 +370,11 @@ describe("ChartRenderer", () => {
       measuringAs(830, 661);
       renderPie();
       const built = (mockLastOption as (s: { width: number; height: number }) => {
-        series: { radius: string[] }[];
+        series: { radius: number[] }[];
       })({ width: 640, height: 661 });
-      expect(built.series[0].radius[1]).toBe("85%");
+      // The side layout's 0.85 of min(640, 661) = a 544px circle, i.e. r = 272 — where the bottom
+      // layout's 0.70 would only have drawn 448.
+      expect(built.series[0].radius[1]).toBeCloseTo(272, 6);
     });
 
     // The ECharts legend this replaces toggled its slice off on click; that has to keep working.

@@ -341,6 +341,24 @@ export function parseColor(color: string): [number, number, number] | undefined 
   return parseOklchColor(color);
 }
 
+/**
+ * The same colour at `alpha` opacity, written as `rgba(...)` — Metabase's
+ * `Color(c).fade(f).rgb().string()` (pie/option.ts), used to de-emphasise a sunburst slice.
+ *
+ * The alpha has to live in the FILL COLOUR rather than in ECharts' `itemStyle.opacity`, which
+ * is the whole reason this exists: `opacity` is applied to the sector's stroke as well, so the
+ * background-coloured border that separates neighbouring slices goes translucent too and the
+ * colour underneath leaks through it. Fading only the fill leaves the border opaque.
+ *
+ * Unparseable input comes back verbatim — the same "leave it alone" degradation `lightenOklch`
+ * uses rather than throwing.
+ */
+export function fadeColor(color: string, alpha: number): string {
+  const rgb = parseColor(color);
+  if (!rgb) return color;
+  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`;
+}
+
 function relativeLuminance(rgb: [number, number, number]): number {
   const [r, g, b] = rgb.map((c) => srgbToLinear(c / 255));
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;

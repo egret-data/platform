@@ -2,7 +2,7 @@ import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
 import { ariaDescription, baseOption, itemTooltip } from "../base";
-import { OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor, seriesColor, lightenOklch, getTextColorForBackground } from "../palette";
+import { OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor, seriesColor, lightenOklch, fadeColor, getTextColorForBackground } from "../palette";
 import {
   calcAvailableDonutSliceLabelLength,
   calcInnerOuterRadiusesForRing,
@@ -123,6 +123,26 @@ const KEY_SEP = "␟";
  * next ring inward. Absent on the synthetic "Other" slice, which has no single origin. */
 interface Slice { name: string; value: number; key?: string; parentKey?: string; itemStyle?: { color: string } }
 
+/** One node of the `sunburst` series' data tree — a drawn slice, plus the slices nested inside it.
+ * Named so `toNode` can be recursive without TypeScript having to infer its own return type. */
+interface PieSliceNode {
+  name: string;
+  value: number;
+  /** This slice's share of its own parent (of the whole chart, at ring 0), already rounded to the
+   * chart's `decimals`. A `sunburst` series supplies no `percent` of its own — see `toNode`. */
+  slicePercent: number;
+  itemStyle: { color: string; borderWidth: number };
+  label: {
+    color: string;
+    formatter: () => string;
+    rotate: 0 | "radial";
+    verticalAlign: "middle";
+  };
+  emphasis: { itemStyle: { color: string; borderColor: string } };
+  blur: { itemStyle: { color: string; opacity: number }; label: { opacity: number } };
+  children?: PieSliceNode[];
+}
+
 /** A ring's raw (pre-robustness-rules) aggregate: rows grouped by the dimension-value tuple up to
  * and including this ring's own dimension, values summed. Pre-existing behaviour, unchanged by
  * nesting: grouping is by DISPLAYED value, so `null`, `undefined` and `""` all render as the same
@@ -231,35 +251,38 @@ function buildSlices(items: Slice[], cfg: PieBuildConfig): { slices: Slice[]; gr
   return { slices, groupOf };
 }
 
-/** Places a ring's slices parent-by-parent, in the parent ring's own finalized order — required
- * because ECharts draws a pie series in array order starting at `startAngle`, so a child ring's
- * data must already be grouped under its parent's arc rather than sorted across parents.
+/** Groups a ring's slices under the key of the PARENT-ring slice each one belongs to — the
+ * structure the sunburst's `children` needs.
+ *
+ * This replaced `reorderByParent`, which existed only because N independent `pie` series draw in
+ * flat array order: a child ring's data had to be pre-sorted into its parents' arcs by hand,
+ * because nothing in the option said which parent a slice belonged to. A tree says it outright,
+ * so the ordering problem disappears and only the grouping is left. (The resulting draw order is
+ * the same: ECharts lays a node's children out consecutively inside that node's arc, in array
+ * order, which is what the hand-rolled version was reproducing.)
  *
  * Grouped by KEY, not by display name: two different parents can have children with the same
  * name (e.g. an "Accessories" category under two different regions), and grouping by name would
  * wrongly merge them.
  *
- * A slice whose parent got folded into the parent's own "Other" (parentGroupOf maps its
- * parentKey to that parent's own other-key, see otherKeyFor) is grouped under that parent's
- * Other position instead of vanishing.
- * A slice with no resolvable group is placed last, after every parent group — defensive only:
- * every level > 0 item, including each parent's own "Other" bucket, carries a defined parentKey
- * (buildSlices folds within parents, not across the ring), so this path isn't expected to trigger
- * there; it exists purely as a safe fallback rather than a silent drop.
+ * A slice whose parent got folded into the parent ring's own "Other" (parentGroupOf maps its
+ * parentKey to that parent's own other-key, see otherKeyFor) lands under that Other bucket
+ * instead of vanishing.
+ * A slice with no resolvable group is dropped. Defensive only: every level > 0 item, including
+ * each parent's own "Other" bucket, carries a defined parentKey (buildSlices folds within
+ * parents, not across the ring) and orphans are filtered out earlier in buildPieRings, so this
+ * path isn't expected to trigger. A tree has nowhere to put a parentless node — the flat version's
+ * "append at the end of the ring" was itself a wrong-looking placement, not a save.
  */
-function reorderByParent(slices: Slice[], parentGroupOf: Map<string, string>, parentOrder: string[]): Slice[] {
+function groupByParent(slices: Slice[], parentGroupOf: Map<string, string>): Map<string, Slice[]> {
   const groups = new Map<string, Slice[]>();
-  const ungrouped: Slice[] = [];
   for (const s of slices) {
     const groupKey = s.parentKey != null ? parentGroupOf.get(s.parentKey) : undefined;
-    if (groupKey == null) { ungrouped.push(s); continue; }
+    if (groupKey == null) continue;
     const arr = groups.get(groupKey);
     if (arr) arr.push(s); else groups.set(groupKey, [s]);
   }
-  const ordered: Slice[] = [];
-  for (const key of parentOrder) ordered.push(...(groups.get(key) ?? []));
-  ordered.push(...ungrouped);
-  return ordered;
+  return groups;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -271,8 +294,8 @@ function reorderByParent(slices: Slice[], parentGroupOf: Map<string, string>, pa
 // matched (see HOLE_RATIO); what differed was how much of the host the circle was allowed to use.
 //
 // The legend is React markup BESIDE the canvas (see PieLegend.tsx), not an ECharts component
-// inside it — ECharts' `legend` does not work with a `sunburst` series, which is what this pie is
-// becoming. So the 190px column below is now real layout: the chart's own box already excludes
+// inside it — ECharts' `legend` does not work with a `sunburst` series, which is what this pie
+// is. So the 190px column below is real layout: the chart's own box already excludes
 // it, and this file's job is only to say what fraction of THAT box the circle fills. Each layout
 // states the diameter it draws, and the bigger one wins:
 //
@@ -360,13 +383,12 @@ function buildPieRings(
   // slice through buildSlices, then reorder it under its parent ring's finalized order.
   const rings: Slice[][] = [];
   // groupOfByLevel[L] is ring L's OWN "did this key survive or fold into Other" map (buildSlices'
-  // `groupOf`), kept around after the loop so the colour-inheritance pass below can resolve a
-  // ring L+1 slice's parentKey the same way reorderByParent does — through its parent's fold state,
-  // not just its raw identity.
+  // `groupOf`), kept around after the loop so the colour-inheritance pass below and the tree
+  // assembly in buildPieOption can both resolve a ring L+1 slice's parentKey through its parent's
+  // fold state, not just its raw identity.
   const groupOfByLevel: Map<string, string>[] = [];
   if (mi != null && dims.length > 0) {
     let parentGroupOf: Map<string, string> | undefined;
-    let parentOrder: string[] = [];
     for (let level = 0; level < dims.length; level++) {
       const path = dims.slice(0, level + 1);
       const dimIdxs = path.map((d) => idx[d]);
@@ -387,11 +409,14 @@ function buildPieRings(
         items = items.filter((it) => !cfg.hiddenSlices!.includes(it.name));
       }
       const { slices, groupOf } = buildSlices(items, cfg);
-      let ordered = level === 0 ? slices : reorderByParent(slices, parentGroupOf!, parentOrder);
+      // A ring below 0 keeps buildSlices' own order (value-desc, each parent's "Other" last within
+      // its group). It no longer has to be re-sorted into parent-contiguous runs: the sunburst
+      // nests these under their parents itself (groupByParent), and a node's children are drawn
+      // consecutively inside its arc whatever order the ring array happened to be in.
+      let ordered = slices;
       // Ring 0 only: sliceOrder is a display-order override keyed on the same raw value as
-      // hiddenSlices — applied AFTER buildSlices (so it can't influence the Other threshold),
-      // and BEFORE parentOrder is captured just below, so an outer ring's contiguous grouping
-      // (reorderByParent, for level > 0) follows this same custom order.
+      // hiddenSlices — applied AFTER buildSlices, so it can't influence the Other threshold.
+      // Ring 0's order IS the sunburst's top-level draw order, so every outer ring follows it.
       if (level === 0 && cfg.sliceOrder?.length) {
         const rank = new Map(cfg.sliceOrder.map((n, i) => [n, i]));
         ordered = [...ordered].sort(
@@ -401,7 +426,6 @@ function buildPieRings(
       rings.push(ordered);
       groupOfByLevel.push(groupOf);
       parentGroupOf = groupOf;
-      parentOrder = ordered.map((s) => s.key ?? OTHER_KEY);
     }
   }
   const effectiveRings = rings.length > 0 ? rings : [[]];
@@ -451,9 +475,23 @@ function buildPieRings(
   //    slot its constituent (folded-away) parents would have had;
   //  - a sliceColors override on a ring below 0 (see the note above — the same NAME can match
   //    more than one ring) is itself a fresh anchor at that level, for the same reason.
-  let anchors = new Map<string, { base: string; sinceLevel: number }>();
+  //
+  // Ring 0's implicit palette slots are RESOLVED HERE rather than left to ECharts. They used to be
+  // left implicit (no `itemStyle` at all on an un-overridden ring-0 slice), which was safe while
+  // each ring was its own `pie` series: a pie colours a datum by its INDEX, so slot i was slot i
+  // whatever else was going on. A `sunburst` colours a top-level node by NAME
+  // (sunburstVisual.js -> `getColorFromPalette(current.name, paletteScope)`) and skips that call
+  // entirely for a node that already has a colour — so one `sliceColors` override on ring 0 would
+  // consume no slot and slide every LATER slice's colour up by one, while the React legend and the
+  // label-contrast pass (which both compute `seriesColor(i)` from the ring index) kept naming the
+  // old ones. Pinning removes the divergence by construction: every ring-0 slice states the colour
+  // it is drawn in, and there is only one answer to read.
   (effectiveRings[0] ?? []).forEach((s, i) => {
-    anchors.set(s.key ?? OTHER_KEY, { base: s.itemStyle?.color ?? seriesColor(i), sinceLevel: 0 });
+    s.itemStyle ??= { color: seriesColor(i) };
+  });
+  let anchors = new Map<string, { base: string; sinceLevel: number }>();
+  (effectiveRings[0] ?? []).forEach((s) => {
+    anchors.set(s.key ?? OTHER_KEY, { base: s.itemStyle!.color, sinceLevel: 0 });
   });
   for (let level = 1; level < effectiveRings.length; level++) {
     const parentFold = groupOfByLevel[level - 1];
@@ -519,9 +557,10 @@ export function buildPieLegend(
   const total = ring0.reduce((t, s) => t + s.value, 0);
   const pct = pctFormatter(cfg.decimals ?? 2);
   return ring0.map((s, i) => {
-    // The colour the slice is actually drawn in: its own override / muted "Other" tint, or (what
-    // ECharts itself would assign) the palette slot at its index in this ring — the same
-    // expression the option builder's own contrast pass uses.
+    // The colour the slice is actually drawn in — read off the slice rather than re-derived, since
+    // buildPieRings now pins every ring-0 slice's colour explicitly (see the note there on why the
+    // sunburst's name-keyed palette made an implicit slot unsafe). `?? seriesColor(i)` is a
+    // belt-and-braces default, not a second source of truth.
     const color = s.itemStyle?.color ?? seriesColor(i);
     return withPercent && total > 0
       ? { name: s.name, color, percent: pct((s.value / total) * 100) }
@@ -543,8 +582,8 @@ export function buildPieOption(
   // is pure data with no DOM access of its own, so it can't measure its own container;
   // EChartsRenderer measures it (ResizeObserver) and threads it through by calling this function
   // itself rather than a plain option object (see that file). Undefined (no caller-supplied size —
-  // most unit tests that aren't testing label fit at all) means "unknown": PX_PER_RADIUS_PERCENT
-  // below then collapses every ring's inner radius to 0px, which takes the SAME "true full pie"
+  // most unit tests that aren't testing label fit at all) means "unknown": the radii stay in
+  // ECharts' percent units and every ring's pixel radius is 0, which takes the SAME "true full pie"
   // path this file already uses when there's genuinely no donut hole (see the comment on
   // `availableSpace` further down) — the per-slice fit check is skipped entirely and every label is
   // shown in full, backstopped only by `labelLayout.hideOverlap`. That's the safe direction for "we
@@ -576,26 +615,26 @@ export function buildPieOption(
   const showPercent = percentVisibility === "inside" || percentVisibility === "both";
   const decimals = cfg.decimals ?? 2;
   const pct = pctFormatter(decimals);
-  const labelFormatter = (p: { name: string; percent: number; data?: { parentPercent?: number } }) => {
-    const name = showName ? p.name : undefined;
-    // ECharts' own `percent` is share-of-that-series (share of the ring); an outer-ring datum
-    // carries a parent-relative override (parentPercent, computed per-slice below) that wins
-    // when present. Ring 0 never sets it, so this is a no-op there.
-    const percentValue = p.data?.parentPercent ?? p.percent;
-    const percent = showPercent ? pct(percentValue) : undefined;
-    if (name != null && percent != null) return `${name}: ${percent}`;
-    return name ?? percent ?? "";
+  // The full, untruncated text a slice's label wants to say — Metabase's getSliceLabel. Called
+  // directly with the slice's own name and share rather than through an ECharts callback: the fit
+  // pass below has to MEASURE this text before anything renders, and a `sunburst` datum has no
+  // `percent` of its own to hand a callback anyway (see `slicePercent`).
+  const composeSliceLabel = (name: string, percent: number) => {
+    const namePart = showName ? name : undefined;
+    const percentPart = showPercent ? pct(percent) : undefined;
+    if (namePart != null && percentPart != null) return `${namePart}: ${percentPart}`;
+    return namePart ?? percentPart ?? "";
   };
 
   // Slice label sizing — Metabase's constants.ts: multiRingFontSize (12) once there's more than
-  // one ring; a single ring gets Metabase's maxFontSize/minFontSize (20/14) RESPONSIVE to the
-  // rendered pixel side length, computed there from an actual container measurement this pure
-  // data-only builder doesn't have (no DOM access here — see EChartsRenderer, which never passes
-  // its size in). Rather than fake a measurement, this uses Metabase's FLOOR (minFontSize, 14):
-  // it never renders LARGER than Metabase would at any size, which is the safe direction — a
-  // label too big is what causes more overlap/hiding, not too small. fontWeight 700 either way
-  // (slice.label.fontWeight) and drawn ON the slice (`position: "inside"`), matching what makes
-  // Metabase's sunburst readable without a legend.
+  // one ring, and Metabase's FLOOR (minFontSize, 14) for a single one. Metabase scales a
+  // single-ring pie's label between 14 and 20 with the rendered side length; egret deliberately
+  // does not, even though it now measures that side length (see `diameterPx` below). The floor
+  // never renders LARGER than Metabase would at any size, which is the safe direction — a label
+  // too big is what causes overlap and hiding — and growing a saved one-ring pie's labels is a
+  // separate change of appearance from this one. fontWeight 700 either way
+  // (slice.label.fontWeight) and drawn ON the slice, matching what makes Metabase's sunburst
+  // readable without a legend.
   const sliceFontSize = multiRing ? 12 : 14;
 
   // ECharts has no built-in shrink-or-truncate for a label that doesn't fit its slice (unlike
@@ -606,39 +645,69 @@ export function buildPieOption(
   // disappears instead of overlapping into mush; it is still reachable via the tooltip.
   const labelLayout = { hideOverlap: true };
 
-  // Radii: Metabase's own ratios (constants.ts) — one ring 3/5, two rings 2/5, three rings 1/4 of
-  // the outer radius. Applied on egret's existing 0-70% "outer edge" scale (unchanged) rather
-  // than literally re-deriving Metabase's own side-length maths, which this file has no
-  // equivalent inputs for.
+  // ---------------------------------------------------------------------------------------------
+  // Geometry.
   //
-  // ONE ring is the deliberate exception: it keeps egret's OWN existing donut on/off semantics
-  // exactly as before (donut:false -> 0%, donut:true -> 45%) rather than Metabase's 3/5 (42%, on
-  // this scale). Note this is now the ONLY thing about a one-ring pie that is unchanged from
-  // `main` — its labels moved inside the slices, gained weight, and gained a 1-degree gap between
-  // slices (see the spec's "A one-ring pie no longer looks like it did on `main`"). The radii
-  // stayed put because a plain pie's proportions were never identified as unreadable, and moving
-  // the hole would change what a saved donut LOOKS LIKE as a shape rather than how it is
-  // labelled. TWO OR MORE rings is where the ratio is unconditional: there is no sensible
-  // multi-ring pie with no hole at all (task spec), so it always applies regardless of `donut`.
-  //
-  // Computed before the centre total below, which needs to know whether there is a hole at all.
-  //
-  // `outerEdge` is no longer a constant 70: a wide, short host puts the legend in a column beside
-  // the chart instead of a row beneath it, and the circle then gets a differently shaped box to
-  // fill — one that already has the legend taken out of it, since the legend is React markup
-  // outside the canvas. `pieLegendPlacement` (above) makes that choice once, from the size of the
-  // WHOLE host; all that's left here is the fraction of its own box each layout fills. A hidden
-  // legend reserves nothing, and so keeps today's geometry exactly.
+  // How much of its own box the circle fills. `outerFraction` is no longer a constant 0.70: a wide,
+  // short host puts the legend in a column beside the chart instead of a row beneath it, and the
+  // circle then gets a differently shaped box to fill — one that already has the legend taken out
+  // of it, since the legend is React markup outside the canvas. `pieLegendPlacement` (above) makes
+  // that choice once, from the size of the WHOLE host; all that's left here is the fraction of its
+  // own box each layout fills. A hidden legend reserves nothing, and so keeps today's geometry.
   const side = (cfg.showLegend ?? true) && cfg.legendPlacement === "side";
-  const outerEdge = 100 * (side ? SIDE_LEGEND_DIAMETER_FRACTION : BOTTOM_LEGEND_DIAMETER_FRACTION);
+  const outerFraction = side ? SIDE_LEGEND_DIAMETER_FRACTION : BOTTOM_LEGEND_DIAMETER_FRACTION;
+
+  // The hole, as a ratio of the OUTER radius — Metabase's own ratios (constants.ts): two rings
+  // 2/5, three rings 1/4. Stated as a ratio rather than an absolute so a saved donut keeps its
+  // SHAPE when the outer edge moves (side vs bottom layout, and the diameter cap below).
+  //
+  // ONE ring is the deliberate exception: it keeps egret's OWN donut on/off semantics (donut:false
+  // -> no hole, donut:true -> 45/70 of the outer radius) rather than Metabase's 3/5. A plain pie's
+  // proportions were never identified as unreadable, and moving the hole would change what a saved
+  // donut LOOKS LIKE as a shape rather than how it is labelled. TWO OR MORE rings is where the
+  // ratio is unconditional: there is no sensible multi-ring pie with no hole at all.
   const HOLE_RATIO: Record<number, number> = { 2: 2 / 5, 3: 1 / 4 };
-  // The one-ring hole is a RATIO of the outer edge (45/70 — egret's own donut proportions,
-  // unchanged at the default outer edge), not a fixed 45%: with the outer edge now able to move,
-  // a fixed hole would change the SHAPE of a saved one-ring donut rather than just its size.
-  const holeStart = multiRing
-    ? outerEdge * HOLE_RATIO[Math.min(ringCount, 3)]
-    : (cfg.donut ? outerEdge * (45 / 70) : 0);
+  const holeRatio = multiRing
+    ? HOLE_RATIO[Math.min(ringCount, 3)]
+    : (cfg.donut ? 45 / 70 : 0);
+
+  // ...and how big the circle is allowed to get, in absolute pixels. Metabase's pie is 550px in a
+  // 735px host — `DIMENSIONS.maxSideLength`, an absolute cap rather than a ratio, because past a
+  // point a bigger circle stops adding information and just pushes the labels apart. Its
+  // `DIMENSIONS.padding.side` (12px a side) comes with it, as a floor on the margin: egret's
+  // fraction already leaves a margin at any normal size (it only binds below ~160px of host), but
+  // it is a fraction, so on a tiny host it would leave a proportionally tiny one.
+  const PIE_MAX_DIAMETER_PX = 550;
+  const PIE_SIDE_PADDING_PX = 12;
+
+  // `containerSize` is the chart's REAL rendered pixel size — this builder is pure data with no DOM
+  // access, so EChartsRenderer measures it (ResizeObserver) and threads it through by calling this
+  // function rather than handing over a plain option object (see that file). Unknown (most unit
+  // tests, which aren't testing geometry at all) means the radii stay in ECharts' own percent-of-
+  // the-shorter-side units and the label fit pass is skipped entirely — see `availableSpace` below
+  // for why "don't guess" is the safe direction there.
+  // A 0x0 host counts as UNKNOWN, not as a zero-sized pie: EChartsRenderer measures once on mount,
+  // which for a not-yet-laid-out element is 0x0, and pixel radii of 0 would draw literally nothing
+  // until the ResizeObserver's first real tick. Percent radii draw correctly at whatever size the
+  // element turns out to have.
+  const sideLengthPx = containerSize ? Math.min(containerSize.width, containerSize.height) : 0;
+  const hasMeasuredSize = sideLengthPx > 0;
+  const diameterPx = Math.max(
+    0,
+    Math.min(outerFraction * sideLengthPx, sideLengthPx - 2 * PIE_SIDE_PADDING_PX, PIE_MAX_DIAMETER_PX),
+  );
+  const outerRadiusPx = diameterPx / 2;
+  const innerRadiusPx = outerRadiusPx * holeRatio;
+
   const fmtPct = (v: number) => `${parseFloat(v.toFixed(2))}%`;
+  // ECharts takes a radius as either a pixel number or a percent of half the container's shorter
+  // side, and accepts both in the same [inner, outer] pair. Pixels whenever the real size is known
+  // — that is the only unit an absolute cap can be expressed in, and it makes the numbers the fit
+  // pass measures against literally the numbers the renderer draws with, rather than a conversion
+  // of them. Percent otherwise, which is exactly the geometry this file drew before the cap.
+  const radius: [number, number] | [string, string] = hasMeasuredSize
+    ? [innerRadiusPx, outerRadiusPx]
+    : [fmtPct(100 * outerFraction * holeRatio), fmtPct(100 * outerFraction)];
 
   // Where the circle sits in its own box. The legend no longer shares the canvas with it, so
   // there is nothing to shift clear of: the pie is simply centred. The bottom layout keeps the
@@ -665,7 +734,7 @@ export function buildPieOption(
   const total = data.reduce((t, s) => t + s.value, 0);
   const totalValueFontSize = ringCount >= 3 ? 17 : 22;
   // Gated on there BEING a hole rather than on `cfg.donut`: a multi-ring pie always has one
-  // (see holeStart below), whatever `donut` says, so keying off `donut` would have hidden the
+  // (see holeRatio above), whatever `donut` says, so keying off `donut` would have hidden the
   // total on exactly the charts this default exists for.
   //
   // A graphic element is positioned against the CANVAS, not against the series — which was a
@@ -673,38 +742,12 @@ export function buildPieOption(
   // Nothing is shifted any more, so this is back to the plain `left: "center"` it always used
   // (an edge position that ECharts treats as a true centring for the literal "center").
   const totalAt = (topPercent: number) => ({ left: "center", top: `${topPercent}%` });
-  const graphic = holeStart > 0 && showTotal && data.length > 0
+  const graphic = holeRatio > 0 && showTotal && data.length > 0
     ? [
         { type: "text", ...totalAt(43), style: { text: fmt(total), fontSize: totalValueFontSize, fontWeight: 700, fill: resolveColor("var(--foreground)", COLOR_FALLBACK.text), textAlign: "center" } },
         { type: "text", ...totalAt(53), style: { text: "Total", fontSize: 14, fontWeight: 700, fill: resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel), textAlign: "center" } },
       ]
     : undefined;
-
-  // calcAvailableDonutSliceLabelLength (sliceLabel.ts, ported from Metabase — see fix 1b below)
-  // needs a real PIXEL radius to compare against a real pixel fontSize. ECharts' own `radius`
-  // here is only ever handed the abstract 0-100 percent-of-container units above (`outerEdge`,
-  // `holeStart`) — converting those to real pixels needs the chart's actual rendered size, which
-  // is exactly what `containerSize` (this function's own parameter, threaded through from
-  // EChartsRenderer's ResizeObserver — see that file) supplies. ECharts defines 100% radius as
-  // half the container's SHORTER side, so this mirrors that convention with `Math.min` rather
-  // than assuming a square container.
-  //
-  // A PREVIOUS version of this fix used a fixed, guessed 300px reference container here instead
-  // of a real measurement (NOMINAL_CONTAINER_MIN_DIMENSION_PX) — reasoning that erring toward a
-  // SMALLER assumed container only makes truncation MORE likely, never causes an overlap a real
-  // (likely larger) container wouldn't have shown. That reasoning was wrong in practice: a real
-  // chart card is routinely ~500-something px, nearly double the guess, so EVERY label was
-  // measured against roughly half the room it actually had and truncated far more aggressively
-  // than the real render needed — "LATAM" down to "L…", some slices to nothing at all. A wrong
-  // guess is wrong in whichever direction it happens to be wrong, which is why this now takes
-  // the real size instead of inventing one: no fixed number is safe at every container size a
-  // chart can actually render at (a dashboard tile, a full-page card, a phone).
-  //
-  // No `containerSize` at all (most unit tests below, which aren't testing label-fit geometry)
-  // collapses to 0 here, which zeroes every ring's inner/outer px and — per the `availableSpace`
-  // comment further down — takes the same "skip the fit check, show labels in full" path as a
-  // true full pie with no donut hole. Safe: unknown size means "don't guess," not "guess small."
-  const PX_PER_RADIUS_PERCENT = containerSize ? Math.min(containerSize.width, containerSize.height) / 2 / 100 : 0;
 
   // Metabase's DIMENSIONS.slice.label.padding (pie/constants.ts) — a small margin subtracted
   // from the geometric space a label is allowed, so text doesn't butt right up against a
@@ -728,238 +771,216 @@ export function buildPieOption(
   const labelTextDark = resolveColor("var(--foreground)", COLOR_FALLBACK.text);
   const labelTextLight = resolveColor("var(--background)", COLOR_FALLBACK.textInverse);
 
-  // Slice gaps and ring borders — Metabase's constants.ts borderProportion/twoRingBorderWidth/
-  // threeRingBorderWidth. Metabase fakes its gap with an opaque, background-coloured border
-  // because its sunburst series has no native gap; ECharts' `pie` series (this file's series
-  // type) DOES support `padAngle` (added 5.4, confirmed present on PieSeriesOption in the
-  // installed echarts@6.1.0) — a real, resolution-independent angular gap — so that's used
-  // directly for "a 1-degree gap between slices" instead of Metabase's arc-length pixel hack.
-  // `padAngle` alone is enough for one ring. Two or more rings ALSO get Metabase's fixed
-  // borderWidth (1 for two rings, 0.3 for three), which separates adjacent RINGS from each
-  // other radially — something padAngle, being purely angular, cannot do — coloured to match the
-  // chart's own background (the card a chart renders inside, per shadcn's Card `bg-card`) rather
-  // than a hardcoded white, so the gap disappears into dark mode too.
-  const ringBorder = multiRing
-    ? { borderColor: resolveColor("var(--card)", COLOR_FALLBACK.card), borderWidth: ringCount === 2 ? 1 : 0.3 }
-    : undefined;
+  // The border between slices — Metabase's `getBorderWidth`. NO ANGULAR GAP: this used to set
+  // ECharts' `padAngle: 1`, on a reading of Metabase's `borderProportion: 360 // 1 degree` as an
+  // angular pad. It isn't one; it is a stroke WIDTH, `(π × innerSideLength) / 360`, i.e. the arc
+  // length one degree subtends at the pie's own radius. The difference is not cosmetic:
+  //  - a stroke straddles the boundary and NEIGHBOURING SLICES SHARE IT, so the fills still touch;
+  //    an angular pad removes real area from every slice, so it under-reports its own value;
+  //  - a pad is constant in ANGLE, so the gap it opens GROWS WITH RADIUS — which is what produced
+  //    36 visible gaps on the outer ring, median 3.96px, against Metabase's 0.
+  // Multi-ring is a flat 1 (Metabase's own `twoRingBorderWidth: 1` and `threeRingBorderWidth: 0.3`
+  // constants are dead in its source — `getBorderWidth` reads neither, and returns 1 for every
+  // ring count above one). Coloured to match the chart's own background (the card a chart renders
+  // inside, per shadcn's Card `bg-card`) rather than Metabase's hardcoded white, so the separator
+  // disappears into dark mode too.
+  const borderWidth = multiRing ? 1 : (Math.PI * diameterPx) / 360;
+  const borderColor = resolveColor("var(--card)", COLOR_FALLBACK.card);
 
-  // Metabase's borderProportion 360, i.e. one degree — named rather than inlined because the
-  // label-fit maths below has to subtract exactly the same gap ECharts draws (see `padHalf`).
-  // Handed to the series as `padAngle` in degrees, which is the unit ECharts takes.
-  const SLICE_PAD_ANGLE_DEG = 1;
-  const SLICE_PAD_ANGLE = (SLICE_PAD_ANGLE_DEG * Math.PI) / 180;
-
-  // REVERSED from an earlier decision. This used to compute a slice's percentage as its share of
-  // THAT RING's own total everywhere, reasoning that a pie is about parts of a whole and that
-  // this kept every ring's percentages comparable with the inner ring's. Seen on a real
-  // three-ring chart, that reasoning holds for ring 0 (which has no parent, so "share of the
-  // ring" already IS "share of the whole") but breaks down on every ring outside it: a channel
-  // slice worth 500 out of its own (region, product) parent's 1000 read as "500/12000 = 4.17% of
-  // everything" — arithmetically true, and useless to whoever is looking at that one wedge. What
-  // they actually want is "50% of its region-and-product", i.e. share of its PARENT slice, which
-  // is what Metabase computes (`normalizedPercentage: otherTotal / node.value`) and what rings 1+
-  // now show here too.
-  //
-  // ECharts computes `percent` once per SERIES (i.e. per ring), with no per-datum override, so
-  // there's no way to ask it for "this slice's share of its parent" directly. Instead, each
-  // level > 0 slice gets its parent-relative percentage precomputed here and stashed on the datum
-  // itself as `parentPercent` (rounded to `decimals`, same as `pct` below); the label formatter
-  // above and the shared tooltip formatter (base.ts' itemTooltip) both prefer it over ECharts' own
-  // `percent` whenever a datum carries one. Ring 0 never gets one, so both formatters fall back to
-  // ECharts' own per-ring percent there — unchanged, since ring 0's share of its ring already is
-  // its share of the whole chart.
-  //
-  // A slice's "own parent" is resolved the same way reorderByParent already resolves it: its
-  // `parentKey` (the previous ring's raw aggregation key), folded through that ring's OWN
-  // `groupOf` (groupOfByLevel[level - 1]) to the actual key of the previous ring's finalized
-  // slice — so a slice nested under a parent that itself folded into that parent ring's own
-  // "Other" bucket is correctly treated as a share of that Other bucket's total, not of a parent
-  // that no longer exists as its own slice. This is exactly why a ring's own "Other" bucket
-  // reports a share of the SAME parent as its folded-in siblings: it carries that same
-  // `parentKey`, so it goes through the identical lookup.
-  const ringValueByKey = effectiveRings.map((ring) => {
-    const map = new Map<string, number>();
-    for (const s of ring) map.set(s.key ?? OTHER_KEY, s.value);
-    return map;
-  });
-  // The legend toggle, applied HERE and nowhere earlier — that is what makes it behave the way
-  // the ECharts legend it replaces did. ECharts filtered the already-built series and left
-  // everything else alone, so a toggled-off ring-0 slice takes nothing with it: the outer rings
-  // keep every slice (children of a hidden parent included), the hole's total does not re-base,
-  // and neither do the legend's own percentages. Contrast `cfg.hiddenSlices`, the saved curation,
-  // which is applied before a ring is even aggregated precisely so that everything DOES re-base.
-  //
-  // A survivor's palette slot has to be pinned as it goes: ECharts colours a datum by its index in
-  // the series data, so dropping a slice would otherwise slide every later one up a slot — and the
-  // React legend's swatches, built from the FULL ring, would name colours the chart no longer
-  // draws. Untouched when nothing is toggled off, so ring 0 keeps its implicit palette slots.
+  // The legend toggle, applied HERE and nowhere earlier. `cfg.hiddenSlices` is the saved curation,
+  // applied before a ring is even aggregated precisely so that every total and threshold re-bases;
+  // this is the ephemeral click, applied to the finished rings. What it now takes with it CHANGED
+  // with the series type, and deliberately: as N independent `pie` series, dropping a ring-0 slice
+  // left its children drawn as orphan arcs in the outer rings, sitting under nothing. A tree cannot
+  // express that — a node's children go with it — so hiding a slice hides its whole family, which
+  // is what the reader was asking for anyway. The hole's total and the legend's own percentages
+  // still do NOT re-base (both are computed from the full rings, above), so the remaining wedges
+  // stay comparable with the numbers beside them.
   const toggledOff = new Set(cfg.toggledOffSlices ?? []);
-  const seriesRings = toggledOff.size === 0
-    ? effectiveRings
-    : effectiveRings.map((ring, level) =>
-        level > 0
-          ? ring
-          : ring
-              .map((s, i) => (s.itemStyle ? s : { ...s, itemStyle: { color: seriesColor(i) } }))
-              .filter((s) => !toggledOff.has(s.name)));
+  const rootSlices = toggledOff.size === 0
+    ? effectiveRings[0]
+    : effectiveRings[0].filter((s) => !toggledOff.has(s.name));
 
-  const series = seriesRings.map((ringData, level) => {
-    const parentFold = level > 0 ? groupOfByLevel[level - 1] : undefined;
-    const parentValues = level > 0 ? ringValueByKey[level - 1] : undefined;
+  // Which finalized parent-ring slice each of a ring's slices belongs to, one map per parent level.
+  // Resolved through the parent ring's OWN fold state (groupOfByLevel[level - 1]), not just the raw
+  // parentKey — so a slice whose parent folded into that ring's "Other" bucket nests under the
+  // Other wedge rather than disappearing. That is also why a ring's own "Other" reports a share of
+  // the same parent as its folded-in siblings: it carries their `parentKey` and takes this same
+  // lookup.
+  const childrenByParentKey = effectiveRings
+    .slice(1)
+    .map((ring, i) => groupByParent(ring, groupOfByLevel[i] ?? new Map()));
 
-    const { inner: ringInnerPct, outer: ringOuterPct } = calcInnerOuterRadiusesForRing(
-      holeStart,
-      outerEdge,
+  // Angles. ECharts' sunburstLayout gives every node the SAME scale — `unitRadian = 2π / rootSum`,
+  // where rootSum is the sum of the top-level nodes — and lays a node's children out consecutively
+  // starting at that node's own start angle. So an outer slice's arc is its share of the WHOLE
+  // chart, nested inside its parent's arc, which is exactly the alignment N independent pie series
+  // could not express: each of those angled its ring by that ring's own total, so a child ring's
+  // wedges lined up with their parents' only by coincidence.
+  //
+  // Reproduced here (rather than read back off the chart) because the label fit below has to know
+  // a slice's arc before anything renders. It starts at 12 o'clock and runs clockwise because that
+  // is ECharts' default (`startAngle: 90, clockwise: true`) and this file never says otherwise —
+  // the convention calcAvailableDonutSliceLabelLength's geometry assumes, and a test pins that both
+  // stay unset so the model can't silently rot.
+  const rootTotal = rootSlices.reduce((t, s) => t + s.value, 0);
+  const unitRadian = rootTotal > 0 ? (2 * Math.PI) / rootTotal : 0;
+
+  const fontStyle = { size: sliceFontSize, weight: 700 };
+
+  /** One slice, as a sunburst node — its own subtree included. */
+  function toNode(s: Slice, level: number, startAngle: number, parentValue: number): PieSliceNode {
+    const endAngle = startAngle + s.value * unitRadian;
+    const { inner: ringInnerPx, outer: ringOuterPx } = calcInnerOuterRadiusesForRing(
+      innerRadiusPx,
+      outerRadiusPx,
       ringCount,
       level + 1,
     );
-    const ringInnerPx = ringInnerPct * PX_PER_RADIUS_PERCENT;
-    const ringOuterPx = ringOuterPct * PX_PER_RADIUS_PERCENT;
-    const fontStyle = { size: sliceFontSize, weight: 700 };
 
-    // Fix 1b: each slice's label is measured against ITS OWN slice's available space and
-    // truncated or dropped, rather than relying solely on labelLayout.hideOverlap's post-layout
-    // backstop. Needs this slice's own angular span, which nothing upstream computes yet —
-    // derived here from a running cumulative share of THIS RING's own total, the same total
-    // ECharts itself angles these slices by (each ring is its own "pie" series, starting at the
-    // default startAngle/12-o'clock and going clockwise — the same convention
-    // calcAvailableDonutSliceLabelLength's geometry assumes; `startAngle`/`clockwise` are never
-    // set on these series, and a test pins that they stay unset so this model can't silently rot).
+    // A slice's share of its own parent — which at ring 0 is the whole chart, so ring 0's share of
+    // the chart is unchanged. REVERSED from an earlier decision that made every ring a share of
+    // ITS RING's total: on a real three-ring chart, a channel slice worth 500 out of its own
+    // (region, product) parent's 1000 read as "500/12000 = 4.17% of everything" — arithmetically
+    // true, and useless to whoever is looking at that one wedge. Metabase computes the same
+    // parent-relative number (`normalizedPercentage`).
     //
-    // The cumulative share gives the slice's NOMINAL boundaries; what ECharts actually DRAWS is
-    // narrower, because `padAngle` (below) opens a gap between neighbours. Its pieLayout
-    // (chart/pie/pieLayout.js) keeps the nominal boundary as the running cursor and draws
-    // `[current + padAngle/2, current + angle - padAngle/2]` — so the mid-angle is unchanged and
-    // the arc loses exactly one padAngle. Measuring against the nominal arc would hand every
-    // label ~1 degree more room than it has, which is the risky direction: labels judged to fit
-    // arcs that are in fact narrower than measured. Metabase pad-adjusts the same way, feeding its
-    // own angles from `d3.pie().padAngle((Math.PI / 180) * 1)`.
+    // Carried on the datum as `slicePercent` because a `sunburst` series has no percentage of its
+    // own AT ALL: only `PieSeriesModel.getDataParams` adds `percent` (and only it honours
+    // `percentPrecision`, which this option therefore no longer sets — a sunburst ignores it). Both
+    // the label below and the shared tooltip (base.ts' itemTooltip) read this instead.
+    const slicePercent = parseFloat(
+      ((parentValue > 0 ? s.value / parentValue : 0) * 100).toFixed(decimals),
+    );
+
+    // Each label is measured against ITS OWN slice's geometry and truncated or dropped, rather
+    // than relying solely on labelLayout.hideOverlap's post-layout backstop.
     //
-    // KNOWN LIMIT, deliberately not modelled: pieLayout also enforces
-    // `minAndPadAngle = minAngle + padAngle` and bumps any slice below that floor up to it,
-    // shrinking the angle left for the rest and shifting every later slice's mid-angle. Modelling
-    // that means reimplementing its two-pass redistribution here, for a case the default 2.5%
-    // "Other" fold already removes (the floor is 1 degree, i.e. 0.28% of a ring; only
-    // `sliceThreshold: 0` can reach it). The residual error is a mid-angle shift, which affects
-    // only the horizontal branch's rectangle bound and the near-x-axis test — never the radial
-    // branch, and never by handing back the arc width this pad accounting just took away.
-    const ringTotal = ringData.reduce((t, s) => t + s.value, 0);
-    let cumulativeValue = 0;
-    const fits = ringData.map((s, i) => {
-      const nominalStart = ringTotal > 0 ? (cumulativeValue / ringTotal) * 2 * Math.PI : 0;
-      cumulativeValue += s.value;
-      const nominalEnd = ringTotal > 0 ? (cumulativeValue / ringTotal) * 2 * Math.PI : 0;
-      // Clamped so a slice narrower than the gap collapses to a point rather than inverting into
-      // a negative arc — which calcChordLength, being even in the angle, would silently read back
-      // as a POSITIVE chord. ECharts draws such a slice as zero-width too (`padAngle > angle`).
-      const padHalf = Math.min(SLICE_PAD_ANGLE, nominalEnd - nominalStart) / 2;
-      const startAngle = nominalStart + padHalf;
-      const endAngle = nominalEnd - padHalf;
-
-      let percentValue: number;
-      if (level > 0 && parentFold && parentValues && s.parentKey != null) {
-        const parentFoldKey = parentFold.get(s.parentKey);
-        const parentValue = parentFoldKey != null ? parentValues.get(parentFoldKey) : undefined;
-        percentValue = parentValue ? (s.value / parentValue) * 100 : ringTotal > 0 ? (s.value / ringTotal) * 100 : 0;
-      } else {
-        percentValue = ringTotal > 0 ? (s.value / ringTotal) * 100 : 0;
-      }
-      // Same combination rule as labelFormatter (name +/- percent), called directly with this
-      // slice's own values rather than through ECharts' callback — this needs the full,
-      // UNtruncated text up front, to measure and fit before rendering even starts.
-      const fullText = labelFormatter({ name: s.name, percent: parseFloat(percentValue.toFixed(decimals)) });
-
-      // calcAvailableDonutSliceLabelLength is, as its name says, a DONUT formula — with a true
-      // zero inner radius (egret's own "one ring, donut off" case, whose radii are the one part
-      // of a one-ring pie this branch left alone; see `outerEdge`/`holeStart` above) its inner
-      // chord is degenerate (a single point), which would make EVERY slice's space collapse to
-      // 0 and drop every label outright — a real regression for egret's plain, no-hole pie,
-      // which the fix's own defect write-up never identified as a problem (it's about a 3-ring
-      // SUNBURST, always a donut). Metabase never hits this because its own ratios always leave
-      // some hole, even at one ring (innerRadiusRatio 3/5). So a true full pie skips this fit
-      // check entirely and keeps showing full labels, same as before this fix — hideOverlap
-      // remains its sole backstop, exactly as it already was.
-      const availableSpace =
-        ringInnerPx > 0
-          ? calcAvailableDonutSliceLabelLength(ringInnerPx, ringOuterPx, startAngle, endAngle, sliceFontSize, labelsPosition) -
-            2 * SLICE_LABEL_PADDING
-          : Infinity;
-
-      const displayLabel = fitSliceLabel({
-        label: fullText,
-        availableSpace,
-        showLabels: showName,
-        measureText,
-        fontStyle,
-      });
-
-      // Fix 2: this slice's OWN render colour — its explicit override/inherited-lightened
-      // colour if it has one, or (matching what ECharts itself would assign) the palette colour
-      // at this slice's own index in this ring, same as the anchors pass above already resolves
-      // ring 0's implicit colours (`s.itemStyle?.color ?? seriesColor(i)`).
-      const sliceColor = s.itemStyle?.color ?? seriesColor(i);
-      const labelColor = getTextColorForBackground(sliceColor, labelTextDark, labelTextLight);
-
-      return { displayLabel, labelColor };
+    // calcAvailableDonutSliceLabelLength is, as its name says, a DONUT formula — with a true zero
+    // inner radius (egret's "one ring, donut off" case) its inner chord is degenerate (a single
+    // point), which would collapse every slice's space to 0 and drop every label outright.
+    // Metabase never hits this because its own ratios always leave some hole, even at one ring. So
+    // a true full pie skips the fit check entirely and keeps showing full labels, with hideOverlap
+    // as its sole backstop. An unknown `containerSize` takes the same path, for the same reason it
+    // always has: "we don't know the real size" must not become "guess small", which is what a
+    // fixed 300px reference container once did — truncating "LATAM" to "L…" in a real ~530px card.
+    const availableSpace =
+      ringInnerPx > 0
+        ? calcAvailableDonutSliceLabelLength(ringInnerPx, ringOuterPx, startAngle, endAngle, sliceFontSize, labelsPosition) -
+          2 * SLICE_LABEL_PADDING
+        : Infinity;
+    const displayLabel = fitSliceLabel({
+      label: composeSliceLabel(s.name, slicePercent),
+      availableSpace,
+      showLabels: showName,
+      measureText,
+      fontStyle,
     });
 
+    // This slice's OWN render colour. Every slice states one (buildPieRings pins ring 0's palette
+    // slots and lightens every ring below it), so the label's contrast is judged against the fill
+    // that will actually be drawn — the reason egret has 0 labels below WCAG AA where Metabase's
+    // own sunburst has 27.
+    const color = s.itemStyle?.color ?? resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel);
+    const labelColor = getTextColorForBackground(color, labelTextDark, labelTextLight);
+
+    const children = childrenByParentKey[level]?.get(s.key ?? OTHER_KEY);
+    let childStart = startAngle;
+
     return {
-      type: "pie" as const,
-      name: dims[level],
-      radius: [fmtPct(ringInnerPct), fmtPct(ringOuterPct)],
-      center,
-      data: ringData.map(({ name, value, itemStyle, parentKey }, i) => {
-        const base = itemStyle ? { name, value, itemStyle } : { name, value };
-        const { displayLabel, labelColor } = fits[i];
+      name: s.name,
+      value: s.value,
+      slicePercent,
+      itemStyle: { color, borderWidth },
+      label: {
+        color: labelColor,
         // Metabase's own sentinel for "nothing to show" (option.ts ~L269): a single space.
         //
-        // Still REQUIRED even though a dropped label is now a proper `null`, and the null cannot
-        // simply be passed through: ECharts reads a formatter returning null/undefined as "no
-        // formatter ran" and falls back to its own default label text (label/labelStyle.ts'
-        // getLabelText — `if (baseText == null) { baseText = opt.defaultText }`), which for a pie
-        // datum is the slice's own name. Returning null would therefore resurrect the very label
-        // the fit decision just dropped. A non-null string is returned verbatim (dataFormat.ts'
-        // getFormattedLabel), so the sentinel is what actually suppresses the label.
-        //
-        // A space rather than "": an empty string is indistinguishable from a slice whose
-        // dimension value is genuinely blank, and telling those two apart is the whole point of
-        // fitSliceLabel's blank-label guard (see the tests that pin it). The cost is that this
-        // invisible label still carries a space's width into `labelLayout.hideOverlap` — accepted,
-        // and the reason a dropped label is a deliberate sentinel here rather than an accident.
-        const withLabel = { ...base, label: { formatter: () => displayLabel ?? " ", color: labelColor } };
-        if (!parentFold || !parentValues || parentKey == null) return withLabel;
-        const parentFoldKey = parentFold.get(parentKey);
-        const parentValue = parentFoldKey != null ? parentValues.get(parentFoldKey) : undefined;
-        if (!parentValue) return withLabel; // defensive only — see the note above
-        const parentPercent = parseFloat(((value / parentValue) * 100).toFixed(decimals));
-        return { ...withLabel, parentPercent };
-      }),
-      // Series-level label: shared defaults every slice's own `label` (above) falls through to
-      // (show, position, fontSize, fontWeight, rotate). Deliberately carries NO `formatter`:
-      // every datum above always sets its own, so a series-level one could never run — it existed
-      // only as a callable convenience for tests, which then asserted the app's label composition
-      // against a function production never executes. Those tests now go through the per-datum
-      // formatter that actually renders (see pie.test.ts).
-      label: {
-        show: showName || showPercent,
-        position: "inside" as const,
-        fontSize: sliceFontSize,
-        fontWeight: 700,
-        // Fix 1a: multi-ring labels run along the radius rather than horizontally — a radial
-        // label fits a narrow arc a horizontal one can't. ECharts' pie label supports this
-        // directly (`rotate: "radial" | "tangential" | number`).
+        // Still REQUIRED even though a dropped label is a proper `null`, and the null cannot simply
+        // be passed through: SunburstPiece._updateLabel does `text = text || this.node.name`, so a
+        // formatter returning null/""/undefined resurrects the very label the fit decision just
+        // dropped. A space is truthy, so it wins — and a space rather than "" because an empty
+        // string is indistinguishable from a slice whose dimension value is genuinely blank, which
+        // is the whole point of fitSliceLabel's blank-label guard.
+        formatter: () => displayLabel ?? " ",
+        // Multi-ring labels run along the radius rather than horizontally — a radial label fits a
+        // narrow arc a horizontal one can't, which is what lets a thin outer ring hold a label at
+        // all. Per datum, like Metabase, since the series-level default would apply to every ring.
         rotate: labelsPosition === "horizontal" ? 0 : ("radial" as const),
         verticalAlign: "middle" as const,
       },
-      labelLayout,
-      padAngle: SLICE_PAD_ANGLE_DEG,
-      itemStyle: ringBorder,
-      // Keeps ECharts' own `percent` (ring 0's percent, and the fallback on every other ring's
-      // datum that somehow lacks a parentPercent) at the same precision `pct` formats to, so
-      // hovering and the in-chart label never disagree.
-      percentPrecision: decimals,
+      // Hovering a slice focuses its ANCESTORS (`emphasis.focus: "ancestor"` on the series) and
+      // blurs everything else. This keeps the hovered slice's own fill and border rather than
+      // letting ECharts lighten it.
+      emphasis: { itemStyle: { color, borderColor } },
+      blur: {
+        itemStyle: {
+          // Faded through the COLOUR, not through `opacity`. ECharts applies `itemStyle.opacity` to
+          // the border as well, so the background-coloured separator would go translucent and the
+          // fill underneath would leak through it. Fading only the fill leaves the border opaque.
+          color: fadeColor(color, 0.3),
+          opacity: 1,
+        },
+        // A label in the theme's normal ink is still legible over a 30%-opacity fill, so it fades
+        // with the slice; one in the INVERSE ink is only readable because its fill is dark, and
+        // that fill is what just went pale — fading it too would leave nothing at all. (Metabase
+        // makes the same split on its own text-primary/text-white pair.)
+        label: { opacity: labelColor === labelTextDark ? 0.3 : 1 },
+      },
+      ...(children?.length
+        ? {
+            children: children.map((child) => {
+              const node = toNode(child, level + 1, childStart, s.value);
+              childStart += child.value * unitRadian;
+              return node;
+            }),
+          }
+        : {}),
     };
+  }
+
+  let rootStart = 0;
+  const seriesData = rootSlices.map((s) => {
+    const node = toNode(s, 0, rootStart, rootTotal);
+    rootStart += s.value * unitRadian;
+    return node;
   });
+
+  // ONE series, of type `sunburst`, exactly like Metabase's — the point of this whole change.
+  // N independent `pie` series could not express ancestry at all, which is why hovering an outer
+  // slice used to change 3 of 55 wedges where Metabase changes 51 of 53.
+  //
+  // Written as a one-element ARRAY rather than Metabase's bare object: ECharts accepts either and
+  // normalises them to the same thing, and an array is what every other builder in this directory
+  // produces, so "how many series does this chart have" stays one question with one answer.
+  const series = [
+    {
+      type: "sunburst" as const,
+      // ECharts' sunburst sorts children by value DESCENDING by default, which would silently undo
+      // `sortRows: false` and `sliceOrder`. `undefined` (the key present, the value absent) is what
+      // suppresses it: zrender's `merge` skips a key that is already `in` the target, so the
+      // default never lands. Metabase writes the same line for the same reason.
+      sort: undefined,
+      // Clicking a wedge must not zoom the chart into it (`nodeClick: 'rootToNode'` is the
+      // default) — a click is egret's drill-through gesture, handled in ChartRenderer.
+      nodeClick: false as const,
+      radius,
+      center,
+      itemStyle: { borderColor },
+      label: {
+        show: showName || showPercent,
+        position: "inside" as const,
+        // Every label was already measured against its own slice, so ECharts must not then also
+        // truncate or wrap it against the bounding box it computes for a rotated label.
+        overflow: "none" as const,
+        fontSize: sliceFontSize,
+        fontWeight: 700,
+      },
+      labelLayout,
+      emphasis: { focus: "ancestor" as const },
+      data: seriesData,
+    },
+  ];
 
   // Every ring's total *should* equal the first ring's (each ring re-partitions the same rows),
   // but the zero/negative filter runs independently per ring (see buildSlices), so a surviving
@@ -991,12 +1012,16 @@ export function buildPieOption(
 
   return {
     ...baseOption(),
+    // ALL animation off, not `animationDuration: 0` — Metabase's own note: on a sunburst the
+    // duration alone does not stop the initial-render animation. It matters more here than it does
+    // there: this option is rebuilt on every resize tick (see EChartsRenderer), and each rebuild
+    // would otherwise replay a 1s expansion.
+    animation: false,
     aria,
     tooltip: itemTooltip(fmt, { percent: true }),
     // NO `legend` KEY, deliberately: the pie's legend is React markup beside the canvas
     // (buildPieLegend + PieLegend.tsx). ECharts' own legend component does not work with a
-    // `sunburst` series — which is what this pie is becoming — so putting one back here would
-    // silently disappear the moment the series type changes.
+    // `sunburst` series, which is what this pie now is.
     graphic,
     series,
   };

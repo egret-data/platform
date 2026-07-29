@@ -109,10 +109,15 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
       option={option}
       className="min-h-0 min-w-0 flex-1"
       onPointClick={onValueClick && pie.dimensions?.[0] ? (p) => {
-        // Each ring's ECharts series is named after its own dimension (see buildPieOption),
-        // so `seriesName` tells us which ring fired the click — a slice from the outer ring
-        // must drill on ITS OWN column, not always dimensions[0].
-        const col = pie.dimensions!.find((d) => d === p.seriesName) ?? pie.dimensions![0];
+        // Which ring fired the click. It used to be read off `seriesName`, because each ring was
+        // its own ECharts series named after its own dimension; the pie is ONE `sunburst` series
+        // now, so there is no per-ring series name left to match. What a sunburst click does carry
+        // is `treePathInfo`, the root-to-node path — and its depth is the ring: entry 0 is the
+        // synthetic virtual root ECharts wraps `series.data` in, entry 1 is the ring-0 slice, so
+        // ring index = length - 2. Clamped both ways so a shape this doesn't expect degrades to
+        // dimensions[0] (the pre-existing fallback) rather than indexing off the end.
+        const ring = (p.treePathInfo?.length ?? 2) - 2;
+        const col = pie.dimensions![Math.min(Math.max(ring, 0), pie.dimensions!.length - 1)];
         onValueClick({ dims: [{ col, value: p.name }] }, p.x, p.y);
       } : undefined}
     />

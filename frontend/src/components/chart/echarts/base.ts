@@ -31,13 +31,17 @@ export function itemTooltip(format: (v: unknown) => string, opts: { percent?: bo
   return {
     trigger: "item" as const,
     textStyle: baseTextStyle,
-    formatter: (p: { name?: string; value?: unknown; percent?: number; data?: { parentPercent?: number } }) => {
+    formatter: (p: { name?: string; value?: unknown; percent?: number; data?: { slicePercent?: number } }) => {
       const name = String(p.name ?? "");
       if (p.value == null || (typeof p.value === "number" && Number.isNaN(p.value))) return name;
       const value = format(p.value);
-      // ECharts' own `percent` is always share-of-that-series (share of the ring); a datum that
-      // carries a parent-relative override (pie's outer rings — see pie.ts buildPieOption) wins.
-      const percent = p.data?.parentPercent ?? p.percent;
+      // A datum that states its own share wins over ECharts'. Required, not merely preferred, for
+      // the pie: a `sunburst` series has no `percent` at all — only `PieSeriesModel.getDataParams`
+      // adds one (and only it honours `percentPrecision`), and the pie is a sunburst now, so every
+      // slice supplies `slicePercent` itself (share of the whole chart at ring 0, of its own parent
+      // below that — see options/pie.ts). The `?? p.percent` fallback is what the other item-tooltip
+      // users (funnel, map, boxplot, sankey) still ride on.
+      const percent = p.data?.slicePercent ?? p.percent;
       return opts.percent && percent != null ? `${name}: ${value} (${percent}%)` : `${name}: ${value}`;
     },
   };
@@ -55,7 +59,7 @@ export function axisTooltip() {
 // NO LEGEND BUILDERS HERE ANY MORE. `bottomLegend`/`sideLegend` composed an ECharts `legend`
 // component, and pie was their only caller — no cartesian chart here has ever set one. The pie's
 // legend is now React markup rendered beside the canvas (buildPieLegend + PieLegend.tsx), because
-// ECharts' legend does not work with a `sunburst` series and that is what the pie is becoming.
+// ECharts' legend does not work with a `sunburst` series and that is what the pie is.
 // Leaving the helpers behind would advertise a shared answer to "what does a legend look like in
 // egret" that nothing implements.
 

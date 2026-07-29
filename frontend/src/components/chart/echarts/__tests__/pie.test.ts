@@ -9,14 +9,33 @@ import { calcAvailableDonutSliceLabelLength } from "../sliceLabel";
 const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }];
 const rows = [["EU", 10], ["US", 30]];
 
+/**
+ * The slices exactly `level` rings out from the centre, in draw order.
+ *
+ * The pie is ONE `sunburst` series whose `data` is a nested `children` tree, so a ring is a DEPTH
+ * in that tree rather than a series of its own. Flattening depth-first is what reproduces the flat
+ * per-ring array the old N-independent-`pie`-series version produced: it visits each parent's
+ * children consecutively, in the parents' own order, which is exactly the contiguous-per-parent
+ * layout `reorderByParent` used to have to construct by hand (and which the sunburst now gets
+ * structurally, since ECharts lays a node's children out inside that node's arc).
+ */
+const ring = (opt: any, level: number): any[] => {
+  let nodes: any[] = opt.series[0].data;
+  for (let i = 0; i < level; i++) nodes = nodes.flatMap((n: any) => n.children ?? []);
+  return nodes;
+};
+
+/** How many rings the tree actually draws — its own depth, counted from the data. */
+const treeDepth = (nodes: any[]): number =>
+  nodes.length === 0 ? 0 : 1 + Math.max(...nodes.map((n: any) => treeDepth(n.children ?? [])));
+
 describe("buildPieOption", () => {
   it("maps rows to {name, value} slices, sorted by value desc", () => {
     const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
-    expect(opt.series[0].type).toBe("pie");
-    // Each datum also carries its own `label` (fix 1b/2 — per-slice fit + contrast colour, see
-    // the "slice label fit & colour" describe block below) — picked out here so this test stays
-    // about mapping/sorting, not label content.
-    expect(opt.series[0].data.map((d: any) => ({ name: d.name, value: d.value }))).toEqual([
+    expect(opt.series[0].type).toBe("sunburst");
+    // Each datum also carries its own `label` (per-slice fit + contrast colour, see the label
+    // describe block below) — picked out here so this test stays about mapping/sorting.
+    expect(ring(opt, 0).map((d: any) => ({ name: d.name, value: d.value }))).toEqual([
       { name: "US", value: 30 },
       { name: "EU", value: 10 },
     ]);
@@ -28,6 +47,73 @@ describe("buildPieOption", () => {
   });
   it("empty when dimension or metric missing", () => {
     expect((buildPieOption(cols, rows, {}) as any).series[0].data).toEqual([]);
+  });
+});
+
+// The change this file's whole shape follows from: N stacked, independent `pie` series became ONE
+// `sunburst`, exactly as Metabase draws its own pies. Independent series cannot express ancestry —
+// which is why hovering an outer slice used to change 3 of 55 wedges where Metabase changes 51 of
+// 53, and why an outer ring's wedges lined up with their parents' only by coincidence.
+describe("buildPieOption — one sunburst series, not N pies", () => {
+  const cols3 = [
+    { name: "region", type: "varchar" }, { name: "category", type: "varchar" },
+    { name: "brand", type: "varchar" }, { name: "m", type: "double" },
+  ];
+  const rows3 = [
+    ["US", "Widgets", "Acme", 10], ["US", "Widgets", "Zenith", 5], ["EU", "Gadgets", "Acme", 3],
+  ];
+
+  it("is exactly one series, of type sunburst, whatever the dimension count", () => {
+    for (const [c, r, dimensions] of [
+      [cols, rows, ["region"]],
+      [cols3, rows3, ["region", "category"]],
+      [cols3, rows3, ["region", "category", "brand"]],
+    ] as const) {
+      const opt = buildPieOption(c as any, r as any, { dimensions: [...dimensions], metric: dimensions.length === 1 ? "rev" : "m" }) as any;
+      expect(opt.series).toHaveLength(1);
+      expect(opt.series[0].type).toBe("sunburst");
+    }
+  });
+
+  it("nests the rings as a children tree whose depth is the dimension count", () => {
+    for (const dimensions of [["region"], ["region", "category"], ["region", "category", "brand"]]) {
+      const opt = buildPieOption(cols3, rows3, { dimensions, metric: "m" }) as any;
+      expect(treeDepth(ring(opt, 0))).toBe(dimensions.length);
+    }
+    // ...and the nesting is real parentage, not just depth: US's children are its own categories.
+    const two = buildPieOption(cols3, rows3, { dimensions: ["region", "category"], metric: "m" }) as any;
+    const us = ring(two, 0).find((d: any) => d.name === "US");
+    expect(us.children.map((c: any) => ({ name: c.name, value: c.value }))).toEqual([{ name: "Widgets", value: 15 }]);
+  });
+
+  it("focuses a hovered slice's ancestors, and fades the rest by COLOUR rather than opacity", () => {
+    const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any;
+    expect(opt.series[0].emphasis).toEqual({ focus: "ancestor" });
+
+    for (const level of [0, 1, 2]) {
+      for (const d of ring(opt, level)) {
+        // Fading via `itemStyle.opacity` would take the border with it, letting the fill leak
+        // through the separator — so the fade lives in the fill colour and opacity stays at 1.
+        expect(d.blur.itemStyle.opacity).toBe(1);
+        expect(d.blur.itemStyle.color).not.toBe(d.itemStyle.color);
+        expect(d.blur.itemStyle.color).toMatch(/^rgba\(\d+, \d+, \d+, 0\.3\)$/);
+      }
+    }
+  });
+
+  it("turns animation off, leaves sorting to the data's own order, and never zooms on a click", () => {
+    const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category"], metric: "m" }) as any;
+    expect(opt.animation).toBe(false);
+    // The key must be PRESENT and undefined: that is what stops ECharts' `sort: 'desc'` default
+    // from merging in and silently re-sorting `sortRows: false` / `sliceOrder` away.
+    expect("sort" in opt.series[0]).toBe(true);
+    expect(opt.series[0].sort).toBeUndefined();
+    expect(opt.series[0].nodeClick).toBe(false);
+  });
+
+  it("keeps `sortRows: false` order, which ECharts' own sunburst default would have undone", () => {
+    const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", sortRows: false }) as any;
+    expect(ring(opt, 0).map((d: any) => d.name)).toEqual(["EU", "US"]);
   });
 });
 
@@ -101,10 +187,15 @@ describe("buildPieOption — data robustness (Metabase parity)", () => {
     const d = slices([["A", 50], ["B", 45], ["C", 2], ["D", 2], ["E", 1]], { sliceThreshold: 0 });
     expect(d.map((s: any) => s.name)).toEqual(["A", "B", "C", "D", "E"]);
   });
-  it("the Other slice is muted; normal slices defer to the palette", () => {
+  it("the Other slice is muted; normal slices take their palette slot", () => {
     const d = slices([["A", 50], ["B", 45], ["C", 2], ["D", 2], ["E", 1]]);
-    expect(d.find((s: any) => s.name === "Other").itemStyle.color).toBeTruthy();
-    expect(d.find((s: any) => s.name === "A").itemStyle).toBeUndefined();
+    const other = d.find((s: any) => s.name === "Other").itemStyle.color;
+    expect(other).toBeTruthy();
+    // Ring 0's palette slots are pinned onto the slice rather than left implicit — a sunburst
+    // assigns them by NAME and skips any slice that already has a colour, so an implicit slot
+    // would shift the moment one slice carried an override. See the colour-inheritance block.
+    expect(d.find((s: any) => s.name === "A").itemStyle.color).toBe(seriesColor(0));
+    expect(other).not.toBe(seriesColor(0));
   });
 });
 
@@ -122,7 +213,7 @@ describe("buildPieOption — donut total & percent (Metabase parity 1b)", () => 
   // means the percentage under test is the one the chart computed from the fixture, not one the
   // test handed in.
   const labelText = (o: any, name: string) =>
-    o.series[0].data.find((d: any) => d.name === name).label.formatter();
+    ring(o, 0).find((d: any) => d.name === name).label.formatter();
 
   it("renders a centre total only for donut + showTotal", () => {
     expect(opt({ showTotal: true }).graphic).toBeFalsy();           // not a donut
@@ -161,14 +252,14 @@ describe("buildPieOption — nested rings (task 4)", () => {
   it("one dimension still renders exactly one series, unchanged", () => {
     const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
     expect(opt.series).toHaveLength(1);
-    expect(opt.series[0].data.map((d: any) => ({ name: d.name, value: d.value }))).toEqual([
+    expect(ring(opt, 0).map((d: any) => ({ name: d.name, value: d.value }))).toEqual([
       { name: "US", value: 30 },
       { name: "EU", value: 10 },
     ]);
     expect(opt.series[0].radius).toEqual(["0%", "70%"]);
   });
 
-  it("two dimensions render two series, at different radii, inner first", () => {
+  it("two dimensions nest as two rings, the inner one aggregating the outer", () => {
     const cols2 = [
       { name: "region", type: "varchar" }, { name: "category", type: "varchar" }, { name: "rev", type: "double" },
     ];
@@ -177,14 +268,12 @@ describe("buildPieOption — nested rings (task 4)", () => {
       ["EU", "Widgets", 5], ["EU", "Gadgets", 5],
     ];
     const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "rev" }) as any;
-    expect(opt.series).toHaveLength(2);
-    const [inner, outer] = opt.series;
-    expect(parseFloat(inner.radius[0])).toBeLessThan(parseFloat(outer.radius[0]));
-    expect(parseFloat(inner.radius[1])).toBeLessThanOrEqual(parseFloat(outer.radius[1]));
+    expect(treeDepth(opt.series[0].data)).toBe(2);
     // inner ring = region totals (US 40, EU 10), sorted desc
-    expect(inner.data.map((d: any) => ({ name: d.name, value: d.value }))).toEqual([
+    expect(ring(opt, 0).map((d: any) => ({ name: d.name, value: d.value }))).toEqual([
       { name: "US", value: 40 }, { name: "EU", value: 10 },
     ]);
+    expect(ring(opt, 1)).toHaveLength(4);
   });
 
   it("the outer ring's slices are contiguous per parent, in the parent's own order", () => {
@@ -198,7 +287,7 @@ describe("buildPieOption — nested rings (task 4)", () => {
       ["EU", "Widgets", 20], ["EU", "Gadgets", 1],
     ];
     const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "rev" }) as any;
-    const outer = opt.series[1].data;
+    const outer = ring(opt, 1);
     expect(outer.map((d: any) => d.name)).toEqual(["Widgets", "Gadgets", "Widgets", "Gadgets"]);
     expect(outer.map((d: any) => d.value)).toEqual([20, 1, 5, 3]);
   });
@@ -210,7 +299,7 @@ describe("buildPieOption — nested rings (task 4)", () => {
     // Outer ring values across both parents: 10, -5 (mixed sign -> dropped), 5, 0 (dropped).
     const rows2 = [["R1", "A", 10], ["R1", "B", -5], ["R2", "C", 5], ["R2", "D", 0]];
     const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "cat"], metric: "m" }) as any;
-    const outer = opt.series[1].data;
+    const outer = ring(opt, 1);
     expect(outer.map((d: any) => d.name)).toEqual(["A", "C"]);
     expect(outer.map((d: any) => d.value)).toEqual([10, 5]);
   });
@@ -230,11 +319,11 @@ describe("buildPieOption — nested rings (task 4)", () => {
       ["R2", "C", 985], ["R2", "D", 5], ["R2", "E", 5], ["R2", "F", 5],
     ];
     const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "cat"], metric: "m" }) as any;
-    const inner = opt.series[0].data;
+    const inner = ring(opt, 0);
     expect(inner.map((d: any) => d.name)).toEqual(["R2", "R1"]);
     expect(inner.some((d: any) => d.name === "Other")).toBe(false);
 
-    const outer = opt.series[1].data;
+    const outer = ring(opt, 1);
     // Contiguous per parent, in the parent's own order (R2 first, then R1): C, R2's Other(15),
     // then A, B (B unfolded — only one small slice under R1).
     expect(outer.map((d: any) => d.name)).toEqual(["C", "Other", "A", "B"]);
@@ -249,7 +338,7 @@ describe("buildPieOption — nested rings (task 4)", () => {
     ];
     const rows2 = [["R1", "A", 50], ["R1", "B", 49], ["R1", "C", 1]]; // only C < 2.5% of 100
     const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "cat"], metric: "m" }) as any;
-    expect(opt.series[1].data.map((d: any) => d.name)).toEqual(["A", "B", "C"]);
+    expect(ring(opt, 1).map((d: any) => d.name)).toEqual(["A", "B", "C"]);
   });
 
   it("a null outer dimension value does not break or drop its parent's slice", () => {
@@ -259,26 +348,18 @@ describe("buildPieOption — nested rings (task 4)", () => {
     const rows2 = [["R1", null, 10], ["R2", "X", 5]];
     expect(() => buildPieOption(cols2, rows2, { dimensions: ["region", "cat"], metric: "m" })).not.toThrow();
     const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "cat"], metric: "m" }) as any;
-    const inner = opt.series[0].data;
+    const inner = ring(opt, 0);
     expect(inner).toHaveLength(2);
     expect(inner.map((d: any) => ({ name: d.name, value: d.value }))).toEqual(
       expect.arrayContaining([{ name: "R1", value: 10 }, { name: "R2", value: 5 }]),
     );
   });
 
-  // Asserts a ring's radii are strictly increasing, non-overlapping (each ring's outer edge is
-  // exactly the next ring's inner edge), and together span [holeStart, 70%] with no gap.
-  function assertContiguousRadii(series: { radius: [string, string] }[], holeStart: number) {
-    const bounds = series.map((s) => s.radius.map((r) => parseFloat(r)));
-    expect(bounds[0][0]).toBe(holeStart);
-    for (let i = 0; i < bounds.length; i++) {
-      expect(bounds[i][0]).toBeLessThan(bounds[i][1]); // each ring itself has positive thickness
-      if (i > 0) expect(bounds[i][0]).toBe(bounds[i - 1][1]); // contiguous: no gap, no overlap
-    }
-    expect(bounds[bounds.length - 1][1]).toBe(70); // spans the full outer edge
-  }
-
-  it("three dimensions render three series at three strictly-increasing, non-overlapping radii", () => {
+  // The rings no longer state their own radii: there is ONE [inner, outer] band and ECharts'
+  // sunburstLayout splits it evenly across the tree's own depth (`rPerLevel = (r - r0) / levels`).
+  // So what this can still pin is the band itself — where the hole starts and where the outer edge
+  // lands — plus the depth that band is divided by.
+  it("three dimensions draw three rings inside one radius band, starting at Metabase's 1/4 hole", () => {
     const cols3 = [
       { name: "region", type: "varchar" }, { name: "category", type: "varchar" },
       { name: "brand", type: "varchar" }, { name: "m", type: "double" },
@@ -287,10 +368,10 @@ describe("buildPieOption — nested rings (task 4)", () => {
       ["US", "Widgets", "Acme", 10], ["US", "Widgets", "Zenith", 5], ["EU", "Gadgets", "Acme", 3],
     ];
     const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any;
-    expect(opt.series).toHaveLength(3);
+    expect(treeDepth(opt.series[0].data)).toBe(3);
     // Metabase's threeRingInnerRadiusRatio (1/4) is unconditional once there are 2+ rings, even
     // with `donut` off — see the "Metabase ring geometry" describe block below.
-    assertContiguousRadii(opt.series, 17.5);
+    expect(opt.series[0].radius).toEqual(["17.5%", "70%"]);
   });
 
   it("donut hollows the centre with one ring, and with three rings the centre stays clear", () => {
@@ -305,22 +386,10 @@ describe("buildPieOption — nested rings (task 4)", () => {
       ["US", "Widgets", "Acme", 10], ["US", "Widgets", "Zenith", 5], ["EU", "Gadgets", "Acme", 3],
     ];
     const three = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m", donut: true }) as any;
-    expect(three.series).toHaveLength(3);
+    expect(treeDepth(three.series[0].data)).toBe(3);
     // Metabase's threeRingInnerRadiusRatio (1/4 of the 70%-outer-edge scale this file uses) — see
     // the "Metabase ring geometry" describe block below for why this replaced the old flat 45%.
-    assertContiguousRadii(three.series, 17.5);
-  });
-
-  it("names each ring's series after its own dimension, so a click can be attributed to the right ring", () => {
-    const cols3 = [
-      { name: "region", type: "varchar" }, { name: "category", type: "varchar" },
-      { name: "brand", type: "varchar" }, { name: "m", type: "double" },
-    ];
-    const rows3 = [
-      ["US", "Widgets", "Acme", 10], ["US", "Widgets", "Zenith", 5], ["EU", "Gadgets", "Acme", 3],
-    ];
-    const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any;
-    expect(opt.series.map((s: any) => s.name)).toEqual(["region", "category", "brand"]);
+    expect(three.series[0].radius).toEqual(["17.5%", "70%"]);
   });
 
   it("says so in the aria description when a ring's total diverges from the first ring's", () => {
@@ -332,8 +401,8 @@ describe("buildPieOption — nested rings (task 4)", () => {
     // are positive) -> mixed-sign drop instead of abs-convert -> keeps only 2 and 1 (total 3).
     const rows2 = [["R1", "A", 2], ["R1", "B", -7], ["R2", "C", 1], ["R2", "D", -4]];
     const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "cat"], metric: "m" }) as any;
-    expect(opt.series[0].data.reduce((t: number, s: any) => t + s.value, 0)).toBe(8);
-    expect(opt.series[1].data.reduce((t: number, s: any) => t + s.value, 0)).toBe(3);
+    expect(ring(opt, 0).reduce((t: number, s: any) => t + s.value, 0)).toBe(8);
+    expect(ring(opt, 1).reduce((t: number, s: any) => t + s.value, 0)).toBe(3);
     expect(opt.aria.label.description).toContain("cat ring totals 3");
     expect(opt.aria.label.description).toContain("not 8");
   });
@@ -371,7 +440,7 @@ describe("buildPieOption — per-parent Other fold (bug fix)", () => {
     ["P3", "D1", 900], ["P3", "D2", 70], ["P3", "d1", 15], ["P3", "d2", 15],
   ];
   const outer = () =>
-    (buildPieOption(cols2, rows2, { dimensions: ["grp", "item"], metric: "m" }) as any).series[1].data;
+    ring(buildPieOption(cols2, rows2, { dimensions: ["grp", "item"], metric: "m" }) as any, 1);
 
   it("each parent with 2+ sub-threshold children gets its OWN Other, and there is no chart-wide Other merging every parent's small slices together", () => {
     const data = outer();
@@ -399,6 +468,43 @@ describe("buildPieOption — per-parent Other fold (bug fix)", () => {
     expect(p3Other).toBeTruthy();
     // Neither Other is 60 (the old ring-wide bug: b1+b2+c_small+d1+d2) or any other cross-parent mix.
     expect(data.filter((d: any) => d.name === "Other").map((d: any) => d.value)).not.toContain(60);
+  });
+
+  // `otherKeyFor` gives each parent's "Other" bucket its OWN key, and that is still load-bearing
+  // under the sunburst even though the nesting is structural now: the key is how a ring's slices
+  // find WHICH parent-ring node to hang off (groupByParent). Collapse the two Others onto one key
+  // and both of them claim the same child list — every folded-away grandchild appears under both.
+  //
+  // Only visible with three rings AND two parents that each fold: with two rings the Other buckets
+  // have no children to mis-attribute, which is why the tests above stayed green when this was
+  // deliberately broken.
+  it("keeps each parent's Other bucket's own grandchildren under that Other, not under another parent's", () => {
+    const cols3 = [
+      { name: "region", type: "varchar" }, { name: "product", type: "varchar" },
+      { name: "channel", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    // Each region totals 1020, so ring 0 never folds. Within each region, the two 10-value
+    // products are sub-threshold against their own parent's 1020, so each region gets its OWN
+    // Other(20) at ring 1 — and each of those Others has its own channels at ring 2.
+    const rows3 = [
+      ["R1", "P1", "x", 1000],
+      ["R1", "a", "A1", 6], ["R1", "a", "A2", 4],
+      ["R1", "b", "B1", 10],
+      ["R2", "P2", "y", 1000],
+      ["R2", "c", "C1", 10],
+      ["R2", "d", "D1", 10],
+    ];
+    const opt = buildPieOption(cols3, rows3, {
+      dimensions: ["region", "product", "channel"], metric: "m",
+    }) as any;
+
+    const others = ring(opt, 1).filter((d: any) => d.name === "Other");
+    expect(others).toHaveLength(2);
+    const childNames = others.map((o: any) => o.children.map((c: any) => c.name).sort());
+    expect(childNames).toContainEqual(["A1", "A2", "B1"]); // R1's folded products' channels
+    expect(childNames).toContainEqual(["C1", "D1"]); // R2's
+    // ...and nothing is claimed twice: 1 + 3 + 1 + 2 channels, no more.
+    expect(ring(opt, 2)).toHaveLength(7);
   });
 
   it("each Other sits contiguous with that parent's other children, in the ring's ordering", () => {
@@ -438,8 +544,8 @@ describe("buildPieOption — per-parent Other fold (bug fix)", () => {
     const opt = buildPieOption(cols3, rows3, {
       dimensions: ["region", "product", "channel"], metric: "m", sliceThreshold: 2.5,
     }) as any;
-    expect(opt.series).toHaveLength(3);
-    const outerRing = opt.series[2].data;
+    expect(treeDepth(opt.series[0].data)).toBe(3);
+    const outerRing = ring(opt, 2);
     // No ring-wide "Other" wedge...
     expect(outerRing.some((d: any) => d.name === "Other")).toBe(false);
     // ...and every one of the 36 real slices survived.
@@ -453,8 +559,15 @@ describe("buildPieOption — per-parent Other fold (bug fix)", () => {
 
 // Task 5 — ring colour inheritance: an outer ring's slice takes its parent slice's own
 // colour, lightened one OKLab step per ring, instead of an unrelated palette colour (Metabase
-// getRingColorAlias). Single-ring pies are untouched — see the "unchanged" test in the
-// nested-rings block above, which asserts ring 0 still carries no itemStyle at all.
+// getRingColorAlias).
+//
+// Ring 0's own colours are now PINNED explicitly rather than left to ECharts' palette. They used
+// to be left implicit (no `itemStyle` at all on an un-overridden slice), which a `pie` series
+// makes safe — it colours by datum INDEX. A `sunburst` colours a top-level node by NAME and skips
+// the palette entirely for a node that already has a colour, so one `sliceColors` override on
+// ring 0 would have consumed no slot and slid every later slice's colour up by one, while the
+// React legend and the label-contrast pass (both computing `seriesColor(i)` from the ring index)
+// went on naming the old ones.
 describe("buildPieOption — ring colour inheritance (task 5)", () => {
   const cols2 = [
     { name: "region", type: "varchar" }, { name: "category", type: "varchar" }, { name: "rev", type: "double" },
@@ -466,10 +579,10 @@ describe("buildPieOption — ring colour inheritance (task 5)", () => {
 
   it("an outer slice inherits its parent's colour, lightened one step", () => {
     const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "rev" }) as any;
-    const inner = opt.series[0].data; // [US(40), EU(10)] — implicit palette, no itemStyle
-    expect(inner.map((d: any) => d.itemStyle)).toEqual([undefined, undefined]);
+    const inner = ring(opt, 0); // [US(40), EU(10)] — the palette, pinned onto each slice
+    expect(inner.map((d: any) => d.itemStyle.color)).toEqual([seriesColor(0), seriesColor(1)]);
 
-    const outer = opt.series[1].data;
+    const outer = ring(opt, 1);
     const usColor = seriesColor(inner.findIndex((d: any) => d.name === "US"));
     const euColor = seriesColor(inner.findIndex((d: any) => d.name === "EU"));
     const widgetsUnderUS = outer.find((d: any) => d.name === "Widgets" && d.value === 30);
@@ -482,10 +595,10 @@ describe("buildPieOption — ring colour inheritance (task 5)", () => {
     const opt = buildPieOption(cols2, rows2, {
       dimensions: ["region", "category"], metric: "rev", sliceColors: { US: "#123456" },
     }) as any;
-    const inner = opt.series[0].data;
+    const inner = ring(opt, 0);
     expect(inner.find((d: any) => d.name === "US").itemStyle.color).toBe("#123456");
 
-    const outer = opt.series[1].data;
+    const outer = ring(opt, 1);
     const widgetsUnderUS = outer.find((d: any) => d.name === "Widgets" && d.value === 30);
     // Must lighten from the OVERRIDE ("#123456"), not from seriesColor(0) — the palette
     // colour US would otherwise have gotten.
@@ -501,9 +614,9 @@ describe("buildPieOption — ring colour inheritance (task 5)", () => {
     const opt = buildPieOption(cols2, rows2, {
       dimensions: ["region"], metric: "rev", sliceColors: { US: "banana", EU: "rgb(1,2,3)" },
     }) as any;
-    const inner = opt.series[0].data;
-    // Not a colour: no override at all, so ECharts' own palette slot still applies.
-    expect(inner.find((d: any) => d.name === "US").itemStyle).toBeUndefined();
+    const inner = ring(opt, 0);
+    // Not a colour: no override at all, so the slice keeps the palette slot for its own index.
+    expect(inner.find((d: any) => d.name === "US").itemStyle.color).toBe(seriesColor(0));
     // A valid non-hex colour still comes through verbatim.
     expect(inner.find((d: any) => d.name === "EU").itemStyle.color).toBe("rgb(1,2,3)");
   });
@@ -525,13 +638,13 @@ describe("buildPieOption — ring colour inheritance (task 5)", () => {
       ["R3", "Y2", -80],
     ];
     const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "cat"], metric: "m" }) as any;
-    const inner = opt.series[0].data;
+    const inner = ring(opt, 0);
     const other = inner.find((d: any) => d.name === "Other");
     expect(other).toBeTruthy();
     expect(other.value).toBe(40);
     const otherColor = other.itemStyle.color;
 
-    const outer = opt.series[1].data;
+    const outer = ring(opt, 1);
     const x = outer.find((d: any) => d.name === "X");
     const y1 = outer.find((d: any) => d.name === "Y1");
     expect(x).toBeTruthy();
@@ -552,7 +665,7 @@ describe("buildPieOption — slice curation (task 6)", () => {
     const opt = buildPieOption(cols, rows, {
       dimensions: ["d"], metric: "m", sliceNames: { US: "United States" },
     }) as any;
-    expect(opt.series[0].data.map((d: any) => d.name)).toEqual(["United States", "EU"]);
+    expect(ring(opt, 0).map((d: any) => d.name)).toEqual(["United States", "EU"]);
   });
 
   it("a hidden slice is absent and the remaining percentages re-base", () => {
@@ -560,7 +673,7 @@ describe("buildPieOption — slice curation (task 6)", () => {
     const opt = buildPieOption(cols, rows, {
       dimensions: ["d"], metric: "m", hiddenSlices: ["B"],
     }) as any;
-    const data = opt.series[0].data;
+    const data = ring(opt, 0);
     expect(data.map((d: any) => d.name)).toEqual(["C", "A"]);
     const total = data.reduce((t: number, d: any) => t + d.value, 0);
     // Must be 70 (A + C), NOT 100 — B's value must not still count toward the total.
@@ -580,9 +693,9 @@ describe("buildPieOption — slice curation (task 6)", () => {
     const opt = buildPieOption(cols2, rows2, {
       dimensions: ["region", "cat"], metric: "m", hiddenSlices: ["R1"],
     }) as any;
-    const inner = opt.series[0].data;
+    const inner = ring(opt, 0);
     expect(inner.map((d: any) => d.name)).toEqual(["R2"]);
-    const outer = opt.series[1].data;
+    const outer = ring(opt, 1);
     expect(outer.map((d: any) => d.name)).toEqual(["C", "D"]);
     const outerTotal = outer.reduce((t: number, d: any) => t + d.value, 0);
     // Must be 25 (C + D), NOT 40 — R1's children (A, B) must not survive their hidden parent.
@@ -594,7 +707,7 @@ describe("buildPieOption — slice curation (task 6)", () => {
     const opt = buildPieOption(cols, rows, {
       dimensions: ["d"], metric: "m", sliceOrder: ["A"],
     }) as any;
-    expect(opt.series[0].data.map((d: any) => d.name)).toEqual(["A", "B", "C"]);
+    expect(ring(opt, 0).map((d: any) => d.name)).toEqual(["A", "B", "C"]);
   });
 
   it("decimals changes what a percentage label shows", () => {
@@ -603,7 +716,7 @@ describe("buildPieOption — slice curation (task 6)", () => {
     // Read from the per-datum formatter — the one that actually renders; A is 10 of 30, i.e.
     // 33.333…%, so the two decimal settings genuinely differ.
     const rows = [["A", 10], ["B", 20]];
-    const labelOfA = (o: any) => o.series[0].data.find((d: any) => d.name === "A").label.formatter();
+    const labelOfA = (o: any) => ring(o, 0).find((d: any) => d.name === "A").label.formatter();
     const withDefault = buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", percentVisibility: "inside", showLabels: false }) as any;
     const withZero = buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", percentVisibility: "inside", decimals: 0, showLabels: false }) as any;
     expect(labelOfA(withDefault)).toBe("33.33%");
@@ -619,7 +732,7 @@ describe("buildPieOption — slice curation (task 6)", () => {
       hiddenSlices: ["C"],
       sliceOrder: ["A", "B"],
     }) as any;
-    const data = opt.series[0].data;
+    const data = ring(opt, 0);
     // C is hidden (by its raw value, even though never renamed).
     expect(data.map((d: any) => d.name)).not.toContain("C");
     // A is renamed for display...
@@ -645,9 +758,9 @@ describe("buildPieOption — slice curation (task 6)", () => {
     const opt = buildPieOption(cols2, rows2, {
       dimensions: ["region", "category"], metric: "m", hiddenSlices: ["US"],
     }) as any;
-    const inner = opt.series[0].data;
+    const inner = ring(opt, 0);
     expect(inner.map((d: any) => d.name)).toEqual(["EU"]);
-    const outer = opt.series[1].data;
+    const outer = ring(opt, 1);
     expect(outer.map((d: any) => d.name)).toEqual(["US"]);
     expect(outer.find((d: any) => d.name === "US").value).toBe(10);
   });
@@ -699,33 +812,57 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
     });
   });
 
-  describe("fix 2 — a 1-degree gap between slices, in the chart's own background", () => {
-    it("every ring gets a 1-degree padAngle, one ring included", () => {
-      const one = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
-      expect(one.series[0].padAngle).toBe(1);
-
-      const three = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any;
-      for (const s of three.series) expect(s.padAngle).toBe(1);
-    });
-
-    it("a single ring carries no extra border — padAngle alone is the gap", () => {
-      const one = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
-      expect(one.series[0].itemStyle?.borderWidth).toBeFalsy();
-    });
-
-    it("two rings use Metabase's twoRingBorderWidth (1), coloured like the chart background", () => {
-      const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m" }) as any;
-      for (const s of opt.series) {
-        expect(s.itemStyle.borderWidth).toBe(1);
-        // jsdom can't resolve var(--card); resolveColor falls back to a concrete colour rather
-        // than ever leaking the literal "var(...)" to the SVG renderer.
-        expect(s.itemStyle.borderColor).not.toContain("var(");
+  // Slices are separated by a shared BORDER STROKE, never by an angular gap.
+  //
+  // This used to set ECharts' `padAngle: 1`, on a reading of Metabase's
+  // `borderProportion: 360 // 1 degree` as an angular pad. It isn't one — `getBorderWidth` returns
+  // `(π × innerSideLength) / 360`, a stroke WIDTH (the arc length one degree subtends at the pie's
+  // own radius). Measured against a real Metabase on the same 3-ring data: Metabase's outer-ring
+  // slices touch (0 gaps), egret's had 36, median 3.96px — because a constant ANGLE opens a gap
+  // that grows with radius, and because a pad removes real area from each slice where a shared
+  // stroke does not.
+  describe("slice separation — a shared border stroke, and no angular gap anywhere", () => {
+    it("sets no padAngle at any ring count", () => {
+      for (const opt of [
+        buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any,
+        buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m" }) as any,
+        buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any,
+      ]) {
+        expect(opt.series[0].padAngle).toBeUndefined();
+        expect(JSON.stringify(opt)).not.toContain("padAngle");
       }
     });
 
-    it("three rings use Metabase's threeRingBorderWidth (0.3)", () => {
-      const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any;
-      for (const s of opt.series) expect(s.itemStyle.borderWidth).toBe(0.3);
+    it("two AND three rings both use a flat borderWidth of 1", () => {
+      // Metabase's own `twoRingBorderWidth: 1` / `threeRingBorderWidth: 0.3` constants are DEAD in
+      // its source — `getBorderWidth` reads neither, and returns a flat 1 for every ring count
+      // above one. The 0.3 this used to draw at three rings came from the dead constant.
+      for (const [c, r, dimensions] of [
+        [cols2, rows2, ["region", "category"]],
+        [cols3, rows3, ["region", "category", "brand"]],
+      ] as const) {
+        const opt = buildPieOption(c as any, r as any, { dimensions: [...dimensions], metric: "m" }) as any;
+        for (let level = 0; level < dimensions.length; level++) {
+          for (const d of ring(opt, level)) expect(d.itemStyle.borderWidth).toBe(1);
+        }
+      }
+    });
+
+    it("a single ring derives its border width from the pie's own diameter", () => {
+      // Metabase's `(π × innerSideLength) / 360` — the arc length one degree subtends. A 400px host
+      // draws a 0.7 * 400 = 280px pie, so the stroke is π * 280 / 360.
+      const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }, undefined, {
+        width: 400, height: 400,
+      }) as any;
+      for (const d of ring(opt, 0)) expect(d.itemStyle.borderWidth).toBeCloseTo((Math.PI * 280) / 360, 9);
+    });
+
+    it("colours the border like the chart's own background, never leaking a raw var()", () => {
+      const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m" }) as any;
+      // jsdom can't resolve var(--card); resolveColor falls back to a concrete colour rather
+      // than ever leaking the literal "var(...)" to the SVG renderer.
+      expect(opt.series[0].itemStyle.borderColor).toBeTruthy();
+      expect(opt.series[0].itemStyle.borderColor).not.toContain("var(");
     });
   });
 
@@ -741,16 +878,18 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
 
     it("multi-ring pies use Metabase's multiRingFontSize (12), weight 700, on every ring", () => {
       const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m", showLabels: true }) as any;
-      for (const s of opt.series) {
-        expect(s.label.fontSize).toBe(12);
-        expect(s.label.fontWeight).toBe(700);
-        expect(s.label.position).toBe("inside");
-      }
+      const label = opt.series[0].label;
+      expect(label.fontSize).toBe(12);
+      expect(label.fontWeight).toBe(700);
+      expect(label.position).toBe("inside");
+      // Every label was already measured against its own slice; ECharts must not truncate or wrap
+      // it a second time against the box it computes for a rotated label.
+      expect(label.overflow).toBe("none");
     });
 
     it("degrades small/overlapping slices by hiding them (ECharts labelLayout.hideOverlap), not overlapping into mush", () => {
       const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m", showLabels: true }) as any;
-      for (const s of opt.series) expect(s.labelLayout).toEqual({ hideOverlap: true });
+      expect(opt.series[0].labelLayout).toEqual({ hideOverlap: true });
     });
   });
 
@@ -763,12 +902,17 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
   describe("fix 1a/1b/2 — slice labels are radial, fit their own slice, and contrast their own fill", () => {
     const stubMeasure = (s: string) => s.length * 7;
 
+    // Rotation is per DATUM now, not per series — one series covers every ring, and a sunburst's
+    // own `label.rotate` default is "radial", so a single-ring pie has to say 0 on each slice or
+    // it would silently start drawing its labels along the radius.
     it("a 3-ring pie's labels use radial rotation; a 1-ring pie's do not", () => {
       const one = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
-      expect(one.series[0].label.rotate).toBe(0);
+      for (const d of ring(one, 0)) expect(d.label.rotate).toBe(0);
 
       const three = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any;
-      for (const s of three.series) expect(s.label.rotate).toBe("radial");
+      for (const level of [0, 1, 2]) {
+        for (const d of ring(three, level)) expect(d.label.rotate).toBe("radial");
+      }
     });
 
     const dCols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
@@ -817,8 +961,35 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
 
       // ...and the chart keeps the label, which is only possible via the radial branch: measured
       // horizontally there isn't even room for a 3-character truncation, so it would be dropped.
-      const emea = opt.series[0].data.find((d: any) => d.name === "EMEA");
+      const emea = ring(opt, 0).find((d: any) => d.name === "EMEA");
       expect(emea.label.formatter()).toBe("EMEA");
+    });
+
+    // The angular scale a label is measured against is the one ECharts' sunburstLayout uses:
+    // `unitRadian = 2π / rootSum` for EVERY node, so an outer slice's arc is its share of the
+    // WHOLE chart, nested inside its parent's. Measuring it as a share of its own PARENT instead
+    // (which is what N independent pie series did — each ring angled by its own total) hands the
+    // fit pass arcs that can be wildly too wide: a lone child fills 100% of its parent but may be a
+    // sliver of the chart. Nothing pinned this, so it is pinned on exactly that slice.
+    it("measures an outer slice's arc as its share of the whole chart, not of its parent", () => {
+      const aCols = [
+        { name: "d", type: "varchar" }, { name: "c", type: "varchar" }, { name: "m", type: "double" },
+      ];
+      // "Only" is 100% of its parent "Small", and 0.1% of the chart. Two rings in a 400px host:
+      // ring 1 spans 98px-140px, so a radial label needs an inner chord wider than the 12px font.
+      // Its real 0.36-degree arc gives 0.6px; its parent-relative "arc" would give a full circle.
+      const opt = buildPieOption(
+        aCols,
+        [["Big", "B1", 999], ["Small", "Only", 1]],
+        { dimensions: ["d", "c"], metric: "m", showLabels: true },
+        stubMeasure,
+        { width: 400, height: 400 },
+      ) as any;
+      const outer = ring(opt, 1);
+      expect(outer.find((d: any) => d.name === "Only").label.formatter()).toBe(" ");
+      // ...and the sibling that really is most of the chart keeps its label, so this isn't just
+      // "everything on the outer ring is dropped".
+      expect(outer.find((d: any) => d.name === "B1").label.formatter()).toBe("B1");
     });
 
     it("a slice too small for its label gets NO label, rather than a bare ellipsis", () => {
@@ -836,7 +1007,7 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
         stubMeasure,
         containerSize,
       ) as any;
-      const tiny = opt.series[0].data.find((d: any) => d.name === "Tiny");
+      const tiny = ring(opt, 0).find((d: any) => d.name === "Tiny");
       expect(tiny.label.formatter()).toBe(" "); // the "nothing to show" sentinel
     });
 
@@ -852,7 +1023,7 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
         stubMeasure,
         containerSize,
       ) as any;
-      const label = opt.series[0].data.find((d: any) => d.name === longName).label.formatter();
+      const label = ring(opt, 0).find((d: any) => d.name === longName).label.formatter();
       expect(label).not.toBeNull();
       expect(label).not.toBe(" ");
       expect(label?.endsWith("…")).toBe(true);
@@ -872,20 +1043,49 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
     // space to render in full. Same data, same slice, same everything else — container size is
     // the ONLY variable — so a real fix must show a full label at a large size where the exact
     // same slice truncates at a small one.
+    //
+    // The "large" size is 1000px rather than the 3000px this used to use, and the name is shorter:
+    // the diameter is capped at 550px now (Metabase's DIMENSIONS.maxSideLength), so past ~786px of
+    // host every size draws the same circle and a 41-character label can never fit a single ring's
+    // horizontal band whatever the host does. That IS the cap working, and the test says the same
+    // thing about a label the capped geometry can actually hold.
     it("the SAME slice's label survives in full at a large container size and truncates at a small one — size is the only variable", () => {
-      const longName = "A very long region name that will not fit";
+      const longName = "Long region";
       const cfg = { dimensions: ["d"], metric: "m", showLabels: true, donut: true };
       const rows2 = [[longName, 55], ["Other region", 45]];
 
       const small = buildPieOption(dCols, rows2, cfg, stubMeasure, { width: 300, height: 300 }) as any;
-      const smallLabel = small.series[0].data.find((d: any) => d.name === longName).label.formatter();
+      const smallLabel = ring(small, 0).find((d: any) => d.name === longName).label.formatter();
       expect(smallLabel).not.toBeNull();
       expect(smallLabel).not.toBe(longName);
       expect(smallLabel?.endsWith("…")).toBe(true);
 
-      const large = buildPieOption(dCols, rows2, cfg, stubMeasure, { width: 3000, height: 3000 }) as any;
-      const largeLabel = large.series[0].data.find((d: any) => d.name === longName).label.formatter();
+      const large = buildPieOption(dCols, rows2, cfg, stubMeasure, { width: 1000, height: 1000 }) as any;
+      const largeLabel = ring(large, 0).find((d: any) => d.name === longName).label.formatter();
       expect(largeLabel).toBe(longName);
+    });
+
+    // Metabase's pie is 550px in a 735px host — an ABSOLUTE cap (`DIMENSIONS.maxSideLength`), not
+    // a ratio, alongside a 12px-a-side padding floor (`DIMENSIONS.padding.side`). Without it a
+    // full-page card drew a circle as big as the card, which stops adding information past a point
+    // and just pushes the labels apart.
+    it("caps the diameter at 550px on a big host, and leaves a smaller host alone", () => {
+      const outer = (size: { width: number; height: number }) =>
+        (buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }, undefined, size) as any)
+          .series[0].radius[1];
+
+      // 1200px host: 0.7 * 1200 = 840px of diameter uncapped -> capped to 550, i.e. r = 275.
+      expect(outer({ width: 1200, height: 1200 })).toBe(275);
+      // ...and a host wider than it is tall is capped off its SHORTER side, like every other
+      // radius in this file.
+      expect(outer({ width: 4000, height: 1000 })).toBe(275);
+
+      // 600px host: 0.7 * 600 = 420 < 550, so nothing is capped and the fraction still rules.
+      expect(outer({ width: 600, height: 600 })).toBe(210);
+
+      // The padding floor only binds on a host small enough that 12px a side is more than the
+      // fraction already leaves: below 80px, here.
+      expect(outer({ width: 60, height: 60 })).toBe((60 - 24) / 2);
     });
 
     // Realistic reproduction of the reported live bug: a 3-ring sunburst (region -> segment ->
@@ -918,7 +1118,7 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
         undefined, // real (canvas-fallback-to-average-glyph-width) measurer — the real app path
         { width: 530, height: 530 },
       ) as any;
-      const ring0 = opt.series[0].data;
+      const ring0 = ring(opt, 0);
       for (const region of regions) {
         const label = ring0.find((d: any) => d.name === region).label.formatter();
         expect(label).toBe(region);
@@ -953,7 +1153,7 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
         stubMeasure,
         { width: 300, height: 300 },
       ) as any;
-      const labelOf = (name: string) => opt.series[0].data.find((d: any) => d.name === name).label.formatter();
+      const labelOf = (name: string) => ring(opt, 0).find((d: any) => d.name === name).label.formatter();
 
       // A row with no dimension value has nothing to fit — an empty string would otherwise sail
       // through the "already fits" fast path (it fits ANY width) and render as a content-less "".
@@ -967,7 +1167,7 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
       // for a real multi-character prefix still gets one.
       expect(labelOf("Alpha")).toBe("Alp…");
 
-      for (const d of opt.series[0].data) {
+      for (const d of ring(opt, 0)) {
         const text = d.label.formatter();
         if (text === " ") continue; // the one legitimate "nothing to show" sentinel
         expect(text.trim()).not.toBe("");
@@ -1003,34 +1203,49 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
 
       // ...and is still cut back, because the padding is subtracted before the fit is judged: 38px
       // of usable room leaves 31px once the ellipsis is paid for, i.e. four characters.
-      const label = opt.series[0].data.find((d: any) => d.name === "ABCDEF").label.formatter();
+      const label = ring(opt, 0).find((d: any) => d.name === "ABCDEF").label.formatter();
       expect(label).toBe("ABCD…");
 
       // A shorter label in the same ring is untouched — the padding trims the margin, not the text.
-      expect(opt.series[0].data.find((d: any) => d.name === "Zed").label.formatter()).toBe("Zed");
+      expect(ring(opt, 0).find((d: any) => d.name === "Zed").label.formatter()).toBe("Zed");
     });
 
-    // The angles a label is measured against have to be the angles ECharts DRAWS, not the raw
-    // cumulative shares. `padAngle: 1` opens a one-degree gap between neighbours, so every drawn
-    // slice is one degree narrower than its share suggests — and measuring against the wider,
-    // nominal arc errs in the risky direction: a label judged to fit an arc that isn't there.
+    // The arc a label is measured against is the slice's FULL nominal share. There used to be a
+    // `padAngle` compensation here — half a degree taken off each end, because `padAngle: 1` made
+    // every drawn slice a degree narrower than its share. The pad is gone (slices are separated by
+    // a shared border stroke, which removes no area at all), so the nominal arc IS the drawn arc
+    // and the compensation would now under-measure every label.
     //
-    // A one-degree difference is only worth a pixel or two on a normal-sized chart, so this uses
-    // a deliberately large one (1800px -> ring 45%-70% = 405px to 630px) where a degree of arc is
-    // worth about a character. The 1/72 slice spans 5 degrees nominally (~31px of usable chord,
-    // enough for "EMEA"'s 28px) and 4 after the gap (~24px, not enough, and not enough for a
-    // 3-character truncation either).
-    it("measures a label against the arc left after the gap between slices, not the raw share", () => {
+    // Pinned on a slice engineered to sit exactly across the boundary: a 1/34 share of a
+    // (diameter-capped) 550px donut leaves just enough room for "EMEA", and one degree less does
+    // not — not even enough for a 3-character truncation. So the old pad accounting would drop
+    // this label and measuring the true arc keeps it.
+    it("measures a label against its full nominal arc, with nothing taken off for a gap", () => {
       const dCols2 = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
       const opt = buildPieOption(
         dCols2,
-        [["Rest", 71], ["EMEA", 1]], // 1/72 of the ring = exactly 5 degrees
+        [["Rest", 33], ["EMEA", 1]], // 1/34 of the ring = 10.59 degrees
         { dimensions: ["d"], metric: "m", donut: true, showLabels: true, sliceThreshold: 0 },
         stubMeasure,
-        { width: 1800, height: 1800 },
+        { width: 1800, height: 1800 }, // capped to a 550px pie: r 275px, hole 45/70 of it
       ) as any;
-      expect(opt.series[0].padAngle).toBe(1); // the gap this measurement has to account for
-      expect(opt.series[0].data.find((d: any) => d.name === "EMEA").label.formatter()).toBe(" ");
+      expect(opt.series[0].padAngle).toBeUndefined();
+
+      // The premise, stated against the geometry rather than assumed. EMEA is the last slice, so
+      // its arc ends at 12 o'clock.
+      const outerPx = 275;
+      const innerPx = outerPx * (45 / 70);
+      const arc = (1 / 34) * 2 * Math.PI;
+      const oneDegree = Math.PI / 180;
+      const room = (start: number, end: number) =>
+        calcAvailableDonutSliceLabelLength(innerPx, outerPx, start, end, 14, "horizontal") - 4;
+      expect(room(2 * Math.PI - arc, 2 * Math.PI)).toBeGreaterThanOrEqual(stubMeasure("EMEA"));
+      // A degree narrower — what the pad compensation used to hand the fit pass — is short of both
+      // the whole label AND the 3-character floor a truncation would have to clear.
+      expect(room(2 * Math.PI - arc + oneDegree / 2, 2 * Math.PI - oneDegree / 2))
+        .toBeLessThan(stubMeasure("EMEA"));
+
+      expect(ring(opt, 0).find((d: any) => d.name === "EMEA").label.formatter()).toBe("EMEA");
     });
 
     // The angle model above starts every ring at 12 o'clock and runs clockwise because that is
@@ -1057,9 +1272,17 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
         dimensions: ["region"], metric: "rev",
         sliceColors: { EU: "#111111", US: "#eeeeee" }, // one very dark fill, one very light fill
       }) as any;
-      const eu = opt.series[0].data.find((d: any) => d.name === "EU");
-      const us = opt.series[0].data.find((d: any) => d.name === "US");
+      const eu = ring(opt, 0).find((d: any) => d.name === "EU");
+      const us = ring(opt, 0).find((d: any) => d.name === "US");
       expect(eu.label.color).not.toBe(us.label.color);
+      // ...and each is the READABLE ink for its own fill. Pinned to the concrete values because
+      // "they differ" alone passed even when the label was being painted in the slice's own fill
+      // colour — two different fills give two different labels either way. jsdom can't resolve
+      // var(), so resolveColor hands back COLOR_FALLBACK.text / .textInverse.
+      expect(eu.label.color).toBe("#ffffff"); // white on near-black
+      expect(us.label.color).toBe("#111827"); // near-black on near-white
+      expect(eu.label.color).not.toBe(eu.itemStyle.color);
+      expect(us.label.color).not.toBe(us.itemStyle.color);
     });
   });
 
@@ -1192,7 +1415,7 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
       const opt = buildPieOption(cols2, rows2, {
         dimensions: ["region", "category"], metric: "m", percentVisibility: "legend",
       }) as any;
-      expect(opt.series[0].data.find((d: any) => d.name === "US").label.formatter()).toBe("US");
+      expect(ring(opt, 0).find((d: any) => d.name === "US").label.formatter()).toBe("US");
     });
 
     // "both" finally means what it says. Before "legend" existed it could only draw the inside
@@ -1201,7 +1424,7 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
       const cfg = { dimensions: ["region", "category"], metric: "m", percentVisibility: "both" };
       expect(legendPercent(cfg, "US")).toBe("80%");
       const opt = buildPieOption(cols2, rows2, cfg as any) as any;
-      expect(opt.series[0].data.find((d: any) => d.name === "US").label.formatter()).toBe("US: 80%");
+      expect(ring(opt, 0).find((d: any) => d.name === "US").label.formatter()).toBe("US: 80%");
     });
 
     it("inside leaves the legend as plain names", () => {
@@ -1241,14 +1464,14 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
         // …and keeps the slices themselves uncluttered, which is the point of choosing the
         // legend over the arcs on a sunburst.
         const opt = buildPieOption(cols2, rows2, cfg) as any;
-        expect(opt.series[0].data.find((d: any) => d.name === "US").label.formatter()).toBe("US");
+        expect(ring(opt, 0).find((d: any) => d.name === "US").label.formatter()).toBe("US");
       });
 
       it("a single-ring pie is untouched: no percentages anywhere", () => {
         const cfg = { dimensions: ["region"], metric: "rev" };
         expect(buildPieLegend(cols, rows, cfg).map((e) => e.percent)).toEqual([undefined, undefined]);
         const opt = buildPieOption(cols, rows, cfg) as any;
-        expect(opt.series[0].data.find((d: any) => d.name === "US").label.formatter()).toBe("US");
+        expect(ring(opt, 0).find((d: any) => d.name === "US").label.formatter()).toBe("US");
       });
 
       it("an explicit off still wins over the multi-ring default", () => {
@@ -1266,7 +1489,7 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
         };
         expect(legendPercent(cfg, "US")).toBeUndefined();
         const opt = buildPieOption(cols2, rows2, cfg) as any;
-        expect(opt.series[0].data.find((d: any) => d.name === "US").label.formatter()).toBe("US");
+        expect(ring(opt, 0).find((d: any) => d.name === "US").label.formatter()).toBe("US");
       });
     });
   });
@@ -1294,25 +1517,38 @@ describe("resolvePercentVisibility", () => {
   });
 });
 
-// Reversal — an outer ring's slice percentage is a share of its PARENT slice, not of that
-// ring's own total (see the comment above buildPieOption's `series` map for the full
-// before/after reasoning: this was the deliberate share-of-ring decision, reversed after a real
-// three-ring chart showed it reads as noise). Ring 0 has no parent, so its share of the chart
-// already IS its share of its own ring — nothing changes there, and it must stay untouched.
+// An outer ring's slice percentage is a share of its PARENT slice, not of that ring's own total
+// (see the comment on `slicePercent` in pie.ts: this was a deliberate share-of-ring decision,
+// reversed after a real three-ring chart showed it reads as noise). Ring 0 has no parent, so its
+// share of the whole chart is what it reports.
 //
-// ECharts computes `percent` once per SERIES (i.e. per ring) with no per-datum override, so the
-// parent-relative number for level > 0 is precomputed here and stashed on the datum itself as
-// `parentPercent`; both the label formatter (below) and the shared tooltip formatter (base.ts,
-// see base.test.ts) prefer it over ECharts' own `percent` whenever a datum carries one.
-describe("buildPieOption — outer-ring percentage is a share of its parent (reversal)", () => {
-  it("a single-ring pie's percentage is unchanged: share of the ring, i.e. share of the whole", () => {
+// EVERY slice states its own `slicePercent`, ring 0 included — it is no longer an override on top
+// of ECharts' number, because a `sunburst` series has none. Only `PieSeriesModel.getDataParams`
+// adds `percent`, and only it honours `percentPrecision` (which this option therefore no longer
+// sets). Both the label and the shared tooltip formatter (base.ts, see base.test.ts) read the
+// datum's own number.
+describe("buildPieOption — every slice states its own percentage, of its own parent", () => {
+  it("a single-ring pie reports each slice's share of the whole chart", () => {
     const cols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
     const rows = [["A", 25], ["B", 75]];
     const opt = buildPieOption(cols, rows, { dimensions: ["d"], metric: "m" }) as any;
-    const a = opt.series[0].data.find((d: any) => d.name === "A");
-    // Ring 0 never carries a parentPercent — the formatters fall back to ECharts' own percent.
-    expect(a.parentPercent).toBeUndefined();
-    expect(opt.tooltip.formatter({ name: "A", value: 25, percent: 25, data: a })).toContain("25%");
+    const a = ring(opt, 0).find((d: any) => d.name === "A");
+    expect(a.slicePercent).toBeCloseTo(25, 9);
+    // ...and the tooltip reads it off the datum. A sunburst hands the formatter no `percent` at
+    // all, so the `percent: 25` here is deliberately absent from what the chart would really pass.
+    expect(opt.tooltip.formatter({ name: "A", value: 25, data: a })).toContain("25%");
+  });
+
+  it("never sets percentPrecision — a pie-series option a sunburst ignores outright", () => {
+    const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", decimals: 3 }) as any;
+    expect(opt.series[0].percentPrecision).toBeUndefined();
+    // The rounding it used to delegate is done here instead, at the chart's own `decimals`.
+    const two = buildPieOption(
+      [{ name: "d", type: "varchar" }, { name: "m", type: "double" }],
+      [["A", 1], ["B", 2]],
+      { dimensions: ["d"], metric: "m", decimals: 3 },
+    ) as any;
+    expect(ring(two, 0).find((d: any) => d.name === "A").slicePercent).toBe(33.333);
   });
 
   it("two rings: an outer slice's percentage is its value over its PARENT's total, not the ring's", () => {
@@ -1326,10 +1562,10 @@ describe("buildPieOption — outer-ring percentage is a share of its parent (rev
     const rows2: unknown[][] = [];
     for (const seg of segments) rows2.push([seg, "C1", 500], [seg, "C2", 310], [seg, "C3", 190]);
     const opt = buildPieOption(cols2, rows2, { dimensions: ["segment", "channel"], metric: "m" }) as any;
-    const outer = opt.series[1].data;
+    const outer = ring(opt, 1);
     const c1Items = outer.filter((d: any) => d.name === "C1" && d.value === 500);
     expect(c1Items).toHaveLength(12);
-    for (const item of c1Items) expect(item.parentPercent).toBeCloseTo(50, 9); // NOT 4.1(6)%
+    for (const item of c1Items) expect(item.slicePercent).toBeCloseTo(50, 9); // NOT 4.1(6)%
     // The tooltip formatter actually reaches 50% when fed the real datum, not the ring-share number.
     const tooltip = opt.tooltip.formatter({ name: "C1", value: 500, percent: 4.17, data: c1Items[0] });
     expect(tooltip).toContain("50%");
@@ -1347,15 +1583,16 @@ describe("buildPieOption — outer-ring percentage is a share of its parent (rev
       ["R2", "P3", "C4", 400], ["R2", "P3", "C5", 600],   // P3 = 1000; R2 = 1000
     ];
     const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "product", "channel"], metric: "m" }) as any;
-    const [, middle, outer] = opt.series;
+    const middle = ring(opt, 1);
+    const outer = ring(opt, 2);
 
     // Middle ring (product): share of its own region — NOT of the 3000 grand total.
-    expect(middle.data.find((d: any) => d.name === "P1").parentPercent).toBeCloseTo((1500 / 2000) * 100, 9); // 75%, not 50%
-    expect(middle.data.find((d: any) => d.name === "P3").parentPercent).toBeCloseTo(100, 9); // R2's only product
+    expect(middle.find((d: any) => d.name === "P1").slicePercent).toBeCloseTo((1500 / 2000) * 100, 9); // 75%, not 50%
+    expect(middle.find((d: any) => d.name === "P3").slicePercent).toBeCloseTo(100, 9); // R2's only product
 
     // Outer ring (channel): share of its own PRODUCT — not of region (60%) or the grand total (40%).
-    expect(outer.data.find((d: any) => d.name === "C1").parentPercent).toBeCloseTo((1200 / 1500) * 100, 9); // 80%
-    expect(outer.data.find((d: any) => d.name === "C4").parentPercent).toBeCloseTo((400 / 1000) * 100, 9); // 40%
+    expect(outer.find((d: any) => d.name === "C1").slicePercent).toBeCloseTo((1200 / 1500) * 100, 9); // 80%
+    expect(outer.find((d: any) => d.name === "C4").slicePercent).toBeCloseTo((400 / 1000) * 100, 9); // 40%
   });
 
   it("decimals still controls the displayed precision at every level", () => {
@@ -1365,8 +1602,8 @@ describe("buildPieOption — outer-ring percentage is a share of its parent (rev
     const rows2 = [["S1", "C1", 1], ["S1", "C2", 2]]; // C1 = 1/3 of its segment = 33.333...%
     const withDefault = buildPieOption(cols2, rows2, { dimensions: ["segment", "channel"], metric: "m" }) as any;
     const withZero = buildPieOption(cols2, rows2, { dimensions: ["segment", "channel"], metric: "m", decimals: 0 }) as any;
-    expect(withDefault.series[1].data.find((d: any) => d.name === "C1").parentPercent).toBeCloseTo(33.33, 9);
-    expect(withZero.series[1].data.find((d: any) => d.name === "C1").parentPercent).toBe(33);
+    expect(ring(withDefault, 1).find((d: any) => d.name === "C1").slicePercent).toBeCloseTo(33.33, 9);
+    expect(ring(withZero, 1).find((d: any) => d.name === "C1").slicePercent).toBe(33);
   });
 
   it('a parent\'s own "Other" bucket reports its share of that same parent', () => {
@@ -1376,9 +1613,9 @@ describe("buildPieOption — outer-ring percentage is a share of its parent (rev
     // P1 totals 1000: two big (800, 180) + two small (10, 10) -> P1's OWN Other = 20 = 2% of P1.
     const rows2 = [["P1", "A1", 800], ["P1", "A2", 180], ["P1", "b1", 10], ["P1", "b2", 10]];
     const opt = buildPieOption(cols2, rows2, { dimensions: ["grp", "item"], metric: "m" }) as any;
-    const other = opt.series[1].data.find((d: any) => d.name === "Other");
+    const other = ring(opt, 1).find((d: any) => d.name === "Other");
     expect(other.value).toBe(20);
-    expect(other.parentPercent).toBeCloseTo(2, 9); // 20 / 1000 (P1's own total)
+    expect(other.slicePercent).toBeCloseTo(2, 9); // 20 / 1000 (P1's own total)
   });
 });
 
@@ -1406,7 +1643,8 @@ describe("a pie's legend goes beside it when that leaves the rings more room", (
   // The real measured host from the Metabase comparison, and a host shaped the opposite way.
   const wideShort = { width: 830, height: 661 };
   const narrowTall = { width: 360, height: 720 };
-  const outerRadiusPct = (opt: any) => parseFloat(String(opt.series[0].radius[1]));
+  /** The pie's outer radius in PIXELS — the unit the option uses once the real size is known. */
+  const outerRadiusPx = (opt: any) => opt.series[0].radius[1] as number;
 
   it("a wide, short host puts the legend in a column beside the chart", () => {
     expect(pieLegendPlacement(wideShort)).toBe("side");
@@ -1447,21 +1685,22 @@ describe("a pie's legend goes beside it when that leaves the rings more room", (
     const opt = buildPieOption(cols, rows, { ...base, legendPlacement: "side" }, undefined, {
       width: wideShort.width - PIE_LEGEND_COLUMN_WIDTH_PX, height: wideShort.height,
     }) as any;
-    expect(outerRadiusPct(opt)).toBeCloseTo(85, 6);
+    // 0.85 * min(640, 661) = 544px of diameter — the number the Metabase comparison asked for,
+    // and comfortably under the 550px cap, so the fraction is still what decides it.
+    expect(outerRadiusPx(opt) * 2).toBeCloseTo(544, 6);
+    expect(opt.series[0].radius[0]).toBe(0); // no donut here
     expect(opt.series[0].center).toEqual(["50%", "50%"]);
-    // 0.85 * min(640, 661) = 544px of diameter — the number the Metabase comparison asked for.
-    expect((outerRadiusPct(opt) / 100) * Math.min(640, 661)).toBeCloseTo(544, 1);
   });
 
   it("the bottom layout's geometry is untouched", () => {
     const opt = buildPieOption(cols, rows, { ...base, legendPlacement: "bottom" }, undefined, narrowTall) as any;
-    expect(opt.series[0].radius).toEqual(["0%", "70%"]);
+    expect(outerRadiusPx(opt) * 2).toBeCloseTo(0.7 * 360, 6);
     expect(opt.series[0].center).toEqual(["50%", "48%"]);
   });
 
   it("an unstated placement is the bottom one — today's geometry, unchanged", () => {
     const opt = buildPieOption(cols, rows, base, undefined, wideShort) as any;
-    expect(opt.series[0].radius).toEqual(["0%", "70%"]);
+    expect(outerRadiusPx(opt) * 2).toBeCloseTo(0.7 * 661, 6);
     expect(opt.series[0].center).toEqual(["50%", "48%"]);
   });
 
@@ -1471,8 +1710,19 @@ describe("a pie's legend goes beside it when that leaves the rings more room", (
     const opt = buildPieOption(
       cols, rows, { ...base, showLegend: false, legendPlacement: "side" }, undefined, wideShort,
     ) as any;
-    expect(opt.series[0].radius).toEqual(["0%", "70%"]);
+    expect(outerRadiusPx(opt) * 2).toBeCloseTo(0.7 * 661, 6);
     expect(opt.series[0].center).toEqual(["50%", "48%"]);
+  });
+
+  // With no measured size at all there are no pixels to state, so the radii stay in ECharts' own
+  // percent-of-the-shorter-side units — the geometry this file drew before the diameter cap. A
+  // 0x0 host counts as unknown too: EChartsRenderer measures once on mount, and a not-yet-laid-out
+  // element reads 0x0, where pixel radii of 0 would draw nothing at all until the first resize.
+  it("falls back to percent radii when the container size is unknown or not yet laid out", () => {
+    expect((buildPieOption(cols, rows, base) as any).series[0].radius).toEqual(["0%", "70%"]);
+    expect((buildPieOption(cols, rows, { ...base, donut: true }) as any).series[0].radius).toEqual(["45%", "70%"]);
+    expect((buildPieOption(cols, rows, base, undefined, { width: 0, height: 0 }) as any).series[0].radius)
+      .toEqual(["0%", "70%"]);
   });
 
   // The whole point of this commit: ECharts' `legend` component does not work with a `sunburst`
@@ -1511,20 +1761,24 @@ describe("a toggled-off legend entry drops its ring-0 slice", () => {
 
   it("removes exactly that slice from ring 0", () => {
     const opt = buildPieOption(cols2, rows2, { ...cfg, toggledOffSlices: ["US"] }) as any;
-    expect(opt.series[0].data.map((d: any) => d.name)).toEqual(["EU"]);
+    expect(ring(opt, 0).map((d: any) => d.name)).toEqual(["EU"]);
   });
 
-  it("leaves every outer ring alone, exactly as the ECharts legend did", () => {
+  // CHANGED BY THE SUNBURST, deliberately. As N independent `pie` series, a toggled-off ring-0
+  // slice took nothing with it: its children stayed drawn in the outer rings as orphan arcs, sitting
+  // under nothing. A tree cannot express that — children belong to their parent — so hiding a slice
+  // now hides its whole family, which is what the reader was asking for anyway.
+  it("takes the hidden slice's children with it, instead of leaving them as orphan arcs", () => {
     const opt = buildPieOption(cols2, rows2, { ...cfg, toggledOffSlices: ["US"] }) as any;
-    expect(opt.series[1].data.map((d: any) => d.name)).toEqual(["Widgets", "Gadgets"]);
+    expect(ring(opt, 1).map((d: any) => d.name)).toEqual(["Gadgets"]); // "Widgets" was US's child
   });
 
-  // ECharts filtered the already-coloured series, so the survivors kept their own colours. A
-  // rebuild would otherwise slide every survivor up a palette slot and the React swatches — built
-  // from the FULL ring — would then name a colour the chart no longer draws.
+  // The survivors keep their own colours. A re-deal would otherwise slide every survivor up a
+  // palette slot and the React swatches — built from the FULL ring — would then name a colour the
+  // chart no longer draws.
   it("keeps each surviving slice's colour rather than re-dealing the palette", () => {
     const opt = buildPieOption(cols2, rows2, { ...cfg, toggledOffSlices: ["US"] }) as any;
-    expect(opt.series[0].data[0].itemStyle.color).toBe(seriesColor(1));
+    expect(ring(opt, 0)[0].itemStyle.color).toBe(seriesColor(1));
     expect(buildPieLegend(cols2, rows2, cfg).find((e) => e.name === "EU")!.color).toBe(seriesColor(1));
   });
 
@@ -1539,9 +1793,10 @@ describe("a toggled-off legend entry drops its ring-0 slice", () => {
   it("nothing toggled off leaves the option byte-for-byte as it was", () => {
     const plain = buildPieOption(cols2, rows2, cfg) as any;
     const empty = buildPieOption(cols2, rows2, { ...cfg, toggledOffSlices: [] }) as any;
-    expect(empty.series[0].data.map((d: any) => d.name)).toEqual(plain.series[0].data.map((d: any) => d.name));
-    // No toggle, no reshuffle — so ring 0 keeps its implicit palette slots and stays untouched.
-    expect(plain.series[0].data.map((d: any) => d.itemStyle)).toEqual([undefined, undefined]);
-    expect(empty.series[0].data.map((d: any) => d.itemStyle)).toEqual([undefined, undefined]);
+    expect(ring(empty, 0).map((d: any) => d.name)).toEqual(ring(plain, 0).map((d: any) => d.name));
+    expect(ring(empty, 0).map((d: any) => d.itemStyle.color)).toEqual(
+      ring(plain, 0).map((d: any) => d.itemStyle.color),
+    );
+    expect(ring(plain, 0).map((d: any) => d.itemStyle.color)).toEqual([seriesColor(0), seriesColor(1)]);
   });
 });

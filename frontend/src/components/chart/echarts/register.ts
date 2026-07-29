@@ -1,6 +1,10 @@
 import { use } from "echarts/core";
 import { SVGRenderer } from "echarts/renderers";
-import { BarChart, LineChart, ScatterChart, PieChart, GaugeChart, FunnelChart, BoxplotChart, SankeyChart, MapChart } from "echarts/charts";
+// SunburstChart, not PieChart: egret's pie IS a sunburst now (one nested series, like Metabase's
+// — see options/pie.ts). PieChart is gone because nothing builds a `pie` series any more, and a
+// registered-but-unused chart type is dead bundle weight that also hides a regression: a stray
+// `type: "pie"` would silently keep working instead of failing loudly.
+import { BarChart, LineChart, ScatterChart, SunburstChart, GaugeChart, FunnelChart, BoxplotChart, SankeyChart, MapChart } from "echarts/charts";
 import {
   GridComponent, TooltipComponent, LegendComponent, DatasetComponent, GraphicComponent, MarkLineComponent, VisualMapComponent,
 } from "echarts/components";
@@ -17,7 +21,7 @@ export function registerEChartsModules() {
   if (registered) return;
   use([
     SVGRenderer,
-    BarChart, LineChart, ScatterChart, PieChart, GaugeChart, FunnelChart, BoxplotChart, SankeyChart, MapChart,
+    BarChart, LineChart, ScatterChart, SunburstChart, GaugeChart, FunnelChart, BoxplotChart, SankeyChart, MapChart,
     GridComponent, TooltipComponent, LegendComponent, DatasetComponent, GraphicComponent, MarkLineComponent, VisualMapComponent,
   ]);
   registered = true;
