@@ -1,6 +1,7 @@
 // src/components/chart/__tests__/ChartRenderer.test.tsx
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import { useState } from "react";
 import { ChartRenderer } from "../ChartRenderer";
 import type { ChartParams, PieConfig } from "@/api/charts";
 
@@ -283,6 +284,64 @@ describe("ChartRenderer", () => {
         pieOption(pie).series[0].data.find((d) => d.name === "A")!.label.formatter();
       expect(labelOfA({ percentVisibility: "inside", showLabels: false })).toBe("22.22%");
       expect(labelOfA({ percentVisibility: "inside", showLabels: false, decimals: 0 })).toBe("22%");
+    });
+  });
+
+  // Pie's `option` is a FUNCTION, and EChartsRenderer re-applies the whole option — for pie, a
+  // per-slice canvas measureText pass over every ring — whenever that function's identity
+  // changes. It must therefore survive a parent render that changed nothing, and must NOT
+  // survive one that changed the config or the data (a stale memo would silently keep drawing
+  // the previous chart).
+  describe("pie option identity", () => {
+    const cols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+
+    /** Re-renders ChartRenderer on a state change of its own parent, exactly as the studio and a
+     * dashboard card do, holding the chart's props fixed unless a test varies them. */
+    function Harness({ pie, rows }: { pie: Partial<PieConfig>; rows: unknown[][] }) {
+      const [, bump] = useState(0);
+      return (
+        <>
+          <button data-testid="bump" onClick={() => bump((n) => n + 1)} />
+          <ChartRenderer
+            vizType="pie"
+            params={params({ pie: { dimensions: ["d"], metric: "m", ...pie } })}
+            columns={cols}
+            rows={rows}
+          />
+        </>
+      );
+    }
+
+    it("keeps the same option across a parent render that changed nothing", () => {
+      const rows = [["A", 10], ["B", 30]];
+      render(<Harness pie={{}} rows={rows} />);
+      const first = mockLastOption;
+      fireEvent.click(screen.getByTestId("bump"));
+      // Same identity => EChartsRenderer's [option] effect doesn't fire => no rebuild.
+      expect(mockLastOption).toBe(first);
+    });
+
+    it("rebuilds the option when the config changes", () => {
+      const rows = [["A", 10], ["B", 30]];
+      const { rerender } = render(<Harness pie={{}} rows={rows} />);
+      const first = mockLastOption;
+      rerender(<Harness pie={{ sliceNames: { A: "Alpha" } }} rows={rows} />);
+      expect(mockLastOption).not.toBe(first);
+      const built = (mockLastOption as (s: { width: number; height: number }) => {
+        series: { data: { name: string }[] }[];
+      })({ width: 400, height: 400 });
+      expect(built.series[0].data.map((d) => d.name)).toContain("Alpha");
+    });
+
+    it("rebuilds the option when the data changes", () => {
+      const { rerender } = render(<Harness pie={{}} rows={[["A", 10], ["B", 30]]} />);
+      const first = mockLastOption;
+      rerender(<Harness pie={{}} rows={[["A", 10], ["B", 30], ["C", 5]]} />);
+      expect(mockLastOption).not.toBe(first);
+      const built = (mockLastOption as (s: { width: number; height: number }) => {
+        series: { data: { name: string }[] }[];
+      })({ width: 400, height: 400 });
+      expect(built.series[0].data.map((d) => d.name)).toContain("C");
     });
   });
 });
