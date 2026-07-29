@@ -249,7 +249,9 @@ describe("buildPieOption — nested rings (task 4)", () => {
     ];
     const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any;
     expect(opt.series).toHaveLength(3);
-    assertContiguousRadii(opt.series, 0);
+    // Metabase's threeRingInnerRadiusRatio (1/4) is unconditional once there are 2+ rings, even
+    // with `donut` off — see the "Metabase ring geometry" describe block below.
+    assertContiguousRadii(opt.series, 17.5);
   });
 
   it("donut hollows the centre with one ring, and with three rings the centre stays clear", () => {
@@ -265,7 +267,9 @@ describe("buildPieOption — nested rings (task 4)", () => {
     ];
     const three = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m", donut: true }) as any;
     expect(three.series).toHaveLength(3);
-    assertContiguousRadii(three.series, 45);
+    // Metabase's threeRingInnerRadiusRatio (1/4 of the 70%-outer-edge scale this file uses) — see
+    // the "Metabase ring geometry" describe block below for why this replaced the old flat 45%.
+    assertContiguousRadii(three.series, 17.5);
   });
 
   it("names each ring's series after its own dimension, so a click can be attributed to the right ring", () => {
@@ -480,5 +484,154 @@ describe("buildPieOption — slice curation (task 6)", () => {
     const outer = opt.series[1].data;
     expect(outer.map((d: any) => d.name)).toEqual(["US"]);
     expect(outer.find((d: any) => d.name === "US").value).toBe(10);
+  });
+});
+
+// Ring geometry, gaps, labels and legend — closing the four gaps against Metabase's own
+// constants.ts (frontend/src/metabase/visualizations/echarts/pie/constants.ts):
+//   slice.innerRadiusRatio 3/5, twoRingInnerRadiusRatio 2/5, threeRingInnerRadiusRatio 1/4;
+//   slice.borderProportion 360 (a 1deg gap); twoRingBorderWidth 1, threeRingBorderWidth 0.3;
+//   slice.multiRingFontSize 12, slice.label.fontWeight 700; total.valueFontSize 22,
+//   total.valueFontSizeSm 17, total.labelFontSize 14, total.fontWeight 700.
+describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
+  const cols2 = [
+    { name: "region", type: "varchar" }, { name: "category", type: "varchar" }, { name: "m", type: "double" },
+  ];
+  const rows2 = [
+    ["US", "Widgets", 30], ["US", "Gadgets", 10],
+    ["EU", "Widgets", 5], ["EU", "Gadgets", 5],
+  ];
+  const cols3 = [
+    { name: "region", type: "varchar" }, { name: "category", type: "varchar" },
+    { name: "brand", type: "varchar" }, { name: "m", type: "double" },
+  ];
+  const rows3 = [
+    ["US", "Widgets", "Acme", 10], ["US", "Widgets", "Zenith", 5], ["EU", "Gadgets", "Acme", 3],
+  ];
+
+  describe("fix 1 — the hole shrinks as rings are added", () => {
+    it("one ring keeps today's exact hole behaviour: donut off = 0%, donut on = 45%", () => {
+      const off = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
+      expect(off.series[0].radius[0]).toBe("0%");
+      const on = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", donut: true }) as any;
+      expect(on.series[0].radius[0]).toBe("45%");
+    });
+
+    it("two rings get Metabase's 2/5 hole, unconditionally — even with donut off", () => {
+      const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m" }) as any;
+      expect(opt.series[0].radius[0]).toBe("28%"); // 70 * 2/5
+    });
+
+    it("three rings get Metabase's 1/4 hole, unconditionally — even with donut off", () => {
+      const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any;
+      expect(opt.series[0].radius[0]).toBe("17.5%"); // 70 * 1/4
+    });
+
+    it("the hole ratio is the same whether donut is explicitly on for a multi-ring pie", () => {
+      const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m", donut: true }) as any;
+      expect(opt.series[0].radius[0]).toBe("28%");
+    });
+  });
+
+  describe("fix 2 — a 1-degree gap between slices, in the chart's own background", () => {
+    it("every ring gets a 1-degree padAngle, one ring included", () => {
+      const one = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
+      expect(one.series[0].padAngle).toBe(1);
+
+      const three = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any;
+      for (const s of three.series) expect(s.padAngle).toBe(1);
+    });
+
+    it("a single ring carries no extra border — padAngle alone is the gap", () => {
+      const one = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
+      expect(one.series[0].itemStyle?.borderWidth).toBeFalsy();
+    });
+
+    it("two rings use Metabase's twoRingBorderWidth (1), coloured like the chart background", () => {
+      const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m" }) as any;
+      for (const s of opt.series) {
+        expect(s.itemStyle.borderWidth).toBe(1);
+        // jsdom can't resolve var(--card); resolveColor falls back to a concrete colour rather
+        // than ever leaking the literal "var(...)" to the SVG renderer.
+        expect(s.itemStyle.borderColor).not.toContain("var(");
+      }
+    });
+
+    it("three rings use Metabase's threeRingBorderWidth (0.3)", () => {
+      const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any;
+      for (const s of opt.series) expect(s.itemStyle.borderWidth).toBe(0.3);
+    });
+  });
+
+  describe("fix 3 — slice labels, sized and weighted like Metabase, degrading gracefully", () => {
+    it("a single ring uses a font size in Metabase's 14-20 range, weight 700, drawn on the slice", () => {
+      const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", showLabels: true }) as any;
+      const label = opt.series[0].label;
+      expect(label.fontSize).toBeGreaterThanOrEqual(14);
+      expect(label.fontSize).toBeLessThanOrEqual(20);
+      expect(label.fontWeight).toBe(700);
+      expect(label.position).toBe("inside");
+    });
+
+    it("multi-ring pies use Metabase's multiRingFontSize (12), weight 700, on every ring", () => {
+      const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m", showLabels: true }) as any;
+      for (const s of opt.series) {
+        expect(s.label.fontSize).toBe(12);
+        expect(s.label.fontWeight).toBe(700);
+        expect(s.label.position).toBe("inside");
+      }
+    });
+
+    it("degrades small/overlapping slices by hiding them (ECharts labelLayout.hideOverlap), not overlapping into mush", () => {
+      const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m", showLabels: true }) as any;
+      for (const s of opt.series) expect(s.labelLayout).toEqual({ hideOverlap: true });
+    });
+  });
+
+  describe("fix 4 — the legend lists only the first dimension's slices", () => {
+    it("a two-ring pie's legend carries only ring 0's names, not ring 1's", () => {
+      const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m", showLegend: true }) as any;
+      expect(opt.legend.data).toEqual(["US", "EU"]);
+      // "Widgets"/"Gadgets" are ring-1-only names here and must not appear in the legend list.
+      expect(opt.legend.data).not.toContain("Widgets");
+      expect(opt.legend.data).not.toContain("Gadgets");
+    });
+
+    it("a one-ring pie's legend is unaffected — it only ever had one ring's names anyway", () => {
+      const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", showLegend: true }) as any;
+      expect(opt.legend.data).toEqual(["US", "EU"]);
+    });
+
+    it("the legend is still absent when showLegend is off", () => {
+      const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m" }) as any;
+      expect(opt.legend).toBeUndefined();
+    });
+  });
+
+  describe("centre total keeps working under the new hole ratios (Metabase's total.* constants)", () => {
+    it("uses Metabase's labelFontSize (14) and bolds the caption too, one ring", () => {
+      const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", donut: true, showTotal: true }) as any;
+      const [value, label] = opt.graphic;
+      expect(value.style.fontSize).toBe(22);
+      expect(value.style.fontWeight).toBe(700);
+      expect(label.style.fontSize).toBe(14);
+      expect(label.style.fontWeight).toBe(700); // previously unset — Metabase bolds the caption too
+    });
+
+    it("shrinks the value to Metabase's valueFontSizeSm (17) under the tightest (three-ring) hole", () => {
+      const opt = buildPieOption(cols3, rows3, {
+        dimensions: ["region", "category", "brand"], metric: "m", donut: true, showTotal: true,
+      }) as any;
+      const [value] = opt.graphic;
+      expect(value.style.fontSize).toBe(17);
+    });
+
+    it("still renders at the regular size under the two-ring hole", () => {
+      const opt = buildPieOption(cols2, rows2, {
+        dimensions: ["region", "category"], metric: "m", donut: true, showTotal: true,
+      }) as any;
+      const [value] = opt.graphic;
+      expect(value.style.fontSize).toBe(22);
+    });
   });
 });

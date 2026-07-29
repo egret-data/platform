@@ -49,9 +49,13 @@ export function axisTooltip() {
   };
 }
 
-/** The bottom, scrollable legend — or nothing, when the chart hides it. */
-export function bottomLegend(show: boolean | undefined) {
-  return show ? { bottom: 0, type: "scroll" as const, textStyle: baseTextStyle } : undefined;
+/** The bottom, scrollable legend — or nothing, when the chart hides it. `data`, when given,
+ * restricts the legend to exactly those names rather than ECharts' default of every series'
+ * own data — needed by pie's nested rings, where only the first ring's slices have a single,
+ * unambiguous colour (see buildPieOption). */
+export function bottomLegend(show: boolean | undefined, data?: string[]) {
+  if (!show) return undefined;
+  return { bottom: 0, type: "scroll" as const, textStyle: baseTextStyle, ...(data ? { data } : {}) };
 }
 
 /**

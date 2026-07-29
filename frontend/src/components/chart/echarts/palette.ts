@@ -123,6 +123,14 @@ export function resolveColor(expr: string, fallback: string): string {
 // the outermost ring is at most 2 steps out from its parent, so +0.24 L total — enough to read
 // as a clearly distinct, lighter band next to its parent's ring without washing a mid-tone
 // slice out to near-white.
+//
+// Checked against Metabase's OWN numbers, not eyeballed: Metabase's ring colouring
+// (getRingColorAlias, ui/colors/accents.ts) shifts HSL lightness by a fixed
+// CHART_TINT_SHADE_FACTOR = 0.125 (12.5 points) for its "light" (outer) variant and -0.125 for
+// its "dark" (inner) variant — a total spread of 0.25 across its two non-base rings. This
+// codebase's 3 accumulated OKLab-L steps of 0.12 span 0 -> 0.24 from ring 0 to ring 2 — within
+// 0.01 of Metabase's own total spread, in a MORE perceptually-uniform space (OKLab) than
+// Metabase's HSL. That comparison does not warrant a change, so 0.12 stays.
 const OKLCH_STEP_L = 0.12;
 
 // Cap the TARGET lightness at 0.9 rather than 1.0. OKLab's gamut boundary curves inward as L
@@ -214,4 +222,5 @@ export const COLOR_FALLBACK = {
   gridLine: "#e5e7eb",     // ≈ --border (very light gray)
   axisLabel: "#6b7280",    // ≈ --muted-foreground (slate)
   text: "#111827",         // ≈ --foreground (near-black)
+  card: "#ffffff",         // ≈ --card (charts render inside a Card, not the page background)
 } as const;
