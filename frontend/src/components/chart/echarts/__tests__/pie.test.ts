@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildPieOption } from "../options/pie";
+import { buildPieOption, resolvePercentVisibility } from "../options/pie";
 import { SERIES_PALETTE, seriesColor, lightenOklch } from "../palette";
 import { calcAvailableDonutSliceLabelLength } from "../sliceLabel";
 
@@ -1151,6 +1151,135 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
       const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", showTotal: true }) as any;
       expect(opt.graphic).toBeFalsy();
     });
+  });
+
+  // Metabase's legend reads `Doohickey 23.88%` — name AND share per ring-0 slice — because its
+  // sample sunburst is configured `"pie.percent_visibility": "legend"`. egret's config had no
+  // such value at all, so its legend could only ever be names.
+  describe("the legend can carry each ring-0 slice's percentage", () => {
+    // rows2 totals 50 at ring 0: US 40 (80%), EU 10 (20%).
+    const legendText = (opt: any, name: string) => opt.legend.formatter(name);
+
+    it("percentVisibility legend puts name and share beside each ring-0 entry", () => {
+      const opt = buildPieOption(cols2, rows2, {
+        dimensions: ["region", "category"], metric: "m", percentVisibility: "legend",
+      }) as any;
+      expect(opt.legend.data).toEqual(["US", "EU"]);
+      expect(legendText(opt, "US")).toBe("US 80%");
+      expect(legendText(opt, "EU")).toBe("EU 20%");
+    });
+
+    it("legend does NOT also put the percent on the slice", () => {
+      const opt = buildPieOption(cols2, rows2, {
+        dimensions: ["region", "category"], metric: "m", percentVisibility: "legend",
+      }) as any;
+      expect(opt.series[0].data.find((d: any) => d.name === "US").label.formatter()).toBe("US");
+    });
+
+    // "both" finally means what it says. Before "legend" existed it could only draw the inside
+    // half, so the value promised something the renderer had no way to deliver.
+    it("both puts the percent in the legend AND on the slice", () => {
+      const opt = buildPieOption(cols2, rows2, {
+        dimensions: ["region", "category"], metric: "m", percentVisibility: "both",
+      }) as any;
+      expect(legendText(opt, "US")).toBe("US 80%");
+      expect(opt.series[0].data.find((d: any) => d.name === "US").label.formatter()).toBe("US: 80%");
+    });
+
+    it("inside leaves the legend as plain names", () => {
+      const opt = buildPieOption(cols2, rows2, {
+        dimensions: ["region", "category"], metric: "m", percentVisibility: "inside",
+      }) as any;
+      expect(opt.legend.formatter).toBeUndefined();
+    });
+
+    it("the legend percent honours the configured decimals, like the slice labels", () => {
+      const opt = buildPieOption(cols3, rows3, {
+        dimensions: ["region", "category", "brand"], metric: "m", percentVisibility: "legend", decimals: 3,
+      }) as any;
+      // US 15 of 18 = 83.333...%
+      expect(legendText(opt, "US")).toBe("US 83.333%");
+    });
+
+    it("a name the legend somehow doesn't know falls back to itself, not to `undefined%`", () => {
+      const opt = buildPieOption(cols2, rows2, {
+        dimensions: ["region", "category"], metric: "m", percentVisibility: "legend",
+      }) as any;
+      expect(legendText(opt, "Nowhere")).toBe("Nowhere");
+    });
+
+    it("a renamed ring-0 slice still gets its percentage", () => {
+      const opt = buildPieOption(cols2, rows2, {
+        dimensions: ["region", "category"], metric: "m", percentVisibility: "legend",
+        sliceNames: { US: "United States" },
+      }) as any;
+      expect(opt.legend.data).toContain("United States");
+      expect(legendText(opt, "United States")).toBe("United States 80%");
+    });
+
+    it("no legend at all means no formatter to trip over", () => {
+      const opt = buildPieOption(cols2, rows2, {
+        dimensions: ["region", "category"], metric: "m", percentVisibility: "legend", showLegend: false,
+      }) as any;
+      expect(opt.legend).toBeUndefined();
+    });
+
+    describe("the default", () => {
+      it("a multi-ring pie shows legend percentages with nothing stored", () => {
+        const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m" }) as any;
+        expect(legendText(opt, "US")).toBe("US 80%");
+        // …and keeps the slices themselves uncluttered, which is the point of choosing the
+        // legend over the arcs on a sunburst.
+        expect(opt.series[0].data.find((d: any) => d.name === "US").label.formatter()).toBe("US");
+      });
+
+      it("a single-ring pie is untouched: no percentages anywhere", () => {
+        const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
+        expect(opt.legend.formatter).toBeUndefined();
+        expect(opt.series[0].data.find((d: any) => d.name === "US").label.formatter()).toBe("US");
+      });
+
+      it("an explicit off still wins over the multi-ring default", () => {
+        const opt = buildPieOption(cols2, rows2, {
+          dimensions: ["region", "category"], metric: "m", percentVisibility: "off",
+        }) as any;
+        expect(opt.legend.formatter).toBeUndefined();
+      });
+
+      // Settings come from a JSONB column that is never whitelisted server-side, so an
+      // unrecognised value has to degrade rather than be trusted — drawing nothing is the safe
+      // reading of "I don't know what this means".
+      it("an unknown stored value degrades to off rather than throwing or guessing", () => {
+        const opt = buildPieOption(cols2, rows2, {
+          dimensions: ["region", "category"], metric: "m",
+          percentVisibility: "everywhere" as never,
+        }) as any;
+        expect(opt.legend.formatter).toBeUndefined();
+        expect(opt.series[0].data.find((d: any) => d.name === "US").label.formatter()).toBe("US");
+      });
+    });
+  });
+});
+
+describe("resolvePercentVisibility", () => {
+  it("passes every known value through, at any ring count", () => {
+    for (const v of ["off", "legend", "inside", "both"] as const) {
+      expect(resolvePercentVisibility(v, 1)).toBe(v);
+      expect(resolvePercentVisibility(v, 3)).toBe(v);
+    }
+  });
+
+  it("defaults to the legend once there is more than one ring, and off below that", () => {
+    expect(resolvePercentVisibility(undefined, 0)).toBe("off");
+    expect(resolvePercentVisibility(undefined, 1)).toBe("off");
+    expect(resolvePercentVisibility(undefined, 2)).toBe("legend");
+    expect(resolvePercentVisibility(undefined, 3)).toBe("legend");
+  });
+
+  it("degrades an unknown stored value to off, not to the default", () => {
+    expect(resolvePercentVisibility("legend ", 3)).toBe("off");
+    expect(resolvePercentVisibility("", 3)).toBe("off");
+    expect(resolvePercentVisibility("true", 3)).toBe("off");
   });
 });
 

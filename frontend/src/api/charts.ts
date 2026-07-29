@@ -113,7 +113,11 @@ export interface PieConfig {
   sliceThreshold?: number;   // percent; slices below this fold into "Other" (default 2.5, 0 = off)
   sortRows?: boolean;        // sort slices by value desc (default true)
   showTotal?: boolean;       // grand total in the hole; defaults ON for a multi-ring pie, off for a one-ring donut
-  percentVisibility?: "off" | "inside" | "both";  // percent in slice labels (default off)
+  // Where a slice's percent appears — Metabase's own `pie.percent_visibility` domain.
+  // Unset defaults to "legend" for a multi-ring pie and "off" for a single ring; see
+  // resolvePercentVisibility in echarts/options/pie.ts, which both the chart and the
+  // settings panel resolve through.
+  percentVisibility?: "off" | "legend" | "inside" | "both";
   sliceColors?: Record<string, string>;  // per-slice colour override keyed by dimension value
   /** Rename a slice of the FIRST dimension. */
   sliceNames?: Record<string, string>;

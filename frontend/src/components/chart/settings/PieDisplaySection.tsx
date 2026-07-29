@@ -7,6 +7,11 @@ import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
 import { AutoToggle } from "./AutoToggle";
+import { resolvePercentVisibility } from "@/components/chart/echarts/options/pie";
+
+// A Radix Select item cannot carry an empty value, so "leave it unset" needs a sentinel that
+// no real percentVisibility can collide with.
+const AUTO = "auto";
 
 function Toggle({ id, label, checked, onChange }: { id: string; label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -25,6 +30,15 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
   // position, with anything unranked keeping its natural (incoming) place after the ranked
   // ones — buildPieOption applies this identical rule to ring 0, so the row order here always
   // matches what the chart itself draws.
+  // The number of rings the chart will actually draw, which is what decides the percentage
+  // default — the same `dimensions` list buildPieOption turns into rings.
+  const ringCount = config.dimensions?.length ?? 0;
+  const hasHole = !!config.donut || ringCount > 1;
+  const effectivePercent = resolvePercentVisibility(config.percentVisibility, ringCount);
+  const autoPercentHint = ringCount > 1
+    ? "puts each innermost-ring slice's share beside its name in the legend"
+    : "leaves percentages off a single-ring pie";
+
   const rank = new Map((config.sliceOrder ?? []).map((n, i) => [n, i]));
   const ranked = [...slices].sort(
     (a, b) => (rank.get(a) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b) ?? Number.MAX_SAFE_INTEGER),
@@ -60,7 +74,7 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
           Auto/On/Off rather than a Switch for that same reason: `undefined` genuinely means
           "on for a sunburst, off for a one-ring donut", which a Switch would have to lie
           about in one of the two cases. */}
-      {(config.donut || (config.dimensions?.length ?? 0) > 1) && (
+      {hasHole && (
         <AutoToggle
           id="pz-total"
           label="Show total"
@@ -76,18 +90,30 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
         onChange={(v) => onChange({ showLabels: v })}
         autoHint="Auto shows slice labels, hiding whichever ones would overlap"
       />
+      {/* Auto is a real option, not decoration: with nothing stored, a multi-ring pie draws
+          its percentages in the legend (see resolvePercentVisibility, which the chart and this
+          control share so they cannot drift). A four-value select with no Auto would have to
+          show "Off" while the chart drew them. A stored value that isn't one of the four shows
+          — and renders as — Off, which is what the chart does with it. */}
       <div className="flex items-center justify-between gap-2">
         <Label className="text-sm font-normal">Percentages</Label>
-        <Select value={config.percentVisibility ?? "off"} onValueChange={(v) => onChange({ percentVisibility: v as PieConfig["percentVisibility"] })}>
+        <Select
+          value={config.percentVisibility === undefined ? AUTO : effectivePercent}
+          onValueChange={(v) => onChange({
+            percentVisibility: v === AUTO ? undefined : (v as PieConfig["percentVisibility"]),
+          })}
+        >
           <SelectTrigger aria-label="Percentages" className="h-7 w-28"><SelectValue /></SelectTrigger>
           <SelectContent>
+            <SelectItem value={AUTO} title={`Auto ${autoPercentHint}`}>Auto</SelectItem>
             <SelectItem value="off">Off</SelectItem>
+            <SelectItem value="legend">In legend</SelectItem>
             <SelectItem value="inside">In chart</SelectItem>
             <SelectItem value="both">Both</SelectItem>
           </SelectContent>
         </Select>
       </div>
-      {config.percentVisibility && config.percentVisibility !== "off" && (
+      {effectivePercent !== "off" && (
         <div className="flex items-center justify-between gap-2">
           <Label htmlFor="pz-decimals" className="text-sm font-normal">Decimal places</Label>
           <Input id="pz-decimals" aria-label="Decimal places" type="number" min={0} max={10} step={1}

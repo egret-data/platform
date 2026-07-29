@@ -127,6 +127,19 @@ describe("the nine simple descriptors", () => {
     expect(back).toEqual(cfg);
   });
 
+  // Adding a value to an enum owes no migration, but it does owe proof that the codec carries
+  // it: `pie.percentVisibility` is a plain key under the prefix, so "legend" round-trips for
+  // the same reason every other display setting does — and an unknown stored value survives
+  // the trip untouched too, because the codec's job is storage, not validation (the RENDERER
+  // is where an unrecognised value degrades to off — see resolvePercentVisibility).
+  it("round-trips the new legend percent-visibility, and does not eat an unknown one", () => {
+    for (const percentVisibility of ["legend", "both", "everywhere"]) {
+      const cfg = { dimensions: ["region", "category"], metric: "m", percentVisibility };
+      const back = byKey.pie.fromParams({ version: 2, spec: EMPTY_SPEC, settings: byKey.pie.toSettings(cfg) });
+      expect(back).toEqual(cfg);
+    }
+  });
+
   it("gives pie a display control and the others none", () => {
     expect(byKey.pie.controls.some((c) => c.section === "display")).toBe(true);
     expect(byKey.scalar.controls.every((c) => c.section === "data")).toBe(true);

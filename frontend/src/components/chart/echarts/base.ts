@@ -55,10 +55,22 @@ export function axisTooltip() {
 /** The bottom, scrollable legend — or nothing, when the chart hides it. `data`, when given,
  * restricts the legend to exactly those names rather than ECharts' default of every series'
  * own data — needed by pie's nested rings, where only the first ring's slices have a single,
- * unambiguous colour (see buildPieOption). */
-export function bottomLegend(show: boolean | undefined, data?: string[]) {
+ * unambiguous colour (see buildPieOption).
+ *
+ * `formatter` rewrites each entry's text from its name. ECharts accepts either a template
+ * string or a callback here; a callback is what pie needs, since the text it wants ("Doohickey
+ * 23.88%") depends on a per-slice number the legend itself doesn't know about. */
+export function bottomLegend(
+  show: boolean | undefined,
+  data?: string[],
+  formatter?: (name: string) => string,
+) {
   if (!show) return undefined;
-  return { bottom: 0, type: "scroll" as const, textStyle: baseTextStyle, ...(data ? { data } : {}) };
+  return {
+    bottom: 0, type: "scroll" as const, textStyle: baseTextStyle,
+    ...(data ? { data } : {}),
+    ...(formatter ? { formatter } : {}),
+  };
 }
 
 /**

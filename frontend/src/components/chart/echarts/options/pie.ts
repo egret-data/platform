@@ -13,6 +13,41 @@ import {
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
 
 export interface ResultColumn { name: string; type: string }
+
+/** Metabase's own `pie.percent_visibility` domain, value for value: nowhere, beside each name
+ * in the legend, on the slice itself, or both. `"legend"` was the one value egret was missing
+ * — and it is the one Metabase's own sample sunburst (question 7) is configured with. */
+export type PercentVisibility = "off" | "legend" | "inside" | "both";
+
+const PERCENT_VISIBILITIES: readonly string[] = ["off", "legend", "inside", "both"];
+
+/**
+ * Where a pie's percentages go, given what (if anything) is stored.
+ *
+ * Unset defaults to "legend" ONCE THERE IS MORE THAN ONE RING, and stays "off" for a single
+ * ring. On a sunburst the legend is where the reader compares — it lists ring 0 only (the
+ * level whose slices are shares of the whole chart, and the only level whose colours are
+ * unambiguous), and it has room for a number that the arcs do not: ring-0 labels are already
+ * competing for arc space with the rings outside them, and the fit pass truncates or drops
+ * them. Percentages on the outer rings would be worse than crowded — they are shares of a
+ * PARENT slice, so stacking them next to ring-0's shares-of-the-whole invites comparing two
+ * different denominators. A single-ring pie is left alone: its labels have room, nothing
+ * about it was reported as unreadable, and every saved one would otherwise change appearance.
+ *
+ * A stored value that isn't one of the four degrades to "off" rather than being trusted:
+ * settings arrive from a JSONB column that is never whitelisted server-side, so this can be
+ * hand-written or mistyped, and drawing nothing is the safe reading of "I don't know what
+ * this means" — the same treatment `resolveColor` gives an uninterpretable colour.
+ *
+ * Shared with the settings panel, which has to show the same answer the chart will draw or
+ * it becomes a control that lies (the bug this program has already fixed for the legend, slice
+ * labels and, just now, the centre total).
+ */
+export function resolvePercentVisibility(stored: string | undefined, ringCount: number): PercentVisibility {
+  if (stored === undefined) return ringCount > 1 ? "legend" : "off";
+  return PERCENT_VISIBILITIES.includes(stored) ? (stored as PercentVisibility) : "off";
+}
+
 export interface PieBuildConfig {
   /** Up to three, drawn as nested rings from the centre out: dimensions[0] is the
    * innermost ring, each subsequent entry nests inside the previous one's slices. */
@@ -29,8 +64,9 @@ export interface PieBuildConfig {
    * hole is large and an empty one reads as unfinished), off for a one-ring donut; ignored by a
    * one-ring pie with no hole at all. */
   showTotal?: boolean;
-  /** Whether the slice's percent appears in its label. Default "off". */
-  percentVisibility?: "off" | "inside" | "both";
+  /** Where a slice's percent appears — see `resolvePercentVisibility` for the values and the
+   * default. Unset defaults to "legend" for a multi-ring pie, "off" for a single ring. */
+  percentVisibility?: PercentVisibility;
   /** Per-slice colour override, keyed by the slice (dimension) value. */
   sliceColors?: Record<string, string>;
   /** Curation of the FIRST dimension's slices only (ring 0) — matches Metabase's `pie.rows`.
@@ -390,7 +426,12 @@ export function buildPieOption(
   // (this program's standing rule) — `??` so an explicit `false` stays off; `||` would treat a
   // saved `false` the same as "unset" and never let anyone turn labels off.
   const showName = cfg.showLabels ?? true;
-  const showPercent = cfg.percentVisibility === "inside" || cfg.percentVisibility === "both";
+  // "both" means what its name says and what Metabase means by it: the legend AND the slice.
+  // Before "legend" existed here, a stored "both" could only ever draw the inside half — the
+  // value promised something the renderer had no way to deliver.
+  const percentVisibility = resolvePercentVisibility(cfg.percentVisibility, ringCount);
+  const showPercent = percentVisibility === "inside" || percentVisibility === "both";
+  const showLegendPercent = percentVisibility === "legend" || percentVisibility === "both";
   const decimals = cfg.decimals ?? 2;
   const pct = (p: number) => `${parseFloat(p.toFixed(decimals))}%`; // configurable decimals, default 2 like Metabase
   const labelFormatter = (p: { name: string; percent: number; data?: { parentPercent?: number } }) => {
@@ -462,6 +503,10 @@ export function buildPieOption(
   // written into stored settings (this program's standing rule).
   const showTotal = cfg.showTotal ?? multiRing;
   const total = data.reduce((t, s) => t + s.value, 0);
+  // Ring 0's value by its DISPLAYED name — the legend only ever knows a name, and the rename
+  // pass above has already run, so this has to key on the same text the legend lists. Built
+  // here rather than in the legend expression so it is one pass, not one lookup per entry.
+  const legendValueByName = new Map(data.map((d) => [d.name, d.value] as const));
   const totalValueFontSize = ringCount >= 3 ? 17 : 22;
   // Gated on there BEING a hole rather than on `cfg.donut`: a multi-ring pie always has one
   // (see holeStart below), whatever `donut` says, so keying off `donut` would have hidden the
@@ -773,7 +818,22 @@ export function buildPieOption(
     // Defaults on (`?? true`, not `||`): a pie's colours are meaningless without the key that
     // says which is which, so an unset value shows the legend; an explicit `false` still turns
     // it off.
-    legend: bottomLegend(cfg.showLegend ?? true, data.map((d) => d.name)),
+    // Metabase's legend reads `Doohickey 23.88%` — name and share, per ring-0 slice. Ring 0's
+    // share of its own ring already IS its share of the whole chart (every outer ring
+    // re-partitions the same rows), so this is the one level where a percentage in a flat list
+    // needs no explanation of what it is a percentage OF. Same `pct` as the slice labels, so
+    // the two never disagree on precision. A name absent from the map (nothing should be, the
+    // legend is built from this very list) falls through to itself rather than to "undefined%".
+    legend: bottomLegend(
+      cfg.showLegend ?? true,
+      data.map((d) => d.name),
+      showLegendPercent && total > 0
+        ? (name: string) => {
+            const value = legendValueByName.get(name);
+            return value === undefined ? name : `${name} ${pct((value / total) * 100)}`;
+          }
+        : undefined,
+    ),
     graphic,
     series,
   };

@@ -200,6 +200,69 @@ describe("PieDisplaySection", () => {
     expect(screen.queryByLabelText("Decimal places")).not.toBeInTheDocument();
   });
 
+  // `legend` completes Metabase's own `pie.percent_visibility` domain — it is the value its
+  // sample sunburst is configured with, and the one egret was missing.
+  describe("Percentages", () => {
+    const openPercentages = async (user: ReturnType<typeof userEvent.setup>) => {
+      await user.click(screen.getByLabelText("Percentages"));
+    };
+
+    it("offers In legend alongside the values that were already there", async () => {
+      const user = userEvent.setup();
+      render(<PieDisplaySection config={{}} onChange={() => {}} slices={[]} />);
+      await openPercentages(user);
+      const options = (await screen.findAllByRole("option")).map((o) => o.textContent);
+      expect(options).toEqual(["Auto", "Off", "In legend", "In chart", "Both"]);
+    });
+
+    it("choosing In legend emits the legend value", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(<PieDisplaySection config={{}} onChange={onChange} slices={[]} />);
+      await openPercentages(user);
+      await user.click(await screen.findByRole("option", { name: "In legend" }));
+      expect(onChange).toHaveBeenCalledWith({ percentVisibility: "legend" });
+    });
+
+    it("choosing Auto clears the stored value", async () => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      render(<PieDisplaySection config={{ percentVisibility: "both" }} onChange={onChange} slices={[]} />);
+      await openPercentages(user);
+      await user.click(await screen.findByRole("option", { name: "Auto" }));
+      expect(onChange).toHaveBeenCalledWith({ percentVisibility: undefined });
+    });
+
+    // The control has to show what the chart will draw. With nothing stored, a multi-ring pie
+    // draws its percentages in the legend, so a select without Auto would read "Off" while
+    // the legend carried numbers.
+    it("shows Auto when nothing is stored", () => {
+      render(<PieDisplaySection config={{ dimensions: ["a", "b"] }} onChange={() => {}} slices={[]} />);
+      expect(within(screen.getByLabelText("Percentages")).getByText("Auto")).toBeInTheDocument();
+    });
+
+    it("offers Decimal places under Auto on a multi-ring pie, since Auto draws percentages there", () => {
+      render(<PieDisplaySection config={{ dimensions: ["a", "b"] }} onChange={() => {}} slices={[]} />);
+      expect(screen.getByLabelText("Decimal places")).toBeInTheDocument();
+    });
+
+    it("keeps Decimal places hidden under Auto on a single-ring pie, which draws none", () => {
+      render(<PieDisplaySection config={{ dimensions: ["a"] }} onChange={() => {}} slices={[]} />);
+      expect(screen.queryByLabelText("Decimal places")).not.toBeInTheDocument();
+    });
+
+    // Whatever the chart does with an unrecognised stored value, the control must say the same
+    // thing — and the chart draws nothing.
+    it("reports an unknown stored value as Off, matching what the chart draws", () => {
+      render(
+        <PieDisplaySection
+          config={{ dimensions: ["a", "b"], percentVisibility: "everywhere" as never }}
+          onChange={() => {}} slices={[]} />,
+      );
+      expect(within(screen.getByLabelText("Percentages")).getByText("Off")).toBeInTheDocument();
+    });
+  });
+
   it("Decimal places patches decimals as a whole number", () => {
     const onChange = vi.fn();
     render(<PieDisplaySection config={{ percentVisibility: "inside" }} onChange={onChange} slices={[]} />);

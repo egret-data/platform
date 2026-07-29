@@ -71,4 +71,15 @@ describe("bottomLegend", () => {
   it("omits the data key entirely when not given one, unchanged from before", () => {
     expect(bottomLegend(true)).not.toHaveProperty("data");
   });
+
+  // A caller (pie, showing each slice's share beside its name) needs to rewrite the entry
+  // text from a number the legend itself knows nothing about, so this takes a callback rather
+  // than ECharts' template-string form.
+  it("passes a formatter through when given one, and omits the key when not", () => {
+    const formatter = (name: string) => `${name} 50%`;
+    expect(bottomLegend(true, ["North"], formatter)).toEqual({
+      bottom: 0, type: "scroll", textStyle: baseTextStyle, data: ["North"], formatter,
+    });
+    expect(bottomLegend(true, ["North"])).not.toHaveProperty("formatter");
+  });
 });
