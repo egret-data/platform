@@ -1,5 +1,5 @@
 // src/components/chart/__tests__/ChartRenderer.test.tsx
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { useState } from "react";
 import { ChartRenderer } from "../ChartRenderer";
@@ -284,6 +284,81 @@ describe("ChartRenderer", () => {
         pieOption(pie).series[0].data.find((d) => d.name === "A")!.label.formatter();
       expect(labelOfA({ percentVisibility: "inside", showLabels: false })).toBe("22.22%");
       expect(labelOfA({ percentVisibility: "inside", showLabels: false, decimals: 0 })).toBe("22%");
+    });
+  });
+
+  // The pie's legend is React markup beside the canvas now, not an ECharts `legend` component
+  // inside it — so ChartRenderer is where the two halves are put together, and this is the seam
+  // that decides which layout they are put together in.
+  describe("-> PieLegend seam", () => {
+    const pieCols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+    const pieRows = [["A", 10], ["B", 30]];
+    const renderPie = (pie: Partial<PieConfig> = {}) =>
+      render(
+        <ChartRenderer
+          vizType="pie"
+          params={params({ pie: { dimensions: ["d"], metric: "m", ...pie } })}
+          columns={pieCols}
+          rows={pieRows}
+        />,
+      );
+    /** Makes every element measure as this size, which is what the placement decision reads. */
+    const measuringAs = (width: number, height: number) =>
+      vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(
+        () => ({ width, height, top: 0, left: 0, right: width, bottom: height, x: 0, y: 0, toJSON() {} }) as DOMRect,
+      );
+
+    afterEach(() => vi.restoreAllMocks());
+
+    it("renders the ring-0 slices as markup, with no legend left in the option", () => {
+      renderPie();
+      expect(screen.getByRole("button", { name: /^B/ })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^A/ })).toBeInTheDocument();
+      const built = (mockLastOption as (s: { width: number; height: number }) => object)({ width: 400, height: 400 });
+      expect(built).not.toHaveProperty("legend");
+    });
+
+    it("draws no legend at all when the chart turns it off", () => {
+      const { container } = renderPie({ showLegend: false });
+      expect(container.querySelector("[data-pie-legend]")).toBeNull();
+    });
+
+    // The real measured host from the Metabase comparison, and one shaped the opposite way.
+    it("puts the legend beside a wide, short host and below a narrow, tall one", () => {
+      measuringAs(830, 661);
+      const { container: wide } = renderPie();
+      expect(wide.querySelector("[data-pie-legend]")).toHaveAttribute("data-pie-legend", "side");
+
+      vi.restoreAllMocks();
+      measuringAs(360, 720);
+      const { container: narrow } = renderPie();
+      expect(narrow.querySelector("[data-pie-legend]")).toHaveAttribute("data-pie-legend", "bottom");
+    });
+
+    it("tells the option builder which layout it is in, so the circle fills the right box", () => {
+      measuringAs(830, 661);
+      renderPie();
+      const built = (mockLastOption as (s: { width: number; height: number }) => {
+        series: { radius: string[] }[];
+      })({ width: 640, height: 661 });
+      expect(built.series[0].radius[1]).toBe("85%");
+    });
+
+    // The ECharts legend this replaces toggled its slice off on click; that has to keep working.
+    it("drops a slice from the option when its legend entry is clicked, and puts it back", () => {
+      renderPie();
+      const built = () =>
+        (mockLastOption as (s: { width: number; height: number }) => {
+          series: { data: { name: string }[] }[];
+        })({ width: 400, height: 400 }).series[0].data.map((d) => d.name);
+      expect(built()).toEqual(["B", "A"]);
+
+      fireEvent.click(screen.getByRole("button", { name: /^B/ }));
+      expect(built()).toEqual(["A"]);
+      expect(screen.getByRole("button", { name: /^B/ })).toHaveAttribute("aria-pressed", "false");
+
+      fireEvent.click(screen.getByRole("button", { name: /^B/ }));
+      expect(built()).toEqual(["B", "A"]);
     });
   });
 

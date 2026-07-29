@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { buildPieOption, resolvePercentVisibility } from "../options/pie";
+import {
+  buildPieOption, buildPieLegend, pieLegendPlacement, resolvePercentVisibility,
+  PIE_LEGEND_COLUMN_WIDTH_PX,
+} from "../options/pie";
 import { SERIES_PALETTE, seriesColor, lightenOklch } from "../palette";
 import { calcAvailableDonutSliceLabelLength } from "../sliceLabel";
 
@@ -49,9 +52,9 @@ describe("buildPieOption — Metabase-parity", () => {
   // chart with no showLegend/showLabels picks up the fix too. `?? true`, not `|| true`: an
   // explicit `false` must still turn each off, not be treated as "unset".
   it("showLegend defaults on; an explicit false turns it off", () => {
-    expect((buildPieOption(cols, rows, base) as any).legend).toMatchObject({ type: "scroll" });
-    expect((buildPieOption(cols, rows, { ...base, showLegend: true }) as any).legend).toMatchObject({ type: "scroll" });
-    expect((buildPieOption(cols, rows, { ...base, showLegend: false }) as any).legend).toBeUndefined();
+    expect(buildPieLegend(cols, rows, base).map((e) => e.name)).toEqual(["US", "EU"]);
+    expect(buildPieLegend(cols, rows, { ...base, showLegend: true }).map((e) => e.name)).toEqual(["US", "EU"]);
+    expect(buildPieLegend(cols, rows, { ...base, showLegend: false })).toEqual([]);
   });
   it("showLabels defaults on; an explicit false turns it off", () => {
     expect((buildPieOption(cols, rows, base) as any).series[0].label.show).toBe(true);
@@ -1062,23 +1065,39 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
 
   describe("fix 4 — the legend lists only the first dimension's slices", () => {
     it("a two-ring pie's legend carries only ring 0's names, not ring 1's", () => {
-      const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m", showLegend: true }) as any;
-      expect(opt.legend.data).toEqual(["US", "EU"]);
+      const names = buildPieLegend(cols2, rows2, {
+        dimensions: ["region", "category"], metric: "m", showLegend: true,
+      }).map((e) => e.name);
+      expect(names).toEqual(["US", "EU"]);
       // "Widgets"/"Gadgets" are ring-1-only names here and must not appear in the legend list.
-      expect(opt.legend.data).not.toContain("Widgets");
-      expect(opt.legend.data).not.toContain("Gadgets");
+      expect(names).not.toContain("Widgets");
+      expect(names).not.toContain("Gadgets");
     });
 
     it("a one-ring pie's legend is unaffected — it only ever had one ring's names anyway", () => {
-      const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", showLegend: true }) as any;
-      expect(opt.legend.data).toEqual(["US", "EU"]);
+      const names = buildPieLegend(cols, rows, { dimensions: ["region"], metric: "rev", showLegend: true })
+        .map((e) => e.name);
+      expect(names).toEqual(["US", "EU"]);
     });
 
     it("the legend is still absent when showLegend is explicitly off", () => {
       // showLegend now defaults on — this must set it to false explicitly to actually test
       // the off case (a bare config, with no showLegend at all, now shows a legend instead).
-      const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m", showLegend: false }) as any;
-      expect(opt.legend).toBeUndefined();
+      expect(buildPieLegend(cols2, rows2, {
+        dimensions: ["region", "category"], metric: "m", showLegend: false,
+      })).toEqual([]);
+    });
+
+    // The swatch is the whole point of a key: it must be the colour the ring-0 slice is actually
+    // drawn in, including a per-slice override and the muted "Other" tint — the legend is no
+    // longer inside the canvas, so nothing else keeps the two in step.
+    it("each entry carries its slice's own render colour", () => {
+      const entries = buildPieLegend(cols, rows, { dimensions: ["region"], metric: "rev" });
+      expect(entries.map((e) => e.color)).toEqual([seriesColor(0), seriesColor(1)]);
+      const overridden = buildPieLegend(cols, rows, {
+        dimensions: ["region"], metric: "rev", sliceColors: { US: "#123456" },
+      });
+      expect(overridden.find((e) => e.name === "US")!.color).toBe("#123456");
     });
   });
 
@@ -1158,15 +1177,15 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
   // such value at all, so its legend could only ever be names.
   describe("the legend can carry each ring-0 slice's percentage", () => {
     // rows2 totals 50 at ring 0: US 40 (80%), EU 10 (20%).
-    const legendText = (opt: any, name: string) => opt.legend.formatter(name);
+    const legendPercent = (cfg: any, name: string) =>
+      buildPieLegend(cols2, rows2, cfg).find((e) => e.name === name)?.percent;
 
     it("percentVisibility legend puts name and share beside each ring-0 entry", () => {
-      const opt = buildPieOption(cols2, rows2, {
+      const entries = buildPieLegend(cols2, rows2, {
         dimensions: ["region", "category"], metric: "m", percentVisibility: "legend",
-      }) as any;
-      expect(opt.legend.data).toEqual(["US", "EU"]);
-      expect(legendText(opt, "US")).toBe("US 80%");
-      expect(legendText(opt, "EU")).toBe("EU 20%");
+      });
+      expect(entries.map((e) => e.name)).toEqual(["US", "EU"]);
+      expect(entries.map((e) => e.percent)).toEqual(["80%", "20%"]);
     });
 
     it("legend does NOT also put the percent on the slice", () => {
@@ -1179,82 +1198,74 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
     // "both" finally means what it says. Before "legend" existed it could only draw the inside
     // half, so the value promised something the renderer had no way to deliver.
     it("both puts the percent in the legend AND on the slice", () => {
-      const opt = buildPieOption(cols2, rows2, {
-        dimensions: ["region", "category"], metric: "m", percentVisibility: "both",
-      }) as any;
-      expect(legendText(opt, "US")).toBe("US 80%");
+      const cfg = { dimensions: ["region", "category"], metric: "m", percentVisibility: "both" };
+      expect(legendPercent(cfg, "US")).toBe("80%");
+      const opt = buildPieOption(cols2, rows2, cfg as any) as any;
       expect(opt.series[0].data.find((d: any) => d.name === "US").label.formatter()).toBe("US: 80%");
     });
 
     it("inside leaves the legend as plain names", () => {
-      const opt = buildPieOption(cols2, rows2, {
+      const entries = buildPieLegend(cols2, rows2, {
         dimensions: ["region", "category"], metric: "m", percentVisibility: "inside",
-      }) as any;
-      expect(opt.legend.formatter).toBeUndefined();
+      });
+      expect(entries.map((e) => e.percent)).toEqual([undefined, undefined]);
     });
 
     it("the legend percent honours the configured decimals, like the slice labels", () => {
-      const opt = buildPieOption(cols3, rows3, {
+      const entries = buildPieLegend(cols3, rows3, {
         dimensions: ["region", "category", "brand"], metric: "m", percentVisibility: "legend", decimals: 3,
-      }) as any;
+      });
       // US 15 of 18 = 83.333...%
-      expect(legendText(opt, "US")).toBe("US 83.333%");
-    });
-
-    it("a name the legend somehow doesn't know falls back to itself, not to `undefined%`", () => {
-      const opt = buildPieOption(cols2, rows2, {
-        dimensions: ["region", "category"], metric: "m", percentVisibility: "legend",
-      }) as any;
-      expect(legendText(opt, "Nowhere")).toBe("Nowhere");
+      expect(entries.find((e) => e.name === "US")!.percent).toBe("83.333%");
     });
 
     it("a renamed ring-0 slice still gets its percentage", () => {
-      const opt = buildPieOption(cols2, rows2, {
+      const entries = buildPieLegend(cols2, rows2, {
         dimensions: ["region", "category"], metric: "m", percentVisibility: "legend",
         sliceNames: { US: "United States" },
-      }) as any;
-      expect(opt.legend.data).toContain("United States");
-      expect(legendText(opt, "United States")).toBe("United States 80%");
+      });
+      expect(entries.map((e) => e.name)).toContain("United States");
+      expect(entries.find((e) => e.name === "United States")!.percent).toBe("80%");
     });
 
-    it("no legend at all means no formatter to trip over", () => {
-      const opt = buildPieOption(cols2, rows2, {
+    it("no legend at all means no entries to trip over", () => {
+      expect(buildPieLegend(cols2, rows2, {
         dimensions: ["region", "category"], metric: "m", percentVisibility: "legend", showLegend: false,
-      }) as any;
-      expect(opt.legend).toBeUndefined();
+      })).toEqual([]);
     });
 
     describe("the default", () => {
       it("a multi-ring pie shows legend percentages with nothing stored", () => {
-        const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m" }) as any;
-        expect(legendText(opt, "US")).toBe("US 80%");
+        const cfg = { dimensions: ["region", "category"], metric: "m" };
+        expect(legendPercent(cfg, "US")).toBe("80%");
         // …and keeps the slices themselves uncluttered, which is the point of choosing the
         // legend over the arcs on a sunburst.
+        const opt = buildPieOption(cols2, rows2, cfg) as any;
         expect(opt.series[0].data.find((d: any) => d.name === "US").label.formatter()).toBe("US");
       });
 
       it("a single-ring pie is untouched: no percentages anywhere", () => {
-        const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
-        expect(opt.legend.formatter).toBeUndefined();
+        const cfg = { dimensions: ["region"], metric: "rev" };
+        expect(buildPieLegend(cols, rows, cfg).map((e) => e.percent)).toEqual([undefined, undefined]);
+        const opt = buildPieOption(cols, rows, cfg) as any;
         expect(opt.series[0].data.find((d: any) => d.name === "US").label.formatter()).toBe("US");
       });
 
       it("an explicit off still wins over the multi-ring default", () => {
-        const opt = buildPieOption(cols2, rows2, {
+        expect(legendPercent({
           dimensions: ["region", "category"], metric: "m", percentVisibility: "off",
-        }) as any;
-        expect(opt.legend.formatter).toBeUndefined();
+        }, "US")).toBeUndefined();
       });
 
       // Settings come from a JSONB column that is never whitelisted server-side, so an
       // unrecognised value has to degrade rather than be trusted — drawing nothing is the safe
       // reading of "I don't know what this means".
       it("an unknown stored value degrades to off rather than throwing or guessing", () => {
-        const opt = buildPieOption(cols2, rows2, {
-          dimensions: ["region", "category"], metric: "m",
-          percentVisibility: "everywhere" as never,
-        }) as any;
-        expect(opt.legend.formatter).toBeUndefined();
+        const cfg = {
+          dimensions: ["region", "category"], metric: "m", percentVisibility: "everywhere" as never,
+        };
+        expect(legendPercent(cfg, "US")).toBeUndefined();
+        const opt = buildPieOption(cols2, rows2, cfg) as any;
         expect(opt.series[0].data.find((d: any) => d.name === "US").label.formatter()).toBe("US");
       });
     });
@@ -1396,136 +1407,141 @@ describe("a pie's legend goes beside it when that leaves the rings more room", (
   const wideShort = { width: 830, height: 661 };
   const narrowTall = { width: 360, height: 720 };
   const outerRadiusPct = (opt: any) => parseFloat(String(opt.series[0].radius[1]));
-  const diameterPx = (opt: any, size: { width: number; height: number }) =>
-    (outerRadiusPct(opt) / 100) * Math.min(size.width, size.height);
 
   it("a wide, short host puts the legend in a column beside the chart", () => {
-    const opt = buildPieOption(cols, rows, base, undefined, wideShort) as any;
-    expect(opt.legend).toMatchObject({ orient: "vertical", left: 0, top: "middle", type: "scroll" });
-    expect(opt.legend).not.toHaveProperty("bottom");
+    expect(pieLegendPlacement(wideShort)).toBe("side");
   });
 
-  it("a narrow, tall host keeps the bottom row", () => {
-    const opt = buildPieOption(cols, rows, base, undefined, narrowTall) as any;
-    expect(opt.legend).toMatchObject({ bottom: 0, type: "scroll" });
-    expect(opt.legend).not.toHaveProperty("orient");
-  });
-
-  // ECharts gives a pie series no automatic awareness of the legend: it centres on the whole
-  // canvas whatever else is drawn there. So the column has to be paid for explicitly, in the
-  // series' own `center` — the middle of the box LEFT of the legend, expressed as a percentage
-  // of the canvas width (the unit `center` already used), not the canvas middle.
-  it("the side layout shifts the pie's centre clear of the legend column", () => {
-    const opt = buildPieOption(cols, rows, base, undefined, wideShort) as any;
-    // (190 + 830) / 2 = 505px... measured from the left edge: the column's 190px plus half of
-    // the 640px that remains = 510px, i.e. 61.45% of 830.
-    expect(opt.series[0].center).toEqual(["61.45%", "50%"]);
-
-    // ...and the circle drawn around that centre genuinely clears the column rather than merely
-    // being off-centre: left edge = 510 - 544/2 = 238px, outside the 190px legend.
-    const leftEdge = 0.6145 * wideShort.width - diameterPx(opt, wideShort) / 2;
-    expect(leftEdge).toBeGreaterThan(190);
-  });
-
-  it("the bottom layout's centre is untouched", () => {
-    const opt = buildPieOption(cols, rows, base, undefined, narrowTall) as any;
-    expect(opt.series[0].center).toEqual(["50%", "48%"]);
+  it("a narrow, tall host keeps the legend below", () => {
+    expect(pieLegendPlacement(narrowTall)).toBe("bottom");
   });
 
   // The assertion that makes the threshold load-bearing rather than decorative: on each host the
-  // layout actually chosen is the one that draws the BIGGER circle. Without this, the choice
-  // could be inverted and every other test here would still pass.
+  // layout chosen is the one that draws the BIGGER circle. Without this, the choice could be
+  // inverted and every other test here would still pass.
   it("each host gets whichever layout draws the bigger pie", () => {
-    const wide = buildPieOption(cols, rows, base, undefined, wideShort) as any;
-    // Chosen: the column. 0.85 * min(830 - 190, 661) = 544px.
-    expect(diameterPx(wide, wideShort)).toBeCloseTo(544, 1);
-    // Rejected: the row, 0.70 * 661 = 462.7px.
-    expect(diameterPx(wide, wideShort)).toBeGreaterThan(0.7 * 661);
-
-    const narrow = buildPieOption(cols, rows, base, undefined, narrowTall) as any;
-    // Chosen: the row. 0.70 * min(360, 720) = 252px.
-    expect(diameterPx(narrow, narrowTall)).toBeCloseTo(252, 1);
-    // Rejected: the column, 0.85 * min(360 - 190, 720) = 144.5px.
-    expect(diameterPx(narrow, narrowTall)).toBeGreaterThan(0.85 * Math.min(360 - 190, 720));
+    const row = (s: { width: number; height: number }) => 0.7 * Math.min(s.width, s.height);
+    const column = (s: { width: number; height: number }) =>
+      0.85 * Math.min(s.width - PIE_LEGEND_COLUMN_WIDTH_PX, s.height);
+    // 830x661: column 544px, row 462.7px -> column.
+    expect(column(wideShort)).toBeCloseTo(544, 1);
+    expect(column(wideShort)).toBeGreaterThan(row(wideShort));
+    expect(pieLegendPlacement(wideShort)).toBe("side");
+    // 360x720: row 252px, column 144.5px -> row.
+    expect(row(narrowTall)).toBeCloseTo(252, 1);
+    expect(row(narrowTall)).toBeGreaterThan(column(narrowTall));
+    expect(pieLegendPlacement(narrowTall)).toBe("bottom");
   });
 
-  // The documented "no DOM" path (see buildPieOption's `containerSize`): with no real measurement
-  // there is no aspect to judge, so nothing moves and nothing resizes.
-  it("an unknown container size keeps the bottom legend and today's geometry", () => {
-    for (const size of [undefined, { width: 0, height: 0 }]) {
-      const opt = buildPieOption(cols, rows, base, undefined, size) as any;
-      expect(opt.legend).toMatchObject({ bottom: 0 });
-      expect(opt.series[0].radius).toEqual(["0%", "70%"]);
-      expect(opt.series[0].center).toEqual(["50%", "48%"]);
-    }
+  // The documented "no DOM" path: with no real measurement there is no aspect to judge, so
+  // nothing moves — the same answer a not-yet-laid-out (0x0) host gives.
+  it("an unknown container size keeps the legend below", () => {
+    expect(pieLegendPlacement(undefined)).toBe("bottom");
+    expect(pieLegendPlacement({ width: 0, height: 0 })).toBe("bottom");
   });
 
-  // No legend, no column to make room for: a chart with `showLegend: false` on the same wide,
-  // short host keeps exactly the geometry it has today.
-  it("a hidden legend reserves nothing", () => {
-    const opt = buildPieOption(cols, rows, { ...base, showLegend: false }, undefined, wideShort) as any;
-    expect(opt.legend).toBeUndefined();
+  // The legend is React markup beside the canvas now, so the chart's own box already excludes
+  // it: the pie simply fills whatever it is given, at the fraction that layout asks for. Nothing
+  // is shifted and nothing is reserved inside the option any more.
+  it("the side layout fills its box at 0.85 and stays centred in it", () => {
+    const opt = buildPieOption(cols, rows, { ...base, legendPlacement: "side" }, undefined, {
+      width: wideShort.width - PIE_LEGEND_COLUMN_WIDTH_PX, height: wideShort.height,
+    }) as any;
+    expect(outerRadiusPct(opt)).toBeCloseTo(85, 6);
+    expect(opt.series[0].center).toEqual(["50%", "50%"]);
+    // 0.85 * min(640, 661) = 544px of diameter — the number the Metabase comparison asked for.
+    expect((outerRadiusPct(opt) / 100) * Math.min(640, 661)).toBeCloseTo(544, 1);
+  });
+
+  it("the bottom layout's geometry is untouched", () => {
+    const opt = buildPieOption(cols, rows, { ...base, legendPlacement: "bottom" }, undefined, narrowTall) as any;
     expect(opt.series[0].radius).toEqual(["0%", "70%"]);
     expect(opt.series[0].center).toEqual(["50%", "48%"]);
   });
 
-  // Metabase's column aligns the name left and the percentage right (`Doohickey    23.88%`).
-  // ECharts' legend can express exactly that — its formatter output is parsed as rich text when
-  // the legend's textStyle declares `rich` styles, and a rich fragment takes its own `width` and
-  // `align` — so the two fragments are a fixed-width left column and a fixed-width right one.
-  describe("the percentages survive the move, aligned as a column", () => {
-    const cols2 = [
-      { name: "region", type: "varchar" }, { name: "category", type: "varchar" }, { name: "m", type: "double" },
-    ];
-    const rows2 = [["US", "Widgets", 80], ["EU", "Gadgets", 20]];
-    const cfg = { dimensions: ["region", "category"], metric: "m", percentVisibility: "legend" as const };
-
-    it("keeps each ring-0 slice's share, in a name-left/percent-right pair of fragments", () => {
-      const opt = buildPieOption(cols2, rows2, cfg, undefined, wideShort) as any;
-      expect(opt.legend.data).toEqual(["US", "EU"]);
-      expect(opt.legend.formatter("US")).toBe("{n|US}{p|80%}");
-      expect(opt.legend.formatter("EU")).toBe("{n|EU}{p|20%}");
-      expect(opt.legend.textStyle.rich.n).toMatchObject({ align: "left" });
-      expect(opt.legend.textStyle.rich.p).toMatchObject({ align: "right" });
-      // Two fixed-width fragments that together fit inside the 190px the centre shift reserved.
-      expect(opt.legend.textStyle.rich.n.width + opt.legend.textStyle.rich.p.width).toBeLessThan(190);
-    });
-
-    it("truncates a name too long for the column instead of overflowing into the chart", () => {
-      const long = [["A very long region name indeed", "Widgets", 80], ["EU", "Gadgets", 20]];
-      const opt = buildPieOption(cols2, long, cfg, undefined, wideShort) as any;
-      expect(opt.legend.textStyle.rich.n).toMatchObject({ overflow: "truncate", ellipsis: "…" });
-    });
-
-    // ECharts' rich text has no escape sequence, so a name containing its markup characters
-    // cannot be put in a fragment without either corrupting the layout or silently rewriting the
-    // user's own data. Such an entry falls back to plain text — the name is still true, it just
-    // loses the alignment.
-    it("a name carrying rich-text markup falls back to plain text rather than corrupting it", () => {
-      const braces = [["Batch {A|B}", "Widgets", 80], ["EU", "Gadgets", 20]];
-      const opt = buildPieOption(cols2, braces, cfg, undefined, wideShort) as any;
-      expect(opt.legend.formatter("Batch {A|B}")).toBe("Batch {A|B} 80%");
-    });
-
-    it("the bottom row is unchanged: plain text, no fragments", () => {
-      const opt = buildPieOption(cols2, rows2, cfg, undefined, narrowTall) as any;
-      expect(opt.legend.formatter("US")).toBe("US 80%");
-      expect(opt.legend.textStyle).not.toHaveProperty("rich");
-    });
+  it("an unstated placement is the bottom one — today's geometry, unchanged", () => {
+    const opt = buildPieOption(cols, rows, base, undefined, wideShort) as any;
+    expect(opt.series[0].radius).toEqual(["0%", "70%"]);
+    expect(opt.series[0].center).toEqual(["50%", "48%"]);
   });
 
-  // The donut's centre total is a `graphic` text element, positioned against the CANVAS, not the
-  // series — so a shifted pie leaves it stranded in the middle of the canvas, overlapping the
-  // rings, unless it is shifted with it.
-  it("the donut's centre total follows the pie's shifted centre", () => {
+  // No legend, no column to make room for: a chart with `showLegend: false` keeps exactly the
+  // geometry it has today even if something upstream still hands it the side placement.
+  it("a hidden legend reserves nothing", () => {
     const opt = buildPieOption(
-      cols, rows, { ...base, donut: true, showTotal: true }, undefined, wideShort,
+      cols, rows, { ...base, showLegend: false, legendPlacement: "side" }, undefined, wideShort,
+    ) as any;
+    expect(opt.series[0].radius).toEqual(["0%", "70%"]);
+    expect(opt.series[0].center).toEqual(["50%", "48%"]);
+  });
+
+  // The whole point of this commit: ECharts' `legend` component does not work with a `sunburst`
+  // series, so the legend had to leave the canvas before the series type can change. Nothing in
+  // the option may re-introduce one.
+  it("the built option carries no ECharts legend at all", () => {
+    for (const cfg of [base, { ...base, legendPlacement: "side" as const }, { ...base, showLegend: true }]) {
+      expect(buildPieOption(cols, rows, cfg, undefined, wideShort)).not.toHaveProperty("legend");
+    }
+  });
+
+  // The donut's centre total is a `graphic` text element positioned against the CANVAS. With
+  // nothing shifted any more it goes back to the plain `left: "center"` it always used.
+  it("the donut's centre total stays centred on the canvas", () => {
+    const opt = buildPieOption(
+      cols, rows, { ...base, donut: true, showTotal: true, legendPlacement: "side" }, undefined, wideShort,
     ) as any;
     const [value, caption] = opt.graphic;
-    expect(value.x).toBeCloseTo(510, 6); // the same 510px the series centres on
-    expect(caption.x).toBeCloseTo(510, 6);
-    expect(value.y).toBeCloseTo(0.43 * 661, 6); // the 43%/53% of the canvas height it already used
-    expect(caption.y).toBeCloseTo(0.53 * 661, 6);
-    expect(value.left).toBeUndefined();
+    expect(value).toMatchObject({ left: "center", top: "43%" });
+    expect(caption).toMatchObject({ left: "center", top: "53%" });
+    expect(value.x).toBeUndefined();
+  });
+});
+
+// Clicking a legend entry toggled that ring-0 slice off before this commit — ECharts' own
+// `legend.selectedMode` defaults to `true`, and a live check (a real ECharts instance, SVG
+// renderer, `legendToggleSelect` on "US") confirmed it: ring 0's US sector disappeared, the
+// remaining slices re-partitioned the full circle, the legend swatch greyed out, and every OTHER
+// ring was left exactly as it was. With the legend out of the canvas, that has to be done here.
+describe("a toggled-off legend entry drops its ring-0 slice", () => {
+  const cols2 = [
+    { name: "region", type: "varchar" }, { name: "category", type: "varchar" }, { name: "m", type: "double" },
+  ];
+  const rows2 = [["US", "Widgets", 40], ["EU", "Gadgets", 10]];
+  const cfg = { dimensions: ["region", "category"], metric: "m", sliceThreshold: 0 };
+
+  it("removes exactly that slice from ring 0", () => {
+    const opt = buildPieOption(cols2, rows2, { ...cfg, toggledOffSlices: ["US"] }) as any;
+    expect(opt.series[0].data.map((d: any) => d.name)).toEqual(["EU"]);
+  });
+
+  it("leaves every outer ring alone, exactly as the ECharts legend did", () => {
+    const opt = buildPieOption(cols2, rows2, { ...cfg, toggledOffSlices: ["US"] }) as any;
+    expect(opt.series[1].data.map((d: any) => d.name)).toEqual(["Widgets", "Gadgets"]);
+  });
+
+  // ECharts filtered the already-coloured series, so the survivors kept their own colours. A
+  // rebuild would otherwise slide every survivor up a palette slot and the React swatches — built
+  // from the FULL ring — would then name a colour the chart no longer draws.
+  it("keeps each surviving slice's colour rather than re-dealing the palette", () => {
+    const opt = buildPieOption(cols2, rows2, { ...cfg, toggledOffSlices: ["US"] }) as any;
+    expect(opt.series[0].data[0].itemStyle.color).toBe(seriesColor(1));
+    expect(buildPieLegend(cols2, rows2, cfg).find((e) => e.name === "EU")!.color).toBe(seriesColor(1));
+  });
+
+  // Also matching the ECharts legend: neither the hole's total nor the legend's own percentages
+  // re-based on what was left showing.
+  it("does not re-base the centre total or the legend percentages", () => {
+    const opt = buildPieOption(cols2, rows2, { ...cfg, showTotal: true, toggledOffSlices: ["US"] }) as any;
+    expect(opt.graphic.map((g: any) => g.style?.text)).toEqual(["50", "Total"]);
+    expect(buildPieLegend(cols2, rows2, cfg).map((e) => e.percent)).toEqual(["80%", "20%"]);
+  });
+
+  it("nothing toggled off leaves the option byte-for-byte as it was", () => {
+    const plain = buildPieOption(cols2, rows2, cfg) as any;
+    const empty = buildPieOption(cols2, rows2, { ...cfg, toggledOffSlices: [] }) as any;
+    expect(empty.series[0].data.map((d: any) => d.name)).toEqual(plain.series[0].data.map((d: any) => d.name));
+    // No toggle, no reshuffle — so ring 0 keeps its implicit palette slots and stays untouched.
+    expect(plain.series[0].data.map((d: any) => d.itemStyle)).toEqual([undefined, undefined]);
+    expect(empty.series[0].data.map((d: any) => d.itemStyle)).toEqual([undefined, undefined]);
   });
 });

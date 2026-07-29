@@ -52,53 +52,12 @@ export function axisTooltip() {
   };
 }
 
-/** The bottom, scrollable legend — or nothing, when the chart hides it. `data`, when given,
- * restricts the legend to exactly those names rather than ECharts' default of every series'
- * own data — needed by pie's nested rings, where only the first ring's slices have a single,
- * unambiguous colour (see buildPieOption).
- *
- * `formatter` rewrites each entry's text from its name. ECharts accepts either a template
- * string or a callback here; a callback is what pie needs, since the text it wants ("Doohickey
- * 23.88%") depends on a per-slice number the legend itself doesn't know about. */
-export function bottomLegend(
-  show: boolean | undefined,
-  data?: string[],
-  formatter?: (name: string) => string,
-) {
-  if (!show) return undefined;
-  return {
-    bottom: 0, type: "scroll" as const, textStyle: baseTextStyle,
-    ...(data ? { data } : {}),
-    ...(formatter ? { formatter } : {}),
-  };
-}
-
-/**
- * The same legend as a left-hand COLUMN rather than a bottom row — for a chart whose host is
- * wide and short, where a column costs less of the shape the chart actually needs than a row
- * does (pie is the only caller; see options/pie.ts, which decides between the two from the
- * chart's real measured size and shifts its own centre to clear this column).
- *
- * `data` and `formatter` mean exactly what they mean on `bottomLegend`. `rich` is the one
- * addition a column can use and a row cannot: ECharts parses a legend formatter's output as
- * rich text once the legend's own textStyle declares rich styles, and each fragment takes its
- * own `width`/`align` — which is how a column gets Metabase's name-left, percentage-right pair
- * ("Doohickey    23.88%") instead of one indivisible run of text.
- */
-export function sideLegend(
-  show: boolean | undefined,
-  data?: string[],
-  formatter?: (name: string) => string,
-  rich?: Record<string, Record<string, unknown>>,
-) {
-  if (!show) return undefined;
-  return {
-    orient: "vertical" as const, left: 0, top: "middle" as const, type: "scroll" as const,
-    textStyle: rich ? { ...baseTextStyle, rich } : baseTextStyle,
-    ...(data ? { data } : {}),
-    ...(formatter ? { formatter } : {}),
-  };
-}
+// NO LEGEND BUILDERS HERE ANY MORE. `bottomLegend`/`sideLegend` composed an ECharts `legend`
+// component, and pie was their only caller — no cartesian chart here has ever set one. The pie's
+// legend is now React markup rendered beside the canvas (buildPieLegend + PieLegend.tsx), because
+// ECharts' legend does not work with a `sunburst` series and that is what the pie is becoming.
+// Leaving the helpers behind would advertise a shared answer to "what does a legend look like in
+// egret" that nothing implements.
 
 /**
  * A screen-reader description of the chart, replacing the one ECharts generates.

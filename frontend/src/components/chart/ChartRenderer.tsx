@@ -1,5 +1,5 @@
 // src/components/chart/ChartRenderer.tsx
-import { useMemo } from "react";
+import { useMemo, useRef, useState } from "react";
 import type {
   AnyChartParams, BoxplotConfig, CartesianConfig, FunnelConfig, GaugeConfig,
   PieConfig, ProgressConfig, SankeyConfig, ScalarConfig, SmartScalarConfig, VizType,
@@ -10,7 +10,10 @@ import { vizConfig, shellSettings } from "@/components/chart/viz/renderConfig";
 import type { DrillContext } from "@/components/chart/drill";
 import { EChartsRenderer, type EChartsSize } from "@/components/chart/echarts/EChartsRenderer";
 import { buildCartesianOption } from "@/components/chart/echarts/options/cartesian";
-import { buildPieOption } from "@/components/chart/echarts/options/pie";
+import { buildPieOption, buildPieLegend, pieLegendPlacement } from "@/components/chart/echarts/options/pie";
+import { PieLegend } from "@/components/chart/PieLegend";
+import { useElementSize } from "@/components/chart/useElementSize";
+import { cn } from "@/lib/utils";
 import { buildGaugeOption } from "@/components/chart/echarts/options/gauge";
 import { buildFunnelOption } from "@/components/chart/echarts/options/funnel";
 import { buildWaterfallOption } from "@/components/chart/echarts/options/waterfall";
@@ -77,17 +80,34 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
     // format edit changes the key and rebuilds. Listing them as well would defeat the point.
     [settingsKey],
   );
+  // The legend is markup beside the chart, so THIS element is the whole host (chart + legend) and
+  // the placement decision is made from its size — `pieLegendPlacement` is the one place that
+  // decides, and the answer is handed to the option builder rather than re-derived there from a
+  // size that by then means something different (the chart's own box, already legend-free, which
+  // EChartsRenderer measures for itself).
+  const hostRef = useRef<HTMLDivElement>(null);
+  const placement = pieLegendPlacement(useElementSize(hostRef));
+
+  // Ephemeral, per-mount: which ring-0 slices the reader has clicked off. Deliberately NOT stored
+  // in the chart's settings — this replaces the ECharts legend's own click-to-hide, which was
+  // never persisted either (that is what `pie.hiddenSlices` is for).
+  const [toggledOff, setToggledOff] = useState<string[]>([]);
+  const legend = useMemo(() => buildPieLegend(columns, rows, input), [input, columns, rows]);
+
   const option = useMemo(
     // `undefined` here is buildPieOption's own measureText param (position 4) — its default (a
     // real canvas measurer) is exactly what production wants; `size` (the measured container
     // from EChartsRenderer) fills containerSize (position 5) — see that function's doc comment.
-    () => (size: EChartsSize) => buildPieOption(columns, rows, input, undefined, size),
-    [input, columns, rows],
+    () => (size: EChartsSize) =>
+      buildPieOption(columns, rows, { ...input, legendPlacement: placement, toggledOffSlices: toggledOff }, undefined, size),
+    [input, columns, rows, placement, toggledOff],
   );
 
-  return (
+  const chart = (
     <EChartsRenderer
+      key="chart"
       option={option}
+      className="min-h-0 min-w-0 flex-1"
       onPointClick={onValueClick && pie.dimensions?.[0] ? (p) => {
         // Each ring's ECharts series is named after its own dimension (see buildPieOption),
         // so `seriesName` tells us which ring fired the click — a slice from the outer ring
@@ -96,6 +116,27 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
         onValueClick({ dims: [{ col, value: p.name }] }, p.x, p.y);
       } : undefined}
     />
+  );
+  const legendEl = (
+    <PieLegend
+      key="legend"
+      entries={legend}
+      placement={placement}
+      toggledOff={toggledOff}
+      onToggle={(name) =>
+        setToggledOff((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]))
+      }
+    />
+  );
+
+  // The column goes to the LEFT of the chart (where Metabase's is, and where the ECharts side
+  // legend was); the block goes underneath. Keyed children rather than two branches, so flipping
+  // placement on a resize never remounts the chart — a remount would re-init ECharts and re-run
+  // the whole per-slice fit pass from scratch.
+  return (
+    <div ref={hostRef} className={cn("flex h-full w-full min-h-0 min-w-0", placement === "side" ? "flex-row" : "flex-col")}>
+      {placement === "side" ? [legendEl, chart] : [chart, legendEl]}
+    </div>
   );
 }
 

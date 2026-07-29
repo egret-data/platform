@@ -1,7 +1,7 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
-import { ariaDescription, baseOption, itemTooltip, bottomLegend, sideLegend } from "../base";
+import { ariaDescription, baseOption, itemTooltip } from "../base";
 import { OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor, seriesColor, lightenOklch, getTextColorForBackground } from "../palette";
 import {
   calcAvailableDonutSliceLabelLength,
@@ -94,6 +94,16 @@ export interface PieBuildConfig {
    * the same shape as `params.spec.temporal_units`, so ChartRenderer forwards it unmodified and each
    * ring looks up its own dimension's unit. */
   dimensionUnits?: Record<string, string>;
+  /** RENDER-TIME, never stored: which layout the legend is being drawn in. The legend itself is
+   * React markup outside the canvas now (see `pieLegendPlacement`, which is the ONE place that
+   * decides this — the pie never re-derives it), so all this does here is say which fraction of
+   * its own box the circle should fill. Unset means the bottom one, i.e. today's geometry. */
+  legendPlacement?: PieLegendPlacement;
+  /** RENDER-TIME, never stored: ring-0 slices the reader has clicked off in the legend, by their
+   * DISPLAYED name (the legend only ever knows that). Distinct from `hiddenSlices`, which is a
+   * saved curation applied before the ring's total and Other threshold are computed at all; this
+   * is the ephemeral legend toggle, applied last — see `buildPieOption`. */
+  toggledOffSlices?: string[];
 }
 
 const OTHER_NAME = "Other";
@@ -260,12 +270,11 @@ function reorderByParent(slices: Slice[], parentGroupOf: Map<string, string>, pa
 // Metabase's legend was a left COLUMN where egret's was a bottom ROW. egret's ring RATIOS already
 // matched (see HOLE_RATIO); what differed was how much of the host the circle was allowed to use.
 //
-// ECharts gives a pie series no awareness of the legend at all — `radius` is a percentage of
-// `min(width, height) / 2` and `center` defaults to the middle of the canvas, whatever else is
-// drawn on it. So a bottom legend never actually took height away from the rings here (it drew
-// over the empty band below them), and simply MOVING it would not have given them any: the real
-// limit is the fraction of the host the circle is allowed. Each layout therefore states the
-// diameter it draws, and the bigger one wins:
+// The legend is React markup BESIDE the canvas (see PieLegend.tsx), not an ECharts component
+// inside it — ECharts' `legend` does not work with a `sunburst` series, which is what this pie is
+// becoming. So the 190px column below is now real layout: the chart's own box already excludes
+// it, and this file's job is only to say what fraction of THAT box the circle fills. Each layout
+// states the diameter it draws, and the bigger one wins:
 //
 //   bottom row : 0.70 * min(w, h)          — exactly what this file already drew, unchanged
 //   side column: 0.85 * min(w - 190, h)    — the box a 190px legend column leaves it
@@ -285,73 +294,63 @@ function reorderByParent(slices: Slice[], parentGroupOf: Map<string, string>, pa
 // The crossover for a 661-tall host is w > 734px (0.85 * (w - 190) > 0.7 * 661); a host narrower
 // than it is tall never reaches it at all, since 0.85 * (w - 190) > 0.7 * w needs w > 1076px.
 // There is no hard-coded breakpoint anywhere — only these two diameters, compared.
-const LEGEND_COLUMN_WIDTH_PX = 190;
+/** Beside the chart in a column, or under it in a row. */
+export type PieLegendPlacement = "side" | "bottom";
+
+/** How wide the legend column is when it goes beside the chart — read by the React legend, which
+ * is the thing that actually occupies it, and by the arithmetic below that decides whether paying
+ * for it is worth it. One number, one place. */
+export const PIE_LEGEND_COLUMN_WIDTH_PX = 190;
 const BOTTOM_LEGEND_DIAMETER_FRACTION = 0.7;
 const SIDE_LEGEND_DIAMETER_FRACTION = 0.85;
-// The column's 190px, spent: ECharts' own legend itemWidth (25) + the gap to the text (~8) +
-// 141px of text + a 16px right margin. The text is split into the two rich-text fragments below.
-const LEGEND_TEXT_WIDTH_PX = 141;
-const LEGEND_PERCENT_WIDTH_PX = 44;
-// Rich-text markup has no escape sequence in ECharts, so an entry whose NAME contains any of it
-// is rendered as plain text instead (see the legend formatter below): the name stays true, it
-// just loses the column alignment. Rewriting the user's own data to fit a layout would be worse.
-const RICH_TEXT_SAFE = /^[^{}|\n]*$/;
 
-/** What the side-column layout needs, or `undefined` when the bottom row is the right answer —
- * which covers "no measurement at all" (the documented no-DOM path: no aspect to judge, so
- * nothing moves and nothing resizes) as well as every host the column would shrink the pie on. */
-interface SideLegendLayout {
-  /** The pie's outer edge, on the same 0-100 percent-of-`min(w, h)/2` scale the rest of this
-   * file uses, so the ring ratios below it are unaffected. */
-  outerEdge: number;
-  /** The middle of the box left of the legend, in canvas pixels. */
-  centerX: number;
-  width: number;
-  height: number;
+/**
+ * Where a pie's legend goes, given the size of the WHOLE chart host (legend included) — the one
+ * place this is decided. React reads it to lay the two out, and hands the answer back to
+ * `buildPieOption` as `legendPlacement` rather than letting the pie re-derive it from a size that
+ * by then means something different (the chart's own box, already legend-free).
+ *
+ * "bottom" is the answer for an unknown size too: no measurement, no aspect to judge, so nothing
+ * moves. A not-yet-laid-out 0x0 host needs no separate guard — at zero the column's own diameter
+ * is zero or negative and the comparison below rejects it, which is the same answer.
+ */
+export function pieLegendPlacement(size?: { width: number; height: number }): PieLegendPlacement {
+  if (!size) return "bottom";
+  const bottomDiameter = BOTTOM_LEGEND_DIAMETER_FRACTION * Math.min(size.width, size.height);
+  const sideDiameter =
+    SIDE_LEGEND_DIAMETER_FRACTION * Math.min(size.width - PIE_LEGEND_COLUMN_WIDTH_PX, size.height);
+  return sideDiameter > bottomDiameter ? "side" : "bottom";
 }
 
-function sideLegendLayout(size?: { width: number; height: number }): SideLegendLayout | undefined {
-  if (!size) return undefined;
-  // A not-yet-laid-out host (EChartsRenderer starts at 0x0 and re-measures on its first
-  // ResizeObserver tick) needs no separate guard: at zero the column's own diameter is zero or
-  // negative and the comparison below rejects it, which is the same "no measurement, nothing
-  // moves" answer as no size at all. Stated because an explicit `width <= 0` clause here WAS
-  // written first, and no test could tell whether it was doing anything.
-  const minSide = Math.min(size.width, size.height);
-  const bottomDiameter = BOTTOM_LEGEND_DIAMETER_FRACTION * minSide;
-  const sideDiameter = SIDE_LEGEND_DIAMETER_FRACTION * Math.min(size.width - LEGEND_COLUMN_WIDTH_PX, size.height);
-  if (sideDiameter <= bottomDiameter) return undefined;
-  return {
-    // radius% is of min(w, h) / 2, so a diameter of d is d / min(w, h) * 100 percent.
-    outerEdge: (sideDiameter / minSide) * 100,
-    centerX: (LEGEND_COLUMN_WIDTH_PX + size.width) / 2,
-    width: size.width,
-    height: size.height,
-  };
+/** One row of the React legend: the swatch's colour, the name, and (when percentages are on) the
+ * slice's share of the whole chart, already formatted to the chart's own precision. */
+export interface PieLegendEntry {
+  name: string;
+  color: string;
+  percent?: string;
 }
 
-export function buildPieOption(
+/** Percent text, at the chart's configured precision — shared by the slice labels and the legend
+ * so the two can never disagree on how many decimals a share has. */
+function pctFormatter(decimals: number) {
+  return (p: number) => `${parseFloat(p.toFixed(decimals))}%`; // default 2, like Metabase
+}
+
+/**
+ * Every ring's finalized slices — aggregated, filtered, Other-folded, coloured and renamed —
+ * innermost first, plus each ring's own "did this key survive or fold into Other" map.
+ *
+ * Split out of `buildPieOption` because the React legend needs ring 0's slices exactly as the
+ * chart draws them (same names after a rename, same colours after an override or an Other fold),
+ * and re-deriving that beside the option is how a legend and a chart drift apart. `buildPieLegend`
+ * and `buildPieOption` therefore go through this same pass; only the option builder continues on
+ * to the expensive per-slice label fit.
+ */
+function buildPieRings(
   columns: ResultColumn[],
   rows: unknown[][],
   cfg: PieBuildConfig,
-  // Injectable text measurer — defaults to a real canvas measurer (see sliceLabel.ts); tests
-  // pass a deterministic stub instead of depending on a real text rasteriser (see that file's
-  // own header comment on why this has to be threaded through as a plain callback here rather
-  // than a renderingContext object like Metabase's).
-  measureText: MeasureText = defaultMeasureText,
-  // The chart's REAL rendered pixel size — this builder is pure data with no DOM access of its
-  // own, so it can't measure its own container; EChartsRenderer measures it (ResizeObserver) and
-  // threads it through by calling this function itself rather than a plain option object (see
-  // that file). Undefined (no caller-supplied size — most unit tests that aren't testing label
-  // fit at all) means "unknown": PX_PER_RADIUS_PERCENT below then collapses every ring's inner
-  // radius to 0px, which takes the SAME "true full pie" path this file already uses when there's
-  // genuinely no donut hole (see the comment on `availableSpace` further down) — the per-slice
-  // fit check is skipped entirely and every label is shown in full, backstopped only by
-  // `labelLayout.hideOverlap`. That's the safe direction for "we don't know the real size": it
-  // never falsely truncates against a guessed number that could just as easily be wrong, the
-  // same reasoning that ruled out NOMINAL_CONTAINER_MIN_DIMENSION_PX in the first place.
-  containerSize?: { width: number; height: number },
-): EChartsCoreOption {
+): { rings: Slice[][]; groupOfByLevel: Map<string, string>[] } {
   const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
   const dims = cfg.dimensions ?? [];
   const mi = cfg.metric != null ? idx[cfg.metric] : undefined;
@@ -491,6 +490,72 @@ export function buildPieOption(
     }
   }
 
+  return { rings: effectiveRings, groupOfByLevel };
+}
+
+/**
+ * The pie's legend, as data — the React component beside the chart (PieLegend.tsx) renders it.
+ *
+ * Ring 0 only: every ring's names used to go into one flat ECharts legend, but only ring 0's
+ * slices have a single, unambiguous colour — an outer ring's "Widgets" can appear once per parent
+ * slice, each a different lightened shade, so listing it would claim a colour it doesn't
+ * consistently have. Ring 0's share of its own ring already IS its share of the whole chart (every
+ * outer ring re-partitions the same rows), so its percentage needs no explanation of what it is a
+ * percentage OF.
+ *
+ * Shows by default (`?? true`, not `||`, so an explicit `false` still turns it off): a pie's
+ * colours are meaningless without the key that says which is which.
+ */
+export function buildPieLegend(
+  columns: ResultColumn[],
+  rows: unknown[][],
+  cfg: PieBuildConfig,
+): PieLegendEntry[] {
+  if (!(cfg.showLegend ?? true)) return [];
+  const { rings } = buildPieRings(columns, rows, cfg);
+  const ring0 = rings[0] ?? [];
+  const visibility = resolvePercentVisibility(cfg.percentVisibility, rings.length);
+  const withPercent = visibility === "legend" || visibility === "both";
+  const total = ring0.reduce((t, s) => t + s.value, 0);
+  const pct = pctFormatter(cfg.decimals ?? 2);
+  return ring0.map((s, i) => {
+    // The colour the slice is actually drawn in: its own override / muted "Other" tint, or (what
+    // ECharts itself would assign) the palette slot at its index in this ring — the same
+    // expression the option builder's own contrast pass uses.
+    const color = s.itemStyle?.color ?? seriesColor(i);
+    return withPercent && total > 0
+      ? { name: s.name, color, percent: pct((s.value / total) * 100) }
+      : { name: s.name, color };
+  });
+}
+
+export function buildPieOption(
+  columns: ResultColumn[],
+  rows: unknown[][],
+  cfg: PieBuildConfig,
+  // Injectable text measurer — defaults to a real canvas measurer (see sliceLabel.ts); tests
+  // pass a deterministic stub instead of depending on a real text rasteriser (see that file's
+  // own header comment on why this has to be threaded through as a plain callback here rather
+  // than a renderingContext object like Metabase's).
+  measureText: MeasureText = defaultMeasureText,
+  // The chart's REAL rendered pixel size — and, since the legend left the canvas, the size of the
+  // box the CIRCLE alone gets, with any legend column or row already taken out of it. This builder
+  // is pure data with no DOM access of its own, so it can't measure its own container;
+  // EChartsRenderer measures it (ResizeObserver) and threads it through by calling this function
+  // itself rather than a plain option object (see that file). Undefined (no caller-supplied size —
+  // most unit tests that aren't testing label fit at all) means "unknown": PX_PER_RADIUS_PERCENT
+  // below then collapses every ring's inner radius to 0px, which takes the SAME "true full pie"
+  // path this file already uses when there's genuinely no donut hole (see the comment on
+  // `availableSpace` further down) — the per-slice fit check is skipped entirely and every label is
+  // shown in full, backstopped only by `labelLayout.hideOverlap`. That's the safe direction for "we
+  // don't know the real size": it never falsely truncates against a guessed number that could just
+  // as easily be wrong, the same reasoning that ruled out NOMINAL_CONTAINER_MIN_DIMENSION_PX in the
+  // first place.
+  containerSize?: { width: number; height: number },
+): EChartsCoreOption {
+  const dims = cfg.dimensions ?? [];
+  const { rings: effectiveRings, groupOfByLevel } = buildPieRings(columns, rows, cfg);
+
   const dimension = dims[0];
   const data = effectiveRings[0];
   const ringCount = effectiveRings.length;
@@ -509,9 +574,8 @@ export function buildPieOption(
   // value promised something the renderer had no way to deliver.
   const percentVisibility = resolvePercentVisibility(cfg.percentVisibility, ringCount);
   const showPercent = percentVisibility === "inside" || percentVisibility === "both";
-  const showLegendPercent = percentVisibility === "legend" || percentVisibility === "both";
   const decimals = cfg.decimals ?? 2;
-  const pct = (p: number) => `${parseFloat(p.toFixed(decimals))}%`; // configurable decimals, default 2 like Metabase
+  const pct = pctFormatter(decimals);
   const labelFormatter = (p: { name: string; percent: number; data?: { parentPercent?: number } }) => {
     const name = showName ? p.name : undefined;
     // ECharts' own `percent` is share-of-that-series (share of the ring); an outer-ring datum
@@ -560,12 +624,13 @@ export function buildPieOption(
   // Computed before the centre total below, which needs to know whether there is a hole at all.
   //
   // `outerEdge` is no longer a constant 70: a wide, short host puts the legend in a column beside
-  // the chart instead of a row beneath it, which leaves the circle a different box to fill — see
-  // sideLegendLayout above for the arithmetic that chooses between the two. A hidden legend
-  // reserves nothing (there is no column to clear), and so keeps today's geometry exactly.
-  const showLegendOpt = cfg.showLegend ?? true;
-  const side = showLegendOpt ? sideLegendLayout(containerSize) : undefined;
-  const outerEdge = side ? side.outerEdge : 70;
+  // the chart instead of a row beneath it, and the circle then gets a differently shaped box to
+  // fill — one that already has the legend taken out of it, since the legend is React markup
+  // outside the canvas. `pieLegendPlacement` (above) makes that choice once, from the size of the
+  // WHOLE host; all that's left here is the fraction of its own box each layout fills. A hidden
+  // legend reserves nothing, and so keeps today's geometry exactly.
+  const side = (cfg.showLegend ?? true) && cfg.legendPlacement === "side";
+  const outerEdge = 100 * (side ? SIDE_LEGEND_DIAMETER_FRACTION : BOTTOM_LEGEND_DIAMETER_FRACTION);
   const HOLE_RATIO: Record<number, number> = { 2: 2 / 5, 3: 1 / 4 };
   // The one-ring hole is a RATIO of the outer edge (45/70 — egret's own donut proportions,
   // unchanged at the default outer edge), not a fixed 45%: with the outer edge now able to move,
@@ -575,13 +640,10 @@ export function buildPieOption(
     : (cfg.donut ? outerEdge * (45 / 70) : 0);
   const fmtPct = (v: number) => `${parseFloat(v.toFixed(2))}%`;
 
-  // Where the circle sits. With the legend beneath it the pie stays horizontally centred and is
-  // lifted a little (48%) off the row; with the legend beside it, the pie centres on the box
-  // LEFT of the column — expressed as a percentage of the canvas width, the unit `center` already
-  // took — and there is nothing below it to lift away from, so it centres vertically too.
-  const center = side
-    ? [fmtPct((side.centerX / side.width) * 100), "50%"]
-    : ["50%", "48%"];
+  // Where the circle sits in its own box. The legend no longer shares the canvas with it, so
+  // there is nothing to shift clear of: the pie is simply centred. The bottom layout keeps the
+  // 2% lift it has always had off the row beneath it; the side layout has nothing below it.
+  const center = ["50%", side ? "50%" : "48%"];
 
   // Donut centre total — Metabase getTotalGraphicOption (static total; no hover swap yet). The
   // innermost ring's total is the grand total: it's summed over every outer dimension already.
@@ -601,59 +663,16 @@ export function buildPieOption(
   // written into stored settings (this program's standing rule).
   const showTotal = cfg.showTotal ?? multiRing;
   const total = data.reduce((t, s) => t + s.value, 0);
-  // Ring 0's value by its DISPLAYED name — the legend only ever knows a name, and the rename
-  // pass above has already run, so this has to key on the same text the legend lists. Built
-  // here rather than in the legend expression so it is one pass, not one lookup per entry.
-  const legendValueByName = new Map(data.map((d) => [d.name, d.value] as const));
-
-  // The legend's entries, and the two ways of writing one. `legendPercentOf` is the number both
-  // layouts show (undefined when percentages are off, or when there is no total to take a share
-  // of); a name the map somehow doesn't know gets no percentage rather than "undefined%".
-  const legendNames = data.map((d) => d.name);
-  const legendPercentOf = showLegendPercent && total > 0
-    ? (name: string) => {
-        const value = legendValueByName.get(name);
-        return value === undefined ? undefined : pct((value / total) * 100);
-      }
-    : undefined;
-  const bottomLegendFormatter = legendPercentOf
-    ? (name: string) => {
-        const percent = legendPercentOf(name);
-        return percent === undefined ? name : `${name} ${percent}`;
-      }
-    : undefined;
-  // The column always formats its entries, even with no percentage to show: the name fragment is
-  // what bounds a long name to the column's own width instead of letting it run into the chart.
-  // A name carrying rich-text markup can't go in a fragment at all (ECharts has no escape for
-  // it), so that entry degrades to plain text — true, just not aligned.
-  const sideLegendFormatter = (name: string) => {
-    const percent = legendPercentOf?.(name);
-    if (!RICH_TEXT_SAFE.test(name)) return percent === undefined ? name : `${name} ${percent}`;
-    return percent === undefined ? `{n|${name}}` : `{n|${name}}{p|${percent}}`;
-  };
-  const legendRich = {
-    n: {
-      width: legendPercentOf ? LEGEND_TEXT_WIDTH_PX - LEGEND_PERCENT_WIDTH_PX : LEGEND_TEXT_WIDTH_PX,
-      align: "left" as const, overflow: "truncate" as const, ellipsis: "…",
-    },
-    ...(legendPercentOf ? { p: { width: LEGEND_PERCENT_WIDTH_PX, align: "right" as const } } : {}),
-  };
   const totalValueFontSize = ringCount >= 3 ? 17 : 22;
   // Gated on there BEING a hole rather than on `cfg.donut`: a multi-ring pie always has one
   // (see holeStart below), whatever `donut` says, so keying off `donut` would have hidden the
   // total on exactly the charts this default exists for.
   //
-  // A graphic element is positioned against the CANVAS, not against the series — so once the pie
-  // shifts right to clear a legend column, a `left: "center"` total stays in the middle of the
-  // canvas and lands on the rings instead of in the hole. `left`/`top` are also edge positions
-  // (ECharts aligns the element's bounding rect to them; only the literal "center" centres it),
-  // so the shifted case can't just pass a percentage — it gives the element its own `x`/`y`,
-  // which zrender draws the text AROUND given the `textAlign: "center"` already set below. The
-  // unshifted case keeps `left: "center"` exactly as before.
-  const totalAt = (topPercent: number) =>
-    side
-      ? { x: side.centerX, y: (topPercent / 100) * side.height }
-      : { left: "center", top: `${topPercent}%` };
+  // A graphic element is positioned against the CANVAS, not against the series — which was a
+  // problem only while the pie was being shifted sideways to clear an in-canvas legend column.
+  // Nothing is shifted any more, so this is back to the plain `left: "center"` it always used
+  // (an edge position that ECharts treats as a true centring for the literal "center").
+  const totalAt = (topPercent: number) => ({ left: "center", top: `${topPercent}%` });
   const graphic = holeStart > 0 && showTotal && data.length > 0
     ? [
         { type: "text", ...totalAt(43), style: { text: fmt(total), fontSize: totalValueFontSize, fontWeight: 700, fill: resolveColor("var(--foreground)", COLOR_FALLBACK.text), textAlign: "center" } },
@@ -763,7 +782,28 @@ export function buildPieOption(
     for (const s of ring) map.set(s.key ?? OTHER_KEY, s.value);
     return map;
   });
-  const series = effectiveRings.map((ringData, level) => {
+  // The legend toggle, applied HERE and nowhere earlier — that is what makes it behave the way
+  // the ECharts legend it replaces did. ECharts filtered the already-built series and left
+  // everything else alone, so a toggled-off ring-0 slice takes nothing with it: the outer rings
+  // keep every slice (children of a hidden parent included), the hole's total does not re-base,
+  // and neither do the legend's own percentages. Contrast `cfg.hiddenSlices`, the saved curation,
+  // which is applied before a ring is even aggregated precisely so that everything DOES re-base.
+  //
+  // A survivor's palette slot has to be pinned as it goes: ECharts colours a datum by its index in
+  // the series data, so dropping a slice would otherwise slide every later one up a slot — and the
+  // React legend's swatches, built from the FULL ring, would name colours the chart no longer
+  // draws. Untouched when nothing is toggled off, so ring 0 keeps its implicit palette slots.
+  const toggledOff = new Set(cfg.toggledOffSlices ?? []);
+  const seriesRings = toggledOff.size === 0
+    ? effectiveRings
+    : effectiveRings.map((ring, level) =>
+        level > 0
+          ? ring
+          : ring
+              .map((s, i) => (s.itemStyle ? s : { ...s, itemStyle: { color: seriesColor(i) } }))
+              .filter((s) => !toggledOff.has(s.name)));
+
+  const series = seriesRings.map((ringData, level) => {
     const parentFold = level > 0 ? groupOfByLevel[level - 1] : undefined;
     const parentValues = level > 0 ? ringValueByKey[level - 1] : undefined;
 
@@ -953,29 +993,10 @@ export function buildPieOption(
     ...baseOption(),
     aria,
     tooltip: itemTooltip(fmt, { percent: true }),
-    // Ring 0 only (fix 4): every ring's names used to go into one flat legend, but only ring 0's
-    // slices have a single, unambiguous colour — an outer ring's "Widgets" can appear once per
-    // parent slice, each a different lightened shade, so listing it in the legend would claim a
-    // colour it doesn't consistently have.
-    //
-    // Defaults on (`?? true`, not `||`): a pie's colours are meaningless without the key that
-    // says which is which, so an unset value shows the legend; an explicit `false` still turns
-    // it off.
-    // Metabase's legend reads `Doohickey 23.88%` — name and share, per ring-0 slice. Ring 0's
-    // share of its own ring already IS its share of the whole chart (every outer ring
-    // re-partitions the same rows), so this is the one level where a percentage in a flat list
-    // needs no explanation of what it is a percentage OF. Same `pct` as the slice labels, so
-    // the two never disagree on precision. A name absent from the map (nothing should be, the
-    // legend is built from this very list) falls through to itself rather than to "undefined%".
-    //
-    // A column can say it the way Metabase does — name left, percentage right — which a bottom
-    // row's single run of text cannot. That takes ECharts' rich text: the formatter emits two
-    // named fragments and the legend's textStyle gives each a fixed width and alignment. The
-    // widths are also what keeps the column inside the 190px the centre shift reserved for it,
-    // rather than a long name overflowing into the chart: the name fragment truncates.
-    legend: side
-      ? sideLegend(showLegendOpt, legendNames, sideLegendFormatter, legendRich)
-      : bottomLegend(showLegendOpt, legendNames, bottomLegendFormatter),
+    // NO `legend` KEY, deliberately: the pie's legend is React markup beside the canvas
+    // (buildPieLegend + PieLegend.tsx). ECharts' own legend component does not work with a
+    // `sunburst` series — which is what this pie is becoming — so putting one back here would
+    // silently disappear the moment the series type changes.
     graphic,
     series,
   };
