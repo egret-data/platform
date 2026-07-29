@@ -72,7 +72,7 @@ spot-checking egret's own config types found gaps it never mentioned:
 |---|---|---|
 | scalar | `{ metric }` | — |
 | progress | `{ metric, goal }` | Metabase has `progress.color` |
-| gauge | `{ metric, min, max }` | Metabase has `gauge.segments` — coloured ranges, the point of a gauge |
+| gauge | `{ metric, min, max }` | see the correction below — this row understated it |
 | funnel | `{ dimension, metric }` | egret-side verified only |
 | waterfall | `{ xAxis, metric, showTotal }` | Metabase has increase / decrease / total colours |
 | boxplot | `{ category, value }` | egret-side verified only |
@@ -90,6 +90,30 @@ So the correction is not "one row was wrong". It is that this was a comparison o
 four types wearing the title of nineteen. Each remaining per-chart spec opens by
 reading both sides for its own type, and records what it verified and what it did
 not.
+
+#### Correction to the gauge row, 2026-07-29
+
+Reading `echarts/options/gauge.ts` in full — while starting chart 04, one day after
+writing the row above — the row was itself imprecise, in the same way the table row
+had been. **egret's gauge does draw three coloured zones.** What it lacks is any
+control over them:
+
+```ts
+axisLine: { lineStyle: { width: 18, color: [[1 / 3, ZONE_LOW], [2 / 3, ZONE_MID], [1, ZONE_HIGH]] } },
+```
+
+Fixed at exact thirds of the range, fixed colours, and — the part that matters —
+**a fixed direction: low is red, high is green.** For any metric where less is
+better (latency, error rate, cost, churn) the gauge is coloured backwards and tells
+the reader the opposite of the truth. That is worse than having no zones at all,
+because a wrong signal outranks a missing one.
+
+Metabase's model is different in kind, not degree: `gauge.segments` is an array of
+`{ min, max, color, label }`, and `gauge.range` is **derived** from those segments
+rather than set separately. The ranges are the model; the scale falls out of them.
+
+Two rows now audited, two rows found imprecise in the same direction — both
+understated what egret already had while missing what was actually wrong with it.
 
 ## Goal
 
