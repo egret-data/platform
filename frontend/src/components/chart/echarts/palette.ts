@@ -109,6 +109,84 @@ export function resolveColor(expr: string, fallback: string): string {
   return out;
 }
 
+// Per-ring OKLab lightness delta for `lightenOklch`. With up to three rings (task 5's pie),
+// the outermost ring is at most 2 steps out from its parent, so +0.24 L total — enough to read
+// as a clearly distinct, lighter band next to its parent's ring without washing a mid-tone
+// slice out to near-white.
+const OKLCH_STEP_L = 0.12;
+
+function srgbToLinear(c: number): number {
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+function linearToSrgb(c: number): number {
+  const x = Math.min(1, Math.max(0, c));
+  return x <= 0.0031308 ? x * 12.92 : 1.055 * Math.pow(x, 1 / 2.4) - 0.055;
+}
+
+/** Parses a `#rgb` / `#rrggbb` hex colour to 0-255 channels; anything else is unparseable. */
+function parseHexColor(color: string): [number, number, number] | undefined {
+  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color.trim());
+  if (!m) return undefined;
+  const hex = m[1].length === 3 ? m[1].split("").map((c) => c + c).join("") : m[1];
+  const n = parseInt(hex, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+/**
+ * Lightens a hex colour by `steps` in OKLab space, keeping chroma (C) and hue (H) fixed —
+ * i.e. moves straight up the L axis of OKLCH. Used to give an outer pie ring's slice a
+ * lighter variant of its parent slice's colour (Metabase's `getRingColorAlias`), rather than
+ * an unrelated palette colour.
+ *
+ * Conversion matrices are Björn Ottosson's OKLab (https://bottosson.github.io/posts/oklab/),
+ * §"Converting from linear sRGB to OKLab" and its inverse.
+ *
+ * `steps <= 0` and unparseable input both return `color` unchanged (verbatim, not
+ * round-tripped) — the former so "no lightening" is exact, the latter so a caller passing
+ * something this function can't handle (e.g. an unresolved `var(--x)`) degrades to "leave it
+ * alone" rather than throwing.
+ */
+export function lightenOklch(color: string, steps: number): string {
+  if (!Number.isFinite(steps) || steps <= 0) return color;
+  const rgb = parseHexColor(color);
+  if (!rgb) return color;
+
+  const [r, g, b] = rgb.map((c) => srgbToLinear(c / 255));
+
+  // linear sRGB -> LMS -> LMS' (cube root)
+  const l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
+  const m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
+  const s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
+  const l_ = Math.cbrt(l);
+  const m_ = Math.cbrt(m);
+  const s_ = Math.cbrt(s);
+
+  // LMS' -> OKLab
+  const L = 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_;
+  const a = 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_;
+  const bb = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_;
+
+  // Raise L only; a/b (so chroma + hue) are untouched — the whole point of doing this in
+  // OKLab rather than a naive sRGB blend toward white, which desaturates and shifts hue.
+  const L2 = Math.min(1, Math.max(0, L + OKLCH_STEP_L * steps));
+
+  // OKLab -> LMS' (inverse of the forward matrix above)
+  const l2_ = L2 + 0.3963377774 * a + 0.2158037573 * bb;
+  const m2_ = L2 - 0.1055613458 * a - 0.0638541728 * bb;
+  const s2_ = L2 - 0.0894841775 * a - 1.2914855480 * bb;
+  const l2 = l2_ * l2_ * l2_;
+  const m2 = m2_ * m2_ * m2_;
+  const s2 = s2_ * s2_ * s2_;
+
+  // LMS -> linear sRGB
+  const r2 = 4.0767416621 * l2 - 3.3077115913 * m2 + 0.2309699292 * s2;
+  const g2 = -1.2684380046 * l2 + 2.6097574011 * m2 - 0.3413193965 * s2;
+  const b2 = -0.0041960863 * l2 - 0.7034186147 * m2 + 1.7076147010 * s2;
+
+  const toHex = (c: number) => Math.round(linearToSrgb(c) * 255).toString(16).padStart(2, "0");
+  return `#${toHex(r2)}${toHex(g2)}${toHex(b2)}`;
+}
+
 /** Concrete fallbacks (≈ egret light-theme tokens) for non-DOM contexts. */
 export const COLOR_FALLBACK = {
   gridLine: "#e5e7eb",     // ≈ --border (very light gray)

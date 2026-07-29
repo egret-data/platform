@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildPieOption } from "../options/pie";
-import { SERIES_PALETTE } from "../palette";
+import { SERIES_PALETTE, seriesColor, lightenOklch } from "../palette";
 
 const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }];
 const rows = [["EU", 10], ["US", 30]];
@@ -298,5 +298,80 @@ describe("buildPieOption — nested rings (task 4)", () => {
   it("does not add a divergence note when every ring's total matches", () => {
     const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
     expect(opt.aria.label.description).not.toContain("Note:");
+  });
+});
+
+// Task 5 — ring colour inheritance: an outer ring's slice takes its parent slice's own
+// colour, lightened one OKLab step per ring, instead of an unrelated palette colour (Metabase
+// getRingColorAlias). Single-ring pies are untouched — see the "unchanged" test in the
+// nested-rings block above, which asserts ring 0 still carries no itemStyle at all.
+describe("buildPieOption — ring colour inheritance (task 5)", () => {
+  const cols2 = [
+    { name: "region", type: "varchar" }, { name: "category", type: "varchar" }, { name: "rev", type: "double" },
+  ];
+  const rows2 = [
+    ["US", "Widgets", 30], ["US", "Gadgets", 10],
+    ["EU", "Widgets", 5], ["EU", "Gadgets", 5],
+  ];
+
+  it("an outer slice inherits its parent's colour, lightened one step", () => {
+    const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "rev" }) as any;
+    const inner = opt.series[0].data; // [US(40), EU(10)] — implicit palette, no itemStyle
+    expect(inner.map((d: any) => d.itemStyle)).toEqual([undefined, undefined]);
+
+    const outer = opt.series[1].data;
+    const usColor = seriesColor(inner.findIndex((d: any) => d.name === "US"));
+    const euColor = seriesColor(inner.findIndex((d: any) => d.name === "EU"));
+    const widgetsUnderUS = outer.find((d: any) => d.name === "Widgets" && d.value === 30);
+    const widgetsUnderEU = outer.find((d: any) => d.name === "Widgets" && d.value === 5);
+    expect(widgetsUnderUS.itemStyle.color).toBe(lightenOklch(usColor, 1));
+    expect(widgetsUnderEU.itemStyle.color).toBe(lightenOklch(euColor, 1));
+  });
+
+  it("a sliceColors override wins, and its children lighten from the override, not the palette colour it replaced", () => {
+    const opt = buildPieOption(cols2, rows2, {
+      dimensions: ["region", "category"], metric: "rev", sliceColors: { US: "#123456" },
+    }) as any;
+    const inner = opt.series[0].data;
+    expect(inner.find((d: any) => d.name === "US").itemStyle.color).toBe("#123456");
+
+    const outer = opt.series[1].data;
+    const widgetsUnderUS = outer.find((d: any) => d.name === "Widgets" && d.value === 30);
+    // Must lighten from the OVERRIDE ("#123456"), not from seriesColor(0) — the palette
+    // colour US would otherwise have gotten.
+    expect(widgetsUnderUS.itemStyle.color).toBe(lightenOklch("#123456", 1));
+    expect(widgetsUnderUS.itemStyle.color).not.toBe(lightenOklch(seriesColor(0), 1));
+  });
+
+  it("a ring's children whose parent folded into the PARENT ring's Other bucket inherit Other's own muted colour, lightened", () => {
+    const cols3 = [
+      { name: "region", type: "varchar" }, { name: "cat", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    // Ring0 (region) totals: R1=960 (big), R2=20 (small), R3=100-80=20 (small) — R2 and R3 fold
+    // into ring0's Other (two small slices). At ring1 (region,cat), R3's row is split into a big
+    // positive (Y1=100) and a negative (Y2=-80, dropped by the sign filter): R3-Y1 survives ring1
+    // on its own merits (100 is well above ring1's own threshold), and R2-X(20) is the ONLY
+    // below-threshold item left at ring1 (one small slice doesn't trigger a fold there) — so both
+    // survive as distinct outer slices, each with a parent that only exists via ring0's Other.
+    const rows3 = [
+      ["R1", "A", 960],
+      ["R2", "X", 20],
+      ["R3", "Y1", 100],
+      ["R3", "Y2", -80],
+    ];
+    const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "cat"], metric: "m" }) as any;
+    const inner = opt.series[0].data;
+    const other = inner.find((d: any) => d.name === "Other");
+    expect(other).toBeTruthy();
+    expect(other.value).toBe(40);
+    const otherColor = other.itemStyle.color;
+
+    const outer = opt.series[1].data;
+    const x = outer.find((d: any) => d.name === "X");
+    const y1 = outer.find((d: any) => d.name === "Y1");
+    expect(x).toBeTruthy();
+    expect(y1).toBeTruthy();
+    expect(x.itemStyle.color).toBe(lightenOklch(otherColor, 1));
+    expect(y1.itemStyle.color).toBe(lightenOklch(otherColor, 1));
   });
 });
