@@ -99,10 +99,19 @@ tune without reading documentation.
 ## Decomposition
 
 Nineteen units, each its own spec → plan → PR, in order of how much they are
-used:
+used — **except where the audit found a type that is incomplete rather than
+merely unpolished**:
 
-> bar · line · table · pie · scalar · pivot · area · combo · scatter · row ·
-> trend · progress · gauge · funnel · waterfall · boxplot · sankey · map · object
+> bar · line · table · **gauge** · pie · scalar · pivot · area · combo · scatter ·
+> row · trend · progress · funnel · waterfall · boxplot · sankey · map · object
+
+**Gauge moved from thirteenth to fourth on 2026-07-29**, when the audit above found
+egret's entire gauge config is `{ metric, min, max }` while Metabase carries
+`gauge.segments` — the coloured ranges that are the reason to choose a gauge over a
+number. Usage order is the right default, but a type that cannot express its own
+premise outranks a type that is merely unpolished. Pie, by contrast, is the row the
+audit found egret already **ahead** on, so it stays where it is and will be a UX
+unit rather than a gap-filling one.
 
 Each PR covers all three axes **for its chart**: configuration UX, the feature
 gaps that chart has, and any split its type warrants. Doing one axis across all
