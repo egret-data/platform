@@ -1,4 +1,5 @@
 import type { EChartsCoreOption } from "echarts/core";
+import type { GaugeSegment } from "@/api/charts";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
 import { baseOption, itemTooltip } from "../base";
@@ -8,8 +9,8 @@ import { SERIES_PALETTE, COLOR_FALLBACK, resolveColor } from "../palette";
 export interface ResultColumn { name: string; type: string }
 export interface GaugeBuildConfig {
   metric?: string;
-  min?: number;
-  max?: number;
+  /** Coloured ranges, in any order. The gauge's scale is derived from them. */
+  segments?: GaugeSegment[];
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
 }
@@ -23,8 +24,10 @@ export function buildGaugeOption(columns: ResultColumn[], rows: unknown[][], cfg
   const mi = cfg.metric != null ? columns.findIndex((c) => c.name === cfg.metric) : -1;
   const raw = mi >= 0 && rows.length > 0 ? rows[0][mi] : undefined;
   const value = raw != null && Number.isFinite(Number(raw)) ? Number(raw) : 0;
-  const min = cfg.min ?? 0;
-  const max = cfg.max ?? (value > min ? value * 2 : min + 100); // Metabase auto-range ≈ 2× value
+  // Task 3 derives these from cfg.segments. Until then, today's auto-range verbatim, so this
+  // commit changes types only and nothing a user can see.
+  const min = 0;
+  const max = value > 0 ? value * 2 : 100;
 
   const fmt = (v: unknown) =>
     cfg.metric ? formatValue(v, cfg.metricTypes?.[cfg.metric] ?? "double", cfg.columnSettings?.[cfg.metric]) : String(v);

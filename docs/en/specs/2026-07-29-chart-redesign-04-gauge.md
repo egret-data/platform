@@ -73,20 +73,25 @@ default — writing segments for them would freeze an auto-range that currently 
 
 Both old keys are removed.
 
-## `fieldDescriptor` gains an escape hatch
+## Where the segment editor lives — corrected before the plan was written
 
-Gauge is one of the nine types declared through `fieldDescriptor`, which supports four scalar field
-kinds — dimension, metric, number, boolean. A repeating list of `{min, max, color, label}` is none of
-them.
+This spec originally proposed giving `fieldDescriptor` a new `custom` field kind, on the reasoning
+that its four scalar kinds — dimension, metric, number, boolean — cannot express a repeating list of
+`{min, max, color, label}`.
 
-The choice is between hand-writing a gauge descriptor, as cartesian and table have, or giving
-`fieldDescriptor` a `custom` kind that renders a supplied component. **This spec takes the second.**
-Hand-writing reopens, for one type, the code that PR3 of A2 deleted; and gauge is not the last type
-to need a non-scalar control — progress needs a colour, waterfall needs three, trend needs a
-comparison baseline. One escape hatch used four times is better than four bespoke descriptors.
+**That was unnecessary, and reading `viz/fields.tsx` before writing the plan is what caught it.**
+`FieldDescriptorSpec` already carries `display?: VizControl<Cfg>[]` — arbitrary controls with their
+own render — and **pie already uses it** (`display: pieDisplay`) for exactly this class of thing.
+The file's own comment says so: *"a viz's display settings (pie's donut, legend, slice colours…) are
+edited by its display controls"*. `fromParams` also reads every key under the viz's prefix rather
+than only the declared fields, so `gauge.segments` round-trips with no codec change.
 
-The hatch is narrow on purpose: `custom` supplies a render function and nothing else. It is not a
-second way to declare scalar fields.
+So the segment editor is a `display` control on the gauge descriptor, `fields.tsx` is not touched,
+and no escape hatch is invented. That is also the better home on its own merits: the ranges are
+presentation, not query shape, and the Data tab should keep asking only for the metric.
+
+This is the third spec-level error this program's "read the code before designing from it" rule has
+caught — after the table row and the gauge row. The rule is earning its place.
 
 ## Deliberately not done
 

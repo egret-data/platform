@@ -50,7 +50,13 @@ describe("the nine simple descriptors", () => {
       pie: { dimension: "region", metric: "m" },
       scalar: { metric: "m" },
       progress: { metric: "m", goal: 10 },
-      gauge: { metric: "m", min: 0, max: 100 },
+      gauge: {
+        metric: "m",
+        segments: [
+          { min: 0, max: 50, color: "red", label: "Low" },
+          { min: 50, max: 100, color: "green" },
+        ],
+      },
       funnel: { dimension: "region", metric: "m" },
       waterfall: { xAxis: "region", metric: "m", showTotal: true },
       smartscalar: { dimension: "order_date", metric: "m" },

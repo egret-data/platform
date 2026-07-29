@@ -122,10 +122,16 @@ export interface ProgressConfig {
   metric?: string;
   goal?: number;
 }
+export interface GaugeSegment {
+  min: number;
+  max: number;
+  color: string;
+  label?: string;
+}
 export interface GaugeConfig {
   metric?: string;
-  min?: number;
-  max?: number;
+  /** Coloured ranges, in any order. The gauge's scale is derived from them. */
+  segments?: GaugeSegment[];
 }
 export interface FunnelConfig {
   dimension?: string;

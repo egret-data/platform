@@ -92,7 +92,7 @@ describe("ChartRenderer", () => {
     render(
       <ChartRenderer
         vizType="gauge"
-        params={params({ gauge: { metric: "revenue", min: 0, max: 100 } })}
+        params={params({ gauge: { metric: "revenue" } })}
         columns={[{ name: "revenue", type: "double" }]}
         rows={[[75]]}
       />,
