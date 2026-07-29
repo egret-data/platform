@@ -166,7 +166,10 @@ function DimensionsControl({ field, config, options, onChange, unitRow }: {
           </div>
         );
       })}
-      {field.temporal && chosen.map((c) => <div key={c}>{unitRow(c)}</div>)}
+      {/* Keyed by index, not by column name: the picker cannot produce a duplicate, but stored
+          settings are not whitelisted server-side, so a malformed array can — and a duplicate
+          value key is unsupported in React. */}
+      {field.temporal && chosen.map((c, i) => <div key={i}>{unitRow(c)}</div>)}
     </div>
   );
 }
