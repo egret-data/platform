@@ -296,11 +296,21 @@ export function buildPieOption(
   // dimension value in more than one ring (e.g. the same string used for both a region and a
   // category) takes the override in both places it appears. Pre-existing behaviour, unchanged
   // here; flagged because it's easy to assume "override" means "ring-0 only".
+  //
+  // The override goes through `resolveColor` like every other colour in this file: it arrives
+  // from the chart's settings JSONB, which is never whitelisted server-side, so it can be
+  // hand-written, migrated or simply mistyped. `resolveColor` is the one place that validates
+  // a colour from a less trusted source — anything the renderer can't draw comes back as the
+  // fallback, and an empty-string fallback (not a colour, so unambiguous) turns that into "no
+  // override": the slice keeps its palette slot instead of being painted with a value ECharts
+  // would ignore and `getTextColorForBackground` would then silently mis-contrast against.
   if (cfg.sliceColors) {
     for (const ring of effectiveRings) {
       for (const s of ring) {
         const c = cfg.sliceColors[s.name];
-        if (c && s.name !== OTHER_NAME) s.itemStyle = { color: c };
+        if (!c || s.name === OTHER_NAME) continue;
+        const resolved = resolveColor(c, "");
+        if (resolved) s.itemStyle = { color: resolved };
       }
     }
   }

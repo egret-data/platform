@@ -480,6 +480,21 @@ describe("buildPieOption — ring colour inheritance (task 5)", () => {
     expect(widgetsUnderUS.itemStyle.color).not.toBe(lightenOklch(seriesColor(0), 1));
   });
 
+  // Chart settings are JSONB and never whitelisted server-side, so a slice colour can arrive as
+  // anything at all. resolveColor is this codebase's one validator for a colour from a less
+  // trusted source; an override that skipped it could paint a slice with a value the renderer
+  // can't draw, which getTextColorForBackground would then silently mis-contrast a label against.
+  it("a slice colour override the renderer can't draw is rejected, leaving the palette slot", () => {
+    const opt = buildPieOption(cols2, rows2, {
+      dimensions: ["region"], metric: "rev", sliceColors: { US: "banana", EU: "rgb(1,2,3)" },
+    }) as any;
+    const inner = opt.series[0].data;
+    // Not a colour: no override at all, so ECharts' own palette slot still applies.
+    expect(inner.find((d: any) => d.name === "US").itemStyle).toBeUndefined();
+    // A valid non-hex colour still comes through verbatim.
+    expect(inner.find((d: any) => d.name === "EU").itemStyle.color).toBe("rgb(1,2,3)");
+  });
+
   it("a ring's children whose parent folded into the PARENT ring's Other bucket inherit Other's own muted colour, lightened", () => {
     const cols3 = [
       { name: "region", type: "varchar" }, { name: "cat", type: "varchar" }, { name: "m", type: "double" },
