@@ -96,14 +96,46 @@ Pie chưa lưu chiều nào thì không nhận gì — không có giá trị nà
 - **Không chăm chút lát theo từng vòng** — lý do ở trên.
 - **Không đổi hành vi click kiểu sunburst.** Click một lát hiện đã drill-through; đổi ý nghĩa đó trên
   pie nhiều vòng là một quyết định riêng.
-- **Donut, tổng ở tâm, ngưỡng lát, sắp xếp, hiện % giữ nguyên.** Chúng chạy tốt, và bản kiểm đúng ở
-  chỗ egret đang đi trước.
+- **Donut, ngưỡng lát, sắp xếp, hiện % giữ nguyên setting.** Chúng chạy tốt, và bản kiểm đúng ở chỗ
+  egret đang đi trước. Tổng ở tâm cũng giữ setting, nhưng không giữ kiểu chữ — xem mục dưới.
+
+## Pie một vòng không còn giống bản trên `main`
+
+Spec này ban đầu hứa rằng pie một chiều sẽ render y hệt như trước. **Lời hứa đó đã bị rút lại**, một
+cách có chủ ý, ở `935e74d0`: vòng đơn được cho luôn hình học của Metabase thay vì bị rào ra ngoài.
+Rào ra ngoài sẽ để egret có hai loại pie khác nhau — một loại lồng vòng đọc giống Metabase và một
+loại phẳng thì không — chỉ vì chính lời hứa đó.
+
+Trước nhánh này, pie một vòng vẽ theo mặc định của ECharts: nhãn nằm **ngoài** hình tròn, mỗi nhãn
+nối về lát của nó bằng một đường dẫn, cỡ chữ và độ đậm mặc định; các lát chạm nhau, không có khe; và
+khi bật `Donut` cùng `Show total` thì có một con số đậm nằm trên dòng chú thích "Total" 13px không
+đậm.
+
+Bây giờ:
+
+- **Nhãn nằm bên trong lát**, 14px, weight 700, lấy một trong hai màu chữ của theme — màu nào thật
+  sự đọc được trên nền của chính lát đó. Không còn đường dẫn. Nhãn mà lát không chứa nổi sẽ bị cắt
+  kèm dấu ba chấm, hoặc bỏ hẳn nếu phần cắt còn dưới ba ký tự thật.
+- **Một khe 1° tách hai lát cạnh nhau**, nên ranh giới đọc được mà không cần viền.
+- **Chú thích ở tâm to và đậm hơn**: con số vẫn 22px, còn chữ "Total" từ 13px thường lên 14px
+  weight 700.
+- **Legend và nhãn lát mặc định bật.** Cả hai là Auto khi chưa đặt, và Auto nghĩa là hiện — màu của
+  một pie không nói lên điều gì nếu thiếu chú giải. Giá trị `false` đã lưu tường minh vẫn tắt được.
+- **Bán kính là thứ duy nhất không đổi.** `Donut` tắt vẫn là hình tròn đặc; `Donut` bật vẫn mở đúng
+  cái lỗ cũ. Tỉ lệ một vòng của Metabase được chủ ý không áp, vì tỉ lệ của một pie phẳng chưa bao giờ
+  là chỗ khó đọc.
+
+**Vậy nên mọi pie một vòng đã lưu đều đổi diện mạo sau khi nâng cấp.** Không có gì lưu khác đi và
+không cần migration cho việc này: đây hoàn toàn là thay đổi lúc render, nên nó chạm tới mọi pie đã
+lưu, và không thể hoàn tác riêng cho một chart — muốn hoàn tác thì phải sửa code.
 
 ## Kiểm tra thật
 
 Trên dataset Demo Sales:
 
-1. Pie một chiều render **y hệt** bản trên `main` — đây là bài kiểm tra thật của migration.
+1. Pie một chiều vẽ ra **một** vòng trên đúng các lát như `main`, cùng bán kính — nhưng với nhãn nằm
+   trong, khe 1° và chú thích ở tâm to hơn như mô tả ở trên. Thứ migration thật sự được kiểm là vẫn
+   một vòng trên đúng các lát đó, chứ không phải từng pixel giống nhau.
 2. Thêm `category` làm chiều thứ hai thì vẽ ra vòng thứ hai, các lát nằm lồng trong vùng của nó.
 3. Màu vòng ngoài là thành viên nhạt hơn, nhận ra được, của họ màu lát trong.
 4. Chiều thứ ba chạy được; gỡ về một chiều chạy được.

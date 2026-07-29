@@ -99,14 +99,49 @@ A pie with no stored dimension gets nothing — there is no value to lift.
 - **No per-ring slice curation** — see above.
 - **No sunburst-style drill on click.** Clicking a slice already drills through in egret; changing
   what that means on a multi-ring pie is a separate decision.
-- **Donut, centre total, slice threshold, sort and percent visibility are untouched.** They work,
-  and the audit was right that egret is ahead there.
+- **Donut, slice threshold, sort and percent visibility keep their settings.** They work, and the
+  audit was right that egret is ahead there. The centre total keeps its setting too, but not its
+  typography — see below.
+
+## A one-ring pie no longer looks like it did on `main`
+
+This spec originally promised that a one-dimension pie would render exactly as before. **That
+promise has been withdrawn**, deliberately, in `935e74d0`: the single ring was given Metabase's
+geometry rather than being fenced off from it. Fencing it off would have left egret with two
+different pies — a nested one that reads like Metabase's and a plain one that doesn't — for no
+reason beyond the promise itself.
+
+Before this branch, a one-ring pie drew ECharts' defaults: labels **outside** the circle, each
+joined to its slice by a leader line, at the default size and regular weight; slices meeting edge
+to edge with no gap; and, with `Donut` and `Show total` on, a bold value over a plain 13px "Total"
+caption.
+
+Now:
+
+- **Labels sit inside the slices**, at 14px and weight 700, in whichever of the theme's two ink
+  colours actually reads against that slice's own fill. No leader lines. A label its slice cannot
+  hold is truncated with an ellipsis, or dropped outright if even the truncation would leave under
+  three real characters.
+- **A 1° gap separates adjacent slices**, so the divisions read without needing a border.
+- **The centre caption is bigger and bolder**: the value stays at 22px, and "Total" goes from a
+  plain 13px to 14px at weight 700.
+- **Legend and slice labels default to on.** Both are Auto unless set, and Auto means shown — a
+  pie's colours say nothing without a key. An explicitly saved `false` still turns either off.
+- **The radii are the one thing that did not move.** `Donut` off is still a full circle; `Donut` on
+  still opens the same hole. Metabase's own one-ring ratio was deliberately not adopted, because a
+  plain pie's proportions were never the thing that read badly.
+
+**Every existing saved single-ring pie therefore changes appearance on upgrade.** Nothing is stored
+differently and nothing needs migrating for it: this is entirely a render-time change, so it reaches
+every pie already saved, and undoing it for one chart is not possible — it would be a code change.
 
 ## Live check
 
 On the Demo Sales dataset:
 
-1. A one-dimension pie renders exactly as it does on `main` — this is the migration's real test.
+1. A one-dimension pie draws **one** ring over the same slices as `main`, with the same radii — but
+   with inside labels, 1° gaps and the larger centre caption described above. Still one ring over
+   the same slices is what the migration is actually being tested on; identical pixels are not.
 2. Adding `category` as a second dimension draws a second ring, whose slices nest inside their
    region.
 3. The outer ring's colours are recognisably lighter members of the inner slice's family.

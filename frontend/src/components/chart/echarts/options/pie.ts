@@ -444,10 +444,13 @@ export function buildPieOption(
   // equivalent inputs for.
   //
   // ONE ring is the deliberate exception: it keeps egret's OWN existing donut on/off semantics
-  // exactly as before (donut:false -> 0%, donut:true -> 45%) rather than Metabase's 3/5 (42%,
-  // on this scale) — moving that hole would violate the "a one-ring pie stays visually
-  // unchanged" guarantee for a chart the brief never identified as unreadable in the first
-  // place. TWO OR MORE rings is where the ratio is unconditional: there is no sensible
+  // exactly as before (donut:false -> 0%, donut:true -> 45%) rather than Metabase's 3/5 (42%, on
+  // this scale). Note this is now the ONLY thing about a one-ring pie that is unchanged from
+  // `main` — its labels moved inside the slices, gained weight, and gained a 1-degree gap between
+  // slices (see the spec's "A one-ring pie no longer looks like it did on `main`"). The radii
+  // stayed put because a plain pie's proportions were never identified as unreadable, and moving
+  // the hole would change what a saved donut LOOKS LIKE as a shape rather than how it is
+  // labelled. TWO OR MORE rings is where the ratio is unconditional: there is no sensible
   // multi-ring pie with no hole at all (task spec), so it always applies regardless of `donut`.
   const outerEdge = 70;
   const HOLE_RATIO: Record<number, number> = { 2: 2 / 5, 3: 1 / 4 };
@@ -623,9 +626,9 @@ export function buildPieOption(
       const fullText = labelFormatter({ name: s.name, percent: parseFloat(percentValue.toFixed(decimals)) });
 
       // calcAvailableDonutSliceLabelLength is, as its name says, a DONUT formula — with a true
-      // zero inner radius (egret's own "one ring, donut off" case; see the "a one-ring pie stays
-      // visually unchanged" guarantee on `outerEdge`/`holeStart` above) its inner chord is
-      // degenerate (a single point), which would make EVERY slice's available space collapse to
+      // zero inner radius (egret's own "one ring, donut off" case, whose radii are the one part
+      // of a one-ring pie this branch left alone; see `outerEdge`/`holeStart` above) its inner
+      // chord is degenerate (a single point), which would make EVERY slice's space collapse to
       // 0 and drop every label outright — a real regression for egret's plain, no-hole pie,
       // which the fix's own defect write-up never identified as a problem (it's about a 3-ring
       // SUNBURST, always a donut). Metabase never hits this because its own ratios always leave
