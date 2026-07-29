@@ -6,38 +6,13 @@ import { Input } from "@/components/ui/input";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
+import { AutoToggle } from "./AutoToggle";
 
 function Toggle({ id, label, checked, onChange }: { id: string; label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
     <div className="flex items-center justify-between">
       <Label htmlFor={id} className="text-sm font-normal">{label}</Label>
       <Switch id={id} aria-label={label} checked={checked} onCheckedChange={onChange} />
-    </div>
-  );
-}
-
-/**
- * Auto / On / Off — for a setting that now defaults on at render time (see buildPieOption:
- * a pie's colours/slices are unreadable without it), so `undefined` is a real, visible third
- * state rather than "off". A two-state Switch can't represent that without contradicting the
- * chart it controls (the exact "switch that lies" bug this fixes) — same shape as
- * CartesianDisplaySection's AutoToggle.
- */
-function AutoToggle({
-  id, label, value, onChange, autoHint,
-}: { id: string; label: string; value: boolean | undefined; onChange: (v: boolean | undefined) => void; autoHint: string }) {
-  const current = value === undefined ? "auto" : value ? "on" : "off";
-  return (
-    <div className="flex items-center justify-between gap-2">
-      <Label htmlFor={id} className="text-sm font-normal">{label}</Label>
-      <Select value={current} onValueChange={(v) => onChange(v === "auto" ? undefined : v === "on")}>
-        <SelectTrigger id={id} aria-label={label} className="h-7 w-24"><SelectValue /></SelectTrigger>
-        <SelectContent>
-          <SelectItem value="auto" title={autoHint}>Auto</SelectItem>
-          <SelectItem value="on">On</SelectItem>
-          <SelectItem value="off">Off</SelectItem>
-        </SelectContent>
-      </Select>
     </div>
   );
 }
