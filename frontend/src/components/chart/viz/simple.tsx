@@ -7,13 +7,14 @@ import type { VizControl, VizControlProps, VizDescriptor } from "./types";
 type Cfg = Record<string, unknown>;
 
 /** Distinct slice values of the current result, for the pie's per-slice colour controls.
- * Reads `config.dimension` (singular) to match the single-select field below — this is
- * practically dead today, since `buildSpec` now reads `dimensions` (plural) and no field
- * writes that key, so the query never groups and this list can never populate. Task 2
- * must move this to `dimensions?.[0]` when it renames the field. */
+ * Reads the FIRST picked dimension (`dimensions?.[0]`) — with nested rings (task 4), the
+ * innermost ring is what `sliceColors`/`sliceNames` key against, matching the single-ring
+ * pie's colouring today. */
 function PieDisplayControl({ config, onChange, resultColumns, rows }: VizControlProps<Cfg>) {
-  const dimIdx = resultColumns.findIndex((c) => c.name === config.dimension);
-  const slices = config.dimension && dimIdx !== -1
+  const dims = Array.isArray(config.dimensions) ? (config.dimensions as string[]) : [];
+  const dim = dims[0];
+  const dimIdx = resultColumns.findIndex((c) => c.name === dim);
+  const slices = dim && dimIdx !== -1
     ? Array.from(new Set(rows.map((r) => String((r as unknown[])[dimIdx] ?? "")).filter((v) => v !== "")))
     : [];
   return (
@@ -48,12 +49,8 @@ const gaugeDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display", re
 export const SIMPLE_DESCRIPTORS: VizDescriptor<Cfg>[] = [
   fieldDescriptor({
     key: "pie", prefix: "pie.", legacyKey: "pie", display: pieDisplay,
-    // KNOWN GAP (task 2 closes it): the field below is still a single-select writing
-    // `config.dimension` (singular), while `buildSpec` and the stored shape are already
-    // plural `dimensions`. Nothing currently sets `dimensions` through this UI — task 2
-    // replaces this with a multi-select `kind` that writes the plural key.
     fields: [
-      { id: "dimension", label: "Dimension", kind: "dimension", required: "a dimension", temporal: true },
+      { id: "dimensions", label: "Dimensions", kind: "dimensions", max: 3, required: "a dimension", temporal: true },
       { id: "metric", label: "Metric", kind: "metric", required: "a metric" },
     ],
     // `c.dimensions` is settings data, not typed input — a stored string/number/object
