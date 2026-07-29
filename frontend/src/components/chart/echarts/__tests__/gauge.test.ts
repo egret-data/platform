@@ -24,4 +24,11 @@ describe("buildGaugeOption", () => {
   it("falls back to a zero value when there is no metric/row", () => {
     expect((buildGaugeOption(cols, [], {}) as any).series[0].data[0].value).toBe(0);
   });
+  it("ignores a min and max left over from before segments existed", () => {
+    // Stored settings are not whitelisted server-side, so these keys can still arrive at
+    // runtime on an old chart even though GaugeBuildConfig no longer declares them.
+    const opt = buildGaugeOption(cols, [[60]], { metric: "rev", min: 999, max: 5000 } as any) as any;
+    expect(opt.series[0].min).toBe(0);
+    expect(opt.series[0].max).toBe(120);
+  });
 });
