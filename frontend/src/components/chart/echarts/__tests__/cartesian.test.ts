@@ -20,9 +20,10 @@ describe("buildCartesianOption — base", () => {
   });
   it("a11y: line series cycle dash style + marker shape (not colour alone), and aria is enabled", () => {
     const opt = buildCartesianOption(columns, rows, { kind: "line", xAxis: "region", yMetrics: ["rev", "cnt"] }) as any;
-    // Screen-reader data description (non-visual fallback) + decal patterns on
-    // filled series for colour-blind users.
-    expect(opt.aria).toMatchObject({ enabled: true, decal: { show: true } });
+    // Screen-reader data description stays on; the decal patterns are off since
+    // chart 05 — the dash/marker cycling below is the colour-independent affordance
+    // that does not cover the fill.
+    expect(opt.aria).toMatchObject({ enabled: true, decal: { show: false } });
     // First two series get DISTINCT dash types + marker shapes so colour-blind
     // users can tell them apart without relying on the palette colour.
     expect(opt.series[0].lineStyle.type).toBe("solid");

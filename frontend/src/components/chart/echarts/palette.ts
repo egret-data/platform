@@ -45,12 +45,22 @@ export const symbolShape = (i: number) => SYMBOLS[i % SYMBOLS.length];
 
 /** ECharts accessibility:
  *  - `enabled` generates a screen-reader description of the chart's data (the
- *    non-visual "data-table" fallback).
- *  - `decal.show` overlays distinct patterns (dots/hatches) on filled series
- *    (bars, pie slices, areas) so colour-blind users can tell them apart without
- *    relying on the palette colour alone (WCAG "color-not-only"). Line charts add
- *    dash/marker cycling on top of this (see `lineType`/`symbolShape`). */
-export const ARIA_A11Y = { enabled: true, decal: { show: true } } as const;
+ *    non-visual "data-table" fallback). This is the part that earns its keep.
+ *  - `decal.show` would overlay patterns (dots/hatches) on filled series so colour
+ *    could be told apart without relying on hue. **Off since chart 05**, for three
+ *    reasons: neither reference tool does it (`grep -r decal` finds nothing in either
+ *    Metabase or Superset); egret's palette IS Metabase's, so the colours were never
+ *    the weak point; and on a nested pie the patterns actively fought the design —
+ *    lightness carries ring depth and hue carries family, and a third orthogonal
+ *    channel obscured both rather than adding anything.
+ *
+ *  This was never a deliberate choice. Sub-project B2 found the `aria` component had
+ *  never been registered, so every aria and decal setting was dead code; registering
+ *  it brought the patterns to life and nobody looked at whether they should be.
+ *
+ *  Line charts still cycle dash style and marker shape per series (`lineType` /
+ *  `symbolShape`), which is the same affordance without covering the fill. */
+export const ARIA_A11Y = { enabled: true, decal: { show: false } } as const;
 
 // Metabase colours a single (un-broken-out) series with its "summarize" green
 // (palm/50 = hsl(89 48% 40%)) rather than the first accent.
