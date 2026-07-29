@@ -129,6 +129,57 @@ Bây giờ:
 không cần migration cho việc này: đây hoàn toàn là thay đổi lúc render, nên nó chạm tới mọi pie đã
 lưu, và không thể hoàn tác riêng cho một chart — muốn hoàn tác thì phải sửa code.
 
+## Ghi nhận quyết định
+
+Mọi commit trên nhánh này đều có phần thân rỗng, nên `git log` và PR chỉ hiện phần văn bản trước khi
+đảo ở trên. Hai quyết định đã viết trong chính tài liệu này bị **đảo ngược có chủ ý** giữa nhánh; một
+phát hiện thứ ba giải thích vì sao cả hai khó phán đoán hơn vẻ ngoài của chúng. Ghi lại ở đây để
+không ai đọc mỗi bản gốc rồi lặng lẽ đưa chúng trở lại.
+
+### Phần trăm của lát vòng ngoài là phần của LÁT CHA, không phải của vòng — đảo ở `bd14992f`
+
+Bản đầu tính phần trăm mỗi lát theo tổng của chính vòng đó, lý lẽ là pie thể hiện phần của một tổng
+thể và như vậy mọi vòng so được với vòng trong cùng. Trên một chart ba vòng thật thì lý lẽ đó không
+trụ được. Nó đúng với vòng 0, vì cha của vòng 0 *chính là* cái tổng thể; nó gãy ở mọi vòng ngoài. Một
+kênh trị giá 500 nằm trong một lát cha (vùng + nhóm hàng) trị giá 1000 lại đọc thành **4,17% của tất
+cả** (500/12000) — đúng về số học, và vô dụng với người đang nhìn đúng một miếng đó, thứ họ muốn là
+**50% của lát cha**. Đó là thứ Metabase tính (`normalizedPercentage`), và là thứ các vòng từ 1 trở đi
+hiện giờ hiển thị.
+
+Vòng 0 giữ nguyên: phần của nó trong vòng vốn đã là phần của cả chart. ECharts tính `percent` một lần
+cho mỗi series và không cho ghi đè theo từng datum, nên mỗi lát vòng ngoài mang sẵn `parentPercent`
+tính trước trên datum của nó; cả formatter nhãn lẫn tooltip dùng chung đều ưu tiên giá trị đó khi có.
+
+### Thiên lệch 3× về chữ trắng của Metabase đã được port rồi bị gỡ — `f8b8483b`, đảo ở `208a1a73`
+
+`getTextColorForBackground` của Metabase nhân độ tương phản của màu trắng lên 3 lần trước khi so
+("chúng tôi cố ý muốn trả về chữ trắng thường xuyên hơn", theo ghi chú thiết kế của họ). Ban đầu nó
+được port nguyên vẹn, đúng kế hoạch. Trên palette của egret, nó làm độ tương phản **tệ đi** một cách
+đo được: với `#509EE3` và `#A989C5`, chữ tối vượt WCAG AA thoải mái — 6,20 và 5,97 so với token chữ
+tối thật của egret — trong khi thiên lệch chọn màu trắng, mà độ tương phản của trắng trên hai nền đó
+bị chặn bởi chính độ sáng của nền, chỉ khoảng 2,86 và 2,97, còn xa 4,5. Đây không phải một trường hợp
+sát ranh bị đẩy theo hướng gây tranh cãi; nó biến một nhãn đang đạt thành một nhãn không đạt.
+
+Thiên lệch đó là một lựa chọn **thẩm mỹ** Metabase cố ý làm, không phải một luật về khả năng đọc, còn
+4,5:1 là quy tắc ưu tiên cao hơn của egret — nên chỗ nào hai thứ xung đột thì thiên lệch thua. Thứ đã
+ship thay vào đó: chọn ứng viên có độ tương phản thô cao hơn, và **chỉ** dùng ưu tiên màu trắng làm
+tiêu chí phá hoà giữa hai ứng viên đều đã vượt 4,5:1 — lúc đó không bên nào rủi ro về khả năng đọc,
+nên vẻ ngoài thiên trắng của Metabase được phép thắng.
+
+### Bộ chọn màu nhãn chưa từng chạy đúng trong app thật cho tới `ea793344`
+
+Ghi lại vì đây chính là lý do hai quyết định trên khó phán đoán hơn vẻ ngoài. `parseColor` không đọc
+được `oklch()`, mà token thiết kế của egret (Tailwind v4) đều viết theo dạng đó — trình duyệt trả
+`var(--foreground)` đã resolve về dưới dạng `oklch(...)` chứ không phải `rgb(...)`, vì
+`getComputedStyle` chỉ serialise màu sRGB cũ thành `rgb()`. Nên trong app thật, mọi phép so tương
+phản đều rơi xuống nhánh dự phòng "không parse được" và trả về màu chữ mặc định bất kể nền. Chế độ
+sáng vẫn trông đúng, thuần tuý vì nhánh dự phòng đó tình cờ hợp với một palette sáng; chỗ lộ ra là
+chế độ tối.
+
+Bài học cần giữ: bất cứ thứ gì đọc một design token để quyết định tương phản đều phải được test trực
+tiếp với một chuỗi `oklch()` thật, chứ không chỉ qua hàm tiêu thụ nó. Chỉ test qua ứng viên được chọn
+đầu ra chính là điều đã để lỗi này sống sót.
+
 ## Kiểm tra thật
 
 Trên dataset Demo Sales:

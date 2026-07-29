@@ -135,6 +135,58 @@ Now:
 differently and nothing needs migrating for it: this is entirely a render-time change, so it reaches
 every pie already saved, and undoing it for one chart is not possible — it would be a code change.
 
+## Decision record
+
+Every commit on this branch has an empty body, so `git log` and the PR show only the pre-reversal
+text above. Two decisions written down earlier in this document were deliberately reversed
+mid-branch; a third finding explains why both were harder to judge than they look. Recorded here so
+none of them is quietly re-introduced by someone reading only the original text.
+
+### An outer slice's percentage is a share of its PARENT, not of its ring — reversed in `bd14992f`
+
+The first implementation computed every slice's percentage as its share of its own ring's total,
+reasoning that a pie shows parts of a whole and that this kept all rings comparable with the
+innermost one. On a real three-ring chart that does not survive contact. It holds for ring 0, whose
+parent *is* the whole; it breaks on every ring outside it. A channel worth 500 inside one
+region-and-product parent of 1000 read as **4.17% of everything** (500/12000) — arithmetically true,
+and useless to whoever is looking at that one wedge, who wants **50% of its parent**. That is what
+Metabase computes (`normalizedPercentage`), and what rings 1+ now show.
+
+Ring 0 is untouched: its share of its ring already is its share of the chart. ECharts computes
+`percent` once per series with no per-datum override, so each outer slice carries a precomputed
+`parentPercent` on its own datum, which both the label formatter and the shared tooltip prefer
+whenever it is present.
+
+### Metabase's 3× white-text bias was ported, then removed — `f8b8483b`, reversed in `208a1a73`
+
+Metabase's `getTextColorForBackground` multiplies white's contrast by a flat 3 before comparing
+("we intentionally want to return white text color more frequently", per its own design notes). It
+was ported faithfully first, as planned. On egret's own palette it measurably made contrast
+**worse**: for `#509EE3` and `#A989C5`, dark text clears WCAG AA comfortably — 6.20 and 5.97 against
+egret's real dark-text token — while the bias picked white, whose contrast against those fills is
+capped by the fills' own luminance at roughly 2.86 and 2.97, nowhere near 4.5. It did not nudge a
+borderline call in a debatable direction; it turned a passing label into a failing one.
+
+The bias is a look preference Metabase made deliberately, not a legibility law, and 4.5:1 is
+egret's higher-priority rule, so where the two conflict the bias loses. What shipped instead: pick
+whichever candidate has the better raw contrast, and apply the white preference **only** as a
+tie-break between two candidates that both already clear 4.5:1 — at which point neither reading is
+at risk and Metabase's white-leaning look is free to win.
+
+### The label colour picker never worked in the live app until `ea793344`
+
+Recorded because it is why both decisions above were harder to judge than they look. `parseColor`
+could not read `oklch()`, and egret's design tokens (Tailwind v4) are written that way — a browser
+hands a resolved `var(--foreground)` back as `oklch(...)`, not `rgb(...)`, because
+`getComputedStyle` only serialises legacy sRGB colours to `rgb()`. So in the real app every
+contrast comparison fell through to the unparseable-input fallback and returned the default ink
+regardless of the fill. Light mode still looked correct, purely because that fallback happens to
+suit a light palette; dark mode is where it showed.
+
+The lesson to keep: anything that reads a design token to make a contrast decision must be tested
+against a real `oklch()` string directly, not only through the function that consumes it. Testing
+it only through the chosen-candidate output is exactly what let this stay broken.
+
 ## Live check
 
 On the Demo Sales dataset:
