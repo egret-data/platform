@@ -1007,6 +1007,48 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
       expect(opt.series[0].data.find((d: any) => d.name === "Zed").label.formatter()).toBe("Zed");
     });
 
+    // The angles a label is measured against have to be the angles ECharts DRAWS, not the raw
+    // cumulative shares. `padAngle: 1` opens a one-degree gap between neighbours, so every drawn
+    // slice is one degree narrower than its share suggests — and measuring against the wider,
+    // nominal arc errs in the risky direction: a label judged to fit an arc that isn't there.
+    //
+    // A one-degree difference is only worth a pixel or two on a normal-sized chart, so this uses
+    // a deliberately large one (1800px -> ring 45%-70% = 405px to 630px) where a degree of arc is
+    // worth about a character. The 1/72 slice spans 5 degrees nominally (~31px of usable chord,
+    // enough for "EMEA"'s 28px) and 4 after the gap (~24px, not enough, and not enough for a
+    // 3-character truncation either).
+    it("measures a label against the arc left after the gap between slices, not the raw share", () => {
+      const dCols2 = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+      const opt = buildPieOption(
+        dCols2,
+        [["Rest", 71], ["EMEA", 1]], // 1/72 of the ring = exactly 5 degrees
+        { dimensions: ["d"], metric: "m", donut: true, showLabels: true, sliceThreshold: 0 },
+        stubMeasure,
+        { width: 1800, height: 1800 },
+      ) as any;
+      expect(opt.series[0].padAngle).toBe(1); // the gap this measurement has to account for
+      expect(opt.series[0].data.find((d: any) => d.name === "EMEA").label.formatter()).toBe(" ");
+    });
+
+    // The angle model above starts every ring at 12 o'clock and runs clockwise because that is
+    // what ECharts does by default (`startAngle: 90, clockwise: true`) and this file never says
+    // otherwise. Nothing enforced that: a future change setting either would leave the fit maths
+    // silently measuring the wrong slices. Setting them isn't forbidden — it just has to come
+    // with a matching change to the derivation, which this test makes impossible to skip.
+    it("never overrides ECharts' default startAngle/clockwise, which the label-fit angles assume", () => {
+      const charts = [
+        buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any,
+        buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m" }) as any,
+        buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any,
+      ];
+      for (const chart of charts) {
+        for (const s of chart.series) {
+          expect(s.startAngle).toBeUndefined();
+          expect(s.clockwise).toBeUndefined();
+        }
+      }
+    });
+
     it("each slice's label colour contrasts with ITS OWN fill, not one fixed colour for the whole ring", () => {
       const opt = buildPieOption(cols, rows, {
         dimensions: ["region"], metric: "rev",

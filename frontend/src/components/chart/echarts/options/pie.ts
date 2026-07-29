@@ -517,6 +517,12 @@ export function buildPieOption(
     ? { borderColor: resolveColor("var(--card)", COLOR_FALLBACK.card), borderWidth: ringCount === 2 ? 1 : 0.3 }
     : undefined;
 
+  // Metabase's borderProportion 360, i.e. one degree — named rather than inlined because the
+  // label-fit maths below has to subtract exactly the same gap ECharts draws (see `padHalf`).
+  // Handed to the series as `padAngle` in degrees, which is the unit ECharts takes.
+  const SLICE_PAD_ANGLE_DEG = 1;
+  const SLICE_PAD_ANGLE = (SLICE_PAD_ANGLE_DEG * Math.PI) / 180;
+
   // REVERSED from an earlier decision. This used to compute a slice's percentage as its share of
   // THAT RING's own total everywhere, reasoning that a pie is about parts of a whole and that
   // this kept every ring's percentages comparable with the inner ring's. Seen on a real
@@ -570,13 +576,38 @@ export function buildPieOption(
     // derived here from a running cumulative share of THIS RING's own total, the same total
     // ECharts itself angles these slices by (each ring is its own "pie" series, starting at the
     // default startAngle/12-o'clock and going clockwise — the same convention
-    // calcAvailableDonutSliceLabelLength's geometry assumes).
+    // calcAvailableDonutSliceLabelLength's geometry assumes; `startAngle`/`clockwise` are never
+    // set on these series, and a test pins that they stay unset so this model can't silently rot).
+    //
+    // The cumulative share gives the slice's NOMINAL boundaries; what ECharts actually DRAWS is
+    // narrower, because `padAngle` (below) opens a gap between neighbours. Its pieLayout
+    // (chart/pie/pieLayout.js) keeps the nominal boundary as the running cursor and draws
+    // `[current + padAngle/2, current + angle - padAngle/2]` — so the mid-angle is unchanged and
+    // the arc loses exactly one padAngle. Measuring against the nominal arc would hand every
+    // label ~1 degree more room than it has, which is the risky direction: labels judged to fit
+    // arcs that are in fact narrower than measured. Metabase pad-adjusts the same way, feeding its
+    // own angles from `d3.pie().padAngle((Math.PI / 180) * 1)`.
+    //
+    // KNOWN LIMIT, deliberately not modelled: pieLayout also enforces
+    // `minAndPadAngle = minAngle + padAngle` and bumps any slice below that floor up to it,
+    // shrinking the angle left for the rest and shifting every later slice's mid-angle. Modelling
+    // that means reimplementing its two-pass redistribution here, for a case the default 2.5%
+    // "Other" fold already removes (the floor is 1 degree, i.e. 0.28% of a ring; only
+    // `sliceThreshold: 0` can reach it). The residual error is a mid-angle shift, which affects
+    // only the horizontal branch's rectangle bound and the near-x-axis test — never the radial
+    // branch, and never by handing back the arc width this pad accounting just took away.
     const ringTotal = ringData.reduce((t, s) => t + s.value, 0);
     let cumulativeValue = 0;
     const fits = ringData.map((s, i) => {
-      const startAngle = ringTotal > 0 ? (cumulativeValue / ringTotal) * 2 * Math.PI : 0;
+      const nominalStart = ringTotal > 0 ? (cumulativeValue / ringTotal) * 2 * Math.PI : 0;
       cumulativeValue += s.value;
-      const endAngle = ringTotal > 0 ? (cumulativeValue / ringTotal) * 2 * Math.PI : 0;
+      const nominalEnd = ringTotal > 0 ? (cumulativeValue / ringTotal) * 2 * Math.PI : 0;
+      // Clamped so a slice narrower than the gap collapses to a point rather than inverting into
+      // a negative arc — which calcChordLength, being even in the angle, would silently read back
+      // as a POSITIVE chord. ECharts draws such a slice as zero-width too (`padAngle > angle`).
+      const padHalf = Math.min(SLICE_PAD_ANGLE, nominalEnd - nominalStart) / 2;
+      const startAngle = nominalStart + padHalf;
+      const endAngle = nominalEnd - padHalf;
 
       let percentValue: number;
       if (level > 0 && parentFold && parentValues && s.parentKey != null) {
@@ -674,7 +705,7 @@ export function buildPieOption(
         verticalAlign: "middle" as const,
       },
       labelLayout,
-      padAngle: 1,
+      padAngle: SLICE_PAD_ANGLE_DEG,
       itemStyle: ringBorder,
       // Keeps ECharts' own `percent` (ring 0's percent, and the fallback on every other ring's
       // datum that somehow lacks a parentPercent) at the same precision `pct` formats to, so
