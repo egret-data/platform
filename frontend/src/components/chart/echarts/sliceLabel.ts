@@ -14,8 +14,13 @@
 // it can be unit tested with a deterministic stub measurer instead of a real text rasteriser —
 // see measureText below for the one place that talks to a real canvas.
 
-export type Point = [number, number];
-export type LabelPosition = "horizontal" | "radial";
+/** Module-private for the same reason as `LabelPosition` below: with the two helpers that
+ * returned it now private, nothing outside this file can see a `Point` at all. */
+type Point = [number, number];
+/** Whether a slice's label runs across the ring or along it. Module-private: nothing outside
+ * names it — pie.ts passes `"radial"`/`"horizontal"` as literals — and an exported alias for a
+ * two-member union is surface without a consumer. */
+type LabelPosition = "horizontal" | "radial";
 
 export interface FontStyle {
   size: number;
@@ -35,15 +40,26 @@ export const calcChordLength = (radius: number, angle: number): number =>
 
 /** Coordinates of a point on a circle, angle measured from the top (12 o'clock), increasing
  * clockwise — the same convention ECharts' pie/sunburst series uses for its default
- * `startAngle: 90, clockwise: true`. */
-export const getCoordOnCircle = (radius: number, angle: number): Point => [
+ * `startAngle: 90, clockwise: true`.
+ *
+ * Module-private: only calcAvailableDonutSliceLabelLength calls it, and the angle convention
+ * that is its whole content is already pinned from outside — the near-x-axis tests move one
+ * slice shape around the circle and assert a different allowance at 12/6 o'clock than at 3/9,
+ * which only holds if this measures from the top. A direct test would restate that convention
+ * rather than check it, so there is nothing here worth an export. */
+const getCoordOnCircle = (radius: number, angle: number): Point => [
   radius * Math.sin(angle),
   radius * Math.cos(angle),
 ];
 
 /** Intersection points of a circle and a horizontal line y = horizontalY. Empty if the line
- * misses the circle, one point if tangent, two if it crosses. */
-export const calcCircleIntersectionByHorizontalLine = (
+ * misses the circle, one point if tangent, two if it crosses.
+ *
+ * Module-private: only getDonutHorizontalChordCoords calls it. Its one branch with a
+ * consequence — the miss/tangent cases, which give that caller too few points to build a chord
+ * from — is covered from outside through the degenerate-geometry tests above, which drive
+ * exactly that path. */
+const calcCircleIntersectionByHorizontalLine = (
   radius: number,
   horizontalY: number,
 ): [] | [Point] | [Point, Point] => {
