@@ -93,7 +93,8 @@ describe("ChartExplore mounts", () => {
   it("renders a bridge viz (pie) saved in the v1 shape", async () => {
     await mountChart("c-pie");
     expect(await screen.findByDisplayValue("Pie v1")).toBeInTheDocument();
-    expect(screen.getByText("Dimension")).toBeInTheDocument();
+    // "Dimensions" plural since chart 05 — a pie takes up to three, drawn as nested rings.
+    expect(screen.getByText("Dimensions")).toBeInTheDocument();
   });
 
   it("renders a migrated viz (bar) saved in the v2 shape", async () => {
