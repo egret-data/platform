@@ -13,6 +13,9 @@ export interface PivotInput {
    * `dimShowsTotals` (on for every dimension except the innermost). Narrows `showColTotals`,
    * never widens it. */
   dimTotals?: Record<string, boolean>;
+  /** metric name -> its `column_title`, when one is set. Only used to decide whether the metric
+   * sub-header is worth a row; the renderer still reads the title from `columnSettings`. */
+  metricTitles?: Record<string, string>;
 }
 
 export type CellValue = number | string | null;
@@ -88,9 +91,17 @@ export interface TopCell {
   colSpan: number;
   rowSpan?: number;
   metric?: string;    // set when this cell is a metric sub-header, for column_title lookup
+  /** Column dimension this cell heads, with its raw value — so the renderer can format the label
+   * (a month bucket should read "January 2026", not the raw `2026-01-01`). Absent on the metric
+   * sub-header and on the synthetic "Total" group. */
+  dim?: string;
+  raw?: string | null;
 }
 export interface RowHeaderCell {
   label: string;
+  /** Raw dimension value behind `label`, for formatting. Absent on subtotal/grand-total rows,
+   * whose labels are prose rather than a value. */
+  raw?: string | null;
   depth: number;           // which row-dim column it starts at
   rowSpan: number;
   colSpan: number;
@@ -238,7 +249,12 @@ export function buildPivot(input: PivotInput): Pivot {
       ) {
         count++;
       }
-      level.push({ label: String(effectiveColPaths[g][d] ?? ""), colSpan: count * nMetric });
+      level.push({
+        label: String(effectiveColPaths[g][d] ?? ""),
+        colSpan: count * nMetric,
+        dim: input.colDims[d],
+        raw: effectiveColPaths[g][d],
+      });
       g += count;
     }
     // the right-hand "Total" group spans all column-dim header levels — emit once on level 0.
@@ -247,8 +263,16 @@ export function buildPivot(input: PivotInput): Pivot {
     }
     topHeader.push(level);
   }
-  // metric sub-header (only when more than one metric) — one cell per colLeaf, aligned to values.
-  if (nMetric > 1 || C === 0) {
+  // Metric sub-header — one cell per colLeaf, aligned to the values.
+  //
+  // Normally only worth a row when there is more than one metric to tell apart (or no column
+  // dimension, where it is the only header there is). The third case is renaming: with a single
+  // metric under column dimensions there was nowhere for its `column_title` to appear, so typing
+  // one in the Formatting panel changed nothing at all — a setting that silently did nothing.
+  const renamedMetric = input.metricTitles
+    ? input.metrics.some((m) => (input.metricTitles?.[m] ?? "") !== "")
+    : false;
+  if (nMetric > 1 || C === 0 || renamedMetric) {
     topHeader.push(colLeaves.map((cl) => ({ label: cl.metric, colSpan: 1, metric: cl.metric })));
   }
 
@@ -274,7 +298,7 @@ export function buildPivot(input: PivotInput): Pivot {
       if (!isGroup) {
         const start = bodyRows.length;
         bodyRows.push({ rowPath: childPath, kind: "leaf", headerCells: [], values: rowValues(childPath) });
-        bodyRows[start].headerCells.push({ label: String(ch.value ?? ""), depth, rowSpan: 1, colSpan: 1 });
+        bodyRows[start].headerCells.push({ label: String(ch.value ?? ""), raw: ch.value, depth, rowSpan: 1, colSpan: 1 });
         span += 1;
         continue;
       }
@@ -284,7 +308,7 @@ export function buildPivot(input: PivotInput): Pivot {
         bodyRows.push({
           rowPath: childPath,
           kind: "subtotal",
-          headerCells: [{ label: String(ch.value ?? ""), depth, rowSpan: 1, colSpan: m - depth, path: childPath, collapsible: true, collapsed: true }],
+          headerCells: [{ label: String(ch.value ?? ""), raw: ch.value, depth, rowSpan: 1, colSpan: m - depth, path: childPath, collapsible: true, collapsed: true }],
           values: rowValues(childPath),
         });
         span += 1;
@@ -295,6 +319,7 @@ export function buildPivot(input: PivotInput): Pivot {
       const childSpan = emitChildren(ch, childPath, depth + 1);
       bodyRows[start].headerCells.push({
         label: String(ch.value ?? ""),
+        raw: ch.value,
         depth,
         rowSpan: childSpan,
         colSpan: 1,

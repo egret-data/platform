@@ -36,3 +36,37 @@ describe("exportFilename", () => {
     expect(exportFilename("   ", "csv")).toBe("chart.csv");
   });
 });
+
+describe("rowsToCsv — pivot rollup results", () => {
+  // A rollup result carries a `__grp_N` marker per dimension plus, interleaved with the data, a
+  // row per subtotal and the grand total. Exported raw, the file opened with `__grp_0` in the
+  // header and a grand total as its FIRST row — indistinguishable from data unless the reader
+  // knows to decode the markers.
+  const cols = [
+    { name: "region", type: "varchar" },
+    { name: "revenue", type: "bigint" },
+    { name: "__grp_0", type: "integer" },
+  ];
+  const rows = [
+    [null, 30, 1],   // grand total
+    ["EU", 10, 0],   // data
+    ["NA", 20, 0],   // data
+  ];
+
+  it("drops the internal grouping-marker columns", () => {
+    expect(rowsToCsv(cols, rows)).not.toContain("__grp_");
+  });
+
+  it("drops rollup rows, keeping only the leaves", () => {
+    expect(rowsToCsv(cols, rows)).toBe("region,revenue\r\nEU,10\r\nNA,20");
+  });
+
+  it("leaves a non-rollup result untouched", () => {
+    const plain = [{ name: "region", type: "varchar" }, { name: "rev", type: "bigint" }];
+    expect(rowsToCsv(plain, [["EU", 10]])).toBe("region,rev\r\nEU,10");
+  });
+
+  it("emits just the header when every row was a rollup row", () => {
+    expect(rowsToCsv(cols, [[null, 30, 1]])).toBe("region,revenue");
+  });
+});

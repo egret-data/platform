@@ -1,6 +1,6 @@
 import { applyVizOverride } from "./params";
 import { StudioPanel } from "@/components/chart/StudioPanel";
-import { SharedDisplaySections, styleColumnsFor } from "@/components/chart/settings/SharedDisplaySections";
+import { SharedDisplaySections, styleColumnsFor, ruleColumnsFor } from "@/components/chart/settings/SharedDisplaySections";
 import { getDescriptor } from "@/components/chart/viz/registry";
 import { vizConfig, shellSettings, mergeVizSettings } from "@/components/chart/viz/renderConfig";
 import { isParamsV2 } from "@/api/charts";
@@ -29,16 +29,17 @@ export function CardVizPanel({ chart, override, columns, rows = [], onChange }: 
   const patch = (next: Record<string, unknown>) => onChange({ ...(override ?? {}), ...next });
 
   // styleColumnsFor inspects a handful of fields; hand it those, from the effective config.
-  const styleColumns = styleColumnsFor(
-    eff.viz_type,
-    {
-      spec: eff.params.spec,
-      cartesian: config as { yMetrics: string[] },
-      scalar: config as { metric?: string },
-      metrics: isParamsV2(eff.params) ? (eff.params.settings["pivot.metrics"] as string[]) : undefined,
-    } as ChartParams,
-    columns,
-  );
+  const styleParams = {
+    spec: eff.params.spec,
+    cartesian: config as { yMetrics: string[] },
+    scalar: config as { metric?: string },
+    metrics: isParamsV2(eff.params) ? (eff.params.settings["pivot.metrics"] as string[]) : undefined,
+    rows: isParamsV2(eff.params) ? (eff.params.settings["pivot.rows"] as string[]) : undefined,
+    cols: isParamsV2(eff.params) ? (eff.params.settings["pivot.cols"] as string[]) : undefined,
+  } as ChartParams;
+  const styleColumns = styleColumnsFor(eff.viz_type, styleParams, columns);
+  // A rule may only target what the viz can actually colour — narrower than what it can format.
+  const ruleColumns = ruleColumnsFor(eff.viz_type, styleParams, columns);
 
   return (
     <div className="flex flex-col gap-3 p-3">
@@ -69,6 +70,7 @@ export function CardVizPanel({ chart, override, columns, rows = [], onChange }: 
         vizType={eff.viz_type}
         resultColumns={columns}
         styleColumns={styleColumns}
+        ruleColumns={ruleColumns}
         tableState={tableState}
         columnSettings={columnSettings}
         conditionalFormatting={conditionalFormatting}

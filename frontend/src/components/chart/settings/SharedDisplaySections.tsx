@@ -18,7 +18,14 @@ export function styleColumnsFor(
   params: ChartParams,
   resultColumns: ResultColumn[],
 ): ResultColumn[] {
-  if (vizType === "pivot_table") return resultColumns.filter((c) => (params.metrics ?? []).includes(c.name));
+  if (vizType === "pivot_table") {
+    // Dimensions as well as measures. `PivotTable` has always read `column_title` for its
+    // row-dimension headers and `rowsToCsv` for every column, but only measures were offered here
+    // — so renaming a dimension was implemented and unreachable. It also gates date formatting,
+    // without which a month bucket renders as the raw `2026-01-01` instead of `January 2026`.
+    const named = new Set([...(params.rows ?? []), ...(params.cols ?? []), ...(params.metrics ?? [])]);
+    return resultColumns.filter((c) => named.has(c.name));
+  }
   if (isCartesianViz(vizType)) {
     const yMetrics = params.cartesian?.yMetrics ?? [];
     return resultColumns.filter((c) => yMetrics.includes(c.name));
@@ -29,6 +36,26 @@ export function styleColumnsFor(
 }
 
 /**
+ * Which columns a CONDITIONAL FORMATTING rule may target.
+ *
+ * Not the same set as `styleColumnsFor`. A pivot colours its value cells only — `buildConditional`
+ * is keyed by metric — so offering its dimensions would mean a rule that saves, reads back, and
+ * colours nothing. Number formatting is different: a dimension header genuinely does format, which
+ * is why the two lists diverge.
+ */
+export function ruleColumnsFor(
+  vizType: VizType,
+  params: ChartParams,
+  resultColumns: ResultColumn[],
+): ResultColumn[] {
+  if (vizType === "pivot_table") {
+    const metrics = new Set(params.metrics ?? []);
+    return resultColumns.filter((c) => metrics.has(c.name));
+  }
+  return styleColumnsFor(vizType, params, resultColumns);
+}
+
+/**
  * The display controls that belong to no single viz: table column layout, number
  * formatting and conditional formatting. They edit settings the shell owns
  * (`column_settings`, `conditional_formatting`, table state), so both the builder's
@@ -36,7 +63,7 @@ export function styleColumnsFor(
  */
 export function SharedDisplaySections({
   vizType, resultColumns, styleColumns, tableState, columnSettings, conditionalFormatting,
-  onTableState, onColumnSettings, onConditionalFormatting,
+  onTableState, onColumnSettings, onConditionalFormatting, only, ruleColumns,
 }: {
   vizType: VizType;
   resultColumns: ResultColumn[];
@@ -47,7 +74,18 @@ export function SharedDisplaySections({
   onTableState: (next: TableState) => void;
   onColumnSettings: (next: Record<string, ColumnFormat>) => void;
   onConditionalFormatting: (next: Rule[]) => void;
+  /** Which half to render. Metabase splits these across two tabs (Columns | Conditional
+   * Formatting) and egret stacked all of it in one column, which is why the pivot's panel — the
+   * longest in the app — read as cut off. Callers that want the old single column omit this and
+   * get everything, so the dashboard's card editor is unchanged. */
+  only?: "format" | "conditional";
+  /** Columns a rule may target; defaults to `styleColumns`. A pivot narrows it to its measures —
+   * see `ruleColumnsFor`. */
+  ruleColumns?: ResultColumn[];
 }) {
+  const showFormat = only !== "conditional";
+  const showConditional = only !== "format";
+
   if (resultColumns.length === 0) {
     // Name what THIS viz needs, not a generic "column formatting" sentence — for a table that
     // sat exactly where the column list belongs.
@@ -61,22 +99,23 @@ export function SharedDisplaySections({
   }
   return (
     <>
-      {vizType === "table" && (
+      {showFormat && vizType === "table" && (
         <div className="space-y-1.5">
           <SectionLabel>Columns</SectionLabel>
           <TableColumnsSection columns={resultColumns} value={tableState} onChange={onTableState} columnSettings={columnSettings} />
         </div>
       )}
-      {styleColumns.length > 0 && (
+      {showFormat && styleColumns.length > 0 && (
         <div className="space-y-1.5">
           <SectionLabel>Formatting</SectionLabel>
-          <FormatSection columns={styleColumns} value={columnSettings} onChange={onColumnSettings} />
+          <FormatSection columns={styleColumns} value={columnSettings} onChange={onColumnSettings}
+            allowMiniBar={vizType === "table"} />
         </div>
       )}
-      {(vizType === "table" || vizType === "pivot_table") && (
+      {showConditional && (vizType === "table" || vizType === "pivot_table") && (
         <div className="space-y-1.5">
           <SectionLabel>Conditional formatting</SectionLabel>
-          <ConditionalFormattingSection columns={styleColumns} rules={conditionalFormatting}
+          <ConditionalFormattingSection columns={ruleColumns ?? styleColumns} rules={conditionalFormatting}
             isPivot={vizType === "pivot_table"} onChange={onConditionalFormatting} />
         </div>
       )}

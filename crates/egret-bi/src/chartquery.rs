@@ -276,6 +276,36 @@ fn find_metric<'a>(metrics: &'a [Metric], name: &str) -> Option<&'a Metric> {
     metrics.iter().find(|m| m.metric_name == name)
 }
 
+/// Give a temporal literal a type, so the engine will compare it against a date column.
+///
+/// `sql_literal` emits a bare quoted string for anything that is not numeric or boolean, and no
+/// engine will implicitly compare `date = varchar`:
+///
+///     Cannot apply operator: date = varchar(10)
+///
+/// Every drill on a time dimension produced exactly that — clicking a cell in a pivot, a bar or a
+/// line chart with a date on the axis returned a 502, on every chart type. The literal is already
+/// quoted and escaped by `sql_literal`; this only wraps it.
+///
+/// The type name differs by engine: StarRocks calls a timestamp `DATETIME`, Trino calls it
+/// `TIMESTAMP`. `CAST` (rather than Trino's `DATE '…'` literal syntax) is what both accept.
+fn cast_temporal(engine: Engine, c: &DatasetColumn, lit: String) -> String {
+    if !c.is_temporal || !lit.starts_with('\'') {
+        return lit;
+    }
+    // `data_type` is the engine's own name for the column; only a plain date has no time part.
+    let date_only = c.data_type.trim().to_ascii_lowercase().starts_with("date")
+        && !c.data_type.to_ascii_lowercase().contains("time");
+    let ty = if date_only {
+        "DATE"
+    } else if matches!(engine, Engine::StarRocks) {
+        "DATETIME"
+    } else {
+        "TIMESTAMP"
+    };
+    format!("CAST({lit} AS {ty})")
+}
+
 /// Render one column filter into a WHERE predicate. Metric filters are rejected (→ HAVING,
 /// deferred to 3c-3.2). The operator comes from an enum, so no operator injection is possible.
 fn render_filter(engine: Engine, columns: &[DatasetColumn], f: &Filter) -> Result<String, BiError> {
@@ -298,7 +328,7 @@ fn render_filter(engine: Engine, columns: &[DatasetColumn], f: &Filter) -> Resul
             }
             let items = arr
                 .iter()
-                .map(|v| sql_literal(v, tg))
+                .map(|v| sql_literal(v, tg).map(|l| cast_temporal(engine, c, l)))
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ");
             let kw = if matches!(f.op, FilterOp::In) {
@@ -309,7 +339,7 @@ fn render_filter(engine: Engine, columns: &[DatasetColumn], f: &Filter) -> Resul
             format!("{lhs} {kw} ({items})")
         }
         _ => {
-            let lit = sql_literal(&f.value, tg)?;
+            let lit = cast_temporal(engine, c, sql_literal(&f.value, tg)?);
             let op = match f.op {
                 FilterOp::Eq => "=",
                 FilterOp::Ne => "<>",
@@ -848,6 +878,78 @@ mod tests {
         assert!(!sql.contains("__dim_"), "{sql}");
         assert!(!sql.contains("__b"), "{sql}");
         assert!(sql.contains("GROUP BY date_trunc('month'"), "{sql}");
+    }
+
+    /// Every drill on a time dimension sent `col = '2026-01-01'` and every engine refused it with
+    /// "Cannot apply operator: date = varchar(10)" — a 502 from clicking any cell on any chart
+    /// with a date on the axis. Live-verified before the fix, on a plain filter as well as a
+    /// pivot drill, so this was never pivot-specific.
+    #[test]
+    fn temporal_filter_literals_are_typed() {
+        let mut date_col = col("d", "datetime", None);
+        date_col.is_temporal = true;
+        date_col.data_type = "date".into();
+        let mut ts_col = col("ts", "datetime", None);
+        ts_col.is_temporal = true;
+        ts_col.data_type = "timestamp(3)".into();
+
+        let spec = |c: &str| QuerySpec {
+            metrics: vec!["revenue".into()],
+            dimensions: vec![],
+            columns: vec![],
+            filters: vec![Filter {
+                col: c.into(),
+                op: FilterOp::Eq,
+                value: serde_json::json!("2026-01-01"),
+            }],
+            orderby: vec![],
+            row_limit: 10,
+            rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
+        };
+        let cols = vec![date_col, ts_col];
+        let metrics = [metric("revenue", "SUM(price)")];
+
+        let d = build(Engine::Trino, &phys(), &cols, &metrics, &spec("d")).unwrap();
+        assert!(d.contains("CAST('2026-01-01' AS DATE)"), "{d}");
+
+        // A timestamp is DATETIME on StarRocks and TIMESTAMP on Trino.
+        let t_trino = build(Engine::Trino, &phys(), &cols, &metrics, &spec("ts")).unwrap();
+        assert!(
+            t_trino.contains("CAST('2026-01-01' AS TIMESTAMP)"),
+            "{t_trino}"
+        );
+        let t_sr = build(Engine::StarRocks, &phys(), &cols, &metrics, &spec("ts")).unwrap();
+        assert!(t_sr.contains("CAST('2026-01-01' AS DATETIME)"), "{t_sr}");
+    }
+
+    #[test]
+    fn non_temporal_filters_are_left_alone() {
+        // The cast must not leak onto ordinary string columns.
+        let spec = QuerySpec {
+            metrics: vec!["revenue".into()],
+            dimensions: vec![],
+            columns: vec![],
+            filters: vec![Filter {
+                col: "region".into(),
+                op: FilterOp::Eq,
+                value: serde_json::json!("EU"),
+            }],
+            orderby: vec![],
+            row_limit: 10,
+            rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
+        };
+        let sql = build(
+            Engine::Trino,
+            &phys(),
+            &[col("region", "string", None)],
+            &[metric("revenue", "SUM(price)")],
+            &spec,
+        )
+        .unwrap();
+        assert!(sql.contains("\"region\" = 'EU'"), "{sql}");
+        assert!(!sql.contains("CAST("), "{sql}");
     }
 
     #[test]

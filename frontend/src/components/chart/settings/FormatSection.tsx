@@ -43,11 +43,15 @@ function ToggleRow({ id, label, checked, onChange }: {
 }
 
 export function FormatSection({
-  columns, value, onChange,
+  columns, value, onChange, allowMiniBar = true,
 }: {
   columns: ResultColumn[];
   value: Record<string, ColumnFormat>;
   onChange: (v: Record<string, ColumnFormat>) => void;
+  /** Only the flat table draws mini bars. The pivot has no renderer for `show_mini_bar`, so the
+   * switch sat there doing nothing — offering a setting that cannot take effect is worse than
+   * not offering it. */
+  allowMiniBar?: boolean;
 }) {
   // which column's settings are expanded (accordion); null = all collapsed
   const [open, setOpen] = useState<string | null>(null);
@@ -144,6 +148,27 @@ export function FormatSection({
                         onChange={(e) => patch({ decimals: e.target.value === "" ? undefined : Number(e.target.value) })} />
                     </Field>
 
+                    {/* `scale` and `number_separators` were both honoured by `formatValue` and had
+                        no control anywhere — implemented and unreachable, the same shape of defect
+                        that cost the pie four settings. Metabase offers both. */}
+                    <Field label="Separator style">
+                      <Select value={fmt.number_separators ?? ".,"}
+                        onValueChange={(v) => patch({ number_separators: v })}>
+                        <SelectTrigger aria-label="Separator style" className="h-8"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value=".,">100,000.00</SelectItem>
+                          <SelectItem value=", ">100 000,00</SelectItem>
+                          <SelectItem value=",.">100.000,00</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+
+                    <Field label="Multiply by a number">
+                      <Input type="number" className="h-8" placeholder="1"
+                        value={fmt.scale ?? ""}
+                        onChange={(e) => patch({ scale: e.target.value === "" ? undefined : Number(e.target.value) })} />
+                    </Field>
+
                     <div className="flex gap-2">
                       <Field label="Prefix">
                         <Input className="h-8" value={fmt.prefix ?? ""} onChange={(e) => patch({ prefix: e.target.value })} />
@@ -156,7 +181,9 @@ export function FormatSection({
                     <div className="space-y-2.5 pt-1">
                       <ToggleRow id={`fmt-compact-${c.name}`} label="Compact (1.2K)" checked={!!fmt.compact} onChange={(v) => patch({ compact: v })} />
                       <ToggleRow id={`fmt-negatives-${c.name}`} label="Negatives in ( )" checked={!!fmt.negative_in_parentheses} onChange={(v) => patch({ negative_in_parentheses: v })} />
-                      <ToggleRow id={`fmt-minibar-${c.name}`} label="Show a mini bar chart" checked={!!fmt.show_mini_bar} onChange={(v) => patch({ show_mini_bar: v })} />
+                      {allowMiniBar && (
+                        <ToggleRow id={`fmt-minibar-${c.name}`} label="Show a mini bar chart" checked={!!fmt.show_mini_bar} onChange={(v) => patch({ show_mini_bar: v })} />
+                      )}
                     </div>
                   </div>
                 )}
@@ -171,6 +198,12 @@ export function FormatSection({
                           <SelectItem value="M/D/YYYY">1/31/2024</SelectItem>
                           <SelectItem value="D/M/YYYY">31/1/2024</SelectItem>
                           <SelectItem value="YYYY-MM-DD">2024-01-31</SelectItem>
+                          {/* Bucket-shaped styles. A pivot grouped by month arrives as the first
+                              of the month, so a full date reads "1/1/2026" and the day is noise —
+                              Metabase labels the same bucket "January 2026" / "Q1 2026". */}
+                          <SelectItem value="MMMM YYYY">January 2024</SelectItem>
+                          <SelectItem value="[Q]Q YYYY">Q1 2024</SelectItem>
+                          <SelectItem value="YYYY">2024</SelectItem>
                         </SelectContent>
                       </Select>
                     </Field>

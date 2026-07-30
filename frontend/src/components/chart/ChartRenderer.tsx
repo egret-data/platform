@@ -309,6 +309,8 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
           dimTotals: pivot.dimTotals,
         }}
         columnWidths={pivot.columnWidths}
+        temporalUnits={params.spec.temporal_units ?? {}}
+        columnTypes={Object.fromEntries(columns.map((c) => [c.name, c.type]))}
         columnSettings={columnSettings}
         conditionalFormatting={conditionalFormatting}
         metricTypes={metricTypes}

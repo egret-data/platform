@@ -22,6 +22,7 @@ interface PivotProps {
   sortDims: Record<string, "asc" | "desc">;
   dimTotals?: Record<string, boolean>;
   columnWidths?: PivotColumnWidths;
+  temporalUnits?: Record<string, string>;
   onToggleCollapse: (path: string) => void;
   onCycleSort: (dim: string) => void;
   onResizeColumn?: (kind: "left" | "value", index: number, width: number) => void;
@@ -96,6 +97,8 @@ export function PreviewPane({
             onToggleCollapse={pivot.onToggleCollapse}
             onCycleSort={pivot.onCycleSort}
             columnWidths={pivot.columnWidths}
+            temporalUnits={pivot.temporalUnits}
+            columnTypes={Object.fromEntries(columns.map((c) => [c.name, c.type]))}
             onResizeColumn={pivot.onResizeColumn}
             onCellDrill={onCellDrill}
           />

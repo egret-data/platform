@@ -64,9 +64,24 @@ export function pivotFromParams(params: AnyChartParams): PivotConfig {
   };
 }
 
+/** Machine name -> display name, from the dataset's own `verbose_name`. Datasets have offered
+ * these for a long time and the chart studio ignored them, so a column named "Total Sales" still
+ * showed as `total_revenue` everywhere a field is picked. */
+function columnLabels(columns: { column_name: string; verbose_name?: string }[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const c of columns) if (c.verbose_name) out[c.column_name] = c.verbose_name;
+  return out;
+}
+function metricLabels(metrics: { metric_name: string; verbose_name?: string }[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const m of metrics) if (m.verbose_name) out[m.metric_name] = m.verbose_name;
+  return out;
+}
+
 function RowsControl({ config, onChange, columns }: VizControlProps<PivotConfig>) {
   return (
     <FieldZone label="Rows" selected={config.rows} onChange={(v) => onChange({ rows: v })}
+      labels={columnLabels(columns)}
       options={columns.map((c) => c.column_name).filter((n) => !config.cols.includes(n))} />
   );
 }
@@ -75,7 +90,11 @@ function ColsControl({ config, onChange, columns, unitRow }: VizControlProps<Piv
   return (
     <>
       <FieldZone label="Columns" selected={config.cols} onChange={(v) => onChange({ cols: v })}
+        labels={columnLabels(columns)}
         options={columns.map((c) => c.column_name).filter((n) => !config.rows.includes(n))} />
+      {/* One unit row per temporal field across BOTH zones. `unitRow` names the field it belongs
+          to — with two date dimensions there were two identical "UNIT" rows and no way to tell
+          which was which. */}
       {[...config.rows, ...config.cols].map((c) => <div key={c}>{unitRow(c)}</div>)}
     </>
   );
@@ -84,37 +103,50 @@ function ColsControl({ config, onChange, columns, unitRow }: VizControlProps<Piv
 function ValuesControl({ config, onChange, metrics }: VizControlProps<PivotConfig>) {
   return (
     <FieldZone label="Values" selected={config.metrics} onChange={(v) => onChange({ metrics: v })}
+      labels={metricLabels(metrics)}
       options={metrics.map((m) => m.metric_name)} />
   );
 }
 
-function TotalsControl({ config, onChange }: VizControlProps<PivotConfig>) {
-  const row = (id: string, label: string, checked: boolean, key: keyof PivotConfig) => (
-    <div className="flex items-center justify-between">
-      <Label htmlFor={id} className="text-sm font-normal">{label}</Label>
-      <Switch id={id} aria-label={label} checked={checked}
-        onCheckedChange={(v) => onChange({ [key]: v } as Partial<PivotConfig>)} />
+function TotalsControl({ config, onChange, columns }: VizControlProps<PivotConfig>) {
+  const row = (id: string, label: string, checked: boolean, key: keyof PivotConfig, hint?: string) => (
+    <div className="space-y-0.5">
+      <div className="flex items-center justify-between">
+        <Label htmlFor={id} className="text-sm font-normal">{label}</Label>
+        <Switch id={id} aria-label={label} checked={checked}
+          onCheckedChange={(v) => onChange({ [key]: v } as Partial<PivotConfig>)} />
+      </div>
+      {/* Persistent helper text rather than a tooltip: these three read as near-synonyms, and
+          "Condense duplicate totals" is the one nobody can guess from its name. Metabase explains
+          it too, behind an info icon; saying it outright costs one line. */}
+      {hint && <p className="pr-10 text-xs text-muted-foreground">{hint}</p>}
     </div>
   );
   // Only a dimension that has one nested beneath it produces a subtotal band; the innermost one's
   // groups are leaves. Listing it would offer a switch that does nothing.
   const subtotalDims = config.rows.slice(0, -1);
   const colTotalsOn = config.showColTotals ?? true;
+  const labels = columnLabels(columns);
 
   return (
     <div className="space-y-1">
       <SectionLabel>Totals</SectionLabel>
       <div className="space-y-2.5 pt-1.5">
-        {row("show-row-totals", "Row totals", config.showRowTotals ?? true, "showRowTotals")}
-        {row("show-col-totals", "Column totals", colTotalsOn, "showColTotals")}
-        {row("condense-totals", "Condense duplicate totals", config.condense ?? true, "condense")}
+        {row("show-row-totals", "Row totals", config.showRowTotals ?? true, "showRowTotals",
+          "A Total column down the right-hand side.")}
+        {row("show-col-totals", "Column totals", colTotalsOn, "showColTotals",
+          "Subtotal bands per group, and a Grand totals row at the bottom.")}
+        {row("condense-totals", "Condense duplicate totals", config.condense ?? true, "condense",
+          "Hides a subtotal row when its group has only one row, so the two would read the same.")}
 
         {colTotalsOn && subtotalDims.length > 0 && (
           <div className="space-y-2 border-t pt-2.5">
             <div className="text-xs text-muted-foreground">Subtotals for</div>
             {subtotalDims.map((name) => (
               <div key={name} className="flex items-center justify-between">
-                <Label htmlFor={`subtotal-${name}`} className="truncate text-sm font-normal">{name}</Label>
+                <Label htmlFor={`subtotal-${name}`} className="truncate text-sm font-normal" title={name}>
+                  {labels[name]?.trim() || name}
+                </Label>
                 <Switch
                   id={`subtotal-${name}`}
                   aria-label={`subtotals for ${name}`}

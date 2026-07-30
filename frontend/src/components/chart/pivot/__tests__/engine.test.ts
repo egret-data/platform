@@ -318,3 +318,29 @@ describe("per-dimension subtotals", () => {
     expect(p.bodyRows.some((r) => r.kind === "grand")).toBe(false);
   });
 });
+
+describe("metric sub-header", () => {
+  const oneMetric: PivotInput = {
+    columns: ["region", "d", "revenue", "__grp_0", "__grp_1"],
+    rows: [["EU", "2026-01", 10, 0, 0], ["EU", null, 10, 0, 1], [null, null, 10, 1, 1]],
+    rowDims: ["region"], colDims: ["d"], metrics: ["revenue"],
+    showRowTotals: false, showColTotals: true, condense: false, collapsed: new Set(),
+  };
+
+  it("is omitted for a single unnamed metric under a column dimension", () => {
+    const p = buildPivot(oneMetric);
+    expect(p.topHeader).toHaveLength(1);
+    expect(p.topHeader[0].some((c) => c.metric)).toBe(false);
+  });
+
+  it("appears when that metric is renamed, so the title has somewhere to show", () => {
+    // Without this, typing a Column title for the only metric changed nothing on screen.
+    const p = buildPivot({ ...oneMetric, metricTitles: { revenue: "Doanh thu" } });
+    expect(p.topHeader).toHaveLength(2);
+    expect(p.topHeader[1].every((c) => c.metric === "revenue")).toBe(true);
+  });
+
+  it("an empty title is not a rename", () => {
+    expect(buildPivot({ ...oneMetric, metricTitles: { revenue: "" } }).topHeader).toHaveLength(1);
+  });
+});

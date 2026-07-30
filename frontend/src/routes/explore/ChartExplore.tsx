@@ -14,7 +14,7 @@ import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
 import type { DrillContext } from "@/components/chart/drill";
 import { ChartTypeGallery } from "@/components/chart/ChartTypeGallery";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
-import { SharedDisplaySections, styleColumnsFor } from "@/components/chart/settings/SharedDisplaySections";
+import { SharedDisplaySections, styleColumnsFor, ruleColumnsFor } from "@/components/chart/settings/SharedDisplaySections";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
 import { StudioToolbar } from "@/components/chart/StudioToolbar";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
@@ -122,6 +122,9 @@ export default function ChartExplore() {
     if (!id && isValidViz(typeParam)) setViz(typeParam);
   }, [id, typeParam]);
 
+  // Only these two draw conditional colours, so only they get the tab.
+  const hasConditionalRules = viz === "table" || viz === "pivot_table";
+
   const columns = detail.data?.columns ?? [];
   const metrics = detail.data?.metrics ?? [];
 
@@ -132,13 +135,20 @@ export default function ChartExplore() {
       else next[col] = token;
       return next;
     });
-  const unitRow = (col: string | undefined) =>
-    col && columns.find((c) => c.column_name === col)?.is_temporal ? (
+  const unitRow = (col: string | undefined) => {
+    const c = col ? columns.find((x) => x.column_name === col) : undefined;
+    // The label names the field. It used to read a bare "Unit", which is unambiguous with one date
+    // dimension and useless with two — a pivot with a date on both axes showed two identical rows.
+    const shown = c?.verbose_name?.trim() || col;
+    return c?.is_temporal ? (
       <div className="flex items-center gap-2 pl-2">
-        <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Unit</span>
-        <TemporalUnitSelect value={temporalUnits[col]} onChange={(u) => setUnit(col, u)} />
+        <span className="truncate text-[11px] uppercase tracking-wide text-muted-foreground" title={col}>
+          Unit · {shown}
+        </span>
+        <TemporalUnitSelect value={temporalUnits[col!]} onChange={(u) => setUnit(col!, u)} />
       </div>
     ) : null;
+  };
 
   function specForRun(): QuerySpec {
     if (descriptor) return descriptor.buildSpec(descConfig, { filters, rowLimit, temporalUnits });
@@ -327,6 +337,11 @@ export default function ChartExplore() {
 
   // Data/Display builder tab in the URL (?tab=), default "data" (preserves prior behavior).
   const builderTab = searchParams.get("tab") ?? "data";
+  // Switching to a viz without rules while that tab is open would leave the panel blank: the
+  // trigger disappears but the selected value does not, and no TabsContent matches it.
+  useEffect(() => {
+    if (!hasConditionalRules && builderTab === "rules") setBuilderTab("display");
+  }, [hasConditionalRules, builderTab]);
   const setBuilderTab = (v: string) =>
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
@@ -377,7 +392,12 @@ export default function ChartExplore() {
   return (
     <div className="flex h-full min-h-0 gap-0">
       {/* Left panel */}
-      <div className="w-72 shrink-0 overflow-y-auto border-r p-4 space-y-4">
+      {/* `scrollbar-gutter: stable` keeps a visible track instead of an overlay scrollbar that
+          only appears mid-scroll. On macOS the overlay bar is hidden at rest, so a settings panel
+          taller than the window looked simply cut off — the pivot's is the longest (totals,
+          per-dimension subtotals, formatting, conditional formatting) and it was reported as
+          "Display doesn't show everything". It always scrolled; nothing said so. */}
+      <div className="w-72 shrink-0 overflow-y-auto [scrollbar-gutter:stable] border-r p-4 space-y-4">
         <Link className="text-xs text-muted-foreground hover:underline" to={`/explore/${ws}/charts`}>← Charts</Link>
 
         <VizSwitcher viz={viz} onChange={changeViz} />
@@ -386,6 +406,12 @@ export default function ChartExplore() {
           <TabsList className={UNDERLINE_LIST}>
             <TabsTrigger value="data" className={UNDERLINE_TRIGGER}>Data</TabsTrigger>
             <TabsTrigger value="display" className={UNDERLINE_TRIGGER}>Display</TabsTrigger>
+            {/* Its own tab, the way Metabase splits Columns | Conditional Formatting. Stacked in
+                with the rest, it made the pivot's panel the longest in the app and the reason it
+                read as cut off. Only table and pivot have rules, so the tab only exists there. */}
+            {hasConditionalRules && (
+              <TabsTrigger value="rules" className={UNDERLINE_TRIGGER}>Colors</TabsTrigger>
+            )}
           </TabsList>
 
           {/* ── DATA TAB ── */}
@@ -448,6 +474,10 @@ export default function ChartExplore() {
                     cartesian: descConfig as { yMetrics: string[] },
                     scalar: descConfig as { metric?: string },
                     metrics: (descConfig as { metrics?: string[] }).metrics,
+                    // The pivot formats its dimensions as well as its measures — without these
+                    // two, `styleColumnsFor` saw no rows/cols and offered measures only.
+                    rows: (descConfig as { rows?: string[] }).rows,
+                    cols: (descConfig as { cols?: string[] }).cols,
                   } as ChartParams, resultColumns)}
                   tableState={tableState}
                   columnSettings={columnSettings}
@@ -455,10 +485,44 @@ export default function ChartExplore() {
                   onTableState={setTableState}
                   onColumnSettings={setColumnSettings}
                   onConditionalFormatting={setConditionalFormatting}
+                  only="format"
                 />
               </>
             )}
           </TabsContent>
+
+          {/* ── COLORS TAB (conditional formatting) ── */}
+          {hasConditionalRules && (
+            <TabsContent value="rules" className="space-y-4">
+              <SharedDisplaySections
+                vizType={viz}
+                resultColumns={resultColumns}
+                styleColumns={styleColumnsFor(viz, {
+                  spec: specForRun(),
+                  cartesian: descConfig as { yMetrics: string[] },
+                  scalar: descConfig as { metric?: string },
+                  metrics: (descConfig as { metrics?: string[] }).metrics,
+                  rows: (descConfig as { rows?: string[] }).rows,
+                  cols: (descConfig as { cols?: string[] }).cols,
+                } as ChartParams, resultColumns)}
+                tableState={tableState}
+                columnSettings={columnSettings}
+                conditionalFormatting={conditionalFormatting}
+                onTableState={setTableState}
+                onColumnSettings={setColumnSettings}
+                ruleColumns={ruleColumnsFor(viz, {
+                  spec: specForRun(),
+                  cartesian: descConfig as { yMetrics: string[] },
+                  scalar: descConfig as { metric?: string },
+                  metrics: (descConfig as { metrics?: string[] }).metrics,
+                  rows: (descConfig as { rows?: string[] }).rows,
+                  cols: (descConfig as { cols?: string[] }).cols,
+                } as ChartParams, resultColumns)}
+                onConditionalFormatting={setConditionalFormatting}
+                only="conditional"
+              />
+            </TabsContent>
+          )}
         </Tabs>
       </div>
 
@@ -524,6 +588,7 @@ export default function ChartExplore() {
                 sortDims: pivotCfg.sort ?? {},
                 dimTotals: pivotCfg.dimTotals,
                 columnWidths: pivotCfg.columnWidths,
+                temporalUnits: temporalUnits ?? {},
                 // Stored with the chart like `collapsedRows` and `sort`, and deliberately NOT part
                 // of `buildSpec` — a column width is presentation, and putting it in the spec would
                 // re-run the query on every drag.

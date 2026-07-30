@@ -1,5 +1,11 @@
 import dayjs from "dayjs";
+// `Q` (quarter) is not in dayjs's core token set. A pivot bucketed by quarter has to be able to
+// render "Q2 2026" — the label Metabase shows — so the plugin is registered here, once, next to
+// the only formatter that uses it.
+import advancedFormat from "dayjs/plugin/advancedFormat";
 import { isNumericType, isTemporalType, type ColumnFormat } from "./format-types";
+
+dayjs.extend(advancedFormat);
 
 function applySeparators(s: string, separators?: string): string {
   if (!separators || separators === ".,") return s;

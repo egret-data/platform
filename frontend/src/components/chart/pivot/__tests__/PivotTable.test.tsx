@@ -105,3 +105,48 @@ describe("PivotTable — column_title header rename", () => {
     expect(screen.getByText("region")).toBeInTheDocument();
   });
 });
+
+describe("PivotTable — dimension labels are formatted", () => {
+  // A month bucket arrives as the raw `2026-01-01`. Metabase's sample pivot reads "Q2 2025";
+  // egret rendered the raw value because only measures were formattable, and the dimension label
+  // never went through `formatValue` at all.
+  const dated: PivotInput = {
+    columns: ["region", "d", "revenue", "__grp_0", "__grp_1"],
+    rows: [
+      ["EU", "2026-01-01", 10, 0, 0],
+      ["EU", null, 10, 0, 1],
+      [null, null, 10, 1, 1],
+    ],
+    rowDims: ["region"], colDims: ["d"], metrics: ["revenue"],
+    showRowTotals: false, showColTotals: true, condense: false, collapsed: new Set(),
+  };
+
+  it("formats a column-dimension header with its date format", () => {
+    render(<PivotTable input={dated}
+      columnTypes={{ d: "date" }}
+      columnSettings={{ d: { date_style: "MMMM YYYY" } }} />);
+    expect(screen.getByText("January 2026")).toBeInTheDocument();
+    expect(screen.queryByText("2026-01-01")).not.toBeInTheDocument();
+  });
+
+  it("formats a row-dimension header too", () => {
+    const rowDated: PivotInput = { ...dated, rowDims: ["d"], colDims: [], 
+      columns: ["d", "revenue", "__grp_0"],
+      rows: [["2026-01-01", 10, 0], [null, 10, 1]] };
+    render(<PivotTable input={rowDated}
+      columnTypes={{ d: "date" }}
+      columnSettings={{ d: { date_style: "MMMM YYYY" } }} />);
+    expect(screen.getByText("January 2026")).toBeInTheDocument();
+  });
+
+  it("leaves the label alone when the column has no format set", () => {
+    render(<PivotTable input={dated} columnTypes={{ d: "date" }} />);
+    expect(screen.getByText("2026-01-01")).toBeInTheDocument();
+  });
+
+  it("does not touch subtotal captions, which are prose not values", () => {
+    render(<PivotTable input={dated} columnTypes={{ d: "date" }}
+      columnSettings={{ d: { date_style: "MMMM YYYY" } }} />);
+    expect(screen.getByText("Grand totals")).toBeInTheDocument();
+  });
+});

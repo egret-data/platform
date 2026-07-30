@@ -2,9 +2,11 @@ import { useState } from "react";
 import { isNumericType, type Rule, type SingleColorRule, type ColorRangeRule, type FormattingOperator } from "../format-types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { ChevronsUpDown } from "lucide-react";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
@@ -41,9 +43,6 @@ export function RuleEditor({
   const allNumeric = selected.length > 0 && selected.every((c) => isNumericType(c.type));
   const ops = allNumeric ? [...NUMERIC_OPS, ...NULL_OPS] : [...STRING_OPS, ...NULL_OPS];
 
-  function toggleColumn(name: string) {
-    setDraft((d) => ({ ...d, columns: d.columns.includes(name) ? d.columns.filter((c) => c !== name) : [...d.columns, name] }));
-  }
   function setType(type: "single" | "range") {
     if (type === draft.type) return;
     setDraft((d) =>
@@ -69,14 +68,54 @@ export function RuleEditor({
     <div className="space-y-3 text-sm">
       <div className="space-y-1">
         <div className="text-xs font-medium uppercase text-muted-foreground">Columns</div>
-        <div className="flex flex-col gap-1 pt-1">
-          {columns.map((c) => (
-            <div key={c.name} className="flex items-center gap-2">
-              <Checkbox id={`rule-col-${c.name}`} checked={draft.columns.includes(c.name)} onCheckedChange={() => toggleColumn(c.name)} />
-              <Label htmlFor={`rule-col-${c.name}`} className="cursor-pointer text-sm font-normal">{c.name}</Label>
-            </div>
-          ))}
-        </div>
+        {/* A dropdown, not one standing checkbox per column: the list is as long as the result
+            is wide, and on a table twenty columns of rows pushed the operator, value and colour
+            off the panel. Closed, the trigger reads like a select and states the choice; open, it
+            is the same tick-list as the field pickers in the Data tab.
+
+            Multi-select rather than a plain Select because a rule genuinely targets several
+            columns — `buildConditional` iterates them, and a colour range takes its extent across
+            all of them at once, so narrowing this to one would change what a rule can express. */}
+        <Popover>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              aria-label="Columns"
+              className="flex h-8 w-full items-center justify-between gap-2 rounded-md border px-2 text-left text-sm hover:bg-muted/30"
+            >
+              <span className={`truncate ${draft.columns.length ? "" : "text-muted-foreground"}`}>
+                {draft.columns.length === 0
+                  ? "Pick columns…"
+                  : draft.columns.length <= 2
+                    ? draft.columns.join(", ")
+                    : `${draft.columns.length} columns`}
+              </span>
+              <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-50" />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent align="start" className="max-h-64 w-64 overflow-y-auto p-1">
+            {columns.map((c) => (
+              <label
+                key={c.name}
+                className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-accent"
+              >
+                <Checkbox
+                  checked={draft.columns.includes(c.name)}
+                  onCheckedChange={() =>
+                    setDraft((d) => ({
+                      ...d,
+                      columns: d.columns.includes(c.name)
+                        ? d.columns.filter((x) => x !== c.name)
+                        : [...d.columns, c.name],
+                    }))
+                  }
+                />
+                <span className="flex-1 truncate">{c.name}</span>
+                <span className="text-xs text-muted-foreground">{c.type}</span>
+              </label>
+            ))}
+          </PopoverContent>
+        </Popover>
       </div>
 
       {allNumeric && (
