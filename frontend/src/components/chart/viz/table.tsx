@@ -88,8 +88,11 @@ export function tableDescriptor(): VizDescriptor<TableConfig> {
       };
     },
     toSettings: (cfg) => ({ "table.columns": cfg.columns, "table.metrics": cfg.metrics }),
-    // A bare table is valid: with no metric it just lists raw rows.
-    requiredFields: () => [],
+    // A bare table is valid — with no metric it just lists raw rows — but an EMPTY one is not.
+    // Returning [] unconditionally told the runner the chart was ready the moment a dataset was
+    // picked, so it fired `columns: [], metrics: []` and the backend answered 400 twice before the
+    // user had chosen anything. The preview now asks for a field instead of failing a query.
+    requiredFields: (cfg) => (cfg.metrics.length > 0 || cfg.columns.length > 0 ? [] : ["at least one column or metric"]),
     buildSpec: (cfg, shared: SharedQueryState): QuerySpec => {
       const agg = cfg.metrics.length > 0;
       const dims = agg ? cfg.columns : [];

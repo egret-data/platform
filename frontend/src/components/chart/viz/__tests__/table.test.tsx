@@ -7,8 +7,14 @@ const SHARED = { filters: [], rowLimit: 1000, temporalUnits: { order_date: "mont
 describe("tableDescriptor", () => {
   const d = tableDescriptor();
 
-  it("needs nothing — a bare table lists raw rows", () => {
-    expect(d.requiredFields({ columns: [], metrics: [] })).toEqual([]);
+  it("needs no metric — a bare table lists raw rows", () => {
+    expect(d.requiredFields({ columns: ["region"], metrics: [] })).toEqual([]);
+  });
+
+  // Reporting "ready" for an empty config made the runner fire `columns: [], metrics: []`, which
+  // the backend answers 400 — two console errors on a page the user had not yet touched.
+  it("asks for a field when nothing is picked instead of running an empty query", () => {
+    expect(d.requiredFields({ columns: [], metrics: [] })).toEqual(["at least one column or metric"]);
   });
 
   it("groups by the chosen columns when metrics are picked", () => {

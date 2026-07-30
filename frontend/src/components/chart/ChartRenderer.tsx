@@ -287,6 +287,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
         conditionalFormatting={conditionalFormatting}
         tableState={tableState}
         dimensionColumns={dimensionColumns}
+        temporalUnits={params.spec.temporal_units ?? {}}
         onCellDrill={onValueClick}
       />
     );

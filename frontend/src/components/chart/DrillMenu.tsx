@@ -1,11 +1,28 @@
 import type { ChartFilter } from "@/api/charts";
-import { drillFilters, type DrillContext } from "./drill";
+import { drillFilters, type DrillContext, type DrillDim } from "./drill";
+import { isExtractUnit, temporalLabel } from "./temporal-units";
+
+/**
+ * What one "Filter by" entry will actually do.
+ *
+ * "See these records" learned to send a half-open range for a bucketed dimension; this menu item
+ * did not, and kept emitting `= 2026-01-01`. The two halves of one menu disagreed, and the half
+ * that stayed on screen — the chart filter — was the one that under-reported. The label follows:
+ * "is 2026-01-01" under a column grouped by month names a day nobody asked about.
+ */
+function describe(d: DrillDim, filters: ChartFilter[]): string {
+  if (filters.length === 2 && "value" in filters[0] && "value" in filters[1]) {
+    return `${d.col} ≥ ${String(filters[0].value)} and < ${String(filters[1].value)}`;
+  }
+  return `${d.col} is ${isExtractUnit(d.unit) ? temporalLabel(d.unit, d.value) : String(d.value)}`;
+}
 
 export function DrillMenu({
   ctx, x, y, onFilterBy, onSeeRecords, onClose,
 }: {
   ctx: DrillContext; x: number; y: number;
-  onFilterBy: (filter: ChartFilter) => void;
+  /** An array, not one filter: a bucketed dimension needs both ends of its range. */
+  onFilterBy: (filters: ChartFilter[]) => void;
   onSeeRecords: (filters: ChartFilter[]) => void;
   onClose: () => void;
 }) {
@@ -16,16 +33,22 @@ export function DrillMenu({
         className="fixed z-50 min-w-48 overflow-hidden rounded-md border bg-popover p-1 text-sm shadow-md"
         style={{ left: x, top: y }}
       >
-        {ctx.dims.map((d, i) => (
-          <button
-            key={i}
-            type="button"
-            className="block w-full rounded px-2 py-1.5 text-left hover:bg-muted"
-            onClick={() => { onFilterBy({ col: d.col, op: "eq", value: d.value }); onClose(); }}
-          >
-            Filter by {d.col} is {String(d.value)}
-          </button>
-        ))}
+        {ctx.dims.map((d, i) => {
+          const filters = drillFilters({ dims: [d] });
+          // An extraction unit contributes no filter (its value is an integer field, not an
+          // instant), so the entry would be a button that changes nothing.
+          if (filters.length === 0) return null;
+          return (
+            <button
+              key={i}
+              type="button"
+              className="block w-full rounded px-2 py-1.5 text-left hover:bg-muted"
+              onClick={() => { onFilterBy(filters); onClose(); }}
+            >
+              Filter by {describe(d, filters)}
+            </button>
+          );
+        })}
         {ctx.dims.length > 0 && <div className="my-1 border-t" />}
         <button
           type="button"

@@ -100,6 +100,12 @@ export function TableColumnsSection({
         />
       </div>
 
+      <div className="flex items-center justify-between">
+        <Label htmlFor="row-index" className="text-sm font-normal">Show row index</Label>
+        <Switch id="row-index" checked={!!value.rowIndex}
+          onCheckedChange={(v) => onChange({ ...value, rowIndex: v })} />
+      </div>
+
       <div className="space-y-2">
         <div className="text-xs font-medium uppercase text-muted-foreground">Pagination</div>
         <div className="flex items-center justify-between">

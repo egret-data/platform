@@ -632,8 +632,11 @@ export default function DashboardView() {
       </Dialog>
       {drillMenu && (
         <DrillMenu ctx={drillMenu.ctx} x={drillMenu.x} y={drillMenu.y}
-          onFilterBy={(f) => {
-            if (!("value" in f)) return;
+          onFilterBy={(fs) => {
+            // A dashboard parameter holds one scalar, so a bucketed drill contributes its lower
+            // bound — the start of the period the cell stood for.
+            const f = fs[0];
+            if (!f || !("value" in f)) return;
             const target = parameters.find((p) =>
               dashboard.cards.some((c) => ((c.options.paramMappings as Record<string, string>) ?? {})[p.id] === f.col));
             if (target) paramsState.setValue(target.slug, f.value);
