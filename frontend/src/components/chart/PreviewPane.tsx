@@ -118,7 +118,14 @@ export function PreviewPane({
                 (the chart-studio bug this program already hit once); the floor below is only
                 a floor, so a short window still gets a usable chart. */}
             <div data-chart-card className="min-h-[20rem] flex-1 rounded-lg border p-2">
-              <ChartRenderer vizType={viz} params={params} columns={columns} rows={rows} metricTypes={metricTypes} />
+              {/* `onValueClick` is what makes a chart clickable at all: ChartRenderer guards every
+                  chart type's click handler on it, so leaving it off meant NO ECharts chart was
+                  ever drillable in the editor — pie, bar, line, gauge, waterfall, all of them.
+                  The two table surfaces above already had `onCellDrill`; this is the same gesture,
+                  and the dashboard has always passed it (DashboardView), which is why the gap only
+                  showed up here. */}
+              <ChartRenderer vizType={viz} params={params} columns={columns} rows={rows} metricTypes={metricTypes}
+                onValueClick={onCellDrill} />
             </div>
           </ChartErrorBoundary>
         )}

@@ -1,11 +1,24 @@
-import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { PreviewPane } from "../PreviewPane";
 import { EMPTY_SPEC } from "@/api/charts";
 
-// The card's geometry is what these tests are about, not what ECharts draws inside it.
+/** The click a test wants the mocked chart to report; set per test. */
+let mockClickPayload: {
+  name?: string;
+  seriesName?: string;
+  treePathInfo?: { name?: string }[];
+  x: number;
+  y: number;
+} = { name: "EU", seriesName: "rev", x: 3, y: 4 };
+
+// The card's geometry is what most of these tests are about, not what ECharts draws inside it —
+// but the drill tests below need the one thing the real renderer contributes to this seam: a
+// click coming back OUT of the canvas. So the stand-in is a button that reports one.
 vi.mock("@/components/chart/echarts/EChartsRenderer", () => ({
-  EChartsRenderer: () => <div data-testid="echarts" />,
+  EChartsRenderer: ({ onPointClick }: { onPointClick?: (p: unknown) => void }) => (
+    <button data-testid="echarts" onClick={() => onPointClick?.(mockClickPayload)} />
+  ),
 }));
 
 const base = {
@@ -26,6 +39,10 @@ const base = {
 };
 
 describe("PreviewPane", () => {
+  beforeEach(() => {
+    mockClickPayload = { name: "EU", seriesName: "rev", x: 3, y: 4 };
+  });
+
   it("shows the empty state before a run", () => {
     render(<PreviewPane {...base} />);
     expect(screen.getByText("Set up your Bar")).toBeInTheDocument();
@@ -76,5 +93,50 @@ describe("PreviewPane", () => {
     // Without the table props there is nothing viz-specific left to draw.
     rerender(<PreviewPane {...base} viz="table" finished columns={columns} rows={rows} />);
     expect(screen.queryByText("region")).not.toBeInTheDocument();
+  });
+
+  // THE SEAM THESE EXIST FOR: this component forwarded `onCellDrill` to its table and pivot
+  // surfaces but handed ChartRenderer nothing, and ChartRenderer guards every chart type's click
+  // handler on `onValueClick &&` — so no ECharts chart had ever been clickable in the chart
+  // editor. Drill worked on dashboards (DashboardView passes it) and nowhere else, which is why
+  // it went unnoticed. Tested HERE, at the prop boundary, so the prop cannot silently go missing
+  // again; ChartRenderer's own tests can't see it, because they pass onValueClick themselves.
+  describe("drill-through", () => {
+    it("makes a cartesian chart clickable, not just the table surfaces", () => {
+      const onCellDrill = vi.fn();
+      render(
+        <PreviewPane {...base} finished onCellDrill={onCellDrill}
+          viz="bar"
+          params={{ spec: EMPTY_SPEC, cartesian: { xAxis: "region", yMetrics: ["rev"] } }}
+          columns={[{ name: "region", type: "varchar" }, { name: "rev", type: "double" }]}
+          rows={[["EU", 10]]} />,
+      );
+      fireEvent.click(screen.getByTestId("echarts"));
+      expect(onCellDrill).toHaveBeenCalledWith({ dims: [{ col: "region", value: "EU" }] }, 3, 4);
+    });
+
+    // The pie's own drill was rewired onto `treePathInfo` when it became a sunburst, and nothing
+    // had ever exercised that path from a real editor click — only from ChartRenderer directly.
+    it("drills a pie slice on its own ring's dimension", () => {
+      const onCellDrill = vi.fn();
+      render(
+        <PreviewPane {...base} finished onCellDrill={onCellDrill}
+          viz="pie"
+          params={{ spec: EMPTY_SPEC, pie: { dimensions: ["region", "category"], metric: "rev" } }}
+          columns={[
+            { name: "region", type: "varchar" }, { name: "category", type: "varchar" },
+            { name: "rev", type: "double" },
+          ]}
+          rows={[["EU", "Widgets", 10]]} />,
+      );
+      // Entry 0 of a sunburst path is ECharts' virtual root, so this is the ring-1 slice.
+      mockClickPayload = {
+        name: "Widgets",
+        treePathInfo: [{ name: "" }, { name: "EU" }, { name: "Widgets" }],
+        x: 5, y: 6,
+      };
+      fireEvent.click(screen.getByTestId("echarts"));
+      expect(onCellDrill).toHaveBeenCalledWith({ dims: [{ col: "category", value: "Widgets" }] }, 5, 6);
+    });
   });
 });
