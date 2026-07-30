@@ -2,9 +2,9 @@ import { useState } from "react";
 import { isNumericType, type Rule, type SingleColorRule, type ColorRangeRule, type FormattingOperator } from "../format-types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { TagCombobox } from "@/components/ui/tag-combobox";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
@@ -41,9 +41,6 @@ export function RuleEditor({
   const allNumeric = selected.length > 0 && selected.every((c) => isNumericType(c.type));
   const ops = allNumeric ? [...NUMERIC_OPS, ...NULL_OPS] : [...STRING_OPS, ...NULL_OPS];
 
-  function toggleColumn(name: string) {
-    setDraft((d) => ({ ...d, columns: d.columns.includes(name) ? d.columns.filter((c) => c !== name) : [...d.columns, name] }));
-  }
   function setType(type: "single" | "range") {
     if (type === draft.type) return;
     setDraft((d) =>
@@ -69,14 +66,26 @@ export function RuleEditor({
     <div className="space-y-3 text-sm">
       <div className="space-y-1">
         <div className="text-xs font-medium uppercase text-muted-foreground">Columns</div>
-        <div className="flex flex-col gap-1 pt-1">
-          {columns.map((c) => (
-            <div key={c.name} className="flex items-center gap-2">
-              <Checkbox id={`rule-col-${c.name}`} checked={draft.columns.includes(c.name)} onCheckedChange={() => toggleColumn(c.name)} />
-              <Label htmlFor={`rule-col-${c.name}`} className="cursor-pointer text-sm font-normal">{c.name}</Label>
-            </div>
-          ))}
-        </div>
+        {/* A picker, not one checkbox per column. The list is as long as the result is wide — a
+            table with twenty columns pushed the operator, value and colour off the panel entirely,
+            and every one of those rows was a line the reader had to scan past to reach the rule
+            itself. Chips show the choice in one line and typing narrows a long list. */}
+        <TagCombobox
+          values={draft.columns}
+          onChange={(next) => setDraft((d) => ({ ...d, columns: next }))}
+          suggest={async (q) => {
+            const needle = q.trim().toLowerCase();
+            return columns
+              .filter((c) => !needle || c.name.toLowerCase().includes(needle))
+              .map((c) => ({ value: c.name, hint: c.type }));
+          }}
+          queryKey={["rule-columns", columns.map((c) => c.name).join(",")]}
+          // A rule may only name a column the result actually has; a typo would save a rule that
+          // silently colours nothing.
+          creatable={false}
+          placeholder={draft.columns.length ? "" : "Pick columns…"}
+          ariaLabel="Columns"
+        />
       </div>
 
       {allNumeric && (
