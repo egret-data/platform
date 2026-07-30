@@ -522,6 +522,17 @@ export default function ChartExplore() {
                 condense: pivotCfg.condense ?? true,
                 collapsed: new Set(pivotCfg.collapsedRows ?? []),
                 sortDims: pivotCfg.sort ?? {},
+                dimTotals: pivotCfg.dimTotals,
+                columnWidths: pivotCfg.columnWidths,
+                // Stored with the chart like `collapsedRows` and `sort`, and deliberately NOT part
+                // of `buildSpec` — a column width is presentation, and putting it in the spec would
+                // re-run the query on every drag.
+                onResizeColumn: (kind, index, width) => {
+                  const cur = pivotCfg.columnWidths ?? {};
+                  patchDescConfig({
+                    columnWidths: { ...cur, [kind]: { ...(cur[kind] ?? {}), [index]: Math.round(width) } },
+                  } as never);
+                },
                 onToggleCollapse: (path) => {
                   const cur = pivotCfg.collapsedRows ?? [];
                   patchDescConfig({ collapsedRows: cur.includes(path) ? cur.filter((x) => x !== path) : [...cur, path] } as never);

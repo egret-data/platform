@@ -18,10 +18,19 @@ export interface PivotConfig {
   /** Serialized collapsed row-group paths — interactive state, persisted with the chart. */
   collapsedRows?: string[];
   sort?: Record<string, "asc" | "desc">;
+  /** Row-dimension name -> whether it shows a subtotal band. Absent = the render-time default
+   * (every dimension except the innermost). Narrows `showColTotals`, never widens it. */
+  dimTotals?: Record<string, boolean>;
+  /** Dragged column widths in px. `left` is indexed by row-dimension position, `value` by column
+   * leaf index — the same split Metabase persists as `leftHeaderWidths`/`valueHeaderWidths`. */
+  columnWidths?: { left?: Record<number, number>; value?: Record<number, number> };
 }
 
 const P = "pivot.";
-const KEYS = ["rows", "cols", "metrics", "showRowTotals", "showColTotals", "condense", "collapsedRows", "sort"] as const;
+const KEYS = [
+  "rows", "cols", "metrics", "showRowTotals", "showColTotals", "condense", "collapsedRows", "sort",
+  "dimTotals", "columnWidths",
+] as const;
 
 export function pivotToSettings(cfg: PivotConfig): VizSettings {
   const out: VizSettings = {};
@@ -87,13 +96,36 @@ function TotalsControl({ config, onChange }: VizControlProps<PivotConfig>) {
         onCheckedChange={(v) => onChange({ [key]: v } as Partial<PivotConfig>)} />
     </div>
   );
+  // Only a dimension that has one nested beneath it produces a subtotal band; the innermost one's
+  // groups are leaves. Listing it would offer a switch that does nothing.
+  const subtotalDims = config.rows.slice(0, -1);
+  const colTotalsOn = config.showColTotals ?? true;
+
   return (
     <div className="space-y-1">
       <SectionLabel>Totals</SectionLabel>
       <div className="space-y-2.5 pt-1.5">
         {row("show-row-totals", "Row totals", config.showRowTotals ?? true, "showRowTotals")}
-        {row("show-col-totals", "Column totals", config.showColTotals ?? true, "showColTotals")}
+        {row("show-col-totals", "Column totals", colTotalsOn, "showColTotals")}
         {row("condense-totals", "Condense duplicate totals", config.condense ?? true, "condense")}
+
+        {colTotalsOn && subtotalDims.length > 0 && (
+          <div className="space-y-2 border-t pt-2.5">
+            <div className="text-xs text-muted-foreground">Subtotals for</div>
+            {subtotalDims.map((name) => (
+              <div key={name} className="flex items-center justify-between">
+                <Label htmlFor={`subtotal-${name}`} className="truncate text-sm font-normal">{name}</Label>
+                <Switch
+                  id={`subtotal-${name}`}
+                  aria-label={`subtotals for ${name}`}
+                  checked={config.dimTotals?.[name] ?? true}
+                  onCheckedChange={(v) =>
+                    onChange({ dimTotals: { ...(config.dimTotals ?? {}), [name]: v } })}
+                />
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -306,7 +306,9 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
           condense: pivot.condense ?? false,
           collapsed: new Set(pivot.collapsedRows ?? []),
           sortDims: pivot.sort ?? {},
+          dimTotals: pivot.dimTotals,
         }}
+        columnWidths={pivot.columnWidths}
         columnSettings={columnSettings}
         conditionalFormatting={conditionalFormatting}
         metricTypes={metricTypes}
