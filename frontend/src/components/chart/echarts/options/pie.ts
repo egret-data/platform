@@ -9,7 +9,7 @@ import {
   tooltipInk,
   tooltipSurface,
 } from "../base";
-import { OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor, resolveFontFamily, seriesColor, ringVariantColor, fadeColor, getTextColorForBackground } from "../palette";
+import { OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor, resolveFontFamily, seriesColor, ringVariantColor, fadeColor, getTextColorForBackground, getTextHaloForBackground } from "../palette";
 import {
   calcAvailableDonutSliceLabelLength,
   calcInnerOuterRadiusesForRing,
@@ -1463,6 +1463,11 @@ export function buildPieOption(
     // own sunburst has 27.
     const color = s.itemStyle?.color ?? resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel);
     const labelColor = getTextColorForBackground(color, labelTextDark, labelTextLight);
+    // ...and, on the two fills where the better ink still cannot reach 4.5:1 (#7172AD in either
+    // theme, #227FD2 in light), a thin outline in the opposite ink so the glyphs separate from the
+    // fill anyway. `undefined` — i.e. nothing spread into `label` at all — on every other fill;
+    // see `getTextHaloForBackground` for why the palette is not the thing being changed here.
+    const labelHalo = getTextHaloForBackground(color, labelTextDark, labelTextLight);
 
     const children = childrenByParentKey[level]?.get(s.key ?? OTHER_KEY);
     let childStart = startAngle;
@@ -1476,6 +1481,7 @@ export function buildPieOption(
       itemStyle: { color, borderWidth },
       label: {
         color: labelColor,
+        ...labelHalo,
         // Metabase's own sentinel for "nothing to show" (option.ts ~L269): a single space.
         //
         // Still REQUIRED even though a dropped label is a proper `null`, and the null cannot simply

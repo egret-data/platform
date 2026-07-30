@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { SERIES_PALETTE, CHART_THEME, seriesColor, resolveColor, resolveFontFamily, CHART_FONT_FALLBACK, chartShade, chartTint, ringVariantColor, getTextColorForBackground, parseColor, COLOR_FALLBACK, onThemeChange } from "../palette";
+import { SERIES_PALETTE, CHART_THEME, seriesColor, resolveColor, resolveFontFamily, CHART_FONT_FALLBACK, chartShade, chartTint, ringVariantColor, getTextColorForBackground, getTextHaloForBackground, LABEL_HALO_WIDTH, parseColor, COLOR_FALLBACK, onThemeChange } from "../palette";
 
 // egret's REAL theme tokens, copied verbatim from src/index.css (`:root` and `.dark`), together
 // with the rgb a browser actually resolves each one to. Every number below was computed from the
@@ -673,6 +673,97 @@ describe("chart palette", () => {
       // oklch) must be read, not treated as unparseable
       expect(getTextColorForBackground("oklch(0.95 0.03 100)", text, inverse)).toBe(inverse);
       expect(getTextColorForBackground("oklch(0.2 0.05 264)", text, inverse)).toBe(text);
+    });
+
+    // ---- The two fills NO ink can serve ----------------------------------------------------
+    //
+    // The sweeps above end by REPORTING two fills rather than asserting them away: #7172AD
+    // (accent7, best 4.456 light / 4.468 dark) and #227FD2 (accent0-dark, 4.323 light). The
+    // picker does its job on both — it returns the better of the two inks — but "better" there
+    // means the least-bad of two illegible options, and the label ships marginally unreadable.
+    //
+    // The palette is deliberately NOT the fix: those are Metabase's accent hexes, matched on
+    // purpose. A 2px outline in the opposite ink is, and it must engage ONLY on the fills that
+    // actually fail — a halo everywhere would be a look change to 45 labels that never needed one.
+    describe("getTextHaloForBackground", () => {
+      /** The best either ink can do, measured with THIS file's independently-written WCAG maths
+       * rather than the implementation's — so "does this fill need a halo?" is answered from the
+       * outside, and a bug shared between the code and its own self-check cannot hide. */
+      const bestInk = (fill: string, textHex: string, inverseHex: string) =>
+        Math.max(wcagContrast(fill, textHex), wcagContrast(fill, inverseHex));
+
+      it("gives no halo at all to a fill one of the inks already clears", () => {
+        const { text, inverse, textHex, inverseHex } = themeCandidates.light;
+        // accent0 itself: dark ink reads at ~6.2 against it, so there is nothing to rescue.
+        expect(bestInk("#509EE3", textHex, inverseHex)).toBeGreaterThanOrEqual(4.5);
+        expect(getTextHaloForBackground("#509EE3", text, inverse)).toBeUndefined();
+        // ...and with flat hex candidates too, so this is not an artefact of the oklch tokens:
+        // a pale fill (dark ink wins) and a near-black one (light ink wins) both stay bare.
+        expect(getTextHaloForBackground("#F9D45C", DARK_TEXT, LIGHT_TEXT)).toBeUndefined();
+        expect(getTextHaloForBackground("#191970", DARK_TEXT, LIGHT_TEXT)).toBeUndefined();
+      });
+
+      it("outlines #7172AD in the ink the label did NOT take — in both themes, since it fails in both", () => {
+        for (const theme of ["light", "dark"] as const) {
+          const { text, inverse, textHex, inverseHex } = themeCandidates[theme];
+          expect(bestInk("#7172AD", textHex, inverseHex), theme).toBeLessThan(4.5);
+          const chosen = getTextColorForBackground("#7172AD", text, inverse);
+          const halo = getTextHaloForBackground("#7172AD", text, inverse);
+          expect(halo, theme).toEqual({
+            textBorderColor: chosen === inverse ? text : inverse,
+            textBorderWidth: LABEL_HALO_WIDTH,
+          });
+          expect(halo!.textBorderColor, theme).not.toBe(chosen); // the OPPOSITE ink, not the same one
+        }
+      });
+
+      it("outlines #227FD2 in light mode, where it falls to 4.32 — and leaves it bare in dark, where it clears", () => {
+        const light = themeCandidates.light;
+        expect(bestInk("#227fd2", light.textHex, light.inverseHex)).toBeCloseTo(4.323, 2);
+        const chosen = getTextColorForBackground("#227fd2", light.text, light.inverse);
+        expect(chosen).toBe(light.text); // near-black is the better of the two, at 4.323
+        expect(getTextHaloForBackground("#227fd2", light.text, light.inverse))
+          .toEqual({ textBorderColor: light.inverse, textBorderWidth: LABEL_HALO_WIDTH });
+
+        // In dark mode the near-black `--background` clears AA against this fill outright, so
+        // there is nothing to outline — the same fill, a different answer, which is the whole
+        // point of keying the halo off the measurement rather than off a list of hexes.
+        const dark = themeCandidates.dark;
+        expect(bestInk("#227fd2", dark.textHex, dark.inverseHex)).toBeGreaterThanOrEqual(4.5);
+        expect(getTextHaloForBackground("#227fd2", dark.text, dark.inverse)).toBeUndefined();
+      });
+
+      it("flips the halo colour with the theme", () => {
+        const l = getTextHaloForBackground("#7172AD", themeCandidates.light.text, themeCandidates.light.inverse);
+        const d = getTextHaloForBackground("#7172AD", themeCandidates.dark.text, themeCandidates.dark.inverse);
+        expect(l!.textBorderColor).toBe(TOKENS.light.foreground);
+        expect(d!.textBorderColor).toBe(TOKENS.dark.foreground);
+        // ...and that is a real flip in lightness, not merely a different token string: the same
+        // fill gets a near-BLACK outline in light mode and a near-WHITE one in dark.
+        expect(relativeLuminance(TOKENS.light.foregroundHex)).toBeLessThan(0.05);
+        expect(relativeLuminance(TOKENS.dark.foregroundHex)).toBeGreaterThan(0.95);
+      });
+
+      // The whole surface, stated once: 8 accents × 3 ring levels × 2 themes = 48 label
+      // backgrounds. The halo must appear on exactly the three that fail and on nothing else —
+      // asserted as an IF-AND-ONLY-IF against the independent measurement, so both directions
+      // are covered (a halo that spread everywhere fails, and so does one that stopped engaging).
+      it("over SERIES_PALETTE × 3 ring levels × both themes: exactly the three failing fills take a halo", () => {
+        const haloed: string[] = [];
+        for (const theme of ["light", "dark"] as const) {
+          const { text, inverse, textHex, inverseHex } = themeCandidates[theme];
+          for (const { base, variant, fill } of sunburstFills()) {
+            const best = bestInk(fill, textHex, inverseHex);
+            const halo = getTextHaloForBackground(fill, text, inverse);
+            expect(halo !== undefined, `${theme} ${base} ${variant} (${fill}): best=${best.toFixed(3)}`)
+              .toBe(best < 4.5);
+            if (halo) haloed.push(`${theme} ${fill}`);
+          }
+        }
+        // #227FD2 is accent0's DARK variant (the sunburst's inner blue); #7172AD is accent7's own
+        // base. Named in full so a palette or ring-rule change that moves the set has to say so.
+        expect(haloed).toEqual(["light #227fd2", "light #7172AD", "dark #7172AD"]);
+      });
     });
   });
 });

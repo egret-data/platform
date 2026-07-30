@@ -544,3 +544,60 @@ export function getTextColorForBackground(
   }
   return whiteContrast > darkContrast ? textColorInverse : textColor;
 }
+
+/**
+ * A thin outline in the OPPOSITE ink, in px. Two is the cartographic default for text over an
+ * arbitrary fill: one is invisible at label sizes, three starts closing up the counters of the
+ * glyphs it is meant to rescue.
+ */
+export const LABEL_HALO_WIDTH = 2;
+
+/**
+ * The halo a label needs when NEITHER candidate ink clears WCAG AA against its fill — ECharts'
+ * `textBorderColor`/`textBorderWidth`, ready to spread into a `label`. `undefined` (no halo at
+ * all) whenever the better ink already clears 4.5:1, which is every fill but two.
+ *
+ * `getTextColorForBackground` always returns SOMETHING, and on a fill both inks fail against, that
+ * something is merely the least-bad of two illegible options. Measured across the whole
+ * SERIES_PALETTE × three ring levels × both themes, exactly two fills are in that position:
+ *
+ *   - `#7172AD` (accent7, the indigo base) — best achievable 4.456 light / 4.468 dark. Fails in
+ *     BOTH themes. Reached by any chart with 8+ series, not just a sunburst.
+ *   - `#227FD2` (accent0-dark, the sunburst's inner blue) — 4.323 in light mode; clears in dark.
+ *
+ * THE PALETTE IS DELIBERATELY NOT THE FIX. Those hexes are Metabase's accents, matched on purpose
+ * and asked for twice; nudging either one to buy contrast would break the match everywhere else it
+ * is drawn. An outline leaves the fills untouched, engages ONLY where the contrast rule actually
+ * fails, and reads the same way a map label over arbitrary terrain does. Metabase does not do this
+ * — it fails AA on 27 of its own 53 sunburst labels, at worst 2.70:1 — so this is a place egret is
+ * deliberately better rather than a parity gap.
+ *
+ * The outline is the ink the label did NOT take, so it is always the maximum available separation
+ * from the glyph itself, and it flips with the theme exactly as the two candidates do.
+ *
+ * An unparseable `backgroundColor` gets no halo: `getTextColorForBackground` degrades to
+ * `textColor` there without having measured anything, and an outline drawn on an unmeasured guess
+ * would be decoration, not legibility.
+ */
+export function getTextHaloForBackground(
+  backgroundColor: string,
+  textColor: string,
+  textColorInverse: string,
+): { textBorderColor: string; textBorderWidth: number } | undefined {
+  const bg = parseColor(backgroundColor);
+  if (!bg) return undefined;
+
+  const fg = parseColor(textColor) ?? [0, 0, 0];
+  const fgInverse = parseColor(textColorInverse) ?? [255, 255, 255];
+
+  // The BEST either ink can do — the same two ratios the picker compares, so the two functions
+  // can never disagree about whether this fill was served.
+  if (Math.max(contrastRatio(bg, fg), contrastRatio(bg, fgInverse)) >= WCAG_AA_CONTRAST) {
+    return undefined;
+  }
+  const chosen = getTextColorForBackground(backgroundColor, textColor, textColorInverse);
+  return {
+    textBorderColor: chosen === textColorInverse ? textColor : textColorInverse,
+    textBorderWidth: LABEL_HALO_WIDTH,
+  };
+}
