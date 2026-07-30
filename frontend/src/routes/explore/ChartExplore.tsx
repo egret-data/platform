@@ -132,13 +132,20 @@ export default function ChartExplore() {
       else next[col] = token;
       return next;
     });
-  const unitRow = (col: string | undefined) =>
-    col && columns.find((c) => c.column_name === col)?.is_temporal ? (
+  const unitRow = (col: string | undefined) => {
+    const c = col ? columns.find((x) => x.column_name === col) : undefined;
+    // The label names the field. It used to read a bare "Unit", which is unambiguous with one date
+    // dimension and useless with two — a pivot with a date on both axes showed two identical rows.
+    const shown = c?.verbose_name?.trim() || col;
+    return c?.is_temporal ? (
       <div className="flex items-center gap-2 pl-2">
-        <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Unit</span>
-        <TemporalUnitSelect value={temporalUnits[col]} onChange={(u) => setUnit(col, u)} />
+        <span className="truncate text-[11px] uppercase tracking-wide text-muted-foreground" title={col}>
+          Unit · {shown}
+        </span>
+        <TemporalUnitSelect value={temporalUnits[col!]} onChange={(u) => setUnit(col!, u)} />
       </div>
     ) : null;
+  };
 
   function specForRun(): QuerySpec {
     if (descriptor) return descriptor.buildSpec(descConfig, { filters, rowLimit, temporalUnits });
