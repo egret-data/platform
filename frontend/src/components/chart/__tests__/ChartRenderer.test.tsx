@@ -1,6 +1,6 @@
 // src/components/chart/__tests__/ChartRenderer.test.tsx
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import { useState } from "react";
 import { ChartRenderer } from "../ChartRenderer";
 import type { ChartParams, PieConfig } from "@/api/charts";
@@ -381,6 +381,44 @@ describe("ChartRenderer", () => {
     it("does not claim the query returned nothing", () => {
       renderPie([["A", 0]]);
       expect(screen.queryByText("No data")).not.toBeInTheDocument();
+    });
+  });
+
+  // `PieBreakdown` shipped built and unit-tested but mounted NOWHERE — the same shape as the four
+  // pie settings that were implemented, panelled and unreachable because ChartRenderer never
+  // forwarded them. A component's own tests can never catch that; only a test at this seam can.
+  describe("a nested pie's structured alternative reaches the page", () => {
+    const cols = [
+      { name: "r", type: "varchar" }, { name: "p", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    const rows = [["US", "Widget", 30], ["US", "Gadget", 10], ["EU", "Widget", 60]];
+
+    const renderPie = (dimensions: string[]) =>
+      render(
+        <ChartRenderer
+          vizType="pie"
+          params={params({ pie: { dimensions, metric: "m" } })}
+          columns={cols}
+          rows={rows}
+        />,
+      );
+
+    it("mounts the table for a multi-ring pie", () => {
+      renderPie(["r", "p"]);
+      expect(screen.getByRole("table")).toBeInTheDocument();
+    });
+
+    it("carries every slice, outer rings included", () => {
+      renderPie(["r", "p"]);
+      const table = screen.getByRole("table");
+      // Ring 0 and ring 1 both present — the ring-1 names are exactly what ariaDescription omits.
+      ["US", "EU", "Widget", "Gadget"].forEach((name) =>
+        expect(within(table).getAllByText(name).length).toBeGreaterThan(0));
+    });
+
+    it("stays out of the way of a single-ring pie, which aria already reads in full", () => {
+      renderPie(["r"]);
+      expect(screen.queryByRole("table")).not.toBeInTheDocument();
     });
   });
 
