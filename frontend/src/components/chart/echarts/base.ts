@@ -1,4 +1,4 @@
-import { ARIA_A11Y, CHART_THEME, SERIES_PALETTE } from "./palette";
+import { ARIA_A11Y, CHART_THEME, SERIES_PALETTE, resolveFontFamily } from "./palette";
 
 /**
  * The parts of an ECharts option that should look the same in every chart type.
@@ -9,8 +9,17 @@ import { ARIA_A11Y, CHART_THEME, SERIES_PALETTE } from "./palette";
  * answer, in one place.
  */
 
-/** Text sizing shared by axis labels, legends and tooltips. */
-export const baseTextStyle = { fontSize: CHART_THEME.labelFontSize } as const;
+/**
+ * Text shared by axis labels, legends and tooltips: the size, and the PRODUCT'S OWN TYPEFACE.
+ *
+ * A function rather than the constant it used to be, because the font is resolved from a CSS
+ * custom property at render time (see `resolveFontFamily`) — a module-level constant would freeze
+ * whatever the token said when this file was first imported, and would go stale on a theme change
+ * exactly the way a module-level colour would.
+ */
+export function baseTextStyle() {
+  return { fontSize: CHART_THEME.labelFontSize, fontFamily: resolveFontFamily() };
+}
 
 /** Everything a chart gets before it adds its own series. */
 export function baseOption() {
@@ -19,7 +28,11 @@ export function baseOption() {
     // without relying on colour (WCAG "colour is not the only visual means").
     aria: ARIA_A11Y,
     color: SERIES_PALETTE,
-    textStyle: baseTextStyle,
+    // At the option ROOT, which is where Metabase states it too: ECharts hands this down as the
+    // default for the text every component draws, so one line puts a whole chart in the app's
+    // font instead of the browser's. It does NOT reach `graphic` elements — the pie's centre
+    // total names the font itself for that reason.
+    textStyle: baseTextStyle(),
   };
 }
 
@@ -30,7 +43,7 @@ export function baseOption() {
 export function itemTooltip(format: (v: unknown) => string, opts: { percent?: boolean } = {}) {
   return {
     trigger: "item" as const,
-    textStyle: baseTextStyle,
+    textStyle: baseTextStyle(),
     formatter: (p: { name?: string; value?: unknown; percent?: number; data?: { slicePercent?: number } }) => {
       const name = String(p.name ?? "");
       if (p.value == null || (typeof p.value === "number" && Number.isNaN(p.value))) return name;
@@ -52,7 +65,7 @@ export function axisTooltip() {
   return {
     trigger: "axis" as const,
     axisPointer: { type: "shadow" as const },
-    textStyle: baseTextStyle,
+    textStyle: baseTextStyle(),
   };
 }
 

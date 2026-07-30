@@ -2,7 +2,7 @@ import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
 import { ariaDescription, baseOption, baseTextStyle } from "../base";
-import { OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor, seriesColor, ringVariantColor, fadeColor, getTextColorForBackground } from "../palette";
+import { OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor, resolveFontFamily, seriesColor, ringVariantColor, fadeColor, getTextColorForBackground } from "../palette";
 import {
   calcAvailableDonutSliceLabelLength,
   calcInnerOuterRadiusesForRing,
@@ -614,6 +614,7 @@ interface PieHoleText {
     text: string;
     fontSize: number;
     fontWeight: number;
+    fontFamily: string;
     fill: string;
     textAlign: "center";
   };
@@ -701,6 +702,11 @@ export function buildPieHoleGraphic(
           top: labelText ? 0 : TOTAL_LONE_VALUE_TOP,
           style: {
             text: valueText, fontSize: valueFontSize, fontWeight: 700,
+            // Named per element: a `graphic` is a zrender element of its own and does NOT inherit
+            // the option root's `textStyle` the way a series label does, so the hole would stay in
+            // the browser's default font while the rings around it moved. Metabase states it on
+            // both of these children for the same reason.
+            fontFamily: resolveFontFamily(),
             fill: resolveColor("var(--foreground)", COLOR_FALLBACK.text), textAlign: "center",
           },
         },
@@ -708,6 +714,7 @@ export function buildPieHoleGraphic(
           id: TOTAL_LABEL_ID, type: "text", left: "center", top: TOTAL_LABEL_TOP,
           style: {
             text: labelText, fontSize: TOTAL_LABEL_FONT_SIZE, fontWeight: 700,
+            fontFamily: resolveFontFamily(),
             fill: resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel), textAlign: "center",
           },
         },
@@ -1011,7 +1018,7 @@ function pieTooltip(
 
   return {
     trigger: "item" as const,
-    textStyle: baseTextStyle,
+    textStyle: baseTextStyle(),
     formatter: (p: { treePathInfo?: { name?: string }[] }) => {
       // The root-to-node path, minus ECharts' own virtual root (entry 0) — the same shape the
       // drill-through click reads. Without it there is nothing to locate the slice by.

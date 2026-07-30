@@ -107,6 +107,7 @@ export function onThemeChange(listener: () => void): () => void {
 
 function handleThemeChange(): void {
   colorCache.clear();
+  fontCache = undefined;
   for (const listener of themeListeners) listener();
 }
 
@@ -117,6 +118,56 @@ if (typeof document !== "undefined" && typeof MutationObserver !== "undefined") 
     attributes: true,
     attributeFilter: ["class"],
   });
+}
+
+// ---------------------------------------------------------------------------------------------
+// The typeface.
+//
+// Measured live: egret's UI is Inter and its charts were drawn in `sans-serif` — the browser's
+// default — because no option ever named a font. Metabase sets one at the option root
+// (`textStyle: { fontFamily: renderingContext.fontFamily }`), which is why its charts are in its
+// own product font rather than in a browser default. The rule is what's worth copying; the FONT is
+// egret's own, read from the same `--font-sans` token the rest of the app is set in (index.css).
+// Copying Metabase's Lato instead would have put the charts in a typeface the surrounding UI
+// doesn't use.
+
+/** The token the app's typeface lives in. */
+const CHART_FONT_TOKEN = "var(--font-sans)";
+
+/** What to draw in when the token can't be read (non-DOM tests, SSR) — the head of the same stack
+ * `--font-sans` holds, so the answer is still "the product's font" rather than the browser's. Kept
+ * short deliberately: the full stack belongs to the token, and duplicating it here would be a
+ * second place to maintain it. */
+export const CHART_FONT_FALLBACK = "Inter, sans-serif";
+
+// Cached like the colours are, and dropped by the same theme-change signal (see
+// handleThemeChange): a theme is free to restate `--font-sans`, and a chart drawn before the
+// switch must not keep the previous theme's answer for the life of the page.
+let fontCache: string | undefined;
+
+/**
+ * The font family every chart draws in, resolved from egret's own token.
+ *
+ * Resolved through a probe element for the same reason `resolveColor` is: ECharts writes the font
+ * into the SVG as a presentation attribute, where a CSS `var()` does not resolve. Unlike a colour
+ * there is nothing to validate — any string is a legal font list — so this is the simpler of the
+ * two: read it, or fall back.
+ */
+export function resolveFontFamily(): string {
+  if (fontCache) return fontCache;
+  if (typeof document === "undefined" || !document.body) return (fontCache = CHART_FONT_FALLBACK);
+
+  const probe = document.createElement("span");
+  probe.style.fontFamily = CHART_FONT_TOKEN;
+  probe.style.display = "none";
+  document.body.appendChild(probe);
+  const resolved = getComputedStyle(probe).fontFamily;
+  probe.remove();
+
+  // jsdom resolves no custom property at all and hands back the literal (or nothing); a real
+  // browser returns the token's own stack.
+  fontCache = resolved && !resolved.includes("var(") ? resolved : CHART_FONT_FALLBACK;
+  return fontCache;
 }
 
 export function resolveColor(expr: string, fallback: string): string {

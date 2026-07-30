@@ -1,13 +1,22 @@
 import { describe, it, expect } from "vitest";
 import { baseOption, itemTooltip, axisTooltip, baseTextStyle } from "../base";
-import { ARIA_A11Y, SERIES_PALETTE } from "../palette";
+import { ARIA_A11Y, SERIES_PALETTE, CHART_FONT_FALLBACK } from "../palette";
 
 describe("baseOption", () => {
   it("carries the accessibility config and the shared palette", () => {
     const o = baseOption();
     expect(o.aria).toBe(ARIA_A11Y);
     expect(o.color).toBe(SERIES_PALETTE);
-    expect(o.textStyle).toEqual(baseTextStyle);
+    expect(o.textStyle).toEqual(baseTextStyle());
+  });
+
+  // Stated concretely, not just as "the same as baseTextStyle" — which would hold just as well if
+  // neither named a font, which is the state this replaced (every chart drew in the browser's
+  // default sans while the app around it is Inter).
+  it("names the product's own typeface, at the option root", () => {
+    expect(baseOption().textStyle.fontFamily).toBe(CHART_FONT_FALLBACK);
+    expect(itemTooltip((v) => String(v)).textStyle.fontFamily).toBe(CHART_FONT_FALLBACK);
+    expect(axisTooltip().textStyle.fontFamily).toBe(CHART_FONT_FALLBACK);
   });
 });
 
@@ -29,7 +38,7 @@ describe("itemTooltip", () => {
   });
 
   it("uses the shared text style", () => {
-    expect(itemTooltip(fmt).textStyle).toEqual(baseTextStyle);
+    expect(itemTooltip(fmt).textStyle).toEqual(baseTextStyle());
   });
 
   // Every pie slice states its own share on the datum (`data.slicePercent`) because the pie is a
@@ -48,7 +57,7 @@ describe("axisTooltip", () => {
     const t = axisTooltip();
     expect(t.trigger).toBe("axis");
     expect(t.axisPointer).toEqual({ type: "shadow" });
-    expect(t.textStyle).toEqual(baseTextStyle);
+    expect(t.textStyle).toEqual(baseTextStyle());
   });
 });
 

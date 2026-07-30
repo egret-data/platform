@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { SERIES_PALETTE, CHART_THEME, seriesColor, resolveColor, chartShade, chartTint, ringVariantColor, getTextColorForBackground, parseColor, COLOR_FALLBACK, onThemeChange } from "../palette";
+import { SERIES_PALETTE, CHART_THEME, seriesColor, resolveColor, resolveFontFamily, CHART_FONT_FALLBACK, chartShade, chartTint, ringVariantColor, getTextColorForBackground, parseColor, COLOR_FALLBACK, onThemeChange } from "../palette";
 
 // egret's REAL theme tokens, copied verbatim from src/index.css (`:root` and `.dark`), together
 // with the rgb a browser actually resolves each one to. Every number below was computed from the
@@ -239,6 +239,33 @@ describe("chart palette", () => {
 
       await flipTheme();
       expect(resolveColor("var(--test-fg)", "#fallback")).toBe("rgb(250, 250, 250)");
+    });
+
+    // The font is read from `--font-sans` exactly the way the colours are read from their tokens,
+    // so it needs the same invalidation: a theme is free to restate the token, and a cached answer
+    // would otherwise outlive the theme that produced it. This is also the only place the
+    // token-reading branch runs at all — jsdom resolves no custom property, so every other test in
+    // the suite (and every chart rendered under vitest) takes the fallback.
+    it("reads the app's font token, caches it, and re-reads it after a theme change", async () => {
+      const computed = vi.spyOn(window, "getComputedStyle");
+      computed.mockReturnValue({ fontFamily: "Inter, sans-serif" } as CSSStyleDeclaration);
+      await flipTheme(); // drop whatever earlier tests resolved
+      expect(resolveFontFamily()).toBe("Inter, sans-serif");
+
+      computed.mockReturnValue({ fontFamily: "Some Other Face, serif" } as CSSStyleDeclaration);
+      // Still the previous answer: the cache doing its job, not the bug.
+      expect(resolveFontFamily()).toBe("Inter, sans-serif");
+
+      await flipTheme();
+      expect(resolveFontFamily()).toBe("Some Other Face, serif");
+    });
+
+    it("falls back to the product's font when the token cannot be resolved", async () => {
+      const computed = vi.spyOn(window, "getComputedStyle");
+      // What jsdom actually does with a custom property: hands the literal straight back.
+      computed.mockReturnValue({ fontFamily: "var(--font-sans)" } as CSSStyleDeclaration);
+      await flipTheme();
+      expect(resolveFontFamily()).toBe(CHART_FONT_FALLBACK);
     });
 
     it("notifies subscribers so a live chart can repaint, and stops after unsubscribe", async () => {

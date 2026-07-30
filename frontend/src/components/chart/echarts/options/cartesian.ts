@@ -3,7 +3,7 @@ import type { CartesianViz, LineSeriesStyle } from "@/api/charts";
 import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue } from "../../format";
-import { ariaDescription } from "../base";
+import { ariaDescription, baseTextStyle } from "../base";
 import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
 import { foldTail } from "../fold";
@@ -665,6 +665,9 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
       points: first ? categories.map((c, i) => ({ name: String(c), value: first.data?.[i] })) : [],
     }),
     color: undefined,
+    // The product's own typeface, at the option root — this is the one builder that composes its
+    // whole option itself rather than spreading base.ts's `baseOption()`, so it has to say so.
+    textStyle: baseTextStyle(),
     grid,
     tooltip: { trigger: cfg.kind === "scatter" ? "item" : "axis", formatter: tooltipFormatter },
     legend,
