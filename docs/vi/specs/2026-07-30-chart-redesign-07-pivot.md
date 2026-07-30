@@ -165,6 +165,37 @@ người dùng, xứng đáng bàn riêng), và mọi thay đổi về sắp x�
 
 ---
 
+## T4 đã đo — số liệu, và lý do KHÔNG làm
+
+Quy tắc là: đo trước, và ghi số liệu lại dù quyết định ngả về phía nào.
+
+Chi phí của riêng DOM ở các hình dạng kiểu pivot, cùng trình duyệt cùng viewport. Đây là **cận
+dưới** của cái egret phải trả — nó bỏ qua React, `formatValue` cho từng ô và lượt định dạng có điều
+kiện, nên con số thật chỉ cao hơn, không bao giờ thấp hơn:
+
+| hình dạng | ô giá trị | node DOM | dựng + layout |
+|---|---|---|---|
+| 21 × 28 — pivot thật hôm nay | 588 | 609 | **8 ms** |
+| 100 × 30 | 3.000 | 3.100 | 33 ms |
+| 500 × 30 | 15.000 | 15.500 | **201 ms** |
+| 2.000 × 30 | 60.000 | 62.000 | 713 ms |
+| 5.000 × 30 | 150.000 | 155.000 | **1.808 ms** |
+
+Đọc bảng: dưới vài nghìn ô thì không cảm nhận được, bắt đầu thấy quanh 15.000 ô, và không dùng nổi
+ở 150.000 ô.
+
+**Quyết định: không làm.** Số hàng lá của pivot bị chặn bởi số tổ hợp khác nhau của các chiều hàng,
+mà `row_limit` mặc định là **1.000** (`MAX_CHART_ROWS` chặn trần ở 10.000). Pivot thật trên bộ dữ
+liệu demo vẽ 588 ô và tốn 8 ms — cách xa ba bậc độ lớn so với ngưỡng đáng lo. Port `Grid` + hai
+`Collection` + `ScrollSync` của Metabase sẽ là viết lại toàn bộ đường render, đặt sticky pane, header
+nhóm có `rowSpan`, dải subtotal và collapse vào vòng rủi ro — để chữa một vấn đề mà dữ liệu này
+không tạo ra được.
+
+**Điều gì sẽ đổi câu trả lời:** một pivot vượt khoảng **15.000 ô giá trị** — có thể chạm tới khi nâng
+`row_limit` cùng các chiều hàng có lực lượng lớn. Đó là ngưỡng kích hoạt một đơn vị riêng, và là con
+số để đối chiếu, thay vì cảm giác rằng một bảng "nên" được ảo hoá. Chart 05 tốn 40 commit viết lại
+thứ nó chưa đo; đây là cùng quy tắc đó, áp dụng để đi tới kết luận ngược lại.
+
 ## Kiểm tra thật
 
 1. Region × category × tháng — **đúng ca đang hỏng hôm nay** — trả về và render được.

@@ -72,16 +72,17 @@ describe("buildPivot single-dim (1 row × 1 col × 1 metric)", () => {
     expect(p.bodyRows.map((b) => b.kind)).toEqual(["leaf", "leaf", "grand"]); // EU, US, Grand total
   });
   it("col leaves are the distinct columns, each metric, plus a Total column", () => {
-    expect(p.colLeaves.length).toBe(3); // SMB, ENT, + Total
+    expect(p.colLeaves.length).toBe(3); // ENT, SMB, + Total
     expect(p.colLeaves[2].isTotal).toBe(true);
   });
+  // Columns sort ascending, so ENT precedes SMB regardless of which appeared first in the result.
   it("places leaf values and the row total", () => {
     const eu = p.bodyRows[0];
     expect(eu.kind).toBe("leaf");
-    expect(eu.values).toEqual([10, 20, 30]); // SMB=10, ENT=20, Total=30
+    expect(eu.values).toEqual([20, 10, 30]); // ENT=20, SMB=10, Total=30
   });
   it("grand total row totals across rows", () => {
-    expect(p.bodyRows[2].values).toEqual([15, 20, 35]); // SMB col=15, ENT col=20, grand=35
+    expect(p.bodyRows[2].values).toEqual([20, 15, 35]); // ENT col=20, SMB col=15, grand=35
   });
 });
 
@@ -238,9 +239,82 @@ describe("dimension sort", () => {
     expect(firstGroupLabel).toBe("US");
   });
 
-  it("keeps first-appearance order when no sort is set", () => {
+  it("sorts ascending when no sort is set", () => {
     const p = buildPivot(rowGrouped);
     const firstGroupLabel = p.bodyRows.flatMap((r) => r.headerCells).find((h) => h.depth === 0)?.label;
     expect(firstGroupLabel).toBe("EU");
+  });
+});
+
+/* ── Column ordering, per-dimension subtotals ──────────────────────────────────────────────── */
+
+/** Column values supplied deliberately OUT of order — the shape a month-bucketed axis arrives in,
+ * because the pivot's query sets `orderby: []` and takes whatever the engine returned. Row values
+ * are out of order too, and reverse-alphabetical, so "sorted" and "as it arrived" cannot agree by
+ * accident the way the case above does. */
+const unordered: PivotInput = {
+  columns: ["region", "cat", "d", "revenue", "__grp_0", "__grp_1", "__grp_2"],
+  rows: [
+    ["US", "SMB", "2026-02", 10, 0, 0, 0],
+    ["US", "SMB", "2026-01", 11, 0, 0, 0],
+    ["US", "ENT", "2026-03", 12, 0, 0, 0],
+    ["EU", "SMB", "2026-01", 13, 0, 0, 0],
+    ["US", null, "2026-01", 33, 0, 1, 0],
+    ["EU", null, "2026-01", 13, 0, 1, 0],
+    [null, null, null, 46, 1, 1, 1],
+  ],
+  rowDims: ["region", "cat"],
+  colDims: ["d"],
+  metrics: ["revenue"],
+  showRowTotals: false,
+  showColTotals: true,
+  condense: false,
+  collapsed: new Set(),
+};
+
+describe("column ordering", () => {
+  it("sorts column values ascending rather than keeping arrival order", () => {
+    // Arrival order is 2026-02, 2026-01, 2026-03. A time axis rendered out of sequence is wrong in
+    // a way the reader cannot recover from, and the order was not even stable between runs.
+    expect(buildPivot(unordered).topHeader[0].map((c) => c.label))
+      .toEqual(["2026-01", "2026-02", "2026-03"]);
+  });
+
+  it("sorts row groups ascending even when they arrived reversed", () => {
+    const labels = buildPivot(unordered).bodyRows
+      .flatMap((r) => r.headerCells)
+      .filter((h) => h.depth === 0 && !/^(Totals|Grand)/.test(h.label))
+      .map((h) => h.label);
+    expect(labels).toEqual(["EU", "US"]);
+  });
+});
+
+describe("per-dimension subtotals", () => {
+  const subtotals = (i: PivotInput) =>
+    buildPivot(i).bodyRows
+      .filter((r) => r.kind === "subtotal")
+      .flatMap((r) => r.headerCells.map((h) => h.label));
+
+  it("shows a band for an outer dimension by default", () => {
+    expect(subtotals(unordered)).toEqual(["Totals for EU", "Totals for US"]);
+  });
+
+  it("drops the band when that dimension is switched off, leaving leaves and the grand total", () => {
+    const p = buildPivot({ ...unordered, dimTotals: { region: false } });
+    expect(p.bodyRows.filter((r) => r.kind === "subtotal")).toHaveLength(0);
+    expect(p.bodyRows.some((r) => r.kind === "grand")).toBe(true);
+    // three distinct leaf row PATHS — (US,SMB) occurs twice in the data, once per date column
+    expect(p.bodyRows.filter((r) => r.kind === "leaf")).toHaveLength(3);
+  });
+
+  it("an explicit true matches the default", () => {
+    expect(subtotals({ ...unordered, dimTotals: { region: true } }))
+      .toEqual(["Totals for EU", "Totals for US"]);
+  });
+
+  it("the global switch still overrides a per-dimension true", () => {
+    const p = buildPivot({ ...unordered, showColTotals: false, dimTotals: { region: true } });
+    expect(p.bodyRows.filter((r) => r.kind === "subtotal")).toHaveLength(0);
+    expect(p.bodyRows.some((r) => r.kind === "grand")).toBe(false);
   });
 });

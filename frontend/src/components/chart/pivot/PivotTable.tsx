@@ -4,9 +4,62 @@ import { buildConditional } from "../conditional";
 import type { ColumnFormat, Rule } from "../format-types";
 import { pivotCellDrill, type DrillContext } from "../drill";
 
+const MIN_COL_WIDTH = 60;
+/** One arrow-key press. Chart 03 established that a mouse-only column interaction is a defect, so
+ * the handle is focusable and resizes from the keyboard as well as from a drag. */
+const KEY_RESIZE_STEP = 16;
+
+function ResizeHandle({ label, onResize, getWidth }: {
+  label: string;
+  onResize: (width: number) => void;
+  /** Measured from the DOM at gesture start — the stored width may be absent (auto-sized). */
+  getWidth: (el: HTMLElement) => number;
+}) {
+  return (
+    <span
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={label}
+      tabIndex={0}
+      className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize select-none hover:bg-primary/40 focus-visible:bg-primary/60 focus-visible:outline-none"
+      onKeyDown={(e) => {
+        if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+        e.preventDefault();
+        const cell = e.currentTarget.parentElement;
+        if (!cell) return;
+        const delta = e.key === "ArrowRight" ? KEY_RESIZE_STEP : -KEY_RESIZE_STEP;
+        onResize(Math.max(MIN_COL_WIDTH, getWidth(cell) + delta));
+      }}
+      onPointerDown={(e) => {
+        e.preventDefault();
+        e.stopPropagation(); // a header click cycles the sort; a drag must not
+        const cell = e.currentTarget.parentElement;
+        if (!cell) return;
+        const startX = e.clientX;
+        const startW = getWidth(cell);
+        const move = (ev: PointerEvent) =>
+          onResize(Math.max(MIN_COL_WIDTH, startW + ev.clientX - startX));
+        const up = () => {
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", up);
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
+      }}
+    />
+  );
+}
+
+export interface PivotColumnWidths {
+  /** by row-dimension position */
+  left?: Record<number, number>;
+  /** by column-leaf index */
+  value?: Record<number, number>;
+}
+
 export function PivotTable({
   input, columnSettings = {}, conditionalFormatting = [], metricTypes = {},
-  onToggleCollapse, onCycleSort, onCellDrill,
+  onToggleCollapse, onCycleSort, onCellDrill, columnWidths, onResizeColumn,
 }: {
   input: PivotInput;
   columnSettings?: Record<string, ColumnFormat>;
@@ -15,6 +68,9 @@ export function PivotTable({
   onToggleCollapse?: (serializedPath: string) => void;
   onCycleSort?: (dimName: string) => void;
   onCellDrill?: (ctx: DrillContext, x: number, y: number) => void;
+  columnWidths?: PivotColumnWidths;
+  /** Omitted in read-only surfaces (a dashboard card), which disables the handles. */
+  onResizeColumn?: (kind: "left" | "value", index: number, width: number) => void;
 }) {
   const p = buildPivot(input);
   const condRows = p.bodyRows.filter((br) => br.kind === "leaf").map((br) => br.values);
@@ -33,6 +89,16 @@ export function PivotTable({
   return (
     <div className="max-h-[60vh] overflow-auto rounded-md border">
       <table className="w-full border-separate border-spacing-0 text-xs text-foreground/90">
+        {/* Widths live on <colgroup> so a body cell never has to know its own width — otherwise
+            every one of them would need the setting threaded down and re-rendered on a drag. */}
+        <colgroup>
+          {p.rowDimNames.map((_, i) => (
+            <col key={`l-${i}`} style={columnWidths?.left?.[i] ? { width: columnWidths.left[i] } : undefined} />
+          ))}
+          {p.colLeaves.map((_, i) => (
+            <col key={`v-${i}`} style={columnWidths?.value?.[i] ? { width: columnWidths.value[i] } : undefined} />
+          ))}
+        </colgroup>
         <thead className="text-foreground">
           {p.topHeader.map((level, li) => (
             <tr key={li}>
@@ -48,23 +114,49 @@ export function PivotTable({
                     <th
                       key={`rd-${di}`}
                       onClick={onCycleSort ? () => onCycleSort(name) : undefined}
-                      className={`w-px sticky top-0 z-30 ${GRID} bg-accent px-4 py-1.5 text-left font-semibold whitespace-nowrap ${di === 0 ? "left-0" : ""} ${onCycleSort ? "cursor-pointer select-none" : ""}`}
+                      className={`relative w-px sticky top-0 z-30 ${GRID} bg-accent px-4 py-1.5 text-left font-semibold whitespace-nowrap ${di === 0 ? "left-0" : ""} ${onCycleSort ? "cursor-pointer select-none" : ""}`}
                     >
                       {columnSettings[name]?.column_title || name}
                       {dir === "asc" ? " ▲" : dir === "desc" ? " ▼" : ""}
+                      {onResizeColumn && (
+                        <ResizeHandle
+                          label={`Resize ${name}`}
+                          getWidth={(el) => columnWidths?.left?.[di] ?? el.getBoundingClientRect().width}
+                          onResize={(w) => onResizeColumn("left", di, w)}
+                        />
+                      )}
                     </th>
                   );
                 })}
-              {level.map((c, ci) => (
-                <th
-                  key={ci}
-                  className={`sticky top-0 z-10 ${GRID} bg-accent px-4 py-1.5 text-right font-semibold whitespace-nowrap last:border-r-0`}
-                  colSpan={c.colSpan}
-                  rowSpan={c.rowSpan ?? 1}
-                >
-                  {c.metric ? (columnSettings[c.metric]?.column_title || c.label) : c.label}
-                </th>
-              ))}
+              {(() => {
+                // A header cell only lines up with a single value column when it spans one. That
+                // is true on the last level — either the metric sub-header (one cell per leaf) or,
+                // with a single metric, the innermost column-dimension level. Higher levels group
+                // several leaves, so they get no handle rather than a wrong one.
+                let offset = 0;
+                return level.map((c, ci) => {
+                  const leafIndex = offset;
+                  offset += c.colSpan;
+                  const resizable = onResizeColumn && c.colSpan === 1 && leafIndex < p.colLeaves.length;
+                  return (
+                    <th
+                      key={ci}
+                      className={`relative sticky top-0 z-10 ${GRID} bg-accent px-4 py-1.5 text-right font-semibold whitespace-nowrap last:border-r-0`}
+                      colSpan={c.colSpan}
+                      rowSpan={c.rowSpan ?? 1}
+                    >
+                      {c.metric ? (columnSettings[c.metric]?.column_title || c.label) : c.label}
+                      {resizable && (
+                        <ResizeHandle
+                          label={`Resize ${c.label}`}
+                          getWidth={(el) => columnWidths?.value?.[leafIndex] ?? el.getBoundingClientRect().width}
+                          onResize={(w) => onResizeColumn("value", leafIndex, w)}
+                        />
+                      )}
+                    </th>
+                  );
+                });
+              })()}
             </tr>
           ))}
         </thead>

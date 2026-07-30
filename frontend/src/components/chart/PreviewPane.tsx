@@ -6,7 +6,7 @@ import type { DrillContext } from "@/components/chart/drill";
 import { ChartRenderer } from "./ChartRenderer";
 import { ChartErrorBoundary } from "./ChartErrorBoundary";
 import { ChartTable } from "./ChartTable";
-import { PivotTable } from "./pivot/PivotTable";
+import { PivotTable, type PivotColumnWidths } from "./pivot/PivotTable";
 import { ChartEmptyState, ChartLoadingState, ChartErrorState } from "./ChartPreviewStates";
 
 interface ResultColumn { name: string; type: string }
@@ -20,8 +20,11 @@ interface PivotProps {
   condense: boolean;
   collapsed: Set<string>;
   sortDims: Record<string, "asc" | "desc">;
+  dimTotals?: Record<string, boolean>;
+  columnWidths?: PivotColumnWidths;
   onToggleCollapse: (path: string) => void;
   onCycleSort: (dim: string) => void;
+  onResizeColumn?: (kind: "left" | "value", index: number, width: number) => void;
 }
 
 interface TableProps {
@@ -85,12 +88,15 @@ export function PreviewPane({
               rowDims: pivot.rowDims, colDims: pivot.colDims, metrics: pivot.metrics,
               showRowTotals: pivot.showRowTotals, showColTotals: pivot.showColTotals,
               condense: pivot.condense, collapsed: pivot.collapsed, sortDims: pivot.sortDims,
+              dimTotals: pivot.dimTotals,
             }}
             columnSettings={columnSettings}
             conditionalFormatting={conditionalFormatting}
             metricTypes={metricTypes}
             onToggleCollapse={pivot.onToggleCollapse}
             onCycleSort={pivot.onCycleSort}
+            columnWidths={pivot.columnWidths}
+            onResizeColumn={pivot.onResizeColumn}
             onCellDrill={onCellDrill}
           />
         )}

@@ -8,7 +8,11 @@ export interface PivotInput {
   showColTotals: boolean;     // nested row-subtotal rows + bottom grand-total row
   condense: boolean;          // drop a subtotal row when its group has one child
   collapsed: Set<string>;     // serialized row-group paths that are collapsed
-  sortDims?: Record<string, "asc" | "desc">;  // row-dimension name -> direction; absent = natural order
+  sortDims?: Record<string, "asc" | "desc">;  // row-dimension name -> direction; absent = ascending
+  /** row-dimension name -> whether it contributes a subtotal band. Absent = the default in
+   * `dimShowsTotals` (on for every dimension except the innermost). Narrows `showColTotals`,
+   * never widens it. */
+  dimTotals?: Record<string, boolean>;
 }
 
 export type CellValue = number | string | null;
@@ -145,13 +149,47 @@ function cmpValues(a: string | null, b: string | null): number {
   return a.localeCompare(b);
 }
 
-function sortTree(node: TreeNode, depth: number, dims: string[], sortDims: Record<string, "asc" | "desc">) {
-  const dir = sortDims[dims[depth]];
-  if (dir) {
-    const sign = dir === "desc" ? -1 : 1;
-    node.children.sort((a, b) => cmpValues(a.value, b.value) * sign);
-  }
+/**
+ * Order a dimension tree's children.
+ *
+ * `sortDims` overrides a level's direction; without one a level sorts **ascending**, it does not
+ * keep the order the rows happened to arrive in. That default is the fix for a real defect: the
+ * pivot's query sets `orderby: []`, so first-appearance order is whatever the engine returned, and
+ * a month-bucketed column dimension came back `2026-02, 2026-03, 2026-01`. Non-deterministic
+ * output that changes between runs is worse than any particular order, and Metabase sorts both
+ * axes too (its sample pivot runs Q2 2025 → Q4 2026 across, Affiliate → Twitter down).
+ */
+function sortTree(
+  node: TreeNode,
+  depth: number,
+  dims: string[],
+  sortDims: Record<string, "asc" | "desc">,
+) {
+  const sign = sortDims[dims[depth]] === "desc" ? -1 : 1;
+  node.children.sort((a, b) => cmpValues(a.value, b.value) * sign);
   for (const ch of node.children) sortTree(ch, depth + 1, dims, sortDims);
+}
+
+/**
+ * Whether the row dimension at `depth` contributes a subtotal band.
+ *
+ * Metabase carries this per column (`pivot_table.column_show_totals`) rather than as one switch,
+ * and defaults it **on for every row dimension except the last** — a subtotal under the innermost
+ * dimension has exactly one child, so it would restate the leaf row directly above it.
+ *
+ * Resolved here rather than stored, so a pivot saved before this existed picks up the default —
+ * the program's rule since chart 01. `input.showColTotals` stays the all-or-nothing shortcut, and
+ * is checked by the caller before this is consulted.
+ *
+ * The default is deliberately a no-op: only a node with children reaches the subtotal branch, and
+ * a row path is as long as `rowDims`, so the innermost dimension's nodes are always leaves. This
+ * setting can therefore only ever turn a band OFF — every existing pivot renders exactly as before.
+ */
+function dimShowsTotals(input: PivotInput, depth: number): boolean {
+  const name = input.rowDims[depth];
+  const stored = name != null ? input.dimTotals?.[name] : undefined;
+  if (stored !== undefined) return stored;
+  return depth < input.rowDims.length - 1;
 }
 
 export function buildPivot(input: PivotInput): Pivot {
@@ -160,6 +198,10 @@ export function buildPivot(input: PivotInput): Pivot {
   const rowTree = buildTree(ix.rowLeafPaths);
   sortTree(rowTree, 0, input.rowDims, input.sortDims ?? {});
   const colTree = buildTree(ix.colLeafPaths);
+  // Columns have no sort UI — there is no header to click — so they always sort ascending. Before
+  // this they were left in arrival order, which is how a month-bucketed axis rendered out of
+  // sequence.
+  sortTree(colTree, 0, input.colDims, {});
 
   // ----- column leaves (full col paths × metrics, + optional Total group) -----
   const colLeafPaths: (string | null)[][] = [];
@@ -223,7 +265,11 @@ export function buildPivot(input: PivotInput): Pivot {
     for (const ch of node.children) {
       const childPath = [...path, ch.value];
       const isGroup = ch.children.length > 0;
-      const hasSubtotal = input.showColTotals && isGroup && (!input.condense || ch.children.length > 1);
+      const hasSubtotal =
+        input.showColTotals &&
+        dimShowsTotals(input, depth) &&
+        isGroup &&
+        (!input.condense || ch.children.length > 1);
 
       if (!isGroup) {
         const start = bodyRows.length;
