@@ -71,7 +71,7 @@ vi.mock("@/api/datasets", () => ({
   }),
 }));
 
-async function mountChart(id: string, tab?: "display") {
+async function mountChart(id: string, tab?: "display" | "rules") {
   const { default: ChartExplore } = await import("../ChartExplore");
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -130,9 +130,17 @@ describe("ChartExplore mounts", () => {
     expect(screen.getByText(/^Set up your/).parentElement!.parentElement).toBe(column);
   });
 
-  it("keeps the table's column and conditional-formatting sections", async () => {
+  it("keeps the table's column section on the Display tab", async () => {
     await mountChart("c-table", "display");
     expect(await screen.findByText("Columns")).toBeInTheDocument();
-    expect(screen.getByText("Conditional formatting")).toBeInTheDocument();
+    // Conditional formatting moved to its own tab — stacked in here it made the panel long
+    // enough to read as cut off, which is what Metabase avoids by splitting the two.
+    expect(screen.queryByText("Conditional formatting")).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Colors" })).toBeInTheDocument();
+  });
+
+  it("puts conditional formatting on its own tab", async () => {
+    await mountChart("c-table", "rules");
+    expect(await screen.findByText("Conditional formatting")).toBeInTheDocument();
   });
 });

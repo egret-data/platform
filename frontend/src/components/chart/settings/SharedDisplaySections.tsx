@@ -43,7 +43,7 @@ export function styleColumnsFor(
  */
 export function SharedDisplaySections({
   vizType, resultColumns, styleColumns, tableState, columnSettings, conditionalFormatting,
-  onTableState, onColumnSettings, onConditionalFormatting,
+  onTableState, onColumnSettings, onConditionalFormatting, only,
 }: {
   vizType: VizType;
   resultColumns: ResultColumn[];
@@ -54,7 +54,15 @@ export function SharedDisplaySections({
   onTableState: (next: TableState) => void;
   onColumnSettings: (next: Record<string, ColumnFormat>) => void;
   onConditionalFormatting: (next: Rule[]) => void;
+  /** Which half to render. Metabase splits these across two tabs (Columns | Conditional
+   * Formatting) and egret stacked all of it in one column, which is why the pivot's panel — the
+   * longest in the app — read as cut off. Callers that want the old single column omit this and
+   * get everything, so the dashboard's card editor is unchanged. */
+  only?: "format" | "conditional";
 }) {
+  const showFormat = only !== "conditional";
+  const showConditional = only !== "format";
+
   if (resultColumns.length === 0) {
     // Name what THIS viz needs, not a generic "column formatting" sentence — for a table that
     // sat exactly where the column list belongs.
@@ -68,20 +76,20 @@ export function SharedDisplaySections({
   }
   return (
     <>
-      {vizType === "table" && (
+      {showFormat && vizType === "table" && (
         <div className="space-y-1.5">
           <SectionLabel>Columns</SectionLabel>
           <TableColumnsSection columns={resultColumns} value={tableState} onChange={onTableState} columnSettings={columnSettings} />
         </div>
       )}
-      {styleColumns.length > 0 && (
+      {showFormat && styleColumns.length > 0 && (
         <div className="space-y-1.5">
           <SectionLabel>Formatting</SectionLabel>
           <FormatSection columns={styleColumns} value={columnSettings} onChange={onColumnSettings}
             allowMiniBar={vizType === "table"} />
         </div>
       )}
-      {(vizType === "table" || vizType === "pivot_table") && (
+      {showConditional && (vizType === "table" || vizType === "pivot_table") && (
         <div className="space-y-1.5">
           <SectionLabel>Conditional formatting</SectionLabel>
           <ConditionalFormattingSection columns={styleColumns} rules={conditionalFormatting}

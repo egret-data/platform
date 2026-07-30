@@ -198,6 +198,12 @@ export function FormatSection({
                           <SelectItem value="M/D/YYYY">1/31/2024</SelectItem>
                           <SelectItem value="D/M/YYYY">31/1/2024</SelectItem>
                           <SelectItem value="YYYY-MM-DD">2024-01-31</SelectItem>
+                          {/* Bucket-shaped styles. A pivot grouped by month arrives as the first
+                              of the month, so a full date reads "1/1/2026" and the day is noise —
+                              Metabase labels the same bucket "January 2026" / "Q1 2026". */}
+                          <SelectItem value="MMMM YYYY">January 2024</SelectItem>
+                          <SelectItem value="[Q]Q YYYY">Q1 2024</SelectItem>
+                          <SelectItem value="YYYY">2024</SelectItem>
                         </SelectContent>
                       </Select>
                     </Field>

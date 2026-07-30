@@ -122,6 +122,9 @@ export default function ChartExplore() {
     if (!id && isValidViz(typeParam)) setViz(typeParam);
   }, [id, typeParam]);
 
+  // Only these two draw conditional colours, so only they get the tab.
+  const hasConditionalRules = viz === "table" || viz === "pivot_table";
+
   const columns = detail.data?.columns ?? [];
   const metrics = detail.data?.metrics ?? [];
 
@@ -334,6 +337,11 @@ export default function ChartExplore() {
 
   // Data/Display builder tab in the URL (?tab=), default "data" (preserves prior behavior).
   const builderTab = searchParams.get("tab") ?? "data";
+  // Switching to a viz without rules while that tab is open would leave the panel blank: the
+  // trigger disappears but the selected value does not, and no TabsContent matches it.
+  useEffect(() => {
+    if (!hasConditionalRules && builderTab === "rules") setBuilderTab("display");
+  }, [hasConditionalRules, builderTab]);
   const setBuilderTab = (v: string) =>
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
@@ -398,6 +406,12 @@ export default function ChartExplore() {
           <TabsList className={UNDERLINE_LIST}>
             <TabsTrigger value="data" className={UNDERLINE_TRIGGER}>Data</TabsTrigger>
             <TabsTrigger value="display" className={UNDERLINE_TRIGGER}>Display</TabsTrigger>
+            {/* Its own tab, the way Metabase splits Columns | Conditional Formatting. Stacked in
+                with the rest, it made the pivot's panel the longest in the app and the reason it
+                read as cut off. Only table and pivot have rules, so the tab only exists there. */}
+            {hasConditionalRules && (
+              <TabsTrigger value="rules" className={UNDERLINE_TRIGGER}>Colors</TabsTrigger>
+            )}
           </TabsList>
 
           {/* ── DATA TAB ── */}
@@ -471,10 +485,36 @@ export default function ChartExplore() {
                   onTableState={setTableState}
                   onColumnSettings={setColumnSettings}
                   onConditionalFormatting={setConditionalFormatting}
+                  only="format"
                 />
               </>
             )}
           </TabsContent>
+
+          {/* ── COLORS TAB (conditional formatting) ── */}
+          {hasConditionalRules && (
+            <TabsContent value="rules" className="space-y-4">
+              <SharedDisplaySections
+                vizType={viz}
+                resultColumns={resultColumns}
+                styleColumns={styleColumnsFor(viz, {
+                  spec: specForRun(),
+                  cartesian: descConfig as { yMetrics: string[] },
+                  scalar: descConfig as { metric?: string },
+                  metrics: (descConfig as { metrics?: string[] }).metrics,
+                  rows: (descConfig as { rows?: string[] }).rows,
+                  cols: (descConfig as { cols?: string[] }).cols,
+                } as ChartParams, resultColumns)}
+                tableState={tableState}
+                columnSettings={columnSettings}
+                conditionalFormatting={conditionalFormatting}
+                onTableState={setTableState}
+                onColumnSettings={setColumnSettings}
+                onConditionalFormatting={setConditionalFormatting}
+                only="conditional"
+              />
+            </TabsContent>
+          )}
         </Tabs>
       </div>
 

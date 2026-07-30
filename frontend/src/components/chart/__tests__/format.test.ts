@@ -75,3 +75,21 @@ describe("formatValue other", () => {
     expect(formatValue("hello", "varchar")).toBe("hello");
   });
 });
+
+describe("date styles for time buckets", () => {
+  // A pivot bucketed by month/quarter/year arrives as the first instant of the bucket, so a full
+  // date shows a day that carries no meaning. These are the shapes Metabase labels buckets with.
+  it("formats a month bucket as month and year", () => {
+    expect(formatValue("2026-01-01", "date", { date_style: "MMMM YYYY" })).toBe("January 2026");
+  });
+  it("formats a quarter bucket with the Q token", () => {
+    expect(formatValue("2026-04-01", "date", { date_style: "[Q]Q YYYY" })).toBe("Q2 2026");
+  });
+  it("formats a year bucket as the year alone", () => {
+    expect(formatValue("2026-01-01", "date", { date_style: "YYYY" })).toBe("2026");
+  });
+  it("abbreviating a month bucket shortens the month name", () => {
+    expect(formatValue("2026-01-01", "date", { date_style: "MMMM YYYY", date_abbreviate: true }))
+      .toBe("Jan 2026");
+  });
+});
