@@ -2527,6 +2527,49 @@ describe("pieHasSlices", () => {
 // This is the table that carries the rest of it: every slice, under its parent, with its share OF
 // that parent.
 describe("buildPieBreakdown", () => {
+  // The table and the legend sit on the same page, so a root slice must not read as a DIFFERENT
+  // number in each. Measured live at the in-arc budget: `APAC 34.6%` in the legend, `APAC 35%` in
+  // the table — they rounded opposite ways.
+  //
+  // Character equality is NOT the invariant, and asserting it was this test's first mistake. The
+  // two precisions are computed over different value sets, exactly as Metabase's legend (ring 0,
+  // 3 significant digits) and slice labels (every depth, 2) are: the table carries deep rows whose
+  // tiny shares demand more decimals, and Metabase's rule then gives that precision to the whole
+  // column so a reader compares like with like. So the table's figure is a REFINEMENT of the
+  // legend's — round it back to the legend's precision and you must get the legend's string.
+  it("states a root slice's share as a refinement of the legend's, never a different number", () => {
+    const cols = [
+      { name: "r", type: "varchar" }, { name: "p", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    // 36.44 / 34.59 / 28.97 of the whole — the live numbers that exposed the split. NO tiny slice
+    // anywhere, deliberately: a sub-percent share forces extra decimals at BOTH budgets, which
+    // makes them agree by accident and leaves this test unable to fail. (It did exactly that on
+    // the first attempt — the mutation back to the in-arc budget survived.) With only sizeable
+    // children, the in-arc budget prints whole numbers and the legend's prints one decimal, so
+    // the two round apart and the refinement check has something to catch.
+    const rows = [
+      ["LATAM", "x", 1822], ["LATAM", "y", 1822],
+      ["APAC", "x", 1730], ["APAC", "y", 1729],
+      ["EMEA", "x", 1449], ["EMEA", "y", 1448],
+    ];
+    const cfg = { dimensions: ["r", "p"], metric: "m" };
+    const legend = buildPieLegend(cols, rows, cfg);
+    const table = buildPieBreakdown(cols, rows, cfg);
+
+    for (const entry of legend) {
+      const row = table.rows.find((r) => r.depth === 0 && r.name === entry.name);
+      expect(row, `no table row for legend entry ${entry.name}`).toBeDefined();
+      const legendDecimals = (entry.percent!.match(/\.(\d+)%/)?.[1] ?? "").length;
+      const tableDecimals = (row!.share.match(/\.(\d+)%/)?.[1] ?? "").length;
+      // The table is at least as precise...
+      expect(tableDecimals).toBeGreaterThanOrEqual(legendDecimals);
+      // ...and agrees once brought back to the legend's precision. This is what fails when the
+      // two round opposite ways, which is the defect measured live.
+      const backToLegend = `${parseFloat(row!.share).toFixed(legendDecimals)}%`;
+      expect(backToLegend).toBe(entry.percent);
+    }
+  });
+
   const cols3 = [
     { name: "region", type: "varchar" }, { name: "product", type: "varchar" },
     { name: "channel", type: "varchar" }, { name: "m", type: "double" },
@@ -2608,11 +2651,21 @@ describe("buildPieBreakdown", () => {
     }
   });
 
-  it("takes the chart's own precision when none is stored, exactly as the slices do", () => {
+  // RE-BASELINED. This used to assert the table printed shares at the SLICE budget, character for
+  // character with the tooltip. It no longer does, deliberately: the table sits beside the legend,
+  // and at the slice budget the same root slice read `34.6%` in one and `35%` in the other. The
+  // table now takes the legend's budget — so it is at least as precise as the tooltip, and equal
+  // whenever the two budgets happen to land on the same number of decimals.
+  it("is never less precise than the tooltip for the same slice", () => {
     const auto = { dimensions: ["region", "product", "channel"], metric: "m" };
     const b = buildPieBreakdown(cols3, rows3, auto);
     const opt = buildPieOption(cols3, rows3, auto) as any;
-    expect(b.rows.find((r) => r.name === "P1")!.share).toBe(tooltipCells(opt, ["R1", "P1"])[1]);
+    const fromTable = b.rows.find((r) => r.name === "P1")!.share;
+    const fromTooltip = tooltipCells(opt, ["R1", "P1"])[1];
+    const decimals = (v: string) => (v.match(/\.(\d+)%/)?.[1] ?? "").length;
+    expect(decimals(fromTable)).toBeGreaterThanOrEqual(decimals(fromTooltip));
+    // Same underlying number, whatever the precision.
+    expect(parseFloat(fromTable)).toBeCloseTo(parseFloat(fromTooltip), 1);
   });
 
   // 3. In step with what is actually drawn.

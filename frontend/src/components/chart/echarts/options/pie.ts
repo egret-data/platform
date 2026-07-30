@@ -1116,6 +1116,11 @@ function pieSharePrecision(
   rootTotal: number,
   childrenByParentKey: Map<string, Slice[]>[],
   cfg: PieBuildConfig,
+  /** The significant-digit budget. Defaults to the in-arc one, because that is who most callers
+   * are. The breakdown TABLE passes the legend's instead: the two sit on the same page, and at
+   * the tighter budget a reader saw `APAC 34.6%` in the legend and `APAC 35%` in the table — not
+   * merely coarser, a different number for the same slice. A table has room; a wedge does not. */
+  significantDigits: number = SLICE_PERCENT_SIGNIFICANT_DIGITS,
 ): number {
   const collect = (slices: Slice[], level: number, parentValue: number, out: number[]): number[] => {
     for (const s of slices) {
@@ -1127,7 +1132,7 @@ function pieSharePrecision(
   };
   return (
     cfg.decimals
-    ?? computeMaxPercentDecimals(collect(rootSlices, 0, rootTotal, []), SLICE_PERCENT_SIGNIFICANT_DIGITS)
+    ?? computeMaxPercentDecimals(collect(rootSlices, 0, rootTotal, []), significantDigits)
   );
 }
 
@@ -1161,8 +1166,10 @@ export interface PieBreakdownRow {
   /** The slice's true metric value, through the chart's own formatter. Never the inflated figure a
    * sub-0.5% wedge is DRAWN at (see MIN_DRAWN_SLICE_FRACTION). */
   value: string;
-  /** Its share of its parent — of the whole chart at ring 0 — formatted at the chart's own
-   * precision, so it is character-for-character what the tooltip prints for the same slice. */
+  /** Its share of its parent — of the whole chart at ring 0 — formatted at the LEGEND's precision,
+   * so a root slice reads character-for-character the same here as in the legend beside it. The
+   * in-arc budget is deliberately not used: a wedge is cramped and a table is not, and at the
+   * tighter one the same slice read `34.6%` in the legend and `35%` here. */
   share: string;
 }
 
@@ -1222,7 +1229,10 @@ export function buildPieBreakdown(
   const childrenByParentKey = pieChildrenByParent(rings, groupOfByLevel);
   const rootSlices = pieRootSlices(rings[0], cfg);
   const rootTotal = rootSlices.reduce((t, s) => t + s.value, 0);
-  const decimals = pieSharePrecision(rootSlices, rootTotal, childrenByParentKey, cfg);
+  // The legend's budget, not the in-arc one — see `pieSharePrecision`'s last parameter.
+  const decimals = pieSharePrecision(
+    rootSlices, rootTotal, childrenByParentKey, cfg, LEGEND_PERCENT_SIGNIFICANT_DIGITS,
+  );
   const pct = pctFormatter(decimals);
 
   const out: PieBreakdownRow[] = [];
