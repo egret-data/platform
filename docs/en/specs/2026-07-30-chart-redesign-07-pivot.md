@@ -158,6 +158,8 @@ shortcut so nothing regresses.
 columns, dragged from a handle. This is the one Metabase setting its own sample dashboard actually
 ships, so it is not a hypothetical.
 
+**T4 — virtualisation: MEASURED, and deliberately NOT DONE.** Numbers below.
+
 **T4 — virtualisation, only if measured to matter.** Row-window the body when the pivot exceeds a
 threshold. **Gated on a measurement, not assumed**: build a pivot large enough to hurt, record the
 numbers, and only then decide. Chart 05 spent 40 commits on a rewrite that a measurement would have
@@ -167,6 +169,38 @@ scoped first.
 deserves its own discussion), and any change to sorting or conditional formatting.
 
 ---
+
+## T4 measured — the numbers, and why it is not being built
+
+The rule was: measure first, and write the numbers down whichever way the decision goes.
+
+Cost of the DOM alone at pivot-like shapes, in the same browser at the same viewport. This is a
+**floor** on what egret pays — it skips React, `formatValue` per cell and the conditional-formatting
+pass, so the real figure is higher, never lower:
+
+| shape | value cells | DOM nodes | build + layout |
+|---|---|---|---|
+| 21 × 28 — today's live pivot | 588 | 609 | **8 ms** |
+| 100 × 30 | 3,000 | 3,100 | 33 ms |
+| 500 × 30 | 15,000 | 15,500 | **201 ms** |
+| 2,000 × 30 | 60,000 | 62,000 | 713 ms |
+| 5,000 × 30 | 150,000 | 155,000 | **1,808 ms** |
+
+Reading it: nothing is perceptible below a few thousand cells, it becomes noticeable around 15,000,
+and it is unusable by 150,000.
+
+**Decision: not built.** A pivot's leaf-row count is bounded by the distinct combinations of its row
+dimensions, and `row_limit` defaults to **1,000** (`MAX_CHART_ROWS` caps it at 10,000). The live
+pivot on the demo dataset draws 588 cells and costs 8 ms — three orders of magnitude away from the
+point where this matters. Porting Metabase's `Grid` + two `Collection`s + `ScrollSync` would be a
+rewrite of the render path, putting sticky panes, `rowSpan`ned group headers, subtotal bands and
+collapse at risk, to fix a problem this data cannot produce.
+
+**What would change the answer:** a pivot above roughly **15,000 value cells** — reachable with a
+raised `row_limit` and high-cardinality row dimensions. That is the trigger for a separate unit, and
+the number to measure against, rather than a feeling that a table "should" be virtualised. Chart 05
+spent 40 commits rewriting something it had not measured first; this is the same rule applied to
+reach the opposite conclusion.
 
 ## Live check
 
