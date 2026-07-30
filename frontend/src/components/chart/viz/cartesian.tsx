@@ -48,9 +48,20 @@ function XMetricControl({ config, onChange, metrics }: VizControlProps<Cartesian
   );
 }
 
+/** Machine name -> display name, from the dataset's own `verbose_name`. */
+function labelMap(items: { verbose_name?: string }[], nameOf: (i: never) => string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const i of items) {
+    const v = i.verbose_name?.trim();
+    if (v) out[nameOf(i as never)] = v;
+  }
+  return out;
+}
+
 function YAxisControl({ config, onChange, metrics }: VizControlProps<CartesianConfig>) {
   return (
     <FieldZone label="Y-axis" selected={config.yMetrics} onChange={(v) => onChange({ yMetrics: v })}
+      labels={labelMap(metrics, (m: { metric_name: string }) => m.metric_name)}
       options={metrics.map((m) => m.metric_name)} />
   );
 }
