@@ -116,6 +116,24 @@ export interface PieBuildConfig {
 
 const OTHER_NAME = "Other";
 const DEFAULT_THRESHOLD = 2.5; // percent — Metabase SLICE_THRESHOLD (0.025)
+/**
+ * The smallest share of the chart a RING-0 slice is drawn at, however little it is worth —
+ * Metabase's `OTHER_SLICE_MIN_PERCENTAGE` (0.005).
+ *
+ * A slice worth 0.1% of the total is about a pixel of arc on a 550px pie, most of it painted over
+ * by the border: there is nothing to hover, nothing to click, and nothing to see. Drawing it at
+ * half a percent gives it a target without giving it a claim — every number the chart REPORTS
+ * about it (label, tooltip, legend percent, centre readout) still comes from its true value, which
+ * is why the datum carries both (see `PieSliceNode.rawValue`).
+ *
+ * RING 0 ONLY, which is Metabase's own rule and its own reason: "if we do this for the outer
+ * rings, it can lead to overlapping slices". An outer slice sits inside its parent's arc, and
+ * there is no spare angle in there to take the extra from — every ring-0 slice, by contrast, is
+ * competing for the whole turn, which the sum below re-normalises. egret's outer rings are more
+ * crowded than Metabase's (a per-parent Other fold keeps more of them), so the rule binds harder
+ * here, not less.
+ */
+const MIN_DRAWN_SLICE_FRACTION = 0.005;
 // Sentinel identifying "this ring's own Other bucket" as a reorder group, distinct from any real
 // column value. Collides only if a real dimension value were literally this string (same accepted
 // risk as OTHER_NAME itself already colliding with a real "Other" category value).
@@ -135,7 +153,15 @@ interface Slice { name: string; value: number; key?: string; parentKey?: string;
  * Named so `toNode` can be recursive without TypeScript having to infer its own return type. */
 interface PieSliceNode {
   name: string;
+  /** WHAT ECHARTS DRAWS THIS SLICE AS — not necessarily what it is worth. `sunburstLayout` turns a
+   * node's `value` straight into an angle, so this is the only field that can express "draw it a
+   * little bigger than it is", which is what the tiny-slice floor needs (see
+   * MIN_DRAWN_SLICE_FRACTION). Equal to `rawValue` for every slice the floor doesn't touch. */
   value: number;
+  /** WHAT THE SLICE IS ACTUALLY WORTH — the number anything that REPORTS the slice must use. Split
+   * from `value` by the tiny-slice floor: a sub-0.5% slice is drawn bigger so it can be pointed at,
+   * and would otherwise start reading out the inflated figure the moment you did point at it. */
+  rawValue: number;
   /** This slice's share of its own parent (of the whole chart, at ring 0), already rounded to the
    * chart's `decimals`. A `sunburst` series supplies no `percent` of its own — see `toNode`. */
   slicePercent: number;
@@ -1072,7 +1098,9 @@ function pieTooltip(
           : "";
         return `<tr style="font-weight:${focused ? TOOLTIP_WEIGHT.focused : TOOLTIP_WEIGHT.name}">`
           + `<td style="padding:1px 0;white-space:nowrap;color:${ink.name}">${marker}${escapeHtml(r.name)}</td>`
-          + `<td style="${cell};font-weight:${numberWeight(focused)};color:${ink.value}">${escapeHtml(fmt(r.value))}</td>`
+          // `rawValue`, never `value`: a floored slice is DRAWN bigger than it is, and the table
+          // that tells you what it is worth is the last place that should repeat the exaggeration.
+          + `<td style="${cell};font-weight:${numberWeight(focused)};color:${ink.value}">${escapeHtml(fmt(r.rawValue))}</td>`
           + `<td style="${cell};font-weight:${numberWeight(focused)};color:${ink.muted}">${escapeHtml(pct(r.slicePercent))}</td>`
           + "</tr>";
       }).join("");
@@ -1081,7 +1109,7 @@ function pieTooltip(
       const footer = rows.length > 1
         ? `<tr style="border-top:1px solid ${borderColor}">`
           + `<td style="padding:3px 0 1px;white-space:nowrap;color:${ink.name}">Total</td>`
-          + `<td style="${cell};padding-top:3px;font-weight:${TOOLTIP_WEIGHT.value};color:${ink.value}">${escapeHtml(fmt(rows.reduce((t, r) => t + r.value, 0)))}</td>`
+          + `<td style="${cell};padding-top:3px;font-weight:${TOOLTIP_WEIGHT.value};color:${ink.value}">${escapeHtml(fmt(rows.reduce((t, r) => t + r.rawValue, 0)))}</td>`
           + `<td style="${cell};padding-top:3px;font-weight:${TOOLTIP_WEIGHT.value};color:${ink.muted}">100%</td>`
           + "</tr>"
         : "";
@@ -1251,13 +1279,36 @@ export function buildPieOption(
   // the convention calcAvailableDonutSliceLabelLength's geometry assumes, and a test pins that both
   // stay unset so the model can't silently rot.
   const rootTotal = rootSlices.reduce((t, s) => t + s.value, 0);
-  const unitRadian = rootTotal > 0 ? (2 * Math.PI) / rootTotal : 0;
+
+  // THE TINY-SLICE FLOOR (see MIN_DRAWN_SLICE_FRACTION). Ring 0's drawn size, per slice — its own
+  // value, or the floor if it is under it. `rootTotal` stays the TRUE total: it is the denominator
+  // every reported percentage is taken against, and inflating it would move numbers on slices the
+  // floor never touched.
+  const drawnValueOf = (s: Slice) => Math.max(s.value, rootTotal * MIN_DRAWN_SLICE_FRACTION);
+  // ...and the sum of those, which is what the turn gets divided by — ECharts' own
+  // `unitRadian = 2π / rootSum`, reproduced here because the label fit below needs a slice's arc
+  // before anything renders. Dividing by the inflated sum is what keeps the circle closed: the
+  // extra a floored slice takes comes off every other slice proportionally, rather than off the
+  // end of the turn.
+  const drawnTotal = rootSlices.reduce((t, s) => t + drawnValueOf(s), 0);
+  const unitRadian = drawnTotal > 0 ? (2 * Math.PI) / drawnTotal : 0;
 
   const fontStyle = { size: sliceFontSize, weight: 700 };
 
-  /** One slice, as a sunburst node — its own subtree included. */
-  function toNode(s: Slice, level: number, startAngle: number, parentValue: number): PieSliceNode {
-    const endAngle = startAngle + s.value * unitRadian;
+  /**
+   * One slice, as a sunburst node — its own subtree included.
+   *
+   * `drawnScale` is how much bigger than itself this subtree is drawn: 1 everywhere except under a
+   * ring-0 slice the floor lifted, where it is that slice's inflation factor. It has to reach the
+   * WHOLE subtree, not just the floored slice, because ECharts lays a node's children out with the
+   * same global `unitRadian` and does NOT renormalise them into their parent's arc — children
+   * carrying their true values under an inflated parent would fill only a fraction of it and leave
+   * the rest of the wedge blank, which reads as missing data rather than as a magnified slice.
+   * Scaling the subtree uniformly keeps every nested proportion exactly as it was.
+   */
+  function toNode(s: Slice, level: number, startAngle: number, parentValue: number, drawnScale: number): PieSliceNode {
+    const drawnValue = s.value * drawnScale;
+    const endAngle = startAngle + drawnValue * unitRadian;
     const { inner: ringInnerPx, outer: ringOuterPx } = calcInnerOuterRadiusesForRing(
       innerRadiusPx,
       outerRadiusPx,
@@ -1316,7 +1367,8 @@ export function buildPieOption(
 
     return {
       name: s.name,
-      value: s.value,
+      value: drawnValue,
+      rawValue: s.value,
       slicePercent,
       isOther: s.key != null && s.key.startsWith(OTHER_KEY),
       itemStyle: { color, borderWidth },
@@ -1358,8 +1410,8 @@ export function buildPieOption(
       ...(children?.length
         ? {
             children: children.map((child) => {
-              const node = toNode(child, level + 1, childStart, s.value);
-              childStart += child.value * unitRadian;
+              const node = toNode(child, level + 1, childStart, s.value, drawnScale);
+              childStart += child.value * drawnScale * unitRadian;
               return node;
             }),
           }
@@ -1369,8 +1421,11 @@ export function buildPieOption(
 
   let rootStart = 0;
   const seriesData = rootSlices.map((s) => {
-    const node = toNode(s, 0, rootStart, rootTotal);
-    rootStart += s.value * unitRadian;
+    const drawnValue = drawnValueOf(s);
+    // `s.value > 0` always holds here (buildSlices drops zeros and negatives), so this only guards
+    // against a future caller reaching this with one.
+    const node = toNode(s, 0, rootStart, rootTotal, s.value > 0 ? drawnValue / s.value : 1);
+    rootStart += drawnValue * unitRadian;
     return node;
   });
 

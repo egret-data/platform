@@ -27,6 +27,12 @@ export interface EChartsPointHover {
   name?: string;
   seriesName?: string;
   value?: unknown;
+  /** The datum OBJECT the option handed ECharts for this element (`getDataParams`' own `data`),
+   * untouched. `value` above is what ECharts LAID THE ELEMENT OUT WITH, which for the pie is not
+   * always what the slice is worth — a sub-0.5% slice is deliberately drawn bigger so it can be
+   * pointed at, and carries its true figure as `rawValue` on this object. See options/pie.ts's
+   * MIN_DRAWN_SLICE_FRACTION. */
+  data?: unknown;
   /** Root-to-node path, tree series only — see `EChartsPointClick.treePathInfo`. */
   treePathInfo?: { name?: string }[];
 }
@@ -126,7 +132,9 @@ export function EChartsRenderer({ option, className, onPointClick, onPointHover,
     // for the middle of the chart crosses.
     chart.on("mouseover", "series", (params: unknown) => {
       const p = params as EChartsPointHover;
-      hoverRef.current?.({ name: p.name, seriesName: p.seriesName, value: p.value, treePathInfo: p.treePathInfo });
+      hoverRef.current?.({
+        name: p.name, seriesName: p.seriesName, value: p.value, data: p.data, treePathInfo: p.treePathInfo,
+      });
     });
     chart.on("mouseout", "series", () => hoverRef.current?.(null));
 

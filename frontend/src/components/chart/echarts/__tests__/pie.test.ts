@@ -2254,3 +2254,58 @@ describe("a pie's tooltip breaks down the slice's siblings", () => {
     expect(shared.formatter({ name: "EU", value: 10, percent: 25 })).toBe("EU: 10 (25%)");
   });
 });
+
+// A sub-0.5% ring-0 slice is DRAWN at 0.5% so there is something to point at — Metabase's
+// OTHER_SLICE_MIN_PERCENTAGE. What that must not do is change a single number the chart reports.
+// The drawn side of this (that the wedge really does come out wider) is measured against real
+// ECharts in pie.tinyslice.echarts.test.tsx; this block is about the figures.
+describe("the tiny-slice floor changes the drawing, not the numbers", () => {
+  const cols2 = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+  // B is 1 in 1001 — 0.0999%, a fifth of the floor. sliceThreshold 0 keeps it out of an "Other"
+  // bucket, so the slice under test is the tiny one itself.
+  const rows2 = [["A", 1000], ["B", 1]];
+  const cfg = { dimensions: ["d"], metric: "m", sliceThreshold: 0 };
+
+  it("draws the floored slice bigger while it keeps its own value", () => {
+    const opt = buildPieOption(cols2, rows2, cfg) as any;
+    const [a, b] = ring(opt, 0);
+    expect(b.rawValue).toBe(1);
+    expect(b.value).toBeCloseTo(1001 * 0.005, 9); // the total's 0.5%, which is what gets drawn
+    // Untouched slices state one number twice, so nothing downstream has to know which is which.
+    expect([a.value, a.rawValue]).toEqual([1000, 1000]);
+  });
+
+  it("reports the slice's true share, not its drawn one", () => {
+    const [, b] = ring(buildPieOption(cols2, rows2, cfg) as any, 0);
+    expect(b.slicePercent).toBe(0.1); // 1/1001, to the default 2 decimals — not 0.5
+  });
+
+  it("keeps the label on the true share", () => {
+    const opt = buildPieOption(cols2, rows2, { ...cfg, percentVisibility: "inside" }) as any;
+    expect(ring(opt, 0)[1].label.formatter()).toBe("B: 0.1%");
+  });
+
+  it("keeps the legend's percent and value true", () => {
+    const [, b] = buildPieLegend(cols2, rows2, { ...cfg, percentVisibility: "legend" });
+    expect(b).toMatchObject({ name: "B", value: 1, percent: "0.1%" });
+  });
+
+  it("keeps the tooltip's value and total true", () => {
+    const html = (buildPieOption(cols2, rows2, cfg) as any).tooltip.formatter({
+      treePathInfo: [{ name: "" }, { name: "B" }],
+    }) as string;
+    const cells = [...html.matchAll(/<tr[^>]*>(.*?)<\/tr>/g)].map((m) =>
+      [...m[1].matchAll(/<td[^>]*>(.*?)<\/td>/g)].map((c) => c[1].replace(/<[^>]*>/g, "")));
+    expect(cells).toEqual([
+      ["A", "1,000", "99.9%"],
+      ["B", "1", "0.1%"],
+      ["Total", "1,001", "100%"],
+    ]);
+  });
+
+  it("keeps the centre total true", () => {
+    const hole = buildPieHole(cols2, rows2, { ...cfg, donut: true, showTotal: true });
+    expect(holeTexts(buildPieHoleGraphic(hole, { ...cfg, donut: true, showTotal: true }, null)))
+      .toEqual(["1,001", "Total"]);
+  });
+});

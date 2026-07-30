@@ -153,7 +153,11 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
       // and so the one that stays lit while everything else fades.
       onPointHover={(p) => setHovered(p ? {
         name: p.name ?? "",
-        value: p.value,
+        // The datum's OWN figure, not the one ECharts laid the wedge out with: a sub-0.5% slice is
+        // drawn at the floor so it can be pointed at (options/pie.ts, MIN_DRAWN_SLICE_FRACTION),
+        // and the hole is a readout — it must say what the slice is worth. `?? p.value` is the
+        // path every other viz takes, none of which draws anything but its own value.
+        value: (p.data as { rawValue?: unknown } | undefined)?.rawValue ?? p.value,
         fromLegend: false,
         rootName: p.treePathInfo?.[1]?.name ?? p.name ?? "",
       } : null)}
