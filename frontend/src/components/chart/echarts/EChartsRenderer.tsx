@@ -19,6 +19,18 @@ export interface EChartsPointClick {
   y: number;
 }
 
+/** The slice (or point) the pointer is currently on. Same identity fields as a click, minus the
+ * cursor position — nothing that reacts to a hover needs it, which is also why these come from
+ * `mouseover`/`mouseout` rather than `mousemove`: one event per element ENTERED, not one per
+ * pixel travelled, so no consumer has to defend against pointer-rate updates. */
+export interface EChartsPointHover {
+  name?: string;
+  seriesName?: string;
+  value?: unknown;
+  /** Root-to-node path, tree series only — see `EChartsPointClick.treePathInfo`. */
+  treePathInfo?: { name?: string }[];
+}
+
 export interface EChartsSize { width: number; height: number }
 
 /** `option` is normally a plain, already-built ECharts option object — every chart type except
@@ -33,15 +45,36 @@ export type EChartsOptionInput = EChartsCoreOption | ((size: EChartsSize) => ECh
  * Thin SVG ECharts wrapper, mirroring Metabase's EChartsRenderer:
  * init on mount, setOption on change, resize via ResizeObserver, dispose on unmount.
  */
-export function EChartsRenderer({ option, className, onPointClick }: {
+export function EChartsRenderer({ option, className, onPointClick, onPointHover, overlay, highlightDataIndex }: {
   option: EChartsOptionInput;
   className?: string;
   onPointClick?: (p: EChartsPointClick) => void;
+  /** Called with the series element under the pointer, and with `null` when it leaves. */
+  onPointHover?: (p: EChartsPointHover | null) => void;
+  /**
+   * A small partial option applied in MERGE mode on top of `option`, and re-stated after every
+   * full (notMerge) apply — so it survives a resize, a theme flip and an option change.
+   *
+   * This exists for one reason: the pie's centre readout has to change on every hover, and its
+   * option is the expensive one to rebuild (a per-slice `measureText` fit pass over every ring).
+   * Re-applying that whole option per hover would also tear the series down and re-init it, which
+   * would drop ECharts' own emphasis/blur state mid-hover. An overlay touches only the keys it
+   * names — for the pie, `graphic`, whose elements carry stable ids so they merge in place.
+   *
+   * It cannot UN-say anything (there is no "unmerge"), so a caller that ever supplies one should
+   * keep supplying one, stating the resting value rather than dropping to `undefined`.
+   */
+  overlay?: EChartsOptionInput;
+  /** Datum to hold in ECharts' emphasis state — the legend's half of a two-way hover. Downplayed
+   * again when it changes or the chart unmounts. */
+  highlightDataIndex?: number;
 }) {
   const elRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<ECharts | null>(null);
   const clickRef = useRef(onPointClick);
   clickRef.current = onPointClick;
+  const hoverRef = useRef(onPointHover);
+  hoverRef.current = onPointHover;
 
   // The chart's last-measured real size — read on init (before ECharts even exists yet) and kept
   // current by the ResizeObserver below, so a function-valued `option` always gets rebuilt
@@ -56,6 +89,17 @@ export function EChartsRenderer({ option, className, onPointClick }: {
   // just because a resize tick needs "whatever option is current right now".
   const optionRef = useRef(option);
   optionRef.current = option;
+  const overlayRef = useRef(overlay);
+  overlayRef.current = overlay;
+
+  /** A full (notMerge) apply of the current option, with the overlay re-stated on top of it.
+   * Every path that re-applies the whole option goes through here — a notMerge apply resets the
+   * keys the overlay owns back to whatever the option says, so anything that skipped this would
+   * snap the pie's hole back to its resting text in the middle of a hover. */
+  const applyOption = (chart: ECharts) => {
+    chart.setOption(resolveOption(optionRef.current), true);
+    if (overlayRef.current) chart.setOption(resolveOption(overlayRef.current));
+  };
 
   useEffect(() => {
     const el = elRef.current;
@@ -64,7 +108,7 @@ export function EChartsRenderer({ option, className, onPointClick }: {
     sizeRef.current = { width: Math.round(rect.width), height: Math.round(rect.height) };
     const chart = init(el, null, { renderer: "svg" });
     chartRef.current = chart;
-    chart.setOption(resolveOption(optionRef.current), true);
+    applyOption(chart);
     chart.on("click", (params: unknown) => {
       const p = params as {
         name?: string; seriesName?: string; value?: unknown;
@@ -76,6 +120,15 @@ export function EChartsRenderer({ option, className, onPointClick }: {
         x: p.event?.event?.clientX ?? 0, y: p.event?.event?.clientY ?? 0,
       });
     });
+
+    // Scoped to ECharts' `series` query so nothing else in the canvas can pass for a data point —
+    // in particular the pie's own centre `graphic`, which sits exactly where a pointer heading
+    // for the middle of the chart crosses.
+    chart.on("mouseover", "series", (params: unknown) => {
+      const p = params as EChartsPointHover;
+      hoverRef.current?.({ name: p.name, seriesName: p.seriesName, value: p.value, treePathInfo: p.treePathInfo });
+    });
+    chart.on("mouseout", "series", () => hoverRef.current?.(null));
 
     // A ResizeObserver tick fires on every layout change — including, during an active
     // drag-resize, many times a second. Rebuilding a function-valued option re-runs pie's whole
@@ -100,7 +153,7 @@ export function EChartsRenderer({ option, className, onPointClick }: {
       if (rafId != null) return; // a rebuild against the latest size is already scheduled
       rafId = requestAnimationFrame(() => {
         rafId = null;
-        chart.setOption(resolveOption(optionRef.current), true);
+        applyOption(chart);
       });
     });
     ro.observe(el);
@@ -111,7 +164,7 @@ export function EChartsRenderer({ option, className, onPointClick }: {
     // the option is what makes the switch land — by this point palette.ts has already dropped its
     // resolved-colour cache, so the rebuild picks up the new theme's values.
     const offTheme = onThemeChange(() => {
-      chart.setOption(resolveOption(optionRef.current), true);
+      applyOption(chart);
     });
 
     return () => {
@@ -124,8 +177,30 @@ export function EChartsRenderer({ option, className, onPointClick }: {
   }, []);
 
   useEffect(() => {
-    chartRef.current?.setOption(resolveOption(option), true);
+    const chart = chartRef.current;
+    if (chart) applyOption(chart);
+    // `option` alone: the overlay has its own effect below, and applyOption reads the current one
+    // off a ref, so a new overlay never needs to drag the expensive option apply along with it.
   }, [option]);
+
+  // The overlay on its own — the hover path. This is the ONE apply that runs at hover frequency,
+  // and it is a merge of a couple of `graphic` elements: no series diff, no re-init, and nothing
+  // that disturbs the emphasis/blur state ECharts is holding for the slice under the pointer.
+  useEffect(() => {
+    if (overlay) chartRef.current?.setOption(resolveOption(overlay));
+  }, [overlay]);
+
+  // Metabase's own `higlightChartOnLegendHover`, prop-shaped: highlight on the way in, downplay
+  // on the way out (including on unmount), addressing the datum by INDEX rather than by name —
+  // see ChartRenderer for why a sunburst cannot safely be addressed by name.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || highlightDataIndex == null) return;
+    chart.dispatchAction({ type: "highlight", seriesIndex: 0, dataIndex: highlightDataIndex });
+    return () => {
+      if (!chart.isDisposed()) chart.dispatchAction({ type: "downplay", seriesIndex: 0, dataIndex: highlightDataIndex });
+    };
+  }, [highlightDataIndex]);
 
   return <div ref={elRef} className={className ?? "h-full w-full"} />;
 }

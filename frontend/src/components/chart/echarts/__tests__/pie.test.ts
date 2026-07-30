@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  buildPieOption, buildPieLegend, pieLegendPlacement, resolvePercentVisibility,
+  buildPieOption, buildPieLegend, buildPieHole, buildPieHoleGraphic, pieLegendPlacement, resolvePercentVisibility,
   PIE_LEGEND_COLUMN_WIDTH_PX,
 } from "../options/pie";
 import { SERIES_PALETTE, seriesColor, lightenOklch } from "../palette";
@@ -1798,5 +1798,135 @@ describe("a toggled-off legend entry drops its ring-0 slice", () => {
       ring(plain, 0).map((d: any) => d.itemStyle.color),
     );
     expect(ring(plain, 0).map((d: any) => d.itemStyle.color)).toEqual([seriesColor(0), seriesColor(1)]);
+  });
+});
+
+// Metabase's `getTotalGraphicOption` swaps the hole's contents for whatever the reader is
+// pointing at: a slice's value over its name, uppercased when the pointer is on the LEGEND entry
+// rather than the slice, and the chart total over "Total" when it is on neither. egret drew only
+// the last of those.
+//
+// The hole is built by its own function rather than inside `buildPieOption` because it has two
+// callers: the option (rest state) and React (on hover). Rebuilding the whole option per hover
+// would re-run the per-slice `measureText` fit pass at pointer rates — see ChartRenderer.
+describe("the pie's hole reads out the slice under the pointer", () => {
+  const cols2 = [
+    { name: "region", type: "varchar" }, { name: "category", type: "varchar" },
+    { name: "m", type: "double" },
+  ];
+  const rows2 = [["US", "Widgets", 40], ["EU", "Gadgets", 10]];
+  const cfg = { dimensions: ["region", "category"], metric: "m" };
+  const text = (g: ReturnType<typeof buildPieHoleGraphic>) => (g ?? []).map((e) => e.style.text);
+  const hole = () => buildPieHole(cols2, rows2, cfg);
+
+  it("says the chart total over 'Total' when nothing is hovered", () => {
+    expect(text(buildPieHoleGraphic(hole(), cfg, null))).toEqual(["50", "Total"]);
+  });
+
+  it("says the hovered slice's value over its name", () => {
+    expect(text(buildPieHoleGraphic(hole(), cfg, { name: "US", value: 40, fromLegend: false })))
+      .toEqual(["40", "US"]);
+  });
+
+  it("uppercases the name when the hover came from the legend, not the chart", () => {
+    expect(text(buildPieHoleGraphic(hole(), cfg, { name: "US", value: 40, fromLegend: true })))
+      .toEqual(["40", "US"]);
+    expect(text(buildPieHoleGraphic(hole(), cfg, { name: "Widgets", value: 40, fromLegend: true })))
+      .toEqual(["40", "WIDGETS"]);
+  });
+
+  // An outer-ring slice reads out exactly the same way — the readout is whatever the pointer is
+  // on, at any depth, which is what makes the hole useful on a sunburst rather than a static
+  // caption.
+  it("reads out an outer-ring slice too, at its own value", () => {
+    expect(text(buildPieHoleGraphic(hole(), cfg, { name: "Gadgets", value: 10, fromLegend: false })))
+      .toEqual(["10", "Gadgets"]);
+  });
+
+  it("formats a hovered value with the metric's own settings, like the total", () => {
+    const formatted = { ...cfg, metricTypes: { m: "double" }, columnSettings: { m: { prefix: "$", decimals: 0 } } };
+    const model = buildPieHole(cols2, rows2, formatted);
+    expect(text(buildPieHoleGraphic(model, formatted, null))[0]).toBe("$50");
+    expect(text(buildPieHoleGraphic(model, formatted, { name: "US", value: 40, fromLegend: false }))[0]).toBe("$40");
+  });
+
+  it("draws nothing at all where the rest state draws nothing", () => {
+    // A single-ring pie with no hole to write in — hovering it must not conjure text into the
+    // middle of a solid disc.
+    const flat = { dimensions: ["region"], metric: "m" };
+    const flatModel = buildPieHole(cols2, rows2, flat);
+    expect(buildPieHoleGraphic(flatModel, flat, { name: "US", value: 40, fromLegend: false })).toBeUndefined();
+    // …and an explicit `showTotal: false` stays empty on hover too.
+    const off = { ...cfg, showTotal: false };
+    expect(buildPieHoleGraphic(buildPieHole(cols2, rows2, off), off, { name: "US", value: 40, fromLegend: false }))
+      .toBeUndefined();
+  });
+
+  // The rest state that ships in the option and the one the hover path produces are the SAME
+  // call, so the hole can't end up styled one way at rest and another under the pointer.
+  it("is the same thing buildPieOption bakes in for the rest state", () => {
+    const opt = buildPieOption(cols2, rows2, cfg) as any;
+    expect(opt.graphic).toEqual(buildPieHoleGraphic(hole(), cfg, null));
+  });
+
+  // Both elements carry a stable id, which is what lets React re-state JUST the hole as a
+  // merge-mode partial option instead of re-applying (and so rebuilding) the whole chart.
+  it("gives each line a stable id so it can be re-stated on its own", () => {
+    const rest = buildPieHoleGraphic(hole(), cfg, null)!;
+    const hovered = buildPieHoleGraphic(hole(), cfg, { name: "US", value: 40, fromLegend: false })!;
+    expect(rest.map((e) => e.id)).toEqual(["pie-total-value", "pie-total-label"]);
+    expect(hovered.map((e) => e.id)).toEqual(rest.map((e) => e.id));
+  });
+
+  // Metabase truncates both lines against `innerRadius * 2` and, when even that leaves them too
+  // wide, drops to `valueFontSizeSm` and hides the label. A stub measurer stands in for a real
+  // text rasteriser, exactly as the slice-label tests do.
+  describe("fitting the text to the hole", () => {
+    /** 10px per character, whatever the font. */
+    const measure = (t: string) => t.length * 10;
+    // A two-ring hole is 2/5 of the outer radius; at 400x400 the circle is 0.7*400 = 280 across,
+    // so outer r = 140 and inner r = 56 — a 112px hole, i.e. 11 characters at this stub's scale.
+    const size = { width: 400, height: 400 };
+
+    it("truncates a value too wide for the hole", () => {
+      const model = { ...hole(), totalText: "1,234,567,890,123" }; // 17 chars = 170px > 112
+      const [value] = buildPieHoleGraphic(model, cfg, null, size, measure)!;
+      expect(value.style.text).toBe("1,234,567,…");
+      expect(value.style.text.length * 10).toBeLessThanOrEqual(112);
+    });
+
+    it("keeps a value that fits untouched", () => {
+      const [value, label] = buildPieHoleGraphic(hole(), cfg, null, size, measure)!;
+      expect(value.style.text).toBe("50");
+      expect(label.style.text).toBe("Total");
+      expect(value.style.fontSize).toBe(22);
+    });
+
+    // Degenerate: at 30x30 the 12px-a-side padding floor leaves a 6px circle, so the hole is
+    // 2.4px across — narrower than this stub's own ellipsis. Metabase's escape hatch.
+    const tiny = { width: 30, height: 30 };
+
+    it("hides the caption and shrinks the value when the hole is too narrow for both", () => {
+      const [value, label] = buildPieHoleGraphic(hole(), cfg, null, tiny, measure)!;
+      expect(value.style.text).toBe("…"); // the total is the headline number, so it survives alone
+      expect(label.style.text).toBe("");
+      expect(value.style.fontSize).toBe(17); // Metabase's valueFontSizeSm
+    });
+
+    // A hover readout is transient — showing a name with no value (or the reverse) says less than
+    // showing nothing, so it goes entirely. Metabase makes the same split.
+    it("drops a hover readout entirely rather than showing half of it", () => {
+      const g = buildPieHoleGraphic(hole(), cfg, { name: "US", value: 40, fromLegend: false }, tiny, measure)!;
+      expect(g.map((e) => e.style.text)).toEqual(["", ""]);
+    });
+
+    // The same "don't guess" rule the slice labels follow: an unmeasured container must not become
+    // a guessed-small one, or a perfectly readable total gets ellipsised against a number nobody
+    // measured.
+    it("never truncates when no real container size is known", () => {
+      const model = { ...hole(), totalText: "1,234,567,890,123" };
+      const [value] = buildPieHoleGraphic(model, cfg, null, undefined, measure)!;
+      expect(value.style.text).toBe("1,234,567,890,123");
+    });
   });
 });

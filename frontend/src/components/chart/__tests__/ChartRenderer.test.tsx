@@ -22,11 +22,27 @@ type MockClick = {
   y: number;
 };
 let mockClickPayload: MockClick = { name: "EU", seriesName: "rev", value: 10, x: 3, y: 4 };
+/** The hover the mocked chart reports when a test "points at" it. */
+let mockHoverPayload: { name?: string; value?: unknown; treePathInfo?: { name?: string }[] } | null = null;
+/** The `overlay` prop each render passes — the merge-mode partial option the pie's centre readout
+ * rides on, and the seam a hover has to land on WITHOUT disturbing `option`. */
+let mockLastOverlay: unknown;
 
 vi.mock("@/components/chart/echarts/EChartsRenderer", () => ({
-  EChartsRenderer: ({ option, onPointClick }: { option: unknown; onPointClick?: (p: MockClick) => void }) => {
+  EChartsRenderer: ({ option, overlay, onPointClick, onPointHover }: {
+    option: unknown;
+    overlay?: unknown;
+    onPointClick?: (p: MockClick) => void;
+    onPointHover?: (p: unknown) => void;
+  }) => {
     mockLastOption = option;
-    return <button data-testid="echarts" onClick={() => onPointClick?.(mockClickPayload)} />;
+    mockLastOverlay = overlay;
+    return (
+      <>
+        <button data-testid="echarts" onClick={() => onPointClick?.(mockClickPayload)} />
+        <button data-testid="echarts-hover" onClick={() => onPointHover?.(mockHoverPayload)} />
+      </>
+    );
   },
 }));
 
@@ -38,6 +54,8 @@ const params = (p: Partial<ChartParams> = {}): ChartParams => ({
 describe("ChartRenderer", () => {
   beforeEach(() => {
     mockLastOption = undefined;
+    mockLastOverlay = undefined;
+    mockHoverPayload = null;
     mockClickPayload = { name: "EU", seriesName: "rev", value: 10, x: 3, y: 4 };
   });
 
@@ -392,6 +410,77 @@ describe("ChartRenderer", () => {
 
       fireEvent.click(screen.getByRole("button", { name: /^B/ }));
       expect(built()).toEqual(["B", "A"]);
+    });
+  });
+
+  // Metabase's hole says what you are pointing at; egret's said "Total" and nothing else. The
+  // interesting half of this is WHERE the hover lands: not on `option`, whose rebuild runs a
+  // per-slice measureText pass over every ring and whose re-application would tear the sunburst
+  // down mid-hover, but on a merge-mode `graphic` overlay that touches only the two text elements.
+  describe("-> the hole reads out the slice under the pointer", () => {
+    const cols2 = [
+      { name: "d", type: "varchar" }, { name: "c", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    const rows2 = [["A", "x", 10], ["B", "y", 30]];
+    const renderPie = () =>
+      render(
+        <ChartRenderer
+          vizType="pie"
+          params={params({ pie: { dimensions: ["d", "c"], metric: "m" } })}
+          columns={cols2}
+          rows={rows2}
+        />,
+      );
+    const holeText = () =>
+      (mockLastOverlay as (s: { width: number; height: number }) => {
+        graphic: { style: { text: string } }[];
+      })({ width: 400, height: 400 }).graphic.map((g) => g.style.text);
+    const hover = (payload: typeof mockHoverPayload) => {
+      mockHoverPayload = payload;
+      fireEvent.click(screen.getByTestId("echarts-hover"));
+    };
+
+    it("shows the chart total until something is pointed at", () => {
+      renderPie();
+      expect(holeText()).toEqual(["40", "Total"]);
+    });
+
+    it("swaps to the pointed-at slice, and back again when the pointer leaves", () => {
+      renderPie();
+      hover({ name: "B", value: 30, treePathInfo: [{ name: "" }, { name: "B" }] });
+      expect(holeText()).toEqual(["30", "B"]);
+
+      hover({ name: "y", value: 30, treePathInfo: [{ name: "" }, { name: "B" }, { name: "y" }] });
+      expect(holeText()).toEqual(["30", "y"]);
+
+      hover(null);
+      expect(holeText()).toEqual(["40", "Total"]);
+    });
+
+    // THE POINT OF THE OVERLAY. A hover that changed `option` would re-run the fit pass and, worse,
+    // make EChartsRenderer re-apply the whole thing with notMerge — throwing away the emphasis
+    // state the hover itself just produced.
+    it("leaves the expensive option untouched while the pointer moves", () => {
+      renderPie();
+      const before = mockLastOption;
+      hover({ name: "B", value: 30, treePathInfo: [{ name: "" }, { name: "B" }] });
+      expect(mockLastOption).toBe(before);
+      hover(null);
+      expect(mockLastOption).toBe(before);
+    });
+
+    // A pie with no hole has nothing to read out into; hovering must not conjure text into the
+    // middle of a solid disc.
+    it("sends no overlay at all for a pie with no hole", () => {
+      render(
+        <ChartRenderer
+          vizType="pie"
+          params={params({ pie: { dimensions: ["d"], metric: "m" } })}
+          columns={cols2}
+          rows={rows2}
+        />,
+      );
+      expect(mockLastOverlay).toBeUndefined();
     });
   });
 

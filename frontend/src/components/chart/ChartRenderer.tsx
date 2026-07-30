@@ -10,7 +10,9 @@ import { vizConfig, shellSettings } from "@/components/chart/viz/renderConfig";
 import type { DrillContext } from "@/components/chart/drill";
 import { EChartsRenderer, type EChartsSize } from "@/components/chart/echarts/EChartsRenderer";
 import { buildCartesianOption } from "@/components/chart/echarts/options/cartesian";
-import { buildPieOption, buildPieLegend, pieLegendPlacement } from "@/components/chart/echarts/options/pie";
+import {
+  buildPieOption, buildPieLegend, buildPieHole, buildPieHoleGraphic, pieLegendPlacement,
+} from "@/components/chart/echarts/options/pie";
 import { PieLegend } from "@/components/chart/PieLegend";
 import { useElementSize } from "@/components/chart/useElementSize";
 import { cn } from "@/lib/utils";
@@ -94,20 +96,46 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
   const [toggledOff, setToggledOff] = useState<string[]>([]);
   const legend = useMemo(() => buildPieLegend(columns, rows, input), [input, columns, rows]);
 
+  // The slice under the pointer. HOVER IS DELIBERATELY NOT A DEPENDENCY OF `option` BELOW: building
+  // that option runs a per-slice `measureText` fit pass over every ring, and re-applying it would
+  // additionally tear the sunburst down and re-init it — losing, mid-hover, the very emphasis state
+  // the hover is producing. Everything hover-driven therefore lands somewhere cheap: the centre
+  // readout as a merge-mode `graphic` overlay (see `overlay`), and the legend as ordinary markup.
+  const [hovered, setHovered] = useState<{ name: string; value: unknown; fromLegend: boolean } | null>(null);
+
+  const chartCfg = useMemo(
+    () => ({ ...input, legendPlacement: placement, toggledOffSlices: toggledOff }),
+    [input, placement, toggledOff],
+  );
+
   const option = useMemo(
     // `undefined` here is buildPieOption's own measureText param (position 4) — its default (a
     // real canvas measurer) is exactly what production wants; `size` (the measured container
     // from EChartsRenderer) fills containerSize (position 5) — see that function's doc comment.
-    () => (size: EChartsSize) =>
-      buildPieOption(columns, rows, { ...input, legendPlacement: placement, toggledOffSlices: toggledOff }, undefined, size),
-    [input, columns, rows, placement, toggledOff],
+    () => (size: EChartsSize) => buildPieOption(columns, rows, chartCfg, undefined, size),
+    [chartCfg, columns, rows],
+  );
+
+  // What the hole says. Built once per data/config change and then merely FORMATTED per hover, so
+  // pointing at a slice costs two text measurements rather than another pass over the rows.
+  const hole = useMemo(() => buildPieHole(columns, rows, input), [input, columns, rows]);
+  const overlay = useMemo(
+    () =>
+      hole.shown
+        ? (size: EChartsSize) => ({ graphic: buildPieHoleGraphic(hole, chartCfg, hovered, size) })
+        : undefined,
+    [hole, chartCfg, hovered],
   );
 
   const chart = (
     <EChartsRenderer
       key="chart"
       option={option}
+      overlay={overlay}
       className="min-h-0 min-w-0 flex-1"
+      // A sunburst node carries its own name and value on the hover event, so the readout needs no
+      // lookup back into the data at all.
+      onPointHover={(p) => setHovered(p ? { name: p.name ?? "", value: p.value, fromLegend: false } : null)}
       onPointClick={onValueClick && pie.dimensions?.[0] ? (p) => {
         // Which ring fired the click. It used to be read off `seriesName`, because each ring was
         // its own ECharts series named after its own dimension; the pie is ONE `sunburst` series

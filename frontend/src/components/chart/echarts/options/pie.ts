@@ -8,6 +8,7 @@ import {
   calcInnerOuterRadiusesForRing,
   fitSliceLabel,
   measureText as defaultMeasureText,
+  truncateLabelText,
   type MeasureText,
 } from "../sliceLabel";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
@@ -359,6 +360,271 @@ function pctFormatter(decimals: number) {
   return (p: number) => `${parseFloat(p.toFixed(decimals))}%`; // default 2, like Metabase
 }
 
+/** The chart's metric formatter — the same one for the slices, the hole and the tooltip, so a
+ * number never reads differently depending on where you are looking at it. */
+function metricFormatter(cfg: PieBuildConfig): (v: unknown) => string {
+  return (v: unknown) =>
+    cfg.metric ? formatValue(v, cfg.metricTypes?.[cfg.metric] ?? "double", cfg.columnSettings?.[cfg.metric]) : String(v);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Geometry, in one place.
+//
+// Pulled out of `buildPieOption` because the hole's readout (see `buildPieHoleGraphic` below)
+// needs the SAME inner radius the rings are drawn against in order to decide what text fits in
+// it — and re-deriving that beside the option is exactly how a chart and the thing drawn on top
+// of it drift apart. One function, one answer, both callers.
+interface PieGeometry {
+  /** The hole, as a fraction of the outer radius. 0 means a true full pie (no hole at all). */
+  holeRatio: number;
+  diameterPx: number;
+  outerRadiusPx: number;
+  innerRadiusPx: number;
+  /** A real container size was supplied; pixel radii are meaningful and text can be fitted. */
+  hasMeasuredSize: boolean;
+  radius: [number, number] | [string, string];
+  center: [string, string];
+}
+
+/** How big the circle is allowed to get, in absolute pixels. Metabase's pie is 550px in a 735px
+ * host — `DIMENSIONS.maxSideLength`, an absolute cap rather than a ratio, because past a point a
+ * bigger circle stops adding information and just pushes the labels apart. */
+const PIE_MAX_DIAMETER_PX = 550;
+/** Metabase's `DIMENSIONS.padding.side` (12px a side), as a floor on the margin: the fraction
+ * above already leaves one at any normal size (it only binds below ~160px of host), but it is a
+ * fraction, so on a tiny host it would leave a proportionally tiny one. */
+const PIE_SIDE_PADDING_PX = 12;
+
+// The hole, as a ratio of the OUTER radius — Metabase's own ratios (constants.ts): two rings
+// 2/5, three rings 1/4. Stated as a ratio rather than an absolute so a saved donut keeps its
+// SHAPE when the outer edge moves (side vs bottom layout, and the diameter cap below).
+const HOLE_RATIO: Record<number, number> = { 2: 2 / 5, 3: 1 / 4 };
+
+function pieGeometry(
+  cfg: PieBuildConfig,
+  ringCount: number,
+  containerSize?: { width: number; height: number },
+): PieGeometry {
+  const multiRing = ringCount > 1;
+
+  // How much of its own box the circle fills. Not a constant 0.70: a wide, short host puts the
+  // legend in a column beside the chart instead of a row beneath it, and the circle then gets a
+  // differently shaped box to fill — one that already has the legend taken out of it, since the
+  // legend is React markup outside the canvas. `pieLegendPlacement` (above) makes that choice
+  // once, from the size of the WHOLE host; all that's left here is the fraction of its own box
+  // each layout fills. A hidden legend reserves nothing, and so keeps today's geometry.
+  const side = (cfg.showLegend ?? true) && cfg.legendPlacement === "side";
+  const outerFraction = side ? SIDE_LEGEND_DIAMETER_FRACTION : BOTTOM_LEGEND_DIAMETER_FRACTION;
+
+  // ONE ring is the deliberate exception to Metabase's ratios: it keeps egret's OWN donut on/off
+  // semantics (donut:false -> no hole, donut:true -> 45/70 of the outer radius) rather than
+  // Metabase's 3/5. A plain pie's proportions were never identified as unreadable, and moving the
+  // hole would change what a saved donut LOOKS LIKE as a shape rather than how it is labelled.
+  // TWO OR MORE rings is where the ratio is unconditional: there is no sensible multi-ring pie
+  // with no hole at all.
+  const holeRatio = multiRing
+    ? HOLE_RATIO[Math.min(ringCount, 3)]
+    : (cfg.donut ? 45 / 70 : 0);
+
+  // `containerSize` is the chart's REAL rendered pixel size — this builder is pure data with no DOM
+  // access, so EChartsRenderer measures it (ResizeObserver) and threads it through by calling this
+  // function rather than handing over a plain option object (see that file). Unknown (most unit
+  // tests, which aren't testing geometry at all) means the radii stay in ECharts' own percent-of-
+  // the-shorter-side units and the label fit pass is skipped entirely — see `availableSpace` in
+  // buildPieOption for why "don't guess" is the safe direction there.
+  // A 0x0 host counts as UNKNOWN, not as a zero-sized pie: EChartsRenderer measures once on mount,
+  // which for a not-yet-laid-out element is 0x0, and pixel radii of 0 would draw literally nothing
+  // until the ResizeObserver's first real tick. Percent radii draw correctly at whatever size the
+  // element turns out to have.
+  const sideLengthPx = containerSize ? Math.min(containerSize.width, containerSize.height) : 0;
+  const hasMeasuredSize = sideLengthPx > 0;
+  const diameterPx = Math.max(
+    0,
+    Math.min(outerFraction * sideLengthPx, sideLengthPx - 2 * PIE_SIDE_PADDING_PX, PIE_MAX_DIAMETER_PX),
+  );
+  const outerRadiusPx = diameterPx / 2;
+  const innerRadiusPx = outerRadiusPx * holeRatio;
+
+  const fmtPct = (v: number) => `${parseFloat(v.toFixed(2))}%`;
+  // ECharts takes a radius as either a pixel number or a percent of half the container's shorter
+  // side, and accepts both in the same [inner, outer] pair. Pixels whenever the real size is known
+  // — that is the only unit an absolute cap can be expressed in, and it makes the numbers the fit
+  // pass measures against literally the numbers the renderer draws with, rather than a conversion
+  // of them. Percent otherwise, which is exactly the geometry this file drew before the cap.
+  const radius: [number, number] | [string, string] = hasMeasuredSize
+    ? [innerRadiusPx, outerRadiusPx]
+    : [fmtPct(100 * outerFraction * holeRatio), fmtPct(100 * outerFraction)];
+
+  // Where the circle sits in its own box. The legend no longer shares the canvas with it, so
+  // there is nothing to shift clear of: the pie is simply centred. The bottom layout keeps the
+  // 2% lift it has always had off the row beneath it; the side layout has nothing below it.
+  const center: [string, string] = ["50%", side ? "50%" : "48%"];
+
+  return { holeRatio, diameterPx, outerRadiusPx, innerRadiusPx, hasMeasuredSize, radius, center };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The hole.
+
+/** What the hole says when nothing is being pointed at, plus everything a hover readout needs to
+ * say something else. Built once per data/config change (see `buildPieHole`) so that reacting to
+ * a hover costs two `measureText` calls, not another pass over the rows. */
+export interface PieHoleModel {
+  /** The hole is written in at all: there IS one, the total is on, and there is data to total. */
+  shown: boolean;
+  /** How many rings the pie draws — the hole's size and its value font size both follow it. */
+  ringCount: number;
+  /** The chart's grand total, formatted with the metric's own settings. */
+  totalText: string;
+  /** The metric formatter, so a hovered slice's value reads exactly like the total does. */
+  format: (v: unknown) => string;
+}
+
+/** The slice the reader is pointing at, as the hole needs to describe it. Both fields come
+ * straight off the hover event (a sunburst's `mouseover` carries the node's own name and value),
+ * so nothing has to look the slice back up in the data. */
+export interface PieHoleReadout {
+  name: string;
+  value: unknown;
+  /** Metabase uppercases the name when the hover came from the LEGEND rather than from the chart
+   * — the two are different gestures and the hole says which one you are making. */
+  fromLegend: boolean;
+}
+
+/** Metabase's `total.*` constants: the regular value size, and the escape hatch it drops to when
+ * the text won't fit the hole. The three-ring hole (1/4 of the outer edge) is tight enough that
+ * the regular size risks overflowing it, so that ring count starts at the small one. */
+const TOTAL_VALUE_FONT_SIZE = 22;
+const TOTAL_VALUE_FONT_SIZE_SM = 17;
+const TOTAL_LABEL_FONT_SIZE = 14;
+const TOTAL_CAPTION = "Total";
+/** Stable identities so the hole can be re-stated on its own — see `buildPieHoleGraphic`. */
+const TOTAL_VALUE_ID = "pie-total-value";
+const TOTAL_LABEL_ID = "pie-total-label";
+
+function pieHoleModel(rings: Slice[][], cfg: PieBuildConfig, format: (v: unknown) => string): PieHoleModel {
+  const ringCount = rings.length;
+  const data = rings[0] ?? [];
+  // DEFAULTS ON FOR A MULTI-RING PIE. Measured against a real Metabase (question 7, "Product
+  // breakdown") at 1440x920: it renders `2,852` over `Total` in the hole, egret rendered nothing,
+  // and an empty void in the middle of three rings is what made the chart read as unfinished. A
+  // one-ring donut is left exactly as it was — its hole is small enough to read as deliberate, and
+  // changing it would change what every saved donut looks like. `??`, not `||`, so an explicit
+  // `false` still turns it off; resolved here at render time and never written into stored
+  // settings (this program's standing rule).
+  //
+  // Gated on there BEING a hole rather than on `cfg.donut`: a multi-ring pie always has one (see
+  // pieGeometry), whatever `donut` says, so keying off `donut` would have hidden the total on
+  // exactly the charts this default exists for.
+  const showTotal = cfg.showTotal ?? ringCount > 1;
+  const shown =
+    showTotal && data.length > 0 && pieGeometry(cfg, ringCount).holeRatio > 0;
+  // The innermost ring's total is the grand total: it's summed over every outer dimension already.
+  return { shown, ringCount, totalText: format(data.reduce((t, s) => t + s.value, 0)), format };
+}
+
+/**
+ * Everything the hole can read out, from the data and settings alone.
+ *
+ * Exported so React can build it ONCE per data/config change and then re-render only the hole on
+ * hover — the option itself must not be rebuilt per hover event, because building it runs a
+ * per-slice `measureText` pass over every ring.
+ */
+export function buildPieHole(columns: ResultColumn[], rows: unknown[][], cfg: PieBuildConfig): PieHoleModel {
+  const { rings } = buildPieRings(columns, rows, cfg);
+  return pieHoleModel(rings, cfg, metricFormatter(cfg));
+}
+
+/** One `graphic` text element of the hole. */
+interface PieHoleText {
+  id: string;
+  type: "text";
+  left: "center";
+  top: string;
+  style: {
+    text: string;
+    fontSize: number;
+    fontWeight: number;
+    fill: string;
+    textAlign: "center";
+  };
+}
+
+/**
+ * The hole's two lines of text, as ECharts `graphic` elements — Metabase's `getTotalGraphicOption`.
+ *
+ * `readout` is what the reader is pointing at, or `null` for the rest state:
+ *   - a slice under the pointer -> that slice's value over its name
+ *   - a slice under the pointer VIA THE LEGEND -> the same, with the name uppercased
+ *   - nothing               -> the chart total over the word "Total"
+ *
+ * Returned as a bare array (never wrapped in an option) so it can be used two ways: baked into the
+ * option `buildPieOption` returns for the rest state, and re-applied ON ITS OWN as a merge-mode
+ * partial option when the hover changes. Both go through this one function, so the hovered hole
+ * cannot end up styled differently from the resting one.
+ *
+ * Positions are percentages of the CANVAS, not of the series — which is fine because nothing is
+ * shifted sideways any more (the legend left the canvas), so `left: "center"` is a true centring.
+ */
+export function buildPieHoleGraphic(
+  hole: PieHoleModel,
+  cfg: PieBuildConfig,
+  readout: PieHoleReadout | null,
+  containerSize?: { width: number; height: number },
+  measureText: MeasureText = defaultMeasureText,
+): PieHoleText[] | undefined {
+  if (!hole.shown) return undefined;
+
+  const { innerRadiusPx, hasMeasuredSize } = pieGeometry(cfg, hole.ringCount, containerSize);
+  const baseFontSize = hole.ringCount >= 3 ? TOTAL_VALUE_FONT_SIZE_SM : TOTAL_VALUE_FONT_SIZE;
+
+  let valueText = readout ? hole.format(readout.value) : hole.totalText;
+  let labelText = readout
+    ? (readout.fromLegend ? readout.name.toUpperCase() : readout.name)
+    : TOTAL_CAPTION;
+  let valueFontSize = baseFontSize;
+
+  // The fit pass runs only against a REAL measured size, the same rule the slice labels follow:
+  // "we don't know how big this is" must never become "guess small", or a perfectly readable
+  // total gets truncated to an ellipsis against a number nobody measured. With no size, the two
+  // strings are drawn in full and ECharts clips nothing.
+  if (hasMeasuredSize) {
+    // Metabase measures with the VALUE's font size for both lines: "technically incorrect for the
+    // label text since it uses a smaller font, however using the value font size for measurements
+    // makes up for the inaccuracy of our heuristic and provided a good end result."
+    const fontStyle = { size: baseFontSize, weight: 700 };
+    const holeWidth = innerRadiusPx * 2;
+    valueText = truncateLabelText(valueText, holeWidth, measureText, fontStyle);
+    if (readout) labelText = truncateLabelText(labelText, holeWidth, measureText, fontStyle);
+
+    const widest = Math.max(measureText(valueText, fontStyle), measureText(labelText, fontStyle));
+    if (holeWidth < widest) {
+      // Too narrow for both lines. The total is the chart's headline number, so it survives alone;
+      // a hover readout is transient and goes entirely rather than showing a name with no value or
+      // a value with no name.
+      if (readout) { valueText = ""; labelText = ""; } else { labelText = ""; }
+      valueFontSize = TOTAL_VALUE_FONT_SIZE_SM;
+    }
+  }
+
+  return [
+    {
+      id: TOTAL_VALUE_ID, type: "text", left: "center", top: "43%",
+      style: {
+        text: valueText, fontSize: valueFontSize, fontWeight: 700,
+        fill: resolveColor("var(--foreground)", COLOR_FALLBACK.text), textAlign: "center",
+      },
+    },
+    {
+      id: TOTAL_LABEL_ID, type: "text", left: "center", top: "53%",
+      style: {
+        text: labelText, fontSize: TOTAL_LABEL_FONT_SIZE, fontWeight: 700,
+        fill: resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel), textAlign: "center",
+      },
+    },
+  ];
+}
+
 /**
  * Every ring's finalized slices — aggregated, filtered, Other-folded, coloured and renamed —
  * innermost first, plus each ring's own "did this key survive or fold into Other" map.
@@ -600,8 +866,7 @@ export function buildPieOption(
   const ringCount = effectiveRings.length;
   const multiRing = ringCount > 1;
 
-  const fmt = (v: unknown) =>
-    cfg.metric ? formatValue(v, cfg.metricTypes?.[cfg.metric] ?? "double", cfg.columnSettings?.[cfg.metric]) : String(v);
+  const fmt = metricFormatter(cfg);
 
   // Label: name (showLabels) and/or percent (percentVisibility) — Metabase getSliceLabel. Applied
   // the same way to every ring. Defaults resolve here, at render time, never in stored settings
@@ -645,109 +910,16 @@ export function buildPieOption(
   // disappears instead of overlapping into mush; it is still reachable via the tooltip.
   const labelLayout = { hideOverlap: true };
 
-  // ---------------------------------------------------------------------------------------------
-  // Geometry.
-  //
-  // How much of its own box the circle fills. `outerFraction` is no longer a constant 0.70: a wide,
-  // short host puts the legend in a column beside the chart instead of a row beneath it, and the
-  // circle then gets a differently shaped box to fill — one that already has the legend taken out
-  // of it, since the legend is React markup outside the canvas. `pieLegendPlacement` (above) makes
-  // that choice once, from the size of the WHOLE host; all that's left here is the fraction of its
-  // own box each layout fills. A hidden legend reserves nothing, and so keeps today's geometry.
-  const side = (cfg.showLegend ?? true) && cfg.legendPlacement === "side";
-  const outerFraction = side ? SIDE_LEGEND_DIAMETER_FRACTION : BOTTOM_LEGEND_DIAMETER_FRACTION;
+  // Geometry and the hole are both computed by the shared helpers above (pieGeometry /
+  // buildPieHoleGraphic) rather than inline here, because the hole has a SECOND caller now: React
+  // re-states it on its own when the pointer moves onto a slice, and re-deriving the inner radius
+  // or the text styling beside the option is how the two would drift apart.
+  const { diameterPx, outerRadiusPx, innerRadiusPx, radius, center } =
+    pieGeometry(cfg, ringCount, containerSize);
 
-  // The hole, as a ratio of the OUTER radius — Metabase's own ratios (constants.ts): two rings
-  // 2/5, three rings 1/4. Stated as a ratio rather than an absolute so a saved donut keeps its
-  // SHAPE when the outer edge moves (side vs bottom layout, and the diameter cap below).
-  //
-  // ONE ring is the deliberate exception: it keeps egret's OWN donut on/off semantics (donut:false
-  // -> no hole, donut:true -> 45/70 of the outer radius) rather than Metabase's 3/5. A plain pie's
-  // proportions were never identified as unreadable, and moving the hole would change what a saved
-  // donut LOOKS LIKE as a shape rather than how it is labelled. TWO OR MORE rings is where the
-  // ratio is unconditional: there is no sensible multi-ring pie with no hole at all.
-  const HOLE_RATIO: Record<number, number> = { 2: 2 / 5, 3: 1 / 4 };
-  const holeRatio = multiRing
-    ? HOLE_RATIO[Math.min(ringCount, 3)]
-    : (cfg.donut ? 45 / 70 : 0);
-
-  // ...and how big the circle is allowed to get, in absolute pixels. Metabase's pie is 550px in a
-  // 735px host — `DIMENSIONS.maxSideLength`, an absolute cap rather than a ratio, because past a
-  // point a bigger circle stops adding information and just pushes the labels apart. Its
-  // `DIMENSIONS.padding.side` (12px a side) comes with it, as a floor on the margin: egret's
-  // fraction already leaves a margin at any normal size (it only binds below ~160px of host), but
-  // it is a fraction, so on a tiny host it would leave a proportionally tiny one.
-  const PIE_MAX_DIAMETER_PX = 550;
-  const PIE_SIDE_PADDING_PX = 12;
-
-  // `containerSize` is the chart's REAL rendered pixel size — this builder is pure data with no DOM
-  // access, so EChartsRenderer measures it (ResizeObserver) and threads it through by calling this
-  // function rather than handing over a plain option object (see that file). Unknown (most unit
-  // tests, which aren't testing geometry at all) means the radii stay in ECharts' own percent-of-
-  // the-shorter-side units and the label fit pass is skipped entirely — see `availableSpace` below
-  // for why "don't guess" is the safe direction there.
-  // A 0x0 host counts as UNKNOWN, not as a zero-sized pie: EChartsRenderer measures once on mount,
-  // which for a not-yet-laid-out element is 0x0, and pixel radii of 0 would draw literally nothing
-  // until the ResizeObserver's first real tick. Percent radii draw correctly at whatever size the
-  // element turns out to have.
-  const sideLengthPx = containerSize ? Math.min(containerSize.width, containerSize.height) : 0;
-  const hasMeasuredSize = sideLengthPx > 0;
-  const diameterPx = Math.max(
-    0,
-    Math.min(outerFraction * sideLengthPx, sideLengthPx - 2 * PIE_SIDE_PADDING_PX, PIE_MAX_DIAMETER_PX),
-  );
-  const outerRadiusPx = diameterPx / 2;
-  const innerRadiusPx = outerRadiusPx * holeRatio;
-
-  const fmtPct = (v: number) => `${parseFloat(v.toFixed(2))}%`;
-  // ECharts takes a radius as either a pixel number or a percent of half the container's shorter
-  // side, and accepts both in the same [inner, outer] pair. Pixels whenever the real size is known
-  // — that is the only unit an absolute cap can be expressed in, and it makes the numbers the fit
-  // pass measures against literally the numbers the renderer draws with, rather than a conversion
-  // of them. Percent otherwise, which is exactly the geometry this file drew before the cap.
-  const radius: [number, number] | [string, string] = hasMeasuredSize
-    ? [innerRadiusPx, outerRadiusPx]
-    : [fmtPct(100 * outerFraction * holeRatio), fmtPct(100 * outerFraction)];
-
-  // Where the circle sits in its own box. The legend no longer shares the canvas with it, so
-  // there is nothing to shift clear of: the pie is simply centred. The bottom layout keeps the
-  // 2% lift it has always had off the row beneath it; the side layout has nothing below it.
-  const center = ["50%", side ? "50%" : "48%"];
-
-  // Donut centre total — Metabase getTotalGraphicOption (static total; no hover swap yet). The
-  // innermost ring's total is the grand total: it's summed over every outer dimension already.
-  //
-  // Font sizes are Metabase's total.* constants. The three-ring hole (1/4 of the outer edge,
-  // below) is tight enough that the regular valueFontSize (22) risks overflowing it, so that
-  // case alone drops to Metabase's own escape hatch, valueFontSizeSm (17); one and two rings keep
-  // the regular size. Metabase also bolds its "Total" caption (total.fontWeight 700) — the
-  // caption text here previously left fontWeight unset (a plain, unbolded caption); now matches.
-  //
-  // DEFAULTS ON FOR A MULTI-RING PIE. Measured against a real Metabase (question 7, "Product
-  // breakdown") at 1440x920: it renders `2,852` over `Total` in the hole, egret rendered
-  // nothing, and an empty void in the middle of three rings is what made the chart read as
-  // unfinished. A one-ring donut is left exactly as it was — its hole is small enough to read
-  // as deliberate, and changing it would change what every saved donut looks like. `??`, not
-  // `||`, so an explicit `false` still turns it off; resolved here at render time and never
-  // written into stored settings (this program's standing rule).
-  const showTotal = cfg.showTotal ?? multiRing;
-  const total = data.reduce((t, s) => t + s.value, 0);
-  const totalValueFontSize = ringCount >= 3 ? 17 : 22;
-  // Gated on there BEING a hole rather than on `cfg.donut`: a multi-ring pie always has one
-  // (see holeRatio above), whatever `donut` says, so keying off `donut` would have hidden the
-  // total on exactly the charts this default exists for.
-  //
-  // A graphic element is positioned against the CANVAS, not against the series — which was a
-  // problem only while the pie was being shifted sideways to clear an in-canvas legend column.
-  // Nothing is shifted any more, so this is back to the plain `left: "center"` it always used
-  // (an edge position that ECharts treats as a true centring for the literal "center").
-  const totalAt = (topPercent: number) => ({ left: "center", top: `${topPercent}%` });
-  const graphic = holeRatio > 0 && showTotal && data.length > 0
-    ? [
-        { type: "text", ...totalAt(43), style: { text: fmt(total), fontSize: totalValueFontSize, fontWeight: 700, fill: resolveColor("var(--foreground)", COLOR_FALLBACK.text), textAlign: "center" } },
-        { type: "text", ...totalAt(53), style: { text: "Total", fontSize: 14, fontWeight: 700, fill: resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel), textAlign: "center" } },
-      ]
-    : undefined;
+  // The rest state — no readout — is the same call the hover path makes with one.
+  const hole = pieHoleModel(effectiveRings, cfg, fmt);
+  const graphic = buildPieHoleGraphic(hole, cfg, null, containerSize, measureText);
 
   // Metabase's DIMENSIONS.slice.label.padding (pie/constants.ts) — a small margin subtracted
   // from the geometric space a label is allowed, so text doesn't butt right up against a
