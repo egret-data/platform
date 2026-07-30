@@ -286,6 +286,26 @@ function groupByParent(slices: Slice[], parentGroupOf: Map<string, string>): Map
   return groups;
 }
 
+/**
+ * Every ring's slices, grouped under the finalized parent-ring slice each one belongs to — one map
+ * per parent level, i.e. the sunburst's `children` structure as lookup tables.
+ *
+ * Resolved through the parent ring's OWN fold state (`groupOfByLevel[level - 1]`), not just the raw
+ * parentKey — so a slice whose parent folded into that ring's "Other" bucket nests under the Other
+ * wedge rather than disappearing. That is also why a ring's own "Other" reports a share of the same
+ * parent as its folded-in siblings: it carries their `parentKey` and takes this same lookup.
+ */
+function pieChildrenByParent(rings: Slice[][], groupOfByLevel: Map<string, string>[]): Map<string, Slice[]>[] {
+  return rings.slice(1).map((ring, i) => groupByParent(ring, groupOfByLevel[i] ?? new Map()));
+}
+
+/** How many nodes this slice contributes to the sunburst's flattened datum list: itself, plus
+ * everything nested inside it. See `PieLegendEntry.sliceDataIndex` for what that is used for. */
+function subtreeSize(s: Slice, level: number, childrenByParentKey: Map<string, Slice[]>[]): number {
+  const children = childrenByParentKey[level]?.get(s.key ?? OTHER_KEY) ?? [];
+  return 1 + children.reduce((t, c) => t + subtreeSize(c, level + 1, childrenByParentKey), 0);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Where the legend goes, and what that costs the rings.
 //
@@ -352,6 +372,27 @@ export interface PieLegendEntry {
   name: string;
   color: string;
   percent?: string;
+  /** The slice's raw metric value. Not shown in the legend — it is what the chart's centre reads
+   * out when the pointer is on this entry, so that a legend hover says the same thing a slice
+   * hover does (a slice hover gets the value off the ECharts event for free; a legend hover has
+   * no event to get it from). */
+  value: number;
+  /**
+   * Where this slice sits in the sunburst's own flattened datum list — what `dispatchAction`
+   * needs to highlight it (see EChartsRenderer's `highlightDataIndex`).
+   *
+   * BY INDEX, NOT BY NAME, which is what Metabase dispatches. ECharts resolves a `name` payload
+   * with `SeriesData.indexOfName`, a linear scan of the WHOLE tree in depth-first pre-order — and
+   * a sunburst's names are only unique within a parent, so the first match can easily be some
+   * other ring's node. "Other" makes that a likely case rather than a theoretical one: every ring
+   * folds its own sub-threshold slices into a bucket of that exact name, so highlighting ring 0's
+   * "Other" would light up whichever nested "Other" happened to come first.
+   *
+   * `undefined` for an entry the reader has toggled off: its slice is not in the tree at all, so
+   * there is nothing to highlight (and the indexes of everything after it shift down, which is
+   * why this is computed against the same `toggledOffSlices` the option is built with).
+   */
+  sliceDataIndex?: number;
 }
 
 /** Percent text, at the chart's configured precision — shared by the slice labels and the legend
@@ -816,21 +857,35 @@ export function buildPieLegend(
   cfg: PieBuildConfig,
 ): PieLegendEntry[] {
   if (!(cfg.showLegend ?? true)) return [];
-  const { rings } = buildPieRings(columns, rows, cfg);
+  const { rings, groupOfByLevel } = buildPieRings(columns, rows, cfg);
   const ring0 = rings[0] ?? [];
   const visibility = resolvePercentVisibility(cfg.percentVisibility, rings.length);
   const withPercent = visibility === "legend" || visibility === "both";
   const total = ring0.reduce((t, s) => t + s.value, 0);
   const pct = pctFormatter(cfg.decimals ?? 2);
+
+  // The sunburst's datum list, walked without building it: ECharts wraps `series.data` in one
+  // virtual root (SunburstSeries.getInitialData) and `Tree.createTree` pushes nodes depth-first,
+  // pre-order — so index 0 is that root and each ring-0 slice starts right after the previous
+  // one's entire subtree. Counting subtree sizes is all that is needed, and it costs no text
+  // measurement, which is the whole reason this doesn't just build the option and read it back.
+  const childrenByParentKey = pieChildrenByParent(rings, groupOfByLevel);
+  const toggledOff = new Set(cfg.toggledOffSlices ?? []);
+  let nextDataIndex = 1;
+
   return ring0.map((s, i) => {
     // The colour the slice is actually drawn in — read off the slice rather than re-derived, since
     // buildPieRings now pins every ring-0 slice's colour explicitly (see the note there on why the
     // sunburst's name-keyed palette made an implicit slot unsafe). `?? seriesColor(i)` is a
     // belt-and-braces default, not a second source of truth.
     const color = s.itemStyle?.color ?? seriesColor(i);
-    return withPercent && total > 0
-      ? { name: s.name, color, percent: pct((s.value / total) * 100) }
-      : { name: s.name, color };
+    let sliceDataIndex: number | undefined;
+    if (!toggledOff.has(s.name)) {
+      sliceDataIndex = nextDataIndex;
+      nextDataIndex += subtreeSize(s, 0, childrenByParentKey);
+    }
+    const base = { name: s.name, color, value: s.value, sliceDataIndex };
+    return withPercent && total > 0 ? { ...base, percent: pct((s.value / total) * 100) } : base;
   });
 }
 
@@ -974,14 +1029,7 @@ export function buildPieOption(
     : effectiveRings[0].filter((s) => !toggledOff.has(s.name));
 
   // Which finalized parent-ring slice each of a ring's slices belongs to, one map per parent level.
-  // Resolved through the parent ring's OWN fold state (groupOfByLevel[level - 1]), not just the raw
-  // parentKey — so a slice whose parent folded into that ring's "Other" bucket nests under the
-  // Other wedge rather than disappearing. That is also why a ring's own "Other" reports a share of
-  // the same parent as its folded-in siblings: it carries their `parentKey` and takes this same
-  // lookup.
-  const childrenByParentKey = effectiveRings
-    .slice(1)
-    .map((ring, i) => groupByParent(ring, groupOfByLevel[i] ?? new Map()));
+  const childrenByParentKey = pieChildrenByParent(effectiveRings, groupOfByLevel);
 
   // Angles. ECharts' sunburstLayout gives every node the SAME scale — `unitRadian = 2π / rootSum`,
   // where rootSum is the sum of the top-level nodes — and lays a node's children out consecutively

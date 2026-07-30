@@ -26,13 +26,26 @@ import {
  * block under a narrow, tall one. Either way it scrolls rather than growing without limit, which
  * is what the ECharts scroll legend's paging used to do.
  */
-export function PieLegend({ entries, placement, toggledOff, onToggle }: {
+export function PieLegend({ entries, placement, toggledOff, onToggle, highlighted, onHover }: {
   entries: PieLegendEntry[];
   placement: PieLegendPlacement;
   /** Entry names the reader has clicked off, by display name — the same list the option builder
    * takes as `toggledOffSlices`, so the two can't disagree about what is showing. */
   toggledOff: string[];
   onToggle: (name: string) => void;
+  /**
+   * The one entry to keep lit: the ring-0 ancestor of whatever slice is under the pointer, or of
+   * whichever entry the reader is pointing at here. Everything else fades, exactly as Metabase's
+   * legend does — the point being that on a sunburst a slice four rings out is a long way from
+   * the entry that names its colour family, and this is what connects them.
+   *
+   * `null`/absent means nothing is hovered and every entry reads normally.
+   */
+  highlighted?: string | null;
+  /** This legend's own half of the two-way hover: the entry entered (or focused), and `null` when
+   * it is left. Focus counts deliberately — the chart's centre reads out a value that appears
+   * nowhere else, so it must not be reachable by pointer alone. */
+  onHover?: (name: string | null) => void;
 }) {
   if (entries.length === 0) return null;
   const side = placement === "side";
@@ -49,13 +62,25 @@ export function PieLegend({ entries, placement, toggledOff, onToggle }: {
     >
       {entries.map((entry) => {
         const off = toggledOff.includes(entry.name);
+        // Something else is hovered, so this entry steps back. Kept separate from `off`, which is
+        // a state the reader chose and which stays legible (greyed text, greyed swatch); this is a
+        // momentary de-emphasis of everything that isn't what you are looking at.
+        const faded = highlighted != null && highlighted !== entry.name;
         return (
           <li key={entry.name} className="min-w-0">
             <button
               type="button"
               aria-pressed={!off}
               onClick={() => onToggle(entry.name)}
-              className="flex w-full min-w-0 items-center gap-2 rounded px-1 py-0.5 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              onMouseEnter={() => onHover?.(entry.name)}
+              onMouseLeave={() => onHover?.(null)}
+              onFocus={() => onHover?.(entry.name)}
+              onBlur={() => onHover?.(null)}
+              data-pie-legend-faded={faded || undefined}
+              className={cn(
+                "flex w-full min-w-0 items-center gap-2 rounded px-1 py-0.5 text-left transition-opacity hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                faded && "opacity-40",
+              )}
             >
               <span
                 data-pie-legend-swatch

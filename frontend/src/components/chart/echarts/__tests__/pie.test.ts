@@ -1930,3 +1930,84 @@ describe("the pie's hole reads out the slice under the pointer", () => {
     });
   });
 });
+
+// Hovering a legend entry has to highlight its slice, which means telling ECharts WHICH datum —
+// and a sunburst has one tree, not a series per ring. Metabase dispatches `{ type: "highlight",
+// name }`, which ECharts resolves with a linear `indexOfName` scan over the whole tree in
+// depth-first pre-order; a sunburst's names are only unique within a parent, and "Other" is a
+// name every ring can produce, so the first match is not reliably the ring-0 slice meant. The
+// index is derived instead, from the same tree the option builds.
+describe("each legend entry points at its own datum in the sunburst's flattened tree", () => {
+  const cols3 = [
+    { name: "region", type: "varchar" }, { name: "category", type: "varchar" },
+    { name: "brand", type: "varchar" }, { name: "m", type: "double" },
+  ];
+  // Deliberately shaped so both rings fold their own "Other" buckets: name lookup would be
+  // ambiguous here, index lookup cannot be.
+  const rows3 = [
+    ["US", "Widgets", "Acme", 40], ["US", "Widgets", "Bolt", 30], ["US", "Gadgets", "Cog", 20],
+    ["US", "Trinkets", "Dot", 1], ["US", "Baubles", "Eft", 1],
+    ["EU", "Widgets", "Acme", 25], ["EU", "Gizmos", "Fig", 15],
+    ["EU", "Trinkets", "Gnu", 1], ["EU", "Baubles", "Hob", 1],
+    // Two regions small enough to fold into ring 0's own "Other" — so the name "Other" exists at
+    // more than one depth, which is the case a name lookup gets wrong.
+    ["AF", "Widgets", "Acme", 1], ["SA", "Widgets", "Bolt", 1],
+  ];
+  const cfg = { dimensions: ["region", "category", "brand"], metric: "m" };
+
+  /** The datum list ECharts builds from `series.data`: one virtual root, then depth-first
+   * pre-order (SunburstSeries.getInitialData -> Tree.createTree). */
+  const flatten = (nodes: any[]): any[] => nodes.flatMap((n: any) => [n, ...flatten(n.children ?? [])]);
+  const datumList = (opt: any) => [{ name: "<root>" }, ...flatten(opt.series[0].data)];
+
+  it("every entry's index lands on a datum of that entry's own name", () => {
+    const opt = buildPieOption(cols3, rows3, cfg) as any;
+    const data = datumList(opt);
+    const entries = buildPieLegend(cols3, rows3, cfg);
+    expect(entries.length).toBeGreaterThan(1);
+    for (const e of entries) {
+      expect(e.sliceDataIndex).toBeTypeOf("number");
+      expect(data[e.sliceDataIndex!].name).toBe(e.name);
+    }
+  });
+
+  // The guard the whole approach exists for: a name lookup would resolve ring 0's "Other" to
+  // whichever nested "Other" the depth-first scan reached first.
+  it("does not point at some deeper ring's slice that shares the name", () => {
+    const opt = buildPieOption(cols3, rows3, cfg) as any;
+    const data = datumList(opt);
+    const names = data.map((d: any) => d.name);
+    // The fixture really is ambiguous — otherwise this test proves nothing.
+    expect(names.filter((n: string) => n === "Other").length).toBeGreaterThan(1);
+    const other = buildPieLegend(cols3, rows3, cfg).find((e) => e.name === "Other")!;
+    // The ring-0 "Other" is NOT the first "Other" the scan meets, so a name payload would have
+    // lit up a nested one instead.
+    expect(other.sliceDataIndex).not.toBe(names.indexOf("Other"));
+    expect(data[other.sliceDataIndex!].name).toBe("Other");
+    expect(data[other.sliceDataIndex!].value).toBe(other.value);
+  });
+
+  it("withholds the index for a toggled-off entry, and re-indexes the ones after it", () => {
+    const before = buildPieLegend(cols3, rows3, cfg);
+    const off = { ...cfg, toggledOffSlices: [before[0].name] };
+    const after = buildPieLegend(cols3, rows3, off);
+    expect(after[0].sliceDataIndex).toBeUndefined();
+    // The survivors move up to fill the hole the removed subtree left.
+    expect(after[1].sliceDataIndex).toBe(1);
+    expect(before[1].sliceDataIndex).toBeGreaterThan(1);
+
+    // …and they still land on the right datum in the tree that is actually drawn.
+    const data = datumList(buildPieOption(cols3, rows3, off) as any);
+    for (const e of after.filter((x) => x.sliceDataIndex != null)) {
+      expect(data[e.sliceDataIndex!].name).toBe(e.name);
+    }
+  });
+
+  // The legend hover reads the slice's value out in the chart's centre, and unlike a chart hover
+  // there is no ECharts event to take it from.
+  it("carries each entry's raw value", () => {
+    const entries = buildPieLegend(cols3, rows3, cfg);
+    const opt = buildPieOption(cols3, rows3, cfg) as any;
+    expect(entries.map((e) => e.value)).toEqual(ring(opt, 0).map((d: any) => d.value));
+  });
+});

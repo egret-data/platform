@@ -27,16 +27,20 @@ let mockHoverPayload: { name?: string; value?: unknown; treePathInfo?: { name?: 
 /** The `overlay` prop each render passes — the merge-mode partial option the pie's centre readout
  * rides on, and the seam a hover has to land on WITHOUT disturbing `option`. */
 let mockLastOverlay: unknown;
+/** The `highlightDataIndex` prop each render passes — the legend's half of the two-way hover. */
+let mockLastHighlight: number | undefined;
 
 vi.mock("@/components/chart/echarts/EChartsRenderer", () => ({
-  EChartsRenderer: ({ option, overlay, onPointClick, onPointHover }: {
+  EChartsRenderer: ({ option, overlay, highlightDataIndex, onPointClick, onPointHover }: {
     option: unknown;
     overlay?: unknown;
+    highlightDataIndex?: number;
     onPointClick?: (p: MockClick) => void;
     onPointHover?: (p: unknown) => void;
   }) => {
     mockLastOption = option;
     mockLastOverlay = overlay;
+    mockLastHighlight = highlightDataIndex;
     return (
       <>
         <button data-testid="echarts" onClick={() => onPointClick?.(mockClickPayload)} />
@@ -55,6 +59,7 @@ describe("ChartRenderer", () => {
   beforeEach(() => {
     mockLastOption = undefined;
     mockLastOverlay = undefined;
+    mockLastHighlight = undefined;
     mockHoverPayload = null;
     mockClickPayload = { name: "EU", seriesName: "rev", value: 10, x: 3, y: 4 };
   });
@@ -481,6 +486,93 @@ describe("ChartRenderer", () => {
         />,
       );
       expect(mockLastOverlay).toBeUndefined();
+    });
+  });
+
+  // Metabase's legend and chart follow each other: hovering a slice greys every legend entry but
+  // its ring-0 ancestor's, and hovering a legend entry highlights that slice AND swaps the hole.
+  // egret's legend is React markup, so one direction is component state; the other is a
+  // `dispatchAction`, which is why the entries carry a datum index at all.
+  describe("-> the legend and the chart follow each other's hover", () => {
+    const cols2 = [
+      { name: "d", type: "varchar" }, { name: "c", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    const rows2 = [["A", "x", 10], ["B", "y", 30]];
+    const renderPie = () =>
+      render(
+        <ChartRenderer
+          vizType="pie"
+          params={params({ pie: { dimensions: ["d", "c"], metric: "m" } })}
+          columns={cols2}
+          rows={rows2}
+        />,
+      );
+    const holeText = () =>
+      (mockLastOverlay as (s: { width: number; height: number }) => {
+        graphic: { style: { text: string } }[];
+      })({ width: 400, height: 400 }).graphic.map((g) => g.style.text);
+    const faded = () =>
+      Array.from(document.querySelectorAll("[data-pie-legend] button"))
+        .filter((b) => b.hasAttribute("data-pie-legend-faded"))
+        .map((b) => b.querySelector("[title]")?.textContent);
+
+    it("greys every legend entry but the hovered slice's ring-0 ancestor", () => {
+      renderPie();
+      expect(faded()).toEqual([]);
+      // An OUTER-ring slice: the entry that stays lit is its ancestor's, not its own — the outer
+      // ring has no legend entry at all.
+      mockHoverPayload = { name: "y", value: 30, treePathInfo: [{ name: "" }, { name: "B" }, { name: "y" }] };
+      fireEvent.click(screen.getByTestId("echarts-hover"));
+      expect(faded()).toEqual(["A"]);
+
+      mockHoverPayload = null;
+      fireEvent.click(screen.getByTestId("echarts-hover"));
+      expect(faded()).toEqual([]);
+    });
+
+    it("highlights the slice and reads it out when a legend entry is hovered", () => {
+      renderPie();
+      fireEvent.mouseEnter(screen.getByRole("button", { name: /^A/ }));
+      // "A" is the second ring-0 slice (B, 30 sorts first and takes its own child with it), so its
+      // datum is index 3 in the sunburst's flattened tree: root, B, y, A.
+      expect(mockLastHighlight).toBe(3);
+      expect(holeText()).toEqual(["10", "A"]);
+      expect(faded()).toEqual(["B"]);
+
+      fireEvent.mouseLeave(screen.getByRole("button", { name: /^A/ }));
+      expect(mockLastHighlight).toBeUndefined();
+      expect(holeText()).toEqual(["40", "Total"]);
+    });
+
+    // ECharts already runs its own emphasis/blur for whatever the pointer is on inside the canvas;
+    // dispatching a second one would fight it. Only the legend direction dispatches.
+    it("dispatches no highlight for a hover that came from the chart", () => {
+      renderPie();
+      mockHoverPayload = { name: "B", value: 30, treePathInfo: [{ name: "" }, { name: "B" }] };
+      fireEvent.click(screen.getByTestId("echarts-hover"));
+      expect(mockLastHighlight).toBeUndefined();
+    });
+
+    // The hole says a value that appears nowhere else in the legend, so it must not be reachable
+    // by pointer alone.
+    it("does the same for a keyboard focus", () => {
+      renderPie();
+      fireEvent.focus(screen.getByRole("button", { name: /^A/ }));
+      expect(mockLastHighlight).toBe(3);
+      expect(holeText()).toEqual(["10", "A"]);
+    });
+
+    // A toggled-off entry's slice is not in the tree, so there is no datum to highlight — and the
+    // survivors' indexes shift, which is why the legend is built with the same toggle list.
+    it("asks for no highlight on a toggled-off entry, and re-indexes the rest", () => {
+      renderPie();
+      fireEvent.click(screen.getByRole("button", { name: /^B/ })); // toggle B off
+      fireEvent.mouseEnter(screen.getByRole("button", { name: /^B/ }));
+      expect(mockLastHighlight).toBeUndefined();
+
+      fireEvent.mouseLeave(screen.getByRole("button", { name: /^B/ }));
+      fireEvent.mouseEnter(screen.getByRole("button", { name: /^A/ }));
+      expect(mockLastHighlight).toBe(1); // A is now the first slice in the tree
     });
   });
 

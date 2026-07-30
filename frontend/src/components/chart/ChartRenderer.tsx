@@ -94,14 +94,28 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
   // in the chart's settings — this replaces the ECharts legend's own click-to-hide, which was
   // never persisted either (that is what `pie.hiddenSlices` is for).
   const [toggledOff, setToggledOff] = useState<string[]>([]);
-  const legend = useMemo(() => buildPieLegend(columns, rows, input), [input, columns, rows]);
+  // The legend needs the same toggle list the option is built with, because a toggled-off slice is
+  // not in the sunburst's datum list at all and every index after it shifts down — see
+  // `PieLegendEntry.sliceDataIndex`. It still LISTS every entry; only the index is withheld.
+  const legendCfg = useMemo(() => ({ ...input, toggledOffSlices: toggledOff }), [input, toggledOff]);
+  const legend = useMemo(() => buildPieLegend(columns, rows, legendCfg), [legendCfg, columns, rows]);
 
-  // The slice under the pointer. HOVER IS DELIBERATELY NOT A DEPENDENCY OF `option` BELOW: building
-  // that option runs a per-slice `measureText` fit pass over every ring, and re-applying it would
-  // additionally tear the sunburst down and re-init it — losing, mid-hover, the very emphasis state
-  // the hover is producing. Everything hover-driven therefore lands somewhere cheap: the centre
-  // readout as a merge-mode `graphic` overlay (see `overlay`), and the legend as ordinary markup.
-  const [hovered, setHovered] = useState<{ name: string; value: unknown; fromLegend: boolean } | null>(null);
+  // The slice under the pointer, from either direction — the chart or the legend. HOVER IS
+  // DELIBERATELY NOT A DEPENDENCY OF `option` BELOW: building that option runs a per-slice
+  // `measureText` fit pass over every ring, and re-applying it would additionally tear the sunburst
+  // down and re-init it — losing, mid-hover, the very emphasis state the hover is producing.
+  // Everything hover-driven therefore lands somewhere cheap: the centre readout as a merge-mode
+  // `graphic` overlay (see `overlay`), the legend as ordinary markup, and the chart's own emphasis
+  // as a `dispatchAction`.
+  const [hovered, setHovered] = useState<{
+    name: string;
+    value: unknown;
+    fromLegend: boolean;
+    /** The ring-0 ancestor's name — which legend entry stays lit. Its own name at ring 0. */
+    rootName: string;
+    /** Legend hovers only: the datum the chart should hold in emphasis. */
+    dataIndex?: number;
+  } | null>(null);
 
   const chartCfg = useMemo(
     () => ({ ...input, legendPlacement: placement, toggledOffSlices: toggledOff }),
@@ -134,8 +148,20 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
       overlay={overlay}
       className="min-h-0 min-w-0 flex-1"
       // A sunburst node carries its own name and value on the hover event, so the readout needs no
-      // lookup back into the data at all.
-      onPointHover={(p) => setHovered(p ? { name: p.name ?? "", value: p.value, fromLegend: false } : null)}
+      // lookup back into the data at all. `treePathInfo[1]` is the ring-0 slice this one descends
+      // from (entry 0 being ECharts' virtual root) — the legend entry that names its colour family,
+      // and so the one that stays lit while everything else fades.
+      onPointHover={(p) => setHovered(p ? {
+        name: p.name ?? "",
+        value: p.value,
+        fromLegend: false,
+        rootName: p.treePathInfo?.[1]?.name ?? p.name ?? "",
+      } : null)}
+      // Only the LEGEND direction dispatches, which is why only the legend path sets `dataIndex`:
+      // when the pointer is on the chart, ECharts is already running its own emphasis/blur for the
+      // element under it, and asking for a second one would fight it. Metabase draws the same line,
+      // for the same reason.
+      highlightDataIndex={hovered?.dataIndex}
       onPointClick={onValueClick && pie.dimensions?.[0] ? (p) => {
         // Which ring fired the click. It used to be read off `seriesName`, because each ring was
         // its own ECharts series named after its own dimension; the pie is ONE `sunburst` series
@@ -159,6 +185,13 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
       onToggle={(name) =>
         setToggledOff((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]))
       }
+      highlighted={hovered?.rootName ?? null}
+      onHover={(name) => {
+        const entry = name != null ? legend.find((e) => e.name === name) : undefined;
+        setHovered(entry
+          ? { name: entry.name, value: entry.value, fromLegend: true, rootName: entry.name, dataIndex: entry.sliceDataIndex }
+          : null);
+      }}
     />
   );
 
