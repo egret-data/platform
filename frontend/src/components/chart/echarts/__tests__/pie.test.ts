@@ -1627,8 +1627,10 @@ describe("buildPieOption — every slice states its own percentage, of its own p
     expect(c1Items).toHaveLength(12);
     for (const item of c1Items) expect(item.slicePercent).toBeCloseTo(50, 9); // NOT 4.1(6)%
     // The tooltip formatter actually reaches 50% when fed the real path, not the ring-share number.
+    // C2/C3 need a decimal (31.0%/19.0%), so the chart's shared precision pads C1's own round
+    // number to match: "50.0%", not the shorter "50%".
     const tooltip = opt.tooltip.formatter({ treePathInfo: [{ name: "" }, { name: "S1" }, { name: "C1" }] });
-    expect(tooltip).toContain("50%");
+    expect(tooltip).toContain("50.0%");
     expect(tooltip).not.toContain("4.17%");
   });
 
@@ -2199,11 +2201,13 @@ describe("a pie's tooltip breaks down the slice's siblings", () => {
     const nested = { dimensions: ["d", "c"], metric: "m" };
     // One decimal, not two: the chart's own percent precision is computed from the shares it
     // DRAWS (Big at 96%, Other at 3.7%, Main at 100%), and Other's breakdown — which is what this
-    // table is — is deliberately not part of that set. See computeMaxPercentDecimals.
+    // table is — is deliberately not part of that set. See computeMaxPercentDecimals. Ch3's own
+    // share happens to round to a whole number, but the shared decimal still pads it: "27.0%",
+    // not the shorter "27%" — the whole reason the precision is computed as a maximum at all.
     expect(rowsOf(tip(["Other"], nested, cols2, rows2))).toEqual([
       ["Ch1", "15", "40.5%"],
       ["Ch2", "12", "32.4%"],
-      ["Ch3", "10", "27%"],
+      ["Ch3", "10", "27.0%"],
       ["Total", "37", "100%"],
     ]);
     // …and nothing in it is marked as focused, because the pointer is on the bucket, not a row.
@@ -2365,12 +2369,15 @@ describe("a pie picks its percent decimals from the data", () => {
 
   it("gives the legend three significant digits' worth", () => {
     const entries = buildPieLegend(cols2, rows2, { ...cfg, percentVisibility: "legend" });
-    expect(entries.map((e) => e.percent)).toEqual(["71%", "23.88%", "5.12%"]);
+    // C's own share is an exact 71%, but the shared precision (driven by B's 5.12%) is 2 decimals
+    // for every entry — "71.00%", not the shorter "71%" a naive formatter would strip it to.
+    expect(entries.map((e) => e.percent)).toEqual(["71.00%", "23.88%", "5.12%"]);
   });
 
   it("gives a slice label two, so it stays shorter than the legend's", () => {
     const opt = buildPieOption(cols2, rows2, { ...cfg, percentVisibility: "inside" }) as any;
-    expect(ring(opt, 0).map((d: any) => d.label.formatter())).toEqual(["C: 71%", "A: 23.9%", "B: 5.1%"]);
+    // Same padding rule at the slice's own (1-decimal) precision: "71.0%", not "71%".
+    expect(ring(opt, 0).map((d: any) => d.label.formatter())).toEqual(["C: 71.0%", "A: 23.9%", "B: 5.1%"]);
   });
 
   it("drops decimals entirely when the data doesn't need them", () => {
@@ -2383,9 +2390,11 @@ describe("a pie picks its percent decimals from the data", () => {
 
   it("still does what an explicit `decimals` says, in both places", () => {
     const four = { ...cfg, percentVisibility: "both" as const, decimals: 4 };
-    expect(buildPieLegend(cols2, rows2, four)[1].percent).toBe("23.88%");
-    expect((ring(buildPieOption(cols2, rows2, four) as any, 0))[1].label.formatter()).toBe("A: 23.88%");
+    // A's share is an exact 23.88% — 4 decimals pads it to "23.8800%", not the shorter "23.88%".
+    expect(buildPieLegend(cols2, rows2, four)[1].percent).toBe("23.8800%");
+    expect((ring(buildPieOption(cols2, rows2, four) as any, 0))[1].label.formatter()).toBe("A: 23.8800%");
     const none = { ...cfg, percentVisibility: "both" as const, decimals: 0 };
+    // decimals: 0 must give "24%", never "24.%" — no stray separator with nothing after it.
     expect(buildPieLegend(cols2, rows2, none)[1].percent).toBe("24%");
     expect((ring(buildPieOption(cols2, rows2, none) as any, 0))[1].label.formatter()).toBe("A: 24%");
   });
@@ -2400,7 +2409,9 @@ describe("a pie picks its percent decimals from the data", () => {
     const rows3 = [["A", "x", 799], ["A", "y", 1], ["B", "z", 200]];
     const opt = buildPieOption(cols3, rows3,
       { dimensions: ["d", "e"], metric: "m", sliceThreshold: 0, percentVisibility: "inside" }) as any;
-    expect(ring(opt, 1).map((d: any) => d.label.formatter())).toEqual(["x: 99.88%", "y: 0.13%", "z: 100%"]);
+    // z is an exact 100% of its own parent B, but the chart's shared 2-decimal precision (driven
+    // by y's 0.13%) pads it too — "100.00%", not the shorter "100%".
+    expect(ring(opt, 1).map((d: any) => d.label.formatter())).toEqual(["x: 99.88%", "y: 0.13%", "z: 100.00%"]);
   });
 
   // ...but it stops at an "Other" bucket, exactly as Metabase's own walk does: it pushes Other's
@@ -2414,6 +2425,64 @@ describe("a pie picks its percent decimals from the data", () => {
       { dimensions: ["d", "e"], metric: "m", percentVisibility: "inside" }) as any;
     const b1 = ring(opt, 1).find((d: any) => d.name === "b1");
     expect(b1.label.formatter()).toBe("b1: 5%");
+  });
+});
+
+/**
+ * `computeMaxPercentDecimals` takes the MAXIMUM decimal count across a chart's shares specifically
+ * so a reader compares like with like down a column (see that function's own header comment) — but
+ * that promise only holds if every value actually PRINTS at that count. `parseFloat(p.toFixed(n))`
+ * used to strip a value's own trailing zeros, so a chart computed to need 1 decimal (because two of
+ * its slices do) would still show a third, round one shorter than its neighbours.
+ *
+ * Live comparison against Metabase on a real 4-slice pie: Metabase's legend read
+ * `23.88% · 26.54% · 15.85% · 33.73%`; egret's read `36.4% · 34.6% · 29%` — that last entry should
+ * have been `29.0%`, one decimal like its neighbours, not the shorter round number
+ * `parseFloat` was silently producing.
+ */
+describe("a percentage prints at its computed precision even when it rounds to a trailing zero", () => {
+  const cols2 = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+  // A 3-slice chart shaped exactly like the live bug: two slices (36.40%, 34.63%) whose legend
+  // precision (3 significant digits) needs 1 decimal, and a third (28.97%) that ROUNDS to an exact
+  // 29 at that same precision — the case a naive `parseFloat` strips.
+  const rows2 = [["A", 3640], ["B", 3463], ["C", 2897]];
+  const cfg = { dimensions: ["d"], metric: "m" };
+
+  it("legend: a value that rounds to a whole number still shows the shared decimal", () => {
+    const entries = buildPieLegend(cols2, rows2, { ...cfg, percentVisibility: "legend" });
+    expect(entries.map((e) => e.percent)).toEqual(["36.4%", "34.6%", "29.0%"]);
+  });
+
+  it("decimals: 0 never leaves a stray separator behind", () => {
+    // The guard `pctFormatter` has to satisfy at the OTHER end of the range: `(29).toFixed(0)` is
+    // "29", with no decimal point at all, so this must read "29%" and never "29.%".
+    const entries = buildPieLegend(cols2, rows2, { ...cfg, percentVisibility: "legend", decimals: 0 });
+    expect(entries.map((e) => e.percent)).toEqual(["36%", "35%", "29%"]);
+    for (const e of entries) expect(e.percent).not.toMatch(/\.%$/);
+  });
+
+  it("a 2-decimal value that rounds evenly still pads: 23.88% stays 23.88%, not 23.9%", () => {
+    // The flip side of the same guard: padding must never itself round away a real digit. cols2
+    // fixture with 2 significant sig-fig decimals already covered elsewhere (rows2 in the
+    // "picks its percent decimals" describe above); this pins the boundary case directly.
+    const exact = buildPieLegend(cols2, [["A", 2388], ["B", 512], ["C", 7100]], { ...cfg, percentVisibility: "legend" });
+    expect(exact.map((e) => e.percent)).toEqual(["71.00%", "23.88%", "5.12%"]);
+  });
+
+  it("legend, slice label and tooltip agree on the same slice's percentage", () => {
+    // An explicit `decimals` is the one config where the legend's own (3-sig-fig) budget and the
+    // slice/tooltip's (2-sig-fig) budget both give way to the same authoritative number (see
+    // `computeMaxPercentDecimals`'s callers: `cfg.decimals ?? computeMaxPercentDecimals(...)` in
+    // both places) — so this is the case where all three sites must print IDENTICAL digits for
+    // the same slice, not just consistently-padded ones at each site's own precision.
+    const withDecimals = { ...cfg, decimals: 1 };
+    const legendPct = buildPieLegend(cols2, rows2, { ...withDecimals, percentVisibility: "legend" })
+      .find((e) => e.name === "C")!.percent;
+    const opt = buildPieOption(cols2, rows2, { ...withDecimals, percentVisibility: "inside" }) as any;
+    const tooltipHtml = opt.tooltip.formatter({ treePathInfo: [{ name: "" }, { name: "C" }] }) as string;
+    expect(legendPct).toBe("29.0%");
+    expect(ring(opt, 0).find((d: any) => d.name === "C").label.formatter()).toBe("C: 29.0%");
+    expect(tooltipHtml).toContain("29.0%");
   });
 });
 

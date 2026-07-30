@@ -432,9 +432,17 @@ export interface PieLegendEntry {
   sliceDataIndex?: number;
 }
 
-/** Percent text, at the given precision. */
+/** Percent text, at the given precision — padded to exactly `decimals` places, never stripped.
+ *
+ * `computeMaxPercentDecimals` takes the MAXIMUM decimal count across a chart's values specifically
+ * so the reader compares like with like down a column (see its own header comment) — a formatter
+ * that then strips a value's own trailing zeros defeats that the moment one value happens to round
+ * to a shorter string than its neighbours (28.97 -> "29%" beside "36.4%" and "34.6%", instead of the
+ * "29.0%" the shared precision promised). `toFixed` alone is exactly the padded form: at
+ * `decimals: 0` it already returns a plain integer string with no separator, so there is no special
+ * case needed for "29%" not "29.%". */
 function pctFormatter(decimals: number) {
-  return (p: number) => `${parseFloat(p.toFixed(decimals))}%`;
+  return (p: number) => `${p.toFixed(decimals)}%`;
 }
 
 /**
