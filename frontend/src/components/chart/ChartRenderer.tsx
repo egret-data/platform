@@ -2,7 +2,7 @@
 import { useMemo, useRef, useState } from "react";
 import type {
   AnyChartParams, BoxplotConfig, CartesianConfig, FunnelConfig, GaugeConfig,
-  PieConfig, ProgressConfig, SankeyConfig, ScalarConfig, SmartScalarConfig, VizType,
+  PieConfig, ProgressConfig, SankeyConfig, ScalarConfig, SmartScalarConfig, VizType, WaterfallConfig,
 } from "@/api/charts";
 import type { PivotConfig } from "@/components/chart/viz/pivot";
 import { isCartesianViz } from "@/api/charts";
@@ -245,7 +245,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
   const progress = cfg as ProgressConfig;
   const gauge = cfg as GaugeConfig;
   const funnel = cfg as FunnelConfig;
-  const waterfall = cfg as { xAxis?: string; metric?: string; showTotal?: boolean };
+  const waterfall = cfg as WaterfallConfig;
   const smart = cfg as SmartScalarConfig;
   const box = cfg as BoxplotConfig;
   const sankey = cfg as SankeyConfig;
@@ -363,14 +363,22 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
     );
   }
 
+  // THE FIVE BRANCHES BELOW SPREAD THEIR CONFIG, for the reason cartesian and pie already do.
+  // Each of them used to re-list the fields it forwarded, and each list happened to match its
+  // config interface — which is precisely the state the pie branch was in until a field was added
+  // to one side and not the other. That cost four settings (decimals, sliceNames, hiddenSlices,
+  // sliceOrder) which shipped implemented and panel-exposed but unreachable from the app, and
+  // cartesian lost four of its own the same way before that. A whitelist that is correct today is
+  // a trap, not a safeguard; spreading makes the two sides impossible to drift apart.
+  //
+  // `columnSettings` and `metricTypes` come AFTER the spread deliberately: they are the shell's,
+  // not the viz's, so a stray same-named key in stored settings cannot shadow them.
   if (vizType === "gauge") {
     return (
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildGaugeOption(columns, rows, {
-              metric: gauge.metric, segments: gauge.segments, columnSettings, metricTypes,
-            })} />}
+          : <EChartsRenderer option={buildGaugeOption(columns, rows, { ...gauge, columnSettings, metricTypes })} />}
       </div>
     );
   }
@@ -380,9 +388,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildFunnelOption(columns, rows, {
-              dimension: funnel.dimension, metric: funnel.metric, columnSettings, metricTypes,
-            })} />}
+          : <EChartsRenderer option={buildFunnelOption(columns, rows, { ...funnel, columnSettings, metricTypes })} />}
       </div>
     );
   }
@@ -392,9 +398,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildWaterfallOption(columns, rows, {
-              xAxis: waterfall.xAxis, metric: waterfall.metric, showTotal: waterfall.showTotal, columnSettings, metricTypes,
-            })} />}
+          : <EChartsRenderer option={buildWaterfallOption(columns, rows, { ...waterfall, columnSettings, metricTypes })} />}
       </div>
     );
   }
@@ -418,9 +422,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildBoxplotOption(columns, rows, {
-              category: box.category, value: box.value, columnSettings, metricTypes,
-            })} />}
+          : <EChartsRenderer option={buildBoxplotOption(columns, rows, { ...box, columnSettings, metricTypes })} />}
       </div>
     );
   }
@@ -430,9 +432,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildSankeyOption(columns, rows, {
-              source: sankey.source, target: sankey.target, metric: sankey.metric, columnSettings, metricTypes,
-            })} />}
+          : <EChartsRenderer option={buildSankeyOption(columns, rows, { ...sankey, columnSettings, metricTypes })} />}
       </div>
     );
   }

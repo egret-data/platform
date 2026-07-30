@@ -8,7 +8,6 @@ export interface ResultColumn { name: string; type: string }
 export interface FunnelBuildConfig {
   dimension?: string;
   metric?: string;
-  showLabels?: boolean;
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
 }
@@ -47,7 +46,15 @@ export function buildFunnelOption(columns: ResultColumn[], rows: unknown[][], cf
       top: "6%",
       bottom: "6%",
       data,
-      label: { show: cfg.showLabels !== false, position: "inside", formatter: (p: { name: string; value: unknown }) => `${p.name}: ${fmt(p.value)}` },
+      // Always shown. This used to read `cfg.showLabels !== false`, but `showLabels` was on no
+      // config any caller could produce — not `FunnelConfig`, not any settings panel — so the
+      // `!== false` arm was unreachable and every funnel ever drawn took this branch. Now that
+      // ChartRenderer SPREADS the config, an accepted-but-unsettable field stops being merely
+      // dead and becomes a backdoor: a hand-edited `funnel.showLabels` in stored settings could
+      // switch a chart's labels off with no control anywhere to switch them back on. Removed
+      // rather than exposed — exposing it is a feature (field + panel toggle + builder), not
+      // debt cleanup, and this keeps every funnel drawing exactly what it draws today.
+      label: { show: true, position: "inside", formatter: (p: { name: string; value: unknown }) => `${p.name}: ${fmt(p.value)}` },
     }],
   };
 }

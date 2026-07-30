@@ -676,4 +676,124 @@ describe("ChartRenderer", () => {
       expect(built.series[0].data.map((d) => d.name)).toContain("C");
     });
   });
+
+  /**
+   * THE SAME SEAM, for the five viz types that hand-listed their fields at this line long after
+   * cartesian and pie stopped: gauge, funnel, waterfall, boxplot and sankey.
+   *
+   * The lists happened to match their config interfaces, so nothing was broken — but that is
+   * exactly the state cartesian and pie were both in until a field was added to one side and not
+   * the other, at which cost four pie settings (decimals, sliceNames, hiddenSlices, sliceOrder)
+   * shipped implemented, panel-exposed and unreachable. These tests exist so the NEXT added field
+   * cannot repeat it.
+   *
+   * They deliberately run through `ChartRenderer` rather than calling the builders, because the
+   * builders were never the broken part: `pie.test.ts` calls `buildPieOption` directly and passed
+   * throughout, since a direct call bypasses the one line that dropped the fields. The assertion
+   * per viz covers EVERY field of its config plus the two the shell contributes, so dropping any
+   * single one of them fails on its own:
+   *   - `columnSettings` shows up as the `$` prefix (a bare value has none);
+   *   - `metricTypes` shows up as the MISSING thousands separator — "varchar" sends the value down
+   *     formatValue's string path, where the default "double" would have grouped it.
+   */
+  describe("-> the remaining option builders' seam", () => {
+    /** A metric formatted through both shell settings at once: `$1234.5`, where `$` proves
+     * columnSettings arrived and the absent comma proves metricTypes did. */
+    const FORMATTED = "$1234.5";
+    const settings = { m: { prefix: "$" } };
+    const types = { m: "varchar" };
+
+    type Built = {
+      series: {
+        min?: number; max?: number;
+        axisLine?: { lineStyle: { color: [number, string][] } };
+        detail?: { formatter: (v: number) => string };
+        label?: { formatter: (p: { name: string; value: unknown }) => string };
+        data?: unknown;
+        links?: { source: string; target: string; value: number }[];
+      }[];
+      xAxis?: { data: string[] };
+      yAxis?: { axisLabel: { formatter: (v: number) => string } };
+      tooltip?: { formatter: (p: { dataType?: string; name?: string; value?: unknown }) => string };
+    };
+
+    /** Renders a viz and hands back the option that actually reached EChartsRenderer. */
+    const optionOf = (vizType: "gauge" | "funnel" | "waterfall" | "boxplot" | "sankey", p: Partial<ChartParams>, columns: { name: string; type: string }[], rows: unknown[][]): Built => {
+      render(
+        <ChartRenderer
+          vizType={vizType}
+          params={params({ columnSettings: settings, ...p })}
+          columns={columns}
+          rows={rows}
+          metricTypes={types}
+        />,
+      );
+      return mockLastOption as Built;
+    };
+
+    it("forwards every GaugeConfig field, and both shell settings, to the built option", () => {
+      // A leading decoy column, so reading the metric by NAME is what produces 1234.5 — dropping
+      // `metric` leaves buildGaugeOption with no column at all and a value of 0.
+      const o = optionOf(
+        "gauge",
+        { gauge: { metric: "m", segments: [{ min: 0, max: 1000, color: "#111111" }, { min: 1000, max: 5000, color: "#222222" }] } },
+        [{ name: "decoy", type: "double" }, { name: "m", type: "double" }],
+        [[999, 1234.5]],
+      );
+      expect(o.series[0].data).toEqual([{ value: 1234.5 }]);           // metric
+      expect([o.series[0].min, o.series[0].max]).toEqual([0, 5000]);    // segments (scale)
+      expect(o.series[0].axisLine!.lineStyle.color)                     // segments (zones)
+        .toEqual([[0.2, "#111111"], [1, "#222222"]]);
+      expect(o.series[0].detail!.formatter(1234.5)).toBe(FORMATTED);    // columnSettings + metricTypes
+    });
+
+    it("forwards every FunnelConfig field, and both shell settings, to the built option", () => {
+      const o = optionOf(
+        "funnel",
+        { funnel: { dimension: "d", metric: "m" } },
+        [{ name: "d", type: "varchar" }, { name: "decoy", type: "double" }, { name: "m", type: "double" }],
+        [["A", 999, 1234.5], ["B", 999, 10]],
+      );
+      expect(o.series[0].data).toEqual([{ name: "A", value: 1234.5 }, { name: "B", value: 10 }]); // dimension + metric
+      expect(o.series[0].label!.formatter({ name: "A", value: 1234.5 })).toBe(`A: ${FORMATTED}`);
+    });
+
+    it("forwards every WaterfallConfig field, and both shell settings, to the built option", () => {
+      const o = optionOf(
+        "waterfall",
+        { waterfall: { xAxis: "x", metric: "m", showTotal: true } },
+        [{ name: "x", type: "varchar" }, { name: "decoy", type: "double" }, { name: "m", type: "double" }],
+        [["Q1", 999, 1000], ["Q2", 999, 234.5]],
+      );
+      // xAxis + metric produce the two steps; showTotal appends the third bar.
+      expect(o.xAxis!.data).toEqual(["Q1", "Q2", "Total"]);
+      expect(o.yAxis!.axisLabel.formatter(1234.5)).toBe(FORMATTED);
+    });
+
+    it("forwards every BoxplotConfig field, and both shell settings, to the built option", () => {
+      const o = optionOf(
+        "boxplot",
+        { boxplot: { category: "c", value: "m" } },
+        [{ name: "c", type: "varchar" }, { name: "decoy", type: "double" }, { name: "m", type: "double" }],
+        [["A", 999, 1], ["A", 999, 3], ["B", 999, 5]],
+      );
+      expect(o.xAxis!.data).toEqual(["A", "B"]);            // category
+      expect(o.series[0].data).toEqual([[1, 1.5, 2, 2.5, 3], [5, 5, 5, 5, 5]]); // value
+      expect(o.yAxis!.axisLabel.formatter(1234.5)).toBe(FORMATTED);
+    });
+
+    it("forwards every SankeyConfig field, and both shell settings, to the built option", () => {
+      const o = optionOf(
+        "sankey",
+        { sankey: { source: "s", target: "t", metric: "m" } },
+        [
+          { name: "s", type: "varchar" }, { name: "t", type: "varchar" },
+          { name: "decoy", type: "double" }, { name: "m", type: "double" },
+        ],
+        [["A", "B", 999, 1234.5]],
+      );
+      expect(o.series[0].links).toEqual([{ source: "A", target: "B", value: 1234.5 }]); // source + target + metric
+      expect(o.tooltip!.formatter({ dataType: "edge", name: "A > B", value: 1234.5 })).toBe(`A > B: ${FORMATTED}`);
+    });
+  });
 });
