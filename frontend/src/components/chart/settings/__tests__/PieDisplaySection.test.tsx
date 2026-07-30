@@ -269,4 +269,22 @@ describe("PieDisplaySection", () => {
     fireEvent.change(screen.getByLabelText("Decimal places"), { target: { value: "0" } });
     expect(onChange).toHaveBeenCalledWith({ decimals: 0 });
   });
+
+  // The chart derives its own precision from the shares it draws once nothing is stored, so a
+  // number in this box with nothing behind it would be a control claiming a value the chart isn't
+  // using — the fault this panel already fixed for the legend, the labels and the centre total.
+  it("Decimal places shows Auto, not a number, when nothing is stored", () => {
+    render(<PieDisplaySection config={{ percentVisibility: "inside" }} onChange={() => {}} slices={[]} />);
+    const input = screen.getByLabelText("Decimal places") as HTMLInputElement;
+    expect(input.value).toBe("");
+    expect(input.placeholder).toBe("Auto");
+  });
+
+  it("Decimal places shows a stored precision, and clearing it goes back to Auto", () => {
+    const onChange = vi.fn();
+    render(<PieDisplaySection config={{ percentVisibility: "inside", decimals: 3 }} onChange={onChange} slices={[]} />);
+    expect((screen.getByLabelText("Decimal places") as HTMLInputElement).value).toBe("3");
+    fireEvent.change(screen.getByLabelText("Decimal places"), { target: { value: "" } });
+    expect(onChange).toHaveBeenCalledWith({ decimals: undefined });
+  });
 });

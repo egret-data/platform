@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildPieOption, buildPieLegend, buildPieHole, buildPieHoleGraphic, pieLegendPlacement, resolvePercentVisibility,
-  PIE_LEGEND_COLUMN_WIDTH_PX,
+  PIE_LEGEND_COLUMN_WIDTH_PX, computeMaxPercentDecimals,
 } from "../options/pie";
 import { SERIES_PALETTE, seriesColor, chartShade, COLOR_FALLBACK } from "../palette";
 import { calcAvailableDonutSliceLabelLength } from "../sliceLabel";
@@ -256,7 +256,9 @@ describe("buildPieOption — donut total & percent (Metabase parity 1b)", () => 
       dimensions: ["d"], metric: "m", percentVisibility: "inside", showLabels: false,
     }) as any;
     expect(thirds.series[0].label.show).toBe(true);
-    expect(labelText(thirds, "A")).toBe("33.33%"); // 1/3, rounded to the default 2 decimals
+    // 1/3, at the precision the DATA asks for: under a slice label's two-significant-digit budget
+    // (see computeMaxPercentDecimals) neither third needs a decimal at all.
+    expect(labelText(thirds, "A")).toBe("33%");
   });
 });
 
@@ -765,13 +767,14 @@ describe("buildPieOption — slice curation (task 6)", () => {
     // showLabels defaults on now, so it's turned off explicitly to isolate the percent text
     // (otherwise the name would be prefixed too, which isn't what this test is about).
     // Read from the per-datum formatter — the one that actually renders; A is 10 of 30, i.e.
-    // 33.333…%, so the two decimal settings genuinely differ.
+    // 33.333…%, so the decimal settings genuinely differ.
     const rows = [["A", 10], ["B", 20]];
     const labelOfA = (o: any) => ring(o, 0).find((d: any) => d.name === "A").label.formatter();
     const withDefault = buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", percentVisibility: "inside", showLabels: false }) as any;
-    const withZero = buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", percentVisibility: "inside", decimals: 0, showLabels: false }) as any;
-    expect(labelOfA(withDefault)).toBe("33.33%");
-    expect(labelOfA(withZero)).toBe("33%");
+    const withThree = buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", percentVisibility: "inside", decimals: 3, showLabels: false }) as any;
+    // Unset asks the data, which (at two significant digits on a slice) wants no decimals here.
+    expect(labelOfA(withDefault)).toBe("33%");
+    expect(labelOfA(withThree)).toBe("33.333%");
   });
 
   it("renaming does not change identity: colour, hidden and order still key on the raw value", () => {
@@ -1658,9 +1661,10 @@ describe("buildPieOption — every slice states its own percentage, of its own p
     ];
     const rows2 = [["S1", "C1", 1], ["S1", "C2", 2]]; // C1 = 1/3 of its segment = 33.333...%
     const withDefault = buildPieOption(cols2, rows2, { dimensions: ["segment", "channel"], metric: "m" }) as any;
-    const withZero = buildPieOption(cols2, rows2, { dimensions: ["segment", "channel"], metric: "m", decimals: 0 }) as any;
-    expect(ring(withDefault, 1).find((d: any) => d.name === "C1").slicePercent).toBeCloseTo(33.33, 9);
-    expect(ring(withZero, 1).find((d: any) => d.name === "C1").slicePercent).toBe(33);
+    const withThree = buildPieOption(cols2, rows2, { dimensions: ["segment", "channel"], metric: "m", decimals: 3 }) as any;
+    // Unset asks the data — no third of this chart needs a decimal at two significant digits.
+    expect(ring(withDefault, 1).find((d: any) => d.name === "C1").slicePercent).toBe(33);
+    expect(ring(withThree, 1).find((d: any) => d.name === "C1").slicePercent).toBeCloseTo(33.333, 9);
   });
 
   it('a parent\'s own "Other" bucket reports its share of that same parent', () => {
@@ -2193,10 +2197,13 @@ describe("a pie's tooltip breaks down the slice's siblings", () => {
     // Three regions small enough to fold into ring 0's Other (37 of 1000), each with one channel.
     const rows2 = [["Big", "Main", 963], ["T1", "Ch1", 15], ["T2", "Ch2", 12], ["T3", "Ch3", 10]];
     const nested = { dimensions: ["d", "c"], metric: "m" };
+    // One decimal, not two: the chart's own percent precision is computed from the shares it
+    // DRAWS (Big at 96%, Other at 3.7%, Main at 100%), and Other's breakdown — which is what this
+    // table is — is deliberately not part of that set. See computeMaxPercentDecimals.
     expect(rowsOf(tip(["Other"], nested, cols2, rows2))).toEqual([
-      ["Ch1", "15", "40.54%"],
-      ["Ch2", "12", "32.43%"],
-      ["Ch3", "10", "27.03%"],
+      ["Ch1", "15", "40.5%"],
+      ["Ch2", "12", "32.4%"],
+      ["Ch3", "10", "27%"],
       ["Total", "37", "100%"],
     ]);
     // …and nothing in it is marked as focused, because the pointer is on the bucket, not a row.
@@ -2287,7 +2294,9 @@ describe("the tiny-slice floor changes the drawing, not the numbers", () => {
 
   it("keeps the legend's percent and value true", () => {
     const [, b] = buildPieLegend(cols2, rows2, { ...cfg, percentVisibility: "legend" });
-    expect(b).toMatchObject({ name: "B", value: 1, percent: "0.1%" });
+    // 1/1001 — its own share to four decimals (which is what three significant digits costs at
+    // this size, see computeMaxPercentDecimals), and nowhere near the 0.5% it is DRAWN at.
+    expect(b).toMatchObject({ name: "B", value: 1, percent: "0.0999%" });
   });
 
   it("keeps the tooltip's value and total true", () => {
@@ -2307,5 +2316,103 @@ describe("the tiny-slice floor changes the drawing, not the numbers", () => {
     const hole = buildPieHole(cols2, rows2, { ...cfg, donut: true, showTotal: true });
     expect(holeTexts(buildPieHoleGraphic(hole, { ...cfg, donut: true, showTotal: true }, null)))
       .toEqual(["1,001", "Total"]);
+  });
+});
+
+/**
+ * HOW MANY DECIMALS A PERCENTAGE GETS, when nobody has said.
+ *
+ * egret hard-coded 2, so a chart of round quarters read `25%` (the trailing zeros are stripped)
+ * but one with a 23.88% slice read `23.88%` in the legend AND on the slice, where Metabase's
+ * slice says `23.9%`. Metabase computes the count from the data — `computeMaxDecimalsForValues`,
+ * over the percentages actually present — with a different significant-digit budget for each
+ * place the number appears: 3 for the legend, 2 for a label drawn on a slice.
+ */
+describe("computeMaxPercentDecimals — Metabase's computeMaxDecimalsForValues", () => {
+  // It is not "the shortest that still looks distinct". It formats each value as a percent under
+  // an Intl `maximumSignificantDigits` budget and counts the fraction digits that survive, taking
+  // the largest count over the set. Nothing compares one value to another.
+  it("counts the fraction digits an Intl percent format keeps under the digit budget", () => {
+    expect(computeMaxPercentDecimals([0.25], 3)).toBe(0);      // "25%"
+    expect(computeMaxPercentDecimals([0.2388], 3)).toBe(1);    // "23.9%"
+    expect(computeMaxPercentDecimals([0.05123], 3)).toBe(2);   // "5.12%"
+    expect(computeMaxPercentDecimals([0.005123], 3)).toBe(3);  // "0.512%"
+  });
+
+  it("gives a smaller budget fewer decimals for the same value", () => {
+    expect(computeMaxPercentDecimals([0.2388], 2)).toBe(0);    // "24%"
+    expect(computeMaxPercentDecimals([0.05123], 2)).toBe(1);   // "5.1%"
+  });
+
+  it("takes the MAXIMUM over the set, so one small slice lengthens every number", () => {
+    expect(computeMaxPercentDecimals([0.2388, 0.0512, 0.71], 3)).toBe(2);
+    expect(computeMaxPercentDecimals([0.2388, 0.71], 3)).toBe(1);
+  });
+
+  it("is 0 for no values at all", () => {
+    expect(computeMaxPercentDecimals([], 3)).toBe(0);
+  });
+});
+
+describe("a pie picks its percent decimals from the data", () => {
+  const cols2 = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+  // Shares 23.88% / 5.12% / 71%. Under the legend's 3-significant-digit budget the 5.12% slice
+  // needs two decimals, so every legend number gets two; under a slice label's 2-digit budget it
+  // needs only one, so the labels stay a character shorter. That is exactly the split the live
+  // Metabase shows: `23.88%` in the legend, `23.9%` on the slice.
+  const rows2 = [["A", 2388], ["B", 512], ["C", 7100]];
+  const cfg = { dimensions: ["d"], metric: "m" };
+
+  it("gives the legend three significant digits' worth", () => {
+    const entries = buildPieLegend(cols2, rows2, { ...cfg, percentVisibility: "legend" });
+    expect(entries.map((e) => e.percent)).toEqual(["71%", "23.88%", "5.12%"]);
+  });
+
+  it("gives a slice label two, so it stays shorter than the legend's", () => {
+    const opt = buildPieOption(cols2, rows2, { ...cfg, percentVisibility: "inside" }) as any;
+    expect(ring(opt, 0).map((d: any) => d.label.formatter())).toEqual(["C: 71%", "A: 23.9%", "B: 5.1%"]);
+  });
+
+  it("drops decimals entirely when the data doesn't need them", () => {
+    const round = [["A", 25], ["B", 75]];
+    expect(buildPieLegend(cols2, round, { ...cfg, percentVisibility: "legend" }).map((e) => e.percent))
+      .toEqual(["75%", "25%"]);
+    const opt = buildPieOption(cols2, round, { ...cfg, percentVisibility: "inside" }) as any;
+    expect(ring(opt, 0).map((d: any) => d.slicePercent)).toEqual([75, 25]);
+  });
+
+  it("still does what an explicit `decimals` says, in both places", () => {
+    const four = { ...cfg, percentVisibility: "both" as const, decimals: 4 };
+    expect(buildPieLegend(cols2, rows2, four)[1].percent).toBe("23.88%");
+    expect((ring(buildPieOption(cols2, rows2, four) as any, 0))[1].label.formatter()).toBe("A: 23.88%");
+    const none = { ...cfg, percentVisibility: "both" as const, decimals: 0 };
+    expect(buildPieLegend(cols2, rows2, none)[1].percent).toBe("24%");
+    expect((ring(buildPieOption(cols2, rows2, none) as any, 0))[1].label.formatter()).toBe("A: 24%");
+  });
+
+  // Metabase's chart-location set is every slice at every depth (getAllSlicePercentages), not just
+  // the ring the legend lists — an outer ring's shares are drawn too, and drawn at the same
+  // precision.
+  it("counts an outer ring's shares too", () => {
+    const cols3 = [{ name: "d", type: "varchar" }, { name: "e", type: "varchar" }, { name: "m", type: "double" }];
+    // Ring 0 is 80/20 — no decimals needed. A's child `y` is 0.125% of it, which is what pushes
+    // every label to two.
+    const rows3 = [["A", "x", 799], ["A", "y", 1], ["B", "z", 200]];
+    const opt = buildPieOption(cols3, rows3,
+      { dimensions: ["d", "e"], metric: "m", sliceThreshold: 0, percentVisibility: "inside" }) as any;
+    expect(ring(opt, 1).map((d: any) => d.label.formatter())).toEqual(["x: 99.88%", "y: 0.13%", "z: 100%"]);
+  });
+
+  // ...but it stops at an "Other" bucket, exactly as Metabase's own walk does: it pushes Other's
+  // own share and does not descend into the slices folded inside it.
+  it("does not descend into an Other bucket's children", () => {
+    const cols3 = [{ name: "d", type: "varchar" }, { name: "e", type: "varchar" }, { name: "m", type: "double" }];
+    // A is 97%; B and C are 1.5% each, so they fold into one Other worth 3%. Nothing outside that
+    // bucket needs a decimal — and `b1`, at 5.333% of Other, would demand one if it counted.
+    const rows3 = [["A", "a1", 9700], ["B", "b1", 16], ["B", "b2", 134], ["C", "c1", 150]];
+    const opt = buildPieOption(cols3, rows3,
+      { dimensions: ["d", "e"], metric: "m", percentVisibility: "inside" }) as any;
+    const b1 = ring(opt, 1).find((d: any) => d.name === "b1");
+    expect(b1.label.formatter()).toBe("b1: 5%");
   });
 });

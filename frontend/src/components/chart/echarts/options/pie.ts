@@ -432,11 +432,54 @@ export interface PieLegendEntry {
   sliceDataIndex?: number;
 }
 
-/** Percent text, at the chart's configured precision — shared by the slice labels and the legend
- * so the two can never disagree on how many decimals a share has. */
+/** Percent text, at the given precision. */
 function pctFormatter(decimals: number) {
-  return (p: number) => `${parseFloat(p.toFixed(decimals))}%`; // default 2, like Metabase
+  return (p: number) => `${parseFloat(p.toFixed(decimals))}%`;
 }
+
+/**
+ * How many decimals a set of shares needs — Metabase's `computeMaxDecimalsForValues`
+ * (visualizations/lib/utils.ts), ported rather than approximated.
+ *
+ * WHAT IT ACTUALLY DOES, because it is easy to assume something cleverer: it formats each fraction
+ * as a percent under an `Intl.NumberFormat` SIGNIFICANT-DIGIT budget, counts the fraction digits
+ * that survive that rounding, and returns the largest count over the set. Nothing compares one
+ * value to another, and nothing looks for the shortest string that keeps them distinct — two
+ * slices of identical size get the same answer as one. The budget is the whole mechanism: at 3
+ * significant digits 23.88% rounds to `23.9%` (1 decimal) and 5.123% to `5.12%` (2), so a chart
+ * containing both prints every share to 2 — which is how Metabase's legend comes to read `23.88%`
+ * when no single value asked for four significant digits.
+ *
+ * Taking the MAX is what makes one number's precision everyone's: a chart with one 5.12% slice
+ * lengthens all its percentages, so the reader compares like with like down the column.
+ *
+ * `fractions` are shares in the 0..1 sense (`style: "percent"` multiplies by 100), matching the
+ * `normalizedPercentage` Metabase feeds it.
+ *
+ * Metabase wraps the whole thing in a try/catch and returns `undefined` when `Intl.NumberFormat`
+ * throws, leaving its formatter to fall back on its own default. egret's caller needs a number, so
+ * the fallback is stated here — 2, which is exactly what this file hard-coded before.
+ */
+export function computeMaxPercentDecimals(fractions: number[], maximumSignificantDigits: number): number {
+  try {
+    const formatter = Intl.NumberFormat("en", { style: "percent", maximumSignificantDigits });
+    let maxDecimals = 0;
+    for (const fraction of fractions) {
+      const part = formatter.formatToParts(fraction).find((p) => p.type === "fraction");
+      const decimals = part ? part.value.length : 0;
+      if (decimals > maxDecimals) maxDecimals = decimals;
+    }
+    return maxDecimals;
+  } catch {
+    return 2;
+  }
+}
+
+/** Metabase's two budgets (pie/format.ts): a legend has room for a longer number than a label
+ * squeezed onto an arc does, so the same share prints as `23.88%` beside the chart and `23.9%` on
+ * it. Deliberately NOT one shared number — the whole point is that the two places differ. */
+const LEGEND_PERCENT_SIGNIFICANT_DIGITS = 3;
+const SLICE_PERCENT_SIGNIFICANT_DIGITS = 2;
 
 /** The chart's metric formatter — the same one for the slices, the hole and the tooltip, so a
  * number never reads differently depending on where you are looking at it. */
@@ -980,7 +1023,16 @@ export function buildPieLegend(
   const visibility = resolvePercentVisibility(cfg.percentVisibility, rings.length);
   const withPercent = visibility === "legend" || visibility === "both";
   const total = ring0.reduce((t, s) => t + s.value, 0);
-  const pct = pctFormatter(cfg.decimals ?? 2);
+  // The legend's OWN precision, over the only shares it lists (ring 0's, each already a share of
+  // the whole chart) and at the legend's own budget — see computeMaxPercentDecimals. An explicit
+  // `decimals` stays authoritative; this is only what "unset" means.
+  const pct = pctFormatter(
+    cfg.decimals
+      ?? computeMaxPercentDecimals(
+        total > 0 ? ring0.map((s) => s.value / total) : [],
+        LEGEND_PERCENT_SIGNIFICANT_DIGITS,
+      ),
+  );
 
   // The sunburst's datum list, walked without building it: ECharts wraps `series.data` in one
   // virtual root (SunburstSeries.getInitialData) and `Tree.createTree` pushes nodes depth-first,
@@ -1168,18 +1220,6 @@ export function buildPieOption(
   // value promised something the renderer had no way to deliver.
   const percentVisibility = resolvePercentVisibility(cfg.percentVisibility, ringCount);
   const showPercent = percentVisibility === "inside" || percentVisibility === "both";
-  const decimals = cfg.decimals ?? 2;
-  const pct = pctFormatter(decimals);
-  // The full, untruncated text a slice's label wants to say — Metabase's getSliceLabel. Called
-  // directly with the slice's own name and share rather than through an ECharts callback: the fit
-  // pass below has to MEASURE this text before anything renders, and a `sunburst` datum has no
-  // `percent` of its own to hand a callback anyway (see `slicePercent`).
-  const composeSliceLabel = (name: string, percent: number) => {
-    const namePart = showName ? name : undefined;
-    const percentPart = showPercent ? pct(percent) : undefined;
-    if (namePart != null && percentPart != null) return `${namePart}: ${percentPart}`;
-    return namePart ?? percentPart ?? "";
-  };
 
   // Slice label sizing — Metabase's constants.ts: multiRingFontSize (12) once there's more than
   // one ring, and Metabase's FLOOR (minFontSize, 14) for a single one. Metabase scales a
@@ -1292,6 +1332,40 @@ export function buildPieOption(
   // end of the turn.
   const drawnTotal = rootSlices.reduce((t, s) => t + drawnValueOf(s), 0);
   const unitRadian = drawnTotal > 0 ? (2 * Math.PI) / drawnTotal : 0;
+
+  // How precise the percentages DRAWN ON THE CHART are — the slice labels, and the tooltip table
+  // that shares their formatter. Metabase's `getAllSlicePercentages`: every slice at every depth,
+  // each as a share of its own parent (which at ring 0 is the chart), at the slice budget rather
+  // than the legend's. It pushes an "Other" bucket's own share and then STOPS — the slices folded
+  // inside it are a breakdown of Other, not of the chart, and their shares are not what a reader
+  // is comparing labels across. Kept faithful to that even though egret's tooltip does list them.
+  //
+  // Computed here rather than beside `showPercent` above because it needs the finished tree: the
+  // rings, the legend toggle, and each ring's grouping under its parent.
+  const collectShares = (slices: Slice[], level: number, parentValue: number, out: number[]): number[] => {
+    for (const s of slices) {
+      out.push(parentValue > 0 ? s.value / parentValue : 0);
+      if (s.key != null && s.key.startsWith(OTHER_KEY)) continue;
+      collectShares(childrenByParentKey[level]?.get(s.key ?? OTHER_KEY) ?? [], level + 1, s.value, out);
+    }
+    return out;
+  };
+  const decimals = cfg.decimals
+    ?? computeMaxPercentDecimals(
+      collectShares(rootSlices, 0, rootTotal, []),
+      SLICE_PERCENT_SIGNIFICANT_DIGITS,
+    );
+  const pct = pctFormatter(decimals);
+  // The full, untruncated text a slice's label wants to say — Metabase's getSliceLabel. Called
+  // directly with the slice's own name and share rather than through an ECharts callback: the fit
+  // pass below has to MEASURE this text before anything renders, and a `sunburst` datum has no
+  // `percent` of its own to hand a callback anyway (see `slicePercent`).
+  const composeSliceLabel = (name: string, percent: number) => {
+    const namePart = showName ? name : undefined;
+    const percentPart = showPercent ? pct(percent) : undefined;
+    if (namePart != null && percentPart != null) return `${namePart}: ${percentPart}`;
+    return namePart ?? percentPart ?? "";
+  };
 
   const fontStyle = { size: sliceFontSize, weight: 700 };
 

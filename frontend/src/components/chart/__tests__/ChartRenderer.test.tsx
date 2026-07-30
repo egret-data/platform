@@ -332,12 +332,13 @@ describe("ChartRenderer", () => {
     });
 
     it("forwards pie.decimals to the built option", () => {
-      // A is 10 of this fixture's 45, i.e. 22.22...% — so 0 decimals renders visibly differently
-      // from the default 2.
+      // A is 10 of this fixture's 45, i.e. 22.22...% — so an explicit precision renders visibly
+      // differently from the unset one, which the pie now computes from the data itself (at two
+      // significant digits on a slice label, this chart's shares want no decimals at all).
       const labelOfA = (pie: Partial<PieConfig>) =>
         pieOption(pie).series[0].data.find((d) => d.name === "A")!.label.formatter();
-      expect(labelOfA({ percentVisibility: "inside", showLabels: false })).toBe("22.22%");
-      expect(labelOfA({ percentVisibility: "inside", showLabels: false, decimals: 0 })).toBe("22%");
+      expect(labelOfA({ percentVisibility: "inside", showLabels: false })).toBe("22%");
+      expect(labelOfA({ percentVisibility: "inside", showLabels: false, decimals: 3 })).toBe("22.222%");
     });
   });
 

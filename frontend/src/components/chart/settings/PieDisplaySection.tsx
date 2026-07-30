@@ -116,11 +116,19 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
       {effectivePercent !== "off" && (
         <div className="flex items-center justify-between gap-2">
           <Label htmlFor="pz-decimals" className="text-sm font-normal">Decimal places</Label>
+          {/* EMPTY, not "2", when nothing is stored: the chart no longer has a fixed default to
+              show. Unset means the pie derives the precision from its own shares (options/pie.ts,
+              computeMaxPercentDecimals) — a number in this box would be a control claiming a value
+              the chart isn't using, which is the same fault this panel already fixed for the
+              legend, the slice labels, the centre total and Percentages' own Auto. Clearing the
+              box is also the only way back to that, which typing a default over it never was. */}
           <Input id="pz-decimals" aria-label="Decimal places" type="number" min={0} max={10} step={1}
-            className="h-7 w-16 text-sm"
-            value={config.decimals ?? 2}
+            className="h-7 w-16 text-sm" placeholder="Auto"
+            value={config.decimals ?? ""}
             onChange={(e) => {
-              const n = Number(e.target.value);
+              const raw = e.target.value;
+              if (raw === "") return onChange({ decimals: undefined });
+              const n = Number(raw);
               onChange({ decimals: Number.isNaN(n) ? undefined : Math.max(0, Math.trunc(n)) });
             }} />
         </div>
