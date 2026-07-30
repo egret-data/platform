@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { SharedDisplaySections } from "../SharedDisplaySections";
+import { SharedDisplaySections, styleColumnsFor, ruleColumnsFor } from "../SharedDisplaySections";
 import type { VizType } from "@/api/charts";
 
 // Renders with no result columns yet and returns the empty-state paragraph's text. Every prop
@@ -78,5 +78,33 @@ describe("SharedDisplaySections — split into halves", () => {
     render(<SharedDisplaySections vizType="pivot_table" {...common} only="conditional" />);
     expect(screen.queryByText("Formatting")).not.toBeInTheDocument();
     expect(screen.getByText("Conditional formatting")).toBeInTheDocument();
+  });
+});
+
+describe("ruleColumnsFor", () => {
+  const cols = [
+    { name: "region", type: "varchar" },
+    { name: "order_date", type: "date" },
+    { name: "revenue", type: "bigint" },
+  ];
+  const params = {
+    rows: ["region"], cols: ["order_date"], metrics: ["revenue"],
+  } as unknown as Parameters<typeof ruleColumnsFor>[1];
+
+  it("a pivot may only colour its measures", () => {
+    // `buildConditional` is keyed by metric, so a rule on a dimension would save, read back, and
+    // colour nothing — a setting that cannot take effect. Widening `styleColumnsFor` to include
+    // dimensions (so they could be FORMATTED) briefly widened this too; it must not.
+    expect(ruleColumnsFor("pivot_table", params, cols).map((c) => c.name)).toEqual(["revenue"]);
+  });
+
+  it("but a pivot may FORMAT its dimensions", () => {
+    expect(styleColumnsFor("pivot_table", params, cols).map((c) => c.name))
+      .toEqual(["region", "order_date", "revenue"]);
+  });
+
+  it("a table may colour every column", () => {
+    expect(ruleColumnsFor("table", params, cols).map((c) => c.name))
+      .toEqual(["region", "order_date", "revenue"]);
   });
 });

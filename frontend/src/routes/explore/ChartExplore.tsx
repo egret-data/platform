@@ -14,7 +14,7 @@ import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
 import type { DrillContext } from "@/components/chart/drill";
 import { ChartTypeGallery } from "@/components/chart/ChartTypeGallery";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
-import { SharedDisplaySections, styleColumnsFor } from "@/components/chart/settings/SharedDisplaySections";
+import { SharedDisplaySections, styleColumnsFor, ruleColumnsFor } from "@/components/chart/settings/SharedDisplaySections";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
 import { StudioToolbar } from "@/components/chart/StudioToolbar";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
@@ -510,6 +510,14 @@ export default function ChartExplore() {
                 conditionalFormatting={conditionalFormatting}
                 onTableState={setTableState}
                 onColumnSettings={setColumnSettings}
+                ruleColumns={ruleColumnsFor(viz, {
+                  spec: specForRun(),
+                  cartesian: descConfig as { yMetrics: string[] },
+                  scalar: descConfig as { metric?: string },
+                  metrics: (descConfig as { metrics?: string[] }).metrics,
+                  rows: (descConfig as { rows?: string[] }).rows,
+                  cols: (descConfig as { cols?: string[] }).cols,
+                } as ChartParams, resultColumns)}
                 onConditionalFormatting={setConditionalFormatting}
                 only="conditional"
               />
