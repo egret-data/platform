@@ -56,19 +56,23 @@ const sunburst = (graphicText: string) => ({
       ],
     },
   ],
-  // Two text elements with stable ids — exactly how options/pie.ts states the hole.
-  graphic: [
-    { id: "pie-total-value", type: "text", left: "center", top: "43%", style: { text: graphicText, fontSize: 22 } },
-    { id: "pie-total-label", type: "text", left: "center", top: "53%", style: { text: "Total", fontSize: 14 } },
-  ],
+  graphic: holeGraphic(graphicText, "Total"),
 });
 
-const hole = (n: number, txt: string) => ({
-  graphic: [
-    { id: "pie-total-value", type: "text", left: "center", top: "43%", style: { text: String(n), fontSize: 22 } },
-    { id: "pie-total-label", type: "text", left: "center", top: "53%", style: { text: txt, fontSize: 14 } },
-  ],
-});
+/** One centred group holding both lines, every element carrying a stable id — exactly how
+ * options/pie.ts states the hole. The nesting is what the merge below has to reach through: a
+ * partial that matched the group but replaced its children would lose the readout entirely. */
+const holeGraphic = (valueText: string, labelText: string) => [
+  {
+    id: "pie-total", type: "group", left: "center", top: "center",
+    children: [
+      { id: "pie-total-value", type: "text", left: "center", top: 0, style: { text: valueText, fontSize: 22, textAlign: "center" } },
+      { id: "pie-total-label", type: "text", left: "center", top: 26, style: { text: labelText, fontSize: 14, textAlign: "center" } },
+    ],
+  },
+];
+
+const hole = (n: number, txt: string) => ({ graphic: holeGraphic(String(n), txt) });
 
 /** Every `<text>` the chart drew, in document order. The hole's two come first (the `graphic`
  * component renders under the series), so `slice(0, 2)` IS the hole. */

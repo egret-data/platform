@@ -500,10 +500,19 @@ function pieGeometry(
     ? [innerRadiusPx, outerRadiusPx]
     : [fmtPct(100 * outerFraction * holeRatio), fmtPct(100 * outerFraction)];
 
-  // Where the circle sits in its own box. The legend no longer shares the canvas with it, so
-  // there is nothing to shift clear of: the pie is simply centred. The bottom layout keeps the
-  // 2% lift it has always had off the row beneath it; the side layout has nothing below it.
-  const center: [string, string] = ["50%", side ? "50%" : "48%"];
+  // Where the circle sits in its own box: DEAD CENTRE, in both layouts.
+  //
+  // The bottom layout used to keep a 2% upward lift "off the row beneath it". There is no row
+  // beneath it inside the canvas any more — the legend became React markup outside it — so the
+  // lift was left over from a legend that had already moved out, and all it did was put the
+  // circle 2% of the height above the box's own middle. It also cost the hole's readout its
+  // centre: `buildPieHoleGraphic` centres the total on the CANVAS (ECharts' `left: "center",
+  // top: "center"`), which is the one point a shifted pie is no longer at — measured at 520px
+  // tall, the total's block sat ~10px below the rings it belongs to.
+  //
+  // Centring both on the same point is what keeps them together BY CONSTRUCTION rather than by
+  // two numbers agreeing: there is no offset here for the hole to have to reproduce.
+  const center: [string, string] = ["50%", "50%"];
 
   return { holeRatio, diameterPx, outerRadiusPx, innerRadiusPx, hasMeasuredSize, radius, center };
 }
@@ -537,13 +546,27 @@ export interface PieHoleReadout {
 }
 
 /** Metabase's `total.*` constants: the regular value size, and the escape hatch it drops to when
- * the text won't fit the hole. The three-ring hole (1/4 of the outer edge) is tight enough that
- * the regular size risks overflowing it, so that ring count starts at the small one. */
+ * the text won't fit the hole.
+ *
+ * THE SMALL SIZE IS A FIT DECISION, NOT A RING COUNT. This used to start a three-ring pie at
+ * `_SM` on the theory that its hole (1/4 of the outer edge) was too tight for 22px — which asked
+ * the wrong question, and answered it without measuring: on the chart the live comparison was
+ * made against, the hole's radius is 66px and `22,437` needs about 78 of the 132px available, so
+ * the small size was being applied to text that fits. Metabase picks 22 and drops to 17 only when
+ * the measured string exceeds `innerRadius * 2` (option.ts's `hasSufficientWidth`), which is what
+ * `buildPieHoleGraphic` does now. */
 const TOTAL_VALUE_FONT_SIZE = 22;
 const TOTAL_VALUE_FONT_SIZE_SM = 17;
 const TOTAL_LABEL_FONT_SIZE = 14;
+/** Where each line sits INSIDE the centred group (Metabase's own offsets): the caption 26px below
+ * the top of the value, and a value drawn with no caption under it nudged down 8px so that the
+ * group — which is centred by its own bounding box — centres the lone line rather than a block
+ * that still reserves room for a caption. */
+const TOTAL_LABEL_TOP = 26;
+const TOTAL_LONE_VALUE_TOP = 8;
 const TOTAL_CAPTION = "Total";
 /** Stable identities so the hole can be re-stated on its own — see `buildPieHoleGraphic`. */
+const TOTAL_GROUP_ID = "pie-total";
 const TOTAL_VALUE_ID = "pie-total-value";
 const TOTAL_LABEL_ID = "pie-total-label";
 
@@ -580,12 +603,13 @@ export function buildPieHole(columns: ResultColumn[], rows: unknown[][], cfg: Pi
   return pieHoleModel(rings, cfg, metricFormatter(cfg));
 }
 
-/** One `graphic` text element of the hole. */
+/** One `graphic` text element of the hole. `top` is an offset INSIDE the group below (pixels from
+ * the top of its box), not a position on the canvas — the group is what gets centred. */
 interface PieHoleText {
   id: string;
   type: "text";
   left: "center";
-  top: string;
+  top: number;
   style: {
     text: string;
     fontSize: number;
@@ -593,6 +617,15 @@ interface PieHoleText {
     fill: string;
     textAlign: "center";
   };
+}
+
+/** The hole, as ECharts states it: ONE group holding both lines. */
+export interface PieHoleGraphic {
+  id: string;
+  type: "group";
+  left: "center";
+  top: "center";
+  children: PieHoleText[];
 }
 
 /**
@@ -608,8 +641,14 @@ interface PieHoleText {
  * partial option when the hover changes. Both go through this one function, so the hovered hole
  * cannot end up styled differently from the resting one.
  *
- * Positions are percentages of the CANVAS, not of the series — which is fine because nothing is
- * shifted sideways any more (the legend left the canvas), so `left: "center"` is a true centring.
+ * THE TWO LINES ARE ONE GROUP, which is Metabase's construction and the fix for what the live
+ * comparison found. They used to be two independent `graphic` texts pinned to 43% and 53% of the
+ * canvas height — a spacing that scales with the chart (50.9px apart on the measured host, against
+ * Metabase's 22) and a midpoint that only lands on the rings if the pie happens to be centred at
+ * 48%. A group states the relationship instead: the caption sits `TOTAL_LABEL_TOP` below the
+ * value's own top whatever size the chart is, and `left/top: "center"` centres the pair — as one
+ * box, by its own bounding rect — on the canvas's middle, which is exactly where `pieGeometry`
+ * puts the rings.
  */
 export function buildPieHoleGraphic(
   hole: PieHoleModel,
@@ -617,17 +656,17 @@ export function buildPieHoleGraphic(
   readout: PieHoleReadout | null,
   containerSize?: { width: number; height: number },
   measureText: MeasureText = defaultMeasureText,
-): PieHoleText[] | undefined {
+): PieHoleGraphic[] | undefined {
   if (!hole.shown) return undefined;
 
   const { innerRadiusPx, hasMeasuredSize } = pieGeometry(cfg, hole.ringCount, containerSize);
-  const baseFontSize = hole.ringCount >= 3 ? TOTAL_VALUE_FONT_SIZE_SM : TOTAL_VALUE_FONT_SIZE;
 
   let valueText = readout ? hole.format(readout.value) : hole.totalText;
   let labelText = readout
     ? (readout.fromLegend ? readout.name.toUpperCase() : readout.name)
     : TOTAL_CAPTION;
-  let valueFontSize = baseFontSize;
+  // The full size unless the hole is measurably too narrow for it — see TOTAL_VALUE_FONT_SIZE.
+  let valueFontSize = TOTAL_VALUE_FONT_SIZE;
 
   // The fit pass runs only against a REAL measured size, the same rule the slice labels follow:
   // "we don't know how big this is" must never become "guess small", or a perfectly readable
@@ -636,8 +675,9 @@ export function buildPieHoleGraphic(
   if (hasMeasuredSize) {
     // Metabase measures with the VALUE's font size for both lines: "technically incorrect for the
     // label text since it uses a smaller font, however using the value font size for measurements
-    // makes up for the inaccuracy of our heuristic and provided a good end result."
-    const fontStyle = { size: baseFontSize, weight: 700 };
+    // makes up for the inaccuracy of our heuristic and provided a good end result." At the size it
+    // intends to DRAW, so the question the fit answers is the one on screen.
+    const fontStyle = { size: TOTAL_VALUE_FONT_SIZE, weight: 700 };
     const holeWidth = innerRadiusPx * 2;
     valueText = truncateLabelText(valueText, holeWidth, measureText, fontStyle);
     if (readout) labelText = truncateLabelText(labelText, holeWidth, measureText, fontStyle);
@@ -654,18 +694,24 @@ export function buildPieHoleGraphic(
 
   return [
     {
-      id: TOTAL_VALUE_ID, type: "text", left: "center", top: "43%",
-      style: {
-        text: valueText, fontSize: valueFontSize, fontWeight: 700,
-        fill: resolveColor("var(--foreground)", COLOR_FALLBACK.text), textAlign: "center",
-      },
-    },
-    {
-      id: TOTAL_LABEL_ID, type: "text", left: "center", top: "53%",
-      style: {
-        text: labelText, fontSize: TOTAL_LABEL_FONT_SIZE, fontWeight: 700,
-        fill: resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel), textAlign: "center",
-      },
+      id: TOTAL_GROUP_ID, type: "group", left: "center", top: "center",
+      children: [
+        {
+          id: TOTAL_VALUE_ID, type: "text", left: "center",
+          top: labelText ? 0 : TOTAL_LONE_VALUE_TOP,
+          style: {
+            text: valueText, fontSize: valueFontSize, fontWeight: 700,
+            fill: resolveColor("var(--foreground)", COLOR_FALLBACK.text), textAlign: "center",
+          },
+        },
+        {
+          id: TOTAL_LABEL_ID, type: "text", left: "center", top: TOTAL_LABEL_TOP,
+          style: {
+            text: labelText, fontSize: TOTAL_LABEL_FONT_SIZE, fontWeight: 700,
+            fill: resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel), textAlign: "center",
+          },
+        },
+      ],
     },
   ];
 }

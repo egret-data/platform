@@ -421,7 +421,7 @@ describe("ChartRenderer", () => {
   // Metabase's hole says what you are pointing at; egret's said "Total" and nothing else. The
   // interesting half of this is WHERE the hover lands: not on `option`, whose rebuild runs a
   // per-slice measureText pass over every ring and whose re-application would tear the sunburst
-  // down mid-hover, but on a merge-mode `graphic` overlay that touches only the two text elements.
+  // down mid-hover, but on a merge-mode `graphic` overlay that touches only the hole's own group.
   describe("-> the hole reads out the slice under the pointer", () => {
     const cols2 = [
       { name: "d", type: "varchar" }, { name: "c", type: "varchar" }, { name: "m", type: "double" },
@@ -438,8 +438,8 @@ describe("ChartRenderer", () => {
       );
     const holeText = () =>
       (mockLastOverlay as (s: { width: number; height: number }) => {
-        graphic: { style: { text: string } }[];
-      })({ width: 400, height: 400 }).graphic.map((g) => g.style.text);
+        graphic: { children: { style: { text: string } }[] }[];
+      })({ width: 400, height: 400 }).graphic[0].children.map((g) => g.style.text);
     const hover = (payload: typeof mockHoverPayload) => {
       mockHoverPayload = payload;
       fireEvent.click(screen.getByTestId("echarts-hover"));
@@ -509,8 +509,8 @@ describe("ChartRenderer", () => {
       );
     const holeText = () =>
       (mockLastOverlay as (s: { width: number; height: number }) => {
-        graphic: { style: { text: string } }[];
-      })({ width: 400, height: 400 }).graphic.map((g) => g.style.text);
+        graphic: { children: { style: { text: string } }[] }[];
+      })({ width: 400, height: 400 }).graphic[0].children.map((g) => g.style.text);
     const faded = () =>
       Array.from(document.querySelectorAll("[data-pie-legend] button"))
         .filter((b) => b.hasAttribute("data-pie-legend-faded"))

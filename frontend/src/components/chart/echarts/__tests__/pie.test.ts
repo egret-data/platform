@@ -26,6 +26,18 @@ const ring = (opt: any, level: number): any[] => {
   return nodes;
 };
 
+/**
+ * The hole's two lines, in order (value, caption).
+ *
+ * The pie states them as ONE `graphic` group — Metabase's own construction (option.ts's
+ * `getTotalGraphicOption`), adopted because two independently positioned texts could not hold a
+ * fixed 22px apart or share the rings' centre; see buildPieHoleGraphic. So anything reading the
+ * hole reads the group's children, and `graphic` itself is one element, not two.
+ */
+const holeLines = (graphic: any): any[] => graphic?.[0]?.children ?? [];
+const holeTexts = (graphic: any): (string | undefined)[] =>
+  holeLines(graphic).map((e: any) => e.style?.text);
+
 /** How many rings the tree actually draws — its own depth, counted from the data. */
 const treeDepth = (nodes: any[]): number =>
   nodes.length === 0 ? 0 : 1 + Math.max(...nodes.map((n: any) => treeDepth(n.children ?? [])));
@@ -225,9 +237,8 @@ describe("buildPieOption — donut total & percent (Metabase parity 1b)", () => 
   });
   it("centre total shows the formatted grand total + a Total caption", () => {
     const g = opt({ donut: true, showTotal: true, metricTypes: { m: "double" }, columnSettings: { m: { prefix: "$", decimals: 0 } } }).graphic;
-    const texts = g.map((e: any) => e.style?.text);
-    expect(texts).toContain("$100");
-    expect(texts).toContain("Total");
+    expect(holeTexts(g)).toContain("$100");
+    expect(holeTexts(g)).toContain("Total");
   });
   it("percentVisibility defaults off → label is the name only", () => {
     const o = opt({ showLabels: true });
@@ -1330,26 +1341,32 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
   describe("centre total keeps working under the new hole ratios (Metabase's total.* constants)", () => {
     it("uses Metabase's labelFontSize (14) and bolds the caption too, one ring", () => {
       const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", donut: true, showTotal: true }) as any;
-      const [value, label] = opt.graphic;
+      const [value, label] = holeLines(opt.graphic);
       expect(value.style.fontSize).toBe(22);
       expect(value.style.fontWeight).toBe(700);
       expect(label.style.fontSize).toBe(14);
       expect(label.style.fontWeight).toBe(700); // previously unset — Metabase bolds the caption too
     });
 
-    it("shrinks the value to Metabase's valueFontSizeSm (17) under the tightest (three-ring) hole", () => {
+    // RE-BASELINED. A three-ring pie used to START at valueFontSizeSm on the theory that its hole
+    // (1/4 of the outer radius) was too tight for 22px — a guess, applied without measuring
+    // anything, and measurably wrong on the chart the live comparison was made against: a 66px
+    // hole radius holds `22,437` at 22px with ~54px to spare, and Metabase draws it at 22 there.
+    // The small size is Metabase's overflow escape hatch (`hasSufficientWidth`), so it is the fit
+    // pass below — against the REAL hole — that reaches for it, at any ring count.
+    it("keeps the full 22px under the tightest (three-ring) hole, which fits it", () => {
       const opt = buildPieOption(cols3, rows3, {
         dimensions: ["region", "category", "brand"], metric: "m", donut: true, showTotal: true,
-      }) as any;
-      const [value] = opt.graphic;
-      expect(value.style.fontSize).toBe(17);
+      }, undefined, { width: 830, height: 661 }) as any;
+      const [value] = holeLines(opt.graphic);
+      expect(value.style.fontSize).toBe(22);
     });
 
     it("still renders at the regular size under the two-ring hole", () => {
       const opt = buildPieOption(cols2, rows2, {
         dimensions: ["region", "category"], metric: "m", donut: true, showTotal: true,
       }) as any;
-      const [value] = opt.graphic;
+      const [value] = holeLines(opt.graphic);
       expect(value.style.fontSize).toBe(22);
     });
   });
@@ -1366,13 +1383,13 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
     it("two rings show the total with nothing stored at all", () => {
       const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "m" }) as any;
       expect(opt.graphic).toBeTruthy();
-      expect(opt.graphic.map((g: any) => g.style?.text)).toEqual(["50", "Total"]);
+      expect(holeTexts(opt.graphic)).toEqual(["50", "Total"]);
     });
 
     it("three rings show it too", () => {
       const opt = buildPieOption(cols3, rows3, { dimensions: ["region", "category", "brand"], metric: "m" }) as any;
       expect(opt.graphic).toBeTruthy();
-      expect(opt.graphic.map((g: any) => g.style?.text)).toEqual(["18", "Total"]);
+      expect(holeTexts(opt.graphic)).toEqual(["18", "Total"]);
     });
 
     it("an explicit false still empties the hole", () => {
@@ -1695,16 +1712,19 @@ describe("a pie's legend goes beside it when that leaves the rings more room", (
     expect(opt.series[0].center).toEqual(["50%", "50%"]);
   });
 
-  it("the bottom layout's geometry is untouched", () => {
+  // The DIAMETER is untouched (0.70 of the shorter side). What changed is the centre: this layout
+  // used to lift the circle 2% "off the row beneath it", and there is no row beneath it inside the
+  // canvas any more — see pieGeometry, and the hole tests below for what the lift cost.
+  it("the bottom layout's diameter is untouched, and the circle is now dead centre", () => {
     const opt = buildPieOption(cols, rows, { ...base, legendPlacement: "bottom" }, undefined, narrowTall) as any;
     expect(outerRadiusPx(opt) * 2).toBeCloseTo(0.7 * 360, 6);
-    expect(opt.series[0].center).toEqual(["50%", "48%"]);
+    expect(opt.series[0].center).toEqual(["50%", "50%"]);
   });
 
   it("an unstated placement is the bottom one — today's geometry, unchanged", () => {
     const opt = buildPieOption(cols, rows, base, undefined, wideShort) as any;
     expect(outerRadiusPx(opt) * 2).toBeCloseTo(0.7 * 661, 6);
-    expect(opt.series[0].center).toEqual(["50%", "48%"]);
+    expect(opt.series[0].center).toEqual(["50%", "50%"]);
   });
 
   // No legend, no column to make room for: a chart with `showLegend: false` keeps exactly the
@@ -1714,7 +1734,7 @@ describe("a pie's legend goes beside it when that leaves the rings more room", (
       cols, rows, { ...base, showLegend: false, legendPlacement: "side" }, undefined, wideShort,
     ) as any;
     expect(outerRadiusPx(opt) * 2).toBeCloseTo(0.7 * 661, 6);
-    expect(opt.series[0].center).toEqual(["50%", "48%"]);
+    expect(opt.series[0].center).toEqual(["50%", "50%"]);
   });
 
   // With no measured size at all there are no pixels to state, so the radii stay in ECharts' own
@@ -1737,16 +1757,55 @@ describe("a pie's legend goes beside it when that leaves the rings more room", (
     }
   });
 
-  // The donut's centre total is a `graphic` text element positioned against the CANVAS. With
-  // nothing shifted any more it goes back to the plain `left: "center"` it always used.
-  it("the donut's centre total stays centred on the canvas", () => {
+  // THE HOLE AND THE RINGS SHARE ONE CENTRE, in every layout — the fault the live comparison
+  // found (the total's block sat ~10px low and, on the deployed chart, 22px right of the rings'
+  // middle). It is stated once here as a relationship rather than as two numbers that happen to
+  // agree: the pie is centred on the canvas, and the hole is the literal `"center"` ECharts
+  // resolves to that same point. Where it actually LANDS is measured on a rendered chart in
+  // pie.hole.echarts.test.tsx — this test only pins that neither side can drift alone.
+  it("the centre total is anchored to the same point as the rings, in either layout", () => {
+    for (const legendPlacement of ["side", "bottom"] as const) {
+      const opt = buildPieOption(
+        cols, rows, { ...base, donut: true, showTotal: true, legendPlacement }, undefined, wideShort,
+      ) as any;
+      expect(opt.series[0].center).toEqual(["50%", "50%"]);
+      expect(opt.graphic).toHaveLength(1);
+      expect(opt.graphic[0]).toMatchObject({ type: "group", left: "center", top: "center" });
+      // ...and nothing shifts it sideways by hand, which is what a re-introduced legend column
+      // would need and is where the 22px went.
+      expect(opt.graphic[0].x).toBeUndefined();
+      expect(holeLines(opt.graphic).map((e: any) => e.left)).toEqual(["center", "center"]);
+    }
+  });
+
+  // Metabase's own construction (option.ts's getTotalGraphicOption): the caption's box starts 26px
+  // below the value's, which — at 22px and 14px — puts the two lines exactly 22px apart whatever
+  // size the chart is. The pair egret drew before was pinned to 43% and 53% of the canvas HEIGHT,
+  // so their spacing scaled with the chart: 50.9px apart on the host the comparison was made on.
+  it("stacks the two lines Metabase's fixed 26px apart, not a fraction of the canvas", () => {
     const opt = buildPieOption(
-      cols, rows, { ...base, donut: true, showTotal: true, legendPlacement: "side" }, undefined, wideShort,
+      cols, rows, { ...base, donut: true, showTotal: true }, undefined, wideShort,
     ) as any;
-    const [value, caption] = opt.graphic;
-    expect(value).toMatchObject({ left: "center", top: "43%" });
-    expect(caption).toMatchObject({ left: "center", top: "53%" });
-    expect(value.x).toBeUndefined();
+    const [value, caption] = holeLines(opt.graphic);
+    expect(value.top).toBe(0);
+    expect(caption.top).toBe(26);
+    // A taller chart moves neither of them: the offsets are pixels inside the group, not
+    // percentages of anything.
+    const taller = buildPieOption(
+      cols, rows, { ...base, donut: true, showTotal: true }, undefined, { width: 830, height: 1200 },
+    ) as any;
+    expect(holeLines(taller.graphic).map((e: any) => e.top)).toEqual([0, 26]);
+  });
+
+  // Metabase's `top: labelText ? 0 : 8`. The group is centred by its own bounding box, so a value
+  // left on its own (the too-narrow escape hatch, and a hover readout that lost its name) has to
+  // be nudged down or the box still reserves the caption's room and the lone line rides high.
+  it("nudges a caption-less value to Metabase's 8px so it centres by itself", () => {
+    const tiny = { width: 30, height: 30 }; // the padding floor leaves a hole ~2px across
+    const opt = buildPieOption(cols, rows, { ...base, donut: true, showTotal: true }, undefined, tiny) as any;
+    const [value, caption] = holeLines(opt.graphic);
+    expect(caption.style.text).toBe("");
+    expect(value.top).toBe(8);
   });
 });
 
@@ -1789,7 +1848,7 @@ describe("a toggled-off legend entry drops its ring-0 slice", () => {
   // re-based on what was left showing.
   it("does not re-base the centre total or the legend percentages", () => {
     const opt = buildPieOption(cols2, rows2, { ...cfg, showTotal: true, toggledOffSlices: ["US"] }) as any;
-    expect(opt.graphic.map((g: any) => g.style?.text)).toEqual(["50", "Total"]);
+    expect(holeTexts(opt.graphic)).toEqual(["50", "Total"]);
     expect(buildPieLegend(cols2, rows2, cfg).map((e) => e.percent)).toEqual(["80%", "20%"]);
   });
 
@@ -1819,7 +1878,8 @@ describe("the pie's hole reads out the slice under the pointer", () => {
   ];
   const rows2 = [["US", "Widgets", 40], ["EU", "Gadgets", 10]];
   const cfg = { dimensions: ["region", "category"], metric: "m" };
-  const text = (g: ReturnType<typeof buildPieHoleGraphic>) => (g ?? []).map((e) => e.style.text);
+  const text = (g: ReturnType<typeof buildPieHoleGraphic>) =>
+    (g?.[0]?.children ?? []).map((e) => e.style.text);
   const hole = () => buildPieHole(cols2, rows2, cfg);
 
   it("says the chart total over 'Total' when nothing is hovered", () => {
@@ -1872,13 +1932,17 @@ describe("the pie's hole reads out the slice under the pointer", () => {
     expect(opt.graphic).toEqual(buildPieHoleGraphic(hole(), cfg, null));
   });
 
-  // Both elements carry a stable id, which is what lets React re-state JUST the hole as a
-  // merge-mode partial option instead of re-applying (and so rebuilding) the whole chart.
-  it("gives each line a stable id so it can be re-stated on its own", () => {
+  // The group and both its lines carry stable ids, which is what lets React re-state JUST the
+  // hole as a merge-mode partial option instead of re-applying (and so rebuilding) the whole
+  // chart. The group needs one as much as its children do: ECharts matches a merged `graphic`
+  // element by id, and an id-less group would be a second one appended over the first.
+  it("gives the group and each line a stable id so it can be re-stated on its own", () => {
     const rest = buildPieHoleGraphic(hole(), cfg, null)!;
     const hovered = buildPieHoleGraphic(hole(), cfg, { name: "US", value: 40, fromLegend: false })!;
-    expect(rest.map((e) => e.id)).toEqual(["pie-total-value", "pie-total-label"]);
+    expect(rest.map((e) => e.id)).toEqual(["pie-total"]);
+    expect(rest[0].children.map((e) => e.id)).toEqual(["pie-total-value", "pie-total-label"]);
     expect(hovered.map((e) => e.id)).toEqual(rest.map((e) => e.id));
+    expect(hovered[0].children.map((e) => e.id)).toEqual(rest[0].children.map((e) => e.id));
   });
 
   // Metabase truncates both lines against `innerRadius * 2` and, when even that leaves them too
@@ -1893,13 +1957,13 @@ describe("the pie's hole reads out the slice under the pointer", () => {
 
     it("truncates a value too wide for the hole", () => {
       const model = { ...hole(), totalText: "1,234,567,890,123" }; // 17 chars = 170px > 112
-      const [value] = buildPieHoleGraphic(model, cfg, null, size, measure)!;
+      const [value] = buildPieHoleGraphic(model, cfg, null, size, measure)![0].children;
       expect(value.style.text).toBe("1,234,567,…");
       expect(value.style.text.length * 10).toBeLessThanOrEqual(112);
     });
 
     it("keeps a value that fits untouched", () => {
-      const [value, label] = buildPieHoleGraphic(hole(), cfg, null, size, measure)!;
+      const [value, label] = buildPieHoleGraphic(hole(), cfg, null, size, measure)![0].children;
       expect(value.style.text).toBe("50");
       expect(label.style.text).toBe("Total");
       expect(value.style.fontSize).toBe(22);
@@ -1910,7 +1974,7 @@ describe("the pie's hole reads out the slice under the pointer", () => {
     const tiny = { width: 30, height: 30 };
 
     it("hides the caption and shrinks the value when the hole is too narrow for both", () => {
-      const [value, label] = buildPieHoleGraphic(hole(), cfg, null, tiny, measure)!;
+      const [value, label] = buildPieHoleGraphic(hole(), cfg, null, tiny, measure)![0].children;
       expect(value.style.text).toBe("…"); // the total is the headline number, so it survives alone
       expect(label.style.text).toBe("");
       expect(value.style.fontSize).toBe(17); // Metabase's valueFontSizeSm
@@ -1920,7 +1984,7 @@ describe("the pie's hole reads out the slice under the pointer", () => {
     // showing nothing, so it goes entirely. Metabase makes the same split.
     it("drops a hover readout entirely rather than showing half of it", () => {
       const g = buildPieHoleGraphic(hole(), cfg, { name: "US", value: 40, fromLegend: false }, tiny, measure)!;
-      expect(g.map((e) => e.style.text)).toEqual(["", ""]);
+      expect(g[0].children.map((e) => e.style.text)).toEqual(["", ""]);
     });
 
     // The same "don't guess" rule the slice labels follow: an unmeasured container must not become
@@ -1928,7 +1992,7 @@ describe("the pie's hole reads out the slice under the pointer", () => {
     // measured.
     it("never truncates when no real container size is known", () => {
       const model = { ...hole(), totalText: "1,234,567,890,123" };
-      const [value] = buildPieHoleGraphic(model, cfg, null, undefined, measure)!;
+      const [value] = buildPieHoleGraphic(model, cfg, null, undefined, measure)![0].children;
       expect(value.style.text).toBe("1,234,567,890,123");
     });
   });
