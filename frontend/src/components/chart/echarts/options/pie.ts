@@ -1,7 +1,7 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
-import { ariaDescription, baseOption, itemTooltip } from "../base";
+import { ariaDescription, baseOption, baseTextStyle } from "../base";
 import { OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor, seriesColor, lightenOklch, fadeColor, getTextColorForBackground } from "../palette";
 import {
   calcAvailableDonutSliceLabelLength,
@@ -132,6 +132,10 @@ interface PieSliceNode {
   /** This slice's share of its own parent (of the whole chart, at ring 0), already rounded to the
    * chart's `decimals`. A `sunburst` series supplies no `percent` of its own — see `toNode`. */
   slicePercent: number;
+  /** This slice is a synthetic "Other" bucket rather than a real dimension value. Metabase's own
+   * `isOther`: it changes what the tooltip lists (its CHILDREN, not its siblings — pointing at
+   * "Other" is asking what is in it) and it is never the focused row. */
+  isOther: boolean;
   itemStyle: { color: string; borderWidth: number };
   label: {
     color: string;
@@ -889,6 +893,109 @@ export function buildPieLegend(
   });
 }
 
+const HTML_ESCAPES: Record<string, string> = {
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+};
+
+/** Every string below goes into an ECharts tooltip via `innerHTML`, and every one of them is a
+ * DIMENSION VALUE — data, from a query the reader does not necessarily control. */
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
+}
+
+/**
+ * The pie's tooltip: a BREAKDOWN of where the hovered slice sits, not a readout of the slice
+ * alone — Metabase's `getTooltipModel` (visualizations/PieChart/use-chart-events.ts).
+ *
+ *   header : at ring 0, the dimension's own name; deeper, the ancestor names joined with " > "
+ *   rows   : the hovered slice's SIBLINGS — each with its value and its share of their common
+ *            parent — with the hovered one marked; a colour marker only at ring 0, where a slice's
+ *            colour is unambiguous (an outer ring's "Widgets" is a different shade under every
+ *            parent, so a swatch there would claim a colour it doesn't have)
+ *   footer : a Total row, only when there is more than one sibling to add up
+ *
+ * Pointing at an "Other" bucket lists its CHILDREN instead: "Other" is not a category you can
+ * compare against its neighbours, it is a question about what went into it.
+ *
+ * That sibling framing is the whole point. `Organic: 743 (33.73%)` tells you what you already
+ * clicked on; the table tells you what it is 33.73% OF, and how the alternatives compare.
+ *
+ * The pie gets its own formatter rather than extending the shared `itemTooltip` in base.ts,
+ * because that one is what funnel, map, boxplot and sankey draw and none of them has a sibling
+ * structure to break down.
+ */
+function pieTooltip(
+  roots: PieSliceNode[],
+  cfg: PieBuildConfig,
+  fmt: (v: unknown) => string,
+  pct: (p: number) => string,
+) {
+  const dimension = cfg.dimensions?.[0];
+  const headerAtRoot = dimension ? (cfg.columnSettings?.[dimension]?.column_title || dimension) : "";
+  const borderColor = resolveColor("var(--border)", COLOR_FALLBACK.gridLine);
+  const mutedColor = resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel);
+
+  return {
+    trigger: "item" as const,
+    textStyle: baseTextStyle,
+    formatter: (p: { treePathInfo?: { name?: string }[] }) => {
+      // The root-to-node path, minus ECharts' own virtual root (entry 0) — the same shape the
+      // drill-through click reads. Without it there is nothing to locate the slice by.
+      const path = (p.treePathInfo ?? []).slice(1).map((n) => n.name ?? "");
+      if (path.length === 0) return "";
+
+      // Walk the tree the option was built from. `ancestors` ends up as the chain down to and
+      // including the hovered node — Metabase's `nodes`.
+      const ancestors: PieSliceNode[] = [];
+      let level = roots;
+      for (const name of path) {
+        const node = level.find((n) => n.name === name);
+        if (!node) return "";
+        ancestors.push(node);
+        level = node.children ?? [];
+      }
+      const node = ancestors[ancestors.length - 1];
+      const parent = ancestors[ancestors.length - 2];
+      const siblings = parent ? (parent.children ?? []) : roots;
+      // Pointing at "Other" asks what is IN it, so its children answer instead of its siblings.
+      // Unless it has none: at the outermost ring the slices it folded away are not in the tree at
+      // all (they are not drawn), and an empty table says less than the sibling comparison does.
+      const rows = node.isOther && node.children?.length ? node.children : siblings;
+      if (rows.length === 0) return "";
+
+      const atRoot = ancestors.length === 1;
+      const header = atRoot ? headerAtRoot : ancestors.slice(0, -1).map((n) => n.name).join("  >  ");
+      const cell = "padding:1px 0 1px 8px;text-align:right;white-space:nowrap";
+
+      const body = rows.map((r) => {
+        const focused = !node.isOther && r === node;
+        // A marker only where a colour means one thing. Below ring 0 the same name is drawn in a
+        // different shade under every parent.
+        const marker = atRoot
+          ? `<span style="display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;background:${escapeHtml(r.itemStyle.color)}"></span>`
+          : "";
+        return `<tr style="font-weight:${focused ? 700 : 400}">`
+          + `<td style="padding:1px 0;white-space:nowrap">${marker}${escapeHtml(r.name)}</td>`
+          + `<td style="${cell}">${escapeHtml(fmt(r.value))}</td>`
+          + `<td style="${cell};color:${mutedColor}">${escapeHtml(pct(r.slicePercent))}</td>`
+          + "</tr>";
+      }).join("");
+
+      // Only worth a total when there is more than one thing to add up — Metabase's own rule.
+      const footer = rows.length > 1
+        ? `<tr style="border-top:1px solid ${borderColor}">`
+          + `<td style="padding:3px 0 1px;white-space:nowrap">Total</td>`
+          + `<td style="${cell};padding-top:3px">${escapeHtml(fmt(rows.reduce((t, r) => t + r.value, 0)))}</td>`
+          + `<td style="${cell};padding-top:3px;color:${mutedColor}">100%</td>`
+          + "</tr>"
+        : "";
+
+      return (header ? `<div style="font-weight:700;margin-bottom:3px">${escapeHtml(header)}</div>` : "")
+        + `<table style="border-collapse:collapse"><tbody>${body}${footer}</tbody></table>`;
+    },
+  };
+}
+
 export function buildPieOption(
   columns: ResultColumn[],
   rows: unknown[][],
@@ -1111,6 +1218,7 @@ export function buildPieOption(
       name: s.name,
       value: s.value,
       slicePercent,
+      isOther: s.key != null && s.key.startsWith(OTHER_KEY),
       itemStyle: { color, borderWidth },
       label: {
         color: labelColor,
@@ -1238,7 +1346,7 @@ export function buildPieOption(
     // would otherwise replay a 1s expansion.
     animation: false,
     aria,
-    tooltip: itemTooltip(fmt, { percent: true }),
+    tooltip: pieTooltip(seriesData, cfg, fmt, pct),
     // NO `legend` KEY, deliberately: the pie's legend is React markup beside the canvas
     // (buildPieLegend + PieLegend.tsx). ECharts' own legend component does not work with a
     // `sunburst` series, which is what this pie now is.

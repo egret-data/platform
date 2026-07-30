@@ -5,6 +5,7 @@ import {
 } from "../options/pie";
 import { SERIES_PALETTE, seriesColor, lightenOklch } from "../palette";
 import { calcAvailableDonutSliceLabelLength } from "../sliceLabel";
+import { itemTooltip } from "../base";
 
 const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }];
 const rows = [["EU", 10], ["US", 30]];
@@ -132,7 +133,9 @@ describe("buildPieOption — Metabase-parity", () => {
   it("item tooltip carries a percent formatter", () => {
     const opt = buildPieOption(cols, rows, base) as any;
     expect(opt.tooltip.trigger).toBe("item");
-    expect(opt.tooltip.formatter({ name: "EU", value: 10, percent: 25 })).toContain("25%");
+    // A sunburst hands its tooltip formatter a root-to-node PATH (entry 0 being ECharts' virtual
+    // root) and no `percent` of its own — see the breakdown suite at the end of this file.
+    expect(opt.tooltip.formatter({ treePathInfo: [{ name: "" }, { name: "EU" }] })).toContain("25%");
   });
   // Both default ON, resolved here at render time rather than stored — so an already-saved
   // chart with no showLegend/showLabels picks up the fix too. `?? true`, not `|| true`: an
@@ -1534,9 +1537,9 @@ describe("buildPieOption — every slice states its own percentage, of its own p
     const opt = buildPieOption(cols, rows, { dimensions: ["d"], metric: "m" }) as any;
     const a = ring(opt, 0).find((d: any) => d.name === "A");
     expect(a.slicePercent).toBeCloseTo(25, 9);
-    // ...and the tooltip reads it off the datum. A sunburst hands the formatter no `percent` at
-    // all, so the `percent: 25` here is deliberately absent from what the chart would really pass.
-    expect(opt.tooltip.formatter({ name: "A", value: 25, data: a })).toContain("25%");
+    // ...and the tooltip reads it off the tree. A sunburst hands the formatter no `percent` at
+    // all, only the root-to-node path.
+    expect(opt.tooltip.formatter({ treePathInfo: [{ name: "" }, { name: "A" }] })).toContain("25%");
   });
 
   it("never sets percentPrecision — a pie-series option a sunburst ignores outright", () => {
@@ -1566,8 +1569,8 @@ describe("buildPieOption — every slice states its own percentage, of its own p
     const c1Items = outer.filter((d: any) => d.name === "C1" && d.value === 500);
     expect(c1Items).toHaveLength(12);
     for (const item of c1Items) expect(item.slicePercent).toBeCloseTo(50, 9); // NOT 4.1(6)%
-    // The tooltip formatter actually reaches 50% when fed the real datum, not the ring-share number.
-    const tooltip = opt.tooltip.formatter({ name: "C1", value: 500, percent: 4.17, data: c1Items[0] });
+    // The tooltip formatter actually reaches 50% when fed the real path, not the ring-share number.
+    const tooltip = opt.tooltip.formatter({ treePathInfo: [{ name: "" }, { name: "S1" }, { name: "C1" }] });
     expect(tooltip).toContain("50%");
     expect(tooltip).not.toContain("4.17%");
   });
@@ -2009,5 +2012,140 @@ describe("each legend entry points at its own datum in the sunburst's flattened 
     const entries = buildPieLegend(cols3, rows3, cfg);
     const opt = buildPieOption(cols3, rows3, cfg) as any;
     expect(entries.map((e) => e.value)).toEqual(ring(opt, 0).map((d: any) => d.value));
+  });
+});
+
+// egret's tooltip said `Organic: 743 (33.73%)` — what you already clicked on. Metabase's says what
+// that is 33.73% OF: the hovered slice's siblings, each with its value and share, with the one
+// under the pointer marked. Ported from `getTooltipModel`
+// (visualizations/PieChart/use-chart-events.ts).
+describe("a pie's tooltip breaks down the slice's siblings", () => {
+  const cols3 = [
+    { name: "region", type: "varchar" }, { name: "product", type: "varchar" },
+    { name: "channel", type: "varchar" }, { name: "m", type: "double" },
+  ];
+  const rows3 = [
+    ["R1", "P1", "Organic", 600], ["R1", "P1", "Paid", 400],   // P1 = 1000
+    ["R1", "P2", "Organic", 500],                               // P2 = 500;  R1 = 1500
+    ["R2", "P3", "Organic", 300], ["R2", "P3", "Paid", 200],    // P3 = 500;  R2 = 500
+  ];
+  const cfg = { dimensions: ["region", "product", "channel"], metric: "m" };
+  const tip = (path: string[], c: any = cfg, cols = cols3, rws = rows3) =>
+    (buildPieOption(cols, rws, c) as any).tooltip.formatter({
+      treePathInfo: [{ name: "" }, ...path.map((name) => ({ name }))],
+    }) as string;
+  /** The table body, as [name, value, percent] triples, ignoring markup. */
+  const rowsOf = (html: string) =>
+    [...html.matchAll(/<tr[^>]*>(.*?)<\/tr>/g)].map((m) =>
+      [...m[1].matchAll(/<td[^>]*>(.*?)<\/td>/g)].map((c) => c[1].replace(/<[^>]*>/g, "")));
+
+  it("lists the hovered slice's siblings, each with its value and share of their parent", () => {
+    // Pointing at one channel under P1 shows every channel under P1 — that is the comparison the
+    // reader is actually making.
+    expect(rowsOf(tip(["R1", "P1", "Organic"]))).toEqual([
+      ["Organic", "600", "60%"],
+      ["Paid", "400", "40%"],
+      ["Total", "1,000", "100%"],
+    ]);
+  });
+
+  it("marks the slice under the pointer, and only it", () => {
+    const html = tip(["R1", "P1", "Paid"]);
+    const bold = [...html.matchAll(/<tr style="font-weight:(\d+)">(.*?)<\/tr>/g)]
+      .filter((m) => m[1] === "700")
+      .map((m) => m[2].replace(/<[^>]*>/g, "").match(/^[A-Za-z]+/)![0]);
+    expect(bold).toEqual(["Paid"]);
+  });
+
+  // At ring 0 the dimension names the comparison; deeper, the ancestors do — you are looking at
+  // channels WITHIN R1 > P1, and the header is the only thing that says so.
+  it("heads the table with the dimension at ring 0 and the ancestors below it", () => {
+    expect(tip(["R1"])).toContain(">region<");
+    expect(tip(["R1", "P1"])).toContain(">R1<");
+    expect(tip(["R1", "P1", "Organic"])).toContain(">R1  &gt;  P1<");
+  });
+
+  it("uses the column's display title in the header when it has one", () => {
+    const titled = { ...cfg, columnSettings: { region: { column_title: "Sales region" } } };
+    expect(tip(["R1"], titled)).toContain(">Sales region<");
+  });
+
+  // A colour marker only where a colour means one thing. "Organic" is drawn in a different shade
+  // under every parent, so a swatch beside it in an outer-ring table would claim a colour it does
+  // not consistently have.
+  it("shows a colour marker at ring 0 only", () => {
+    expect(tip(["R1"])).toContain("background:");
+    expect(tip(["R1", "P1"])).not.toContain("background:");
+    expect(tip(["R1", "P1", "Organic"])).not.toContain("background:");
+  });
+
+  // "Other" is not a category to compare against its neighbours — pointing at it is a question
+  // about what went into it.
+  it("lists an Other bucket's children rather than its siblings", () => {
+    const cols2 = [
+      { name: "d", type: "varchar" }, { name: "c", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    // Three regions small enough to fold into ring 0's Other (37 of 1000), each with one channel.
+    const rows2 = [["Big", "Main", 963], ["T1", "Ch1", 15], ["T2", "Ch2", 12], ["T3", "Ch3", 10]];
+    const nested = { dimensions: ["d", "c"], metric: "m" };
+    expect(rowsOf(tip(["Other"], nested, cols2, rows2))).toEqual([
+      ["Ch1", "15", "40.54%"],
+      ["Ch2", "12", "32.43%"],
+      ["Ch3", "10", "27.03%"],
+      ["Total", "37", "100%"],
+    ]);
+    // …and nothing in it is marked as focused, because the pointer is on the bucket, not a row.
+    expect(tip(["Other"], nested, cols2, rows2)).not.toContain('font-weight:700">');
+  });
+
+  // At the OUTERMOST ring the slices an Other folded away are not in the tree at all — they are
+  // not drawn — so there are no children to list and the sibling comparison is what is left.
+  it("falls back to the siblings for an Other bucket with nothing nested in it", () => {
+    const cols2 = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+    const rows2 = [["Big", 960], ["Tiny1", 10], ["Tiny2", 15], ["Tiny3", 15]];
+    const flat = { dimensions: ["d"], metric: "m" };
+    expect(rowsOf(tip(["Other"], flat, cols2, rows2))).toEqual([
+      ["Big", "960", "96%"],
+      ["Other", "40", "4%"],
+      ["Total", "1,000", "100%"],
+    ]);
+  });
+
+  it("drops the Total row when there is only one sibling to add up", () => {
+    // P2 is R1's only product with one channel — nothing to total.
+    expect(rowsOf(tip(["R1", "P2", "Organic"]))).toEqual([["Organic", "500", "100%"]]);
+  });
+
+  it("formats values with the metric's own settings", () => {
+    const money = { ...cfg, metricTypes: { m: "double" }, columnSettings: { m: { prefix: "$", decimals: 0 } } };
+    expect(rowsOf(tip(["R1", "P1", "Organic"], money))[0]).toEqual(["Organic", "$600", "60%"]);
+  });
+
+  it("honours the chart's own decimal precision on the shares", () => {
+    const cols2 = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+    const rows2 = [["A", 1], ["B", 2]];
+    const three = { dimensions: ["d"], metric: "m", decimals: 3 };
+    expect(rowsOf(tip(["A"], three, cols2, rows2))[1]).toEqual(["A", "1", "33.333%"]);
+  });
+
+  // Every name in that table is a DIMENSION VALUE, going into an ECharts tooltip via innerHTML.
+  it("escapes dimension values instead of injecting them as markup", () => {
+    const cols2 = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+    const rows2 = [["<img src=x onerror=alert(1)>", 60], ["safe", 40]];
+    const html = tip(["<img src=x onerror=alert(1)>"], { dimensions: ["d"], metric: "m" }, cols2, rows2);
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
+  });
+
+  it("says nothing at all for a path it cannot resolve", () => {
+    expect(tip([])).toBe("");
+    expect(tip(["nope"])).toBe("");
+  });
+
+  // The shared item tooltip is what funnel, map, boxplot and sankey draw; none of them has a
+  // sibling structure, and none of their behaviour changes because the pie stopped using it.
+  it("leaves the shared item tooltip alone", () => {
+    const shared = itemTooltip((v) => String(v), { percent: true });
+    expect(shared.formatter({ name: "EU", value: 10, percent: 25 })).toBe("EU: 10 (25%)");
   });
 });
