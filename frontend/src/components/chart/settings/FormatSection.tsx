@@ -148,6 +148,27 @@ export function FormatSection({
                         onChange={(e) => patch({ decimals: e.target.value === "" ? undefined : Number(e.target.value) })} />
                     </Field>
 
+                    {/* `scale` and `number_separators` were both honoured by `formatValue` and had
+                        no control anywhere — implemented and unreachable, the same shape of defect
+                        that cost the pie four settings. Metabase offers both. */}
+                    <Field label="Separator style">
+                      <Select value={fmt.number_separators ?? ".,"}
+                        onValueChange={(v) => patch({ number_separators: v })}>
+                        <SelectTrigger aria-label="Separator style" className="h-8"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value=".,">100,000.00</SelectItem>
+                          <SelectItem value=", ">100 000,00</SelectItem>
+                          <SelectItem value=",.">100.000,00</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+
+                    <Field label="Multiply by a number">
+                      <Input type="number" className="h-8" placeholder="1"
+                        value={fmt.scale ?? ""}
+                        onChange={(e) => patch({ scale: e.target.value === "" ? undefined : Number(e.target.value) })} />
+                    </Field>
+
                     <div className="flex gap-2">
                       <Field label="Prefix">
                         <Input className="h-8" value={fmt.prefix ?? ""} onChange={(e) => patch({ prefix: e.target.value })} />

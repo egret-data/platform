@@ -98,6 +98,7 @@ export function PreviewPane({
             onCycleSort={pivot.onCycleSort}
             columnWidths={pivot.columnWidths}
             temporalUnits={pivot.temporalUnits}
+            columnTypes={Object.fromEntries(columns.map((c) => [c.name, c.type]))}
             onResizeColumn={pivot.onResizeColumn}
             onCellDrill={onCellDrill}
           />

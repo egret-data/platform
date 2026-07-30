@@ -154,3 +154,29 @@ describe("FormatSection", () => {
     expect(screen.getByLabelText("Column title")).toHaveValue("Rev Total");
   });
 });
+
+describe("FormatSection — settings that had no control", () => {
+  // `scale` and `number_separators` were both read by `formatValue` and offered nowhere, so they
+  // could only be set by hand-editing stored JSON — implemented and unreachable.
+  it("offers Multiply by a number and writes it through", async () => {
+    const onChange = vi.fn();
+    render(<FormatSection columns={[{ name: "rev", type: "bigint" }]} value={{}} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: /rev/ }));
+    fireEvent.change(screen.getByLabelText("Multiply by a number"), { target: { value: "100" } });
+    expect(onChange).toHaveBeenCalledWith({ rev: { scale: 100 } });
+  });
+
+  it("clearing Multiply by a number removes it rather than storing 0", () => {
+    const onChange = vi.fn();
+    render(<FormatSection columns={[{ name: "rev", type: "bigint" }]} value={{ rev: { scale: 100 } }} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: /rev/ }));
+    fireEvent.change(screen.getByLabelText("Multiply by a number"), { target: { value: "" } });
+    expect(onChange).toHaveBeenCalledWith({ rev: { scale: undefined } });
+  });
+
+  it("offers a separator style", () => {
+    render(<FormatSection columns={[{ name: "rev", type: "bigint" }]} value={{}} onChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /rev/ }));
+    expect(screen.getByLabelText("Separator style")).toBeInTheDocument();
+  });
+});

@@ -60,6 +60,7 @@ export interface PivotColumnWidths {
 export function PivotTable({
   input, columnSettings = {}, conditionalFormatting = [], metricTypes = {},
   onToggleCollapse, onCycleSort, onCellDrill, columnWidths, onResizeColumn, temporalUnits = {},
+  columnTypes = {},
 }: {
   input: PivotInput;
   columnSettings?: Record<string, ColumnFormat>;
@@ -74,6 +75,9 @@ export function PivotTable({
   /** dimension -> temporal unit, so a drill on a bucketed column filters the whole bucket rather
    * than the single instant its label happens to show. */
   temporalUnits?: Record<string, string>;
+  /** column name -> SQL type, for the DIMENSIONS as well as the measures. Without it a date
+   * dimension's labels render as the raw `2026-01-01` even when the user has set a date format. */
+  columnTypes?: Record<string, string>;
 }) {
   // The engine needs to know whether any metric was renamed, so it can give the sub-header a row
   // to show the name in — see `renamedMetric` there.
@@ -95,6 +99,17 @@ export function PivotTable({
   // vertical (border-subtle ~5%). Opaque bg-accent total band; opaque row-headers so sticky panes
   // never bleed. border-separate keeps cell z-index working.
   const GRID = "border-b border-border/50 border-r border-border/30";
+
+  /** A dimension label, formatted the way its column says to. A bucketed date arrives as a raw
+   * `2026-01-01`; with a date format set it should read like a date. `raw == null` means the cell
+   * carries prose (a subtotal caption), which is left alone. */
+  const dimLabel = (dim: string | undefined, raw: string | null | undefined, fallback: string) => {
+    if (dim == null || raw == null) return fallback;
+    const fmt = columnSettings[dim];
+    if (!fmt) return fallback;
+    const out = formatValue(raw, columnTypes[dim] ?? "varchar", fmt);
+    return out === "" ? fallback : out;
+  };
 
   return (
     <div className="max-h-[60vh] overflow-auto rounded-md border">
@@ -155,7 +170,9 @@ export function PivotTable({
                       colSpan={c.colSpan}
                       rowSpan={c.rowSpan ?? 1}
                     >
-                      {c.metric ? (columnSettings[c.metric]?.column_title || c.label) : c.label}
+                      {c.metric
+                        ? (columnSettings[c.metric]?.column_title || c.label)
+                        : dimLabel(c.dim, c.raw, c.label)}
                       {resizable && (
                         <ResizeHandle
                           label={`Resize ${c.label}`}
@@ -193,7 +210,7 @@ export function PivotTable({
                         {hc.collapsed ? "+" : "–"}
                       </button>
                     )}
-                    {hc.label}
+                    {dimLabel(p.rowDimNames[hc.depth], hc.raw, hc.label)}
                   </th>
                 ))}
                 {br.values.map((v, vi) => {

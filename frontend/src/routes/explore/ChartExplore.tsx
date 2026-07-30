@@ -460,6 +460,10 @@ export default function ChartExplore() {
                     cartesian: descConfig as { yMetrics: string[] },
                     scalar: descConfig as { metric?: string },
                     metrics: (descConfig as { metrics?: string[] }).metrics,
+                    // The pivot formats its dimensions as well as its measures — without these
+                    // two, `styleColumnsFor` saw no rows/cols and offered measures only.
+                    rows: (descConfig as { rows?: string[] }).rows,
+                    cols: (descConfig as { cols?: string[] }).cols,
                   } as ChartParams, resultColumns)}
                   tableState={tableState}
                   columnSettings={columnSettings}

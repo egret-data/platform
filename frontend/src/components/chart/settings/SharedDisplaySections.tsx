@@ -18,7 +18,14 @@ export function styleColumnsFor(
   params: ChartParams,
   resultColumns: ResultColumn[],
 ): ResultColumn[] {
-  if (vizType === "pivot_table") return resultColumns.filter((c) => (params.metrics ?? []).includes(c.name));
+  if (vizType === "pivot_table") {
+    // Dimensions as well as measures. `PivotTable` has always read `column_title` for its
+    // row-dimension headers and `rowsToCsv` for every column, but only measures were offered here
+    // — so renaming a dimension was implemented and unreachable. It also gates date formatting,
+    // without which a month bucket renders as the raw `2026-01-01` instead of `January 2026`.
+    const named = new Set([...(params.rows ?? []), ...(params.cols ?? []), ...(params.metrics ?? [])]);
+    return resultColumns.filter((c) => named.has(c.name));
+  }
   if (isCartesianViz(vizType)) {
     const yMetrics = params.cartesian?.yMetrics ?? [];
     return resultColumns.filter((c) => yMetrics.includes(c.name));
