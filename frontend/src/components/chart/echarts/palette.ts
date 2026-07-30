@@ -160,27 +160,21 @@ export function resolveColor(expr: string, fallback: string): string {
   return out;
 }
 
-// Per-ring OKLab lightness delta for `lightenOklch`. With up to three rings (task 5's pie),
-// the outermost ring is at most 2 steps out from its parent, so +0.24 L total — enough to read
-// as a clearly distinct, lighter band next to its parent's ring without washing a mid-tone
-// slice out to near-white.
-//
-// Checked against Metabase's OWN numbers, not eyeballed: Metabase's ring colouring
-// (getRingColorAlias, ui/colors/accents.ts) shifts HSL lightness by a fixed
-// CHART_TINT_SHADE_FACTOR = 0.125 (12.5 points) for its "light" (outer) variant and -0.125 for
-// its "dark" (inner) variant — a total spread of 0.25 across its two non-base rings. This
-// codebase's 3 accumulated OKLab-L steps of 0.12 span 0 -> 0.24 from ring 0 to ring 2 — within
-// 0.01 of Metabase's own total spread, in a MORE perceptually-uniform space (OKLab) than
-// Metabase's HSL. That comparison does not warrant a change, so 0.12 stays.
-const OKLCH_STEP_L = 0.12;
-
-// Cap the TARGET lightness at 0.9 rather than 1.0. OKLab's gamut boundary curves inward as L
-// approaches 1 (physically: not every hue can reach pure white at full saturation), so
-// `linearToSrgb`'s per-channel clamp increasingly has to clip individual channels rather than
-// scale them together — which is exactly what erodes chroma. Stopping short of that edge at
-// 0.9 keeps every SERIES_PALETTE colour's chroma comfortably above a "still visibly tinted"
-// floor even after 3 lightening steps (see the palette.test.ts sweep over the whole palette).
-const OKLCH_MAX_L = 0.9;
+/**
+ * Metabase's `CHART_TINT_SHADE_FACTOR` (0.125), as the HSL lightness POINTS its own accent
+ * variants are derived with — `deriveChartTintColor`/`deriveChartShadeColor` (ui/colors/accents.ts)
+ * are `Color(hex).lightness(l ± 12.5).hex()`, nothing more.
+ *
+ * THIS REPLACED AN OKLCH RAMP, and the space matters. egret used to lighten each ring outward
+ * from the base by a fixed OKLab-L step, deliberately holding chroma constant so the outer rings
+ * kept their saturation — which is exactly why the result read as more vivid than Metabase's, and
+ * why the two disagreed on every ring: egret drew base -> lighter -> lightest (ring-1 blue
+ * #76C4FF), Metabase draws dark -> base -> light (ring-1 blue #87BCEC, i.e. the base itself).
+ * Matching the LOOK therefore means matching the derivation, in Metabase's own (less
+ * perceptually-uniform) HSL — an OKLCH equivalent lands near these hexes but not on them, and
+ * palette.test.ts asserts all 24 of Metabase's own accent variants exactly.
+ */
+const CHART_TINT_SHADE_POINTS = 12.5;
 
 function srgbToLinear(c: number): number {
   return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
@@ -199,31 +193,12 @@ function parseHexColor(color: string): [number, number, number] | undefined {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-// The OKLab <-> sRGB pair below is the single copy of the colour-space maths in this file: it
-// backs BOTH `lightenOklch` (which moves a colour up the L axis) and `parseColor`'s `oklch()`
-// branch (which reads egret's design tokens). Conversion matrices are Björn Ottosson's OKLab
-// (https://bottosson.github.io/posts/oklab/), §"Converting from linear sRGB to OKLab" and its
-// inverse.
-
-/** sRGB 0-255 channels -> OKLab `[L, a, b]`. */
-function srgbToOklab(rgb: [number, number, number]): [number, number, number] {
-  const [r, g, b] = rgb.map((c) => srgbToLinear(c / 255));
-
-  // linear sRGB -> LMS -> LMS' (cube root)
-  const l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
-  const m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
-  const s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
-  const l_ = Math.cbrt(l);
-  const m_ = Math.cbrt(m);
-  const s_ = Math.cbrt(s);
-
-  // LMS' -> OKLab
-  return [
-    0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
-    1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
-    0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
-  ];
-}
+// OKLab -> sRGB, used by `parseColor`'s `oklch()` branch (which reads egret's design tokens).
+// Conversion matrix is the inverse of Björn Ottosson's OKLab
+// (https://bottosson.github.io/posts/oklab/), §"Converting from linear sRGB to OKLab".
+//
+// The forward direction went with `lightenOklch`: nothing in this file moves a colour along an
+// OKLab axis any more (see CHART_TINT_SHADE_POINTS), so only the reader is left.
 
 /** OKLab `[L, a, b]` -> sRGB 0-255 channels, each clamped into gamut and rounded. */
 function oklabToSrgb(L: number, a: number, b: number): [number, number, number] {
@@ -242,40 +217,89 @@ function oklabToSrgb(L: number, a: number, b: number): [number, number, number] 
   return [r, g, bl].map((c) => Math.round(linearToSrgb(c) * 255)) as [number, number, number];
 }
 
+/** sRGB 0-255 channels -> HSL, in the `color` package's own units (h 0-360, s/l 0-100) — the
+ * space Metabase derives its accent variants in. */
+function srgbToHsl([r255, g255, b255]: [number, number, number]): [number, number, number] {
+  const [r, g, b] = [r255 / 255, g255 / 255, b255 / 255];
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+  const l = (max + min) / 2;
+  if (d === 0) return [0, 0, l * 100]; // achromatic: hue and saturation are meaningless
+  const s = d / (1 - Math.abs(2 * l - 1));
+  const h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return [((h * 60) % 360 + 360) % 360, s * 100, l * 100];
+}
+
+/** HSL (h 0-360, s/l 0-100) -> sRGB 0-255 channels, rounded. */
+function hslToSrgb(h: number, s100: number, l100: number): [number, number, number] {
+  const s = s100 / 100;
+  const l = l100 / 100;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  const [r, g, b] =
+    h < 60 ? [c, x, 0]
+      : h < 120 ? [x, c, 0]
+        : h < 180 ? [0, c, x]
+          : h < 240 ? [0, x, c]
+            : h < 300 ? [x, 0, c]
+              : [c, 0, x];
+  return [r, g, b].map((v) => Math.round((v + m) * 255)) as [number, number, number];
+}
+
+/** A colour with its HSL lightness moved by `points`, clamped to the 0-100 range. */
+function shiftLightness(color: string, points: number): string {
+  const rgb = parseColor(color);
+  if (!rgb) return color; // an unresolved var(), a CSS keyword: leave it alone rather than throw
+  const [h, s, l] = srgbToHsl(rgb);
+  const toHex = (c: number) => c.toString(16).padStart(2, "0");
+  return `#${hslToSrgb(h, s, Math.min(100, Math.max(0, l + points))).map(toHex).join("")}`;
+}
+
 /**
- * Lightens a colour by `steps` in OKLab space, keeping chroma (C) and hue (H) fixed —
- * i.e. moves straight up the L axis of OKLCH. Used to give an outer pie ring's slice a
- * lighter variant of its parent slice's colour (Metabase's `getRingColorAlias`), rather than
- * an unrelated palette colour.
+ * The lighter and darker variants of a chart colour — Metabase's `deriveChartTintColor` and
+ * `deriveChartShadeColor` (ui/colors/accents.ts), which is how its `accentN-light` and
+ * `accentN-dark` are defined: the base's HSL lightness ± CHART_TINT_SHADE_POINTS.
+ *
+ * DERIVED rather than looked up, which is where this deliberately parts company with Metabase.
+ * Metabase maps a slice's hex back to an accent NAME and asks its theme for `accentN-dark`, so a
+ * colour that isn't one of the eight accents (a custom per-slice override, egret's muted "Other"
+ * grey) gets no variant at all and every ring of that family renders the same flat colour.
+ * Deriving gives the same 24 hexes for the eight accents — palette.test.ts pins every one — and
+ * gives an override the same three-level treatment the palette gets.
  *
  * Input goes through the shared `parseColor`, so a colour that arrived as a browser-resolved
- * token (`oklch(...)`) or as `rgb()` lightens exactly like a hex literal does. That matters
- * live rather than theoretically: the "Other" slice's colour is `var(--muted-foreground)`, which
- * `resolveColor` turns into an `oklch()` string in a real browser — while this only read hex,
- * every ring nested under Other came back unchanged and the whole sub-tree rendered one flat grey.
- *
- * `steps <= 0` and unparseable input both return `color` unchanged (verbatim, not
- * round-tripped) — the former so "no lightening" is exact, the latter so a caller passing
- * something this function can't handle (e.g. an unresolved `var(--x)`) degrades to "leave it
- * alone" rather than throwing.
+ * token (`oklch(...)`) or as `rgb()` is handled exactly like a hex literal. That matters live
+ * rather than theoretically: the "Other" slice's colour is `var(--muted-foreground)`, which
+ * `resolveColor` turns into an `oklch()` string in a real browser — while an earlier version of
+ * this read only hex, every ring nested under Other came back unchanged and the whole sub-tree
+ * rendered one flat grey.
  */
-export function lightenOklch(color: string, steps: number): string {
-  if (!Number.isFinite(steps) || steps <= 0) return color;
-  const rgb = parseColor(color);
-  if (!rgb) return color;
+export function chartTint(color: string): string {
+  return shiftLightness(color, CHART_TINT_SHADE_POINTS);
+}
 
-  const [L, a, b] = srgbToOklab(rgb);
+export function chartShade(color: string): string {
+  return shiftLightness(color, -CHART_TINT_SHADE_POINTS);
+}
 
-  // Raise L only; a/b (so chroma + hue) are untouched — the whole point of doing this in
-  // OKLab rather than a naive sRGB blend toward white, which desaturates and shifts hue.
-  // Capped at OKLCH_MAX_L (see above), but never DARKENED below the input: a colour that
-  // starts out brighter than the cap already (rare for this codebase's palette, but possible
-  // for an arbitrary sliceColors override) is left at its own lightness rather than dimmed.
-  const target = L + OKLCH_STEP_L * steps;
-  const L2 = Math.max(L, Math.min(target, OKLCH_MAX_L));
-
-  const toHex = (c: number) => c.toString(16).padStart(2, "0");
-  return `#${oklabToSrgb(L2, a, b).map(toHex).join("")}`;
+/**
+ * A ring's own fill, given its family's BASE colour: Metabase's three levels, inner ring darkest.
+ *
+ *   -1 -> the dark variant   (`accentN-dark`, the innermost ring of a nested pie)
+ *    0 -> the base itself    (the middle ring, and every single-ring pie)
+ *   +1 -> the light variant  (`accentN-light`, the outermost ring)
+ *
+ * Three fixed levels rather than a per-depth ramp, because that is what Metabase's own model does
+ * (`getRingColorAlias`, called with "inner"/"middle"/"outer") and a pie draws at most three rings.
+ * `variant` is clamped, so a fourth ring — which the config does not offer, but nothing here
+ * enforces — repeats the outermost shade rather than fading away into white.
+ */
+export function ringVariantColor(base: string, variant: number): string {
+  if (variant < 0) return chartShade(base);
+  if (variant > 0) return chartTint(base);
+  return base;
 }
 
 /** Concrete fallbacks (≈ egret light-theme tokens) for non-DOM contexts. */
@@ -326,7 +350,7 @@ function parseOklchColor(color: string): [number, number, number] | undefined {
 
 /** Parses `#rgb`/`#rrggbb`, `rgb()`/`rgba()` (alpha ignored) or `oklch()` to 0-255 channels;
  * anything else (a named CSS colour, an unresolved `var()`, ...) is unparseable. Covers what this
- * file's OWN outputs (SERIES_PALETTE, lightenOklch, resolveColor) can ever produce, plus what a
+ * file's OWN outputs (SERIES_PALETTE, chartTint/chartShade, resolveColor) can ever produce, plus what a
  * real browser's `getComputedStyle` returns for a resolved `var()` — which for egret's tokens is
  * `oklch(...)`, and only for a legacy colour `rgb(r, g, b)`. Not a general CSS colour parser.
  *
@@ -350,7 +374,7 @@ export function parseColor(color: string): [number, number, number] | undefined 
  * background-coloured border that separates neighbouring slices goes translucent too and the
  * colour underneath leaks through it. Fading only the fill leaves the border opaque.
  *
- * Unparseable input comes back verbatim — the same "leave it alone" degradation `lightenOklch`
+ * Unparseable input comes back verbatim — the same "leave it alone" degradation `chartTint`
  * uses rather than throwing.
  */
 export function fadeColor(color: string, alpha: number): string {
@@ -401,12 +425,12 @@ const WCAG_AA_CONTRAST = 4.5;
  * with `textColorInverse` preferred only as a tie-break once both already clear WCAG AA (see the
  * comment above `WCAG_AA_CONTRAST`) — adapted from Metabase's `getTextColorForBackground`
  * (ui/colors/palette.ts), minus its 3x white bias. Reuses this file's own `srgbToLinear` (the
- * sRGB electro-optical transfer function, also used by `lightenOklch`) rather than duplicating
+ * sRGB electro-optical transfer function, also used by `parseColor`'s oklch branch) rather than duplicating
  * the gamma maths for the WCAG relative-luminance formula.
  *
  * `backgroundColor` failing to parse (a CSS colour keyword, an unresolved `var()`, ...) falls
  * back to `textColor` — the same "leave it alone / pick the safe default" degradation this
- * file already uses elsewhere (e.g. `lightenOklch` on unparseable input) rather than throwing.
+ * file already uses elsewhere (e.g. `chartTint` on unparseable input) rather than throwing.
  */
 export function getTextColorForBackground(
   backgroundColor: string,

@@ -3,7 +3,7 @@ import {
   buildPieOption, buildPieLegend, buildPieHole, buildPieHoleGraphic, pieLegendPlacement, resolvePercentVisibility,
   PIE_LEGEND_COLUMN_WIDTH_PX,
 } from "../options/pie";
-import { SERIES_PALETTE, seriesColor, lightenOklch } from "../palette";
+import { SERIES_PALETTE, seriesColor, chartShade, COLOR_FALLBACK } from "../palette";
 import { calcAvailableDonutSliceLabelLength } from "../sliceLabel";
 import { itemTooltip } from "../base";
 
@@ -571,9 +571,14 @@ describe("buildPieOption — per-parent Other fold (bug fix)", () => {
   });
 });
 
-// Task 5 — ring colour inheritance: an outer ring's slice takes its parent slice's own
-// colour, lightened one OKLab step per ring, instead of an unrelated palette colour (Metabase
-// getRingColorAlias).
+// Task 5 — ring colour inheritance: an outer ring's slice takes a VARIANT of its parent slice's
+// own colour rather than an unrelated palette colour (Metabase's getRingColorAlias).
+//
+// THE VARIANTS ARE METABASE'S THREE FIXED LEVELS — inner dark, middle base, outer light — not a
+// per-depth lightening ramp. egret used to start at the base and lighten outward in OKLCH, which
+// is why a live side-by-side had it disagreeing with Metabase on every ring at once: egret's
+// ring-1 blue measured #76C4FF against Metabase's #87BCEC, and its innermost ring was the medium
+// base where Metabase's is the deep #227FD2.
 //
 // Ring 0's own colours are now PINNED explicitly rather than left to ECharts' palette. They used
 // to be left implicit (no `itemStyle` at all on an un-overridden slice), which a `pie` series
@@ -591,33 +596,60 @@ describe("buildPieOption — ring colour inheritance (task 5)", () => {
     ["EU", "Widgets", 5], ["EU", "Gadgets", 5],
   ];
 
-  it("an outer slice inherits its parent's colour, lightened one step", () => {
-    const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "rev" }) as any;
-    const inner = ring(opt, 0); // [US(40), EU(10)] — the palette, pinned onto each slice
-    expect(inner.map((d: any) => d.itemStyle.color)).toEqual([seriesColor(0), seriesColor(1)]);
-
-    const outer = ring(opt, 1);
-    const usColor = seriesColor(inner.findIndex((d: any) => d.name === "US"));
-    const euColor = seriesColor(inner.findIndex((d: any) => d.name === "EU"));
-    const widgetsUnderUS = outer.find((d: any) => d.name === "Widgets" && d.value === 30);
-    const widgetsUnderEU = outer.find((d: any) => d.name === "Widgets" && d.value === 5);
-    expect(widgetsUnderUS.itemStyle.color).toBe(lightenOklch(usColor, 1));
-    expect(widgetsUnderEU.itemStyle.color).toBe(lightenOklch(euColor, 1));
+  // The rule, on the shape it was measured on: three rings, dark then base then light. Stated
+  // with Metabase's OWN published hexes for the first accent rather than with a call to the
+  // derivation under test — this is the assertion that says egret draws the same colours a
+  // Metabase sunburst does, so it cannot be satisfied by any self-consistent ramp.
+  it("paints the rings dark, base, then light — Metabase's own accent variants", () => {
+    const cols3 = [
+      { name: "a", type: "varchar" }, { name: "b", type: "varchar" }, { name: "c", type: "varchar" },
+      { name: "m", type: "double" },
+    ];
+    const rows3 = [["A", "B", "C", 10]];
+    const opt = buildPieOption(cols3, rows3, { dimensions: ["a", "b", "c"], metric: "m" }) as any;
+    expect(seriesColor(0)).toBe("#509EE3");
+    expect(ring(opt, 0)[0].itemStyle.color.toUpperCase()).toBe("#227FD2"); // accent0-dark
+    expect(ring(opt, 1)[0].itemStyle.color.toUpperCase()).toBe("#509EE3"); // accent0
+    expect(ring(opt, 2)[0].itemStyle.color.toUpperCase()).toBe("#87BCEC"); // accent0-light
   });
 
-  it("a sliceColors override wins, and its children lighten from the override, not the palette colour it replaced", () => {
+  it("a two-ring pie is the dark variant inside its base, per family", () => {
+    const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "rev" }) as any;
+    const inner = ring(opt, 0); // [US(40), EU(10)]
+    expect(inner.map((d: any) => d.itemStyle.color)).toEqual([chartShade(seriesColor(0)), chartShade(seriesColor(1))]);
+
+    const outer = ring(opt, 1);
+    const widgetsUnderUS = outer.find((d: any) => d.name === "Widgets" && d.value === 30);
+    const widgetsUnderEU = outer.find((d: any) => d.name === "Widgets" && d.value === 5);
+    // The middle ring is the family's base colour itself, undarkened — so a family reads as one
+    // hue at two lightnesses rather than as two unrelated colours.
+    expect(widgetsUnderUS.itemStyle.color).toBe(seriesColor(0));
+    expect(widgetsUnderEU.itemStyle.color).toBe(seriesColor(1));
+  });
+
+  // A single ring is deliberately left as it was: Metabase's own `hasMultipleRings` gate, and the
+  // one case where changing the variant would restyle every saved pie in the product.
+  it("a single-ring pie keeps the base colours, undarkened", () => {
+    const opt = buildPieOption(cols2, rows2, { dimensions: ["region"], metric: "rev" }) as any;
+    expect(ring(opt, 0).map((d: any) => d.itemStyle.color)).toEqual([seriesColor(0), seriesColor(1)]);
+  });
+
+  it("a sliceColors override wins, and its rings vary from the override, not the palette colour it replaced", () => {
     const opt = buildPieOption(cols2, rows2, {
       dimensions: ["region", "category"], metric: "rev", sliceColors: { US: "#123456" },
     }) as any;
     const inner = ring(opt, 0);
-    expect(inner.find((d: any) => d.name === "US").itemStyle.color).toBe("#123456");
+    // The override is the family's BASE, so ring 0 shows its dark variant — the same treatment
+    // the palette gets. (Metabase leaves a non-accent hex flat at every ring instead, which is
+    // the one place this deliberately does more than the port.)
+    expect(inner.find((d: any) => d.name === "US").itemStyle.color).toBe(chartShade("#123456"));
 
     const outer = ring(opt, 1);
     const widgetsUnderUS = outer.find((d: any) => d.name === "Widgets" && d.value === 30);
-    // Must lighten from the OVERRIDE ("#123456"), not from seriesColor(0) — the palette
-    // colour US would otherwise have gotten.
-    expect(widgetsUnderUS.itemStyle.color).toBe(lightenOklch("#123456", 1));
-    expect(widgetsUnderUS.itemStyle.color).not.toBe(lightenOklch(seriesColor(0), 1));
+    // Must derive from the OVERRIDE ("#123456"), not from seriesColor(0) — the palette colour US
+    // would otherwise have gotten.
+    expect(widgetsUnderUS.itemStyle.color).toBe("#123456");
+    expect(widgetsUnderUS.itemStyle.color).not.toBe(seriesColor(0));
   });
 
   // Chart settings are JSONB and never whitelisted server-side, so a slice colour can arrive as
@@ -635,7 +667,7 @@ describe("buildPieOption — ring colour inheritance (task 5)", () => {
     expect(inner.find((d: any) => d.name === "EU").itemStyle.color).toBe("rgb(1,2,3)");
   });
 
-  it("a ring's children whose parent folded into the PARENT ring's Other bucket inherit Other's own muted colour, lightened", () => {
+  it("a ring's children whose parent folded into the PARENT ring's Other bucket inherit Other's own muted colour", () => {
     const cols3 = [
       { name: "region", type: "varchar" }, { name: "cat", type: "varchar" }, { name: "m", type: "double" },
     ];
@@ -656,15 +688,20 @@ describe("buildPieOption — ring colour inheritance (task 5)", () => {
     const other = inner.find((d: any) => d.name === "Other");
     expect(other).toBeTruthy();
     expect(other.value).toBe(40);
-    const otherColor = other.itemStyle.color;
+    // Other is a family like any other: its muted grey is the base, so the inner ring shows the
+    // grey's dark variant and what nests under it shows the grey itself.
+    const muted = COLOR_FALLBACK.axisLabel; // resolveColor("var(--muted-foreground)") under jsdom
+    expect(other.itemStyle.color).toBe(chartShade(muted));
 
     const outer = ring(opt, 1);
     const x = outer.find((d: any) => d.name === "X");
     const y1 = outer.find((d: any) => d.name === "Y1");
     expect(x).toBeTruthy();
     expect(y1).toBeTruthy();
-    expect(x.itemStyle.color).toBe(lightenOklch(otherColor, 1));
-    expect(y1.itemStyle.color).toBe(lightenOklch(otherColor, 1));
+    expect(x.itemStyle.color).toBe(muted);
+    expect(y1.itemStyle.color).toBe(muted);
+    // ...and NOT one of the palette families, which is the whole point of the Other anchor.
+    expect(x.itemStyle.color).not.toBe(seriesColor(0));
   });
 });
 
@@ -1840,8 +1877,10 @@ describe("a toggled-off legend entry drops its ring-0 slice", () => {
   // chart no longer draws.
   it("keeps each surviving slice's colour rather than re-dealing the palette", () => {
     const opt = buildPieOption(cols2, rows2, { ...cfg, toggledOffSlices: ["US"] }) as any;
-    expect(ring(opt, 0)[0].itemStyle.color).toBe(seriesColor(1));
-    expect(buildPieLegend(cols2, rows2, cfg).find((e) => e.name === "EU")!.color).toBe(seriesColor(1));
+    // Two rings, so ring 0 draws each family's dark variant — EU keeps ITS slot's variant
+    // (accent1-dark), rather than sliding up into the one US vacated.
+    expect(ring(opt, 0)[0].itemStyle.color).toBe(chartShade(seriesColor(1)));
+    expect(buildPieLegend(cols2, rows2, cfg).find((e) => e.name === "EU")!.color).toBe(chartShade(seriesColor(1)));
   });
 
   // Also matching the ECharts legend: neither the hole's total nor the legend's own percentages
@@ -1859,7 +1898,9 @@ describe("a toggled-off legend entry drops its ring-0 slice", () => {
     expect(ring(empty, 0).map((d: any) => d.itemStyle.color)).toEqual(
       ring(plain, 0).map((d: any) => d.itemStyle.color),
     );
-    expect(ring(plain, 0).map((d: any) => d.itemStyle.color)).toEqual([seriesColor(0), seriesColor(1)]);
+    expect(ring(plain, 0).map((d: any) => d.itemStyle.color)).toEqual(
+      [seriesColor(0), seriesColor(1)].map(chartShade),
+    );
   });
 });
 

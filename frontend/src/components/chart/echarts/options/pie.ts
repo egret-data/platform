@@ -2,7 +2,7 @@ import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
 import { ariaDescription, baseOption, baseTextStyle } from "../base";
-import { OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor, seriesColor, lightenOklch, fadeColor, getTextColorForBackground } from "../palette";
+import { OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor, seriesColor, ringVariantColor, fadeColor, getTextColorForBackground } from "../palette";
 import {
   calcAvailableDonutSliceLabelLength,
   calcInnerOuterRadiusesForRing,
@@ -812,24 +812,35 @@ function buildPieRings(
   }
 
   // Ring n's slice colour: its family's own BASE colour (an implicit palette slot, or a
-  // sliceColors override — on whichever ring introduced it) lightened by a single
-  // `lightenOklch(base, steps)` call, never by re-lightening an already-lightened colour.
-  // Chaining ring-over-ring (each hop calling lightenOklch on the PREVIOUS ring's already
-  // 8-bit-rounded output) was tried first and rejected: every hop that hits the clamp
-  // (see OKLCH_MAX_L) rounds to hex and re-parses, so the per-channel gamut clipping compounds
-  // and a pale colour can collapse to indistinguishable-from-white by ring 3 (verified: e.g.
-  // #EF8C8C's chroma fell from 0.121 to 0.0000000373 after 3 chained hops). A single call from
-  // a stable base has no such compounding.
+  // sliceColors override — on whichever ring introduced it) at that ring's VARIANT.
+  //
+  // METABASE'S THREE FIXED LEVELS, not a computed per-depth ramp: inner ring dark, middle ring the
+  // base, outer ring light (`getRingColorAlias`, called with "inner"/"middle"/"outer" from its own
+  // model). egret used to start at the base and lighten OUTWARD in OKLCH, deliberately holding
+  // chroma so the outer rings stayed saturated — which is why the two charts disagreed on every
+  // ring at once and egret read as the more vivid of the pair: measured side by side, egret's
+  // ring-1 blue was #76C4FF against Metabase's #87BCEC, and its innermost ring was the medium base
+  // where Metabase's is the deep #227FD2. See `ringVariantColor` (palette.ts) for the derivation
+  // and the check that it reproduces all 24 of Metabase's own accent hexes.
+  //
+  // The variants are DERIVED from the base rather than looked up in a table of accents, which is
+  // where this parts company with Metabase: its own model maps a hex back to an accent name, so a
+  // slice whose colour isn't one of the eight (a per-slice override, egret's muted "Other" grey)
+  // gets no variant at all and renders flat at every depth. Deriving gives an override the same
+  // three-level treatment the palette gets.
   //
   // `anchors` maps a ring's own key (or OTHER_KEY for its synthetic "Other" bucket) to
-  // { base, sinceLevel }: the colour to lighten from, and the ring level it was FIXED at. Ring 0
-  // fixes every slice's base at level 0 (sinceLevel: 0), so ring n's slice ordinarily computes
-  // `lightenOklch(base, n)` directly off the ring-0 colour. Two things reset the anchor instead
-  // of propagating it unchanged:
+  // { base, sinceLevel, baseVariant }: the colour to derive from, the ring level it was FIXED at,
+  // and the variant that level itself renders in — so a slice's own variant is
+  // `level - sinceLevel + baseVariant`. Ring 0 fixes every slice's base at level 0 with
+  // baseVariant -1 (the dark inner ring) once there is more than one ring, and 0 for a single-ring
+  // pie, which is left exactly as it was drawn before. Two things reset the anchor instead of
+  // propagating it unchanged:
   //  - a ring's own synthetic "Other" bucket already has a fixed muted colour (set above,
-  //    unconditionally, at every ring depth) — it becomes a fresh anchor at ITS level, so
-  //    anything nested under it lightens from Other's muted colour, not from whatever palette
-  //    slot its constituent (folded-away) parents would have had;
+  //    unconditionally, at every ring depth) — it becomes a fresh anchor at ITS level, holding
+  //    that colour as its own base (variant 0), so anything nested under it takes the LIGHT
+  //    variant of Other's muted grey rather than of whatever palette slot its constituent
+  //    (folded-away) parents would have had;
   //  - a sliceColors override on a ring below 0 (see the note above — the same NAME can match
   //    more than one ring) is itself a fresh anchor at that level, for the same reason.
   //
@@ -843,32 +854,49 @@ function buildPieRings(
   // label-contrast pass (which both compute `seriesColor(i)` from the ring index) kept naming the
   // old ones. Pinning removes the divergence by construction: every ring-0 slice states the colour
   // it is drawn in, and there is only one answer to read.
+  type ColorAnchor = { base: string; sinceLevel: number; baseVariant: number };
+  // Ring 0's own variant: the DARK one on a nested pie, the base itself on a single-ring pie —
+  // which is Metabase's `hasMultipleRings` gate, and what leaves every saved one-ring pie looking
+  // exactly as it does today.
+  const ring0Variant = effectiveRings.length > 1 ? -1 : 0;
+
   (effectiveRings[0] ?? []).forEach((s, i) => {
     s.itemStyle ??= { color: seriesColor(i) };
   });
-  let anchors = new Map<string, { base: string; sinceLevel: number }>();
+  let anchors = new Map<string, ColorAnchor>();
   (effectiveRings[0] ?? []).forEach((s) => {
-    anchors.set(s.key ?? OTHER_KEY, { base: s.itemStyle!.color, sinceLevel: 0 });
+    // The anchor holds the family's BASE colour, not the colour ring 0 is painted in — every
+    // deeper ring's variant is measured from the base, so darkening ring 0 in place would make
+    // ring 1 the base's own lightening of an already-darkened colour.
+    anchors.set(s.key ?? OTHER_KEY, { base: s.itemStyle!.color, sinceLevel: 0, baseVariant: ring0Variant });
+  });
+  (effectiveRings[0] ?? []).forEach((s) => {
+    s.itemStyle = { color: ringVariantColor(anchors.get(s.key ?? OTHER_KEY)!.base, ring0Variant) };
   });
   for (let level = 1; level < effectiveRings.length; level++) {
     const parentFold = groupOfByLevel[level - 1];
-    const nextAnchors = new Map<string, { base: string; sinceLevel: number }>();
+    const nextAnchors = new Map<string, ColorAnchor>();
     for (const s of effectiveRings[level]) {
       const groupKey = s.parentKey != null ? parentFold?.get(s.parentKey) : undefined;
       const ancestorAnchor = groupKey != null ? anchors.get(groupKey) : undefined;
       const alreadyStyled = s.itemStyle != null; // this ring's own Other bucket, or its own sliceColors override
       if (!alreadyStyled && ancestorAnchor) {
-        s.itemStyle = { color: lightenOklch(ancestorAnchor.base, level - ancestorAnchor.sinceLevel) };
+        const variant = level - ancestorAnchor.sinceLevel + ancestorAnchor.baseVariant;
+        s.itemStyle = { color: ringVariantColor(ancestorAnchor.base, variant) };
       }
       const key = s.key ?? OTHER_KEY;
       if (alreadyStyled) {
-        nextAnchors.set(key, { base: s.itemStyle!.color, sinceLevel: level });
+        // A colour fixed at THIS level is its own family's base, so what nests under it takes the
+        // light variant of it — one step out, not two.
+        nextAnchors.set(key, { base: s.itemStyle!.color, sinceLevel: level, baseVariant: 0 });
       } else if (ancestorAnchor) {
         nextAnchors.set(key, ancestorAnchor); // propagate the SAME anchor, not this ring's own colour
       } else {
         // Defensive only: every non-Other slice's parentKey should resolve via groupOf (orphans
         // are filtered out earlier in the main loop) — a muted grey is a safe, visible fallback.
-        nextAnchors.set(key, { base: resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel), sinceLevel: level });
+        nextAnchors.set(key, {
+          base: resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel), sinceLevel: level, baseVariant: 0,
+        });
       }
     }
     anchors = nextAnchors;

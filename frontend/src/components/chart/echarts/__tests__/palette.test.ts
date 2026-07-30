@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { SERIES_PALETTE, CHART_THEME, seriesColor, resolveColor, lightenOklch, getTextColorForBackground, parseColor, COLOR_FALLBACK, onThemeChange } from "../palette";
+import { SERIES_PALETTE, CHART_THEME, seriesColor, resolveColor, chartShade, chartTint, ringVariantColor, getTextColorForBackground, parseColor, COLOR_FALLBACK, onThemeChange } from "../palette";
 
 // egret's REAL theme tokens, copied verbatim from src/index.css (`:root` and `.dark`), together
 // with the rgb a browser actually resolves each one to. Every number below was computed from the
@@ -23,7 +23,7 @@ const TOKENS = {
 } as const;
 
 // Independent (deliberately duplicated) sRGB -> OKLab conversion, used ONLY to verify
-// lightenOklch's output from the outside — asserting on the hue/lightness the test itself
+// a colour under test from the outside — asserting on the hue/lightness the test itself
 // computes, rather than trusting the implementation's own intermediate values.
 function hexToRgb(hex: string): [number, number, number] {
   const n = parseInt(hex.replace("#", ""), 16);
@@ -53,6 +53,32 @@ function hueDegrees(hex: string): number {
   const deg = (oklch(hex).H * 180) / Math.PI;
   return deg < 0 ? deg + 360 : deg;
 }
+
+/** Independent (deliberately duplicated) sRGB -> HSL, in the 0-360 / 0-100 / 0-100 units the
+ * `color` package Metabase derives its accent variants with uses. Used only to check
+ * chartShade/chartTint from the outside. */
+function hsl(hex: string): { h: number; s: number; l: number } {
+  const [r, g, b] = hexToRgb(hex).map((c) => c / 255);
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  const l = (max + min) / 2;
+  if (d === 0) return { h: 0, s: 0, l: l * 100 };
+  const s = d / (1 - Math.abs(2 * l - 1));
+  const h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return { h: ((h * 60) % 360 + 360) % 360, s: s * 100, l: l * 100 };
+}
+
+/**
+ * Every fill a sunburst can draw: each palette colour at each of Metabase's three ring levels
+ * (inner = dark, middle = base, outer = light). This IS the set of label backgrounds the contrast
+ * sweeps below have to cover — it replaced "the base plus 1 and 2 OKLCH lightening steps", which
+ * was the shape of the ramp egret drew before adopting Metabase's rule.
+ */
+const RING_VARIANTS = [-1, 0, 1] as const;
+const variantName = (v: number) => (v < 0 ? "dark" : v > 0 ? "light" : "base");
+const sunburstFills = () =>
+  SERIES_PALETTE.flatMap((base) =>
+    RING_VARIANTS.map((v) => ({ base, variant: variantName(v), fill: ringVariantColor(base, v) })),
+  );
 
 describe("chart palette", () => {
   it("exposes Metabase's 8 accent colors in order", () => {
@@ -102,7 +128,7 @@ describe("chart palette", () => {
   });
 
   // parseColor is the shared "colour string -> channels" reader behind getTextColorForBackground's
-  // WCAG maths and lightenOklch's ring shading. It understood only hex and rgb(), so every egret
+  // WCAG maths and the ring variants' shading. It understood only hex and rgb(), so every egret
   // design token — all of which are oklch() (Tailwind v4) — was unparseable, and both callers
   // silently took their "can't read it" branch.
   describe("parseColor", () => {
@@ -244,97 +270,98 @@ describe("chart palette", () => {
     check("#0000FF", 0.452, 0.3132, 264.05);
   });
 
-  describe("lightenOklch", () => {
-    const BLUE = SERIES_PALETTE[0]; // "#509EE3"
-    const RED = "#CC3333";
-    const GREEN = "#33AA33";
+  // ------------------------------------------------------------------------------------------
+  // The ring variants. These replaced `lightenOklch`, which lightened OUTWARD from the base in
+  // OKLCH (deliberately preserving chroma) and so made egret's sunburst read as base -> lighter
+  // -> lightest where Metabase reads dark -> base -> light. Measured side by side: egret's ring-1
+  // blue was #76C4FF against Metabase's #87BCEC, and its innermost ring was the medium base where
+  // Metabase's is the deep accent0-dark.
+  //
+  // The port is checked against Metabase's OWN numbers rather than described in prose: the table
+  // below is every accent variant read out of a running Metabase, and `chartShade`/`chartTint`
+  // have to reproduce all 24 of them from the eight bases alone. That is what makes this a port
+  // and not an approximation — an OKLCH-space or a differently-rounded HSL implementation lands
+  // near these values but not ON them.
+  describe("chartShade / chartTint — Metabase's accent variants", () => {
+    /** [base, dark (shade), light (tint)] — measured from a running Metabase's CSS variables. */
+    const METABASE_ACCENTS: [string, string, string][] = [
+      ["#509EE3", "#227FD2", "#87BCEC"],
+      ["#88BF4D", "#689636", "#A7D07C"],
+      ["#A989C5", "#8A5EB0", "#C8B4DA"],
+      ["#EF8C8C", "#E75454", "#F7C4C4"],
+      ["#F9D45C", "#F7C41F", "#FBE499"],
+      ["#F2A86F", "#ED8535", "#F7CBA9"],
+      ["#98D9D9", "#69C8C8", "#C7EAEA"],
+      ["#7172AD", "#51528D", "#999AC4"],
+    ];
 
-    it("raises perceived (OKLab) lightness", () => {
-      const lightened = lightenOklch(BLUE, 1);
-      expect(oklch(lightened).L).toBeGreaterThan(oklch(BLUE).L);
+    it("the eight bases under test really are egret's own palette, in order", () => {
+      // Otherwise the table below would be checking a derivation against colours egret doesn't use.
+      expect(METABASE_ACCENTS.map(([base]) => base)).toEqual(SERIES_PALETTE);
     });
 
-    it("preserves hue — a red stays red, a green stays green", () => {
-      const redHue = oklch(RED).H;
-      const lightenedRedHue = oklch(lightenOklch(RED, 1)).H;
-      expect(lightenedRedHue).toBeCloseTo(redHue, 2);
-
-      const greenHue = oklch(GREEN).H;
-      const lightenedGreenHue = oklch(lightenOklch(GREEN, 1)).H;
-      expect(lightenedGreenHue).toBeCloseTo(greenHue, 2);
-
-      // and the two stay distinct hues from each other
-      expect(lightenedRedHue).not.toBeCloseTo(lightenedGreenHue, 1);
+    it("reproduces every one of Metabase's 24 accent hexes", () => {
+      for (const [base, dark, light] of METABASE_ACCENTS) {
+        expect(chartShade(base).toUpperCase(), `${base} -> dark`).toBe(dark);
+        expect(chartTint(base).toUpperCase(), `${base} -> light`).toBe(light);
+      }
     });
 
-    it("lightening by 0 returns the input unchanged", () => {
-      expect(lightenOklch(BLUE, 0)).toBe(BLUE);
-    });
-
-    it("is monotonic — two steps are lighter than one", () => {
-      const one = oklch(lightenOklch(BLUE, 1)).L;
-      const two = oklch(lightenOklch(BLUE, 2)).L;
-      expect(two).toBeGreaterThan(one);
+    // The rule behind the table, so a future colour that isn't in it is still covered. Tolerances
+    // are the cost of the 8-bit round trip through a hex string (the derived colour is re-read
+    // from 24-bit sRGB, not from the exact HSL triple), not slack in the rule.
+    it("moves HSL lightness by Metabase's ±12.5 points, leaving hue and saturation alone", () => {
+      for (const [base] of METABASE_ACCENTS) {
+        const b = hsl(base);
+        for (const [variant, delta] of [[chartShade(base), -12.5], [chartTint(base), 12.5]] as const) {
+          const v = hsl(variant);
+          expect(Math.abs(v.l - (b.l + delta)), `${base} -> ${variant} lightness`).toBeLessThan(1);
+          expect(Math.abs(v.h - b.h), `${base} -> ${variant} hue`).toBeLessThan(1);
+          expect(Math.abs(v.s - b.s), `${base} -> ${variant} saturation`).toBeLessThan(2);
+        }
+      }
     });
 
     it("returns a concrete colour string, never a var() the SVG renderer can't resolve", () => {
-      const lightened = lightenOklch(BLUE, 1);
-      expect(lightened).not.toContain("var(");
-      expect(lightened).toMatch(/^#[0-9a-f]{6}$/i);
+      expect(chartTint(SERIES_PALETTE[0])).toMatch(/^#[0-9a-f]{6}$/i);
+      expect(chartShade(SERIES_PALETTE[0])).toMatch(/^#[0-9a-f]{6}$/i);
     });
 
     it("returns an unparseable input unchanged rather than throwing", () => {
-      expect(() => lightenOklch("var(--foreground)", 1)).not.toThrow();
-      expect(lightenOklch("var(--foreground)", 1)).toBe("var(--foreground)");
-      expect(lightenOklch("not-a-color", 1)).toBe("not-a-color");
+      for (const fn of [chartShade, chartTint]) {
+        expect(() => fn("var(--foreground)")).not.toThrow();
+        expect(fn("var(--foreground)")).toBe("var(--foreground)");
+        expect(fn("not-a-color")).toBe("not-a-color");
+      }
     });
 
-    // The second casualty of the same OKLCH blindness, and a live one: the "Other" slice's colour
-    // is `var(--muted-foreground)`, which a real browser resolves to an oklch() string — so every
-    // ring nested under Other came back UNCHANGED from lightenOklch and the whole Other sub-tree
-    // rendered as one flat grey. Under jsdom the same call gets COLOR_FALLBACK's hex instead and
-    // lightens fine, which is precisely why no test ever saw it.
-    it("lightens a browser-resolved oklch()/rgb() colour, not just a hex literal", () => {
+    // Inherited from lightenOklch, and a live requirement rather than a theoretical one: the
+    // "Other" slice's colour is `var(--muted-foreground)`, which a real browser resolves to an
+    // oklch() string. A variant function that only understood hex would hand every ring nested
+    // under Other the same flat grey — the exact bug that shipped once already.
+    it("reads a browser-resolved oklch()/rgb() colour, not just a hex literal", () => {
       const mutedDark = "oklch(0.71 0.01 286.09)"; // --muted-foreground, dark theme
-      const lightened = lightenOklch(mutedDark, 1);
-      expect(lightened).toMatch(/^#[0-9a-f]{6}$/i);
-      expect(oklch(lightened).L).toBeGreaterThan(0.71);
-
-      const fromRgb = lightenOklch("rgb(107, 114, 128)", 1);
-      expect(fromRgb).toMatch(/^#[0-9a-f]{6}$/i);
-      expect(oklch(fromRgb).L).toBeGreaterThan(oklch("#6b7280").L);
+      expect(chartTint(mutedDark)).toMatch(/^#[0-9a-f]{6}$/i);
+      expect(hsl(chartTint(mutedDark)).l).toBeGreaterThan(hsl(chartShade(mutedDark)).l);
       // identical input, two spellings -> identical output
-      expect(fromRgb).toBe(lightenOklch("#6b7280", 1));
+      expect(chartTint("rgb(107, 114, 128)")).toBe(chartTint("#6b7280"));
     });
 
-    it("clamps rather than overflowing or wrapping when already near-white", () => {
-      // A light grey whose OWN lightness (~0.845) is comfortably below the 0.9 cap, so 5 steps
-      // (target ~1.45) unambiguously overshoots it — this proves the clamp actually ENGAGES,
-      // rather than merely passing because the input was already near the cap (a no-op would
-      // have satisfied a looser "didn't get darker" assertion without the clamp firing at all).
-      const lightGrey = "#cccccc";
-      expect(oklch(lightGrey).L).toBeLessThan(0.9);
-      const lightened = lightenOklch(lightGrey, 5);
-      expect(lightened).toMatch(/^#[0-9a-f]{6}$/i);
-      const { L } = oklch(lightened);
-      expect(L).toBeCloseTo(0.9, 1); // reaches the cap, doesn't overflow past it or wrap
+    it("clamps at the ends of the lightness range instead of wrapping past them", () => {
+      expect(chartTint("#ffffff")).toBe("#ffffff");
+      expect(chartShade("#000000")).toBe("#000000");
+      // ...and a near-white still moves, so the clamp isn't just freezing everything pale
+      expect(chartTint("#f0f0f0")).not.toBe("#f0f0f0");
     });
 
-    // The bug this guards: chaining lightenOklch ring-over-ring (each hop re-parsing the
-    // previous hop's 8-bit-rounded hex output) let per-channel gamut clipping compound, so a
-    // mid-tone slice's colour collapsed to indistinguishable-from-white by the 3rd ring. pie.ts
-    // no longer chains — it lightens each ring directly off a stable base colour in one call —
-    // but this test guards the PRIMITIVE itself: every palette colour must still carry visible
-    // chroma after 3 steps, however it gets called.
-    it("every SERIES_PALETTE colour still has meaningful chroma after 3 lightening steps", () => {
-      // Floor picked well above what the old chained bug produced (it collapsed as low as
-      // ~0.0000373 and ~0.0034 for two palette colours — literally indistinguishable from
-      // white) and comfortably below every colour's actual post-fix chroma (measured minimum
-      // ~0.055, for the indigo "#7172AD") — so this fails on a real regression, not on noise.
-      const CHROMA_FLOOR = 0.04;
-      for (const color of SERIES_PALETTE) {
-        const lightened = lightenOklch(color, 3);
-        expect(oklch(lightened).C, `${color} -> ${lightened}`).toBeGreaterThan(CHROMA_FLOOR);
+    // Every fill a sunburst can now produce has to stay a distinct, visible colour: three levels
+    // of the same hue that a reader can tell apart at a glance.
+    it("keeps each ring's fill visibly distinct from its neighbours", () => {
+      for (const base of SERIES_PALETTE) {
+        const [dark, light] = [chartShade(base), chartTint(base)];
+        expect(new Set([dark, base, light]).size, base).toBe(3);
+        expect(hsl(dark).l, base).toBeLessThan(hsl(base).l);
+        expect(hsl(light).l, base).toBeGreaterThan(hsl(base).l);
       }
     });
   });
@@ -451,41 +478,36 @@ describe("chart palette", () => {
       expect(getTextColorForBackground("not-a-color", DARK_TEXT, LIGHT_TEXT)).toBe(DARK_TEXT);
     });
 
-    // The real set of backgrounds a sunburst pie produces: every SERIES_PALETTE colour at ring
-    // 0 (as shipped, unlightened), plus each one lightened 1 and 2 OKLCH steps for rings 1 and
-    // 2 (pie.ts's actual max ring depth — see OKLCH_STEP_L's own comment: "at most 2 steps out
-    // from its parent" for a 3-ring pie). Every one of these must get a label colour that
-    // actually clears 4.5:1 against SOME candidate — if one can't, that's a gap in
-    // SERIES_PALETTE itself, not something this function can paper over by picking harder.
-    it("every SERIES_PALETTE fill a sunburst can produce (ring 0, +1 step, +2 steps) gets a label clearing 4.5:1 — or is reported by name", () => {
-      const fills: { base: string; steps: number; fill: string }[] = [];
-      for (const base of SERIES_PALETTE) {
-        for (let steps = 0; steps <= 2; steps++) {
-          fills.push({ base, steps, fill: steps === 0 ? base : lightenOklch(base, steps) });
-        }
-      }
-
-      const failures = fills
-        .map(({ base, steps, fill }) => {
+    // The real set of backgrounds a sunburst pie produces: every SERIES_PALETTE colour at each of
+    // Metabase's three ring levels — dark (inner), base (middle), light (outer). Every one of
+    // these must get a label colour that actually clears 4.5:1 against SOME candidate — if one
+    // can't, that's a gap in SERIES_PALETTE itself, not something this function can paper over by
+    // picking harder.
+    it("every SERIES_PALETTE fill a sunburst can produce (dark, base, light) gets a label clearing 4.5:1 — or is reported by name", () => {
+      const failures = sunburstFills()
+        .map(({ base, variant, fill }) => {
           const dark = wcagContrast(fill, COLOR_FALLBACK.text);
           const white = wcagContrast(fill, COLOR_FALLBACK.textInverse);
-          return { base, steps, fill, dark, white, best: Math.max(dark, white) };
+          return { base, variant, fill, dark, white, best: Math.max(dark, white) };
         })
         .filter((r) => r.best < 4.5);
 
       // Ground rule: report a real gap by name and ratio rather than loosening this assertion.
-      // #7172AD (indigo) ring 0 — the base colour itself, unlightened — is exactly such a gap:
-      // best achievable is white at ≈4.456, just under AA; near-black does worse (≈3.98). This
-      // is a genuine, pre-existing SERIES_PALETTE limitation (indigo is the 8th/last accent
-      // colour, only reached with 8+ categories), not something introduced or fixable by this
-      // function — documented here by name and ratio rather than silently excluded.
+      // TWO now, and the first one is NEW — introduced by adopting Metabase's dark inner ring:
+      //   #227FD2 (accent0-dark, the inner blue): best ≈4.253 against these non-DOM fallback
+      //     candidates, near-black. It was #509EE3 (≈6.2) while egret coloured its inner ring
+      //     with the base. Reported rather than quietly shipped; see the both-themes sweep below
+      //     for what it measures against the REAL tokens (≈4.32 light, and it clears AA in dark).
+      //   #7172AD (indigo) at the base level: best ≈4.456, white — pre-existing, and inherent to
+      //     the 8th accent colour rather than to anything this function or the ring rule does.
+      // For scale: Metabase's own sunburst fails AA on 27 of its 53 labels, worst 2.70:1.
       const summary = failures
-        .map((f) => `${f.base} +${f.steps} (${f.fill}): dark=${f.dark.toFixed(3)} white=${f.white.toFixed(3)} best=${f.best.toFixed(3)}`)
+        .map((f) => `${f.base} ${f.variant} (${f.fill}): dark=${f.dark.toFixed(3)} white=${f.white.toFixed(3)} best=${f.best.toFixed(3)}`)
         .join("; ");
-      expect(failures.length, `unexpected AA gap(s): ${summary}`).toBe(1);
-      expect(failures[0].base, summary).toBe("#7172AD");
-      expect(failures[0].steps, summary).toBe(0);
-      expect(failures[0].best, summary).toBeCloseTo(4.456, 2);
+      expect(failures.length, `unexpected AA gap(s): ${summary}`).toBe(2);
+      expect(failures.map((f) => f.fill), summary).toEqual(["#227fd2", "#7172AD"]);
+      expect(failures[0].best, summary).toBeCloseTo(4.253, 2);
+      expect(failures[1].best, summary).toBeCloseTo(4.456, 2);
     });
 
     // ---- The theme half of the story -------------------------------------------------------
@@ -534,66 +556,81 @@ describe("chart palette", () => {
     });
 
     // The live symptom, restated as an assertion: on a real 3-ring sunburst all 51 labels came
-    // back the SAME colour. Every SERIES_PALETTE fill (and every lightened ring variant) is
-    // mid-to-light, so in EITHER theme they must all take the near-black candidate — which is
-    // `--foreground` in light mode but `--background` in dark mode. Only a genuinely dark fill
-    // takes the other one. Pre-fix, dark mode inverted this for all 24 sunburst fills at once.
+    // back the SAME colour. The pick has to follow the FILL, not the theme — so a given fill gets
+    // the same ink in light mode and in dark mode, since the fills themselves don't change with
+    // the theme.
+    //
+    // RE-BASELINED BY THE RING RULE. While every ring lightened outward from the base, all 24
+    // fills were mid-to-light and all 24 took the near-black candidate; the only interesting case
+    // had to be imported (#191970). Metabase's rule paints the INNER ring dark, so three of the
+    // fills are now genuinely dark and legitimately take light ink — which makes the exception
+    // list itself the assertion: exactly the dark variants deep enough to need it, and nothing
+    // else moved.
     it("picks by the FILL's lightness, not by the theme's — the same fill gets the same ink in both", () => {
-      const fills = [...SERIES_PALETTE, ...SERIES_PALETTE.map((c) => lightenOklch(c, 1)), ...SERIES_PALETTE.map((c) => lightenOklch(c, 2))];
+      const fills = sunburstFills();
       for (const theme of ["light", "dark"] as const) {
         const { text, inverse, textHex, inverseHex } = themeCandidates[theme];
         // the near-black candidate in this theme
         const nearBlack = relativeLuminance(textHex) < relativeLuminance(inverseHex) ? text : inverse;
-        const exceptions = fills.filter((f) => getTextColorForBackground(f, text, inverse) !== nearBlack);
-        // #7172AD at ring 0 is the one fill NEITHER candidate can serve (the AA gap the sweep
-        // below reports by name). In light mode white is its marginally better option — 4.456 vs
-        // 4.047 for this theme's near-black `--foreground` — so it is the sole legitimate
-        // exception there; in dark mode the near-black `--background` wins it outright (4.468 vs
-        // 4.344) and there is no exception at all. Every other fill takes near-black in both.
-        expect(exceptions, theme).toEqual(theme === "light" ? ["#7172AD"] : []);
-        // ...and a genuinely dark fill takes the OTHER one, so this is a picker, not a constant
-        const onMidnight = getTextColorForBackground("#191970", text, inverse);
-        expect(onMidnight, theme).not.toBe(nearBlack);
-        expect(new Set([...fills.map((f) => getTextColorForBackground(f, text, inverse)), onMidnight]).size, theme).toBe(2);
+        const exceptions = fills
+          .filter((f) => getTextColorForBackground(f.fill, text, inverse) !== nearBlack)
+          .map((f) => f.fill);
+        // #8A5EB0 (accent2-dark) and #51528D (accent7-dark) are dark enough that white genuinely
+        // reads better on them — the picker doing its job, in both themes. #7172AD (the indigo
+        // base) is the fill NEITHER candidate can serve: in light mode white is its marginally
+        // better option (4.456 vs 4.047), so it joins them there; in dark mode the near-black
+        // `--background` wins it outright (4.468 vs 4.344) and it does not.
+        expect(exceptions, theme).toEqual(
+          theme === "light" ? ["#8a5eb0", "#51528d", "#7172AD"] : ["#8a5eb0", "#51528d"],
+        );
+        // ...and every other fill takes near-black, so this is a picker, not a constant
+        expect(new Set(fills.map((f) => getTextColorForBackground(f.fill, text, inverse))).size, theme).toBe(2);
       }
     });
 
     // Assertion 2 — the dark-mode sweep, mirroring the light-mode one above but with the REAL
     // oklch tokens on both sides instead of the non-DOM hex fallbacks. Runs both themes so the
     // light half can never again be the only one under test.
-    it("every sunburst fill (ring 0, +1, +2) gets a label clearing 4.5:1 in BOTH themes — or is reported by name", () => {
+    it("every sunburst fill (dark, base, light) gets a label clearing 4.5:1 in BOTH themes — or is reported by name", () => {
       const gaps: string[] = [];
+      let worst = { ratio: Infinity, where: "" };
       for (const theme of ["light", "dark"] as const) {
         const { text, inverse, textHex, inverseHex } = themeCandidates[theme];
-        for (const base of SERIES_PALETTE) {
-          for (let steps = 0; steps <= 2; steps++) {
-            const fill = steps === 0 ? base : lightenOklch(base, steps);
-            const chosen = getTextColorForBackground(fill, text, inverse);
-            const chosenHex = chosen === text ? textHex : inverseHex;
-            const achieved = wcagContrast(fill, chosenHex);
-            const best = Math.max(wcagContrast(fill, textHex), wcagContrast(fill, inverseHex));
+        for (const { base, variant, fill } of sunburstFills()) {
+          const chosen = getTextColorForBackground(fill, text, inverse);
+          const chosenHex = chosen === text ? textHex : inverseHex;
+          const achieved = wcagContrast(fill, chosenHex);
+          const best = Math.max(wcagContrast(fill, textHex), wcagContrast(fill, inverseHex));
 
-            // Whatever the palette can achieve, the picker must actually achieve it — a fill that
-            // COULD clear AA but got the other candidate is a picker bug, not a palette gap.
-            expect(achieved, `${theme} ${base} +${steps} (${fill}): picked ${chosen}`).toBeCloseTo(best, 6);
-            if (best < 4.5) {
-              gaps.push(`${theme} ${base} +${steps} (${fill}): best=${best.toFixed(3)}`);
-            }
+          // Whatever the palette can achieve, the picker must actually achieve it — a fill that
+          // COULD clear AA but got the other candidate is a picker bug, not a palette gap.
+          expect(achieved, `${theme} ${base} ${variant} (${fill}): picked ${chosen}`).toBeCloseTo(best, 6);
+          if (achieved < worst.ratio) worst = { ratio: achieved, where: `${theme} ${base} ${variant} (${fill})` };
+          if (best < 4.5) {
+            gaps.push(`${theme} ${base} ${variant} (${fill}): best=${best.toFixed(3)}`);
           }
         }
       }
 
       // Same ground rule as the light-mode sweep: report a real palette gap by name and ratio
-      // rather than loosening the assertion. #7172AD (indigo, the 8th accent — only reached at 8+
-      // categories) at ring 0 is the ONLY fill that cannot clear AA, and it can't in either
-      // theme: light best ≈4.456 (white), dark best ≈4.468 (near-black). Pre-existing and inherent
-      // to SERIES_PALETTE, not something this function can fix by picking harder.
+      // rather than loosening the assertion. THREE entries, two fills:
+      //   - #227FD2 (accent0-dark), light mode only, ≈4.323 — NEW, and the cost of adopting
+      //     Metabase's dark inner ring: this fill did not exist while egret coloured ring 0 with
+      //     the base (#509EE3, ≈6.20). In dark mode its near-black `--background` clears AA.
+      //   - #7172AD (the indigo base), both themes, ≈4.456 / ≈4.468 — pre-existing, inherent to
+      //     the 8th accent (only reached at 8+ categories).
+      // Nothing else in the 24 fills × 2 themes falls short, and the worst ratio anywhere is
+      // ≈4.32:1 — against Metabase's own sunburst, which fails 27 of 53 labels at worst 2.70:1.
       const summary = gaps.join("; ");
-      expect(gaps.length, `unexpected AA gap(s): ${summary}`).toBe(2);
-      expect(gaps[0], summary).toContain("light #7172AD +0");
-      expect(gaps[1], summary).toContain("dark #7172AD +0");
+      expect(gaps.length, `unexpected AA gap(s): ${summary}`).toBe(3);
+      expect(gaps[0], summary).toContain("light #509EE3 dark (#227fd2)");
+      expect(gaps[1], summary).toContain("light #7172AD base");
+      expect(gaps[2], summary).toContain("dark #7172AD base");
+      expect(wcagContrast("#227fd2", TOKENS.light.foregroundHex), summary).toBeCloseTo(4.323, 2);
       expect(wcagContrast("#7172AD", TOKENS.light.backgroundHex), summary).toBeCloseTo(4.456, 2);
       expect(wcagContrast("#7172AD", TOKENS.dark.backgroundHex), summary).toBeCloseTo(4.468, 2);
+      // The headline number for the whole palette, stated once so a regression moves it.
+      expect(worst.ratio, worst.where).toBeCloseTo(4.323, 2);
     });
 
     // Assertion 4 — the direct regression guard. If parseColor ever loses oklch(), BOTH candidates
