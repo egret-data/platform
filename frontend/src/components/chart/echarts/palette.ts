@@ -360,6 +360,11 @@ export const COLOR_FALLBACK = {
   text: "#111827",         // ≈ --foreground (near-black)
   textInverse: "#ffffff",  // ≈ --background in light mode — the "opposite ink" for getTextColorForBackground
   card: "#ffffff",         // ≈ --card (charts render inside a Card, not the page background)
+  // ≈ --popover / --popover-foreground in light mode — the pair every FLOATING surface in this app
+  // is tokenised with (ui/popover.tsx, ui/dropdown-menu.tsx), and so the pair a chart tooltip is
+  // drawn with too. See base.ts' `tooltipSurface`.
+  popover: "#f8f8f8",
+  popoverForeground: "#090909",
 } as const;
 
 // An oklch() component: a number (`0.14`), a percentage (`14%`), or the `none` keyword (which
@@ -434,6 +439,27 @@ export function fadeColor(color: string, alpha: number): string {
   return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})`;
 }
 
+/**
+ * `color` at `weight`, the rest `backdrop` — a straight per-channel sRGB mix.
+ *
+ * For an OPAQUE backdrop this is exactly what painting `color` at `weight` opacity on top of it
+ * produces, which is the point: it turns "the same ink, dimmer" into a CONCRETE colour. A
+ * translucent `rgba(...)` has no contrast ratio at all until you say what is behind it, and every
+ * caller here does know — so resolving it once, here, is what lets the result be checked (see
+ * `colorContrast`) instead of taken on trust.
+ *
+ * `weight` is clamped to 0..1. Unparseable input comes back verbatim — the same "leave it alone"
+ * degradation `chartTint` and `fadeColor` already use rather than throwing.
+ */
+export function mixColor(color: string, backdrop: string, weight: number): string {
+  const fg = parseColor(color);
+  const bg = parseColor(backdrop);
+  if (!fg || !bg) return color;
+  const t = Math.min(1, Math.max(0, weight));
+  const [r, g, b] = fg.map((c, i) => Math.round(c * t + bg[i] * (1 - t)));
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
 function relativeLuminance(rgb: [number, number, number]): number {
   const [r, g, b] = rgb.map((c) => srgbToLinear(c / 255));
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
@@ -446,6 +472,22 @@ function contrastRatio(a: [number, number, number], b: [number, number, number])
   const lighter = Math.max(l1, l2);
   const darker = Math.min(l1, l2);
   return (lighter + 0.05) / (darker + 0.05);
+}
+
+/**
+ * The WCAG contrast ratio between two colours, written any way `parseColor` reads them (`#rgb`,
+ * `rgb()`, `oklch()` — i.e. this file's own outputs and a browser's resolved tokens);
+ * `undefined` if either is unreadable.
+ *
+ * Exported so that a design decision which RESTS on a contrast can be asserted as one. Pinning the
+ * hexes such a decision happened to produce tests the arithmetic, not the property — and the
+ * property is the whole reason the colours were chosen. `base.tooltip.test.ts` uses it to check the
+ * tooltip's three ink levels against the real `--popover` of BOTH themes.
+ */
+export function colorContrast(a: string, b: string): number | undefined {
+  const ca = parseColor(a);
+  const cb = parseColor(b);
+  return ca && cb ? contrastRatio(ca, cb) : undefined;
 }
 
 // Metabase's ui/colors/palette.ts getTextColorForBackground biases its pick toward white by a

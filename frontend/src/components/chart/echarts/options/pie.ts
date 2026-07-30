@@ -1,7 +1,14 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
-import { ariaDescription, baseOption, baseTextStyle } from "../base";
+import {
+  ariaDescription,
+  baseOption,
+  TOOLTIP_HEADER_FONT_SIZE,
+  TOOLTIP_WEIGHT,
+  tooltipInk,
+  tooltipSurface,
+} from "../base";
 import { OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor, resolveFontFamily, seriesColor, ringVariantColor, fadeColor, getTextColorForBackground } from "../palette";
 import {
   calcAvailableDonutSliceLabelLength,
@@ -1014,11 +1021,15 @@ function pieTooltip(
   const dimension = cfg.dimensions?.[0];
   const headerAtRoot = dimension ? (cfg.columnSettings?.[dimension]?.column_title || dimension) : "";
   const borderColor = resolveColor("var(--border)", COLOR_FALLBACK.gridLine);
-  const mutedColor = resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel);
+  // The three emphasis levels this table is read in — see TOOLTIP_INK_WEIGHT in base.ts. Every cell
+  // states its own, rather than leaving the value's to be inherited from the container's textStyle:
+  // the whole point is a RAMP, and a ramp with one step written somewhere else is a ramp nobody can
+  // check in one place.
+  const ink = tooltipInk();
 
   return {
     trigger: "item" as const,
-    textStyle: baseTextStyle(),
+    ...tooltipSurface(),
     formatter: (p: { treePathInfo?: { name?: string }[] }) => {
       // The root-to-node path, minus ECharts' own virtual root (entry 0) — the same shape the
       // drill-through click reads. Without it there is nothing to locate the slice by.
@@ -1047,6 +1058,10 @@ function pieTooltip(
       const atRoot = ancestors.length === 1;
       const header = atRoot ? headerAtRoot : ancestors.slice(0, -1).map((n) => n.name).join("  >  ");
       const cell = "padding:1px 0 1px 8px;text-align:right;white-space:nowrap";
+      // The number cells carry the semibold; the name cell is left on the row's own weight, which
+      // is also what the focused row raises. So a focused row goes bold throughout without ever
+      // inverting the ramp inside it.
+      const numberWeight = (focused: boolean) => (focused ? TOOLTIP_WEIGHT.focused : TOOLTIP_WEIGHT.value);
 
       const body = rows.map((r) => {
         const focused = !node.isOther && r === node;
@@ -1055,23 +1070,27 @@ function pieTooltip(
         const marker = atRoot
           ? `<span style="display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;background:${escapeHtml(r.itemStyle.color)}"></span>`
           : "";
-        return `<tr style="font-weight:${focused ? 700 : 400}">`
-          + `<td style="padding:1px 0;white-space:nowrap">${marker}${escapeHtml(r.name)}</td>`
-          + `<td style="${cell}">${escapeHtml(fmt(r.value))}</td>`
-          + `<td style="${cell};color:${mutedColor}">${escapeHtml(pct(r.slicePercent))}</td>`
+        return `<tr style="font-weight:${focused ? TOOLTIP_WEIGHT.focused : TOOLTIP_WEIGHT.name}">`
+          + `<td style="padding:1px 0;white-space:nowrap;color:${ink.name}">${marker}${escapeHtml(r.name)}</td>`
+          + `<td style="${cell};font-weight:${numberWeight(focused)};color:${ink.value}">${escapeHtml(fmt(r.value))}</td>`
+          + `<td style="${cell};font-weight:${numberWeight(focused)};color:${ink.muted}">${escapeHtml(pct(r.slicePercent))}</td>`
           + "</tr>";
       }).join("");
 
       // Only worth a total when there is more than one thing to add up — Metabase's own rule.
       const footer = rows.length > 1
         ? `<tr style="border-top:1px solid ${borderColor}">`
-          + `<td style="padding:3px 0 1px;white-space:nowrap">Total</td>`
-          + `<td style="${cell};padding-top:3px">${escapeHtml(fmt(rows.reduce((t, r) => t + r.value, 0)))}</td>`
-          + `<td style="${cell};padding-top:3px;color:${mutedColor}">100%</td>`
+          + `<td style="padding:3px 0 1px;white-space:nowrap;color:${ink.name}">Total</td>`
+          + `<td style="${cell};padding-top:3px;font-weight:${TOOLTIP_WEIGHT.value};color:${ink.value}">${escapeHtml(fmt(rows.reduce((t, r) => t + r.value, 0)))}</td>`
+          + `<td style="${cell};padding-top:3px;font-weight:${TOOLTIP_WEIGHT.value};color:${ink.muted}">100%</td>`
           + "</tr>"
         : "";
 
-      return (header ? `<div style="font-weight:700;margin-bottom:3px">${escapeHtml(header)}</div>` : "")
+      // The header NAMES the comparison; it is not part of it. It used to be the boldest thing in
+      // the tooltip (700, at the row size) — the most emphasis on the least information. Metabase
+      // runs it the other way: a size smaller than the rows, regular weight, and the dim ink.
+      const headerStyle = `font-size:${TOOLTIP_HEADER_FONT_SIZE}px;font-weight:${TOOLTIP_WEIGHT.header};color:${ink.muted};margin-bottom:3px`;
+      return (header ? `<div style="${headerStyle}">${escapeHtml(header)}</div>` : "")
         + `<table style="border-collapse:collapse"><tbody>${body}${footer}</tbody></table>`;
     },
   };
