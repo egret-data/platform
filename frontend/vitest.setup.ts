@@ -29,6 +29,21 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as MediaQueryList;
 }
 
+// jsdom has no <canvas> 2D context (no `canvas` npm package installed) — calling
+// getContext("2d") logs a noisy "Not implemented" error to the console on every call before
+// falling through to `null`. sliceLabel.ts's `measureText` already treats a `null` 2D context
+// as "no real rasteriser available" and falls back to an average-character-width
+// approximation (see that file), so the noisy log serves no purpose in tests — this stubs
+// getContext to return `null` directly and silently for "2d", the same way every other jsdom
+// gap in this file is patched.
+if (typeof HTMLCanvasElement !== "undefined") {
+  const originalGetContext = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = function (contextId: string, ...args: unknown[]) {
+    if (contextId === "2d") return null;
+    return originalGetContext.apply(this, [contextId, ...args] as never);
+  } as typeof HTMLCanvasElement.prototype.getContext;
+}
+
 // jsdom lacks these; Radix DropdownMenu/Select need them to open via pointer events.
 beforeEach(() => {
   if (!HTMLElement.prototype.hasPointerCapture) HTMLElement.prototype.hasPointerCapture = () => false;

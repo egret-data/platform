@@ -1,7 +1,7 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
-import { ariaDescription, baseOption } from "../base";
+import { ariaDescription, baseOption, tooltipSurface } from "../base";
 import { CHART_THEME, SERIES_PALETTE, COLOR_FALLBACK, resolveColor } from "../palette";
 
 export interface ResultColumn { name: string; type: string }
@@ -68,7 +68,10 @@ export function buildBoxplotOption(columns: ResultColumn[], rows: unknown[][], c
       points: categories.map((c, i) => ({ name: String(c), value: stats[i]?.box?.[2] })),
     }),
     grid: CHART_THEME.grid,
-    tooltip: { trigger: "item" },
+    // The series-level `tooltip: { trigger: "item" }` entries below only make the outlier and mean
+    // points hoverable at all; the box the tooltip is DRAWN in is this one, so the shared surface
+    // belongs here and covers all three.
+    tooltip: { trigger: "item", ...tooltipSurface() },
     xAxis: {
       type: "category", data: categories,
       axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor },

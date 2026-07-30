@@ -2,7 +2,7 @@ import { applyVizOverride } from "./params";
 import { StudioPanel } from "@/components/chart/StudioPanel";
 import { SharedDisplaySections, styleColumnsFor } from "@/components/chart/settings/SharedDisplaySections";
 import { getDescriptor } from "@/components/chart/viz/registry";
-import { vizConfig, shellSettings } from "@/components/chart/viz/renderConfig";
+import { vizConfig, shellSettings, mergeVizSettings } from "@/components/chart/viz/renderConfig";
 import { isParamsV2 } from "@/api/charts";
 import type { Chart, ChartParams } from "@/api/charts";
 
@@ -52,7 +52,10 @@ export function CardVizPanel({ chart, override, columns, rows = [], onChange }: 
           descriptor={descriptor}
           config={config as never}
           onConfigChange={((p: object) =>
-            patch(descriptor.toSettings({ ...(config as object), ...p } as never))) as (p: never) => void}
+            // mergeVizSettings, not `patch`: `patch` spreads over the existing override, and a
+            // setting the user has put back to "Auto" has to LEAVE it — a spread can only add
+            // or overwrite, so Auto would silently re-save the value it was replacing.
+            onChange(mergeVizSettings(override ?? {}, descriptor, { ...(config as object), ...p } as never))) as (p: never) => void}
           columns={[]}
           metrics={[]}
           resultColumns={columns}

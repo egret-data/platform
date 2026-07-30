@@ -39,7 +39,7 @@ describe("temporal-units", () => {
     const opt = buildPieOption(
       [{ name: "dow", type: "int" }, { name: "n", type: "int" }],
       [[1, 10], [7, 3]],
-      { dimension: "dow", metric: "n", dimensionUnit: "day_of_week" },
+      { dimensions: ["dow"], metric: "n", dimensionUnits: { dow: "day_of_week" } },
     ) as { series: { data: { name: string }[] }[] };
     const names = opt.series[0].data.map((d) => d.name);
     expect(names).toContain("Mon");

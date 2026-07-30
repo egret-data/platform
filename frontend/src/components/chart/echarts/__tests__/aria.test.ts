@@ -17,10 +17,13 @@ describe("ariaDescription", () => {
     );
   });
 
-  it("keeps the decal patterns and the enabled flag", () => {
+  it("keeps the screen-reader description on, and the decal patterns off", () => {
+    // The two halves of `aria` are separable and were separated in chart 05: the
+    // description is the part that earns its keep, while the patterns covered the
+    // fill and matched neither Metabase nor Superset.
     const a = ariaDescription({ kind: "Pie chart", format: fmt, points: [] });
     expect(a.enabled).toBe(true);
-    expect(a.decal).toEqual({ show: true });
+    expect(a.decal).toEqual({ show: false });
   });
 
   it("mentions the series count when more than one is plotted", () => {
@@ -48,7 +51,7 @@ describe("charts carry a description rather than ECharts' generated one", () => 
   const rows = [["North", 10], ["South", 20]];
 
   it("pie", () => {
-    const o = buildPieOption(columns, rows, { dimension: "region", metric: "rev" }) as {
+    const o = buildPieOption(columns, rows, { dimensions: ["region"], metric: "rev" }) as {
       aria: { label: { description: string } };
     };
     expect(o.aria.label.description).toContain("Pie chart of rev by region");

@@ -3,7 +3,7 @@ import type { CartesianViz, LineSeriesStyle } from "@/api/charts";
 import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue } from "../../format";
-import { ariaDescription } from "../base";
+import { ariaDescription, baseTextStyle, tooltipSurface } from "../base";
 import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
 import { foldTail } from "../fold";
@@ -273,7 +273,7 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
     .filter((p) => Number.isFinite(p.value[0]) && Number.isFinite(p.value[1]));
   return {
     grid: { ...CHART_THEME.grid, bottom: (CHART_THEME.grid.bottom as number) + 22 },
-    tooltip: { trigger: "item", formatter: (p: { data: { name: string }; value: number[] }) => `${p.data.name}<br/>${cfg.xMetric}: ${fmtM(cfg.xMetric!, p.value[0])}<br/>${yMetric}: ${fmtM(yMetric, p.value[1])}` },
+    tooltip: { trigger: "item", ...tooltipSurface(), formatter: (p: { data: { name: string }; value: number[] }) => `${p.data.name}<br/>${cfg.xMetric}: ${fmtM(cfg.xMetric!, p.value[0])}<br/>${yMetric}: ${fmtM(yMetric, p.value[1])}` },
     xAxis: { type: "value", name: cfg.xMetric, nameLocation: "middle", nameGap: 28, axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmtM(cfg.xMetric!, v) }, splitLine: { lineStyle: { color: gridLine } } },
     yAxis: { type: "value", name: yMetric, axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmtM(yMetric, v) }, splitLine: { lineStyle: { color: gridLine } } },
     series: [{ type: "scatter", symbolSize: 10, itemStyle: { color: SUMMARIZE_COLOR, opacity: CHART_THEME.scatterOpacity }, data }],
@@ -665,8 +665,11 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
       points: first ? categories.map((c, i) => ({ name: String(c), value: first.data?.[i] })) : [],
     }),
     color: undefined,
+    // The product's own typeface, at the option root — this is the one builder that composes its
+    // whole option itself rather than spreading base.ts's `baseOption()`, so it has to say so.
+    textStyle: baseTextStyle(),
     grid,
-    tooltip: { trigger: cfg.kind === "scatter" ? "item" : "axis", formatter: tooltipFormatter },
+    tooltip: { trigger: cfg.kind === "scatter" ? "item" : "axis", ...tooltipSurface(), formatter: tooltipFormatter },
     legend,
     xAxis,
     yAxis,

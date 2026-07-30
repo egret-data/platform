@@ -40,14 +40,40 @@ describe("the nine simple descriptors", () => {
   });
 
   it("prunes temporal units to the grouped dimension", () => {
-    expect(byKey.pie.buildSpec({ dimension: "order_date", metric: "m" }, SHARED).temporal_units)
+    expect(byKey.pie.buildSpec({ dimensions: ["order_date"], metric: "m" }, SHARED).temporal_units)
       .toEqual({ order_date: "month" });
-    expect(byKey.pie.buildSpec({ dimension: "region", metric: "m" }, SHARED).temporal_units).toEqual({});
+    expect(byKey.pie.buildSpec({ dimensions: ["region"], metric: "m" }, SHARED).temporal_units).toEqual({});
+  });
+
+  // `dimensions` comes from stored settings, not typed input — a pre-migration row (or
+  // anything else that slipped past a server-side check) can hand back a bare string, a
+  // number, or an object instead of an array. Every one of those must degrade to "no
+  // dimensions" rather than reaching `strs()`, which assumes an array and throws on `.map`.
+  it("degrades a malformed stored `dimensions` value to an empty list instead of crashing", () => {
+    for (const bad of ["region", 5, { region: true }]) {
+      const spec = byKey.pie.buildSpec({ dimensions: bad, metric: "m" }, SHARED);
+      expect(spec.dimensions).toEqual([]);
+    }
+  });
+
+  // Migration 0099 flattened the legacy `pie.dimension` (singular) into settings under
+  // that exact key; migration 0103 (task 3, same PR) renames it to the plural `pie.dimensions`
+  // array. Until 0103 runs, `fromParams` reads the old key back as `cfg.dimension`, which
+  // nothing downstream reads any more — so a pre-0103 pie compiles a spec with no
+  // dimensions and renders blank (rows still come back, so the empty-state guard never
+  // fires). This pins that gap; it is expected to flip to a non-empty `["region"]` once
+  // task 3's migration lands in this same PR, at which point this assertion inverts.
+  it("a pre-0103 pie has no dimensions until the migration lifts its key", () => {
+    const cfg = byKey.pie.fromParams({
+      version: 2, spec: EMPTY_SPEC, settings: { "pie.dimension": "region", "pie.metric": "rev" },
+    });
+    const spec = byKey.pie.buildSpec(cfg, SHARED);
+    expect(spec.dimensions).toEqual([]);
   });
 
   it("round-trips every descriptor's config through settings", () => {
     const sample: Record<string, Record<string, unknown>> = {
-      pie: { dimension: "region", metric: "m" },
+      pie: { dimensions: ["region"], metric: "m" },
       scalar: { metric: "m" },
       progress: { metric: "m", goal: 10 },
       gauge: {
@@ -89,6 +115,29 @@ describe("the nine simple descriptors", () => {
     const cfg = { dimension: "category", metric: "m", donut: true, showLegend: true, sliceColors: { A: "#fff" } };
     const back = byKey.pie.fromParams({ version: 2, spec: EMPTY_SPEC, settings: byKey.pie.toSettings(cfg) });
     expect(back).toEqual(cfg);
+  });
+
+  // Multi-dimension shape (task 1): `dimensions` and the slice-curation fields (e.g.
+  // `sliceNames`) are stored keys under the pie prefix like any other, so they need no
+  // codec change to round-trip — `fromParams` reads every key under the prefix, not
+  // only the ones `fields` declares.
+  it("round-trips the multi-dimension shape, including slice-curation fields", () => {
+    const cfg = { dimensions: ["region", "category"], metric: "m", sliceNames: { A: "Alpha" } };
+    const back = byKey.pie.fromParams({ version: 2, spec: EMPTY_SPEC, settings: byKey.pie.toSettings(cfg) });
+    expect(back).toEqual(cfg);
+  });
+
+  // Adding a value to an enum owes no migration, but it does owe proof that the codec carries
+  // it: `pie.percentVisibility` is a plain key under the prefix, so "legend" round-trips for
+  // the same reason every other display setting does — and an unknown stored value survives
+  // the trip untouched too, because the codec's job is storage, not validation (the RENDERER
+  // is where an unrecognised value degrades to off — see resolvePercentVisibility).
+  it("round-trips the new legend percent-visibility, and does not eat an unknown one", () => {
+    for (const percentVisibility of ["legend", "both", "everywhere"]) {
+      const cfg = { dimensions: ["region", "category"], metric: "m", percentVisibility };
+      const back = byKey.pie.fromParams({ version: 2, spec: EMPTY_SPEC, settings: byKey.pie.toSettings(cfg) });
+      expect(back).toEqual(cfg);
+    }
   });
 
   it("gives pie a display control and the others none", () => {

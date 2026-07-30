@@ -37,7 +37,7 @@ import { getDescriptor } from "@/components/chart/viz/registry";
 import { pivotDescriptor, type PivotConfig } from "@/components/chart/viz/pivot";
 import { tableDescriptor } from "@/components/chart/viz/table";
 import type { VizDescriptor } from "@/components/chart/viz/types";
-import { shellSettings } from "@/components/chart/viz/renderConfig";
+import { shellSettings, mergeVizSettings } from "@/components/chart/viz/renderConfig";
 import { StudioPanel } from "@/components/chart/StudioPanel";
 import { PreviewPane } from "@/components/chart/PreviewPane";
 import { VizSwitcher } from "@/components/chart/VizSwitcher";
@@ -256,8 +256,9 @@ export default function ChartExplore() {
         version: 2,
         spec: specForRun(),
         settings: {
-          ...settings,
-          ...descriptor.toSettings(descConfig),
+          // mergeVizSettings, not a bare spread: a setting the user has put back to "Auto"
+          // must LEAVE the stored settings, and a spread can only add or overwrite.
+          ...mergeVizSettings(settings, descriptor, descConfig),
           column_settings: columnSettings,
           conditional_formatting: conditionalFormatting,
         },
@@ -461,8 +462,13 @@ export default function ChartExplore() {
         </Tabs>
       </div>
 
-      {/* Main area (full-width preview) */}
-      <div className="flex-1 overflow-auto p-4 space-y-3">
+      {/* Main area (full-width preview). A flex COLUMN, so the chart card below can claim
+          the height left over after the toolbar instead of guessing at a viewport fraction
+          — the parent row is `flex h-full min-h-0`, which makes this column's own height
+          definite, which is what lets `flex-1` on the card resolve to real pixels. It keeps
+          `overflow-auto` for the short-window case, where the card's own min-height wins
+          and this scrolls. */}
+      <div className="flex flex-1 flex-col overflow-auto p-4 space-y-3">
         <h1 className="sr-only">{saveName || "New chart"}</h1>
         <StudioToolbar
           name={saveName} onName={setSaveName}

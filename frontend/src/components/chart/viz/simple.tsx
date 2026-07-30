@@ -6,14 +6,19 @@ import type { VizControl, VizControlProps, VizDescriptor } from "./types";
 
 type Cfg = Record<string, unknown>;
 
-/** Distinct slice values of the current result, for the pie's per-slice colour controls. */
+/** Distinct slice values of the current result, for the pie's per-slice colour controls.
+ * Reads the FIRST picked dimension (`dimensions?.[0]`) — with nested rings (task 4), the
+ * innermost ring is what `sliceColors`/`sliceNames` key against, matching the single-ring
+ * pie's colouring today. */
 function PieDisplayControl({ config, onChange, resultColumns, rows }: VizControlProps<Cfg>) {
-  const dimIdx = resultColumns.findIndex((c) => c.name === config.dimension);
-  const slices = config.dimension && dimIdx !== -1
+  const dims = Array.isArray(config.dimensions) ? (config.dimensions as string[]) : [];
+  const dim = dims[0];
+  const dimIdx = resultColumns.findIndex((c) => c.name === dim);
+  const slices = dim && dimIdx !== -1
     ? Array.from(new Set(rows.map((r) => String((r as unknown[])[dimIdx] ?? "")).filter((v) => v !== "")))
     : [];
   return (
-    <PieDisplaySection config={config as PieConfig} sliceNames={slices}
+    <PieDisplaySection config={config as PieConfig} slices={slices}
       onChange={(patch) => onChange(patch as Partial<Cfg>)} />
   );
 }
@@ -45,11 +50,16 @@ export const SIMPLE_DESCRIPTORS: VizDescriptor<Cfg>[] = [
   fieldDescriptor({
     key: "pie", prefix: "pie.", legacyKey: "pie", display: pieDisplay,
     fields: [
-      { id: "dimension", label: "Dimension", kind: "dimension", required: "a dimension", temporal: true },
+      { id: "dimensions", label: "Dimensions", kind: "dimensions", max: 3, required: "a dimension", temporal: true },
       { id: "metric", label: "Metric", kind: "metric", required: "a metric" },
     ],
-    buildSpec: (c, s, h) => h.dimsAndMetrics([c.dimension], [c.metric], s),
-    legacyFromSpec: (spec) => ({ dimension: spec.dimensions?.[0], metric: spec.metrics?.[0] }),
+    // `c.dimensions` is settings data, not typed input — a stored string/number/object
+    // (pre-migration rows, or anything not yet whitelisted server-side) must not reach
+    // `strs()`, which assumes an array and throws on `.map`. Every sibling descriptor is
+    // safe here only because it wraps a single field in an array literal; pie is the one
+    // descriptor that forwards a stored value directly, so it needs its own guard.
+    buildSpec: (c, s, h) => h.dimsAndMetrics(Array.isArray(c.dimensions) ? c.dimensions : [], [c.metric], s),
+    legacyFromSpec: (spec) => ({ dimensions: spec.dimensions, metric: spec.metrics?.[0] }),
   }),
   fieldDescriptor({
     key: "scalar", prefix: "scalar.", legacyKey: "scalar",

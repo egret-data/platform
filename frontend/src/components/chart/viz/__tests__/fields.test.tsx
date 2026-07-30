@@ -1,6 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { fieldDescriptor } from "../fields";
 import { EMPTY_SPEC } from "@/api/charts";
+import type { DatasetColumn } from "@/api/datasets";
 
 const d = fieldDescriptor({
   key: "funnel",
@@ -52,5 +55,107 @@ describe("fieldDescriptor", () => {
   it("gives every declared field a data control", () => {
     expect(d.controls.map((c) => c.id)).toEqual(["dimension", "metric"]);
     expect(d.controls.every((c) => c.section === "data")).toBe(true);
+  });
+});
+
+function col(name: string, temporal = false): DatasetColumn {
+  return {
+    column_name: name, data_type: temporal ? "timestamp" : "varchar", type_generic: temporal ? "temporal" : "string",
+    is_temporal: temporal, ordinal: 0, expression: null, verbose_name: name, description: "",
+    is_calculated: false, groupby: true, filterable: true, format: "", semantic_type: "",
+  };
+}
+
+const COLUMNS = [col("region"), col("category"), col("city"), col("order_date", true), col("ship_date", true)];
+
+describe("fieldDescriptor: the `dimensions` field kind (multi-select, up to `max`)", () => {
+  const multi = fieldDescriptor({
+    key: "pie",
+    prefix: "pie2.",
+    fields: [
+      { id: "dimensions", label: "Dimensions", kind: "dimensions", max: 3, required: "a dimension", temporal: true },
+      { id: "metric", label: "Metric", kind: "metric", required: "a metric" },
+    ],
+    buildSpec: (cfg, shared, helpers) =>
+      helpers.dimsAndMetrics(Array.isArray(cfg.dimensions) ? cfg.dimensions : [], [cfg.metric], shared),
+  });
+  const Control = multi.controls.find((c) => c.id === "dimensions")!.render;
+
+  function renderControl(config: Record<string, unknown>, onChange = vi.fn()) {
+    render(
+      <Control
+        config={config}
+        onChange={onChange}
+        columns={COLUMNS}
+        metrics={[]}
+        resultColumns={[]}
+        rows={[]}
+        unitRow={(c) => (c ? <div data-testid={`unit-${c}`}>unit:{c}</div> : null)}
+      />,
+    );
+    return onChange;
+  }
+
+  it("renders one empty picker when nothing is chosen", () => {
+    renderControl({});
+    expect(screen.getAllByRole("combobox")).toHaveLength(1);
+  });
+
+  it("emits the whole array with the picked column", async () => {
+    const onChange = renderControl({});
+    await userEvent.click(screen.getByRole("combobox"));
+    await userEvent.click(await screen.findByRole("option", { name: "region" }));
+    expect(onChange).toHaveBeenCalledWith({ dimensions: ["region"] });
+  });
+
+  it("shows a second empty picker once one dimension is chosen", () => {
+    renderControl({ dimensions: ["region"] });
+    expect(screen.getAllByRole("combobox")).toHaveLength(2);
+  });
+
+  it("does not offer an already-chosen column in the remaining pickers", async () => {
+    renderControl({ dimensions: ["region"] });
+    const boxes = screen.getAllByRole("combobox");
+    await userEvent.click(boxes[1]); // the empty "add" picker
+    expect(screen.queryByRole("option", { name: "region" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "category" })).toBeInTheDocument();
+  });
+
+  it("renders no further picker once `max` is reached", () => {
+    renderControl({ dimensions: ["region", "category", "city"] });
+    expect(screen.getAllByRole("combobox")).toHaveLength(3);
+  });
+
+  it("keeps the remaining two in order after removing the first of three", async () => {
+    const onChange = renderControl({ dimensions: ["region", "category", "city"] });
+    await userEvent.click(screen.getByRole("button", { name: /remove region/i }));
+    expect(onChange).toHaveBeenCalledWith({ dimensions: ["category", "city"] });
+  });
+
+  it("always emits the full array, never a partial patch, when replacing an existing pick", async () => {
+    const onChange = renderControl({ dimensions: ["region", "category"] });
+    const boxes = screen.getAllByRole("combobox");
+    await userEvent.click(boxes[0]);
+    await userEvent.click(await screen.findByRole("option", { name: "city" }));
+    expect(onChange).toHaveBeenCalledWith({ dimensions: ["city", "category"] });
+  });
+
+  // Design decision (task 2, step 3): `temporalUnits` is keyed by column name, and every
+  // other multi-column control (pivot's rows/cols, table's columns) renders the shared
+  // date-grouping row once per selected column, not just the first — so a second temporal
+  // dimension silently losing its grouping control would be a regression relative to that
+  // precedent. Pin that this field follows the same rule.
+  it("renders the date-grouping row for every chosen temporal dimension, not only the first", () => {
+    renderControl({ dimensions: ["order_date", "ship_date"] });
+    expect(screen.getByTestId("unit-order_date")).toBeInTheDocument();
+    expect(screen.getByTestId("unit-ship_date")).toBeInTheDocument();
+  });
+
+  // `[]` is truthy in JS — a plain `!cfg[f.id]` check would call an emptied-out dimensions
+  // list "set", so a user who removes their last pick would stop seeing "Add: a dimension"
+  // even though the field is once again unconfigured.
+  it("still reports the field as required after its array is emptied out", () => {
+    expect(multi.requiredFields({ dimensions: [], metric: "m" })).toEqual(["a dimension"]);
+    expect(multi.requiredFields({ dimensions: ["region"], metric: "m" })).toEqual([]);
   });
 });

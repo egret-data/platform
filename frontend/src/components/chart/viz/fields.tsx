@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+import { Trash2 } from "lucide-react";
 import { pruneUnits } from "@/components/chart/temporal-units";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { Label } from "@/components/ui/label";
@@ -15,7 +17,7 @@ type Cfg = Record<string, unknown>;
 export interface FieldSpec {
   id: string;
   label: string;
-  kind: "dimension" | "metric" | "number" | "boolean";
+  kind: "dimension" | "metric" | "number" | "boolean" | "dimensions";
   /** Label used in "Add: …" when this field is empty; omit for optional fields. */
   required?: string;
   placeholder?: string;
@@ -23,6 +25,8 @@ export interface FieldSpec {
   temporal?: boolean;
   /** Exclude the value of this other field from the options (e.g. sankey source vs target). */
   excludes?: string;
+  /** `dimensions` only: how many may be picked. */
+  max?: number;
 }
 
 export interface Helpers {
@@ -94,6 +98,9 @@ function FieldControl({ field, config, onChange, columns, metrics, unitRow }: {
   const options = field.kind === "metric"
     ? metrics.map((m) => m.metric_name)
     : columns.map((c) => c.column_name).filter((n) => !field.excludes || n !== config[field.excludes]);
+  if (field.kind === "dimensions") {
+    return <DimensionsControl field={field} config={config} options={options} onChange={onChange} unitRow={unitRow} />;
+  }
   return (
     <>
       <div className="space-y-1">
@@ -109,6 +116,61 @@ function FieldControl({ field, config, onChange, columns, metrics, unitRow }: {
       </div>
       {field.temporal && unitRow(config[field.id] as string | undefined)}
     </>
+  );
+}
+
+/**
+ * A `dimensions` field: an ordered list of up to `field.max` column names, rendered as one
+ * picker per already-chosen column plus a single empty "add" picker while under the limit.
+ * Every emit replaces the whole array — there is no partial-patch path — because the stored
+ * shape (and every reader of it, e.g. pie's nested rings) is the array itself, in order.
+ */
+function DimensionsControl({ field, config, options, onChange, unitRow }: {
+  field: FieldSpec;
+  config: Cfg;
+  options: string[];
+  onChange: (patch: Partial<Cfg>) => void;
+  unitRow: (col?: string) => ReactNode;
+}) {
+  const max = field.max ?? Infinity;
+  const chosen = Array.isArray(config[field.id]) ? (config[field.id] as string[]) : [];
+  const emit = (next: string[]) => onChange({ [field.id]: next } as Partial<Cfg>);
+  // One slot per chosen column, plus a trailing empty "add" slot while under `max`.
+  const slots: (string | undefined)[] = chosen.length < max ? [...chosen, undefined] : chosen;
+  return (
+    <div className="space-y-1">
+      <Label className={LABEL_CLASS}>{field.label}</Label>
+      {slots.map((value, i) => {
+        // A column already picked by another slot is excluded here, so the same column
+        // can't be chosen twice — but THIS slot's own current value stays offered, or
+        // reopening it would make its own pick look like it vanished from the list.
+        const takenElsewhere = new Set(chosen.filter((_, j) => j !== i));
+        const avail = options.filter((n) => !takenElsewhere.has(n));
+        return (
+          <div key={i} className="flex items-center gap-1">
+            <Select value={value ?? ""} onValueChange={(v) => { if (v) { const next = [...chosen]; next[i] = v; emit(next); } }}>
+              <SelectTrigger className="h-8 text-sm">
+                <SelectValue placeholder={value === undefined ? "Add a dimension…" : (field.placeholder ?? "Pick a dimension…")} />
+              </SelectTrigger>
+              <SelectContent>
+                {avail.map((n) => <SelectItem key={n} value={n}>{n}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            {value !== undefined && (
+              <button type="button" aria-label={`Remove ${value}`}
+                className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-destructive"
+                onClick={() => emit(chosen.filter((_, j) => j !== i))}>
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        );
+      })}
+      {/* Keyed by index, not by column name: the picker cannot produce a duplicate, but stored
+          settings are not whitelisted server-side, so a malformed array can — and a duplicate
+          value key is unsupported in React. */}
+      {field.temporal && chosen.map((c, i) => <div key={i}>{unitRow(c)}</div>)}
+    </div>
   );
 }
 
@@ -145,7 +207,14 @@ export function fieldDescriptor(spec: FieldDescriptorSpec): VizDescriptor<Cfg> {
       for (const [k, v] of Object.entries(cfg)) if (v !== undefined) out[prefix + k] = v;
       return out;
     },
-    requiredFields: (cfg) => fields.filter((f) => f.required && !cfg[f.id]).map((f) => f.required!),
+    // `dimensions` stores an array, so "unset" must also catch the emptied-out `[]` a user
+    // gets to by removing their last pick — plain falsiness (`!cfg[f.id]`) misses it, since
+    // an empty array is truthy in JS.
+    requiredFields: (cfg) => fields.filter((f) => {
+      if (!f.required) return false;
+      const v = cfg[f.id];
+      return !v || (Array.isArray(v) && v.length === 0);
+    }).map((f) => f.required!),
     buildSpec: (cfg, shared) => spec.buildSpec(cfg, shared, helpers),
     controls: [
       ...fields.map((f): VizControl<Cfg> => ({
