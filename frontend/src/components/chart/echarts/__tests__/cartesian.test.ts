@@ -504,3 +504,32 @@ describe("cartesianSeriesNames helper", () => {
     expect(cartesianSeriesNames(cols, rows, { yMetrics: ["rev"], series: "yr" })).toEqual(["2023", "(empty)"]);
   });
 });
+
+describe("category axis labels are formatted", () => {
+  // A chart grouped by month put the raw bucket on the axis — "2026-01-01" for what is really
+  // January 2026. Only the metric (value) axis went through `formatValue`.
+  const base = {
+    yMetrics: ["rev"], xAxis: "d", kind: "bar" as const,
+    metricTypes: { rev: "bigint" },
+  };
+  const axisOf = (opt: Record<string, unknown>) =>
+    (Array.isArray(opt.xAxis) ? opt.xAxis[0] : opt.xAxis) as { axisLabel?: { formatter?: (v: string) => string } };
+
+  it("applies the x column's date format to its labels", () => {
+    const opt = buildCartesianOption(
+      [{ name: "d", type: "date" }, { name: "rev", type: "bigint" }],
+      [["2026-01-01", 10]],
+      { ...base, xAxisType: "date", columnSettings: { d: { date_style: "MMMM YYYY" } } },
+    ) as Record<string, unknown>;
+    expect(axisOf(opt).axisLabel?.formatter?.("2026-01-01")).toBe("January 2026");
+  });
+
+  it("leaves labels alone when the column has no format", () => {
+    const opt = buildCartesianOption(
+      [{ name: "d", type: "date" }, { name: "rev", type: "bigint" }],
+      [["2026-01-01", 10]],
+      { ...base, xAxisType: "date" },
+    ) as Record<string, unknown>;
+    expect(axisOf(opt).axisLabel?.formatter?.("2026-01-01")).toBe("2026-01-01");
+  });
+});

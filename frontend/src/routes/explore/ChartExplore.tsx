@@ -471,7 +471,7 @@ export default function ChartExplore() {
                   resultColumns={resultColumns}
                   styleColumns={styleColumnsFor(viz, {
                     spec: specForRun(),
-                    cartesian: descConfig as { yMetrics: string[] },
+                    cartesian: descConfig as { yMetrics: string[]; xAxis?: string; series?: string },
                     scalar: descConfig as { metric?: string },
                     metrics: (descConfig as { metrics?: string[] }).metrics,
                     // The pivot formats its dimensions as well as its measures — without these
@@ -499,7 +499,7 @@ export default function ChartExplore() {
                 resultColumns={resultColumns}
                 styleColumns={styleColumnsFor(viz, {
                   spec: specForRun(),
-                  cartesian: descConfig as { yMetrics: string[] },
+                  cartesian: descConfig as { yMetrics: string[]; xAxis?: string; series?: string },
                   scalar: descConfig as { metric?: string },
                   metrics: (descConfig as { metrics?: string[] }).metrics,
                   rows: (descConfig as { rows?: string[] }).rows,
@@ -512,7 +512,7 @@ export default function ChartExplore() {
                 onColumnSettings={setColumnSettings}
                 ruleColumns={ruleColumnsFor(viz, {
                   spec: specForRun(),
-                  cartesian: descConfig as { yMetrics: string[] },
+                  cartesian: descConfig as { yMetrics: string[]; xAxis?: string; series?: string },
                   scalar: descConfig as { metric?: string },
                   metrics: (descConfig as { metrics?: string[] }).metrics,
                   rows: (descConfig as { rows?: string[] }).rows,

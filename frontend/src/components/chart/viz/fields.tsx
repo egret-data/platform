@@ -98,8 +98,15 @@ function FieldControl({ field, config, onChange, columns, metrics, unitRow }: {
   const options = field.kind === "metric"
     ? metrics.map((m) => m.metric_name)
     : columns.map((c) => c.column_name).filter((n) => !field.excludes || n !== config[field.excludes]);
+  // Datasets have carried `verbose_name` for a long time and offer a UI to set it, but every field
+  // picker read the machine name, so naming a column "Total Sales" changed nothing here. Value
+  // stays the machine name — only the label changes.
+  const labelOf = (n: string) =>
+    (field.kind === "metric"
+      ? metrics.find((m) => m.metric_name === n)?.verbose_name
+      : columns.find((c) => c.column_name === n)?.verbose_name)?.trim() || n;
   if (field.kind === "dimensions") {
-    return <DimensionsControl field={field} config={config} options={options} onChange={onChange} unitRow={unitRow} />;
+    return <DimensionsControl field={field} config={config} options={options} labelOf={labelOf} onChange={onChange} unitRow={unitRow} />;
   }
   return (
     <>
@@ -110,7 +117,7 @@ function FieldControl({ field, config, onChange, columns, metrics, unitRow }: {
             <SelectValue placeholder={field.placeholder ?? (field.kind === "metric" ? "Pick a metric…" : "Pick a dimension…")} />
           </SelectTrigger>
           <SelectContent>
-            {options.map((n) => <SelectItem key={n} value={n}>{n}</SelectItem>)}
+            {options.map((n) => <SelectItem key={n} value={n}>{labelOf(n)}</SelectItem>)}
           </SelectContent>
         </Select>
       </div>
@@ -125,10 +132,12 @@ function FieldControl({ field, config, onChange, columns, metrics, unitRow }: {
  * Every emit replaces the whole array — there is no partial-patch path — because the stored
  * shape (and every reader of it, e.g. pie's nested rings) is the array itself, in order.
  */
-function DimensionsControl({ field, config, options, onChange, unitRow }: {
+function DimensionsControl({ field, config, options, labelOf, onChange, unitRow }: {
   field: FieldSpec;
   config: Cfg;
   options: string[];
+  /** Machine name -> display name; see `labelOf` in the caller. */
+  labelOf: (n: string) => string;
   onChange: (patch: Partial<Cfg>) => void;
   unitRow: (col?: string) => ReactNode;
 }) {
@@ -153,7 +162,7 @@ function DimensionsControl({ field, config, options, onChange, unitRow }: {
                 <SelectValue placeholder={value === undefined ? "Add a dimension…" : (field.placeholder ?? "Pick a dimension…")} />
               </SelectTrigger>
               <SelectContent>
-                {avail.map((n) => <SelectItem key={n} value={n}>{n}</SelectItem>)}
+                {avail.map((n) => <SelectItem key={n} value={n}>{labelOf(n)}</SelectItem>)}
               </SelectContent>
             </Select>
             {value !== undefined && (

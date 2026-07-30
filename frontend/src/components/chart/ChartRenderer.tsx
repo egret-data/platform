@@ -7,7 +7,7 @@ import type {
 import type { PivotConfig } from "@/components/chart/viz/pivot";
 import { isCartesianViz } from "@/api/charts";
 import { vizConfig, shellSettings } from "@/components/chart/viz/renderConfig";
-import type { DrillContext } from "@/components/chart/drill";
+import type { DrillContext, DrillDim } from "@/components/chart/drill";
 import { EChartsRenderer, type EChartsSize } from "@/components/chart/echarts/EChartsRenderer";
 import { buildCartesianOption } from "@/components/chart/echarts/options/cartesian";
 import {
@@ -333,12 +333,24 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
               columnSettings,
               metricTypes,
               xAxisUnit: params.spec.temporal_units?.[cartesian.xAxis ?? ""],
+              xAxisType: columns.find((c) => c.name === cartesian.xAxis)?.type,
             })}
             onPointClick={onValueClick && cartesian.xAxis ? (p) => {
-              // NOTE: for an extraction temporal unit (e.g. day_of_week) p.name is the display label
-              // ("Mon"), not the raw integer (1), so drill-through filters won't match the column.
-              // Tracked as a follow-up; extraction-grouped drill is an unusual path.
-              const dims: { col: string; value: unknown }[] = [{ col: cartesian.xAxis as string, value: p.name }];
+              // The x value carries its temporal unit, so a bucketed axis drills to the whole
+              // bucket. Without it a bar grouped by month filtered `= 2026-01-01`, which is one
+              // day of the month the bar actually covers — the same silent under-count the pivot
+              // had, understating the result with nothing on screen to say so.
+              //
+              // It also retires the note that used to sit here: with an EXTRACTION unit
+              // (`day_of_week`) `p.name` is the display label ("Mon"), not the raw integer, so the
+              // filter could never match. `drillFilters` now drops extraction dimensions instead
+              // of emitting a predicate that silently matches nothing.
+              const unit = params.spec.temporal_units?.[cartesian.xAxis as string];
+              const dims: DrillDim[] = [
+                unit
+                  ? { col: cartesian.xAxis as string, value: p.name, unit }
+                  : { col: cartesian.xAxis as string, value: p.name },
+              ];
               if (cartesian.series && p.seriesName != null) dims.push({ col: cartesian.series, value: p.seriesName });
               onValueClick({ dims }, p.x, p.y);
             } : undefined}

@@ -37,6 +37,7 @@ export interface CartesianBuildConfig {
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
   xAxisUnit?: string;            // temporal extraction unit for the x-axis dimension (e.g. "day_of_week")
+  xAxisType?: string;            // SQL type of the x-axis dimension, so its labels can be formatted
   /** Short value-axis labels (25.5K). Defaults to on once the numbers are wide. */
   compactValues?: boolean;
   /** Fold all but the largest `maxCategories - 1` into "Other". Unset keeps every category. */
@@ -552,7 +553,20 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     // The title matches the label colour — an axis name is not a lesser piece of chrome
     // than the values beneath it, and ECharts' default nameTextStyle colour reads paler.
     nameTextStyle: { color: axisLabelColor },
-    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, interval: "auto" as const, rotate },
+    // Category labels go through the column's own format. Extraction units are already
+    // substituted above (`displayCats`), but a TRUNCATION unit left the raw bucket on the axis —
+    // a chart grouped by month read "2026-01-01" where the bucket is really January 2026. The
+    // formatter only changes what is drawn; `data` stays the raw value, so a drill still filters
+    // on what the engine returned.
+    axisLabel: {
+      fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, interval: "auto" as const, rotate,
+      formatter: (v: string) => {
+        const fmt = cfg.xAxis ? cfg.columnSettings?.[cfg.xAxis] : undefined;
+        if (!fmt || v == null) return String(v ?? "");
+        const out = formatValue(v, cfg.xAxisType ?? "varchar", fmt);
+        return out === "" ? String(v) : out;
+      },
+    },
     axisLine: { lineStyle: { color: gridLine } },
   };
   // Non-ordinal x: a value (linear) or time (timeseries) axis positioning points by

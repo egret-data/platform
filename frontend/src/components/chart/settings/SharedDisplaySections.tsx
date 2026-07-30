@@ -27,8 +27,16 @@ export function styleColumnsFor(
     return resultColumns.filter((c) => named.has(c.name));
   }
   if (isCartesianViz(vizType)) {
-    const yMetrics = params.cartesian?.yMetrics ?? [];
-    return resultColumns.filter((c) => yMetrics.includes(c.name));
+    // The plotted metrics AND the axis/series dimensions. Only measures were offered, so a date
+    // on the x-axis had no format to set — and the axis labels therefore always drew the raw
+    // bucket ("2026-01-01" for what is really January 2026). Same pairing as the pivot: the
+    // renderer could format it and the panel gave nowhere to say so.
+    const named = new Set([
+      ...(params.cartesian?.yMetrics ?? []),
+      ...(params.cartesian?.xAxis ? [params.cartesian.xAxis] : []),
+      ...(params.cartesian?.series ? [params.cartesian.series] : []),
+    ]);
+    return resultColumns.filter((c) => named.has(c.name));
   }
   if (vizType === "scalar") return resultColumns.filter((c) => c.name === params.scalar?.metric);
   if (vizType === "pie") return [];

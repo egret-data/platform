@@ -56,3 +56,23 @@ describe("pivotCellDrill", () => {
     expect(pivotCellDrill(["region"], ["EU"], [], [], {}).dims).toEqual([{ col: "region", value: "EU" }]);
   });
 });
+
+describe("cartesian drill on a bucketed axis", () => {
+  // Same defect the pivot had: a bar grouped by month filtered `= 2026-01-01`, one day of the
+  // month the bar covers, and reported fewer records than the bar counted — with no error.
+  it("a bucketed x value becomes the bucket's range", () => {
+    expect(drillFilters({ dims: [{ col: "d", value: "2026-01-01", unit: "month" }, { col: "region", value: "EU" }] }))
+      .toEqual([
+        { col: "d", op: "ge", value: "2026-01-01" },
+        { col: "d", op: "lt", value: "2026-02-01" },
+        { col: "region", op: "eq", value: "EU" },
+      ]);
+  });
+
+  it("an extraction axis contributes no filter instead of one that cannot match", () => {
+    // With `day_of_week` the chart shows "Mon" while the column holds an integer, so an equality
+    // on the label could never match a row. Dropping it widens the result rather than returning
+    // an empty one.
+    expect(drillFilters({ dims: [{ col: "d", value: "Mon", unit: "day_of_week" }] })).toEqual([]);
+  });
+});

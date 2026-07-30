@@ -31,3 +31,11 @@ describe("FieldZone display names", () => {
     expect(screen.getByRole("button", { name: "remove Region" })).toBeInTheDocument();
   });
 });
+
+describe("FieldZone labels reach the cartesian zones too", () => {
+  it("a metric's verbose name shows in a Y-axis zone", () => {
+    render(<FieldZone label="Y-axis" selected={["total_revenue"]} options={["total_revenue"]}
+      labels={{ total_revenue: "Tổng doanh thu" }} onChange={vi.fn()} />);
+    expect(screen.getByText("Tổng doanh thu")).toBeInTheDocument();
+  });
+});
