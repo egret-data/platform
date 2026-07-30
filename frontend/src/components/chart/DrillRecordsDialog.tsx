@@ -19,14 +19,17 @@ export function DrillRecordsDialog({
     : null;
   const data = useSpecData(ws, datasetId, spec, open && !!datasetId && columns.length > 0);
 
-  const summary = filters.length
-    ? filters.map((f) => ("value" in f ? `${f.col} = ${String(f.value)}` : `${f.col} ${f.op}`)).join(", ")
-    : "all rows";
+  // "Records where all rows" is not a sentence. A drill with no filters was unreachable until the
+  // scalar arrived — it has no dimensions, so its drill context is always empty — which is how a
+  // string that had always been wrong first became visible.
+  const title = filters.length
+    ? `Records where ${filters.map((f) => ("value" in f ? `${f.col} = ${String(f.value)}` : `${f.col} ${f.op}`)).join(", ")}`
+    : "All records";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-4xl">
-        <DialogHeader><DialogTitle>Records where {summary}</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{title}</DialogTitle></DialogHeader>
         <div className="max-h-[70vh] overflow-auto">
           {data.error && <p className="rounded bg-destructive/10 p-3 text-sm text-destructive">{data.error}</p>}
           {/* Gate on `hasResult`, not `!isLoading`: while the dialog is open but

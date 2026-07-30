@@ -39,6 +39,20 @@ describe("BigNumber", () => {
     });
   });
 
+  it("keeps the captions in the same centred group as the number", () => {
+    // The live check found them stranded at the BOTTOM of the card, ~300px under the number,
+    // because the value's box had `flex-1 basis-0` and swallowed the spare height. jsdom runs no
+    // layout so it cannot see the gap — what it CAN see is the structure that caused it: the
+    // measuring element must be absolutely positioned (out of flow), not a flex child that grows.
+    const { container } = render(
+      <BigNumber columns={COLS} rows={[[1234]]} metric="rev" label="Revenue" />,
+    );
+    const sizer = container.querySelector("[aria-hidden]");
+    expect(sizer, "the measuring element should exist").not.toBeNull();
+    expect(sizer!.className).toContain("absolute");
+    expect(sizer!.className).not.toContain("flex-1");
+  });
+
   describe("conditional colours", () => {
     const bands = [
       { min: 0, max: 1500, color: "#e75454", label: "Low" },

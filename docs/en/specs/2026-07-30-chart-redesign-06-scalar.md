@@ -250,6 +250,54 @@ Confirmed good in the same pass: the value draws in **Inter** (the product font 
 compaction fires with the full value in the tooltip (`3,428,911` → `3.4M`), the narrow-card cap
 lands exactly on 2.5rem at 220px, and the band name renders as text under the number.
 
+## Live check on kind — what running it actually found
+
+Deployed to kind (frontend image rebuilt, `kind load`, rollout, **new page, bundle hash confirmed**)
+and driven end to end against real Trino data (`Demo Sales`, `total_revenue` = 116,269), side by
+side with Metabase card 39 at 1440×920.
+
+**A fourth defect, and only the screenshot could see it.** The captions were stranded at the
+**bottom of the card, ~300px under the number**: the value's box had `flex-1 basis-0` and swallowed
+all the spare height. Every numeric check passed — the number fitted, nothing overflowed, contrast
+was fine — because none of them measured the *gap*. The measuring element is now absolutely
+positioned (out of flow) and the caption block is measured so its height is subtracted from the
+number's. Confirmed after redeploy: gap 0px, group centred to within 3px.
+
+This is the rule from §1 earning its place in the other direction: measurements alone miss layout.
+
+**Also fixed here:** `Records where all rows` was not a sentence. A drill with no filters was
+unreachable until the scalar arrived — it has no dimensions, so its context is always empty — so a
+string that had always been wrong only now became visible. It reads `All records`.
+
+**A near miss worth recording:** a rebuild run from the wrong directory failed, and the very next
+command happily re-loaded the *old* image and reported a successful rollout. Verifying the bundle
+hash and the Docker image ID is what stopped a check against stale code.
+
+### Side by side with Metabase card 39
+
+| | Metabase | egret |
+|---|---|---|
+| font-size | **64px** | **64px** |
+| weight | 700 | 700 |
+| typeface | Lato (its product font) | Inter (egret's) |
+| band colour | `#E75454`, **3.62:1** on white | `#5B8C3A`, **3.99:1** |
+| band name shown | **never** — colour only | as text under the number |
+| drill | menu | menu (`All records` → real rows) |
+| PNG export | `canSavePng = false` | absent (no `<svg>` in the container) |
+
+The 64px match is the strongest evidence the port is right: both apps land on the same no-grid
+ceiling from the same constants, on different data.
+
+### Verified in the running app
+
+Round-trip through the backend is clean — `scalar.segments` stores under the flat `scalar.` prefix
+and **`"max": null` survives as null, not `0`**, which is the `Number("") === 0` trap the editor
+guards. Reloading the saved chart renders it identically (no repeat of the pie's silent blank).
+The band editor cycles the new palette, the contrast warning fires with the measured number
+(`#F9D45C` → "light 1.44:1"), drill opens real records, the export menu offers CSV and not PNG
+even though four 16px icons sit in the same `main`, and a dashboard card compacts to `116.3K` at
+44.8px with the caption still under the number. Both themes checked.
+
 ## Live check
 
 On the Demo Sales dataset, against Metabase's card 39 at a matched viewport:

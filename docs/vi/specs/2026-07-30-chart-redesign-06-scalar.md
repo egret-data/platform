@@ -252,6 +252,52 @@ chart 05 không chạm tới một chart dạng DOM), không tràn ở cả năm
 giá trị đầy đủ (`3,428,911` → `3.4M`), mức chặn card hẹp rơi đúng 2.5rem ở 220px, và tên dải hiện
 thành chữ dưới con số.
 
+## Kiểm tra thật trên kind — chạy thật đã tìm ra gì
+
+Đã deploy lên kind (build lại frontend image, `kind load`, rollout, **mở TRANG MỚI, xác nhận hash
+bundle**) và chạy end-to-end với dữ liệu Trino thật (`Demo Sales`, `total_revenue` = 116.269), đặt
+cạnh Metabase card 39 ở 1440×920.
+
+**Lỗi thứ tư, và chỉ ảnh chụp mới thấy.** Các caption bị mắc kẹt ở **đáy card, cách con số ~300px**:
+hộp chứa giá trị có `flex-1 basis-0` nên nuốt hết chiều cao thừa. Mọi phép kiểm bằng số đều đạt — số
+vừa khung, không tràn, tương phản tốt — vì không phép nào đo **khoảng cách**. Nay phần tử đo được đặt
+absolute (ra khỏi luồng) và khối caption được đo để trừ khỏi chiều cao dành cho số. Xác nhận sau khi
+deploy lại: khoảng cách 0px, cả cụm căn giữa lệch trong 3px.
+
+Đây là quy tắc §1 chứng minh giá trị theo chiều ngược lại: **chỉ đo số thì bỏ sót bố cục**.
+
+**Cũng sửa luôn ở đây:** `Records where all rows` không thành câu. Một drill không có filter nào là
+bất khả cho tới khi scalar xuất hiện — nó không có chiều nên ngữ cảnh luôn rỗng — nên một chuỗi vốn
+đã sai từ lâu giờ mới lộ ra. Nay nó đọc là `All records`.
+
+**Một pha suýt hỏng đáng ghi:** một lần build chạy sai thư mục nên thất bại, và lệnh ngay sau đó
+vẫn vui vẻ nạp lại image **cũ** rồi báo rollout thành công. Nhờ kiểm tra hash bundle và image ID mà
+không kết luận trên code cũ.
+
+### Đặt cạnh Metabase card 39
+
+| | Metabase | egret |
+|---|---|---|
+| cỡ chữ | **64px** | **64px** |
+| weight | 700 | 700 |
+| font | Lato (font sản phẩm của nó) | Inter (của egret) |
+| màu dải | `#E75454`, **3.62:1** trên trắng | `#5B8C3A`, **3.99:1** |
+| có hiện tên dải | **không bao giờ** — chỉ có màu | hiện thành chữ dưới số |
+| drill | có menu | có menu (`All records` → bản ghi thật) |
+| xuất PNG | `canSavePng = false` | vắng mặt (container không có `<svg>`) |
+
+Việc khớp đúng 64px là bằng chứng mạnh nhất rằng bản port đúng: hai app cùng rơi vào một trần
+không-lưới từ cùng bộ hằng số, trên dữ liệu khác nhau.
+
+### Đã kiểm chứng trong app đang chạy
+
+Round-trip qua backend sạch — `scalar.segments` lưu dưới tiền tố phẳng `scalar.` và **`"max": null`
+sống sót đúng là null, không thành `0`**, đúng cái bẫy `Number("") === 0` mà editor phòng. Tải lại
+chart đã lưu render y hệt (không lặp lại ca pie trắng im lặng). Editor dải xoay đúng bảng màu mới,
+cảnh báo tương phản hiện kèm số đo (`#F9D45C` → "light 1.44:1"), drill mở bản ghi thật, menu xuất có
+CSV mà không có PNG dù có bốn icon 16px nằm cùng trong `main`, và card dashboard rút gọn thành
+`116.3K` ở 44.8px với caption vẫn nằm ngay dưới số. Đã kiểm cả hai theme.
+
 ## Kiểm tra thật
 
 Trên bộ dữ liệu Demo Sales, đối chiếu card 39 của Metabase ở cùng một viewport:

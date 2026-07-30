@@ -42,7 +42,15 @@ export function BigNumber({
   gridCols?: number;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const captionRef = useRef<HTMLDivElement>(null);
   const size = useElementSize(hostRef);
+  const captionSize = useElementSize(captionRef);
+  // The captions sit in the same centred column as the value, so the room left for the number is
+  // the box minus whatever they take. Measured, not assumed: a first attempt gave the value host
+  // `flex-1 basis-0`, which let it swallow all the spare height and pinned the captions to the
+  // BOTTOM of the card, ~300px under the number. Every numeric check passed — the number fitted,
+  // nothing overflowed — because none of them measured the gap. Only the screenshot showed it.
+  const captionHeight = captionSize?.height ?? 0;
 
   const mi = metric != null ? columns.findIndex((c) => c.name === metric) : -1;
   const raw = mi >= 0 && rows.length > 0 ? rows[0][mi] : undefined;
@@ -65,7 +73,7 @@ export function BigNumber({
     const fontFamily = host ? window.getComputedStyle(host).fontFamily : "inherit";
     return findSize({
       text: display,
-      targetHeight: Math.max(size.height - SCALAR_PADDING, 0),
+      targetHeight: Math.max(size.height - captionHeight - SCALAR_PADDING, 0),
       targetWidth: Math.max(size.width - SCALAR_PADDING, 0),
       unit: "rem",
       fontFamily,
@@ -75,7 +83,7 @@ export function BigNumber({
       max: maxFontSizeRem(gridCols, GRID_COLS, size.width),
       measurer: measureText,
     });
-  }, [size, display, raw, gridCols]);
+  }, [size, display, raw, gridCols, captionHeight]);
 
   const segment = matchSegment(raw, segments);
   const isClickable = onValueClick != null && raw != null;
@@ -127,17 +135,19 @@ export function BigNumber({
 
   return (
     <div
-      className="flex h-full min-h-[5rem] w-full flex-col items-center justify-center"
+      className="relative flex h-full min-h-[5rem] w-full flex-col items-center justify-center"
       // When the number is not interactive the whole card reads as one image, which is what makes
       // a screen reader say "total_revenue: 25,468" as a single utterance instead of a bare number
       // followed by an unrelated-sounding word. Once it IS interactive that role would hide the
       // control, so the accessible name moves onto the button.
       {...(isClickable ? {} : { role: "img", "aria-label": spoken })}
     >
-      {/* `flex-1` + `min-h-0` + `basis-0`: this box's size comes from the space left over, never
-          from the number inside it. If it grew with its content the ResizeObserver and the font
-          fit would chase each other. */}
-      <div ref={hostRef} className="flex min-h-0 w-full flex-1 basis-0 items-center justify-center px-2">
+      {/* `absolute inset-0`: this measures the WHOLE box without taking part in the layout, so the
+          number and its captions stay one centred group. Sizing it by `flex-1` instead made it
+          swallow the spare height and stranded the captions at the bottom of the card. */}
+      <div ref={hostRef} aria-hidden className="pointer-events-none absolute inset-0" />
+
+      <div className="flex w-full min-w-0 items-center justify-center px-2">
         {isCompacted ? (
           <TooltipProvider delayDuration={200}>
             <Tooltip>
@@ -152,17 +162,19 @@ export function BigNumber({
         )}
       </div>
 
-      {/* The band's name as TEXT, not only as colour. Metabase keeps this in a hover tooltip, so
-          its red and green numbers are indistinguishable to a colourblind reader or on a
-          monochrome display — `color-not-only`, High severity. Colour stays the fast signal; the
-          word carries the meaning. */}
-      {segment?.label && (
-        <div className="mt-1.5 shrink-0 px-2 text-center text-xs font-medium" style={{ color: segment.color }}>
-          {segment.label}
-        </div>
-      )}
-      {label && <div className="mt-3 shrink-0 px-2 text-center text-sm text-foreground">{label}</div>}
-      {sublabel && <div className="mt-1 shrink-0 px-2 text-center text-xs text-muted-foreground">{sublabel}</div>}
+      {/* One measured block, so the space it takes can be subtracted from the number's own. The
+          band's name is TEXT here, not only colour: Metabase keeps it in a hover tooltip, which
+          leaves a red and a green number indistinguishable to a colourblind reader or on a
+          monochrome display — `color-not-only`, High severity. */}
+      <div ref={captionRef} className="w-full shrink-0">
+        {segment?.label && (
+          <div className="mt-1.5 px-2 text-center text-xs font-medium" style={{ color: segment.color }}>
+            {segment.label}
+          </div>
+        )}
+        {label && <div className="mt-3 px-2 text-center text-sm text-foreground">{label}</div>}
+        {sublabel && <div className="mt-1 px-2 text-center text-xs text-muted-foreground">{sublabel}</div>}
+      </div>
     </div>
   );
 }
