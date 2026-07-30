@@ -16,8 +16,20 @@ function csvCell(v: unknown): string {
  * cell instead of falling back to the real name.
  */
 export function rowsToCsv(columns: ResultColumn[], rows: unknown[][], columnSettings?: Record<string, ColumnFormat>): string {
-  const header = columns.map((c) => csvCell(columnSettings?.[c.name]?.column_title || c.name)).join(",");
-  const body = rows.map((r) => r.map(csvCell).join(",")).join("\r\n");
+  // A rollup result carries one `__grp_N` marker per dimension and, interleaved with the data, a
+  // row for every subtotal and the grand total. Those are how the pivot builds its bands — they
+  // are not columns or rows anyone asked for. Exported raw, the file opened with `__grp_0,__grp_1,
+  // __grp_2` in the header and a first row of `,,,116269,1,1,1`: a total, indistinguishable from
+  // data unless the reader knows to decode the markers. Drop both.
+  const markerIdx = columns.map((c, i) => (/^__grp_\d+$/.test(c.name) ? i : -1)).filter((i) => i >= 0);
+  const keep = columns.map((_, i) => i).filter((i) => !markerIdx.includes(i));
+  const isRollupRow = (r: unknown[]) => markerIdx.some((i) => Number(r[i]) === 1);
+
+  const header = keep.map((i) => csvCell(columnSettings?.[columns[i].name]?.column_title || columns[i].name)).join(",");
+  const body = rows
+    .filter((r) => !isRollupRow(r))
+    .map((r) => keep.map((i) => csvCell(r[i])).join(","))
+    .join("\r\n");
   return body ? `${header}\r\n${body}` : header;
 }
 

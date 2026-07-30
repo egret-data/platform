@@ -377,7 +377,12 @@ export default function ChartExplore() {
   return (
     <div className="flex h-full min-h-0 gap-0">
       {/* Left panel */}
-      <div className="w-72 shrink-0 overflow-y-auto border-r p-4 space-y-4">
+      {/* `scrollbar-gutter: stable` keeps a visible track instead of an overlay scrollbar that
+          only appears mid-scroll. On macOS the overlay bar is hidden at rest, so a settings panel
+          taller than the window looked simply cut off — the pivot's is the longest (totals,
+          per-dimension subtotals, formatting, conditional formatting) and it was reported as
+          "Display doesn't show everything". It always scrolled; nothing said so. */}
+      <div className="w-72 shrink-0 overflow-y-auto [scrollbar-gutter:stable] border-r p-4 space-y-4">
         <Link className="text-xs text-muted-foreground hover:underline" to={`/explore/${ws}/charts`}>← Charts</Link>
 
         <VizSwitcher viz={viz} onChange={changeViz} />
@@ -524,6 +529,7 @@ export default function ChartExplore() {
                 sortDims: pivotCfg.sort ?? {},
                 dimTotals: pivotCfg.dimTotals,
                 columnWidths: pivotCfg.columnWidths,
+                temporalUnits: temporalUnits ?? {},
                 // Stored with the chart like `collapsedRows` and `sort`, and deliberately NOT part
                 // of `buildSpec` — a column width is presentation, and putting it in the spec would
                 // re-run the query on every drag.

@@ -70,7 +70,8 @@ export function SharedDisplaySections({
       {styleColumns.length > 0 && (
         <div className="space-y-1.5">
           <SectionLabel>Formatting</SectionLabel>
-          <FormatSection columns={styleColumns} value={columnSettings} onChange={onColumnSettings} />
+          <FormatSection columns={styleColumns} value={columnSettings} onChange={onColumnSettings}
+            allowMiniBar={vizType === "table"} />
         </div>
       )}
       {(vizType === "table" || vizType === "pivot_table") && (

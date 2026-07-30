@@ -43,11 +43,15 @@ function ToggleRow({ id, label, checked, onChange }: {
 }
 
 export function FormatSection({
-  columns, value, onChange,
+  columns, value, onChange, allowMiniBar = true,
 }: {
   columns: ResultColumn[];
   value: Record<string, ColumnFormat>;
   onChange: (v: Record<string, ColumnFormat>) => void;
+  /** Only the flat table draws mini bars. The pivot has no renderer for `show_mini_bar`, so the
+   * switch sat there doing nothing — offering a setting that cannot take effect is worse than
+   * not offering it. */
+  allowMiniBar?: boolean;
 }) {
   // which column's settings are expanded (accordion); null = all collapsed
   const [open, setOpen] = useState<string | null>(null);
@@ -156,7 +160,9 @@ export function FormatSection({
                     <div className="space-y-2.5 pt-1">
                       <ToggleRow id={`fmt-compact-${c.name}`} label="Compact (1.2K)" checked={!!fmt.compact} onChange={(v) => patch({ compact: v })} />
                       <ToggleRow id={`fmt-negatives-${c.name}`} label="Negatives in ( )" checked={!!fmt.negative_in_parentheses} onChange={(v) => patch({ negative_in_parentheses: v })} />
-                      <ToggleRow id={`fmt-minibar-${c.name}`} label="Show a mini bar chart" checked={!!fmt.show_mini_bar} onChange={(v) => patch({ show_mini_bar: v })} />
+                      {allowMiniBar && (
+                        <ToggleRow id={`fmt-minibar-${c.name}`} label="Show a mini bar chart" checked={!!fmt.show_mini_bar} onChange={(v) => patch({ show_mini_bar: v })} />
+                      )}
                     </div>
                   </div>
                 )}

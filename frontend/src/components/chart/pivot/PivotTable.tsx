@@ -59,7 +59,7 @@ export interface PivotColumnWidths {
 
 export function PivotTable({
   input, columnSettings = {}, conditionalFormatting = [], metricTypes = {},
-  onToggleCollapse, onCycleSort, onCellDrill, columnWidths, onResizeColumn,
+  onToggleCollapse, onCycleSort, onCellDrill, columnWidths, onResizeColumn, temporalUnits = {},
 }: {
   input: PivotInput;
   columnSettings?: Record<string, ColumnFormat>;
@@ -71,8 +71,18 @@ export function PivotTable({
   columnWidths?: PivotColumnWidths;
   /** Omitted in read-only surfaces (a dashboard card), which disables the handles. */
   onResizeColumn?: (kind: "left" | "value", index: number, width: number) => void;
+  /** dimension -> temporal unit, so a drill on a bucketed column filters the whole bucket rather
+   * than the single instant its label happens to show. */
+  temporalUnits?: Record<string, string>;
 }) {
-  const p = buildPivot(input);
+  // The engine needs to know whether any metric was renamed, so it can give the sub-header a row
+  // to show the name in — see `renamedMetric` there.
+  const metricTitles: Record<string, string> = {};
+  for (const m of input.metrics) {
+    const t = columnSettings[m]?.column_title;
+    if (t) metricTitles[m] = t;
+  }
+  const p = buildPivot({ ...input, metricTitles });
   const condRows = p.bodyRows.filter((br) => br.kind === "leaf").map((br) => br.values);
   const condColIndex: Record<string, number> = {};
   p.colLeaves.forEach((cl, i) => { if (!(cl.metric in condColIndex)) condColIndex[cl.metric] = i; });
@@ -199,7 +209,7 @@ export function PivotTable({
                       style={bg ? { backgroundColor: bg } : undefined}
                       onClick={onCellDrill && br.kind === "leaf"
                         ? (e) => onCellDrill(
-                            pivotCellDrill(input.rowDims, br.rowPath, input.colDims, cl.colPath),
+                            pivotCellDrill(input.rowDims, br.rowPath, input.colDims, cl.colPath, temporalUnits),
                             e.clientX, e.clientY,
                           )
                         : undefined}

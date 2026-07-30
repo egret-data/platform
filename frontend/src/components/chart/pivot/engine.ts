@@ -13,6 +13,9 @@ export interface PivotInput {
    * `dimShowsTotals` (on for every dimension except the innermost). Narrows `showColTotals`,
    * never widens it. */
   dimTotals?: Record<string, boolean>;
+  /** metric name -> its `column_title`, when one is set. Only used to decide whether the metric
+   * sub-header is worth a row; the renderer still reads the title from `columnSettings`. */
+  metricTitles?: Record<string, string>;
 }
 
 export type CellValue = number | string | null;
@@ -247,8 +250,16 @@ export function buildPivot(input: PivotInput): Pivot {
     }
     topHeader.push(level);
   }
-  // metric sub-header (only when more than one metric) — one cell per colLeaf, aligned to values.
-  if (nMetric > 1 || C === 0) {
+  // Metric sub-header — one cell per colLeaf, aligned to the values.
+  //
+  // Normally only worth a row when there is more than one metric to tell apart (or no column
+  // dimension, where it is the only header there is). The third case is renaming: with a single
+  // metric under column dimensions there was nowhere for its `column_title` to appear, so typing
+  // one in the Formatting panel changed nothing at all — a setting that silently did nothing.
+  const renamedMetric = input.metricTitles
+    ? input.metrics.some((m) => (input.metricTitles?.[m] ?? "") !== "")
+    : false;
+  if (nMetric > 1 || C === 0 || renamedMetric) {
     topHeader.push(colLeaves.map((cl) => ({ label: cl.metric, colSpan: 1, metric: cl.metric })));
   }
 

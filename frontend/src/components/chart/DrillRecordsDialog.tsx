@@ -22,8 +22,18 @@ export function DrillRecordsDialog({
   // "Records where all rows" is not a sentence. A drill with no filters was unreachable until the
   // scalar arrived — it has no dimensions, so its drill context is always empty — which is how a
   // string that had always been wrong first became visible.
+  // The operator has to be printed, not assumed to be `=`. A drill on a bucketed time dimension
+  // sends a half-open range, and hard-coding `=` rendered it as the nonsense
+  // "order_date = 2026-01-01, order_date = 2026-02-01" — two contradictory equalities describing
+  // what is actually one month.
+  const OPS: Record<string, string> = {
+    eq: "=", ne: "≠", gt: ">", ge: "≥", lt: "<", le: "≤",
+    like: "like", not_like: "not like", in: "in", not_in: "not in",
+  };
   const title = filters.length
-    ? `Records where ${filters.map((f) => ("value" in f ? `${f.col} = ${String(f.value)}` : `${f.col} ${f.op}`)).join(", ")}`
+    ? `Records where ${filters
+        .map((f) => ("value" in f ? `${f.col} ${OPS[f.op] ?? f.op} ${String(f.value)}` : `${f.col} ${f.op}`))
+        .join(", ")}`
     : "All records";
 
   return (
