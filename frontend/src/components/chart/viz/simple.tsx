@@ -1,6 +1,7 @@
 import { PieDisplaySection } from "@/components/chart/settings/PieDisplaySection";
 import { GaugeSegmentsSection } from "@/components/chart/settings/GaugeSegmentsSection";
-import type { GaugeSegment, PieConfig } from "@/api/charts";
+import { ScalarDisplaySection } from "@/components/chart/settings/ScalarDisplaySection";
+import type { GaugeSegment, PieConfig, ScalarConfig } from "@/api/charts";
 import { fieldDescriptor } from "./fields";
 import type { VizControl, VizControlProps, VizDescriptor } from "./types";
 
@@ -42,6 +43,20 @@ function GaugeDisplayControl({ config, onChange, resultColumns, rows }: VizContr
 
 const gaugeDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display", render: GaugeDisplayControl }];
 
+/** The scalar's captions and conditional-colour bands. Unlike the gauge's, this control needs
+ * nothing from the result — a band is compared against whatever value renders, not against the
+ * columns — so it takes only the config. */
+function ScalarDisplayControl({ config, onChange }: VizControlProps<Cfg>) {
+  return (
+    <ScalarDisplaySection
+      config={config as ScalarConfig}
+      onChange={(patch) => onChange(patch as Partial<Cfg>)}
+    />
+  );
+}
+
+const scalarDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display", render: ScalarDisplayControl }];
+
 /**
  * The nine viz types whose configuration is just a handful of field pickers. Declared
  * through `fieldDescriptor` rather than written out, so adding one is a few lines of data.
@@ -62,7 +77,7 @@ export const SIMPLE_DESCRIPTORS: VizDescriptor<Cfg>[] = [
     legacyFromSpec: (spec) => ({ dimensions: spec.dimensions, metric: spec.metrics?.[0] }),
   }),
   fieldDescriptor({
-    key: "scalar", prefix: "scalar.", legacyKey: "scalar",
+    key: "scalar", prefix: "scalar.", legacyKey: "scalar", display: scalarDisplay,
     fields: [{ id: "metric", label: "Metric", kind: "metric", required: "a metric" }],
     buildSpec: (c, s, h) => h.oneRow(c.metric, s),
     legacyFromSpec: (spec) => ({ metric: spec.metrics?.[0] }),

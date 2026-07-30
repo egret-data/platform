@@ -89,6 +89,61 @@ describe("ChartRenderer", () => {
     expect(screen.getByText((t) => t.replace(/,/g, "") === "42000")).toBeInTheDocument();
   });
 
+  // THE SEAM, not the component. Every assertion below would still pass if `BigNumber` were
+  // perfect and this branch dropped the setting on the floor — which is exactly what happened to
+  // pie (decimals, sliceNames, hiddenSlices, sliceOrder) and to cartesian before it, because the
+  // component tests called the builder directly and never crossed this line. The scalar branch
+  // spreads its config; these tests are what would notice if someone un-spread it.
+  describe("scalar settings reach the chart through ChartRenderer", () => {
+    const cols = [{ name: "revenue", type: "double" }];
+
+    it("forwards conditional-colour segments", () => {
+      render(
+        <ChartRenderer
+          vizType="scalar"
+          params={params({
+            scalar: {
+              metric: "revenue",
+              segments: [{ min: 0, max: 100, color: "#e75454", label: "Low" }],
+            },
+          })}
+          columns={cols}
+          rows={[[42]]}
+        />,
+      );
+      expect(screen.getByText("42")).toHaveStyle({ color: "#e75454" });
+      expect(screen.getByText("Low")).toBeInTheDocument();
+    });
+
+    it("forwards label and sublabel", () => {
+      render(
+        <ChartRenderer
+          vizType="scalar"
+          params={params({ scalar: { metric: "revenue", label: "Revenue", sublabel: "this quarter" } })}
+          columns={cols}
+          rows={[[42]]}
+        />,
+      );
+      expect(screen.getByText("Revenue")).toBeInTheDocument();
+      expect(screen.getByText("this quarter")).toBeInTheDocument();
+    });
+
+    it("forwards the drill handler", () => {
+      const onValueClick = vi.fn();
+      render(
+        <ChartRenderer
+          vizType="scalar"
+          params={params({ scalar: { metric: "revenue" } })}
+          columns={cols}
+          rows={[[42]]}
+          onValueClick={onValueClick}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button"));
+      expect(onValueClick).toHaveBeenCalledWith({ dims: [] }, expect.any(Number), expect.any(Number));
+    });
+  });
+
   it("dispatches cartesian viz to the ECharts renderer", () => {
     render(
       <ChartRenderer

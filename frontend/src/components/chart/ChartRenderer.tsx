@@ -249,9 +249,12 @@ export interface ChartRendererProps {
   /** metric_name -> data_type, for metric value formatting. Optional; defaults to {}. */
   metricTypes?: Record<string, string>;
   onValueClick?: (ctx: DrillContext, x: number, y: number) => void;
+  /** The card's width in dashboard grid columns, when it is on a grid. Supplied only by
+   * `DashboardCardView`; the studio preview has no grid and omits it. */
+  gridCols?: number;
 }
 
-export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO_METRIC_TYPES, onValueClick }: ChartRendererProps) {
+export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO_METRIC_TYPES, onValueClick, gridCols }: ChartRendererProps) {
   // One config, from the viz's own descriptor; each branch below reads it as its type.
   const cfg = vizConfig(vizType, params);
   const cartesian = { yMetrics: [], ...cfg } as CartesianConfig;
@@ -351,13 +354,18 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
   }
 
   if (vizType === "scalar") {
+    // SPREADS its config, for the reason spelled out above the five branches below: a
+    // hand-maintained field list is a trap, not a safeguard. This branch used to list `metric`
+    // alone, and this unit adds three more fields to the other side of it.
     return (
       <div className="h-full w-full">
         <BigNumber
+          {...scalar}
           columns={columns}
           rows={rows}
-          metric={scalar.metric}
           format={scalar.metric ? columnSettings[scalar.metric] : undefined}
+          onValueClick={onValueClick}
+          gridCols={gridCols}
         />
       </div>
     );

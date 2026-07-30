@@ -128,8 +128,33 @@ export interface PieConfig {
   /** Decimal places on percentages. */
   decimals?: number;
 }
+/**
+ * A conditional-colour band for a scalar. Deliberately NOT `GaugeSegment`: a gauge's arc needs
+ * both ends to have a length, so its bounds are required numbers, while a scalar band is a plain
+ * interval test and "≥ 1701 is High" is the natural way to write its top band. Matches Metabase's
+ * `ScalarSegment`.
+ *
+ * `min`/`max` are NULLABLE, not optional. A bound edited down to an empty input has to round-trip
+ * through JSONB as an explicit "no bound"; an optional key that simply disappears is
+ * indistinguishable from one that was never set.
+ */
+export interface ScalarSegment {
+  /** Lower bound, inclusive. `null` is −∞. */
+  min: number | null;
+  /** Upper bound, inclusive. `null` is +∞. */
+  max: number | null;
+  color: string;
+  label?: string;
+}
 export interface ScalarConfig {
   metric?: string;
+  /** Conditional colour bands. Order is meaning — the FIRST match wins, so nothing sorts these. */
+  segments?: ScalarSegment[];
+  /** Optional caption under the value. Off by default: dashboard cards already render a header,
+   * so the old always-on metric name printed it twice. */
+  label?: string;
+  /** Optional second caption line, below `label`. */
+  sublabel?: string;
 }
 export interface ProgressConfig {
   metric?: string;
