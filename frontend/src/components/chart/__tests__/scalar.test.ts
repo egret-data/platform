@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   compactifyValue, isValidSegment, matchSegment, formatSegmentRange, shouldCompact, maxFontSizeRem,
-  MAX_SIZE_LARGE, NARROW_CARD_MAX_SIZE,
+  MAX_SIZE_LARGE, NARROW_CARD_MAX_SIZE, NO_GRID_MAX_SIZE, SCALAR_BAND_PALETTE, bandContrast, LARGE_TEXT_CONTRAST,
 } from "../scalar";
 import { findSize, type TextMeasurer } from "../measure-text";
 
@@ -136,7 +136,46 @@ describe("maxFontSizeRem", () => {
   });
 
   it("falls back to the large bound when there is no grid to read", () => {
-    expect(maxFontSizeRem(undefined, undefined, 800)).toBe(MAX_SIZE_LARGE);
+    expect(maxFontSizeRem(undefined, undefined, 800)).toBe(NO_GRID_MAX_SIZE);
+  });
+});
+
+describe("band colours", () => {
+  it("every default band colour clears the large-text bar in BOTH themes", () => {
+    // The measured reason this palette exists: all eight SERIES_PALETTE colours fail as ink on the
+    // light card. If someone swaps these back for the series palette, this fails.
+    for (const hex of SCALAR_BAND_PALETTE) {
+      const c = bandContrast(hex);
+      expect(c, hex).not.toBeNull();
+      expect(c!.light, `${hex} light`).toBeGreaterThanOrEqual(LARGE_TEXT_CONTRAST);
+      expect(c!.dark, `${hex} dark`).toBeGreaterThanOrEqual(LARGE_TEXT_CONTRAST);
+    }
+  });
+
+  it("flags a colour that is unreadable on one side", () => {
+    // Independently known: near-white is invisible on the light card, near-black on the dark one.
+    expect(bandContrast("#FFFFFF")!.passes).toBe(false);
+    expect(bandContrast("#FFFFFF")!.light).toBeLessThan(LARGE_TEXT_CONTRAST);
+    expect(bandContrast("#000000")!.passes).toBe(false);
+    expect(bandContrast("#000000")!.dark).toBeLessThan(LARGE_TEXT_CONTRAST);
+  });
+
+  it("agrees with the browser measurement for Metabase's own segment colour", () => {
+    // Metabase's sample card 39 ships #51528D. Measured in a browser against egret's dark card it
+    // is 2.48 — under the bar — which is why these are not copied.
+    const c = bandContrast("#51528D")!;
+    expect(c.dark).toBeCloseTo(2.48, 1);
+    expect(c.passes).toBe(false);
+  });
+
+  it("returns null for anything that is not a readable hex", () => {
+    expect(bandContrast("var(--primary)")).toBeNull();
+    expect(bandContrast("rebeccapurple")).toBeNull();
+  });
+
+  it("computes a known ratio correctly", () => {
+    // Black on white is the textbook 21:1.
+    expect(bandContrast("#000000")!.light).toBeCloseTo(21, 1);
   });
 });
 

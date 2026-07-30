@@ -33,6 +33,7 @@ export interface SegmentRow {
  */
 export function SegmentRangesSection({
   rows, onChange, nullableBounds = false, contiguous = false, minRows = 0, emptyHint,
+  palette = SERIES_PALETTE, warnContrast,
 }: {
   rows: SegmentRow[];
   onChange: (rows: SegmentRow[]) => void;
@@ -41,6 +42,13 @@ export function SegmentRangesSection({
   minRows?: number;
   /** Shown in place of the list when there are no rows. Only reachable when `minRows` is 0. */
   emptyHint?: string;
+  /** Colours `Add range` cycles through. The gauge uses `SERIES_PALETTE` because its colours are
+   * FILLS; the scalar passes its own, because its colours are ink and the series palette fails
+   * 4.5:1 as ink on the light card in all eight slots. */
+  palette?: readonly string[];
+  /** Returns a warning for a colour that is hard to read, or `null`. The scalar supplies this
+   * because a user may pick any colour from the swatch, not only a palette default. */
+  warnContrast?: (hex: string) => string | null;
 }) {
   function patch(i: number, field: keyof SegmentRow, v: SegmentRow[keyof SegmentRow]) {
     const next = rows.map((s) => ({ ...s }));
@@ -72,7 +80,7 @@ export function SegmentRangesSection({
   function addRange() {
     const last = rows[rows.length - 1];
     const base = last && typeof last.max === "number" ? last.max : 0;
-    onChange([...rows, { min: base, max: base + 10, color: SERIES_PALETTE[rows.length % SERIES_PALETTE.length] }]);
+    onChange([...rows, { min: base, max: base + 10, color: palette[rows.length % palette.length] }]);
   }
 
   function removeRange(i: number) {
@@ -86,8 +94,10 @@ export function SegmentRangesSection({
       {rows.length === 0 && emptyHint && (
         <div className="rounded border border-dashed px-2 py-1.5 text-xs text-muted-foreground">{emptyHint}</div>
       )}
-      {rows.map((s, i) => (
-        <div key={i} className="flex items-center gap-1">
+      {rows.map((s, i) => {
+        const warning = warnContrast?.(s.color) ?? null;
+        return (
+        <div key={i} className="flex flex-wrap items-center gap-1">
           <input
             type="color"
             aria-label={`range ${i + 1} color`}
@@ -128,8 +138,14 @@ export function SegmentRangesSection({
           >
             <Trash2 className="h-3.5 w-3.5" />
           </button>
+          {/* Said out loud rather than silently rendered. A band colour lands on the headline
+              number itself, so an unreadable one is not a cosmetic problem. */}
+          {warning && (
+            <p role="status" className="w-full pl-8 text-xs text-muted-foreground">{warning}</p>
+          )}
         </div>
-      ))}
+        );
+      })}
       <Button type="button" variant="outline" size="sm" className="w-full" onClick={addRange}>
         <Plus className="mr-1 h-3.5 w-3.5" /> Add range
       </Button>

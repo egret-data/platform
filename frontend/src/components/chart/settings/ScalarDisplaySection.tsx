@@ -1,7 +1,21 @@
 import type { ScalarConfig, ScalarSegment } from "@/api/charts";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { bandContrast, LARGE_TEXT_CONTRAST, SCALAR_BAND_PALETTE } from "@/components/chart/scalar";
 import { SegmentRangesSection, type SegmentRow } from "./SegmentRangesSection";
+
+/** Names the theme the colour is hard to read in, and the measured number, rather than a generic
+ * "low contrast" — the user can only act on which side is failing. Silence means it clears the
+ * bar in both. */
+function contrastWarning(hex: string): string | null {
+  const c = bandContrast(hex);
+  if (!c || c.passes) return null;
+  const weak = [
+    c.light < LARGE_TEXT_CONTRAST ? `light ${c.light}:1` : null,
+    c.dark < LARGE_TEXT_CONTRAST ? `dark ${c.dark}:1` : null,
+  ].filter(Boolean).join(", ");
+  return `Hard to read on the card (${weak}); ${LARGE_TEXT_CONTRAST}:1 is the minimum for a number this size.`;
+}
 
 /**
  * The scalar's display settings: optional captions, and the conditional-colour bands.
@@ -53,6 +67,8 @@ export function ScalarDisplaySection({ config, onChange }: {
           rows={segments}
           nullableBounds
           minRows={0}
+          palette={SCALAR_BAND_PALETTE}
+          warnContrast={contrastWarning}
           emptyHint="No ranges — the number uses the default text colour."
           onChange={(next) => onChange({ segments: next.map(toScalarSegment) })}
         />

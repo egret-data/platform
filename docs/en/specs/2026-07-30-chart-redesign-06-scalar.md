@@ -206,6 +206,50 @@ before it — and this unit adds three fields to that side.
   chart 11. They are typed as scalar settings in Metabase but its Scalar never reads them.
 - **The number formatting.** It already matches. Do not touch `formatValue`.
 
+## What the live measurement changed
+
+Measured in a browser at 1440×920 against a harness rendering the real component at five card
+sizes in both themes. Three things were wrong that no unit test could have shown.
+
+**1. The font ceiling was 7rem where Metabase's is 4rem.** Metabase reads
+`max: gridSize ? getMaxFontSize(…) : 4` — the no-grid fallback is a flat `4`, not `MAX_SIZE_LARGE`.
+Misreading it put a two-digit number at **112px on a 300×160 card**, filling it corner to corner.
+Fixed, and the card's grid width is now plumbed (`DashboardCardView` → `ChartRenderer` →
+`BigNumber`) so a dashboard card scales its ceiling by its share of the grid, as Metabase does.
+
+**2. `SERIES_PALETTE` is unusable as band ink, and the whole palette failed.** A band colours the
+numeral itself, which is a different problem from filling an area. Measured as ink on the light
+card, **all 8 series colours fail 4.5:1 and 6 of 8 fail even 3:1** (worst `#F9D45C` at **1.44**).
+Dark mode was fine (7/8 over 4.5), which is exactly how a light-mode-only sweep would have missed
+it — chart 05's lesson, repeated.
+
+There is also a hard limit worth stating, because it bounds what any palette can promise here:
+**no single colour clears 4.5:1 against both themes.** Light demands relative luminance ≤ 0.183,
+dark demands ≥ 0.274; the ranges do not overlap. Checked against 27 candidates — all 27 fail one
+side. Since the numeral is bold and never renders below 24px in a real card, the bar that applies
+is the large-text **3:1**, and a purpose-built `SCALAR_BAND_PALETTE` clears it in both themes:
+
+| | light | dark |
+|---|---|---|
+| before (`SERIES_PALETTE`) | **8/8 fail 4.5, 6/8 fail 3.0**, worst 1.44 | 1/8 fail 4.5, worst 3.97 |
+| after (`SCALAR_BAND_PALETTE`) | 8/8 pass 3.0, worst **3.73** | 8/8 pass 3.0, worst **3.60** |
+
+The editor also warns, naming the failing theme and the number, when a user picks a colour of their
+own that misses the bar — silence would mean shipping an unreadable headline number.
+
+**Metabase's own segment colours are not copied.** Its sample card 39 ships `#51528D`, which
+measures **2.48** against egret's dark card.
+
+**3. A float-accumulation bug in the ported `findSize`.** Metabase's bare `size - step` drifts:
+stepping 7 down to what should be 2.4 yields `2.399999999999996`, which reaches the DOM as a
+font-size with sixteen decimals and never lands on the step grid its own constant describes. Each
+step is rounded now. Caught by this module's own tests, not by reading.
+
+Confirmed good in the same pass: the value draws in **Inter** (the product font — chart 05's
+`sans-serif` defect does not reach a DOM chart), nothing overflows at any of the five sizes,
+compaction fires with the full value in the tooltip (`3,428,911` → `3.4M`), the narrow-card cap
+lands exactly on 2.5rem at 220px, and the band name renders as text under the number.
+
 ## Live check
 
 On the Demo Sales dataset, against Metabase's card 39 at a matched viewport:

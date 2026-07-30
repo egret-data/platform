@@ -77,7 +77,10 @@ function ChartCardTileBody({ card, chart, onValueClick, blocked, editing, autoHe
             : (() => {
               return (
                 <ChartErrorBoundary resetKey={`${chart.id}:${eff.viz_type}:${data.columns?.length ?? 0}:${data.rows?.length ?? 0}`}>
-                  <ChartRenderer vizType={eff.viz_type} params={eff.params} columns={data.columns} rows={data.rows} onValueClick={onValueClick} />
+                  {/* `gridCols` lets a viz scale a size ceiling to the card's share of the grid —
+                      the scalar's number is the one that uses it today. Only a dashboard card
+                      knows this; the studio preview has no grid and falls back to its own cap. */}
+                  <ChartRenderer vizType={eff.viz_type} params={eff.params} columns={data.columns} rows={data.rows} onValueClick={onValueClick} gridCols={card.size_x} />
                 </ChartErrorBoundary>
               );
             })();

@@ -10,6 +10,7 @@ import {
   MIN_SIZE_REM, SCALAR_PADDING, SIZE_STEP_REM, maxFontSizeRem,
 } from "./scalar";
 import { useElementSize } from "./useElementSize";
+import { GRID_COLS } from "./dashboard-grid";
 
 interface ResultColumn { name: string; type: string }
 
@@ -21,7 +22,7 @@ const VALUE_FONT_WEIGHT = 700;
 
 /** Metabase-style "Number" viz: one aggregated value, large and formatted. */
 export function BigNumber({
-  columns, rows, metric, format = {}, segments, label, sublabel, onValueClick,
+  columns, rows, metric, format = {}, segments, label, sublabel, onValueClick, gridCols,
 }: {
   columns: ResultColumn[];
   rows: unknown[][];
@@ -36,6 +37,9 @@ export function BigNumber({
   /** Present when the chart is drillable. A scalar has no dimensions, so its drill context is
    * empty — "show me the records behind this number". */
   onValueClick?: (ctx: DrillContext, x: number, y: number) => void;
+  /** The card's width in dashboard grid columns. A card that owns more of the grid earns a bigger
+   * ceiling; without it (the studio preview) the ceiling is `NO_GRID_MAX_SIZE`. */
+  gridCols?: number;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const size = useElementSize(hostRef);
@@ -68,10 +72,10 @@ export function BigNumber({
       fontWeight: VALUE_FONT_WEIGHT,
       step: SIZE_STEP_REM,
       min: MIN_SIZE_REM,
-      max: maxFontSizeRem(undefined, undefined, size.width),
+      max: maxFontSizeRem(gridCols, GRID_COLS, size.width),
       measurer: measureText,
     });
-  }, [size, display, raw]);
+  }, [size, display, raw, gridCols]);
 
   const segment = matchSegment(raw, segments);
   const isClickable = onValueClick != null && raw != null;

@@ -208,6 +208,50 @@ tay mỗi `metric`, đúng kiểu whitelist đã làm pie mất bốn setting v�
   bao giờ đọc.
 - **Định dạng số.** Đã ngang bằng rồi. Không đụng vào `formatValue`.
 
+## Đo thật đã thay đổi những gì
+
+Đo trong trình duyệt ở 1440×920, với một harness render đúng component thật ở năm cỡ card, cả hai
+theme. Ba thứ đã sai mà không unit test nào có thể phát hiện.
+
+**1. Trần cỡ chữ là 7rem trong khi Metabase là 4rem.** Metabase đọc
+`max: gridSize ? getMaxFontSize(…) : 4` — giá trị dự phòng khi không có lưới là số `4` phẳng, không
+phải `MAX_SIZE_LARGE`. Đọc nhầm chỗ đó khiến một con số hai chữ số hiện ở **112px trên card
+300×160**, chiếm trọn từ mép này sang mép kia. Đã sửa, và bề rộng lưới của card giờ được truyền
+xuống (`DashboardCardView` → `ChartRenderer` → `BigNumber`) để card dashboard co giãn trần theo phần
+lưới nó chiếm, đúng như Metabase.
+
+**2. `SERIES_PALETTE` không dùng được làm màu nét chữ của dải, và cả bảng màu đều trượt.** Một dải tô
+màu chính con số, đó là bài toán khác với tô một mảng. Đo trên card sáng, **cả 8 màu series đều trượt
+4.5:1 và 6/8 trượt cả mốc 3:1** (tệ nhất `#F9D45C` ở **1.44**). Dark mode thì ổn (7/8 trên 4.5) — và
+đó chính là cách một lần quét chỉ-light-mode sẽ bỏ sót nó; đúng bài học của chart 05, lặp lại.
+
+Có một giới hạn cứng cần nói rõ, vì nó chặn mọi lời hứa của bất kỳ bảng màu nào ở đây: **không một
+màu đơn nào đạt 4.5:1 ở cả hai theme.** Light đòi độ sáng tương đối ≤ 0.183, dark đòi ≥ 0.274; hai
+khoảng không giao nhau. Đã kiểm 27 ứng viên — cả 27 trượt một phía. Vì con số in đậm và không bao giờ
+render dưới 24px trong card thật, mốc áp dụng là **3:1** của chữ lớn, và bảng
+`SCALAR_BAND_PALETTE` chuyên dụng đạt mốc đó ở cả hai theme:
+
+| | light | dark |
+|---|---|---|
+| trước (`SERIES_PALETTE`) | **8/8 trượt 4.5, 6/8 trượt 3.0**, tệ nhất 1.44 | 1/8 trượt 4.5, tệ nhất 3.97 |
+| sau (`SCALAR_BAND_PALETTE`) | 8/8 đạt 3.0, tệ nhất **3.73** | 8/8 đạt 3.0, tệ nhất **3.60** |
+
+Editor cũng cảnh báo, nêu rõ theme nào trượt và con số bao nhiêu, khi người dùng tự chọn một màu
+không đạt — im lặng đồng nghĩa với việc ship một con số tiêu đề không đọc nổi.
+
+**Không chép màu dải của chính Metabase.** Card mẫu 39 của nó dùng `#51528D`, đo trên card tối của
+egret ra **2.48**.
+
+**3. Lỗi tích luỹ số thực trong `findSize` đã port.** Phép `size - step` trần trụi của Metabase bị
+trôi: hạ từ 7 xuống chỗ đáng lẽ là 2.4 lại ra `2.399999999999996`, rồi vào DOM thành font-size mười
+sáu chữ số thập phân và không bao giờ rơi đúng lưới bước mà chính hằng số của nó mô tả. Giờ mỗi bước
+đều được làm tròn. Do chính test của module này bắt được, không phải do đọc ra.
+
+Cũng xác nhận tốt trong cùng lượt đo: con số vẽ bằng **Inter** (font sản phẩm — lỗi `sans-serif` của
+chart 05 không chạm tới một chart dạng DOM), không tràn ở cả năm cỡ, rút gọn hoạt động và tooltip giữ
+giá trị đầy đủ (`3,428,911` → `3.4M`), mức chặn card hẹp rơi đúng 2.5rem ở 220px, và tên dải hiện
+thành chữ dưới con số.
+
 ## Kiểm tra thật
 
 Trên bộ dữ liệu Demo Sales, đối chiếu card 39 của Metabase ở cùng một viewport:
