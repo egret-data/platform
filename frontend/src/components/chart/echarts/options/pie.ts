@@ -1087,6 +1087,163 @@ export function buildPieLegend(
   });
 }
 
+// ---------------------------------------------------------------------------------------------
+// The three things the chart and the breakdown table must not be able to disagree about: which
+// ring-0 slices are showing, how precise every reported share is, and whether a ring's own total
+// diverges from the chart's. All three used to live inline in `buildPieOption`; the table reports
+// the same numbers the arcs do, so a second copy of any of them is a divergence waiting to happen.
+
+/** Ring 0, minus whatever the reader has clicked off in the legend — the slices the sunburst
+ * actually roots its tree at. `cfg.hiddenSlices` is NOT this: that is a saved curation, already
+ * applied by `buildPieRings` before any total or threshold was computed. */
+function pieRootSlices(ring0: Slice[], cfg: PieBuildConfig): Slice[] {
+  const toggledOff = new Set(cfg.toggledOffSlices ?? []);
+  return toggledOff.size === 0 ? ring0 : ring0.filter((s) => !toggledOff.has(s.name));
+}
+
+/**
+ * How precise the percentages this chart REPORTS are — the slice labels, the tooltip's table and
+ * the breakdown table, which all share this one answer.
+ *
+ * Metabase's `getAllSlicePercentages`: every slice at every depth, each as a share of its own
+ * parent (which at ring 0 is the chart), at the slice budget rather than the legend's. It pushes an
+ * "Other" bucket's own share and then STOPS — the slices folded inside it are a breakdown of Other,
+ * not of the chart, and their shares are not what a reader is comparing labels across. Kept
+ * faithful to that even though egret's tooltip (and now its table) does list them.
+ */
+function pieSharePrecision(
+  rootSlices: Slice[],
+  rootTotal: number,
+  childrenByParentKey: Map<string, Slice[]>[],
+  cfg: PieBuildConfig,
+): number {
+  const collect = (slices: Slice[], level: number, parentValue: number, out: number[]): number[] => {
+    for (const s of slices) {
+      out.push(parentValue > 0 ? s.value / parentValue : 0);
+      if (s.key != null && s.key.startsWith(OTHER_KEY)) continue;
+      collect(childrenByParentKey[level]?.get(s.key ?? OTHER_KEY) ?? [], level + 1, s.value, out);
+    }
+    return out;
+  };
+  return (
+    cfg.decimals
+    ?? computeMaxPercentDecimals(collect(rootSlices, 0, rootTotal, []), SLICE_PERCENT_SIGNIFICANT_DIGITS)
+  );
+}
+
+/**
+ * A ring drawing less (or more) than the chart's own total, said out loud.
+ *
+ * Every ring's total *should* equal the first ring's (each ring re-partitions the same rows), but
+ * the zero/negative filter runs independently per ring (see buildSlices), so a surviving parent can
+ * still lose children there — the sign/zero rule is applied per-item on the finer partition, not by
+ * re-netting the parent's already-signed total. Nothing about the drawn chart reveals this, so the
+ * chart's aria description and the breakdown table both carry the note.
+ */
+function pieDivergenceNotes(rings: Slice[][], dims: string[], fmt: (v: unknown) => string): string[] {
+  const ringTotals = rings.map((ring) => ring.reduce((t, s) => t + s.value, 0));
+  return ringTotals
+    .map((t, level) => ({ t, level }))
+    .filter(({ t, level }) => level > 0 && Math.abs(t - ringTotals[0]) > 1e-9)
+    .map(({ t, level }) => `Note: the ${dims[level]} ring totals ${fmt(t)}, not ${fmt(ringTotals[0])} like the chart's overall total — some rows were dropped by the zero/negative filter at that ring.`);
+}
+
+/** One row of the breakdown table: one DRAWN slice, at the depth the chart draws it. */
+export interface PieBreakdownRow {
+  /** Which ring, counted from the centre — 0 is the innermost. Indexes `PieBreakdownModel.levels`. */
+  depth: number;
+  /** The slice's display name: after a `sliceNames` rename, and `"Other"` for a folded bucket. */
+  name: string;
+  /** The wedge this one sits inside, and its own, innermost first — empty at ring 0. This is the
+   * POSITION half of what a sunburst encodes and a flat list cannot: an outer "Widgets" appears
+   * once per parent, and only its ancestors say which one this is. */
+  parents: string[];
+  /** The slice's true metric value, through the chart's own formatter. Never the inflated figure a
+   * sub-0.5% wedge is DRAWN at (see MIN_DRAWN_SLICE_FRACTION). */
+  value: string;
+  /** Its share of its parent — of the whole chart at ring 0 — formatted at the chart's own
+   * precision, so it is character-for-character what the tooltip prints for the same slice. */
+  share: string;
+}
+
+/**
+ * The pie's arcs, as a structure — what `PieBreakdown.tsx` renders beside the chart.
+ *
+ * `rows` is empty for anything below two rings, which is the decision, not an accident: a
+ * single-ring pie is a flat (name, value) list and the chart's own `aria` description already
+ * reads that out in full. A second copy of the same list is a cost to a screen-reader user, not a
+ * gain, so nothing is offered there at all.
+ */
+export interface PieBreakdownModel {
+  /** Depth-first, in the order the sunburst lays the slices out: each slice immediately followed
+   * by everything nested inside it. Empty below two rings — see above. */
+  rows: PieBreakdownRow[];
+  /** Each ring's dimension, innermost first, through `columnSettings` like every other label. */
+  levels: string[];
+  /** What the value column is measuring. */
+  metric: string;
+  /** See `pieDivergenceNotes`. */
+  notes: string[];
+}
+
+/**
+ * Every slice the chart draws, with its ancestry, its value and its share of its parent.
+ *
+ * THE ACCESSIBILITY GAP THIS CLOSES. Past two levels a sunburst encodes meaning in COLOUR (the
+ * family, plus a lightened shade per ring) and in POSITION (a nested arc under one specific parent
+ * wedge). A text description recovers neither, so the chart's `aria` description could only ever
+ * read out ring 0 — a screen-reader user got the innermost ring and no way to know the outer ones
+ * existed. `ui-ux-pro-max` grades the shape C for accessibility for exactly this and calls a table
+ * alternative mandatory for production use.
+ *
+ * Built from the SAME pass the chart is (`buildPieRings` + `pieChildrenByParent` — the sunburst's
+ * `children` tree, as lookup tables), and through the same `pieRootSlices` / `pieSharePrecision` /
+ * `metricFormatter` helpers, for the reason `buildPieLegend` is: a table that re-derived any of
+ * this from the rows would be a second answer to every question the chart already answers, and the
+ * two would drift on the first rename, hide, fold or format change. What it costs is one extra
+ * `buildPieRings` pass, which is the same trade the legend already makes — and it skips the
+ * expensive part (the per-slice canvas label fit) entirely.
+ */
+export function buildPieBreakdown(
+  columns: ResultColumn[],
+  rows: unknown[][],
+  cfg: PieBuildConfig,
+): PieBreakdownModel {
+  const dims = cfg.dimensions ?? [];
+  const fmt = metricFormatter(cfg);
+  // The same display-title lookup the tooltip's header takes, so a renamed column is renamed here
+  // too rather than reverting to its raw name in the one place a screen reader reads it.
+  const label = (col: string | undefined) => (col ? cfg.columnSettings?.[col]?.column_title || col : "");
+  const { rings, groupOfByLevel } = buildPieRings(columns, rows, cfg);
+  const model = { rows: [] as PieBreakdownRow[], levels: dims.map(label), metric: label(cfg.metric), notes: [] as string[] };
+  // One ring (or none at all) — nothing here that the chart's own aria description doesn't say.
+  if (rings.length < 2) return { ...model, levels: [] };
+
+  const childrenByParentKey = pieChildrenByParent(rings, groupOfByLevel);
+  const rootSlices = pieRootSlices(rings[0], cfg);
+  const rootTotal = rootSlices.reduce((t, s) => t + s.value, 0);
+  const decimals = pieSharePrecision(rootSlices, rootTotal, childrenByParentKey, cfg);
+  const pct = pctFormatter(decimals);
+
+  const out: PieBreakdownRow[] = [];
+  // Depth-first, parents before children — the order ECharts itself lays the tree out in, so the
+  // table reads down the chart rather than in an order of its own invention.
+  const walk = (slices: Slice[], level: number, parentValue: number, parents: string[]) => {
+    for (const s of slices) {
+      // Rounded exactly as `toNode` rounds a slice's own `slicePercent` (and then formatted by the
+      // same `pctFormatter`), so this cell and the tooltip's cannot print different strings.
+      const share = parseFloat(((parentValue > 0 ? s.value / parentValue : 0) * 100).toFixed(decimals));
+      out.push({ depth: level, name: s.name, parents, value: fmt(s.value), share: pct(share) });
+      // An "Other" bucket at the outermost ring has no children in the tree at all — the slices it
+      // folded away are not drawn, so they are not listed. Below that it does, and they are.
+      walk(childrenByParentKey[level]?.get(s.key ?? OTHER_KEY) ?? [], level + 1, s.value, [...parents, s.name]);
+    }
+  };
+  walk(rootSlices, 0, rootTotal, []);
+
+  return { ...model, rows: out, notes: pieDivergenceNotes(rings, dims, fmt) };
+}
+
 const HTML_ESCAPES: Record<string, string> = {
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 };
@@ -1326,10 +1483,7 @@ export function buildPieOption(
   // is what the reader was asking for anyway. The hole's total and the legend's own percentages
   // still do NOT re-base (both are computed from the full rings, above), so the remaining wedges
   // stay comparable with the numbers beside them.
-  const toggledOff = new Set(cfg.toggledOffSlices ?? []);
-  const rootSlices = toggledOff.size === 0
-    ? effectiveRings[0]
-    : effectiveRings[0].filter((s) => !toggledOff.has(s.name));
+  const rootSlices = pieRootSlices(effectiveRings[0], cfg);
 
   // Which finalized parent-ring slice each of a ring's slices belongs to, one map per parent level.
   const childrenByParentKey = pieChildrenByParent(effectiveRings, groupOfByLevel);
@@ -1361,28 +1515,12 @@ export function buildPieOption(
   const drawnTotal = rootSlices.reduce((t, s) => t + drawnValueOf(s), 0);
   const unitRadian = drawnTotal > 0 ? (2 * Math.PI) / drawnTotal : 0;
 
-  // How precise the percentages DRAWN ON THE CHART are — the slice labels, and the tooltip table
-  // that shares their formatter. Metabase's `getAllSlicePercentages`: every slice at every depth,
-  // each as a share of its own parent (which at ring 0 is the chart), at the slice budget rather
-  // than the legend's. It pushes an "Other" bucket's own share and then STOPS — the slices folded
-  // inside it are a breakdown of Other, not of the chart, and their shares are not what a reader
-  // is comparing labels across. Kept faithful to that even though egret's tooltip does list them.
-  //
-  // Computed here rather than beside `showPercent` above because it needs the finished tree: the
-  // rings, the legend toggle, and each ring's grouping under its parent.
-  const collectShares = (slices: Slice[], level: number, parentValue: number, out: number[]): number[] => {
-    for (const s of slices) {
-      out.push(parentValue > 0 ? s.value / parentValue : 0);
-      if (s.key != null && s.key.startsWith(OTHER_KEY)) continue;
-      collectShares(childrenByParentKey[level]?.get(s.key ?? OTHER_KEY) ?? [], level + 1, s.value, out);
-    }
-    return out;
-  };
-  const decimals = cfg.decimals
-    ?? computeMaxPercentDecimals(
-      collectShares(rootSlices, 0, rootTotal, []),
-      SLICE_PERCENT_SIGNIFICANT_DIGITS,
-    );
+  // How precise the percentages DRAWN ON THE CHART are — the slice labels, the tooltip table that
+  // shares their formatter, and the breakdown table beside the chart, which all take the SAME
+  // answer from `pieSharePrecision` (see it for the rule). Resolved here rather than beside
+  // `showPercent` above because it needs the finished tree: the rings, the legend toggle, and each
+  // ring's grouping under its parent.
+  const decimals = pieSharePrecision(rootSlices, rootTotal, childrenByParentKey, cfg);
   const pct = pctFormatter(decimals);
   // The full, untruncated text a slice's label wants to say — Metabase's getSliceLabel. Called
   // directly with the slice's own name and share rather than through an ECharts callback: the fit
@@ -1573,26 +1711,25 @@ export function buildPieOption(
     },
   ];
 
-  // Every ring's total *should* equal the first ring's (each ring re-partitions the same rows),
-  // but the zero/negative filter runs independently per ring (see buildSlices), so a surviving
-  // parent can still lose children there — the sign/zero rule is applied per-item on the finer
-  // partition, not by re-netting the parent's already-signed total. A screen-reader user has no
-  // other way to notice a ring quietly drawing less (or more) than the chart's stated total, so
-  // say so explicitly.
-  const ringTotals = effectiveRings.map((ring) => ring.reduce((t, s) => t + s.value, 0));
-  const divergenceNotes = ringTotals
-    .map((t, level) => ({ t, level }))
-    .filter(({ t, level }) => level > 0 && Math.abs(t - ringTotals[0]) > 1e-9)
-    .map(({ t, level }) => `Note: the ${dims[level]} ring totals ${fmt(t)}, not ${fmt(ringTotals[0])} like the chart's overall total — some rows were dropped by the zero/negative filter at that ring.`);
+  // A screen-reader user has no other way to notice a ring quietly drawing less (or more) than the
+  // chart's stated total — see `pieDivergenceNotes`. Carried by the breakdown table as well.
+  const divergenceNotes = pieDivergenceNotes(effectiveRings, dims, fmt);
 
-  // KNOWN GAP, DEFERRED (not solved here): `ariaDescription` gives a screen-reader user ring
-  // 0's flat (name, value) list, but says nothing about ring 1+ — beyond two levels a sunburst
-  // encodes meaning in colour (family + lightened shade) and position (nested arc under a
-  // specific parent wedge) that this text summary cannot recover at all. The standard remedy is
-  // a full table/indented-list alternative with each slice's share of its parent, which is a
-  // separate unit of work (a real UI, not a string) and is explicitly NOT attempted here — flagged
-  // so this gap isn't mistaken for solved by fixes 1/2 above, which only make the VISUAL labels
-  // fit and read; they don't add anything for a screen reader.
+  // WHAT THIS DESCRIPTION IS, AND WHAT IT IS NOT. It reads out ring 0 — the slices whose shares are
+  // shares of the whole chart — and nothing deeper, because a sunburst past two levels encodes
+  // meaning in COLOUR (family + lightened shade) and POSITION (a nested arc under one specific
+  // parent wedge) that no flat sentence can recover. That used to be a flagged gap; the rest of the
+  // chart is now `buildPieBreakdown` + PieBreakdown.tsx, a real table of every slice under its own
+  // parent with its share OF that parent, rendered beside the chart whenever there is more than one
+  // ring.
+  //
+  // This description deliberately STAYS as it is, rather than standing down in favour of that
+  // table. The two are not the same reading: this is what a screen reader announces on reaching the
+  // chart itself — a one-breath summary of the level whose slices are shares of the whole — and the
+  // table is a structure to be navigated when that summary raises a question. Replacing it with a
+  // pointer would leave the chart element itself saying nothing, which is worse than saying the
+  // innermost ring; and a single-ring pie, whose table is deliberately empty (see
+  // `buildPieBreakdown`), would then have no description at all.
   const baseAria = ariaDescription({
     kind: "Pie chart", metric: cfg.metric, dimension, format: fmt,
     points: data.map((d) => ({ name: String(d.name), value: d.value })),
