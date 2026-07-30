@@ -381,22 +381,74 @@ pub fn build(
                 "rollup requires at least one dimension".into(),
             ));
         }
+        // When rolling up, a dimension outside every group would be selected without appearing in
+        // any grouping set — not valid SQL, and the engine's complaint ("must be an aggregate
+        // expression or appear in GROUP BY") names an internal `__dim_N` the caller never wrote.
+        // Reject it here, where the message can name the caller's own dimension. The pivot builder
+        // always covers every dimension, so this is a guard on the public API, not on the UI.
+        if !spec.rollup_groups.is_empty() {
+            for name in &spec.dimensions {
+                if !spec.rollup_groups.iter().any(|g| g.contains(name)) {
+                    return Err(BiError::BadRequest(format!(
+                        "dimension is not in any rollup group: {name}"
+                    )));
+                }
+            }
+        }
         // Resolve every dimension to its expression once; remember each name's position.
         let mut dim_exprs: Vec<String> = Vec::new();
         let mut dim_index: std::collections::HashMap<&str, usize> =
             std::collections::HashMap::new();
         for (i, name) in spec.dimensions.iter().enumerate() {
             let e = dim_expr(engine, columns, spec, name)?;
-            select.push(format!("{e} AS {}", quote_ident(engine, name)));
             dim_index.insert(name.as_str(), i);
             dim_exprs.push(e);
+        }
+        let has_rollup = !spec.rollup_groups.is_empty();
+
+        // A rollup query mentions each dimension THREE times: in the SELECT list, in
+        // `GROUPING(...)`, and inside `GROUP BY GROUPING SETS (...)`. That is fine while a
+        // dimension is a bare column, and breaks the moment it is an expression — a temporal unit
+        // makes it `date_trunc('month', "order_date")`, and `GROUPING()` accepts a COLUMN
+        // REFERENCE, not a function call. Trino reads `date_trunc` as the start of a qualified
+        // name, hits `(`, and fails to parse:
+        //
+        //     line 2:164: mismatched input '('. Expecting: ')', ',', '.'
+        //
+        // Every pivot with a time bucket died here, and the studio defaults a date column's unit
+        // to Month, so it was the first thing a user hit rather than an edge case.
+        //
+        // So when rolling up, each dimension expression is materialised once in a derived table
+        // under a reserved name, and everything downstream refers to that plain identifier. This
+        // also keeps expressions out of `GROUPING SETS`, which StarRocks parses more strictly than
+        // Trino does — the same reason this file already emits GROUPING SETS instead of ROLLUP().
+        //
+        // `SELECT *` carries the raw columns through, so metric expressions (`sum(totalprice)`)
+        // and the WHERE clause still resolve against real columns — a filter must match the real
+        // timestamp, never the truncated group key (see `render_filter`). The `__dim_` prefix
+        // follows the existing `__grp_` convention: reserved, and not reachable as a user column.
+        let from = if has_rollup {
+            let projections: Vec<String> = dim_exprs
+                .iter()
+                .enumerate()
+                // {i} is a usize counter, never user data — safe unquoted.
+                .map(|(i, e)| format!("{e} AS __dim_{i}"))
+                .collect();
+            let inner = format!("(SELECT *, {} FROM {from}) AS __b", projections.join(", "));
+            dim_exprs = (0..dim_exprs.len()).map(|i| format!("__dim_{i}")).collect();
+            inner
+        } else {
+            from
+        };
+
+        for (i, name) in spec.dimensions.iter().enumerate() {
+            select.push(format!("{} AS {}", dim_exprs[i], quote_ident(engine, name)));
         }
         for name in &spec.metrics {
             let m = find_metric(metrics, name)
                 .ok_or_else(|| BiError::BadRequest(format!("unknown metric: {name}")))?;
             select.push(format!("{} AS {}", m.expression, quote_ident(engine, name)));
         }
-        let has_rollup = !spec.rollup_groups.is_empty();
         if has_rollup {
             for (i, e) in dim_exprs.iter().enumerate() {
                 // {i} is a usize counter, never user data — safe unquoted.
@@ -650,15 +702,195 @@ mod tests {
         };
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
         // ROLLUP(region) × ROLLUP(seg) expanded to portable GROUPING SETS
-        // (works on both Trino and StarRocks).
+        // (works on both Trino and StarRocks). Dimensions are materialised in a derived table
+        // first, so every one of these positions is a bare identifier — see the comment on the
+        // rollup branch for why an expression here is a parse error.
         assert!(
-            sql.contains(
-                "GROUP BY GROUPING SETS ((\"region\", \"seg\"), (\"region\"), (\"seg\"), ())"
-            ),
+            sql.contains("GROUP BY GROUPING SETS ((__dim_0, __dim_1), (__dim_0), (__dim_1), ())"),
             "{sql}"
         );
-        assert!(sql.contains("GROUPING(\"region\") AS __grp_0"), "{sql}");
-        assert!(sql.contains("GROUPING(\"seg\") AS __grp_1"), "{sql}");
+        assert!(sql.contains("GROUPING(__dim_0) AS __grp_0"), "{sql}");
+        assert!(sql.contains("GROUPING(__dim_1) AS __grp_1"), "{sql}");
+        // The output still speaks the user's column names.
+        assert!(sql.contains("__dim_0 AS \"region\""), "{sql}");
+        assert!(
+            sql.contains("(SELECT *, \"region\" AS __dim_0, \"seg\" AS __dim_1 FROM"),
+            "{sql}"
+        );
+    }
+
+    /// A pivot: two rollup groups, one of them bucketed by month.
+    ///
+    /// This is the shape that could not run at all. `rollup_groups` and `temporal_units` each had
+    /// tests; their INTERSECTION had none — all four rollup tests passed an empty units map — and
+    /// the bug lived in exactly that empty cell. The tests below fill the row.
+    fn pivot_spec(unit: Option<&str>) -> QuerySpec {
+        let mut tu = std::collections::HashMap::new();
+        if let Some(u) = unit {
+            tu.insert("created".to_string(), u.to_string());
+        }
+        QuerySpec {
+            metrics: vec!["revenue".into()],
+            dimensions: vec!["region".into(), "created".into()],
+            columns: vec![],
+            filters: vec![],
+            orderby: vec![],
+            row_limit: 100,
+            rollup_groups: vec![vec!["region".into()], vec!["created".into()]],
+            temporal_units: tu,
+        }
+    }
+
+    fn temporal_cols() -> Vec<DatasetColumn> {
+        let mut c = col("created", "datetime", None);
+        c.is_temporal = true;
+        vec![col("region", "string", None), c]
+    }
+
+    /// The invariant the whole fix exists to hold: whatever a dimension's expression is, the three
+    /// places a rollup query mentions it must be plain identifiers. `GROUPING(` followed by
+    /// anything that opens another paren is the parse error this shipped with.
+    fn assert_no_expression_in_grouping(sql: &str) {
+        assert!(
+            !sql.contains("GROUPING(date_trunc") && !sql.contains("GROUPING(EXTRACT"),
+            "GROUPING() must take a column reference, never an expression:\n{sql}"
+        );
+        for (i, _) in sql.match_indices("GROUPING(") {
+            let rest = &sql[i + "GROUPING(".len()..];
+            let arg: String = rest.chars().take_while(|c| *c != ')').collect();
+            assert!(
+                !arg.contains('('),
+                "GROUPING() argument is an expression, not a column: {arg}\n{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_rollup_with_truncation_unit_groups_on_a_plain_identifier() {
+        for engine in [Engine::Trino, Engine::StarRocks] {
+            let sql = build(
+                engine,
+                &phys(),
+                &temporal_cols(),
+                &[metric("revenue", "SUM(price)")],
+                &pivot_spec(Some("month")),
+            )
+            .unwrap();
+            assert_no_expression_in_grouping(&sql);
+            // the bucket is computed once, in the derived table, and named
+            assert!(sql.contains("AS __dim_1"), "{sql}");
+            assert!(sql.contains("date_trunc('month'"), "{sql}");
+            assert!(sql.contains("GROUPING(__dim_1) AS __grp_1"), "{sql}");
+            // and the result still speaks the user's column name (quoting differs per engine)
+            assert!(
+                sql.contains("__dim_1 AS ") && sql.contains("created"),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_rollup_with_extraction_unit_groups_on_a_plain_identifier() {
+        // `day_of_week` is an extraction, not a truncation — a different expression shape, and it
+        // failed the same way, which is what showed the bug was about expressions in general.
+        for engine in [Engine::Trino, Engine::StarRocks] {
+            let sql = build(
+                engine,
+                &phys(),
+                &temporal_cols(),
+                &[metric("revenue", "SUM(price)")],
+                &pivot_spec(Some("day_of_week")),
+            )
+            .unwrap();
+            assert_no_expression_in_grouping(&sql);
+            assert!(sql.contains("GROUPING(__dim_1) AS __grp_1"), "{sql}");
+        }
+    }
+
+    #[test]
+    fn build_rollup_without_a_unit_is_unaffected() {
+        let sql = build(
+            Engine::Trino,
+            &phys(),
+            &temporal_cols(),
+            &[metric("revenue", "SUM(price)")],
+            &pivot_spec(None),
+        )
+        .unwrap();
+        assert_no_expression_in_grouping(&sql);
+        assert!(sql.contains("\"created\" AS __dim_1"), "{sql}");
+    }
+
+    #[test]
+    fn build_without_rollup_is_not_wrapped_at_all() {
+        // The non-rollup path is used by every other chart type. It must stay byte-identical, so
+        // this fix cannot regress them.
+        let mut tu = std::collections::HashMap::new();
+        tu.insert("created".to_string(), "month".to_string());
+        let spec = QuerySpec {
+            metrics: vec!["revenue".into()],
+            dimensions: vec!["created".into()],
+            columns: vec![],
+            filters: vec![],
+            orderby: vec![],
+            row_limit: 100,
+            rollup_groups: vec![],
+            temporal_units: tu,
+        };
+        let sql = build(
+            Engine::Trino,
+            &phys(),
+            &temporal_cols(),
+            &[metric("revenue", "SUM(price)")],
+            &spec,
+        )
+        .unwrap();
+        assert!(!sql.contains("__dim_"), "{sql}");
+        assert!(!sql.contains("__b"), "{sql}");
+        assert!(sql.contains("GROUP BY date_trunc('month'"), "{sql}");
+    }
+
+    #[test]
+    fn build_rejects_a_dimension_outside_every_rollup_group() {
+        // Live-verified as invalid regardless of temporal units — the engine returns
+        // "'__dim_1' must be an aggregate expression or appear in GROUP BY", naming an internal
+        // alias. Caught here instead, naming the caller's dimension.
+        let mut spec = pivot_spec(None);
+        spec.rollup_groups = vec![vec!["region".into()]];
+        let err = build(
+            Engine::Trino,
+            &phys(),
+            &temporal_cols(),
+            &[metric("revenue", "SUM(price)")],
+            &spec,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("not in any rollup group"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn build_rollup_with_a_filter_keeps_it_on_the_raw_column() {
+        // A filter must match the real timestamp, never the truncated group key. The derived table
+        // carries the raw columns through with `*`, so the predicate still resolves against them.
+        let mut spec = pivot_spec(Some("month"));
+        spec.filters = vec![Filter {
+            col: "region".into(),
+            op: FilterOp::Eq,
+            value: serde_json::json!("EU"),
+        }];
+        let sql = build(
+            Engine::Trino,
+            &phys(),
+            &temporal_cols(),
+            &[metric("revenue", "SUM(price)")],
+            &spec,
+        )
+        .unwrap();
+        assert!(sql.contains("WHERE \"region\" = 'EU'"), "{sql}");
+        assert_no_expression_in_grouping(&sql);
     }
 
     #[test]
@@ -810,13 +1042,13 @@ mod tests {
         // ROLLUP(region, nation) × ROLLUP(seg) → portable GROUPING SETS.
         assert!(
             sql.contains(
-                "GROUP BY GROUPING SETS ((\"region\", \"nation\", \"seg\"), (\"region\", \"nation\"), (\"region\", \"seg\"), (\"region\"), (\"seg\"), ())"
+                "GROUP BY GROUPING SETS ((__dim_0, __dim_1, __dim_2), (__dim_0, __dim_1), (__dim_0, __dim_2), (__dim_0), (__dim_2), ())"
             ),
             "{sql}"
         );
-        assert!(sql.contains("GROUPING(\"region\") AS __grp_0"), "{sql}");
-        assert!(sql.contains("GROUPING(\"nation\") AS __grp_1"), "{sql}");
-        assert!(sql.contains("GROUPING(\"seg\") AS __grp_2"), "{sql}");
+        assert!(sql.contains("GROUPING(__dim_0) AS __grp_0"), "{sql}");
+        assert!(sql.contains("GROUPING(__dim_1) AS __grp_1"), "{sql}");
+        assert!(sql.contains("GROUPING(__dim_2) AS __grp_2"), "{sql}");
     }
 
     #[test]
