@@ -342,6 +342,48 @@ describe("ChartRenderer", () => {
     });
   });
 
+  // A pie whose every value is zero has ROWS — so the `rows.length === 0` guard every viz shares
+  // does not fire — but nothing it can draw: the zero/negative filter empties ring 0, and what
+  // reached the canvas was an empty sunburst, i.e. a blank rectangle with no message on it. The
+  // aria description said "No data." all along, so the chart disagreed with its own text
+  // alternative.
+  describe("a pie with nothing to draw", () => {
+    const pieCols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+    const renderPie = (rows: unknown[][]) =>
+      render(
+        <ChartRenderer
+          vizType="pie"
+          params={params({ pie: { dimensions: ["d"], metric: "m" } })}
+          columns={pieCols}
+          rows={rows}
+        />,
+      );
+
+    it("says so instead of drawing an empty canvas", () => {
+      renderPie([["A", 0], ["B", 0], ["C", 0]]);
+      expect(screen.getByText("No values to chart")).toBeInTheDocument();
+      expect(screen.queryByTestId("echarts")).not.toBeInTheDocument();
+    });
+
+    it("says the same for values it cannot chart at all", () => {
+      renderPie([["A", null], ["B", "n/a"]]);
+      expect(screen.getByText("No values to chart")).toBeInTheDocument();
+    });
+
+    it("still draws a pie that has one slice left", () => {
+      renderPie([["A", 0], ["B", 7]]);
+      expect(screen.queryByText("No values to chart")).not.toBeInTheDocument();
+      expect(screen.getByTestId("echarts")).toBeInTheDocument();
+    });
+
+    // "No data" is what an empty RESULT says, and this result is not empty — the rows came back,
+    // they just have nothing a pie can show a share of.
+    it("does not claim the query returned nothing", () => {
+      renderPie([["A", 0]]);
+      expect(screen.queryByText("No data")).not.toBeInTheDocument();
+    });
+  });
+
   // The pie's legend is React markup beside the canvas now, not an ECharts `legend` component
   // inside it — so ChartRenderer is where the two halves are put together, and this is the seam
   // that decides which layout they are put together in.

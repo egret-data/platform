@@ -11,7 +11,7 @@ import type { DrillContext } from "@/components/chart/drill";
 import { EChartsRenderer, type EChartsSize } from "@/components/chart/echarts/EChartsRenderer";
 import { buildCartesianOption } from "@/components/chart/echarts/options/cartesian";
 import {
-  buildPieOption, buildPieLegend, buildPieHole, buildPieHoleGraphic, pieLegendPlacement,
+  buildPieOption, buildPieLegend, buildPieHole, buildPieHoleGraphic, pieLegendPlacement, pieHasSlices,
 } from "@/components/chart/echarts/options/pie";
 import { PieLegend } from "@/components/chart/PieLegend";
 import { useElementSize } from "@/components/chart/useElementSize";
@@ -29,8 +29,11 @@ import { SmartScalarChart } from "@/components/chart/SmartScalarChart";
 import { ObjectDetail } from "@/components/chart/ObjectDetail";
 import { MapChart } from "@/components/chart/MapChart";
 
-const EmptyState = () => (
-  <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+/** `message` defaults to the empty-RESULT wording every viz shares. A caller passes its own when
+ * the result was not empty — the pie's is the case that needs it: rows came back and none of them
+ * is something a share can be taken of. */
+const EmptyState = ({ message = "No data" }: { message?: string }) => (
+  <div className="flex h-full items-center justify-center text-sm text-muted-foreground">{message}</div>
 );
 
 /** Stable stand-in for an omitted `metricTypes` prop. A `= {}` default parameter allocates a
@@ -141,6 +144,13 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
     [hole, chartCfg, hovered],
   );
 
+  // NOTHING TO DRAW — rows, but no wedge among them (see `pieHasSlices`). ChartRenderer's shared
+  // `rows.length === 0` guard cannot see this case, and what used to happen was an empty sunburst:
+  // a blank rectangle, with the chart's own aria description already saying "No data." to anyone
+  // reading it that way. Placed after every hook, since the count depends on the same memoised
+  // config they do.
+  const hasSlices = useMemo(() => pieHasSlices(columns, rows, input), [input, columns, rows]);
+
   const chart = (
     <EChartsRenderer
       key="chart"
@@ -198,6 +208,12 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
       }}
     />
   );
+
+  // "No values to chart", not "No data": the query DID return rows — a pie just cannot show a
+  // share of a column that is all zeros. Said in the shell's own empty state rather than as
+  // Metabase's grey "Other" disc, because egret has one and because a full circle in a single
+  // colour reads as one category worth everything.
+  if (!hasSlices) return <EmptyState message="No values to chart" />;
 
   // The column goes to the LEFT of the chart (where Metabase's is, and where the ECharts side
   // legend was); the block goes underneath. Keyed children rather than two branches, so flipping

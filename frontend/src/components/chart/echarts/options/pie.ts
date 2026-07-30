@@ -1000,6 +1000,26 @@ function buildPieRings(
 }
 
 /**
+ * Whether this pie has a single wedge to draw.
+ *
+ * `false` is NOT the same as "no rows". A pie can only show a share of something, so every zero,
+ * every non-number and (in a mixed-sign column) every negative is dropped before a ring is built
+ * — which means a query that returned plenty of rows can still leave ring 0 empty. Untouched, that
+ * reached the canvas as an empty sunburst: a blank rectangle with no message on it, while the
+ * chart's own aria description already read "No data.".
+ *
+ * Exported so ChartRenderer can say so in the shell's own empty state rather than handing ECharts
+ * nothing to draw. Metabase's answer is a single "Other" slice in its muted text colour — a whole
+ * grey disc — which egret does not copy here: egret has a real empty state, and a full circle in
+ * one colour still looks like one category worth all of the chart. What is worth copying is
+ * Metabase's point, which is that an all-zero pie should read as "nothing to show" rather than as
+ * broken.
+ */
+export function pieHasSlices(columns: ResultColumn[], rows: unknown[][], cfg: PieBuildConfig): boolean {
+  return buildPieRings(columns, rows, cfg).rings[0].length > 0;
+}
+
+/**
  * The pie's legend, as data — the React component beside the chart (PieLegend.tsx) renders it.
  *
  * Ring 0 only: every ring's names used to go into one flat ECharts legend, but only ring 0's

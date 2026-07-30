@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildPieOption, buildPieLegend, buildPieHole, buildPieHoleGraphic, pieLegendPlacement, resolvePercentVisibility,
-  PIE_LEGEND_COLUMN_WIDTH_PX, computeMaxPercentDecimals,
+  PIE_LEGEND_COLUMN_WIDTH_PX, computeMaxPercentDecimals, pieHasSlices,
 } from "../options/pie";
 import { SERIES_PALETTE, seriesColor, chartShade, COLOR_FALLBACK } from "../palette";
 import { calcAvailableDonutSliceLabelLength } from "../sliceLabel";
@@ -2414,5 +2414,37 @@ describe("a pie picks its percent decimals from the data", () => {
       { dimensions: ["d", "e"], metric: "m", percentVisibility: "inside" }) as any;
     const b1 = ring(opt, 1).find((d: any) => d.name === "b1");
     expect(b1.label.formatter()).toBe("b1: 5%");
+  });
+});
+
+// A pie can only show a share of something, so a column of zeros leaves ring 0 empty even though
+// the query returned rows — and an empty ring 0 used to reach the canvas as an empty sunburst,
+// i.e. nothing at all. ChartRenderer asks this before it draws.
+describe("pieHasSlices", () => {
+  const cols2 = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+  const cfg = { dimensions: ["d"], metric: "m" };
+
+  it("is false when every value is zero, however many rows there are", () => {
+    expect(pieHasSlices(cols2, [["A", 0], ["B", 0], ["C", 0]], cfg)).toBe(false);
+    // ...and the chart really would have had nothing to draw.
+    expect((buildPieOption(cols2, [["A", 0], ["B", 0]], cfg) as any).series[0].data).toEqual([]);
+  });
+
+  it("is false for values a pie cannot take a share of at all", () => {
+    expect(pieHasSlices(cols2, [["A", null], ["B", "n/a"]], cfg)).toBe(false);
+  });
+
+  it("is true as soon as one slice survives", () => {
+    expect(pieHasSlices(cols2, [["A", 0], ["B", 7]], cfg)).toBe(true);
+  });
+
+  // An all-negative column is charted on its magnitudes (buildSlices' own rule), so it is NOT the
+  // empty case — only a mixed-sign one loses its negatives.
+  it("is true for an all-negative column, which the pie draws by magnitude", () => {
+    expect(pieHasSlices(cols2, [["A", -3], ["B", -7]], cfg)).toBe(true);
+  });
+
+  it("is false with no dimension or metric to build a ring from", () => {
+    expect(pieHasSlices(cols2, [["A", 5]], {})).toBe(false);
   });
 });
