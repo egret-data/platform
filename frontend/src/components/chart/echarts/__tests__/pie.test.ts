@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildPieOption, buildPieLegend, buildPieHole, buildPieHoleGraphic, pieLegendPlacement, resolvePercentVisibility,
-  PIE_LEGEND_COLUMN_WIDTH_PX, computeMaxPercentDecimals, pieHasSlices,
+  PIE_LEGEND_COLUMN_WIDTH_PX, computeMaxPercentDecimals, pieHasSlices, buildPieBreakdown,
 } from "../options/pie";
 import { SERIES_PALETTE, seriesColor, chartShade, COLOR_FALLBACK } from "../palette";
 import { calcAvailableDonutSliceLabelLength } from "../sliceLabel";
@@ -2515,5 +2515,229 @@ describe("pieHasSlices", () => {
 
   it("is false with no dimension or metric to build a ring from", () => {
     expect(pieHasSlices(cols2, [["A", 5]], {})).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The structured alternative to the arcs (buildPieBreakdown).
+//
+// A sunburst past two levels encodes meaning in COLOUR (family + lightened shade) and POSITION
+// (nested inside a specific parent wedge). Neither survives a text summary, which is what the
+// chart's `aria` description is — so a screen-reader user got ring 0's flat list and nothing else.
+// This is the table that carries the rest of it: every slice, under its parent, with its share OF
+// that parent.
+describe("buildPieBreakdown", () => {
+  // The table and the legend sit on the same page, so a root slice must not read as a DIFFERENT
+  // number in each. Measured live at the in-arc budget: `APAC 34.6%` in the legend, `APAC 35%` in
+  // the table — they rounded opposite ways.
+  //
+  // Character equality is NOT the invariant, and asserting it was this test's first mistake. The
+  // two precisions are computed over different value sets, exactly as Metabase's legend (ring 0,
+  // 3 significant digits) and slice labels (every depth, 2) are: the table carries deep rows whose
+  // tiny shares demand more decimals, and Metabase's rule then gives that precision to the whole
+  // column so a reader compares like with like. So the table's figure is a REFINEMENT of the
+  // legend's — round it back to the legend's precision and you must get the legend's string.
+  it("states a root slice's share as a refinement of the legend's, never a different number", () => {
+    const cols = [
+      { name: "r", type: "varchar" }, { name: "p", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    // 36.44 / 34.59 / 28.97 of the whole — the live numbers that exposed the split. NO tiny slice
+    // anywhere, deliberately: a sub-percent share forces extra decimals at BOTH budgets, which
+    // makes them agree by accident and leaves this test unable to fail. (It did exactly that on
+    // the first attempt — the mutation back to the in-arc budget survived.) With only sizeable
+    // children, the in-arc budget prints whole numbers and the legend's prints one decimal, so
+    // the two round apart and the refinement check has something to catch.
+    const rows = [
+      ["LATAM", "x", 1822], ["LATAM", "y", 1822],
+      ["APAC", "x", 1730], ["APAC", "y", 1729],
+      ["EMEA", "x", 1449], ["EMEA", "y", 1448],
+    ];
+    const cfg = { dimensions: ["r", "p"], metric: "m" };
+    const legend = buildPieLegend(cols, rows, cfg);
+    const table = buildPieBreakdown(cols, rows, cfg);
+
+    for (const entry of legend) {
+      const row = table.rows.find((r) => r.depth === 0 && r.name === entry.name);
+      expect(row, `no table row for legend entry ${entry.name}`).toBeDefined();
+      const legendDecimals = (entry.percent!.match(/\.(\d+)%/)?.[1] ?? "").length;
+      const tableDecimals = (row!.share.match(/\.(\d+)%/)?.[1] ?? "").length;
+      // The table is at least as precise...
+      expect(tableDecimals).toBeGreaterThanOrEqual(legendDecimals);
+      // ...and agrees once brought back to the legend's precision. This is what fails when the
+      // two round opposite ways, which is the defect measured live.
+      const backToLegend = `${parseFloat(row!.share).toFixed(legendDecimals)}%`;
+      expect(backToLegend).toBe(entry.percent);
+    }
+  });
+
+  const cols3 = [
+    { name: "region", type: "varchar" }, { name: "product", type: "varchar" },
+    { name: "channel", type: "varchar" }, { name: "m", type: "double" },
+  ];
+  // Each region totals 1020, so ring 0 never folds. Within each region the two 10-value products
+  // are sub-threshold against their own parent's 1020, so each region gets its OWN Other(20) at
+  // ring 1 — and each of those Others keeps its channels at ring 2.
+  const rows3 = [
+    ["R1", "P1", "x", 1000],
+    ["R1", "a", "A1", 6], ["R1", "a", "A2", 4],
+    ["R1", "b", "B1", 10],
+    ["R2", "P2", "y", 1000],
+    ["R2", "c", "C1", 10],
+    ["R2", "d", "D1", 10],
+  ];
+  const cfg3 = { dimensions: ["region", "product", "channel"], metric: "m", decimals: 1 };
+
+  /** What the CHART itself says this slice's share is — read back out of the tooltip's own HTML,
+   * so the two can only agree by actually agreeing. `path` is root-to-slice, the same shape
+   * ECharts hands the formatter as `treePathInfo` (minus its virtual root, which is prepended
+   * here). Returns [value, share] as the tooltip prints them. */
+  const tooltipCells = (opt: any, path: string[]): [string, string] => {
+    const html: string = opt.tooltip.formatter({
+      treePathInfo: [{ name: "" }, ...path.map((name) => ({ name }))],
+    });
+    const leaf = path[path.length - 1];
+    const row = html.split("<tr").find((r) => r.includes(`>${leaf}</td>`))!;
+    const cells = [...row.matchAll(/>([^<>]+)<\/td>/g)].map((m) => m[1]);
+    return [cells[1], cells[2]];
+  };
+
+  // 1. Every slice, under its correct parent.
+  it("exposes every slice of a three-ring chart, each under its own parent", () => {
+    const { rows: out } = buildPieBreakdown(cols3, rows3, cfg3);
+    expect(out.map((r) => [r.depth, r.parents, r.name])).toEqual([
+      [0, [], "R1"],
+      [1, ["R1"], "P1"],
+      [2, ["R1", "P1"], "x"],
+      [1, ["R1"], "Other"],
+      [2, ["R1", "Other"], "B1"],
+      [2, ["R1", "Other"], "A1"],
+      [2, ["R1", "Other"], "A2"],
+      [0, [], "R2"],
+      [1, ["R2"], "P2"],
+      [2, ["R2", "P2"], "y"],
+      [1, ["R2"], "Other"],
+      [2, ["R2", "Other"], "C1"],
+      [2, ["R2", "Other"], "D1"],
+    ]);
+  });
+
+  it("names each ring by its own dimension, and the value column by the metric", () => {
+    const b = buildPieBreakdown(cols3, rows3, {
+      ...cfg3, columnSettings: { region: { column_title: "Region" }, m: { column_title: "Revenue" } },
+    });
+    expect(b.levels).toEqual(["Region", "product", "channel"]);
+    expect(b.metric).toBe("Revenue");
+  });
+
+  // 2. The share is of the PARENT, and it is the same number the chart's own tooltip prints.
+  it("states each slice's share of its parent — the number the tooltip shows for that slice", () => {
+    const b = buildPieBreakdown(cols3, rows3, cfg3);
+    const share = (name: string, parents: string[]) =>
+      b.rows.find((r) => r.name === name && r.parents.join("|") === parents.join("|"))!.share;
+    // Ring 0's parent is the whole chart; deeper, it is the wedge the slice sits inside — so B1
+    // is half of the Other bucket it is nested in, not 0.5% of the chart.
+    expect(share("R1", [])).toBe("50.0%");
+    expect(share("P1", ["R1"])).toBe("98.0%");
+    expect(share("Other", ["R1"])).toBe("2.0%");
+    expect(share("B1", ["R1", "Other"])).toBe("50.0%");
+    expect(share("A1", ["R1", "Other"])).toBe("30.0%");
+
+    const opt = buildPieOption(cols3, rows3, cfg3) as any;
+    for (const path of [["R1"], ["R1", "P1"], ["R1", "Other", "B1"], ["R2", "P2", "y"]]) {
+      const row = b.rows.find(
+        (r) => r.name === path[path.length - 1] && r.parents.join("|") === path.slice(0, -1).join("|"),
+      )!;
+      expect(row.share).toBe(tooltipCells(opt, path)[1]);
+    }
+  });
+
+  // RE-BASELINED. This used to assert the table printed shares at the SLICE budget, character for
+  // character with the tooltip. It no longer does, deliberately: the table sits beside the legend,
+  // and at the slice budget the same root slice read `34.6%` in one and `35%` in the other. The
+  // table now takes the legend's budget — so it is at least as precise as the tooltip, and equal
+  // whenever the two budgets happen to land on the same number of decimals.
+  it("is never less precise than the tooltip for the same slice", () => {
+    const auto = { dimensions: ["region", "product", "channel"], metric: "m" };
+    const b = buildPieBreakdown(cols3, rows3, auto);
+    const opt = buildPieOption(cols3, rows3, auto) as any;
+    const fromTable = b.rows.find((r) => r.name === "P1")!.share;
+    const fromTooltip = tooltipCells(opt, ["R1", "P1"])[1];
+    const decimals = (v: string) => (v.match(/\.(\d+)%/)?.[1] ?? "").length;
+    expect(decimals(fromTable)).toBeGreaterThanOrEqual(decimals(fromTooltip));
+    // Same underlying number, whatever the precision.
+    expect(parseFloat(fromTable)).toBeCloseTo(parseFloat(fromTooltip), 1);
+  });
+
+  // 3. In step with what is actually drawn.
+  it("leaves out a hidden slice and everything nested under it", () => {
+    const b = buildPieBreakdown(cols3, rows3, { ...cfg3, hiddenSlices: ["R2"] });
+    expect(b.rows.some((r) => r.name === "R2" || r.parents.includes("R2"))).toBe(false);
+    expect(b.rows.some((r) => r.name === "P2" || r.name === "y")).toBe(false);
+    // ...and the rest re-bases, exactly as the chart does: R1 is now the whole chart.
+    expect(b.rows.find((r) => r.name === "R1")!.share).toBe("100.0%");
+  });
+
+  it("leaves out a slice the reader has toggled off in the legend", () => {
+    const b = buildPieBreakdown(cols3, rows3, { ...cfg3, toggledOffSlices: ["R1"] });
+    expect(b.rows.some((r) => r.name === "R1" || r.parents.includes("R1"))).toBe(false);
+    expect(b.rows.some((r) => r.name === "R2")).toBe(true);
+  });
+
+  it("uses a renamed slice's new name, wherever it appears", () => {
+    const b = buildPieBreakdown(cols3, rows3, { ...cfg3, sliceNames: { R1: "Region One" } });
+    expect(b.rows.some((r) => r.name === "R1")).toBe(false);
+    expect(b.rows.find((r) => r.depth === 0)!.name).toBe("Region One");
+    expect(b.rows.find((r) => r.name === "P1")!.parents).toEqual(["Region One"]);
+  });
+
+  it("shows each parent's own folded Other as one entry under that parent", () => {
+    const b = buildPieBreakdown(cols3, rows3, cfg3);
+    const others = b.rows.filter((r) => r.name === "Other");
+    expect(others.map((r) => r.parents)).toEqual([["R1"], ["R2"]]);
+    // The folded-away products themselves are NOT drawn, so they are not listed either — what is
+    // listed under Other is what the chart nests inside it.
+    expect(b.rows.some((r) => ["a", "b", "c", "d"].includes(r.name))).toBe(false);
+  });
+
+  // 6. Values read the same here as everywhere else the chart states them.
+  it("formats a value with the chart's own metric formatter", () => {
+    const formatted = { ...cfg3, columnSettings: { m: { prefix: "$", decimals: 0 } } };
+    const b = buildPieBreakdown(cols3, rows3, formatted);
+    const opt = buildPieOption(cols3, rows3, formatted) as any;
+    const row = b.rows.find((r) => r.name === "x")!;
+    expect(row.value).toBe(tooltipCells(opt, ["R1", "P1", "x"])[0]);
+    expect(row.value).toContain("$");
+    // ...and it is the slice's TRUE value, never the inflated one a tiny wedge is drawn at.
+    expect(b.rows.find((r) => r.name === "A2")!.value).toBe("$4");
+  });
+
+  // The same caveat the chart's aria description carries: a ring whose own total diverges from the
+  // chart's, because the zero/negative filter runs independently per ring.
+  it("carries the ring-total divergence note", () => {
+    const cols2 = [
+      { name: "region", type: "varchar" }, { name: "product", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    // R1 nets to 20 at ring 0; at ring 1 the -10 is dropped outright, so that ring totals 30.
+    const b = buildPieBreakdown(cols2, [["R1", "P1", 30], ["R1", "P2", -10]], {
+      dimensions: ["region", "product"], metric: "m",
+    });
+    expect(b.notes).toHaveLength(1);
+    expect(b.notes[0]).toContain("product");
+    expect(b.notes[0]).toContain("30");
+  });
+
+  // 5. A single-ring pie is a flat list, which the chart's `aria` description already reads out in
+  // full. A second, redundant description is not an improvement for a screen-reader user — it is
+  // the same list twice — so the breakdown does not engage at all below two rings.
+  it("produces nothing for a single-ring pie, whose aria description is already the whole story", () => {
+    expect(buildPieBreakdown(cols, rows, { dimensions: ["region"], metric: "rev" }).rows).toEqual([]);
+    // ...and the chart's own description is still there, listing every slice.
+    const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev" }) as any;
+    expect(opt.aria.label.description).toContain("US");
+    expect(opt.aria.label.description).toContain("EU");
+  });
+
+  it("produces nothing when there is no ring to break down at all", () => {
+    expect(buildPieBreakdown(cols, rows, {}).rows).toEqual([]);
   });
 });

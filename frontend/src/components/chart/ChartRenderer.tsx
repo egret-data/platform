@@ -2,7 +2,7 @@
 import { useMemo, useRef, useState } from "react";
 import type {
   AnyChartParams, BoxplotConfig, CartesianConfig, FunnelConfig, GaugeConfig,
-  PieConfig, ProgressConfig, SankeyConfig, ScalarConfig, SmartScalarConfig, VizType,
+  PieConfig, ProgressConfig, SankeyConfig, ScalarConfig, SmartScalarConfig, VizType, WaterfallConfig,
 } from "@/api/charts";
 import type { PivotConfig } from "@/components/chart/viz/pivot";
 import { isCartesianViz } from "@/api/charts";
@@ -12,7 +12,9 @@ import { EChartsRenderer, type EChartsSize } from "@/components/chart/echarts/EC
 import { buildCartesianOption } from "@/components/chart/echarts/options/cartesian";
 import {
   buildPieOption, buildPieLegend, buildPieHole, buildPieHoleGraphic, pieLegendPlacement, pieHasSlices,
+  buildPieBreakdown,
 } from "@/components/chart/echarts/options/pie";
+import { PieBreakdown } from "@/components/chart/PieBreakdown";
 import { PieLegend } from "@/components/chart/PieLegend";
 import { useElementSize } from "@/components/chart/useElementSize";
 import { cn } from "@/lib/utils";
@@ -92,6 +94,11 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
   // EChartsRenderer measures for itself).
   const hostRef = useRef<HTMLDivElement>(null);
   const placement = pieLegendPlacement(useElementSize(hostRef));
+
+  // The arcs-to-markup alternative, from the same `input` the chart is drawn from, so the two
+  // cannot disagree about hidden slices, renames, Other-folding or number formatting. It returns
+  // nothing below two rings — a single-ring pie is already read in full by `ariaDescription`.
+  const breakdown = useMemo(() => buildPieBreakdown(columns, rows, input), [columns, rows, input]);
 
   // Ephemeral, per-mount: which ring-0 slices the reader has clicked off. Deliberately NOT stored
   // in the chart's settings — this replaces the ECharts legend's own click-to-hide, which was
@@ -219,9 +226,16 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
   // legend was); the block goes underneath. Keyed children rather than two branches, so flipping
   // placement on a resize never remounts the chart — a remount would re-init ECharts and re-run
   // the whole per-slice fit pass from scratch.
+  //
+  // `hostRef` sits on the chart+legend row, NOT on the outer element, so the breakdown's closed
+  // summary can never feed back into `pieLegendPlacement` — measuring the outer one would let the
+  // disclosure's own height change the side/bottom answer, and opening it would change it again.
   return (
-    <div ref={hostRef} className={cn("flex h-full w-full min-h-0 min-w-0", placement === "side" ? "flex-row" : "flex-col")}>
-      {placement === "side" ? [legendEl, chart] : [chart, legendEl]}
+    <div className="flex h-full w-full min-h-0 min-w-0 flex-col">
+      <div ref={hostRef} className={cn("flex min-h-0 min-w-0 flex-1", placement === "side" ? "flex-row" : "flex-col")}>
+        {placement === "side" ? [legendEl, chart] : [chart, legendEl]}
+      </div>
+      <PieBreakdown breakdown={breakdown} />
     </div>
   );
 }
@@ -245,7 +259,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
   const progress = cfg as ProgressConfig;
   const gauge = cfg as GaugeConfig;
   const funnel = cfg as FunnelConfig;
-  const waterfall = cfg as { xAxis?: string; metric?: string; showTotal?: boolean };
+  const waterfall = cfg as WaterfallConfig;
   const smart = cfg as SmartScalarConfig;
   const box = cfg as BoxplotConfig;
   const sankey = cfg as SankeyConfig;
@@ -363,14 +377,22 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
     );
   }
 
+  // THE FIVE BRANCHES BELOW SPREAD THEIR CONFIG, for the reason cartesian and pie already do.
+  // Each of them used to re-list the fields it forwarded, and each list happened to match its
+  // config interface — which is precisely the state the pie branch was in until a field was added
+  // to one side and not the other. That cost four settings (decimals, sliceNames, hiddenSlices,
+  // sliceOrder) which shipped implemented and panel-exposed but unreachable from the app, and
+  // cartesian lost four of its own the same way before that. A whitelist that is correct today is
+  // a trap, not a safeguard; spreading makes the two sides impossible to drift apart.
+  //
+  // `columnSettings` and `metricTypes` come AFTER the spread deliberately: they are the shell's,
+  // not the viz's, so a stray same-named key in stored settings cannot shadow them.
   if (vizType === "gauge") {
     return (
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildGaugeOption(columns, rows, {
-              metric: gauge.metric, segments: gauge.segments, columnSettings, metricTypes,
-            })} />}
+          : <EChartsRenderer option={buildGaugeOption(columns, rows, { ...gauge, columnSettings, metricTypes })} />}
       </div>
     );
   }
@@ -380,9 +402,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildFunnelOption(columns, rows, {
-              dimension: funnel.dimension, metric: funnel.metric, columnSettings, metricTypes,
-            })} />}
+          : <EChartsRenderer option={buildFunnelOption(columns, rows, { ...funnel, columnSettings, metricTypes })} />}
       </div>
     );
   }
@@ -392,9 +412,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildWaterfallOption(columns, rows, {
-              xAxis: waterfall.xAxis, metric: waterfall.metric, showTotal: waterfall.showTotal, columnSettings, metricTypes,
-            })} />}
+          : <EChartsRenderer option={buildWaterfallOption(columns, rows, { ...waterfall, columnSettings, metricTypes })} />}
       </div>
     );
   }
@@ -418,9 +436,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildBoxplotOption(columns, rows, {
-              category: box.category, value: box.value, columnSettings, metricTypes,
-            })} />}
+          : <EChartsRenderer option={buildBoxplotOption(columns, rows, { ...box, columnSettings, metricTypes })} />}
       </div>
     );
   }
@@ -430,9 +446,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildSankeyOption(columns, rows, {
-              source: sankey.source, target: sankey.target, metric: sankey.metric, columnSettings, metricTypes,
-            })} />}
+          : <EChartsRenderer option={buildSankeyOption(columns, rows, { ...sankey, columnSettings, metricTypes })} />}
       </div>
     );
   }

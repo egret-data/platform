@@ -10,7 +10,6 @@ export interface WaterfallBuildConfig {
   xAxis?: string;
   metric?: string;
   showTotal?: boolean;
-  showLabels?: boolean;
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
 }
@@ -84,7 +83,13 @@ export function buildWaterfallOption(columns: ResultColumn[], rows: unknown[][],
       { type: "bar", stack: "wf", silent: true, itemStyle: { color: "transparent" }, emphasis: { itemStyle: { color: "transparent" } }, tooltip: { show: false }, data: base },
       {
         type: "bar", stack: "wf", barWidth: CHART_THEME.barWidth, data: bars,
-        label: cfg.showLabels ? { show: true, position: "top", fontSize: CHART_THEME.labelFontSize, color: axisLabelColor, formatter: (p: { value: unknown }) => fmt(p.value) } : { show: false },
+        // Never shown — see the funnel's twin note. `showLabels` was on no config any caller
+        // could produce (`WaterfallConfig` has no such field and no panel offers one), so the
+        // `show: true` arm was unreachable and every waterfall ever drawn took this one. It also
+        // defaulted the OPPOSITE way to the funnel's identically-named field, for no stated
+        // reason. Removed rather than exposed: cartesian's real "Data labels" toggle is what a
+        // waterfall would need to grow, field and panel control together, and that is a feature.
+        label: { show: false },
       },
     ],
   };
