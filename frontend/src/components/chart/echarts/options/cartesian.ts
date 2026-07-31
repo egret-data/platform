@@ -196,7 +196,40 @@ function applySeriesOrder(series: SeriesLike[], cfg: CartesianBuildConfig): Seri
   return out;
 }
 
-const isNormalized = (cfg: CartesianBuildConfig) => !!cfg.normalized && !!cfg.stacked;
+/**
+ * Whether this chart stacks, resolving the default its KIND carries.
+ *
+ * An area chart stacks unless told otherwise — Metabase's own default, and for a reason its
+ * measurement shows: overlapping translucent areas at 0.3 opacity read as mud, so the shape only
+ * works stacked. Bar and line default to unstacked, as they do there.
+ *
+ * `undefined` is genuinely distinct from `false` here: `cartesianToSettings` drops undefined keys,
+ * so a chart whose Stacking control was never touched stores nothing and takes the kind's default,
+ * while one explicitly set to "Don't stack" stores `false` and keeps it.
+ */
+export function resolveStacked(cfg: Pick<CartesianBuildConfig, "kind" | "stacked">): boolean {
+  return cfg.stacked ?? cfg.kind === "area";
+}
+
+/** The three mutually exclusive stacking states Metabase offers, as one value. */
+export type StackMode = "none" | "stacked" | "normalized";
+
+export function stackModeOf(cfg: Pick<CartesianBuildConfig, "kind" | "stacked" | "normalized">): StackMode {
+  if (!resolveStacked(cfg)) return "none";
+  return cfg.normalized ? "normalized" : "stacked";
+}
+
+/** The config patch a chosen mode writes. Two booleans encode three states, so the pair has to be
+ *  set together — leaving `normalized` behind when switching to "Don't stack" would store a
+ *  combination no control can show. */
+export function stackModePatch(mode: StackMode): { stacked: boolean; normalized: boolean | undefined } {
+  return {
+    stacked: mode !== "none",
+    normalized: mode === "normalized" ? true : undefined,
+  };
+}
+
+const isNormalized = (cfg: CartesianBuildConfig) => !!cfg.normalized && resolveStacked(cfg);
 
 // 100% stacking — rewrite each category column so its series values sum to 100.
 function normalizeStacks(series: { data: (number | null)[] }[]) {
@@ -331,7 +364,7 @@ export function buildCartesianOption(
     const seriesValues = distinct(xrows.map((r) => r[gi]));
     const cell = new Map(xrows.map((r) => [`${catKey(r[xi])} ${catKey(r[gi])}`, r[mi] as number | null]));
     // Grouped bars (>1 series, not stacked) must auto-size to sit side by side.
-    const grouped = !cfg.stacked && seriesTypeFor(cfg.kind, metric, cfg.seriesTypes) === "bar" && seriesValues.length > 1;
+    const grouped = !resolveStacked(cfg) && seriesTypeFor(cfg.kind, metric, cfg.seriesTypes) === "bar" && seriesValues.length > 1;
     const builtSeries = seriesValues.map((sv, si) => {
       const data = categories.map((c) => {
         const v = cell.get(`${catKey(c)} ${catKey(sv)}`);
@@ -344,7 +377,7 @@ export function buildCartesianOption(
     const series = applySeriesOrder(builtSeries as unknown as SeriesLike[], cfg) as unknown as typeof builtSeries;
     if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
     if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
-    if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
+    if (resolveStacked(cfg) && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
     if (usesXScale(cfg)) applyXScale(categories, series, cfg);
     applyMarkers(series as unknown as SeriesLike[]);
     const displayCats = isExtractUnit(cfg.xAxisUnit) ? categories.map((v) => temporalLabel(cfg.xAxisUnit, v)) : categories;
@@ -353,7 +386,7 @@ export function buildCartesianOption(
 
   const rowByCat = new Map(xrows.map((r) => [catKey(r[xi]), r]));
   const barMetrics = cfg.yMetrics.filter((m) => seriesTypeFor(cfg.kind, m, cfg.seriesTypes) === "bar").length;
-  const grouped = !cfg.stacked && barMetrics > 1;
+  const grouped = !resolveStacked(cfg) && barMetrics > 1;
   // Metabase tints a lone series with its summarize green rather than accent blue.
   const singleColor = cfg.yMetrics.length === 1 ? SUMMARIZE_COLOR : undefined;
   let series = cfg.yMetrics.map((metric, si) => {
@@ -400,7 +433,7 @@ export function buildCartesianOption(
 
   if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
   if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
-  if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
+  if (resolveStacked(cfg) && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
   if (usesXScale(cfg)) applyXScale(categories, series, cfg);
   applyMarkers(series as unknown as SeriesLike[]);
   const displayCats = isExtractUnit(cfg.xAxisUnit) ? categories.map((v) => temporalLabel(cfg.xAxisUnit, v)) : categories;
@@ -443,9 +476,29 @@ function decorateSeries(
   // ECharts auto-size and place them side by side (otherwise they overlap).
   if (type === "bar") { if (!grouped) out.barWidth = CHART_THEME.barWidth; out.barMinHeight = BAR_MIN_HEIGHT; }
   if (type === "bar" || cfg.kind === "area") {
-    if (cfg.stacked) out.stack = "total";
+    if (resolveStacked(cfg)) out.stack = "total";
   }
   if (cfg.kind === "area") out.areaStyle = { opacity: CHART_THEME.areaOpacity };
+
+  // Pointing at a series lifts it and pushes every other one back — the effect that makes a
+  // multi-series chart readable, and the one thing egret's cartesian charts had no answer for.
+  // Without `focus`, ECharts applies its default emphasis to whatever is under the pointer and
+  // leaves the rest alone: measured on egret, hovering one band lightened ALL FOUR, which says
+  // nothing about which one you are on.
+  //
+  // The numbers are Metabase's, measured on a live instance rather than read off its source:
+  //   bar  — hovered stays opaque, the other series drop to 0.3
+  //   area — hovered fill goes 0.3 -> 0.6, the other fills 0.3 -> 0.2
+  // The trend and stack-total helper series are excluded by their callers, which never reach here.
+  out.emphasis = {
+    focus: "series",
+    ...(cfg.kind === "area" ? { areaStyle: { opacity: CHART_THEME.areaOpacityEmphasis } } : {}),
+  };
+  out.blur = {
+    itemStyle: { opacity: CHART_THEME.blurOpacity },
+    lineStyle: { opacity: CHART_THEME.blurOpacity },
+    ...(cfg.kind === "area" ? { areaStyle: { opacity: CHART_THEME.areaOpacityBlur } } : {}),
+  };
   if (type === "line") {
     // A series may depart from the chart-wide line appearance. Metabase keeps these settings
     // per-series only; egret keeps a chart-wide default and lets a series override it, so the

@@ -216,3 +216,30 @@ describe("CartesianDisplaySection", () => {
     });
   });
 });
+
+describe("CartesianDisplaySection — Stacking", () => {
+  // Metabase offers one control with three options. Two switches made the reader discover the
+  // third state by turning the first one on, and could store `normalized` while `stacked` was off.
+  it("shows one control, and a fresh area reads Stack", () => {
+    render(<CartesianDisplaySection kind="area" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    expect(screen.getByLabelText("Stacking")).toHaveTextContent("Stack");
+    expect(screen.queryByLabelText("100% stacked")).toBeNull();
+  });
+
+  it("a fresh bar reads Don't stack", () => {
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    expect(screen.getByLabelText("Stacking")).toHaveTextContent(/Don.t stack/);
+  });
+
+  // Stack totals only means something on a plain stack — a 100% stack's total is always 100.
+  it("offers Stack totals on a stack but not on a 100% stack", () => {
+    const { rerender } = render(
+      <CartesianDisplaySection kind="area" config={{ yMetrics: ["rev"] }} onChange={() => {}} />,
+    );
+    expect(screen.getByLabelText("Stack totals")).toBeInTheDocument();
+    rerender(
+      <CartesianDisplaySection kind="area" config={{ yMetrics: ["rev"], stacked: true, normalized: true }} onChange={() => {}} />,
+    );
+    expect(screen.queryByLabelText("Stack totals")).toBeNull();
+  });
+});
