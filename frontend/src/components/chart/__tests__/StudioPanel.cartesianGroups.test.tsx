@@ -29,10 +29,21 @@ describe("StudioPanel renders bar's grouped Display controls", () => {
     tab: "display" as const,
   };
 
-  it("shows Series, Axes and Format headings", () => {
+  it("shows Series and Format headings — Axes has its own tab now", () => {
     render(<StudioPanel {...props} />);
     const headings = screen.getAllByRole("heading").map((h) => h.textContent);
-    expect(headings).toEqual(expect.arrayContaining(["Series", "Axes", "Format"]));
+    expect(headings).toEqual(expect.arrayContaining(["Series", "Format"]));
+    expect(headings).not.toContain("Axes");
+  });
+
+  // The bar's real axis controls, in the tab that now owns them.
+  it("puts the bar's axis controls in the Axes tab", () => {
+    render(<StudioPanel {...props} tab="axes" />);
+    expect(screen.getByLabelText("X axis scale")).toBeInTheDocument();
+    expect(screen.getByLabelText("X axis lines and ticks")).toBeInTheDocument();
+    expect(screen.getByLabelText("Y tick marks")).toBeInTheDocument();
+    // …and not the Series ones.
+    expect(screen.queryByLabelText("Legend")).toBeNull();
   });
 
   it("a non-advanced control inside a group is reachable — Legend under Series", () => {

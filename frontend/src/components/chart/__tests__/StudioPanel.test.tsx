@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { StudioPanel } from "../StudioPanel";
+import { StudioPanel, hasAxesControls } from "../StudioPanel";
 import { tableDescriptor } from "../viz/table";
 import type { VizDescriptor } from "../viz/types";
 
@@ -98,21 +98,21 @@ describe("StudioPanel", () => {
       ...desc,
       controls: [
         { id: "a", section: "display", group: "Series", render: () => <div>A</div> },
-        { id: "b", section: "display", group: "Axes", render: () => <div>B</div> },
+        { id: "b", section: "display", group: "Format", render: () => <div>B</div> },
         { id: "c", section: "display", group: "Series", render: () => <div>C</div> },
       ],
     } as unknown as VizDescriptor<{ yMetrics: string[] }>;
     render(<StudioPanel {...props} descriptor={grouped} tab="display" />);
     const headings = screen.getAllByRole("heading").map((h) => h.textContent);
-    expect(headings).toEqual(["Series", "Axes"]);
+    expect(headings).toEqual(["Series", "Format"]);
   });
 
   it("puts advanced controls behind a disclosure that starts closed", async () => {
     const withAdvanced = {
       ...desc,
       controls: [
-        { id: "a", section: "display", group: "Axes", render: () => <div>Always</div> },
-        { id: "b", section: "display", group: "Axes", advanced: true, render: () => <div>Rare</div> },
+        { id: "a", section: "display", group: "Format", render: () => <div>Always</div> },
+        { id: "b", section: "display", group: "Format", advanced: true, render: () => <div>Rare</div> },
       ],
     } as unknown as VizDescriptor<{ yMetrics: string[] }>;
     render(<StudioPanel {...props} descriptor={withAdvanced} tab="display" />);
@@ -130,16 +130,16 @@ describe("StudioPanel", () => {
       ...desc,
       key: "bar",
       controls: [
-        { id: "a", section: "display", group: "Axes", render: () => <div>Always</div> },
-        { id: "b", section: "display", group: "Axes", advanced: true, render: () => <div>RareA</div> },
+        { id: "a", section: "display", group: "Format", render: () => <div>Always</div> },
+        { id: "b", section: "display", group: "Format", advanced: true, render: () => <div>RareA</div> },
       ],
     } as unknown as VizDescriptor<{ yMetrics: string[] }>;
     const descB = {
       ...desc,
       key: "line",
       controls: [
-        { id: "a", section: "display", group: "Axes", render: () => <div>Always</div> },
-        { id: "b", section: "display", group: "Axes", advanced: true, render: () => <div>RareB</div> },
+        { id: "a", section: "display", group: "Format", render: () => <div>Always</div> },
+        { id: "b", section: "display", group: "Format", advanced: true, render: () => <div>RareB</div> },
       ],
     } as unknown as VizDescriptor<{ yMetrics: string[] }>;
     const { rerender } = render(<StudioPanel {...props} descriptor={descA} tab="display" />);
@@ -153,5 +153,41 @@ describe("StudioPanel", () => {
     render(<StudioPanel {...props} tab="data" />);
     expect(screen.getByText("X-axis control")).toBeInTheDocument();
     expect(screen.queryByRole("heading")).not.toBeInTheDocument();
+  });
+});
+
+describe("StudioPanel — the Axes tab", () => {
+  const desc = {
+    key: "bar",
+    controls: [
+      { id: "s", section: "display", group: "Series", render: () => <div>SeriesControl</div> },
+      { id: "x", section: "display", group: "Axes", render: () => <div>XScale</div> },
+      { id: "y", section: "display", group: "Axes", advanced: true, render: () => <div>YMin</div> },
+    ],
+  } as never;
+
+  // `group: "Axes"` is declared once by the viz; the shell decides whether it is a heading or a
+  // tab. Leaving it in both places would have printed every axis control twice.
+  it("moves the Axes group out of the Display tab", () => {
+    render(<StudioPanel {...props} descriptor={desc} tab="display" />);
+    expect(screen.getByText("SeriesControl")).toBeInTheDocument();
+    expect(screen.queryByText("XScale")).toBeNull();
+    expect(screen.queryByText("Axes")).toBeNull();
+  });
+
+  // Flat: the group heading would only repeat the tab's own name, and an "advanced" control has
+  // no group left to hide inside, so it must not silently disappear.
+  it("renders the Axes group flat in its own tab, advanced controls included", () => {
+    render(<StudioPanel {...props} descriptor={desc} tab="axes" />);
+    expect(screen.getByText("XScale")).toBeInTheDocument();
+    expect(screen.getByText("YMin")).toBeInTheDocument();
+    expect(screen.queryByText("SeriesControl")).toBeNull();
+    expect(screen.queryByRole("button", { name: /more options/i })).toBeNull();
+  });
+
+  it("reports which vizzes have an Axes tab at all", () => {
+    expect(hasAxesControls(desc)).toBe(true);
+    expect(hasAxesControls({ key: "pie", controls: [{ id: "d", section: "display", render: () => null }] } as never)).toBe(false);
+    expect(hasAxesControls(undefined)).toBe(false);
   });
 });

@@ -4,6 +4,14 @@ import { SectionLabel } from "@/components/chart/settings/SectionLabel";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import type { VizControl, VizControlProps, VizDescriptor } from "./viz/types";
 
+/** The one group name the shell promotes to its own tab — see `Props.tab`. */
+export const AXES_GROUP = "Axes";
+
+/** Whether this viz has anything to put in an Axes tab; the shell hides the tab otherwise. */
+export function hasAxesControls<Cfg>(descriptor: VizDescriptor<Cfg> | undefined): boolean {
+  return !!descriptor?.controls.some((c) => c.section === "display" && c.group === AXES_GROUP);
+}
+
 interface Props<Cfg> {
   descriptor: VizDescriptor<Cfg>;
   config: Cfg;
@@ -13,7 +21,13 @@ interface Props<Cfg> {
   resultColumns: { name: string; type: string }[];
   rows: unknown[][];
   unitRow: (col?: string) => ReactNode;
-  tab: "data" | "display";
+  /**
+   * Which panel tab to render. "axes" is not a `section` any control declares — it is the
+   * DISPLAY section filtered to the "Axes" group, so a viz says where a control belongs once
+   * (`group: "Axes"`) and the shell decides whether that group is a heading or a tab. Metabase
+   * splits its own panel the same way (Data | Display | Axes).
+   */
+  tab: "data" | "display" | "axes";
   /**
    * The caller renders more content in this tab after this panel — e.g. the shell-owned
    * `SharedDisplaySections` that always follows the Display tab. A descriptor declaring no
@@ -30,12 +44,25 @@ interface Props<Cfg> {
 export function StudioPanel<Cfg>({
   descriptor, config, onConfigChange, columns, metrics, resultColumns, rows, unitRow, tab, hasMoreBelow,
 }: Props<Cfg>) {
-  const shown = descriptor.controls.filter((c) => c.section === tab);
+  const shown = descriptor.controls.filter((c) => {
+    if (tab === "axes") return c.section === "display" && c.group === AXES_GROUP;
+    if (tab === "display") return c.section === "display" && c.group !== AXES_GROUP;
+    return c.section === tab;
+  });
   if (shown.length === 0) {
     if (hasMoreBelow) return null;
     return <p className="text-xs text-muted-foreground">No {tab} options for this chart type.</p>;
   }
   const controlProps = { config, onChange: onConfigChange, columns, metrics, resultColumns, rows, unitRow };
+  // Inside the Axes TAB the group heading would just repeat the tab's own name, so everything
+  // there renders flat — including the advanced ones, which no longer have a group to hide in.
+  if (tab === "axes") {
+    return (
+      <div className="space-y-1.5">
+        {shown.map(({ id, render: Control }) => <Control key={id} {...controlProps} />)}
+      </div>
+    );
+  }
   const ungrouped = shown.filter((c) => !c.group);
   // Group order follows first appearance in the descriptor, so a viz controls its own
   // panel order without a separate list to keep in sync.
