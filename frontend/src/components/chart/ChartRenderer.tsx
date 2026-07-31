@@ -12,7 +12,7 @@ import { EChartsRenderer, type EChartsSize } from "@/components/chart/echarts/EC
 import { buildCartesianOption } from "@/components/chart/echarts/options/cartesian";
 import {
   buildPieOption, buildPieLegend, buildPieHole, buildPieHoleGraphic, pieLegendPlacement, pieHasSlices,
-  buildPieBreakdown,
+  buildPieBreakdown, pieSliceDrillPath,
 } from "@/components/chart/echarts/options/pie";
 import { PieBreakdown } from "@/components/chart/PieBreakdown";
 import { PieLegend } from "@/components/chart/PieLegend";
@@ -184,16 +184,25 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
       // for the same reason.
       highlightDataIndex={hovered?.dataIndex}
       onPointClick={onValueClick && pie.dimensions?.[0] ? (p) => {
-        // Which ring fired the click. It used to be read off `seriesName`, because each ring was
-        // its own ECharts series named after its own dimension; the pie is ONE `sunburst` series
-        // now, so there is no per-ring series name left to match. What a sunburst click does carry
-        // is `treePathInfo`, the root-to-node path — and its depth is the ring: entry 0 is the
-        // synthetic virtual root ECharts wraps `series.data` in, entry 1 is the ring-0 slice, so
-        // ring index = length - 2. Clamped both ways so a shape this doesn't expect degrades to
-        // dimensions[0] (the pre-existing fallback) rather than indexing off the end.
-        const ring = (p.treePathInfo?.length ?? 2) - 2;
-        const col = pie.dimensions![Math.min(Math.max(ring, 0), pie.dimensions!.length - 1)];
-        onValueClick({ dims: [{ col, value: p.name }] }, p.x, p.y);
+        // The slice's whole root-to-here path in RAW dimension values, from the datum's own
+        // aggregation key. Three things the old `{ col: dimensions[ring], value: p.name }` got
+        // wrong, all of them silent:
+        //   - a nested slice contributed only its own ring, so "Widgets" under "North" drilled to
+        //     every region's Widgets — the answer to a question nobody asked;
+        //   - a folded bucket drilled to `= 'Other'`, which matches no row at all;
+        //   - a bucketed date drilled to the instant the label shows instead of the period it
+        //     stands for, the same under-report the table, the pivot and the cartesian had.
+        const path = pieSliceDrillPath((p.data as { key?: string } | undefined)?.key);
+        if (!path) return; // an Other bucket, or a datum with no key — nothing single to filter by
+        const dims: DrillDim[] = [];
+        path.forEach((value, ring) => {
+          const col = pie.dimensions![ring];
+          if (!col) return;
+          const unit = params.spec.temporal_units?.[col];
+          dims.push(unit ? { col, value, unit } : { col, value });
+        });
+        if (dims.length === 0) return;
+        onValueClick({ dims }, p.x, p.y);
       } : undefined}
     />
   );

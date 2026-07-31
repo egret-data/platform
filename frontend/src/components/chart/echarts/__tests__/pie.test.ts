@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildPieOption, buildPieLegend, buildPieHole, buildPieHoleGraphic, pieLegendPlacement, resolvePercentVisibility,
   PIE_LEGEND_COLUMN_WIDTH_PX, computeMaxPercentDecimals, pieHasSlices, buildPieBreakdown,
+  pieSliceDrillPath,
 } from "../options/pie";
 import { SERIES_PALETTE, seriesColor, chartShade, COLOR_FALLBACK } from "../palette";
 import { calcAvailableDonutSliceLabelLength } from "../sliceLabel";
@@ -2739,5 +2740,73 @@ describe("buildPieBreakdown", () => {
 
   it("produces nothing when there is no ring to break down at all", () => {
     expect(buildPieBreakdown(cols, rows, {}).rows).toEqual([]);
+  });
+});
+
+describe("pieSliceDrillPath", () => {
+  const SEP = "\u241F";
+  const OTHER = "\u0000__other__\u0000";
+
+  it("returns the whole ancestor path in raw values", () => {
+    expect(pieSliceDrillPath(["EU", "Widgets", "Direct"].join(SEP))).toEqual(["EU", "Widgets", "Direct"]);
+    expect(pieSliceDrillPath("EU")).toEqual(["EU"]);
+  });
+
+  // "Other" is a bucket the chart invented. No single column value stands behind it, so a filter
+  // built from it matches nothing - an empty result presented as the slice's contents.
+  it("refuses an Other bucket, at any ring", () => {
+    expect(pieSliceDrillPath(OTHER)).toBeNull();
+    expect(pieSliceDrillPath([OTHER, "EU"].join(SEP))).toBeNull();
+    expect(pieSliceDrillPath(["EU", OTHER].join(SEP))).toBeNull();
+  });
+
+  it("refuses a datum with no key rather than throwing", () => {
+    expect(pieSliceDrillPath(undefined)).toBeNull();
+  });
+
+  // A real category literally named "Other" is a different string from the sentinel, so it still
+  // drills - the collision the sentinel exists to avoid.
+  it("still drills a real value that happens to be named Other", () => {
+    expect(pieSliceDrillPath("Other")).toEqual(["Other"]);
+  });
+});
+
+describe("slice labels honour the dimension's column format", () => {
+  const COLS = [{ name: "order_date", type: "date" }, { name: "rev", type: "double" }];
+  const ROWS = [["2026-01-01", 30], ["2026-02-01", 10]];
+
+  // The pie was the one chart that ignored a dimension's format: a month breakout read
+  // "2026-01-01" while the same column in a table or a pivot read the way its setting said.
+  it("formats the slice name while leaving the key raw", () => {
+    const opt = buildPieOption(COLS, ROWS, {
+      dimensions: ["order_date"], metric: "rev",
+      dimensionUnits: { order_date: "month" },
+      columnSettings: { order_date: { date_style: "MMMM YYYY" } },
+    }) as any;
+    const data = opt.series[0].data;
+    expect(data.map((d: any) => d.name)).toEqual(["January 2026", "February 2026"]);
+    // The drill, the colour overrides and the ordering all address the raw value, so it must
+    // survive the rename untouched.
+    expect(data.map((d: any) => d.key)).toEqual(["2026-01-01", "2026-02-01"]);
+  });
+
+  it("leaves an extraction unit's label alone rather than re-formatting a finished word", () => {
+    const opt = buildPieOption(
+      [{ name: "dow", type: "date" }, { name: "rev", type: "double" }],
+      [[3, 30], [5, 10]],
+      {
+        dimensions: ["dow"], metric: "rev",
+        dimensionUnits: { dow: "day_of_week" },
+        columnSettings: { dow: { date_style: "MMMM YYYY" } },
+      },
+    ) as any;
+    expect(opt.series[0].data.map((d: any) => d.name)).toEqual(["Wed", "Fri"]);
+  });
+
+  it("falls back to the raw value when the column has no format", () => {
+    const opt = buildPieOption(COLS, ROWS, {
+      dimensions: ["order_date"], metric: "rev", dimensionUnits: { order_date: "month" },
+    }) as any;
+    expect(opt.series[0].data.map((d: any) => d.name)).toEqual(["2026-01-01", "2026-02-01"]);
   });
 });
