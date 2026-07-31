@@ -25,8 +25,12 @@ function SortableHeader({ id, disabled, children, className, style, onClick }: {
   style?: CSSProperties; onClick?: MouseEventHandler;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id, disabled });
-  // Destructure role out so we can override dnd-kit's "button" with "columnheader"
-  const { role: _dndRole, ...restAttributes } = attributes;
+  // Destructure role out so we can override dnd-kit's "button" with "columnheader".
+  // `aria-disabled` goes too: dnd-kit sets it whenever the item can't be DRAGGED, but the header
+  // it lands on is still fully operable — click to sort, drag the separator to resize. A pinned
+  // column was therefore announced (and its resize handle with it, since the state propagates to
+  // descendants) as unavailable while both controls worked.
+  const { role: _dndRole, "aria-disabled": _dndDisabled, ...restAttributes } = attributes;
   return (
     <th
       ref={setNodeRef}
@@ -43,6 +47,8 @@ function SortableHeader({ id, disabled, children, className, style, onClick }: {
 }
 
 const MIN_COL_WIDTH = 60;
+/** px width of the "#" gutter — pinned columns start after it, or they slide underneath. */
+const ROW_INDEX_WIDTH = 40;
 
 const fillTemplate = (tpl: string, value: string) => tpl.replace(/\{\{\s*value\s*\}\}/g, value);
 
@@ -101,7 +107,7 @@ function renderTableCell(
 
 export function ChartTable({
   columns, rows, columnSettings = {}, conditionalFormatting = [],
-  tableState = {}, onTableStateChange, dimensionColumns, onCellDrill,
+  tableState = {}, onTableStateChange, dimensionColumns, onCellDrill, temporalUnits,
 }: {
   columns: ResultColumn[];
   rows: unknown[][];
@@ -111,6 +117,10 @@ export function ChartTable({
   onTableStateChange?: (next: TableState) => void;
   dimensionColumns?: string[];
   onCellDrill?: (ctx: DrillContext, x: number, y: number) => void;
+  /** dimension -> temporal unit, so a drill on a bucketed column filters the whole bucket rather
+   * than the single instant the cell happens to show. Without it a row grouped by month filtered
+   * `= 2026-01-01` and under-reported, the same defect the pivot and the cartesian charts had. */
+  temporalUnits?: Record<string, string>;
 }) {
   const [sorting, setSorting] = useState<SortingState>([]);
 
@@ -202,6 +212,7 @@ export function ChartTable({
     return ordered;
   }, [columns, tableState.columnOrder]);
 
+  const showRowIndex = !!tableState.rowIndex;
   const paginationEnabled = !!tableState.pagination?.enabled;
   const pageSize = tableState.pagination?.pageSize ?? 25;
   const [pageIndex, setPageIndex] = useState(0);
@@ -218,6 +229,10 @@ export function ChartTable({
       columnOrder,
       ...(paginationEnabled ? { pagination: { pageIndex, pageSize } } : {}),
     },
+    // tanstack defaults numeric columns to descending-first; Metabase sorts ascending on the first
+    // click for every column type. Two adjacent tables that disagree on what one click means is a
+    // worse trap than either convention on its own.
+    sortDescFirst: false,
     columnResizeMode: "onChange",
     enableColumnResizing: true,
     onSortingChange: setSorting,
@@ -291,6 +306,15 @@ export function ChartTable({
           <thead className="bg-accent">
             {table.getHeaderGroups().map((hg) => (
               <tr key={hg.id} className="text-left text-muted-foreground">
+                {showRowIndex && (
+                  // Outside the tanstack column model on purpose: the data columns are keyed
+                  // `col_<i>` by position, and sorting, pinning, reordering, resizing, drill and
+                  // the CSV export all address them by that key. A real column here would shift
+                  // every one of those by one.
+                  <th scope="col" style={{ width: ROW_INDEX_WIDTH }} className="sticky left-0 top-0 z-30 border-b border-r border-border/50 bg-accent px-3 py-2 text-right font-medium tabular-nums">
+                    #
+                  </th>
+                )}
                 <SortableContext items={table.getVisibleLeafColumns().map((c) => c.id)} strategy={horizontalListSortingStrategy}>
                 {hg.headers.map((h) => {
                   const isNum = (h.column.columnDef.meta as { isNum?: boolean } | undefined)?.isNum ?? false;
@@ -304,7 +328,7 @@ export function ChartTable({
                       onClick={h.column.getToggleSortingHandler()}
                       style={{
                         ...(sized ? { width: h.getSize() } : {}),
-                        ...(pinned ? { left: h.column.getStart("left") } : {}),
+                        ...(pinned ? { left: h.column.getStart("left") + (showRowIndex ? ROW_INDEX_WIDTH : 0) } : {}),
                       }}
                       className={`relative sticky top-0 cursor-pointer select-none border-b border-border/50 bg-accent px-3 py-2 font-medium whitespace-nowrap ${
                         pinned ? "z-30 border-r border-border/50" : "z-10"
@@ -332,10 +356,20 @@ export function ChartTable({
             ))}
           </thead>
           <tbody>
-            {table.getRowModel().rows.map((r) => {
+            {table.getRowModel().rows.map((r, i) => {
               const rowColor = cond.rowBg(r.index);
               return (
                 <tr key={r.id} className="hover:bg-accent/40" style={rowColor ? { backgroundColor: rowColor } : undefined}>
+                  {showRowIndex && (
+                    // Position in what is on screen, not `r.index`: after a sort the underlying
+                    // row order is meaningless, and the number has to keep counting across pages.
+                    <td
+                      className="sticky left-0 z-20 border-b border-r border-border/50 px-3 py-1.5 text-right text-muted-foreground tabular-nums"
+                      style={{ backgroundColor: rowColor ?? "var(--background)" }}
+                    >
+                      {(paginationEnabled ? pageIndex * pageSize : 0) + i + 1}
+                    </td>
+                  )}
                   {r.getVisibleCells().map((cell) => {
                     const meta = cell.column.columnDef.meta as { isNum?: boolean; name?: string } | undefined;
                     const isNum = meta?.isNum ?? false;
@@ -350,7 +384,7 @@ export function ChartTable({
                         key={cell.id}
                         style={{
                           ...(sized ? { width: cell.column.getSize() } : {}),
-                          ...(pinned ? { left: cell.column.getStart("left") } : {}),
+                          ...(pinned ? { left: cell.column.getStart("left") + (showRowIndex ? ROW_INDEX_WIDTH : 0) } : {}),
                           ...(pinned
                             ? (pinTint ? { background: `linear-gradient(${pinTint}, ${pinTint}), var(--background)` } : {})
                             : (bg ? { backgroundColor: bg } : {})),
@@ -360,7 +394,7 @@ export function ChartTable({
                         } ${onCellDrill && dimensionColumns?.length ? "cursor-pointer" : ""}`}
                         onClick={onCellDrill && dimensionColumns && dimensionColumns.length > 0
                           ? (e) => onCellDrill(
-                              tableCellDrill(dimensionColumns, columns.map((c) => c.name), r.original as unknown[]),
+                              tableCellDrill(dimensionColumns, columns.map((c) => c.name), r.original as unknown[], temporalUnits),
                               e.clientX, e.clientY,
                             )
                           : undefined}

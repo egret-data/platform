@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { pivotCellDrill, drillFilters } from "../drill";
+import { pivotCellDrill, tableCellDrill, drillFilters } from "../drill";
 
 describe("drillFilters", () => {
   it("uses equality for a plain dimension", () => {
@@ -74,5 +74,33 @@ describe("cartesian drill on a bucketed axis", () => {
     // on the label could never match a row. Dropping it widens the result rather than returning
     // an empty one.
     expect(drillFilters({ dims: [{ col: "d", value: "Mon", unit: "day_of_week" }] })).toEqual([]);
+  });
+});
+
+describe("tableCellDrill", () => {
+  const cols = ["order_date", "region", "revenue"];
+
+  it("carries the temporal unit of a bucketed dimension", () => {
+    const ctx = tableCellDrill(["order_date", "region"], cols, ["2026-01-01", "North", 2084], { order_date: "month" });
+    expect(ctx.dims).toEqual([
+      { col: "order_date", value: "2026-01-01", unit: "month" },
+      { col: "region", value: "North" },
+    ]);
+  });
+
+  // The table shipped without this and every bucketed drill filtered `= 2026-01-01`, so a cell
+  // reading a month's total opened a dialog showing one day of it — the same silent under-report
+  // the pivot and the cartesian charts each had.
+  it("filters the whole bucket, not the instant the cell shows", () => {
+    const ctx = tableCellDrill(["order_date"], cols, ["2026-01-01", "North", 2084], { order_date: "month" });
+    expect(drillFilters(ctx)).toEqual([
+      { col: "order_date", op: "ge", value: "2026-01-01" },
+      { col: "order_date", op: "lt", value: "2026-02-01" },
+    ]);
+  });
+
+  it("skips null dimension values and columns absent from the result", () => {
+    const ctx = tableCellDrill(["region", "not_selected"], cols, ["2026-01-01", null, 2084]);
+    expect(ctx.dims).toEqual([]);
   });
 });

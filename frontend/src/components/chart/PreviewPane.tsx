@@ -32,6 +32,8 @@ interface TableProps {
   state: TableState;
   onStateChange: (next: TableState) => void;
   dimensionColumns: string[];
+  /** dimension -> temporal unit, so a drill on a bucketed column filters the bucket, not the instant. */
+  temporalUnits?: Record<string, string>;
 }
 
 interface Props {
@@ -108,6 +110,7 @@ export function PreviewPane({
             columnSettings={columnSettings} conditionalFormatting={conditionalFormatting}
             tableState={table.state} onTableStateChange={table.onStateChange}
             dimensionColumns={table.dimensionColumns}
+            temporalUnits={table.temporalUnits}
             onCellDrill={onCellDrill} />
         )}
         {finished && viz !== "table" && viz !== "pivot_table" && (

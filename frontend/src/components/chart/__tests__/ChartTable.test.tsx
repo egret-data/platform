@@ -213,8 +213,8 @@ describe("ChartTable interactions", () => {
     render(<ChartTable columns={COLS} rows={mkRows(3)} />);
     const header = screen.getByText("b").closest("th")!;
     fireEvent.click(header);
-    const firstCellDesc = within(document.querySelector("tbody")!).getAllByRole("row")[0];
-    expect(firstCellDesc).toHaveTextContent("2");
+    const firstRowAsc = within(document.querySelector("tbody")!).getAllByRole("row")[0];
+    expect(firstRowAsc).toHaveTextContent("a0");
   });
 });
 
@@ -253,15 +253,16 @@ describe("ChartTable — column_title header rename", () => {
       />,
     );
     const header = screen.getByText("Revenue");
-    // Numeric columns default to a descending first click in TanStack table.
+    // Ascending on the first click, for numbers as well as text — Metabase's convention, and
+    // `sortDescFirst: false` is what holds TanStack's numeric columns to it.
     fireEvent.click(header);
-    const bodyRowsDesc = within(document.querySelector("tbody")!).getAllByRole("row");
-    expect(bodyRowsDesc[0]).toHaveTextContent("EU");
-    expect(bodyRowsDesc[0]).toHaveTextContent("30");
+    const asc = within(document.querySelector("tbody")!).getAllByRole("row");
+    expect(asc[0]).toHaveTextContent("US");
+    expect(asc[0]).toHaveTextContent("10");
     fireEvent.click(header);
-    const bodyRowsAsc = within(document.querySelector("tbody")!).getAllByRole("row");
-    expect(bodyRowsAsc[0]).toHaveTextContent("US");
-    expect(bodyRowsAsc[0]).toHaveTextContent("10");
+    const desc = within(document.querySelector("tbody")!).getAllByRole("row");
+    expect(desc[0]).toHaveTextContent("EU");
+    expect(desc[0]).toHaveTextContent("30");
   });
 
   it("falls back to the raw name for a column with no column_title, alongside a renamed one", () => {
@@ -274,5 +275,64 @@ describe("ChartTable — column_title header rename", () => {
     );
     expect(screen.getByText("region")).toBeInTheDocument();
     expect(screen.getByText("Revenue")).toBeInTheDocument();
+  });
+});
+
+describe("cell drill", () => {
+  // A wiring test, not a logic one: `tableCellDrill` had always accepted `temporalUnits` and
+  // ChartTable had always failed to pass it, so every unit test of the drill helper passed while
+  // the table on screen still filtered by the instant. Assert the prop actually arrives.
+  it("passes the temporal unit of a bucketed dimension into the drill context", () => {
+    const onCellDrill = vi.fn();
+    render(
+      <ChartTable
+        columns={[{ name: "order_date", type: "date" }, { name: "revenue", type: "double" }]}
+        rows={[["2026-01-01", 2084]]}
+        dimensionColumns={["order_date"]}
+        temporalUnits={{ order_date: "month" }}
+        onCellDrill={onCellDrill}
+      />,
+    );
+    fireEvent.click(screen.getByText("2,084"));
+    expect(onCellDrill).toHaveBeenCalled();
+    expect(onCellDrill.mock.calls[0][0].dims).toEqual([
+      { col: "order_date", value: "2026-01-01", unit: "month" },
+    ]);
+  });
+});
+
+// dnd-kit marks an undraggable item `aria-disabled`, and pinning a column makes it undraggable.
+// Spread onto the <th> that meant a frozen column — and, by state propagation, its resize
+// separator — was announced as unavailable even though clicking sorted it and dragging resized it.
+it("does not announce a pinned column header as disabled", () => {
+  render(
+    <ChartTable
+      columns={[{ name: "order_date", type: "date" }, { name: "revenue", type: "double" }]}
+      rows={[["2026-01-01", 2084]]}
+      tableState={{ pinnedLeft: 1 }}
+    />,
+  );
+  const th = screen.getByRole("columnheader", { name: /order_date/ });
+  expect(th).not.toHaveAttribute("aria-disabled");
+  expect(within(th).getByRole("separator", { name: "Resize column" })).not.toHaveAttribute("aria-disabled");
+});
+
+describe("row index", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "revenue", type: "double" }];
+  const rows = [["North", 3], ["South", 1], ["East", 2]];
+
+  it("is absent unless asked for", () => {
+    render(<ChartTable columns={cols} rows={rows} />);
+    expect(screen.queryByRole("columnheader", { name: "#" })).toBeNull();
+  });
+
+  // Numbers the rows AS DISPLAYED. Using the row's index into the source data would restart the
+  // count from wherever a sorted row originally sat, so the column would read 3, 1, 2.
+  it("numbers rows by their position on screen, not their position in the data", () => {
+    render(<ChartTable columns={cols} rows={rows} tableState={{ rowIndex: true }} />);
+    fireEvent.click(screen.getByRole("columnheader", { name: /revenue/ }));
+    const body = screen.getAllByRole("row").slice(1) as HTMLTableRowElement[];
+    expect(body.map((r) => r.cells[0].textContent)).toEqual(["1", "2", "3"]);
+    expect(body.map((r) => r.cells[2].textContent)).toEqual(["1", "2", "3"]);
   });
 });

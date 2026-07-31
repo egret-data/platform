@@ -251,8 +251,12 @@ export default function ChartExplore() {
     return desc.fromParams(base);
   }
 
-  function addFilter(f: ChartFilter) {
-    setFilters((prev) => [...prev.filter((x) => x.col !== f.col), f]);
+  /** Replace whatever the drilled columns already had, then add every new filter. Takes a LIST
+   *  because a bucketed dimension drills to a half-open range — two filters on the SAME column,
+   *  which the old one-at-a-time version would have deduped down to the second half. */
+  function addFilter(fs: ChartFilter[]) {
+    const cols = new Set(fs.map((f) => f.col));
+    setFilters((prev) => [...prev.filter((x) => !cols.has(x.col)), ...fs]);
   }
 
   const mutations = useChartMutations(ws);
@@ -615,6 +619,10 @@ export default function ChartExplore() {
                 state: tableState,
                 onStateChange: setTableState,
                 dimensionColumns: frozenTable.metrics.length > 0 ? frozenTable.columns : [],
+                // From the FROZEN spec, not the live `temporalUnits` state: the rows on screen were
+                // fetched with the units in force when the query ran, so a drill has to filter by
+                // those. Reading live state would build a bucket for a grouping the cell never used.
+                temporalUnits: previewParams().spec.temporal_units ?? {},
               } : undefined}
             >
               {filters.length > 0 && (
