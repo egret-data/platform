@@ -79,19 +79,26 @@ describe("CartesianDisplaySection", () => {
     rerender(<CartesianDisplaySection kind="line" config={{ yMetrics: [] }} onChange={() => {}} />);
     expect(screen.queryByLabelText("Horizontal")).not.toBeInTheDocument();
   });
-  it("per-series colour swatch patches seriesColors by name", () => {
+  // The per-series colour and rename moved to SeriesListSection, which now carries all four
+  // per-series settings on one row — see that file's own tests.
+
+  it("offers Metabase's axis line/tick toggles and the value-axis tick count", () => {
     const onChange = vi.fn();
-    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev", "cnt"] }} onChange={onChange} seriesNames={["rev", "cnt"]} />);
-    fireEvent.change(screen.getByLabelText("color cnt"), { target: { value: "#ff0000" } });
-    expect(onChange).toHaveBeenCalledWith({ seriesColors: { cnt: "#ff0000" } });
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={onChange} />);
+    // Unset means shown, so a chart saved before these existed keeps drawing both.
+    expect(screen.getByLabelText("X axis lines and ticks")).toBeChecked();
+    expect(screen.getByLabelText("Y axis lines and ticks")).toBeChecked();
+    fireEvent.click(screen.getByLabelText("Y axis lines and ticks"));
+    expect(onChange).toHaveBeenCalledWith({ yAxisTicks: false });
+    fireEvent.change(screen.getByLabelText("Y tick marks"), { target: { value: "5" } });
+    expect(onChange).toHaveBeenLastCalledWith({ yTickCount: 5 });
   });
-  it("per-series rename patches seriesLabels and clears when emptied", () => {
+
+  it("clearing the tick count returns the axis to auto", () => {
     const onChange = vi.fn();
-    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], seriesLabels: { rev: "Old" } }} onChange={onChange} seriesNames={["rev"]} />);
-    fireEvent.change(screen.getByLabelText("label rev"), { target: { value: "Revenue" } });
-    expect(onChange).toHaveBeenCalledWith({ seriesLabels: { rev: "Revenue" } });
-    fireEvent.change(screen.getByLabelText("label rev"), { target: { value: "" } });
-    expect(onChange).toHaveBeenLastCalledWith({ seriesLabels: {} });
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], yTickCount: 5 }} onChange={onChange} />);
+    fireEvent.change(screen.getByLabelText("Y tick marks"), { target: { value: "" } });
+    expect(onChange).toHaveBeenLastCalledWith({ yTickCount: undefined });
   });
   it("Data label density is hidden when data labels are off", () => {
     render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);

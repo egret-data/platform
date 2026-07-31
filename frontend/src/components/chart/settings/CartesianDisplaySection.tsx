@@ -28,13 +28,15 @@ interface SectionProps {
  * per-series colour/label, and the combo per-metric series type. Per-series style and size
  * live in their own control (SeriesLineStyleSection) so they can hide behind "More options".
  */
-export function SeriesOptions({ kind, config, onChange, seriesNames = [] }: SectionProps & { seriesNames?: string[] }) {
+/** The colour a series shows before any override: a lone (non-breakout) metric gets the summarize
+ *  green, everything else cycles the accent palette — mirrors the renderer's own choice. */
+export function defaultSeriesColor(hasBreakout: boolean, count: number, i: number): string {
+  return !hasBreakout && count === 1 ? SUMMARIZE_COLOR : seriesColor(i);
+}
+
+export function SeriesOptions({ kind, config, onChange }: SectionProps & { seriesNames?: string[] }) {
   const canStack = kind === "bar" || kind === "row" || kind === "area";
   const isLineish = kind === "line" || kind === "area";
-  // Default colour a series shows before any override: lone (non-breakout) metric gets the
-  // summarize green, everything else cycles the accent palette — mirrors the renderer.
-  const defaultColor = (i: number) =>
-    !config.series && seriesNames.length === 1 ? SUMMARIZE_COLOR : seriesColor(i);
   return (
     <div className="space-y-2.5">
       {canStack && <Toggle id="cz-stacked" label="Stacked" checked={!!config.stacked} onChange={(v) => onChange({ stacked: v })} />}
@@ -81,34 +83,6 @@ export function SeriesOptions({ kind, config, onChange, seriesNames = [] }: Sect
               <SelectItem value="off">Off</SelectItem>
             </SelectContent>
           </Select>
-        </div>
-      )}
-
-      {seriesNames.length > 0 && (
-        <div className="space-y-1.5 border-t pt-2">
-          <div className="text-xs text-muted-foreground">Series</div>
-          {seriesNames.map((name, i) => (
-            <div key={name} className="flex items-center gap-2">
-              <input
-                type="color"
-                aria-label={`color ${name}`}
-                className="h-7 w-8 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
-                value={config.seriesColors?.[name] ?? defaultColor(i)}
-                onChange={(e) => onChange({ seriesColors: { ...config.seriesColors, [name]: e.target.value } })}
-              />
-              <Input
-                className="h-7 flex-1"
-                aria-label={`label ${name}`}
-                placeholder={name}
-                value={config.seriesLabels?.[name] ?? ""}
-                onChange={(e) => {
-                  const next = { ...config.seriesLabels };
-                  if (e.target.value) next[name] = e.target.value; else delete next[name];
-                  onChange({ seriesLabels: next });
-                }}
-              />
-            </div>
-          ))}
         </div>
       )}
 
@@ -202,6 +176,24 @@ export function AxisRangeOptions({ kind, config, onChange }: SectionProps) {
   return (
     <div className="space-y-2.5">
       {kind !== "scatter" && <Toggle id="cz-log" label="Log scale" checked={!!config.logScale} onChange={(v) => onChange({ logScale: v })} />}
+      {/* Metabase's "Show lines and tick marks", one per axis. Stored as `false` only when turned
+          off, so a chart saved before these existed keeps drawing both. */}
+      <Toggle id="cz-xticks" label="X axis lines and ticks" checked={config.xAxisTicks !== false}
+        onChange={(v) => onChange({ xAxisTicks: v ? undefined : false })} />
+      <Toggle id="cz-yticks" label="Y axis lines and ticks" checked={config.yAxisTicks !== false}
+        onChange={(v) => onChange({ yAxisTicks: v ? undefined : false })} />
+      <div className="flex items-center justify-between gap-2">
+        <Label htmlFor="cz-ytickcount" className="text-sm font-normal">Y tick marks</Label>
+        <Input
+          id="cz-ytickcount" aria-label="Y tick marks" type="number" min={2} max={20} step={1}
+          className="h-7 w-20" placeholder="Auto"
+          value={config.yTickCount ?? ""}
+          onChange={(e) => {
+            const n = Number(e.target.value);
+            onChange({ yTickCount: e.target.value === "" || Number.isNaN(n) ? undefined : n });
+          }}
+        />
+      </div>
       {kind !== "scatter" && (
         <div className="grid grid-cols-2 gap-2 border-t pt-2">
           <label className="space-y-1">

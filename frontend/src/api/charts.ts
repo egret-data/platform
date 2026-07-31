@@ -79,6 +79,9 @@ export interface CartesianConfig {
   seriesTypes?: Record<string, "bar" | "line">;  // combo only: metric -> type
   rightAxisMetrics?: string[];   // metrics plotted against a 2nd (right) Y axis
   logScale?: boolean;            // value axis uses a log scale
+  xAxisTicks?: boolean;          // Metabase "Show lines and tick marks" (x). Unset = shown.
+  yAxisTicks?: boolean;          // …and the same for y.
+  yTickCount?: number;           // Metabase "Number of tick marks" on the value axis. Unset = auto.
   normalized?: boolean;          // 100% stacking
   goalValue?: number;            // horizontal goal/reference line
   goalLabel?: string;

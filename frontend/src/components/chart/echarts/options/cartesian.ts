@@ -38,6 +38,12 @@ export interface CartesianBuildConfig {
   metricTypes?: Record<string, string>;
   xAxisUnit?: string;            // temporal extraction unit for the x-axis dimension (e.g. "day_of_week")
   xAxisType?: string;            // SQL type of the x-axis dimension, so its labels can be formatted
+  /** Metabase's "Show lines and tick marks", per axis. Unset means shown, which is what every
+   *  chart drew before the toggles existed. */
+  xAxisTicks?: boolean;
+  yAxisTicks?: boolean;
+  /** Metabase's "Number of tick marks" on the value axis. Unset lets ECharts choose. */
+  yTickCount?: number;
   seriesUnit?: string;           // temporal unit of the BREAKOUT dimension, same role as xAxisUnit
   seriesType?: string;           // SQL type of the breakout dimension, so its labels can be formatted
   /** Short value-axis labels (25.5K). Defaults to on once the numbers are wide. */
@@ -596,7 +602,8 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
         return out === "" ? String(v) : out;
       },
     },
-    axisLine: { lineStyle: { color: gridLine } },
+    axisLine: { show: cfg.xAxisTicks !== false, lineStyle: { color: gridLine } },
+    axisTick: { show: cfg.xAxisTicks !== false },
   };
   // Non-ordinal x: a value (linear) or time (timeseries) axis positioning points by
   // their real coordinate. Series carry [x, y] pairs (see applyXScale).
@@ -605,7 +612,8 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     name: xTitle, nameLocation: "middle" as const, nameGap: 28,
     nameTextStyle: { color: axisLabelColor },
     axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor },
-    axisLine: { lineStyle: { color: gridLine } },
+    axisLine: { show: cfg.xAxisTicks !== false, lineStyle: { color: gridLine } },
+    axisTick: { show: cfg.xAxisTicks !== false },
     splitLine: { show: false as const },
   };
   const xCategory = usesXScale(cfg) ? scaleAxis : categoryAxis;
@@ -623,6 +631,11 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     ...(cfg.yMin != null ? { min: cfg.yMin } : {}),
     ...(cfg.yMax != null ? { max: cfg.yMax } : {}),
     axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: fmtFor(metrics) },
+    axisLine: { show: cfg.yAxisTicks !== false, lineStyle: { color: gridLine } },
+    axisTick: { show: cfg.yAxisTicks !== false },
+    // `splitNumber` is a HINT — ECharts still rounds to human intervals, so asking for 5 can
+    // yield 4 or 6. Metabase's own control behaves the same way, being the same underlying knob.
+    ...(cfg.yTickCount != null ? { splitNumber: cfg.yTickCount } : {}),
     // A second (right) axis omits gridlines to avoid doubling them up.
     splitLine: position === "right" ? { show: false } : { lineStyle: { color: gridLine } },
   });

@@ -577,3 +577,38 @@ describe("breakout series names", () => {
     expect(opt.series[0].name).toBe("Wed");
   });
 });
+
+describe("axis lines, ticks and tick count", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }];
+  const rows = [["EU", 10], ["US", 20]];
+  const base = { kind: "bar" as const, xAxis: "region", yMetrics: ["rev"] };
+
+  // Unset means shown — every chart saved before these settings existed must keep both axes drawn.
+  it("draws lines and ticks on both axes by default", () => {
+    const opt = buildCartesianOption(cols, rows, base) as any;
+    expect(opt.xAxis.axisLine.show).toBe(true);
+    expect(opt.xAxis.axisTick.show).toBe(true);
+    expect(opt.yAxis.axisLine.show).toBe(true);
+    expect(opt.yAxis.axisTick.show).toBe(true);
+    expect(opt.yAxis.splitNumber).toBeUndefined();
+  });
+
+  it("hides each axis' line and ticks independently", () => {
+    const opt = buildCartesianOption(cols, rows, { ...base, xAxisTicks: false }) as any;
+    expect(opt.xAxis.axisLine.show).toBe(false);
+    expect(opt.xAxis.axisTick.show).toBe(false);
+    expect(opt.yAxis.axisLine.show).toBe(true);
+  });
+
+  it("passes the requested tick count to the value axis", () => {
+    const opt = buildCartesianOption(cols, rows, { ...base, yTickCount: 5 }) as any;
+    expect(opt.yAxis.splitNumber).toBe(5);
+  });
+
+  // Horizontal swaps which ECharts axis is the value one, so the toggles have to follow the
+  // ROLE (category vs value), not the axis key.
+  it("keeps the toggles attached to their axis role when horizontal", () => {
+    const opt = buildCartesianOption(cols, rows, { ...base, horizontal: true, yTickCount: 4 }) as any;
+    expect(opt.xAxis.splitNumber).toBe(4);
+  });
+});
