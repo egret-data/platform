@@ -79,6 +79,9 @@ export interface CartesianConfig {
   seriesTypes?: Record<string, "bar" | "line">;  // combo only: metric -> type
   rightAxisMetrics?: string[];   // metrics plotted against a 2nd (right) Y axis
   logScale?: boolean;            // value axis uses a log scale
+  autoSplitY?: boolean;          // Metabase "Split y-axis when necessary". Unset = on.
+  showXLabel?: boolean;          // Metabase "Show label" (x), separate from the label text.
+  showYLabel?: boolean;          // …and the same for y.
   xAxisTicks?: boolean;          // Metabase "Show lines and tick marks" (x). Unset = shown.
   yAxisTicks?: boolean;          // …and the same for y.
   yTickCount?: number;           // Metabase "Number of tick marks" on the value axis. Unset = auto.

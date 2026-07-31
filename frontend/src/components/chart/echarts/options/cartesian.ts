@@ -23,6 +23,13 @@ export interface CartesianBuildConfig {
   yLabel?: string;
   seriesTypes?: Record<string, "bar" | "line">;
   rightAxisMetrics?: string[];   // metrics plotted against a second (right) Y axis
+  /** Metabase's "Split y-axis when necessary". Unset means on, as it is there. Only consulted when
+   *  `rightAxisMetrics` is empty — an explicit assignment always wins over a computed one. */
+  autoSplitY?: boolean;
+  /** Metabase's "Show label", one per axis, separate from the label TEXT. Unset means shown. Kept
+   *  apart from the text so hiding a title does not make the user retype it to bring it back. */
+  showXLabel?: boolean;
+  showYLabel?: boolean;
   logScale?: boolean;            // value axis uses a log scale
   normalized?: boolean;          // 100% stacking — each category's values sum to 100
   goalValue?: number;            // horizontal reference (goal) line
@@ -244,10 +251,131 @@ function normalizeStacks(series: { data: (number | null)[] }[]) {
   }
 }
 
+/** A metric's [min, max] over the drawn rows. */
+type Extent = [number, number];
+
 // Right-axis is active only when it splits the metrics (≥1 left and ≥1 right) on a
 // vertical chart — clean-room of Metabase's left/right axis split.
 function rightMetrics(cfg: CartesianBuildConfig): string[] {
   return (cfg.rightAxisMetrics ?? []).filter((m) => cfg.yMetrics.includes(m));
+}
+
+/** Per-metric [min, max] over the drawn rows. The split decision needs one range per metric — the
+ *  granularity egret's own right-axis control uses, so a computed split is a value that control
+ *  could equally have produced by hand. */
+function metricExtents(columns: ResultColumn[], rows: unknown[][], metrics: string[]): Record<string, Extent> {
+  const out: Record<string, Extent> = {};
+  for (const m of metrics) {
+    const i = columns.findIndex((c) => c.name === m);
+    if (i < 0) continue;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const r of rows) {
+      const v = Number(r[i]);
+      if (!Number.isFinite(v)) continue;
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    if (Number.isFinite(lo) && Number.isFinite(hi)) out[m] = [lo, hi];
+  }
+  return out;
+}
+
+/** Metabase's `KEYS_TO_COMPARE` verbatim — the format fields that make two metrics incomparable on
+ *  one scale. Every one of them exists on egret's ColumnFormat under the same name. */
+const KEYS_TO_COMPARE = [
+  "number_style", "currency", "currency_style", "number_separators", "decimals", "scale",
+  "prefix", "suffix",
+] as const;
+
+function comparisonSettings(fmt: ColumnFormat | undefined): string {
+  if (!fmt) return "";
+  const picked: Record<string, unknown> = {};
+  for (const k of KEYS_TO_COMPARE) {
+    const v = fmt[k];
+    if (v === undefined) continue;
+    // Metabase drops an EMPTY prefix/suffix before comparing, so "" and unset are the same thing.
+    if ((k === "prefix" || k === "suffix") && v === "") continue;
+    picked[k] = v;
+  }
+  return JSON.stringify(picked);
+}
+
+/**
+ * Whether the y-axis should split itself — Metabase's `shouldAutoSplitYAxis`, ported.
+ *
+ * Its own note on the last rule, kept because it is the reason for the number: "When the series
+ * with the smallest range is less than 5% of the chart's total range, we split the y-axis so it
+ * doesn't look too small."
+ *
+ * The `semantic_type` and multi-card clauses have no egret equivalent — egret plots one dataset and
+ * carries no semantic types — so they are dropped rather than approximated. The format clause does
+ * translate exactly: two metrics formatted as different currencies, or one scaled and one not, do
+ * not belong on one scale however close their ranges are.
+ */
+export function shouldAutoSplitY(cfg: CartesianBuildConfig, extents: Record<string, Extent>): boolean {
+  if (cfg.autoSplitY === false) return false;
+  // A stack answers a different question — the parts of one total — so a second scale would make
+  // the stack meaningless. Metabase bails on `stackable.stack_type` for the same reason.
+  if (resolveStacked(cfg)) return false;
+  if (isHorizontal(cfg)) return false;
+  const metrics = cfg.yMetrics.filter((m) => extents[m] != null);
+  if (metrics.length < 2) return false;
+
+  const fmts = metrics.map((m) => comparisonSettings(cfg.columnSettings?.[m]));
+  if (new Set(fmts).size > 1) return true;
+
+  const ranges = metrics.map((m) => extents[m][1] - extents[m][0]);
+  const minRange = Math.min(...ranges);
+  const chartRange = Math.max(...metrics.map((m) => extents[m][1])) - Math.min(...metrics.map((m) => extents[m][0]));
+  if (chartRange === 0) return false;
+  return minRange / chartRange <= 0.05;
+}
+
+// Metabase's own constants, verbatim.
+const SPLIT_AXIS_UNSPLIT_COST = -100;
+const SPLIT_AXIS_COST_FACTOR = 2;
+const SPLIT_AXIS_MAX_DEPTH = 8;
+
+/** Every partition of `list` into two sides. Past the depth cap the remainder goes to the smaller
+ *  side in one piece, so the search stays bounded without dropping a metric. */
+function generateSplits(list: string[], left: string[] = [], right: string[] = [], depth = 0): [string[], string[]][] {
+  if (list.length === 0) return [[left, right]];
+  if (depth > SPLIT_AXIS_MAX_DEPTH) {
+    return left.length < right.length ? [[left.concat(list), right]] : [[left, right.concat(list)]];
+  }
+  return [
+    ...generateSplits(list.slice(1), left.concat([list[0]]), right, depth + 1),
+    ...generateSplits(list.slice(1), left, right.concat([list[0]]), depth + 1),
+  ];
+}
+
+/** How badly one axis serves the metrics on it: the square of how much of the axis each metric
+ *  fails to use. An empty side scores -100 while unsplit is still favoured, which is what keeps a
+ *  chart on one axis unless splitting genuinely pays. */
+function axisCost(extents: Extent[], favorUnsplit = true): number {
+  if (favorUnsplit && extents.length === 0) return SPLIT_AXIS_UNSPLIT_COST;
+  const lo = Math.min(...extents.map((e) => e[0]));
+  const hi = Math.max(...extents.map((e) => e[1]));
+  const axisRange = hi - lo;
+  if (axisRange === 0) return 0;
+  return extents.reduce((sum, e) => {
+    const r = e[1] - e[0];
+    return sum + (r === 0 ? 0 : Math.pow(axisRange / r, SPLIT_AXIS_COST_FACTOR));
+  }, 0);
+}
+
+/** The cheapest partition. Metabase's `computeSplit`, ported. Returns the RIGHT side, which is what
+ *  egret's `rightAxisMetrics` names. */
+export function computeAxisSplit(metrics: string[], extents: Record<string, Extent>): string[] {
+  const usable = metrics.filter((m) => extents[m] != null);
+  let best: [string[], string[]] | null = null;
+  let bestCost = Infinity;
+  for (const split of generateSplits(usable)) {
+    const c = axisCost(split[0].map((m) => extents[m])) + axisCost(split[1].map((m) => extents[m]));
+    if (!best || c < bestCost) { best = split; bestCost = c; }
+  }
+  return best?.[1] ?? [];
 }
 function isDualAxis(cfg: CartesianBuildConfig): boolean {
   const right = rightMetrics(cfg);
@@ -335,11 +463,26 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
 export function buildCartesianOption(
   columns: ResultColumn[],
   rows: unknown[][],
-  cfg: CartesianBuildConfig,
+  cfg0: CartesianBuildConfig,
 ): EChartsCoreOption {
-  if (cfg.kind === "scatter" && cfg.xMetric && cfg.yMetrics.length > 0) {
-    return scatterXY(columns, rows, cfg);
+  if (cfg0.kind === "scatter" && cfg0.xMetric && cfg0.yMetrics.length > 0) {
+    return scatterXY(columns, rows, cfg0);
   }
+  // Resolve the automatic axis split ONCE, here, and hand the rest of the builder a config that
+  // already names the right-axis metrics. Every downstream reader — `isDualAxis`, the per-series
+  // `yAxisIndex`, the axis titles — then goes on asking the same question it always did, and a
+  // computed split is indistinguishable from one the user assigned by hand.
+  const cfg: CartesianBuildConfig = (cfg0.rightAxisMetrics ?? []).length > 0
+    ? cfg0
+    : (() => {
+        const extents = metricExtents(columns, rows, cfg0.yMetrics);
+        if (!shouldAutoSplitY(cfg0, extents)) return cfg0;
+        const right = computeAxisSplit(cfg0.yMetrics, extents);
+        // A split that puts everything on one side is not a split.
+        return right.length > 0 && right.length < cfg0.yMetrics.length
+          ? { ...cfg0, rightAxisMetrics: right }
+          : cfg0;
+      })();
   const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
   const xi = cfg.xAxis != null ? idx[cfg.xAxis] : undefined;
   const fmt = (metric: string, v: unknown) =>
@@ -578,7 +721,7 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     col == null ? undefined : (cfg.seriesLabels?.[col] ?? cfg.columnSettings?.[col]?.column_title ?? col);
   // An axis plotting several metrics has no one name — the legend names them instead.
   const metricTitle = (metrics: string[]) => (metrics.length === 1 ? titleOf(metrics[0]) : undefined);
-  const xTitle = cfg.xLabel ?? titleOf(cfg.xAxis);
+  const xTitle = cfg.showXLabel === false ? undefined : (cfg.xLabel ?? titleOf(cfg.xAxis));
 
   // Compact labels are for wide numbers, not for many bars — three bars of revenue in the
   // millions crowd an axis just as badly as forty do. Measured per axis: a dual-axis chart
@@ -595,7 +738,7 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   const rightSide = dual ? rightMetrics(cfg) : [];
   const leftSide = [...new Set(plotted.filter((s) => s.yAxisIndex !== 1).map((s) => s.__metric ?? s.name ?? ""))]
     .filter(Boolean);
-  const yTitle = cfg.yLabel ?? metricTitle(leftSide);
+  const yTitle = cfg.showYLabel === false ? undefined : (cfg.yLabel ?? metricTitle(leftSide));
   const widestOf = (metrics: string[]) => {
     let widest = 0;
     for (const s of plotted) {

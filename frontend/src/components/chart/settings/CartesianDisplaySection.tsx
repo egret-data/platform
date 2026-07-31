@@ -147,17 +147,25 @@ export function AxesOptions({ kind, config, onChange }: SectionProps) {
       {config.yMetrics.length > 1 && !config.horizontal && kind !== "row" && (
         <div className="space-y-1.5 border-t pt-2">
           <div className="text-xs text-muted-foreground">Y axis</div>
+          {/* "Auto" is the resting state, not "Left". With the automatic split turned on and nothing
+              assigned by hand, the chart can perfectly well draw a metric on the right — and these
+              selects used to say "Left" underneath a chart that was visibly doing otherwise.
+              Choosing either side turns the split off for the whole chart, which is what an
+              explicit assignment means. */}
           {config.yMetrics.map((m) => {
+            const assigned = (config.rightAxisMetrics ?? []).length > 0;
             const onRight = (config.rightAxisMetrics ?? []).includes(m);
             return (
               <div key={m} className="flex items-center justify-between gap-2">
                 <Label className="truncate text-sm font-normal">{m}</Label>
-                <Select value={onRight ? "right" : "left"} onValueChange={(v) => {
+                <Select value={!assigned ? "auto" : onRight ? "right" : "left"} onValueChange={(v) => {
+                  if (v === "auto") { onChange({ rightAxisMetrics: [] }); return; }
                   const rest = (config.rightAxisMetrics ?? []).filter((x) => x !== m);
                   onChange({ rightAxisMetrics: v === "right" ? [...rest, m] : rest });
                 }}>
                   <SelectTrigger aria-label={`axis ${m}`} className="h-7 w-24"><SelectValue /></SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="auto">Auto</SelectItem>
                     <SelectItem value="left">Left</SelectItem>
                     <SelectItem value="right">Right</SelectItem>
                   </SelectContent>
@@ -168,15 +176,32 @@ export function AxesOptions({ kind, config, onChange }: SectionProps) {
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-2 border-t pt-2">
-        <label className="space-y-1">
-          <span className="text-xs text-muted-foreground">X label</span>
-          <Input className="h-8" value={config.xLabel ?? ""} onChange={(e) => onChange({ xLabel: e.target.value })} />
-        </label>
-        <label className="space-y-1">
-          <span className="text-xs text-muted-foreground">Y label</span>
-          <Input className="h-8" value={config.yLabel ?? ""} onChange={(e) => onChange({ yLabel: e.target.value })} />
-        </label>
+      {/* Metabase pairs each axis title with its own Show label switch. Kept apart from the text so
+          hiding a title does not make the user retype it to bring it back — with the text alone as
+          the control, "off" meant an empty box and the wording was gone for good. */}
+      <div className="space-y-2 border-t pt-2">
+        <div className="space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="cz-xlabel" className="text-sm font-normal">X label</Label>
+            <Switch id="cz-show-xlabel" aria-label="Show X label" checked={config.showXLabel !== false}
+              onCheckedChange={(v) => onChange({ showXLabel: v ? undefined : false })} />
+          </div>
+          {config.showXLabel !== false && (
+            <Input id="cz-xlabel" aria-label="X label" className="h-8" placeholder="Auto"
+              value={config.xLabel ?? ""} onChange={(e) => onChange({ xLabel: e.target.value })} />
+          )}
+        </div>
+        <div className="space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="cz-ylabel" className="text-sm font-normal">Y label</Label>
+            <Switch id="cz-show-ylabel" aria-label="Show Y label" checked={config.showYLabel !== false}
+              onCheckedChange={(v) => onChange({ showYLabel: v ? undefined : false })} />
+          </div>
+          {config.showYLabel !== false && (
+            <Input id="cz-ylabel" aria-label="Y label" className="h-8" placeholder="Auto"
+              value={config.yLabel ?? ""} onChange={(e) => onChange({ yLabel: e.target.value })} />
+          )}
+        </div>
       </div>
     </div>
   );
@@ -199,6 +224,13 @@ export function AxisRangeOptions({ kind, config, onChange }: SectionProps) {
           off, so a chart saved before these existed keeps drawing both. */}
       <Toggle id="cz-xticks" label="X axis lines and ticks" checked={config.xAxisTicks !== false}
         onChange={(v) => onChange({ xAxisTicks: v ? undefined : false })} />
+      {/* Only meaningful with two or more metrics on one axis to separate. Metabase gates it the
+          same way, and computes the split rather than asking which metric goes where — egret's
+          per-metric Axis selects still win when they name anything. */}
+      {kind !== "scatter" && config.yMetrics.length > 1 && (
+        <Toggle id="cz-autosplit" label="Split y-axis when necessary" checked={config.autoSplitY !== false}
+          onChange={(v) => onChange({ autoSplitY: v ? undefined : false })} />
+      )}
       <Toggle id="cz-yticks" label="Y axis lines and ticks" checked={config.yAxisTicks !== false}
         onChange={(v) => onChange({ yAxisTicks: v ? undefined : false })} />
       <div className="flex items-center justify-between gap-2">

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildCartesianOption, cartesianSeriesNames, resolveStacked, stackModeOf, stackModePatch,
+  shouldAutoSplitY, computeAxisSplit,
 } from "../options/cartesian";
 import { CHART_THEME, SERIES_PALETTE, SUMMARIZE_COLOR } from "../palette";
 
@@ -229,8 +230,16 @@ describe("buildCartesianOption — dual axis & scale (Metabase parity 1d)", () =
     expect(opt.series.find((s: any) => s.name === "cnt").yAxisIndex).toBe(1);
     expect(opt.series.find((s: any) => s.name === "rev").yAxisIndex ?? 0).toBe(0);
   });
-  it("stays single-axis when no metric is on the right", () => {
+  // `cnt` spans 2 against `rev`'s 100 — 1% of the chart's range, well under Metabase's 5% rule, so
+  // sharing one axis would flatten it to a line on the floor. The split is now computed.
+  it("splits the axis itself when one metric would be invisible beside the other", () => {
     const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "x", yMetrics: ["rev", "cnt"] }) as any;
+    expect(Array.isArray(opt.yAxis)).toBe(true);
+    expect(opt.series.find((s: any) => s.name === "cnt").yAxisIndex).toBe(1);
+  });
+
+  it("stays single-axis when the split is turned off", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "x", yMetrics: ["rev", "cnt"], autoSplitY: false }) as any;
     expect(Array.isArray(opt.yAxis)).toBe(false);
   });
   it("stays single-axis when every metric is on the right", () => {
@@ -688,5 +697,48 @@ describe("hover emphasis and blur", () => {
     const s = opt.series[0];
     expect(s.blur.itemStyle.opacity).toBe(0.3);
     expect(s.emphasis.areaStyle).toBeUndefined();
+  });
+});
+
+describe("automatic y-axis split (Metabase's shouldAutoSplitYAxis / computeSplit)", () => {
+  const ext = (o: Record<string, [number, number]>) => o;
+  const base = { kind: "bar" as const, xAxis: "x", yMetrics: ["a", "b"] };
+
+  // Its own note, kept because it is the reason for the number: "When the series with the smallest
+  // range is less than 5% of the chart's total range, we split the y-axis so it doesn't look too
+  // small."
+  it("splits at the 5% boundary and not above it", () => {
+    expect(shouldAutoSplitY(base, ext({ a: [0, 100], b: [0, 5] }))).toBe(true);
+    expect(shouldAutoSplitY(base, ext({ a: [0, 100], b: [0, 6] }))).toBe(false);
+  });
+
+  it("never splits a stack — a second scale would make the parts stop summing to the whole", () => {
+    expect(shouldAutoSplitY({ ...base, kind: "area" }, ext({ a: [0, 100], b: [0, 1] }))).toBe(false);
+    expect(shouldAutoSplitY({ ...base, stacked: true }, ext({ a: [0, 100], b: [0, 1] }))).toBe(false);
+  });
+
+  it("needs two metrics, and respects the opt-out", () => {
+    expect(shouldAutoSplitY({ ...base, yMetrics: ["a"] }, ext({ a: [0, 100] }))).toBe(false);
+    expect(shouldAutoSplitY({ ...base, autoSplitY: false }, ext({ a: [0, 100], b: [0, 1] }))).toBe(false);
+  });
+
+  // Metabase's KEYS_TO_COMPARE clause: two metrics in different currencies do not belong on one
+  // scale however close their ranges are.
+  it("splits metrics whose formats are not comparable, whatever their ranges", () => {
+    const cfg = { ...base, columnSettings: { a: { currency: "USD" }, b: { currency: "EUR" } } };
+    expect(shouldAutoSplitY(cfg, ext({ a: [0, 100], b: [0, 100] }))).toBe(true);
+    // …and an empty prefix is the same as no prefix, as it is there.
+    const same = { ...base, columnSettings: { a: { prefix: "" }, b: {} } };
+    expect(shouldAutoSplitY(same, ext({ a: [0, 100], b: [0, 100] }))).toBe(false);
+  });
+
+  it("puts the odd metric out on its own side", () => {
+    expect(computeAxisSplit(["a", "b"], ext({ a: [0, 100], b: [0, 2] }))).toEqual(["b"]);
+  });
+
+  // `axisCost` scores an empty side at -100 while unsplit is favoured, so metrics that share a
+  // scale comfortably stay together.
+  it("keeps comparable metrics on one axis", () => {
+    expect(computeAxisSplit(["a", "b"], ext({ a: [0, 100], b: [0, 90] }))).toEqual([]);
   });
 });
