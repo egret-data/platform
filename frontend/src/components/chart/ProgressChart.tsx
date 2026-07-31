@@ -95,9 +95,12 @@ export function ProgressChart({
             value. The value is centred on the fill end, so anything added to it hangs half its
             width past that point: measured, the pair reached 76px beyond the right end of the bar
             and within 13px of the card edge, and a longer message ("No data available") would have
-            gone over. */}
+            gone over.
+            `bottom-full mb-1` rather than a fixed negative offset: a -12px top against a ~15px
+            line box left the descenders sitting 3px INSIDE the bar. Anchoring the message's BOTTOM
+            to the bar's top keeps the gap correct whatever the font metrics turn out to be. */}
         {message && (
-          <div data-progress-message className="absolute -top-3 left-0 text-xs text-muted-foreground">
+          <div data-progress-message className="absolute bottom-full left-0 mb-1 text-xs text-muted-foreground">
             {message}
           </div>
         )}

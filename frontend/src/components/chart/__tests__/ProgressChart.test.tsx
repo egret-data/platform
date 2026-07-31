@@ -74,7 +74,9 @@ describe("ProgressChart — the message has its own row", () => {
     const message = container.querySelector("[data-progress-message]")!;
     expect(message).toBeInTheDocument();
     expect(value.contains(message)).toBe(false);
-    // Pinned to the left edge, not to the fill end.
+    // Pinned to the left edge, not to the fill end, and anchored by its BOTTOM to the bar's top —
+    // a fixed negative offset let the descenders sit inside the bar.
     expect((message as HTMLElement).className).toContain("left-0");
+    expect((message as HTMLElement).className).toContain("bottom-full");
   });
 });
