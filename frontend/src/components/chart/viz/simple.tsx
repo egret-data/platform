@@ -130,13 +130,33 @@ function FunnelStepsControl({ config, onChange, resultColumns, rows }: VizContro
         } as Partial<Cfg>)}
       />
       <p className="text-xs text-muted-foreground">
-        A funnel reads top to bottom in this order — it is not re-sorted by size.
+        A funnel reads left to right in this order — it is not re-sorted by size.
       </p>
     </div>
   );
 }
 
-const funnelDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display", render: FunnelStepsControl }];
+/** Metabase's `funnel.type`. */
+function FunnelTypeControl({ config, onChange }: VizControlProps<Cfg>) {
+  return (
+    <div className="space-y-1">
+      <Label className="text-sm font-normal">Funnel type</Label>
+      <Select value={(config.type as string | undefined) ?? "funnel"}
+        onValueChange={(v) => onChange({ type: v === "funnel" ? undefined : v } as Partial<Cfg>)}>
+        <SelectTrigger aria-label="Funnel type" className="h-8 text-sm"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="funnel">Funnel — one narrowing band</SelectItem>
+          <SelectItem value="bar">Bar — a column per step</SelectItem>
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+const funnelDisplay: VizControl<Cfg>[] = [
+  { id: "type", section: "display", render: FunnelTypeControl },
+  { id: "steps", section: "display", render: FunnelStepsControl },
+];
 
 /** The scalar's captions and conditional-colour bands. Unlike the gauge's, this control needs
  * nothing from the result — a band is compared against whatever value renders, not against the

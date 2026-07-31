@@ -193,6 +193,8 @@ export interface FunnelConfig {
   stepOrder?: string[];
   /** …and the ones left out. */
   hiddenSteps?: string[];
+  /** Metabase's `funnel.type`: one narrowing band, or a column per step. */
+  type?: "funnel" | "bar";
 }
 export interface WaterfallConfig {
   xAxis?: string;
