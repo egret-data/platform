@@ -479,6 +479,26 @@ function decorateSeries(
     if (resolveStacked(cfg)) out.stack = "total";
   }
   if (cfg.kind === "area") out.areaStyle = { opacity: CHART_THEME.areaOpacity };
+
+  // Pointing at a series lifts it and pushes every other one back — the effect that makes a
+  // multi-series chart readable, and the one thing egret's cartesian charts had no answer for.
+  // Without `focus`, ECharts applies its default emphasis to whatever is under the pointer and
+  // leaves the rest alone: measured on egret, hovering one band lightened ALL FOUR, which says
+  // nothing about which one you are on.
+  //
+  // The numbers are Metabase's, measured on a live instance rather than read off its source:
+  //   bar  — hovered stays opaque, the other series drop to 0.3
+  //   area — hovered fill goes 0.3 -> 0.6, the other fills 0.3 -> 0.2
+  // The trend and stack-total helper series are excluded by their callers, which never reach here.
+  out.emphasis = {
+    focus: "series",
+    ...(cfg.kind === "area" ? { areaStyle: { opacity: CHART_THEME.areaOpacityEmphasis } } : {}),
+  };
+  out.blur = {
+    itemStyle: { opacity: CHART_THEME.blurOpacity },
+    lineStyle: { opacity: CHART_THEME.blurOpacity },
+    ...(cfg.kind === "area" ? { areaStyle: { opacity: CHART_THEME.areaOpacityBlur } } : {}),
+  };
   if (type === "line") {
     // A series may depart from the chart-wide line appearance. Metabase keeps these settings
     // per-series only; egret keeps a chart-wide default and lets a series override it, so the

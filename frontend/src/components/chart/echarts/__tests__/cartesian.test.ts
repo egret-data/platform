@@ -659,3 +659,34 @@ describe("stacking defaults and the three-state mode", () => {
     expect(stackModePatch("normalized")).toEqual({ stacked: true, normalized: true });
   });
 });
+
+describe("hover emphasis and blur", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }, { name: "cnt", type: "double" }];
+  const rows = [["EU", 10, 3], ["US", 20, 5]];
+
+  // Without `focus`, ECharts emphasises whatever is under the pointer and leaves the rest alone —
+  // measured on egret, hovering one band lightened all four, which says nothing about which one
+  // you are on. Metabase focuses the series and pushes the others back.
+  it("focuses the hovered series on every cartesian kind", () => {
+    for (const kind of ["bar", "line", "area"] as const) {
+      const opt = buildCartesianOption(cols, rows, { kind, xAxis: "region", yMetrics: ["rev", "cnt"] }) as any;
+      for (const s of opt.series) expect(s.emphasis.focus).toBe("series");
+    }
+  });
+
+  it("lifts an area's own fill and pushes the others back, at Metabase's measured opacities", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "area", xAxis: "region", yMetrics: ["rev", "cnt"] }) as any;
+    const s = opt.series[0];
+    expect(s.areaStyle.opacity).toBe(0.3);
+    expect(s.emphasis.areaStyle.opacity).toBe(0.6);
+    expect(s.blur.areaStyle.opacity).toBe(0.2);
+  });
+
+  // A bar has no fill opacity to raise, so only the blur applies to it.
+  it("blurs a bar without inventing an emphasis fill for it", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev", "cnt"] }) as any;
+    const s = opt.series[0];
+    expect(s.blur.itemStyle.opacity).toBe(0.3);
+    expect(s.emphasis.areaStyle).toBeUndefined();
+  });
+});

@@ -16,6 +16,13 @@ export const SERIES_PALETTE = [
 export const CHART_THEME = {
   barWidth: "80%",      // CHART_STYLE.series.barWidth 0.8
   areaOpacity: 0.3,     // CHART_STYLE.opacity.area
+  // Hover states, measured on a live Metabase rather than read off its source: pointing at one
+  // series lifts it and pushes the others back. An area's fill carries both halves of the effect
+  // (0.3 -> 0.6 hovered, 0.3 -> 0.2 blurred); a bar or a line has no fill opacity to raise, so
+  // only the blur applies to it.
+  areaOpacityEmphasis: 0.6,
+  areaOpacityBlur: 0.2,
+  blurOpacity: 0.3,
   scatterOpacity: 0.8,  // CHART_STYLE.opacity.scatter
   symbolSize: 6,        // CHART_STYLE.symbolSize
   lineWidth: 2,         // LINE_SIZE.M
