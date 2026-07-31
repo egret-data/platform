@@ -194,6 +194,10 @@ export interface WaterfallConfig {
 export interface SmartScalarConfig {
   dimension?: string;
   metric?: string;
+  /** Metabase "Switch positive / negative colors?" — for a metric where LESS is better. */
+  switchPositiveNegative?: boolean;
+  /** Metabase "Compact number": 36,513 -> 36.5k. */
+  compact?: boolean;
 }
 export interface BoxplotConfig {
   category?: string;
