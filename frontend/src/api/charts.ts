@@ -76,7 +76,10 @@ export interface CartesianConfig {
   showLegend?: boolean;      // legend visibility
   xLabel?: string;
   yLabel?: string;
-  seriesTypes?: Record<string, "bar" | "line">;  // combo only: metric -> type
+  // combo only: SERIES name -> how it is drawn. Keyed by series, not by metric, so a broken-out
+  // combo can draw each band differently — and so one panel row can carry a series' colour, its
+  // rename and its display together.
+  seriesTypes?: Record<string, "bar" | "line" | "area">;
   rightAxisMetrics?: string[];   // metrics plotted against a 2nd (right) Y axis
   logScale?: boolean;            // value axis uses a log scale
   autoSplitY?: boolean;          // Metabase "Split y-axis when necessary". Unset = on.

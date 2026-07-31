@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildCartesianOption, cartesianSeriesNames, resolveStacked, stackModeOf, stackModePatch,
-  shouldAutoSplitY, computeAxisSplit,
+  shouldAutoSplitY, computeAxisSplit, seriesDisplayFor,
 } from "../options/cartesian";
 import { CHART_THEME, SERIES_PALETTE, SUMMARIZE_COLOR } from "../palette";
 
@@ -740,5 +740,51 @@ describe("automatic y-axis split (Metabase's shouldAutoSplitYAxis / computeSplit
   // scale comfortably stay together.
   it("keeps comparable metrics on one axis", () => {
     expect(computeAxisSplit(["a", "b"], ext({ a: [0, 100], b: [0, 90] }))).toEqual([]);
+  });
+});
+
+describe("combo — how each series is drawn", () => {
+  const cols = [{ name: "x", type: "varchar" }, { name: "rev", type: "double" }, { name: "cnt", type: "double" }];
+  const rows = [["A", 100, 3], ["B", 200, 5]];
+
+  // Metabase's `getSeriesDefaultDisplay`, verbatim: `index === 0 ? "line" : "bar"`. egret defaulted
+  // every series to "bar", so a fresh combo was indistinguishable from a bar chart until the user
+  // changed something — the one thing the chart type exists to show was off by default.
+  it("draws the first series as a line and the rest as bars", () => {
+    expect(seriesDisplayFor("combo", "rev", 0)).toBe("line");
+    expect(seriesDisplayFor("combo", "cnt", 1)).toBe("bar");
+    expect(seriesDisplayFor("combo", "third", 2)).toBe("bar");
+  });
+
+  it("lets an explicit choice win, keyed by SERIES name", () => {
+    expect(seriesDisplayFor("combo", "rev", 0, { rev: "bar" })).toBe("bar");
+    expect(seriesDisplayFor("combo", "cnt", 1, { cnt: "area" })).toBe("area");
+    // A key for a different series does not leak onto this one.
+    expect(seriesDisplayFor("combo", "cnt", 1, { rev: "area" })).toBe("bar");
+  });
+
+  it("leaves the fixed kinds alone", () => {
+    expect(seriesDisplayFor("bar", "rev", 0)).toBe("bar");
+    expect(seriesDisplayFor("line", "rev", 1)).toBe("line");
+    expect(seriesDisplayFor("area", "rev", 1)).toBe("area");
+  });
+
+  it("reaches the drawn series", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "combo", xAxis: "x", yMetrics: ["rev", "cnt"] }) as any;
+    expect(opt.series.map((s: any) => s.type)).toEqual(["line", "bar"]);
+    expect(opt.series[0].areaStyle).toBeUndefined();
+  });
+
+  // "area" is not an ECharts series type — it is a line that happens to be filled — so a combo can
+  // hold a filled band and a bare line at once.
+  it("draws an area-displayed series as a filled line", () => {
+    const opt = buildCartesianOption(cols, rows, {
+      kind: "combo", xAxis: "x", yMetrics: ["rev", "cnt"], seriesTypes: { rev: "area" },
+    }) as any;
+    expect(opt.series[0].type).toBe("line");
+    expect(opt.series[0].areaStyle.opacity).toBe(0.3);
+    expect(opt.series[0].emphasis.areaStyle.opacity).toBe(0.6);
+    expect(opt.series[1].type).toBe("bar");
+    expect(opt.series[1].areaStyle).toBeUndefined();
   });
 });

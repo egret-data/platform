@@ -7,7 +7,7 @@ import {
 } from "@/components/chart/settings/CartesianDisplaySection";
 import { SeriesListSection } from "@/components/chart/settings/SeriesListSection";
 import { SeriesLineStyleSection } from "@/components/chart/settings/SeriesLineStyleSection";
-import { cartesianSeriesNames } from "@/components/chart/echarts/options/cartesian";
+import { cartesianSeriesNames, stackModeOf } from "@/components/chart/echarts/options/cartesian";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
@@ -106,7 +106,7 @@ function MaxCategoriesControl({ config, onChange }: VizControlProps<CartesianCon
 
 // Series names come from the last result, not from anything precomputed — the shell must not know
 // cartesian-specific shape.
-function SeriesListControl({ config, onChange, resultColumns, rows }: VizControlProps<CartesianConfig>) {
+function SeriesListControl({ kind, config, onChange, resultColumns, rows }: VizControlProps<CartesianConfig> & { kind: CartesianViz }) {
   const names = cartesianSeriesNames(resultColumns, rows, config);
   if (names.length === 0) return null;
   return (
@@ -116,6 +116,12 @@ function SeriesListControl({ config, onChange, resultColumns, rows }: VizControl
       hidden={config.hiddenSeries}
       colors={config.seriesColors}
       labels={config.seriesLabels}
+      types={config.seriesTypes}
+      // Only a combo lets a series choose; every other kind draws what its type says. Hidden while
+      // stacked, as Metabase hides it — a stack of mixed shapes is not a thing anyone can read.
+      defaultDisplay={kind === "combo" && stackModeOf({ kind, stacked: config.stacked, normalized: config.normalized }) === "none"
+        ? (i) => (i === 0 ? "line" : "bar")
+        : undefined}
       defaultColor={(i) => defaultSeriesColor(!!config.series, names.length, i)}
       onChange={onChange}
     />
@@ -148,7 +154,10 @@ function displayControls(kind: CartesianViz): VizControl<CartesianConfig>[] {
         <SeriesOptions kind={kind} config={config} onChange={onChange} />
       ),
     },
-    { id: "seriesList", section: "display", group: "Series", render: SeriesListControl },
+    {
+      id: "seriesList", section: "display", group: "Series",
+      render: (p: VizControlProps<CartesianConfig>) => <SeriesListControl kind={kind} {...p} />,
+    },
     ...(isLineish ? [{
       id: "seriesLineStyle", section: "display" as const, group: "Series", advanced: true,
       render: SeriesLineStyleControl,

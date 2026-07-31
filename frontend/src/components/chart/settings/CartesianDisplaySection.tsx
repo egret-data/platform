@@ -105,23 +105,9 @@ export function SeriesOptions({ kind, config, onChange }: SectionProps & { serie
         </div>
       )}
 
-      {kind === "combo" && config.yMetrics.length > 0 && (
-        <div className="space-y-1.5 border-t pt-2">
-          <div className="text-xs text-muted-foreground">Series type</div>
-          {config.yMetrics.map((m) => (
-            <div key={m} className="flex items-center justify-between gap-2">
-              <Label className="truncate text-sm font-normal">{m}</Label>
-              <Select value={config.seriesTypes?.[m] ?? "bar"} onValueChange={(v) => onChange({ seriesTypes: { ...config.seriesTypes, [m]: v as "bar" | "line" } })}>
-                <SelectTrigger aria-label={`type ${m}`} className="h-7 w-24"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="bar">Bar</SelectItem>
-                  <SelectItem value="line">Line</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          ))}
-        </div>
-      )}
+      {/* The per-series display moved onto the series row itself (SeriesListSection), where it sits
+          with that series' colour and rename — one row per series, the way Metabase has it. It used
+          to be a THIRD parallel list keyed by metric, printing every name again. */}
     </div>
   );
 }

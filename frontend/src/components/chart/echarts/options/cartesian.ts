@@ -21,7 +21,7 @@ export interface CartesianBuildConfig {
   showLegend?: boolean;
   xLabel?: string;
   yLabel?: string;
-  seriesTypes?: Record<string, "bar" | "line">;
+  seriesTypes?: Record<string, SeriesDisplay>;   // series name -> how it is drawn (combo)
   rightAxisMetrics?: string[];   // metrics plotted against a second (right) Y axis
   /** Metabase's "Split y-axis when necessary". Unset means on, as it is there. Only consulted when
    *  `rightAxisMetrics` is empty — an explicit assignment always wins over a computed one. */
@@ -414,12 +414,33 @@ function seriesDisplayName(cfg: CartesianBuildConfig, raw: string): string {
   return formatValue(raw, cfg.seriesType ?? "varchar", fmt) || raw;
 }
 
-function seriesTypeFor(kind: CartesianViz, metric: string, seriesTypes?: Record<string, "bar" | "line">) {
-  if (kind === "combo") return seriesTypes?.[metric] ?? "bar";
-  if (kind === "area") return "line";
+/** What a series is DRAWN AS. "area" is not an ECharts series type — it is a line with a fill — so
+ *  it stays separate from the `type` the option carries (see `echartsTypeOf`). */
+export type SeriesDisplay = "bar" | "line" | "area";
+
+/**
+ * A combo series' display, keyed by the SERIES name — the same key space as its colour and its
+ * rename, so one row of the panel can carry all of them. It used to be keyed by metric, which a
+ * breakout has only one of: every band of a broken-out combo was forced to share one display.
+ *
+ * The default is Metabase's, verbatim (`getSeriesDefaultDisplay`): `index === 0 ? "line" : "bar"`.
+ * egret defaulted every series to "bar", so a fresh combo was indistinguishable from a bar chart
+ * until the user changed something — the one thing the chart type exists to show was off by
+ * default.
+ */
+export function seriesDisplayFor(
+  kind: CartesianViz, seriesName: string, index: number, seriesTypes?: Record<string, SeriesDisplay>,
+): SeriesDisplay | "scatter" {
+  if (kind === "combo") return seriesTypes?.[seriesName] ?? (index === 0 ? "line" : "bar");
+  if (kind === "area") return "area";
   if (kind === "scatter") return "scatter";
   if (kind === "row") return "bar";
   return kind; // "bar" | "line"
+}
+
+/** The ECharts series type behind a display. An area is a line that happens to be filled. */
+function echartsTypeOf(display: SeriesDisplay | "scatter"): "bar" | "line" | "scatter" {
+  return display === "area" ? "line" : display;
 }
 
 const distinct = (vals: unknown[]) => {
@@ -507,7 +528,10 @@ export function buildCartesianOption(
     const seriesValues = distinct(xrows.map((r) => r[gi]));
     const cell = new Map(xrows.map((r) => [`${catKey(r[xi])} ${catKey(r[gi])}`, r[mi] as number | null]));
     // Grouped bars (>1 series, not stacked) must auto-size to sit side by side.
-    const grouped = !resolveStacked(cfg) && seriesTypeFor(cfg.kind, metric, cfg.seriesTypes) === "bar" && seriesValues.length > 1;
+    // How many of these will be drawn as bars decides whether bars must sit side by side. With a
+    // per-series display the answer is no longer one lookup — a combo can mix them.
+    const barCount = seriesValues.filter((_, si) => seriesDisplayFor(cfg.kind, "", si, cfg.seriesTypes) === "bar").length;
+    const grouped = !resolveStacked(cfg) && barCount > 1;
     const builtSeries = seriesValues.map((sv, si) => {
       const data = categories.map((c) => {
         const v = cell.get(`${catKey(c)} ${catKey(sv)}`);
@@ -528,7 +552,7 @@ export function buildCartesianOption(
   }
 
   const rowByCat = new Map(xrows.map((r) => [catKey(r[xi]), r]));
-  const barMetrics = cfg.yMetrics.filter((m) => seriesTypeFor(cfg.kind, m, cfg.seriesTypes) === "bar").length;
+  const barMetrics = cfg.yMetrics.filter((m, si) => seriesDisplayFor(cfg.kind, m, si, cfg.seriesTypes) === "bar").length;
   const grouped = !resolveStacked(cfg) && barMetrics > 1;
   // Metabase tints a lone series with its summarize green rather than accent blue.
   const singleColor = cfg.yMetrics.length === 1 ? SUMMARIZE_COLOR : undefined;
@@ -596,7 +620,8 @@ function decorateSeries(
   grouped = false,
   colorOverride?: string,
 ) {
-  const type = seriesTypeFor(cfg.kind, metric, cfg.seriesTypes);
+  const display = seriesDisplayFor(cfg.kind, s.name ?? metric, colorIdx, cfg.seriesTypes);
+  const type = echartsTypeOf(display);
   // Per-series colour (keyed by the original series name) wins over the single-series
   // green and the palette slot — clean-room of Metabase's series colour settings.
   const color = cfg.seriesColors?.[s.name] ?? colorOverride ?? seriesColor(colorIdx);
@@ -618,10 +643,13 @@ function decorateSeries(
   // Only pin the bar width for a single bar per category; grouped bars must let
   // ECharts auto-size and place them side by side (otherwise they overlap).
   if (type === "bar") { if (!grouped) out.barWidth = CHART_THEME.barWidth; out.barMinHeight = BAR_MIN_HEIGHT; }
-  if (type === "bar" || cfg.kind === "area") {
+  // Filled either because the whole chart is an area, or because this one series is displayed as
+  // one — a combo can hold both a filled band and a bare line.
+  const filled = cfg.kind === "area" || display === "area";
+  if (type === "bar" || filled) {
     if (resolveStacked(cfg)) out.stack = "total";
   }
-  if (cfg.kind === "area") out.areaStyle = { opacity: CHART_THEME.areaOpacity };
+  if (filled) out.areaStyle = { opacity: CHART_THEME.areaOpacity };
 
   // Pointing at a series lifts it and pushes every other one back — the effect that makes a
   // multi-series chart readable, and the one thing egret's cartesian charts had no answer for.
@@ -635,12 +663,12 @@ function decorateSeries(
   // The trend and stack-total helper series are excluded by their callers, which never reach here.
   out.emphasis = {
     focus: "series",
-    ...(cfg.kind === "area" ? { areaStyle: { opacity: CHART_THEME.areaOpacityEmphasis } } : {}),
+    ...(filled ? { areaStyle: { opacity: CHART_THEME.areaOpacityEmphasis } } : {}),
   };
   out.blur = {
     itemStyle: { opacity: CHART_THEME.blurOpacity },
     lineStyle: { opacity: CHART_THEME.blurOpacity },
-    ...(cfg.kind === "area" ? { areaStyle: { opacity: CHART_THEME.areaOpacityBlur } } : {}),
+    ...(filled ? { areaStyle: { opacity: CHART_THEME.areaOpacityBlur } } : {}),
   };
   if (type === "line") {
     // A series may depart from the chart-wide line appearance. Metabase keeps these settings

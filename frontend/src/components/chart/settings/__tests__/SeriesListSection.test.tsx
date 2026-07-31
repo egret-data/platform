@@ -90,3 +90,30 @@ describe("SeriesListSection — one row per series", () => {
     expect((screen.getByLabelText("color a") as HTMLInputElement).value).toBe("#111111");
   });
 });
+
+describe("SeriesListSection — the combo display select", () => {
+  const base = { names: ["rev", "cnt"], defaultColor: () => "#000000" };
+
+  // It used to be a THIRD parallel list keyed by metric, printing every series name again beside
+  // the row that already carried its colour and its rename.
+  it("sits on the series' own row, defaulting to line then bar", () => {
+    render(<SeriesListSection {...base} defaultDisplay={(i) => (i === 0 ? "line" : "bar")} onChange={() => {}} />);
+    expect(screen.getByLabelText("display rev")).toHaveTextContent("Line");
+    expect(screen.getByLabelText("display cnt")).toHaveTextContent("Bar");
+  });
+
+  it("writes the chosen display against the SERIES name", () => {
+    const onChange = vi.fn();
+    render(
+      <SeriesListSection {...base} types={{ cnt: "area" }}
+        defaultDisplay={(i) => (i === 0 ? "line" : "bar")} onChange={onChange} />,
+    );
+    expect(screen.getByLabelText("display cnt")).toHaveTextContent("Area");
+  });
+
+  // Every other kind draws what its type says, so there is nothing to choose.
+  it("is absent when the chart kind offers no per-series display", () => {
+    render(<SeriesListSection {...base} onChange={() => {}} />);
+    expect(screen.queryByLabelText("display rev")).toBeNull();
+  });
+});
