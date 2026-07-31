@@ -25,13 +25,37 @@ const ZONE_HIGH = SERIES_PALETTE[1]; // green
  * is stored yet, instead of re-deriving the thirds-of-[0, value*2] numbers a second time.
  */
 export function defaultGaugeSegments(value: number): GaugeSegment[] {
+  // Metabase's own default (`getDefaultGaugeSegments`): the arc runs 0 → 2v with boundaries at
+  // v/2 and v, so the MIDDLE boundary is the value itself and the needle lands on it — the reader
+  // can see where they are without reading a number.
+  //
+  // Equal thirds of 0 → 2v, which this used to be, put the needle at an arbitrary point AND made
+  // the boundaries fractional: a value of 116,269 filled the editor's inputs with
+  // `77512.66666666667`, eleven decimals of noise the user had to clear by hand before the panel
+  // read as anything but broken.
   const max = value > 0 ? value * 2 : 100;
-  const third = max / 3;
+  const half = max / 4;   // = v/2
+  const mid = max / 2;    // = v
   return [
-    { min: 0, max: third, color: ZONE_LOW },
-    { min: third, max: 2 * third, color: ZONE_MID },
-    { min: 2 * third, max, color: ZONE_HIGH },
+    { min: 0, max: roundBound(half), color: ZONE_LOW },
+    { min: roundBound(half), max: roundBound(mid), color: ZONE_MID },
+    { min: roundBound(mid), max: roundBound(max), color: ZONE_HIGH },
   ];
+}
+
+/**
+ * A derived bound, kept to something a person would type.
+ *
+ * Metabase's boundaries come out whole because halving and doubling an integer stays integral;
+ * egret's did not, because a third of a value rarely is. Rounding here rather than only in the
+ * INPUT matters: the number the editor shows is the number that gets stored the moment anything
+ * else on the row is touched, so a display-only fix would have written the noise back anyway.
+ * Sub-unit values (a rate of 0.42) keep three decimals instead of collapsing to 0.
+ */
+function roundBound(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  if (Number.isInteger(n)) return n;
+  return Math.abs(n) >= 1 ? Math.round(n * 100) / 100 : Math.round(n * 1000) / 1000;
 }
 
 /**

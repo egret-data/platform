@@ -150,3 +150,21 @@ describe("GaugeSegmentsSection", () => {
     expect(screen.getByLabelText("range 3 name")).toHaveValue("C");
   });
 });
+
+describe("GaugeSegmentsSection — the column header", () => {
+  // Four controls sit on a range row and only the colour swatch reads as itself. Which box was
+  // min, which was max and what the trailing text box was for could only be found by typing into
+  // them; Metabase labels its own gauge ranges Label | Min | Max.
+  it("names the columns above the rows", () => {
+    render(<GaugeSegmentsSection value={100} onChange={() => {}} />);
+    for (const name of ["Min", "Max", "Label"]) {
+      expect(screen.getByText(name)).toBeInTheDocument();
+    }
+  });
+
+  it("shows the value on the middle boundary, not a fraction", () => {
+    render(<GaugeSegmentsSection value={18760} onChange={() => {}} />);
+    expect((screen.getByLabelText("range 2 max") as HTMLInputElement).value).toBe("18760");
+    expect((screen.getByLabelText("range 1 max") as HTMLInputElement).value).toBe("9380");
+  });
+});
