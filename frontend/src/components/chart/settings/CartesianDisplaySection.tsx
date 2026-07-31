@@ -3,6 +3,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { seriesColor, SUMMARIZE_COLOR } from "@/components/chart/echarts/palette";
+import { stackModeOf, stackModePatch, type StackMode } from "@/components/chart/echarts/options/cartesian";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
@@ -39,9 +40,27 @@ export function SeriesOptions({ kind, config, onChange }: SectionProps & { serie
   const isLineish = kind === "line" || kind === "area";
   return (
     <div className="space-y-2.5">
-      {canStack && <Toggle id="cz-stacked" label="Stacked" checked={!!config.stacked} onChange={(v) => onChange({ stacked: v })} />}
-      {canStack && config.stacked && <Toggle id="cz-normalized" label="100% stacked" checked={!!config.normalized} onChange={(v) => onChange({ normalized: v })} />}
-      {canStack && config.stacked && !config.normalized && <Toggle id="cz-stacktotal" label="Stack totals" checked={!!config.showStackTotal} onChange={(v) => onChange({ showStackTotal: v })} />}
+      {/* Three mutually exclusive states, offered as one choice — Metabase's own Stacking control.
+          Two switches ("Stacked", then "100% stacked" appearing under it) made the reader discover
+          the third state by turning the first one on, and let the panel store `normalized` while
+          `stacked` was off: a combination no control could show and the renderer ignored. */}
+      {canStack && (
+        <div className="space-y-1">
+          <Label className="text-sm font-normal">Stacking</Label>
+          <Select value={stackModeOf({ kind, stacked: config.stacked, normalized: config.normalized })}
+            onValueChange={(v) => onChange(stackModePatch(v as StackMode))}>
+            <SelectTrigger aria-label="Stacking" className="h-7 w-full"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">Don&apos;t stack</SelectItem>
+              <SelectItem value="stacked">Stack</SelectItem>
+              <SelectItem value="normalized">Stack — 100%</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+      {canStack && stackModeOf({ kind, stacked: config.stacked, normalized: config.normalized }) === "stacked" && (
+        <Toggle id="cz-stacktotal" label="Stack totals" checked={!!config.showStackTotal} onChange={(v) => onChange({ showStackTotal: v })} />
+      )}
       {isLineish && (
         <div className="flex items-center justify-between gap-2">
           <Label className="text-sm font-normal">Line shape</Label>

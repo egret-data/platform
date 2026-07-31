@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { buildCartesianOption, cartesianSeriesNames } from "../options/cartesian";
+import {
+  buildCartesianOption, cartesianSeriesNames, resolveStacked, stackModeOf, stackModePatch,
+} from "../options/cartesian";
 import { CHART_THEME, SERIES_PALETTE, SUMMARIZE_COLOR } from "../palette";
 
 const columns = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }, { name: "cnt", type: "bigint" }];
@@ -610,5 +612,50 @@ describe("axis lines, ticks and tick count", () => {
   it("keeps the toggles attached to their axis role when horizontal", () => {
     const opt = buildCartesianOption(cols, rows, { ...base, horizontal: true, yTickCount: 4 }) as any;
     expect(opt.xAxis.splitNumber).toBe(4);
+  });
+});
+
+describe("stacking defaults and the three-state mode", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }, { name: "cnt", type: "double" }];
+  const rows = [["EU", 10, 3], ["US", 20, 5]];
+
+  // Overlapping translucent areas at 0.3 opacity read as mud, which is why Metabase's area chart
+  // stacks unless told otherwise. Bar and line do not.
+  it("stacks an area by default and leaves bar and line unstacked", () => {
+    expect(resolveStacked({ kind: "area" })).toBe(true);
+    expect(resolveStacked({ kind: "bar" })).toBe(false);
+    expect(resolveStacked({ kind: "line" })).toBe(false);
+  });
+
+  // `undefined` (control never touched) and `false` (explicitly "Don't stack") must stay distinct:
+  // `cartesianToSettings` drops undefined keys, so the difference is what a saved chart carries.
+  it("keeps an explicit Don't stack on an area", () => {
+    expect(resolveStacked({ kind: "area", stacked: false })).toBe(false);
+    expect(resolveStacked({ kind: "bar", stacked: true })).toBe(true);
+  });
+
+  it("reaches the drawn series, not just the helper", () => {
+    const area = buildCartesianOption(cols, rows, { kind: "area", xAxis: "region", yMetrics: ["rev", "cnt"] }) as any;
+    expect(area.series.map((s: any) => s.stack)).toEqual(["total", "total"]);
+    const bar = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev", "cnt"] }) as any;
+    expect(bar.series.every((s: any) => s.stack === undefined)).toBe(true);
+    const off = buildCartesianOption(cols, rows, { kind: "area", xAxis: "region", yMetrics: ["rev", "cnt"], stacked: false }) as any;
+    expect(off.series.every((s: any) => s.stack === undefined)).toBe(true);
+  });
+
+  it("reads the three states as one value", () => {
+    expect(stackModeOf({ kind: "area" })).toBe("stacked");
+    expect(stackModeOf({ kind: "bar" })).toBe("none");
+    expect(stackModeOf({ kind: "bar", stacked: true, normalized: true })).toBe("normalized");
+    // `normalized` alone is not a state: without stacking there is nothing to normalise.
+    expect(stackModeOf({ kind: "bar", normalized: true })).toBe("none");
+  });
+
+  // Two booleans encode three states, so the pair must be written together — leaving `normalized`
+  // behind when choosing "Don't stack" stored a combination no control could show.
+  it("clears normalized when the mode leaves it behind", () => {
+    expect(stackModePatch("none")).toEqual({ stacked: false, normalized: undefined });
+    expect(stackModePatch("stacked")).toEqual({ stacked: true, normalized: undefined });
+    expect(stackModePatch("normalized")).toEqual({ stacked: true, normalized: true });
   });
 });
