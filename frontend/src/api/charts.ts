@@ -82,6 +82,7 @@ export interface CartesianConfig {
   seriesTypes?: Record<string, "bar" | "line" | "area">;
   rightAxisMetrics?: string[];   // metrics plotted against a 2nd (right) Y axis
   logScale?: boolean;            // value axis uses a log scale
+  bubbleMetric?: string;         // scatter only: the metric whose value sizes each bubble
   autoSplitY?: boolean;          // Metabase "Split y-axis when necessary". Unset = on.
   showXLabel?: boolean;          // Metabase "Show label" (x), separate from the label text.
   showYLabel?: boolean;          // …and the same for y.

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildCartesianOption, cartesianSeriesNames, resolveStacked, stackModeOf, stackModePatch,
-  shouldAutoSplitY, computeAxisSplit, seriesDisplayFor,
+  shouldAutoSplitY, computeAxisSplit, seriesDisplayFor, bubbleDiameter,
 } from "../options/cartesian";
 import { CHART_THEME, SERIES_PALETTE, SUMMARIZE_COLOR } from "../palette";
 
@@ -176,7 +176,8 @@ describe("buildCartesianOption — metric-vs-metric scatter (Metabase parity)", 
     expect(opt.xAxis.type).toBe("value");
     expect(opt.yAxis.type).toBe("value");
     expect(opt.series[0].type).toBe("scatter");
-    expect(opt.series[0].data).toEqual([{ value: [1, 10], name: "A" }, { value: [2, 20], name: "B" }]);
+    expect(opt.series[0].data.map((d: any) => ({ value: d.value, name: d.name })))
+      .toEqual([{ value: [1, 10], name: "A" }, { value: [2, 20], name: "B" }]);
   });
   it("falls back to a category scatter without xMetric", () => {
     const opt = buildCartesianOption(cols, rows, { kind: "scatter", xAxis: "d", yMetrics: ["y"] }) as any;
@@ -786,5 +787,64 @@ describe("combo — how each series is drawn", () => {
     expect(opt.series[0].emphasis.areaStyle.opacity).toBe(0.6);
     expect(opt.series[1].type).toBe("bar");
     expect(opt.series[1].areaStyle).toBeUndefined();
+  });
+});
+
+describe("scatter — bubbles, breakout and focus", () => {
+  const cols = [
+    { name: "d", type: "varchar" }, { name: "g", type: "varchar" },
+    { name: "x", type: "double" }, { name: "y", type: "double" }, { name: "b", type: "double" },
+  ];
+  const rows = [
+    ["A", "EU", 1, 10, 0], ["B", "EU", 2, 20, 50], ["C", "US", 3, 30, 100],
+  ];
+  const base = { kind: "scatter" as const, xAxis: "d", xMetric: "x", yMetrics: ["y"] };
+
+  // Metabase's own scale, and its reason: interpolating by AREA rather than by radius, because a
+  // radius-linear scale exaggerates large values — doubling the radius quadruples the ink.
+  it("sizes a bubble by area between 15 and 75", () => {
+    expect(bubbleDiameter(0, 0, 100)).toBeCloseTo(15, 6);
+    expect(bubbleDiameter(100, 0, 100)).toBeCloseTo(75, 6);
+    // Halfway is NOT 45 — that is the whole point of an area scale.
+    expect(bubbleDiameter(50, 0, 100)).toBeCloseTo(2 * Math.sqrt((Math.PI * 7.5 ** 2 + Math.PI * 37.5 ** 2) / 2 / Math.PI), 6);
+    expect(bubbleDiameter(50, 0, 100)).toBeGreaterThan(50);
+  });
+
+  it("falls back to the floor when there is nothing to scale against", () => {
+    expect(bubbleDiameter(5, 5, 5)).toBe(15);
+    expect(bubbleDiameter(NaN, 0, 10)).toBe(15);
+  });
+
+  it("gives every point its own size from the bubble metric", () => {
+    const opt = buildCartesianOption(cols, rows, { ...base, bubbleMetric: "b" }) as any;
+    const sizeOf = opt.series[0].symbolSize;
+    const data = opt.series[0].data;
+    expect(sizeOf(null, { data: data[0] })).toBeCloseTo(15, 6);
+    expect(sizeOf(null, { data: data[2] })).toBeCloseTo(75, 6);
+  });
+
+  // The extent spans every point, not each band's own — otherwise one value would draw at two
+  // sizes depending on which breakout band it landed in.
+  it("scales bubbles against the whole chart, not each series", () => {
+    const opt = buildCartesianOption(cols, rows, { ...base, series: "g", bubbleMetric: "b" }) as any;
+    const us = opt.series.find((s: any) => s.__raw === "US");
+    expect(us.symbolSize(null, { data: us.data[0] })).toBeCloseTo(75, 6);
+  });
+
+  it("draws one series per breakout value, each its own colour", () => {
+    const opt = buildCartesianOption(cols, rows, { ...base, series: "g" }) as any;
+    expect(opt.series.map((s: any) => s.__raw)).toEqual(["EU", "US"]);
+    expect(opt.series[0].itemStyle.color).not.toBe(opt.series[1].itemStyle.color);
+    expect(opt.legend).toBeDefined();
+  });
+
+  // scatterXY bypasses decorateSeries, so it missed the emphasis work the rest of the family got —
+  // and a scatter needs it most, its points overlapping by nature.
+  it("focuses the hovered series", () => {
+    const opt = buildCartesianOption(cols, rows, { ...base, series: "g" }) as any;
+    for (const s of opt.series) {
+      expect(s.emphasis.focus).toBe("series");
+      expect(s.blur.itemStyle.opacity).toBe(0.3);
+    }
   });
 });

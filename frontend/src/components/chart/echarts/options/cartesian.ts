@@ -25,6 +25,8 @@ export interface CartesianBuildConfig {
   rightAxisMetrics?: string[];   // metrics plotted against a second (right) Y axis
   /** Metabase's "Split y-axis when necessary". Unset means on, as it is there. Only consulted when
    *  `rightAxisMetrics` is empty — an explicit assignment always wins over a computed one. */
+  /** Scatter only: the metric whose value sizes each bubble. */
+  bubbleMetric?: string;
   autoSplitY?: boolean;
   /** Metabase's "Show label", one per axis, separate from the label TEXT. Unset means shown. Kept
    *  apart from the text so hiding a title does not make the user retype it to bring it back. */
@@ -460,24 +462,98 @@ function sortCategories(cats: unknown[], type: string): unknown[] {
 
 // Metric-vs-metric scatter (Metabase's true scatter): each dimension row is a point
 // at (xMetric, yMetric) on two value axes.
+// Metabase's bubble scale (scatter/option/series.ts), verbatim including its rationale: the size
+// interpolates by AREA, not by radius, because a radius-linear scale exaggerates large values —
+// doubling the radius quadruples the ink. `d = 2·√(area/π)`.
+const MIN_BUBBLE_DIAMETER = 15;
+const MAX_BUBBLE_DIAMETER = 75;
+
+/** Diameter for a bubble value, given the metric's extent. Returns the floor when there is nothing
+ *  to scale against — a single point, or an extent of width zero. */
+export function bubbleDiameter(value: number, lo: number, hi: number): number {
+  if (!Number.isFinite(value) || !(hi > lo)) return MIN_BUBBLE_DIAMETER;
+  const t = Math.min(1, Math.max(0, (value - lo) / (hi - lo)));
+  const areaLo = Math.PI * (MIN_BUBBLE_DIAMETER / 2) ** 2;
+  const areaHi = Math.PI * (MAX_BUBBLE_DIAMETER / 2) ** 2;
+  return 2 * Math.sqrt((areaLo + t * (areaHi - areaLo)) / Math.PI);
+}
+
+// Metric-vs-metric scatter (Metabase's true scatter): each dimension row is a point
+// at (xMetric, yMetric) on two value axes.
 function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBuildConfig): EChartsCoreOption {
   const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
   const di = cfg.xAxis != null ? idx[cfg.xAxis] : undefined;
   const xi = idx[cfg.xMetric!];
   const yMetric = cfg.yMetrics[0];
   const yi = idx[yMetric];
+  const gi = cfg.series != null ? idx[cfg.series] : undefined;
+  const bi = cfg.bubbleMetric != null ? idx[cfg.bubbleMetric] : undefined;
   const gridLine = resolveColor(CHART_THEME.gridLine, COLOR_FALLBACK.gridLine);
   const axisLabelColor = resolveColor(CHART_THEME.axisLabel, COLOR_FALLBACK.axisLabel);
   const fmtM = (m: string, v: unknown) => formatValue(v, cfg.metricTypes?.[m] ?? "double", cfg.columnSettings?.[m]);
-  const data = rows
-    .map((r) => ({ value: [Number(r[xi]), Number(r[yi])], name: di != null ? String(r[di] ?? "") : "" }))
-    .filter((p) => Number.isFinite(p.value[0]) && Number.isFinite(p.value[1]));
+
+  interface Pt { value: number[]; name: string; bubble?: number }
+  const points: (Pt & { group: string })[] = [];
+  for (const r of rows) {
+    const x = Number(r[xi]);
+    const y = Number(r[yi]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    const b = bi != null ? Number(r[bi]) : undefined;
+    points.push({
+      value: [x, y],
+      name: di != null ? String(r[di] ?? "") : "",
+      ...(b != null && Number.isFinite(b) ? { bubble: b } : {}),
+      group: gi != null ? String(r[gi] ?? "") : "",
+    });
+  }
+
+  // The bubble extent spans EVERY point, not each series' own — otherwise the same value would
+  // draw at two sizes depending on which breakout band it landed in.
+  const bubbles = points.map((p) => p.bubble).filter((v): v is number => v != null);
+  const bLo = bubbles.length ? Math.min(...bubbles) : 0;
+  const bHi = bubbles.length ? Math.max(...bubbles) : 0;
+  // Total on purpose: ECharts calls this per symbol during layout, and anything thrown in there
+  // takes the whole series down silently — the chart keeps its axes and simply draws no points.
+  const sizeOf = (p: Pt | undefined) => {
+    const v = p?.bubble;
+    return bi == null || v == null ? CHART_THEME.scatterSymbolSize : bubbleDiameter(v, bLo, bHi);
+  };
+
+  const groups = cfg.series != null ? distinct(points.map((p) => p.group)).map(String) : [""];
+  const series = groups.map((g, si) => {
+    const own = points.filter((p) => p.group === g);
+    // A lone series takes the summarize green, as everywhere else in the family.
+    const color = cfg.seriesColors?.[g] ?? (groups.length === 1 ? SUMMARIZE_COLOR : seriesColor(si));
+    return {
+      type: "scatter" as const,
+      name: cfg.seriesLabels?.[g] ?? (g === "" ? yMetric : g),
+      __raw: g,
+      itemStyle: { color, opacity: CHART_THEME.scatterOpacity },
+      symbolSize: (_v: unknown, params?: { data?: Pt }) => sizeOf(params?.data),
+      // The same lift-and-recede the rest of the family got; a scatter with several bands needs it
+      // most, since its points overlap by nature.
+      emphasis: { focus: "series" as const },
+      blur: { itemStyle: { opacity: CHART_THEME.blurOpacity } },
+      data: own,
+    };
+  });
+
   return {
     grid: { ...CHART_THEME.grid, bottom: (CHART_THEME.grid.bottom as number) + 22 },
-    tooltip: { trigger: "item", ...tooltipSurface(), formatter: (p: { data: { name: string }; value: number[] }) => `${p.data.name}<br/>${cfg.xMetric}: ${fmtM(cfg.xMetric!, p.value[0])}<br/>${yMetric}: ${fmtM(yMetric, p.value[1])}` },
+    tooltip: {
+      trigger: "item", ...tooltipSurface(),
+      formatter: (p: { data: Pt; value: number[] }) => {
+        const head = p.data.name ? `${p.data.name}<br/>` : "";
+        const bubble = cfg.bubbleMetric != null && p.data.bubble != null
+          ? `<br/>${cfg.bubbleMetric}: ${fmtM(cfg.bubbleMetric, p.data.bubble)}`
+          : "";
+        return `${head}${cfg.xMetric}: ${fmtM(cfg.xMetric!, p.value[0])}<br/>${yMetric}: ${fmtM(yMetric, p.value[1])}${bubble}`;
+      },
+    },
+    ...(groups.length > 1 ? { legend: { type: "scroll", bottom: 0, textStyle: { color: axisLabelColor } } } : {}),
     xAxis: { type: "value", name: cfg.xMetric, nameLocation: "middle", nameGap: 28, axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmtM(cfg.xMetric!, v) }, splitLine: { lineStyle: { color: gridLine } } },
     yAxis: { type: "value", name: yMetric, axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmtM(yMetric, v) }, splitLine: { lineStyle: { color: gridLine } } },
-    series: [{ type: "scatter", symbolSize: 10, itemStyle: { color: SUMMARIZE_COLOR, opacity: CHART_THEME.scatterOpacity }, data }],
+    series,
   };
 }
 

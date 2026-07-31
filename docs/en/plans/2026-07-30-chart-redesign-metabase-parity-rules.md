@@ -56,6 +56,10 @@ measurement. Screenshots alone miss contrast and geometry; measurements alone mi
 - **"Take the tallest column" finds the wrong centre of a circle** — many columns near the centre are
   within a pixel of each other. This invented a 22px horizontal offset that did not exist.
 - Legend swatches share the chart's `<svg>` and inflate any bounding-box union.
+- **`getBBox()` ignores the transform**, and ECharts scales a scatter symbol with one. Every point
+  measured ~2px however large it was drawn, so a `width > 3` filter reported an empty chart — a
+  chart that was in fact drawing correctly, and had been all along. Chart 10 spent an hour on that
+  phantom. Use `getBoundingClientRect()` whenever the question is "how big does this LOOK".
 - **A page held open across a redeploy keeps the old bundle**, even with a cache-busting query
   parameter, because its module graph is already loaded. Check the hashed filename in `script[src]`
   and open a **new** page. This produced a phantom "regression" that was dispatched for repair.

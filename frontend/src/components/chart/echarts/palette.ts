@@ -24,6 +24,8 @@ export const CHART_THEME = {
   areaOpacityBlur: 0.2,
   blurOpacity: 0.3,
   scatterOpacity: 0.8,  // CHART_STYLE.opacity.scatter
+  /** Point diameter when no bubble metric sizes them. Metabase's own floor for a sized bubble. */
+  scatterSymbolSize: 15,
   symbolSize: 6,        // CHART_STYLE.symbolSize
   lineWidth: 2,         // LINE_SIZE.M
   labelFontSize: 13,    // FONT_SIZES.label

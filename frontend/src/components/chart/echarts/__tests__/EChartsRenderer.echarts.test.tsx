@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { render } from "@testing-library/react";
 import { EChartsRenderer } from "../EChartsRenderer";
+import { buildCartesianOption } from "../options/cartesian";
 
 /**
  * EChartsRenderer against REAL ECharts — no `vi.mock("echarts/core")`.
@@ -272,5 +273,38 @@ describe("EChartsRenderer against real ECharts — the overlay and the highlight
     await settle();
     expect(texts(container).slice(0, 2)).toEqual(["40", "B"]);
     expect(blurred(container)).toBe(4);
+  });
+});
+
+// A scatter drew its axes and NO points on the live chart while every unit test on the option
+// passed — the failure a mocked ECharts cannot see. This runs the real SVG renderer over the
+// option `scatterXY` actually produces.
+describe("scatter draws its points (real ECharts)", () => {
+  const cols = [
+    { name: "d", type: "varchar" }, { name: "x", type: "double" },
+    { name: "y", type: "double" }, { name: "b", type: "double" },
+  ];
+  const rows = [["A", 1, 10, 0], ["B", 2, 20, 50], ["C", 3, 30, 100]];
+
+  const drawnSymbols = (container: HTMLElement) =>
+    [...container.querySelectorAll("path")].filter((p) => {
+      const f = p.getAttribute("fill");
+      return f != null && f !== "none" && f !== "#000";
+    }).length;
+
+  it("draws one symbol per point", () => {
+    const opt = buildCartesianOption(cols, rows, {
+      kind: "scatter", xAxis: "d", xMetric: "x", yMetrics: ["y"],
+    }) as never;
+    const { container } = render(<EChartsRenderer option={opt} />);
+    expect(drawnSymbols(container)).toBeGreaterThanOrEqual(3);
+  });
+
+  it("still draws them when a bubble metric sizes them", () => {
+    const opt = buildCartesianOption(cols, rows, {
+      kind: "scatter", xAxis: "d", xMetric: "x", yMetrics: ["y"], bubbleMetric: "b",
+    }) as never;
+    const { container } = render(<EChartsRenderer option={opt} />);
+    expect(drawnSymbols(container)).toBeGreaterThanOrEqual(3);
   });
 });
