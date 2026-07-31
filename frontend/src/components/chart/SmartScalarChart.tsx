@@ -12,14 +12,33 @@ const DOWN = SERIES_PALETTE[3]; // red
  * previous period. Rows are expected ordered by the dimension; the last two are
  * compared. Clean-room of Metabase's SmartScalar comparison.
  */
+/** The period a temporal unit names, for the comparison caption. Metabase writes "vs. previous
+ *  month" rather than a bare "vs. previous" — the reader should not have to remember which
+ *  granularity the chart was grouped by to know what it is being compared against. */
+const PERIOD_NAME: Record<string, string> = {
+  minute: "minute", hour: "hour", day: "day", week: "week",
+  month: "month", quarter: "quarter", year: "year",
+};
+
 export function SmartScalarChart({
-  columns, rows, dimension, metric, format = {},
+  columns, rows, dimension, metric, format = {}, dimensionFormat = {}, unit,
+  switchPositiveNegative = false, compact = false,
 }: {
   columns: ResultColumn[];
   rows: unknown[][];
   dimension?: string;
   metric?: string;
   format?: ColumnFormat;
+  /** The dimension's own format, so the period label reads at the grouping's granularity. */
+  dimensionFormat?: ColumnFormat;
+  /** The dimension's temporal unit, when it has one — names the period being compared against. */
+  unit?: string;
+  /** Metabase's "Switch positive / negative colors?". A metric where LESS is better — cost, churn,
+   *  time-to-resolve — reads backwards otherwise: green for the number going up. The same defect
+   *  the gauge's fixed low-red/high-green zones had before chart 04. */
+  switchPositiveNegative?: boolean;
+  /** Metabase's "Compact number": 36,513 -> 36.5k, for a card too small to hold the full figure. */
+  compact?: boolean;
 }) {
   const mi = metric != null ? columns.findIndex((c) => c.name === metric) : -1;
   const di = dimension != null ? columns.findIndex((c) => c.name === dimension) : -1;
@@ -40,8 +59,14 @@ export function SmartScalarChart({
   const down = change < 0;
 
   const dimType = di >= 0 ? columns[di].type : "varchar";
-  const fmt = (v: number) => formatValue(v, type, format);
-  const curLabel = curRow && di >= 0 ? formatValue(curRow[di], dimType) : "";
+  const fmt = (v: number) => formatValue(v, type, compact ? { ...format, compact: true } : format);
+  const curLabel = curRow && di >= 0 ? formatValue(curRow[di], dimType, dimensionFormat) : "";
+  // Which way is good. `up`/`down` stay factual — they drive the arrow — while the COLOUR follows
+  // this, so the arrow keeps saying what happened even when the reading of it is inverted.
+  const good = switchPositiveNegative ? down : up;
+  const bad = switchPositiveNegative ? up : down;
+  const period = unit != null ? PERIOD_NAME[unit] : undefined;
+  const vsLabel = period ? `vs previous ${period}:` : "vs previous:";
 
   return (
     <div className="flex h-full min-h-[5rem] flex-col items-center justify-center gap-1"
@@ -50,18 +75,18 @@ export function SmartScalarChart({
         curLabel ? `${curLabel}: ` : "",
         hasCur ? fmt(current) : "no value",
         hasComparison
-          ? `, ${up ? "up" : down ? "down" : "unchanged"}${Number.isFinite(pct) ? ` ${(Math.abs(pct) * 100).toFixed(2)}%` : ""} versus previous ${fmt(previous)}`
+          ? `, ${up ? "up" : down ? "down" : "unchanged"}${Number.isFinite(pct) ? ` ${(Math.abs(pct) * 100).toFixed(2)}%` : ""} versus previous ${period ? `${period} ` : ""}${fmt(previous)}`
           : "",
       ].join("")}>
       <div className="text-[2.5rem] font-bold leading-none tabular-nums text-foreground">{hasCur ? fmt(current) : "—"}</div>
       {curLabel && <div className="text-sm text-muted-foreground">{curLabel}</div>}
       {hasComparison && (
         <div className="flex items-center gap-1.5 text-sm">
-          <span data-trend className="flex items-center gap-1 font-medium" style={{ color: up ? UP : down ? DOWN : undefined }}>
+          <span data-trend className="flex items-center gap-1 font-medium" style={{ color: good ? UP : bad ? DOWN : undefined }}>
             {up ? "▲" : down ? "▼" : "•"}{" "}
             {Number.isFinite(pct) ? `${(Math.abs(pct) * 100).toFixed(2)}%` : fmt(Math.abs(change))}
           </span>
-          <span className="text-muted-foreground">vs previous: {fmt(previous)}</span>
+          <span className="text-muted-foreground">{vsLabel} {fmt(previous)}</span>
         </div>
       )}
     </div>

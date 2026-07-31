@@ -486,6 +486,10 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
           dimension={smart.dimension}
           metric={smart.metric}
           format={smart.metric ? columnSettings[smart.metric] : undefined}
+          dimensionFormat={smart.dimension ? columnSettings[smart.dimension] : undefined}
+          unit={smart.dimension ? params.spec.temporal_units?.[smart.dimension] : undefined}
+          switchPositiveNegative={!!smart.switchPositiveNegative}
+          compact={!!smart.compact}
         />
       </div>
     );

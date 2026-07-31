@@ -2,6 +2,8 @@ import { PieDisplaySection } from "@/components/chart/settings/PieDisplaySection
 import { GaugeSegmentsSection } from "@/components/chart/settings/GaugeSegmentsSection";
 import { ScalarDisplaySection } from "@/components/chart/settings/ScalarDisplaySection";
 import type { GaugeSegment, PieConfig, ScalarConfig } from "@/api/charts";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { fieldDescriptor } from "./fields";
 import type { VizControl, VizControlProps, VizDescriptor } from "./types";
 
@@ -42,6 +44,29 @@ function GaugeDisplayControl({ config, onChange, resultColumns, rows }: VizContr
 }
 
 const gaugeDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display", render: GaugeDisplayControl }];
+
+/** The trend's two Display switches, both Metabase's. */
+function TrendDisplayControl({ config, onChange }: VizControlProps<Cfg>) {
+  const row = (id: string, label: string, hint: string, key: string) => (
+    <div className="space-y-0.5">
+      <div className="flex items-center justify-between gap-2">
+        <Label htmlFor={id} className="text-sm font-normal">{label}</Label>
+        <Switch id={id} aria-label={label} checked={!!config[key]}
+          onCheckedChange={(v) => onChange({ [key]: v || undefined } as Partial<Cfg>)} />
+      </div>
+      <p className="text-xs text-muted-foreground">{hint}</p>
+    </div>
+  );
+  return (
+    <div className="space-y-2.5">
+      {row("ss-switch", "Switch positive / negative colours",
+        "For a metric where less is better — cost, churn, time to resolve.", "switchPositiveNegative")}
+      {row("ss-compact", "Compact number", "36,513 becomes 36.5k.", "compact")}
+    </div>
+  );
+}
+
+const trendDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display", render: TrendDisplayControl }];
 
 /** The scalar's captions and conditional-colour bands. Unlike the gauge's, this control needs
  * nothing from the result — a band is compared against whatever value renders, not against the
@@ -119,7 +144,7 @@ export const SIMPLE_DESCRIPTORS: VizDescriptor<Cfg>[] = [
     legacyFromSpec: (spec) => ({ xAxis: spec.dimensions?.[0], metric: spec.metrics?.[0] }),
   }),
   fieldDescriptor({
-    key: "smartscalar", prefix: "smartscalar.", legacyKey: "smartscalar",
+    key: "smartscalar", prefix: "smartscalar.", legacyKey: "smartscalar", display: trendDisplay,
     fields: [
       { id: "dimension", label: "Time / order dimension", kind: "dimension", required: "a time dimension", temporal: true },
       { id: "metric", label: "Metric", kind: "metric", required: "a metric" },
