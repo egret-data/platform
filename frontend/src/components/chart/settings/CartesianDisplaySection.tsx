@@ -118,6 +118,13 @@ export function SeriesOptions({ kind, config, onChange }: SectionProps & { serie
 
 /** X-axis scale, the left/right axis split for multi-metric charts, and the axis titles. */
 export function AxesOptions({ kind, config, onChange }: SectionProps) {
+  // On a horizontal chart the CATEGORY axis is the vertical one, so naming these controls after
+  // the config keys (`xLabel` is the category axis, `yLabel` the value axis) prints them backwards
+  // from what the reader sees: "Y min" would govern the horizontal extent. Metabase relabels the
+  // same settings by the axis they appear on; so do these.
+  const horiz = kind === "row" || !!config.horizontal;
+  const catAx = horiz ? "Y" : "X";   // the dimension axis
+  const valAx = horiz ? "X" : "Y";   // the measure axis
   return (
     <div className="space-y-2.5">
       {kind !== "scatter" && kind !== "row" && !config.horizontal && (
@@ -172,23 +179,23 @@ export function AxesOptions({ kind, config, onChange }: SectionProps) {
       <div className="space-y-2 border-t pt-2">
         <div className="space-y-1">
           <div className="flex items-center justify-between gap-2">
-            <Label htmlFor="cz-xlabel" className="text-sm font-normal">X label</Label>
-            <Switch id="cz-show-xlabel" aria-label="Show X label" checked={config.showXLabel !== false}
+            <Label htmlFor="cz-xlabel" className="text-sm font-normal">{catAx} label</Label>
+            <Switch id="cz-show-xlabel" aria-label={`Show ${catAx} label`} checked={config.showXLabel !== false}
               onCheckedChange={(v) => onChange({ showXLabel: v ? undefined : false })} />
           </div>
           {config.showXLabel !== false && (
-            <Input id="cz-xlabel" aria-label="X label" className="h-8" placeholder="Auto"
+            <Input id="cz-xlabel" aria-label={`${catAx} label`} className="h-8" placeholder="Auto"
               value={config.xLabel ?? ""} onChange={(e) => onChange({ xLabel: e.target.value })} />
           )}
         </div>
         <div className="space-y-1">
           <div className="flex items-center justify-between gap-2">
-            <Label htmlFor="cz-ylabel" className="text-sm font-normal">Y label</Label>
-            <Switch id="cz-show-ylabel" aria-label="Show Y label" checked={config.showYLabel !== false}
+            <Label htmlFor="cz-ylabel" className="text-sm font-normal">{valAx} label</Label>
+            <Switch id="cz-show-ylabel" aria-label={`Show ${valAx} label`} checked={config.showYLabel !== false}
               onCheckedChange={(v) => onChange({ showYLabel: v ? undefined : false })} />
           </div>
           {config.showYLabel !== false && (
-            <Input id="cz-ylabel" aria-label="Y label" className="h-8" placeholder="Auto"
+            <Input id="cz-ylabel" aria-label={`${valAx} label`} className="h-8" placeholder="Auto"
               value={config.yLabel ?? ""} onChange={(e) => onChange({ yLabel: e.target.value })} />
           )}
         </div>
@@ -207,12 +214,19 @@ export function OrientationOption({ kind, config, onChange }: SectionProps) {
 
 /** Manual axis bounds and log scale — not meaningful on a scatter's continuous axes. */
 export function AxisRangeOptions({ kind, config, onChange }: SectionProps) {
+  // On a horizontal chart the CATEGORY axis is the vertical one, so naming these controls after
+  // the config keys (`xLabel` is the category axis, `yLabel` the value axis) prints them backwards
+  // from what the reader sees: "Y min" would govern the horizontal extent. Metabase relabels the
+  // same settings by the axis they appear on; so do these.
+  const horiz = kind === "row" || !!config.horizontal;
+  const catAx = horiz ? "Y" : "X";   // the dimension axis
+  const valAx = horiz ? "X" : "Y";   // the measure axis
   return (
     <div className="space-y-2.5">
       {kind !== "scatter" && <Toggle id="cz-log" label="Log scale" checked={!!config.logScale} onChange={(v) => onChange({ logScale: v })} />}
       {/* Metabase's "Show lines and tick marks", one per axis. Stored as `false` only when turned
           off, so a chart saved before these existed keeps drawing both. */}
-      <Toggle id="cz-xticks" label="X axis lines and ticks" checked={config.xAxisTicks !== false}
+      <Toggle id="cz-xticks" label={`${catAx} axis lines and ticks`} checked={config.xAxisTicks !== false}
         onChange={(v) => onChange({ xAxisTicks: v ? undefined : false })} />
       {/* Only meaningful with two or more metrics on one axis to separate. Metabase gates it the
           same way, and computes the split rather than asking which metric goes where — egret's
@@ -221,12 +235,12 @@ export function AxisRangeOptions({ kind, config, onChange }: SectionProps) {
         <Toggle id="cz-autosplit" label="Split y-axis when necessary" checked={config.autoSplitY !== false}
           onChange={(v) => onChange({ autoSplitY: v ? undefined : false })} />
       )}
-      <Toggle id="cz-yticks" label="Y axis lines and ticks" checked={config.yAxisTicks !== false}
+      <Toggle id="cz-yticks" label={`${valAx} axis lines and ticks`} checked={config.yAxisTicks !== false}
         onChange={(v) => onChange({ yAxisTicks: v ? undefined : false })} />
       <div className="flex items-center justify-between gap-2">
-        <Label htmlFor="cz-ytickcount" className="text-sm font-normal">Y tick marks</Label>
+        <Label htmlFor="cz-ytickcount" className="text-sm font-normal">{valAx} tick marks</Label>
         <Input
-          id="cz-ytickcount" aria-label="Y tick marks" type="number" min={2} max={20} step={1}
+          id="cz-ytickcount" aria-label={`${valAx} tick marks`} type="number" min={2} max={20} step={1}
           className="h-7 w-20" placeholder="Auto"
           value={config.yTickCount ?? ""}
           onChange={(e) => {
@@ -238,13 +252,13 @@ export function AxisRangeOptions({ kind, config, onChange }: SectionProps) {
       {kind !== "scatter" && (
         <div className="grid grid-cols-2 gap-2 border-t pt-2">
           <label className="space-y-1">
-            <span className="text-xs text-muted-foreground">Y min</span>
+            <span className="text-xs text-muted-foreground">{valAx} min</span>
             <Input className="h-8" type="number" placeholder="auto"
               value={config.yMin ?? ""}
               onChange={(e) => { const n = Number(e.target.value); onChange({ yMin: e.target.value === "" || Number.isNaN(n) ? undefined : n }); }} />
           </label>
           <label className="space-y-1">
-            <span className="text-xs text-muted-foreground">Y max</span>
+            <span className="text-xs text-muted-foreground">{valAx} max</span>
             <Input className="h-8" type="number" placeholder="auto"
               value={config.yMax ?? ""}
               onChange={(e) => { const n = Number(e.target.value); onChange({ yMax: e.target.value === "" || Number.isNaN(n) ? undefined : n }); }} />
