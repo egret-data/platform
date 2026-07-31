@@ -61,3 +61,20 @@ describe("ProgressChart — Metabase parity", () => {
     expect(redTrack).not.toBe(blueTrack);
   });
 });
+
+describe("ProgressChart — the message has its own row", () => {
+  const cols = [{ name: "m", type: "double" }];
+
+  // Measured against Metabase: it left-aligns the message on a row of its own. Appending it to the
+  // floating value instead put the pair 76px past the right end of the bar and within 13px of the
+  // card edge — a longer message would have gone over.
+  it("does not ride along with the floating value label", () => {
+    const { container } = render(<ProgressChart columns={cols} rows={[[120]]} metric="m" goal={100} />);
+    const value = container.querySelector("[data-progress-value]")!;
+    const message = container.querySelector("[data-progress-message]")!;
+    expect(message).toBeInTheDocument();
+    expect(value.contains(message)).toBe(false);
+    // Pinned to the left edge, not to the fill end.
+    expect((message as HTMLElement).className).toContain("left-0");
+  });
+});

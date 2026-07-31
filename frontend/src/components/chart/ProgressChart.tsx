@@ -90,8 +90,17 @@ export function ProgressChart({
         <div data-progress-value className="absolute -top-7 -translate-x-1/2 whitespace-nowrap text-sm font-semibold tabular-nums text-foreground"
           style={{ left: `${arrowPercent * 100}%` }}>
           {hasValue ? fmt(value) : "—"}
-          {message && <span data-progress-message className="ml-2 font-normal text-muted-foreground">{message}</span>}
         </div>
+        {/* Its own row, left-aligned, the way Metabase places it — NOT appended to the floating
+            value. The value is centred on the fill end, so anything added to it hangs half its
+            width past that point: measured, the pair reached 76px beyond the right end of the bar
+            and within 13px of the card edge, and a longer message ("No data available") would have
+            gone over. */}
+        {message && (
+          <div data-progress-message className="absolute -top-3 left-0 text-xs text-muted-foreground">
+            {message}
+          </div>
+        )}
         {hasGoal && hasValue && (
           <div
             data-progress-pointer
