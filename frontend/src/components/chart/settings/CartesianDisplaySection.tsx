@@ -36,7 +36,11 @@ export function defaultSeriesColor(hasBreakout: boolean, count: number, i: numbe
 }
 
 export function SeriesOptions({ kind, config, onChange }: SectionProps & { seriesNames?: string[] }) {
-  const canStack = kind === "bar" || kind === "row" || kind === "area";
+  // Combo stacks too — Metabase's own per-series display setting hides itself on
+  // `stackable.stack_type`, which only means anything because a combo can reach that state there.
+  // egret excluded combo, so the guard that hides the display select was unreachable and a combo
+  // could not stack at all.
+  const canStack = kind === "bar" || kind === "row" || kind === "area" || kind === "combo";
   const isLineish = kind === "line" || kind === "area";
   return (
     <div className="space-y-2.5">

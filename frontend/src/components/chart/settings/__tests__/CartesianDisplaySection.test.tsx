@@ -291,3 +291,18 @@ describe("CartesianDisplaySection — the per-metric axis select", () => {
     expect(screen.getByLabelText("axis cnt")).toHaveTextContent("Right");
   });
 });
+
+describe("CartesianDisplaySection — a combo can stack", () => {
+  // Metabase hides the per-series display on `stackable.stack_type`, which only means anything
+  // because a combo can reach that state there. egret excluded combo from `canStack`, so a combo
+  // could not stack at all and the guard that hides the display select was unreachable.
+  it("offers Stacking on a combo", () => {
+    render(<CartesianDisplaySection kind="combo" config={{ yMetrics: ["rev", "cnt"] }} onChange={() => {}} />);
+    expect(screen.getByLabelText("Stacking")).toHaveTextContent(/Don.t stack/);
+  });
+
+  it("still offers none where stacking makes no sense", () => {
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    expect(screen.queryByLabelText("Stacking")).toBeNull();
+  });
+});
