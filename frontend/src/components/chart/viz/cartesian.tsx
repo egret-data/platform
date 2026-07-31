@@ -49,6 +49,24 @@ function XMetricControl({ config, onChange, metrics }: VizControlProps<Cartesian
   );
 }
 
+/** Metabase's "Bubble size": a third metric sizing each point. Only meaningful on a true
+ *  metric-vs-metric scatter, so it hides until an x metric is chosen. */
+function BubbleMetricControl({ config, onChange, metrics }: VizControlProps<CartesianConfig>) {
+  if (!config.xMetric) return null;
+  return (
+    <div className="space-y-1">
+      <Label className={LABEL_CLASS}>Bubble size</Label>
+      <Select value={config.bubbleMetric ?? "__none"} onValueChange={(v) => onChange({ bubbleMetric: v === "__none" ? undefined : v })}>
+        <SelectTrigger aria-label="Bubble size" className="h-8 text-sm"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="__none">None — every point the same size</SelectItem>
+          {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
 /** Machine name -> display name, from the dataset's own `verbose_name`. */
 function labelMap(items: { verbose_name?: string }[], nameOf: (i: never) => string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -204,7 +222,10 @@ function displayControls(kind: CartesianViz): VizControl<CartesianConfig>[] {
 export function cartesianDescriptor(kind: CartesianViz): VizDescriptor<CartesianConfig> {
   const controls: VizControl<CartesianConfig>[] = [
     { id: "x", section: "data", render: XAxisControl },
-    ...(kind === "scatter" ? [{ id: "xMetric", section: "data" as const, render: XMetricControl }] : []),
+    ...(kind === "scatter" ? [
+      { id: "xMetric", section: "data" as const, render: XMetricControl },
+      { id: "bubbleMetric", section: "data" as const, render: BubbleMetricControl },
+    ] : []),
     { id: "y", section: "data", render: YAxisControl },
     { id: "series", section: "data", render: SeriesControl },
     // Scatter's x-axis is a metric, not a category to fold into "Other" — nothing to bind
@@ -228,7 +249,9 @@ export function cartesianDescriptor(kind: CartesianViz): VizDescriptor<Cartesian
     },
     buildSpec: (cfg, shared: SharedQueryState): QuerySpec => {
       const dims = [cfg.xAxis, cfg.series].filter((d): d is string => !!d);
-      const mets = kind === "scatter" && cfg.xMetric ? [cfg.xMetric, ...cfg.yMetrics] : cfg.yMetrics;
+      const mets = kind === "scatter" && cfg.xMetric
+        ? [cfg.xMetric, ...cfg.yMetrics, ...(cfg.bubbleMetric ? [cfg.bubbleMetric] : [])]
+        : cfg.yMetrics;
       return {
         metrics: mets, dimensions: dims, columns: [], filters: shared.filters, orderby: [],
         row_limit: shared.rowLimit, rollup_groups: [],

@@ -12,7 +12,7 @@ const KEYS = [
   "showStackTotal", "seriesColors", "seriesLabels", "yMin", "yMax",
   "xScale", "compactValues", "maxCategories",
   "seriesOrder", "hiddenSeries", "labelDensity",
-  "xAxisTicks", "yAxisTicks", "yTickCount", "autoSplitY", "showXLabel", "showYLabel",
+  "xAxisTicks", "yAxisTicks", "yTickCount", "autoSplitY", "showXLabel", "showYLabel", "bubbleMetric",
   "lineShape", "missing", "markers", "seriesLine",
 ] as const satisfies readonly (keyof CartesianConfig)[];
 
