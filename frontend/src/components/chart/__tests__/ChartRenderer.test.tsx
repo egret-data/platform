@@ -20,6 +20,8 @@ type MockClick = {
   treePathInfo?: { name?: string }[];
   /** The datum the element was built from. The pie's drill reads its `key`. */
   data?: unknown;
+  /** Which series the clicked element belongs to. The cartesian drill reads `__raw` through it. */
+  seriesIndex?: number;
   x: number;
   y: number;
 };
@@ -931,5 +933,99 @@ describe("ChartRenderer", () => {
       expect(o.series[0].links).toEqual([{ source: "A", target: "B", value: 1234.5 }]); // source + target + metric
       expect(o.tooltip!.formatter({ dataType: "edge", name: "A > B", value: 1234.5 })).toBe(`A > B: ${FORMATTED}`);
     });
+  });
+});
+
+describe("cartesian drill — the breakout series", () => {
+  const COLS = [
+    { name: "region", type: "varchar" },
+    { name: "category", type: "varchar" },
+    { name: "rev", type: "double" },
+  ];
+  const ROWS = [["EU", "Widgets", 10], ["EU", "Gadgets", 4], ["US", "Widgets", 7]];
+
+  // `p.seriesName` is the LEGEND's text. Renaming a series therefore made its clicks filter by a
+  // string no row holds, and the drill quietly returned nothing.
+  it("filters by the series' raw value, not the label the legend shows", () => {
+    const onValueClick = vi.fn();
+    render(
+      <ChartRenderer
+        vizType="bar"
+        params={params({ cartesian: { xAxis: "region", yMetrics: ["rev"], series: "category", seriesLabels: { Widgets: "Widgets (renamed)" } } })}
+        columns={COLS}
+        rows={ROWS}
+        onValueClick={onValueClick}
+      />,
+    );
+    mockClickPayload = { name: "EU", seriesName: "Widgets (renamed)", seriesIndex: 0, value: 10, x: 1, y: 2 };
+    fireEvent.click(screen.getByTestId("echarts"));
+    const { dims } = onValueClick.mock.calls[0][0];
+    expect(dims).toContainEqual({ col: "category", value: "Widgets" });
+  });
+
+  it("attaches the breakout dimension's temporal unit so it drills to a period", () => {
+    const onValueClick = vi.fn();
+    render(
+      <ChartRenderer
+        vizType="bar"
+        params={params({
+          cartesian: { xAxis: "region", yMetrics: ["rev"], series: "order_date" },
+          spec: {
+            metrics: ["rev"], dimensions: ["region", "order_date"], columns: [], filters: [],
+            orderby: [], row_limit: 1000, rollup_groups: [],
+            temporal_units: { order_date: "month" },
+          },
+        })}
+        columns={[{ name: "region", type: "varchar" }, { name: "order_date", type: "date" }, { name: "rev", type: "double" }]}
+        rows={[["EU", "2026-01-01", 10]]}
+        onValueClick={onValueClick}
+      />,
+    );
+    mockClickPayload = { name: "EU", seriesName: "2026-01-01", seriesIndex: 0, value: 10, x: 1, y: 2 };
+    fireEvent.click(screen.getByTestId("echarts"));
+    const { dims } = onValueClick.mock.calls[0][0];
+    expect(dims).toContainEqual({ col: "order_date", value: "2026-01-01", unit: "month" });
+  });
+});
+
+describe("cartesian drill — the folded Other bar", () => {
+  const COLS = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }];
+  const ROWS = [["EU", 100], ["US", 80], ["APAC", 5], ["LATAM", 3]];
+
+  // `maxCategories` sums the tail into a bar the chart invented. `= 'Other'` matches no row —
+  // and when a real category of that name exists, foldTail merges into it, so the filter can
+  // return a fraction of the bar and pass for the whole of it.
+  it("refuses the bar the long-tail fold invented", () => {
+    const onValueClick = vi.fn();
+    render(
+      <ChartRenderer
+        vizType="bar"
+        params={params({ cartesian: { xAxis: "region", yMetrics: ["rev"], maxCategories: 3 } })}
+        columns={COLS} rows={ROWS} onValueClick={onValueClick}
+      />,
+    );
+    mockClickPayload = { name: "Other", seriesName: "rev", seriesIndex: 0, value: 8, x: 1, y: 2 };
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).not.toHaveBeenCalled();
+
+    // A real category still drills.
+    mockClickPayload = { name: "EU", seriesName: "rev", seriesIndex: 0, value: 100, x: 1, y: 2 };
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "region", value: "EU" }] }, 1, 2);
+  });
+
+  // With no fold configured, a column whose value genuinely IS "Other" must keep drilling.
+  it("still drills a real category named Other when nothing was folded", () => {
+    const onValueClick = vi.fn();
+    render(
+      <ChartRenderer
+        vizType="bar"
+        params={params({ cartesian: { xAxis: "region", yMetrics: ["rev"] } })}
+        columns={COLS} rows={[["Other", 12]]} onValueClick={onValueClick}
+      />,
+    );
+    mockClickPayload = { name: "Other", seriesName: "rev", seriesIndex: 0, value: 12, x: 1, y: 2 };
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "region", value: "Other" }] }, 1, 2);
   });
 });

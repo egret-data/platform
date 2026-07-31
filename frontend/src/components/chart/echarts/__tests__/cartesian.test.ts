@@ -533,3 +533,47 @@ describe("category axis labels are formatted", () => {
     expect(axisOf(opt).axisLabel?.formatter?.("2026-01-01")).toBe("2026-01-01");
   });
 });
+
+describe("breakout series names", () => {
+  const cols = [
+    { name: "region", type: "varchar" },
+    { name: "order_date", type: "date" },
+    { name: "rev", type: "double" },
+  ];
+  const rows = [["EU", "2026-01-01", 10], ["EU", "2026-02-01", 4]];
+
+  // The panel offered a date style for the breakout column and stored it; the legend drew the raw
+  // bucket regardless — the same offered-stored-ignored pair the pivot and the pie each had.
+  it("reads a breakout dimension through its column format", () => {
+    const opt = buildCartesianOption(cols, rows, {
+      kind: "bar", xAxis: "region", yMetrics: ["rev"], series: "order_date",
+      seriesType: "date", columnSettings: { order_date: { date_style: "MMMM YYYY" } },
+    }) as any;
+    expect(opt.series.map((s: any) => s.name)).toEqual(["January 2026", "February 2026"]);
+    // …while the raw value rides along, because that is what a drill has to filter by.
+    expect(opt.series.map((s: any) => s.__raw)).toEqual(["2026-01-01", "2026-02-01"]);
+  });
+
+  it("lets an explicit rename win over the column format", () => {
+    const opt = buildCartesianOption(cols, rows, {
+      kind: "bar", xAxis: "region", yMetrics: ["rev"], series: "order_date",
+      seriesType: "date", columnSettings: { order_date: { date_style: "MMMM YYYY" } },
+      seriesLabels: { "2026-01-01": "Kickoff" },
+    }) as any;
+    expect(opt.series.map((s: any) => s.name)).toEqual(["Kickoff", "February 2026"]);
+    expect(opt.series[0].__raw).toBe("2026-01-01");
+  });
+
+  it("leaves an extraction unit's finished word alone", () => {
+    const opt = buildCartesianOption(
+      [{ name: "region", type: "varchar" }, { name: "dow", type: "date" }, { name: "rev", type: "double" }],
+      [["EU", "Wed", 10]],
+      {
+        kind: "bar", xAxis: "region", yMetrics: ["rev"], series: "dow",
+        seriesUnit: "day_of_week", seriesType: "date",
+        columnSettings: { dow: { date_style: "MMMM YYYY" } },
+      },
+    ) as any;
+    expect(opt.series[0].name).toBe("Wed");
+  });
+});

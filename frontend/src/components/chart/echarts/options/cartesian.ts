@@ -6,7 +6,7 @@ import { formatValue } from "../../format";
 import { ariaDescription, baseTextStyle, tooltipSurface } from "../base";
 import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
-import { foldTail } from "../fold";
+import { foldTail, OTHER_LABEL } from "../fold";
 
 export interface ResultColumn { name: string; type: string }
 export interface CartesianBuildConfig {
@@ -38,6 +38,8 @@ export interface CartesianBuildConfig {
   metricTypes?: Record<string, string>;
   xAxisUnit?: string;            // temporal extraction unit for the x-axis dimension (e.g. "day_of_week")
   xAxisType?: string;            // SQL type of the x-axis dimension, so its labels can be formatted
+  seriesUnit?: string;           // temporal unit of the BREAKOUT dimension, same role as xAxisUnit
+  seriesType?: string;           // SQL type of the breakout dimension, so its labels can be formatted
   /** Short value-axis labels (25.5K). Defaults to on once the numbers are wide. */
   compactValues?: boolean;
   /** Fold all but the largest `maxCategories - 1` into "Other". Unset keeps every category. */
@@ -235,6 +237,16 @@ function applyXScale(categories: unknown[], series: unknown[], cfg: CartesianBui
 }
 
 // ECharts series type for a metric under the active kind.
+/** A breakout series' value as it should READ — its column's format, if the column has one and the
+ *  value is a real column value rather than an extraction unit's finished word ("Wed"). */
+function seriesDisplayName(cfg: CartesianBuildConfig, raw: string): string {
+  const col = cfg.series;
+  if (col == null || isExtractUnit(cfg.seriesUnit)) return raw;
+  const fmt = cfg.columnSettings?.[col];
+  if (!fmt) return raw;
+  return formatValue(raw, cfg.seriesType ?? "varchar", fmt) || raw;
+}
+
 function seriesTypeFor(kind: CartesianViz, metric: string, seriesTypes?: Record<string, "bar" | "line">) {
   if (kind === "combo") return seriesTypes?.[metric] ?? "bar";
   if (kind === "area") return "line";
@@ -355,6 +367,7 @@ export function buildCartesianOption(
   // through an "Other" bucket would describe where the user set the cutoff rather than the
   // data, since the bucket's size moves with it. Those are separate decisions, taken when
   // the charts that need them are redesigned.
+  let foldedCategory: string | undefined;
   const foldable =
     cfg.maxCategories != null &&
     !cfg.series &&
@@ -368,6 +381,11 @@ export function buildCartesianOption(
       categories.map((c, i) => ({ name: String(c), value: s.data?.[i] })),
       cfg.maxCategories,
     );
+    // A fold actually happened only if the list got shorter. Recorded on the option so the drill
+    // can refuse that one bar: "Other" here is a bucket the chart invented, and `= 'Other'` either
+    // matches nothing or — because foldTail merges into a REAL category of that name when one
+    // exists — matches a fraction of the bar and understates it. Both are wrong silently.
+    if (folded.length < categories.length) foldedCategory = OTHER_LABEL;
     categories = folded.map((p) => p.name);
     s.data = folded.map((p) => (typeof p.value === "number" ? p.value : null));
   }
@@ -380,7 +398,10 @@ export function buildCartesianOption(
   if (usesXScale(cfg)) applyXScale(categories, series, cfg);
   applyMarkers(series as unknown as SeriesLike[]);
   const displayCats = isExtractUnit(cfg.xAxisUnit) ? categories.map((v) => temporalLabel(cfg.xAxisUnit, v)) : categories;
-  return baseOption(cfg, displayCats as (string | number)[], series);
+  // `__foldedCategory` is not an ECharts key — ECharts ignores what it doesn't know. It rides on
+  // the option because the drill needs to recognise the one bar it must refuse, and the option is
+  // the only thing both the builder and the click handler hold.
+  return { ...baseOption(cfg, displayCats as (string | number)[], series), __foldedCategory: foldedCategory };
 }
 
 // Shared decoration: type, color, stack, areaStyle, labels, smooth, symbol.
@@ -399,7 +420,15 @@ function decorateSeries(
   const color = cfg.seriesColors?.[s.name] ?? colorOverride ?? seriesColor(colorIdx);
   const out: Record<string, unknown> = {
     ...s,
-    name: cfg.seriesLabels?.[s.name] ?? s.name,  // display label override (legend/tooltip)
+    // Display label, in falling order of authority: the user's explicit rename, then the series
+    // dimension's own column format, then the raw value. The FORMAT step is what made a breakout
+    // by month read "2026-01-01" in the legend while the panel offered a date style for that very
+    // column — offered, stored, and ignored.
+    name: cfg.seriesLabels?.[s.name] ?? seriesDisplayName(cfg, s.name),
+    // The RAW series value, kept because `name` above is what the reader sees and the drill needs
+    // what the column holds. Filtering by the display label found nothing the moment a series was
+    // renamed — the rename silently broke the click.
+    __raw: s.name,
     __metric: metric,                            // keep the source metric for tooltip formatting
     type,
     itemStyle: { color },

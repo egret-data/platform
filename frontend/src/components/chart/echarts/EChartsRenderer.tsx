@@ -15,6 +15,11 @@ export interface EChartsPointClick {
    * `treePathInfo.length - 2`. The pie is the one chart that reads it (see ChartRenderer): with a
    * single series there is no per-ring `seriesName` left to attribute a click by. */
   treePathInfo?: { name?: string }[];
+  /** Index of the series the clicked element belongs to. Lets a consumer recover fields the option
+   * put ON THE SERIES rather than on the datum — the cartesian drill reads `__raw` this way,
+   * because `seriesName` is the DISPLAY label and a renamed series must still filter by its
+   * column's real value. */
+  seriesIndex?: number;
   /** The datum OBJECT this element was built from, untouched — the same field the hover path has
    * always forwarded. The pie's drill needs it: a click reports the slice's display NAME, and the
    * raw dimension path it stands for lives on the datum (see options/pie.ts' `pieSliceDrillPath`). */
@@ -121,12 +126,13 @@ export function EChartsRenderer({ option, className, onPointClick, onPointHover,
     applyOption(chart);
     chart.on("click", (params: unknown) => {
       const p = params as {
-        name?: string; seriesName?: string; value?: unknown; data?: unknown;
+        name?: string; seriesName?: string; value?: unknown; data?: unknown; seriesIndex?: number;
         treePathInfo?: { name?: string }[];
         event?: { event?: { clientX?: number; clientY?: number } };
       };
       clickRef.current?.({
-        name: p.name, seriesName: p.seriesName, value: p.value, data: p.data, treePathInfo: p.treePathInfo,
+        name: p.name, seriesName: p.seriesName, value: p.value, data: p.data,
+        seriesIndex: p.seriesIndex, treePathInfo: p.treePathInfo,
         x: p.event?.event?.clientX ?? 0, y: p.event?.event?.clientY ?? 0,
       });
     });
