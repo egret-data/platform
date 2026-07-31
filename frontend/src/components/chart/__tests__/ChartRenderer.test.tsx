@@ -18,6 +18,8 @@ type MockClick = {
   value?: unknown;
   /** Root-to-node path, as a sunburst click carries it — entry 0 is ECharts' virtual root. */
   treePathInfo?: { name?: string }[];
+  /** The datum the element was built from. The pie's drill reads its `key`. */
+  data?: unknown;
   x: number;
   y: number;
 };
@@ -241,11 +243,10 @@ describe("ChartRenderer", () => {
     expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "region", value: "EU" }] }, 3, 4);
   });
 
-  // The pie is ONE `sunburst` series, so a click carries no per-ring `seriesName` to attribute it
-  // by — its ring comes from the depth of `treePathInfo`, whose first entry is the virtual root
-  // ECharts wraps `series.data` in. One case per ring, since getting the off-by-one wrong would
-  // drill every slice on the wrong column.
-  it("drills a pie click on the clicked ring's own dimension, not always dimensions[0]", () => {
+  // A pie click reports the slice's display NAME, which on a nested chart names only the innermost
+  // ring. The drill reads the datum's aggregation key instead — the whole root-to-here path in raw
+  // values — so an outer slice filters by its ancestors too. `␟` is options/pie.ts' KEY_SEP.
+  it("drills a nested pie slice on its whole ancestor path, not just its own ring", () => {
     const onValueClick = vi.fn();
     render(
       <ChartRenderer
@@ -259,35 +260,77 @@ describe("ChartRenderer", () => {
         onValueClick={onValueClick}
       />,
     );
-    const root = { name: "" };
 
-    // Ring 0 — path is [root, EU].
-    mockClickPayload = { name: "EU", value: 40, treePathInfo: [root, { name: "EU" }], x: 1, y: 2 };
+    mockClickPayload = { name: "EU", value: 40, data: { key: "EU" }, x: 1, y: 2 };
     fireEvent.click(screen.getByTestId("echarts"));
     expect(onValueClick).toHaveBeenLastCalledWith({ dims: [{ col: "region", value: "EU" }] }, 1, 2);
 
-    // Ring 1 — must drill on "category", not "region", even though the slice is still one level
-    // out from a ring-0 wedge.
-    mockClickPayload = {
-      name: "Widgets", value: 10,
-      treePathInfo: [root, { name: "EU" }, { name: "Widgets" }], x: 5, y: 6,
-    };
+    // Ring 1 — "Widgets" under "EU" must NOT drill to every region's Widgets.
+    mockClickPayload = { name: "Widgets", value: 10, data: { key: "EU␟Widgets" }, x: 5, y: 6 };
     fireEvent.click(screen.getByTestId("echarts"));
-    expect(onValueClick).toHaveBeenLastCalledWith({ dims: [{ col: "category", value: "Widgets" }] }, 5, 6);
+    expect(onValueClick).toHaveBeenLastCalledWith(
+      { dims: [{ col: "region", value: "EU" }, { col: "category", value: "Widgets" }] }, 5, 6,
+    );
 
     // Ring 2.
-    mockClickPayload = {
-      name: "Direct", value: 10,
-      treePathInfo: [root, { name: "EU" }, { name: "Widgets" }, { name: "Direct" }], x: 7, y: 8,
-    };
+    mockClickPayload = { name: "Direct", value: 10, data: { key: "EU␟Widgets␟Direct" }, x: 7, y: 8 };
     fireEvent.click(screen.getByTestId("echarts"));
-    expect(onValueClick).toHaveBeenLastCalledWith({ dims: [{ col: "channel", value: "Direct" }] }, 7, 8);
+    expect(onValueClick).toHaveBeenLastCalledWith({
+      dims: [
+        { col: "region", value: "EU" },
+        { col: "category", value: "Widgets" },
+        { col: "channel", value: "Direct" },
+      ],
+    }, 7, 8);
+  });
 
-    // A click with no path at all (nothing else in the app sends one) still drills the first
-    // dimension rather than throwing or indexing off the end.
+  // "Other" is a bucket the chart invented, not a value in the column. Drilling it sent
+  // `region = 'Other'`, which matches no row — an empty dialog reported as the slice's contents.
+  it("refuses to drill an Other bucket rather than filtering by a value that does not exist", () => {
+    const onValueClick = vi.fn();
+    render(
+      <ChartRenderer
+        vizType="pie"
+        params={params({ pie: { dimensions: ["region"], metric: "rev" } })}
+        columns={[{ name: "region", type: "varchar" }, { name: "rev", type: "double" }]}
+        rows={[["EU", 10]]}
+        onValueClick={onValueClick}
+      />,
+    );
+    mockClickPayload = { name: "Other", value: 1, data: { key: "\u0000__other__\u0000" }, x: 1, y: 2 };
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).not.toHaveBeenCalled();
+
+    // …and a datum with no key at all (nothing else in the app sends one) is inert, not a throw.
     mockClickPayload = { name: "EU", value: 40, x: 9, y: 10 };
     fireEvent.click(screen.getByTestId("echarts"));
-    expect(onValueClick).toHaveBeenLastCalledWith({ dims: [{ col: "region", value: "EU" }] }, 9, 10);
+    expect(onValueClick).not.toHaveBeenCalled();
+  });
+
+  // Fourth chart family with this defect: a slice standing for a whole month drilled to the single
+  // day its label happens to name.
+  it("attaches the temporal unit so a bucketed slice drills to its period", () => {
+    const onValueClick = vi.fn();
+    render(
+      <ChartRenderer
+        vizType="pie"
+        params={params({
+          pie: { dimensions: ["order_date"], metric: "rev" },
+          spec: {
+            metrics: ["rev"], dimensions: ["order_date"], columns: [], filters: [], orderby: [],
+            row_limit: 1000, rollup_groups: [], temporal_units: { order_date: "month" },
+          },
+        })}
+        columns={[{ name: "order_date", type: "date" }, { name: "rev", type: "double" }]}
+        rows={[["2026-01-01", 10]]}
+        onValueClick={onValueClick}
+      />,
+    );
+    mockClickPayload = { name: "2026-01-01", value: 10, data: { key: "2026-01-01" }, x: 1, y: 2 };
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).toHaveBeenLastCalledWith(
+      { dims: [{ col: "order_date", value: "2026-01-01", unit: "month" }] }, 1, 2,
+    );
   });
 
   it("wires onCellDrill on a table card when onValueClick is set", () => {

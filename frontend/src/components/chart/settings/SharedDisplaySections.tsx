@@ -39,7 +39,18 @@ export function styleColumnsFor(
     return resultColumns.filter((c) => named.has(c.name));
   }
   if (vizType === "scalar") return resultColumns.filter((c) => c.name === params.scalar?.metric);
-  if (vizType === "pie") return [];
+  if (vizType === "pie") {
+    // Its dimensions AND its metric. Returning [] hid a section the pie's own renderer had always
+    // been reading: `metricFormatter` resolves `columnSettings[metric]` for every label, tooltip
+    // and the centre total, and the slice names resolve their dimension's format the same way — so
+    // both were implemented with nowhere to say so. A month breakout drew "2026-01-01" and the
+    // total drew a bare number, with no currency, prefix or decimals reachable from the chart.
+    const named = new Set([
+      ...(params.pie?.dimensions ?? []),
+      ...(params.pie?.metric ? [params.pie.metric] : []),
+    ]);
+    return resultColumns.filter((c) => named.has(c.name));
+  }
   return resultColumns;
 }
 

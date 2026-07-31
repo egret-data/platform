@@ -477,6 +477,10 @@ export default function ChartExplore() {
                     spec: specForRun(),
                     cartesian: descConfig as { yMetrics: string[]; xAxis?: string; series?: string },
                     scalar: descConfig as { metric?: string },
+                    // …and the pie formats its dimensions and its metric. Left out, the synthetic
+                    // params below carried no `pie` key at all, so the filter matched nothing and
+                    // the section stayed hidden however the descriptor was configured.
+                    pie: descConfig as { dimensions?: string[]; metric?: string },
                     metrics: (descConfig as { metrics?: string[] }).metrics,
                     // The pivot formats its dimensions as well as its measures — without these
                     // two, `styleColumnsFor` saw no rows/cols and offered measures only.
@@ -505,6 +509,10 @@ export default function ChartExplore() {
                   spec: specForRun(),
                   cartesian: descConfig as { yMetrics: string[]; xAxis?: string; series?: string },
                   scalar: descConfig as { metric?: string },
+                    // …and the pie formats its dimensions and its metric. Left out, the synthetic
+                    // params below carried no `pie` key at all, so the filter matched nothing and
+                    // the section stayed hidden however the descriptor was configured.
+                    pie: descConfig as { dimensions?: string[]; metric?: string },
                   metrics: (descConfig as { metrics?: string[] }).metrics,
                   rows: (descConfig as { rows?: string[] }).rows,
                   cols: (descConfig as { cols?: string[] }).cols,
@@ -518,6 +526,10 @@ export default function ChartExplore() {
                   spec: specForRun(),
                   cartesian: descConfig as { yMetrics: string[]; xAxis?: string; series?: string },
                   scalar: descConfig as { metric?: string },
+                    // …and the pie formats its dimensions and its metric. Left out, the synthetic
+                    // params below carried no `pie` key at all, so the filter matched nothing and
+                    // the section stayed hidden however the descriptor was configured.
+                    pie: descConfig as { dimensions?: string[]; metric?: string },
                   metrics: (descConfig as { metrics?: string[] }).metrics,
                   rows: (descConfig as { rows?: string[] }).rows,
                   cols: (descConfig as { cols?: string[] }).cols,

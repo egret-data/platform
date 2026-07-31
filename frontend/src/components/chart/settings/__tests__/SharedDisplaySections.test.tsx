@@ -108,3 +108,24 @@ describe("ruleColumnsFor", () => {
       .toEqual(["region", "order_date", "revenue"]);
   });
 });
+
+describe("styleColumnsFor — pie", () => {
+  const cols = [
+    { name: "region", type: "varchar" },
+    { name: "order_date", type: "date" },
+    { name: "revenue", type: "double" },
+  ];
+
+  // The pie returned [] unconditionally, so its Formatting section never appeared — while the
+  // renderer had always resolved `columnSettings[metric]` for every label, tooltip and the centre
+  // total, and the slice names resolve their dimension's format the same way.
+  it("offers the pie's dimensions and its metric", () => {
+    const params = { pie: { dimensions: ["order_date", "region"], metric: "revenue" } } as never;
+    expect(styleColumnsFor("pie", params, cols).map((c) => c.name))
+      .toEqual(["region", "order_date", "revenue"]);
+  });
+
+  it("offers nothing while the pie is still unconfigured", () => {
+    expect(styleColumnsFor("pie", {} as never, cols)).toEqual([]);
+  });
+});

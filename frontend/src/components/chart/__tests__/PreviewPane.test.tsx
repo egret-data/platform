@@ -8,6 +8,7 @@ let mockClickPayload: {
   name?: string;
   seriesName?: string;
   treePathInfo?: { name?: string }[];
+  data?: unknown;
   x: number;
   y: number;
 } = { name: "EU", seriesName: "rev", x: 3, y: 4 };
@@ -115,9 +116,9 @@ describe("PreviewPane", () => {
       expect(onCellDrill).toHaveBeenCalledWith({ dims: [{ col: "region", value: "EU" }] }, 3, 4);
     });
 
-    // The pie's own drill was rewired onto `treePathInfo` when it became a sunburst, and nothing
-    // had ever exercised that path from a real editor click — only from ChartRenderer directly.
-    it("drills a pie slice on its own ring's dimension", () => {
+    // The pie's own drill reads the datum's aggregation key, and nothing had ever exercised that
+    // path from a real editor click — only from ChartRenderer directly.
+    it("drills a pie slice on its whole ancestor path", () => {
       const onCellDrill = vi.fn();
       render(
         <PreviewPane {...base} finished onCellDrill={onCellDrill}
@@ -129,14 +130,12 @@ describe("PreviewPane", () => {
           ]}
           rows={[["EU", "Widgets", 10]]} />,
       );
-      // Entry 0 of a sunburst path is ECharts' virtual root, so this is the ring-1 slice.
-      mockClickPayload = {
-        name: "Widgets",
-        treePathInfo: [{ name: "" }, { name: "EU" }, { name: "Widgets" }],
-        x: 5, y: 6,
-      };
+      // `␟` is options/pie.ts' KEY_SEP: this is the ring-1 slice "Widgets" under "EU".
+      mockClickPayload = { name: "Widgets", data: { key: "EU␟Widgets" }, x: 5, y: 6 };
       fireEvent.click(screen.getByTestId("echarts"));
-      expect(onCellDrill).toHaveBeenCalledWith({ dims: [{ col: "category", value: "Widgets" }] }, 5, 6);
+      expect(onCellDrill).toHaveBeenCalledWith(
+        { dims: [{ col: "region", value: "EU" }, { col: "category", value: "Widgets" }] }, 5, 6,
+      );
     });
   });
 });

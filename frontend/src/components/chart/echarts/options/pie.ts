@@ -143,6 +143,26 @@ const OTHER_KEY = "\u0000__other__\u0000";
 // accepted risk as OTHER_KEY/OTHER_NAME).
 const KEY_SEP = "␟";
 
+/**
+ * The raw dimension values behind a clicked slice, outermost ring last — or `null` when the slice
+ * cannot be drilled at all.
+ *
+ * A pie click reports the slice's NAME. That is the innermost ring's DISPLAY value, which is the
+ * wrong thing to filter by twice over: on a nested pie it says nothing about which parent the
+ * slice sits under (clicking "Widgets" under "North" filtered every region's Widgets), and on a
+ * folded bucket it is the literal word "Other", which matches no row in the table. The aggregation
+ * key carries the whole path in raw values instead, and the Other sentinel is unambiguous where
+ * the display name is not.
+ *
+ * Returns `null` for an Other bucket (there is no single value to filter by — Metabase likewise
+ * refuses to drill one) and for a missing key.
+ */
+export function pieSliceDrillPath(key: string | undefined): string[] | null {
+  if (key == null) return null;
+  const parts = key.split(KEY_SEP);
+  return parts.some((p) => p.startsWith(OTHER_KEY)) ? null : parts;
+}
+
 /** One (aggregated) slice going into a ring, still carrying the identity fields ring-nesting needs:
  * `key` — this ring's own aggregation key (the dimension-value path up to and including this ring);
  * `parentKey` — the same path one ring in, i.e. the key this slice's row(s) aggregate to in the
@@ -169,6 +189,11 @@ interface PieSliceNode {
    * `isOther`: it changes what the tooltip lists (its CHILDREN, not its siblings — pointing at
    * "Other" is asking what is in it) and it is never the focused row. */
   isOther: boolean;
+  /** This slice's own aggregation key — the raw dimension values of its whole root-to-here path,
+   * KEY_SEP-joined. The drill reads it: what a click reports is the slice NAME, which is only the
+   * innermost ring's value and, on an "Other" bucket, not a column value at all. See
+   * `pieSliceDrillPath`. */
+  key?: string;
   itemStyle: { color: string; borderWidth: number };
   label: {
     color: string;
@@ -185,7 +210,15 @@ interface PieSliceNode {
  * and including this ring's own dimension, values summed. Pre-existing behaviour, unchanged by
  * nesting: grouping is by DISPLAYED value, so `null`, `undefined` and `""` all render as the same
  * `""`-named slice and merge together. */
-function aggregateRing(rows: unknown[][], dimIdxs: (number | undefined)[], units: (string | undefined)[], mi: number): Slice[] {
+function aggregateRing(
+  rows: unknown[][], dimIdxs: (number | undefined)[], units: (string | undefined)[], mi: number,
+  // How this ring's own dimension value should READ. Applied to the display name only, never to
+  // the key: grouping, the per-slice curations (colour/hide/order) and the drill all address the
+  // raw value, and a rename must not move any of them. Without it a pie broken out by month
+  // labelled its slices `2026-01-01` while the same column in a table or a pivot honoured its
+  // date format — the one chart that ignored the setting.
+  labelOf: (raw: string) => string = (raw) => raw,
+): Slice[] {
   const groups = new Map<string, Slice>();
   for (const r of rows) {
     const parts = dimIdxs.map((di, i) => {
@@ -199,7 +232,7 @@ function aggregateRing(rows: unknown[][], dimIdxs: (number | undefined)[], units
     else groups.set(key, {
       key,
       parentKey: parts.length > 1 ? parts.slice(0, -1).join(KEY_SEP) : undefined,
-      name: parts[parts.length - 1],
+      name: labelOf(parts[parts.length - 1]),
       value,
     });
   }
@@ -841,7 +874,16 @@ function buildPieRings(
       const path = dims.slice(0, level + 1);
       const dimIdxs = path.map((d) => idx[d]);
       const units = path.map((d) => cfg.dimensionUnits?.[d]);
-      let items = aggregateRing(rows, dimIdxs, units, mi);
+      // This ring's own dimension decides how its slices read. An EXTRACTION unit is exempt: its
+      // part is already `temporalLabel`'s finished word ("Wed"), and running that back through a
+      // date format would make nonsense of it.
+      const ringDim = path[path.length - 1];
+      const ringFmt = cfg.columnSettings?.[ringDim];
+      const ringType = columns[idx[ringDim] ?? -1]?.type ?? "varchar";
+      const labelOf = ringFmt && !isExtractUnit(cfg.dimensionUnits?.[ringDim])
+        ? (raw: string) => formatValue(raw, ringType, ringFmt) || raw
+        : undefined;
+      let items = aggregateRing(rows, dimIdxs, units, mi, labelOf);
       // A row whose ancestor got dropped outright (not even folded to Other) at the parent ring has
       // no home here either: its parent's slice doesn't exist to nest under.
       if (level > 0 && parentGroupOf) {
@@ -1626,6 +1668,7 @@ export function buildPieOption(
       rawValue: s.value,
       slicePercent,
       isOther: s.key != null && s.key.startsWith(OTHER_KEY),
+      key: s.key,
       itemStyle: { color, borderWidth },
       label: {
         color: labelColor,
