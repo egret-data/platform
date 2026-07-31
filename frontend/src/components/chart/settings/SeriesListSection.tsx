@@ -1,11 +1,14 @@
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import type { SeriesDisplay } from "@/components/chart/echarts/options/cartesian";
 
 export interface SeriesListPatch {
   seriesOrder?: string[];
   hiddenSeries?: string[];
   seriesColors?: Record<string, string>;
   seriesLabels?: Record<string, string>;
+  seriesTypes?: Record<string, SeriesDisplay>;
 }
 
 /**
@@ -22,12 +25,17 @@ export interface SeriesListPatch {
  * renderer assigns palette slots before it applies `seriesOrder`, so a reordered series keeps the
  * colour it is actually drawn in.
  */
-export function SeriesListSection({ names, order, hidden, colors, labels, defaultColor, onChange }: {
+export function SeriesListSection({ names, order, hidden, colors, labels, types, defaultDisplay, defaultColor, onChange }: {
   names: string[];
   order?: string[];
   hidden?: string[];
   colors?: Record<string, string>;
   labels?: Record<string, string>;
+  /** Combo only: how each series is drawn. Absent for every other kind, whose display is fixed. */
+  types?: Record<string, SeriesDisplay>;
+  /** The display a series falls back to, by its NATURAL index — Metabase's first-is-a-line rule.
+   *  Undefined means this chart kind offers no per-series display at all. */
+  defaultDisplay?: (naturalIndex: number) => SeriesDisplay;
   defaultColor: (naturalIndex: number) => string;
   onChange: (patch: SeriesListPatch) => void;
 }) {
@@ -73,6 +81,21 @@ export function SeriesListSection({ names, order, hidden, colors, labels, defaul
             value={colors?.[name] ?? defaultColor(naturalIndex.get(name) ?? i)}
             onChange={(e) => onChange({ seriesColors: { ...colors, [name]: e.target.value } })}
           />
+          {defaultDisplay && (
+            <Select
+              value={types?.[name] ?? defaultDisplay(naturalIndex.get(name) ?? i)}
+              onValueChange={(v) => onChange({ seriesTypes: { ...types, [name]: v as SeriesDisplay } })}
+            >
+              <SelectTrigger aria-label={`display ${name}`} className="h-7 w-[4.5rem] shrink-0 px-2 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="line">Line</SelectItem>
+                <SelectItem value="area">Area</SelectItem>
+                <SelectItem value="bar">Bar</SelectItem>
+              </SelectContent>
+            </Select>
+          )}
           <Input
             className="h-7 min-w-0 flex-1"
             aria-label={`label ${name}`}
