@@ -306,3 +306,33 @@ describe("CartesianDisplaySection — a combo can stack", () => {
     expect(screen.queryByLabelText("Stacking")).toBeNull();
   });
 });
+
+describe("CartesianDisplaySection — axis names follow the chart's orientation", () => {
+  // `xLabel` is the CATEGORY axis and `yLabel` the value axis, whichever way the bars run. On a row
+  // chart the category axis is the vertical one, so naming these after the config keys printed them
+  // backwards from the screen: "Y min" governed the horizontal extent. Metabase relabels the same
+  // settings by the axis they appear on.
+  it("names the value-axis controls X on a row chart", () => {
+    render(<CartesianDisplaySection kind="row" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    expect(screen.getByLabelText("X min")).toBeInTheDocument();
+    expect(screen.getByLabelText("X max")).toBeInTheDocument();
+    expect(screen.getByLabelText("X tick marks")).toBeInTheDocument();
+    expect(screen.getByLabelText("X axis lines and ticks")).toBeInTheDocument();
+    // …and the category axis, which is vertical here, reads Y.
+    expect(screen.getByLabelText("Y axis lines and ticks")).toBeInTheDocument();
+    expect(screen.getByLabelText("Show Y label")).toBeInTheDocument();
+  });
+
+  it("does the same for a bar turned horizontal", () => {
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], horizontal: true }} onChange={() => {}} />);
+    expect(screen.getByLabelText("X min")).toBeInTheDocument();
+    expect(screen.getByLabelText("Y axis lines and ticks")).toBeInTheDocument();
+  });
+
+  it("leaves an upright chart alone", () => {
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    expect(screen.getByLabelText("Y min")).toBeInTheDocument();
+    expect(screen.getByLabelText("X axis lines and ticks")).toBeInTheDocument();
+    expect(screen.getByLabelText("Show X label")).toBeInTheDocument();
+  });
+});
