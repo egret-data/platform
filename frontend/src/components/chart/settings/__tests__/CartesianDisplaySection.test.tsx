@@ -243,3 +243,51 @@ describe("CartesianDisplaySection — Stacking", () => {
     expect(screen.queryByLabelText("Stack totals")).toBeNull();
   });
 });
+
+describe("CartesianDisplaySection — axis titles and the split", () => {
+  // With the text box as the only control, hiding a title meant emptying it, and the wording was
+  // gone for good. Metabase pairs each title with its own switch.
+  it("keeps Show label separate from the label text", () => {
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xLabel: "Month" }} onChange={onChange} />,
+    );
+    expect(screen.getByLabelText("Show X label")).toBeChecked();
+    expect(screen.getByLabelText("X label")).toHaveValue("Month");
+    fireEvent.click(screen.getByLabelText("Show X label"));
+    expect(onChange).toHaveBeenCalledWith({ showXLabel: false });
+    // Hidden: the box goes away, and the stored text is untouched so turning it back on restores it.
+    rerender(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xLabel: "Month", showXLabel: false }} onChange={onChange} />);
+    expect(screen.queryByLabelText("X label")).toBeNull();
+    fireEvent.click(screen.getByLabelText("Show X label"));
+    expect(onChange).toHaveBeenLastCalledWith({ showXLabel: undefined });
+  });
+
+  // Nothing to separate with one metric.
+  it("offers the split only once there are two metrics to separate", () => {
+    const { rerender } = render(
+      <CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={() => {}} />,
+    );
+    expect(screen.queryByLabelText("Split y-axis when necessary")).toBeNull();
+    rerender(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev", "cnt"] }} onChange={() => {}} />);
+    expect(screen.getByLabelText("Split y-axis when necessary")).toBeChecked();
+  });
+});
+
+describe("CartesianDisplaySection — the per-metric axis select", () => {
+  const cfg = { yMetrics: ["rev", "cnt"] };
+
+  // It used to read "Left" for every metric while the automatic split was drawing one of them on
+  // the right — the panel asserting something the chart visibly contradicted.
+  it("rests on Auto while nothing is assigned by hand", () => {
+    render(<CartesianDisplaySection kind="bar" config={cfg} onChange={() => {}} />);
+    expect(screen.getByLabelText("axis rev")).toHaveTextContent("Auto");
+    expect(screen.getByLabelText("axis cnt")).toHaveTextContent("Auto");
+  });
+
+  it("shows the real sides once one is assigned", () => {
+    render(<CartesianDisplaySection kind="bar" config={{ ...cfg, rightAxisMetrics: ["cnt"] }} onChange={() => {}} />);
+    expect(screen.getByLabelText("axis rev")).toHaveTextContent("Left");
+    expect(screen.getByLabelText("axis cnt")).toHaveTextContent("Right");
+  });
+});
