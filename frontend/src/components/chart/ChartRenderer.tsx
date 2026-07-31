@@ -330,21 +330,32 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
   }
 
   if (isCartesianViz(vizType)) {
+    const seriesUnit = cartesian.series ? params.spec.temporal_units?.[cartesian.series] : undefined;
+    // Hoisted so the click handler can read back what the builder put ON THE SERIES — `__raw`, the
+    // series' real column value behind whatever label the legend ended up showing.
+    const cartesianOption = buildCartesianOption(columns, rows, {
+      // Spread rather than list the fields: this used to be a hand-maintained whitelist, and
+      // four settings added in one branch were silently dropped between the panel and the
+      // chart because nobody remembered to extend it.
+      ...cartesian,
+      kind: vizType,
+      columnSettings,
+      metricTypes,
+      xAxisUnit: params.spec.temporal_units?.[cartesian.xAxis ?? ""],
+      xAxisType: columns.find((c) => c.name === cartesian.xAxis)?.type,
+      seriesUnit,
+      seriesType: columns.find((c) => c.name === cartesian.series)?.type,
+    });
+    const foldedCategory = (cartesianOption as { __foldedCategory?: string }).__foldedCategory;
+    const rawSeriesAt = (i: number | undefined): string | undefined => {
+      const list = (cartesianOption as { series?: { __raw?: string }[] }).series;
+      return i == null ? undefined : list?.[i]?.__raw;
+    };
     return (
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildCartesianOption(columns, rows, {
-              // Spread rather than list the fields: this used to be a hand-maintained whitelist, and
-              // four settings added in one branch were silently dropped between the panel and the
-              // chart because nobody remembered to extend it.
-              ...cartesian,
-              kind: vizType,
-              columnSettings,
-              metricTypes,
-              xAxisUnit: params.spec.temporal_units?.[cartesian.xAxis ?? ""],
-              xAxisType: columns.find((c) => c.name === cartesian.xAxis)?.type,
-            })}
+          : <EChartsRenderer option={cartesianOption}
             onPointClick={onValueClick && cartesian.xAxis ? (p) => {
               // The x value carries its temporal unit, so a bucketed axis drills to the whole
               // bucket. Without it a bar grouped by month filtered `= 2026-01-01`, which is one
@@ -355,13 +366,28 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
               // (`day_of_week`) `p.name` is the display label ("Mon"), not the raw integer, so the
               // filter could never match. `drillFilters` now drops extraction dimensions instead
               // of emitting a predicate that silently matches nothing.
+              // The long-tail fold's "Other" is a bucket the chart invented, so there is nothing
+              // single to filter by — and because the fold merges into a real category of that
+              // name when one exists, `= 'Other'` can even return a fraction of the bar and pass
+              // for an answer. Same refusal the pie makes for its own folded slice.
+              if (foldedCategory != null && p.name === foldedCategory) return;
               const unit = params.spec.temporal_units?.[cartesian.xAxis as string];
               const dims: DrillDim[] = [
                 unit
                   ? { col: cartesian.xAxis as string, value: p.name, unit }
                   : { col: cartesian.xAxis as string, value: p.name },
               ];
-              if (cartesian.series && p.seriesName != null) dims.push({ col: cartesian.series, value: p.seriesName });
+              // The series' RAW value, not `p.seriesName` — that is the legend's label, so a
+              // renamed series (or one whose column carries a date format) filtered by text no
+              // row holds and drilled to nothing at all.
+              if (cartesian.series) {
+                const raw = rawSeriesAt(p.seriesIndex) ?? p.seriesName;
+                if (raw != null) {
+                  dims.push(seriesUnit
+                    ? { col: cartesian.series, value: raw, unit: seriesUnit }
+                    : { col: cartesian.series, value: raw });
+                }
+              }
               onValueClick({ dims }, p.x, p.y);
             } : undefined}
           />}

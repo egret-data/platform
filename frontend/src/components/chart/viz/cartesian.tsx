@@ -3,8 +3,9 @@ import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { FieldZone } from "@/components/chart/config/FieldZone";
 import {
   SeriesOptions, AxesOptions, OrientationOption, AxisRangeOptions, FormatOptions, GoalOptions, TrendOption,
+  defaultSeriesColor,
 } from "@/components/chart/settings/CartesianDisplaySection";
-import { SeriesOrderSection } from "@/components/chart/settings/SeriesOrderSection";
+import { SeriesListSection } from "@/components/chart/settings/SeriesListSection";
 import { SeriesLineStyleSection } from "@/components/chart/settings/SeriesLineStyleSection";
 import { cartesianSeriesNames } from "@/components/chart/echarts/options/cartesian";
 import { Label } from "@/components/ui/label";
@@ -103,13 +104,21 @@ function MaxCategoriesControl({ config, onChange }: VizControlProps<CartesianCon
   );
 }
 
-// Series list draws its names the same way the per-series colour/label control does: from the
-// last result, not from anything precomputed — the shell must not know cartesian-specific shape.
-function SeriesOrderControl({ config, onChange, resultColumns, rows }: VizControlProps<CartesianConfig>) {
+// Series names come from the last result, not from anything precomputed — the shell must not know
+// cartesian-specific shape.
+function SeriesListControl({ config, onChange, resultColumns, rows }: VizControlProps<CartesianConfig>) {
   const names = cartesianSeriesNames(resultColumns, rows, config);
   if (names.length === 0) return null;
   return (
-    <SeriesOrderSection names={names} order={config.seriesOrder} hidden={config.hiddenSeries} onChange={onChange} />
+    <SeriesListSection
+      names={names}
+      order={config.seriesOrder}
+      hidden={config.hiddenSeries}
+      colors={config.seriesColors}
+      labels={config.seriesLabels}
+      defaultColor={(i) => defaultSeriesColor(!!config.series, names.length, i)}
+      onChange={onChange}
+    />
   );
 }
 
@@ -135,12 +144,11 @@ function displayControls(kind: CartesianViz): VizControl<CartesianConfig>[] {
   return [
     {
       id: "seriesOptions", section: "display", group: "Series",
-      render: ({ config, onChange, resultColumns, rows }: VizControlProps<CartesianConfig>) => (
-        <SeriesOptions kind={kind} config={config} onChange={onChange}
-          seriesNames={cartesianSeriesNames(resultColumns, rows, config)} />
+      render: ({ config, onChange }: VizControlProps<CartesianConfig>) => (
+        <SeriesOptions kind={kind} config={config} onChange={onChange} />
       ),
     },
-    { id: "seriesOrder", section: "display", group: "Series", render: SeriesOrderControl },
+    { id: "seriesList", section: "display", group: "Series", render: SeriesListControl },
     ...(isLineish ? [{
       id: "seriesLineStyle", section: "display" as const, group: "Series", advanced: true,
       render: SeriesLineStyleControl,

@@ -38,7 +38,7 @@ import { pivotDescriptor, type PivotConfig } from "@/components/chart/viz/pivot"
 import { tableDescriptor } from "@/components/chart/viz/table";
 import type { VizDescriptor } from "@/components/chart/viz/types";
 import { shellSettings, mergeVizSettings } from "@/components/chart/viz/renderConfig";
-import { StudioPanel } from "@/components/chart/StudioPanel";
+import { StudioPanel, hasAxesControls } from "@/components/chart/StudioPanel";
 import { PreviewPane } from "@/components/chart/PreviewPane";
 import { VizSwitcher } from "@/components/chart/VizSwitcher";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
@@ -71,6 +71,8 @@ export default function ChartExplore() {
   // The descriptor for the active viz, or undefined while it is still on the bridge —
   // i.e. still driven by the inline branches below. PR3 empties that bridge out.
   const descriptor = getDescriptor(viz);
+  // Only the charts that declare axis controls get an Axes tab — a pie or a scalar has none.
+  const showAxesTab = hasAxesControls(descriptor);
   // One opaque config for whichever viz is active. Only its descriptor reads inside it;
   // null means "not seeded yet", so the descriptor's own default applies.
   const [descState, setDescState] = useState<unknown>(null);
@@ -346,6 +348,11 @@ export default function ChartExplore() {
   useEffect(() => {
     if (!hasConditionalRules && builderTab === "rules") setBuilderTab("display");
   }, [hasConditionalRules, builderTab]);
+  // Same for Axes: a pie has none, so switching to one while that tab is open must not strand
+  // the panel on a tab whose trigger has just disappeared.
+  useEffect(() => {
+    if (!showAxesTab && builderTab === "axes") setBuilderTab("display");
+  }, [showAxesTab, builderTab]);
   const setBuilderTab = (v: string) =>
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
@@ -410,6 +417,12 @@ export default function ChartExplore() {
           <TabsList className={UNDERLINE_LIST}>
             <TabsTrigger value="data" className={UNDERLINE_TRIGGER}>Data</TabsTrigger>
             <TabsTrigger value="display" className={UNDERLINE_TRIGGER}>Display</TabsTrigger>
+            {/* Metabase splits Data | Display | Axes, and the axis settings are the half of the
+                Display tab a reader goes looking for by name. Only the charts that HAVE axes
+                declare anything in that group, so only they get the tab. */}
+            {showAxesTab && (
+              <TabsTrigger value="axes" className={UNDERLINE_TRIGGER}>Axes</TabsTrigger>
+            )}
             {/* Its own tab, the way Metabase splits Columns | Conditional Formatting. Stacked in
                 with the rest, it made the pivot's panel the longest in the app and the reason it
                 read as cut off. Only table and pivot have rules, so the tab only exists there. */}
@@ -498,6 +511,17 @@ export default function ChartExplore() {
               </>
             )}
           </TabsContent>
+
+          {/* ── AXES TAB ── */}
+          {showAxesTab && (
+            <TabsContent value="axes" className="space-y-4">
+              {descriptor && (
+                <StudioPanel descriptor={descriptor} config={descConfig} onConfigChange={patchDescConfig}
+                  columns={columns} metrics={metrics} resultColumns={resultColumns} rows={data.rows}
+                  unitRow={unitRow} tab="axes" />
+              )}
+            </TabsContent>
+          )}
 
           {/* ── COLORS TAB (conditional formatting) ── */}
           {hasConditionalRules && (

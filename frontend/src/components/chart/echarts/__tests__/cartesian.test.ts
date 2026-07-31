@@ -533,3 +533,82 @@ describe("category axis labels are formatted", () => {
     expect(axisOf(opt).axisLabel?.formatter?.("2026-01-01")).toBe("2026-01-01");
   });
 });
+
+describe("breakout series names", () => {
+  const cols = [
+    { name: "region", type: "varchar" },
+    { name: "order_date", type: "date" },
+    { name: "rev", type: "double" },
+  ];
+  const rows = [["EU", "2026-01-01", 10], ["EU", "2026-02-01", 4]];
+
+  // The panel offered a date style for the breakout column and stored it; the legend drew the raw
+  // bucket regardless — the same offered-stored-ignored pair the pivot and the pie each had.
+  it("reads a breakout dimension through its column format", () => {
+    const opt = buildCartesianOption(cols, rows, {
+      kind: "bar", xAxis: "region", yMetrics: ["rev"], series: "order_date",
+      seriesType: "date", columnSettings: { order_date: { date_style: "MMMM YYYY" } },
+    }) as any;
+    expect(opt.series.map((s: any) => s.name)).toEqual(["January 2026", "February 2026"]);
+    // …while the raw value rides along, because that is what a drill has to filter by.
+    expect(opt.series.map((s: any) => s.__raw)).toEqual(["2026-01-01", "2026-02-01"]);
+  });
+
+  it("lets an explicit rename win over the column format", () => {
+    const opt = buildCartesianOption(cols, rows, {
+      kind: "bar", xAxis: "region", yMetrics: ["rev"], series: "order_date",
+      seriesType: "date", columnSettings: { order_date: { date_style: "MMMM YYYY" } },
+      seriesLabels: { "2026-01-01": "Kickoff" },
+    }) as any;
+    expect(opt.series.map((s: any) => s.name)).toEqual(["Kickoff", "February 2026"]);
+    expect(opt.series[0].__raw).toBe("2026-01-01");
+  });
+
+  it("leaves an extraction unit's finished word alone", () => {
+    const opt = buildCartesianOption(
+      [{ name: "region", type: "varchar" }, { name: "dow", type: "date" }, { name: "rev", type: "double" }],
+      [["EU", "Wed", 10]],
+      {
+        kind: "bar", xAxis: "region", yMetrics: ["rev"], series: "dow",
+        seriesUnit: "day_of_week", seriesType: "date",
+        columnSettings: { dow: { date_style: "MMMM YYYY" } },
+      },
+    ) as any;
+    expect(opt.series[0].name).toBe("Wed");
+  });
+});
+
+describe("axis lines, ticks and tick count", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }];
+  const rows = [["EU", 10], ["US", 20]];
+  const base = { kind: "bar" as const, xAxis: "region", yMetrics: ["rev"] };
+
+  // Unset means shown — every chart saved before these settings existed must keep both axes drawn.
+  it("draws lines and ticks on both axes by default", () => {
+    const opt = buildCartesianOption(cols, rows, base) as any;
+    expect(opt.xAxis.axisLine.show).toBe(true);
+    expect(opt.xAxis.axisTick.show).toBe(true);
+    expect(opt.yAxis.axisLine.show).toBe(true);
+    expect(opt.yAxis.axisTick.show).toBe(true);
+    expect(opt.yAxis.splitNumber).toBeUndefined();
+  });
+
+  it("hides each axis' line and ticks independently", () => {
+    const opt = buildCartesianOption(cols, rows, { ...base, xAxisTicks: false }) as any;
+    expect(opt.xAxis.axisLine.show).toBe(false);
+    expect(opt.xAxis.axisTick.show).toBe(false);
+    expect(opt.yAxis.axisLine.show).toBe(true);
+  });
+
+  it("passes the requested tick count to the value axis", () => {
+    const opt = buildCartesianOption(cols, rows, { ...base, yTickCount: 5 }) as any;
+    expect(opt.yAxis.splitNumber).toBe(5);
+  });
+
+  // Horizontal swaps which ECharts axis is the value one, so the toggles have to follow the
+  // ROLE (category vs value), not the axis key.
+  it("keeps the toggles attached to their axis role when horizontal", () => {
+    const opt = buildCartesianOption(cols, rows, { ...base, horizontal: true, yTickCount: 4 }) as any;
+    expect(opt.xAxis.splitNumber).toBe(4);
+  });
+});
