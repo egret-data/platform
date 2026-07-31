@@ -3,6 +3,11 @@ import { GaugeSegmentsSection } from "@/components/chart/settings/GaugeSegmentsS
 import { ScalarDisplaySection } from "@/components/chart/settings/ScalarDisplaySection";
 import type { GaugeSegment, PieConfig, ScalarConfig } from "@/api/charts";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { SERIES_PALETTE } from "@/components/chart/echarts/palette";
+
+/** Metabase’s `color("accent1")`, the progress bar’s default. */
+const PROGRESS_DEFAULT_COLOR = SERIES_PALETTE[1];
 import { Switch } from "@/components/ui/switch";
 import { fieldDescriptor } from "./fields";
 import type { VizControl, VizControlProps, VizDescriptor } from "./types";
@@ -68,6 +73,40 @@ function TrendDisplayControl({ config, onChange }: VizControlProps<Cfg>) {
 
 const trendDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display", render: TrendDisplayControl }];
 
+/** The progress bar's colour and its goal-from-a-column, both Metabase's. */
+function ProgressDisplayControl({ config, onChange, metrics }: VizControlProps<Cfg>) {
+  const color = (config.color as string | undefined) ?? PROGRESS_DEFAULT_COLOR;
+  return (
+    <div className="space-y-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <Label htmlFor="pg-color" className="text-sm font-normal">Colour</Label>
+        <input
+          id="pg-color" type="color" aria-label="Colour"
+          className="h-7 w-8 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+          value={color}
+          onChange={(e) => onChange({ color: e.target.value } as Partial<Cfg>)}
+        />
+      </div>
+      <div className="space-y-1">
+        <Label className="text-sm font-normal">Goal from a metric</Label>
+        <Select
+          value={(config.goalColumn as string | undefined) ?? "__none"}
+          onValueChange={(v) => onChange({ goalColumn: v === "__none" ? undefined : v } as Partial<Cfg>)}
+        >
+          <SelectTrigger aria-label="Goal from a metric" className="h-8 text-sm"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__none">None — use the fixed goal</SelectItem>
+            {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">A metric whose value is the target, instead of a number typed once.</p>
+      </div>
+    </div>
+  );
+}
+
+const progressDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display", render: ProgressDisplayControl }];
+
 /** The scalar's captions and conditional-colour bands. Unlike the gauge's, this control needs
  * nothing from the result — a band is compared against whatever value renders, not against the
  * columns — so it takes only the config. */
@@ -104,16 +143,26 @@ export const SIMPLE_DESCRIPTORS: VizDescriptor<Cfg>[] = [
   fieldDescriptor({
     key: "scalar", prefix: "scalar.", legacyKey: "scalar", display: scalarDisplay,
     fields: [{ id: "metric", label: "Metric", kind: "metric", required: "a metric" }],
-    buildSpec: (c, s, h) => h.oneRow(c.metric, s),
+    // A goal read from a metric has to be fetched alongside the value, in the same single row.
+    buildSpec: (c, s, h) => {
+      const base = h.oneRow(c.metric, s);
+      const gc = typeof c.goalColumn === "string" ? c.goalColumn : undefined;
+      return gc && gc !== c.metric ? { ...base, metrics: [...base.metrics, gc] } : base;
+    },
     legacyFromSpec: (spec) => ({ metric: spec.metrics?.[0] }),
   }),
   fieldDescriptor({
-    key: "progress", prefix: "progress.", legacyKey: "progress",
+    key: "progress", prefix: "progress.", legacyKey: "progress", display: progressDisplay,
     fields: [
       { id: "metric", label: "Metric", kind: "metric", required: "a metric" },
       { id: "goal", label: "Goal", kind: "number", placeholder: "Target value" },
     ],
-    buildSpec: (c, s, h) => h.oneRow(c.metric, s),
+    // A goal read from a metric has to be fetched alongside the value, in the same single row.
+    buildSpec: (c, s, h) => {
+      const base = h.oneRow(c.metric, s);
+      const gc = typeof c.goalColumn === "string" ? c.goalColumn : undefined;
+      return gc && gc !== c.metric ? { ...base, metrics: [...base.metrics, gc] } : base;
+    },
     legacyFromSpec: (spec) => ({ metric: spec.metrics?.[0] }),
   }),
   fieldDescriptor({
@@ -121,7 +170,12 @@ export const SIMPLE_DESCRIPTORS: VizDescriptor<Cfg>[] = [
     fields: [
       { id: "metric", label: "Metric", kind: "metric", required: "a metric" },
     ],
-    buildSpec: (c, s, h) => h.oneRow(c.metric, s),
+    // A goal read from a metric has to be fetched alongside the value, in the same single row.
+    buildSpec: (c, s, h) => {
+      const base = h.oneRow(c.metric, s);
+      const gc = typeof c.goalColumn === "string" ? c.goalColumn : undefined;
+      return gc && gc !== c.metric ? { ...base, metrics: [...base.metrics, gc] } : base;
+    },
     legacyFromSpec: (spec) => ({ metric: spec.metrics?.[0] }),
   }),
   fieldDescriptor({

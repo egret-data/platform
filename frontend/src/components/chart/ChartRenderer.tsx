@@ -431,6 +431,8 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
           rows={rows}
           metric={progress.metric}
           goal={progress.goal}
+          goalColumn={progress.goalColumn}
+          color={progress.color}
           format={progress.metric ? columnSettings[progress.metric] : undefined}
         />
       </div>

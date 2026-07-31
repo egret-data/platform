@@ -170,6 +170,10 @@ export interface ScalarConfig {
 export interface ProgressConfig {
   metric?: string;
   goal?: number;
+  /** Metabase's goal takes a number OR a column; this names the column when one is chosen. */
+  goalColumn?: string;
+  /** Metabase's `progress.color` — the bar colour, from which the track shades are derived. */
+  color?: string;
 }
 export interface GaugeSegment {
   min: number;
