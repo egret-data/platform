@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildGaugeOption } from "../options/gauge";
+import { buildGaugeOption, defaultGaugeSegments } from "../options/gauge";
 import { SERIES_PALETTE } from "../palette";
 
 const cols = [{ name: "rev", type: "double" }];
@@ -11,14 +11,17 @@ const ZONE_HIGH = SERIES_PALETTE[1]; // green
 
 describe("buildGaugeOption", () => {
   describe("no segments configured (unconfigured gauge)", () => {
-    it("renders byte-identically to today: thirds of [0, value*2], red -> yellow -> green", () => {
+    // Metabase's own default: the arc runs 0 -> 2v with boundaries at v/2 and v, so the needle
+    // lands exactly on the middle boundary. Equal thirds put it at an arbitrary point and made the
+    // boundaries fractional for most values.
+    it("splits [0, value*2] at value/2 and value, red -> yellow -> green", () => {
       const opt = buildGaugeOption(cols, [[60]], { metric: "rev" }) as any;
       expect(opt.series[0].type).toBe("gauge");
       expect(opt.series[0].min).toBe(0);
       expect(opt.series[0].max).toBe(120);
       expect(opt.series[0].axisLine.lineStyle.color).toEqual([
-        [1 / 3, ZONE_LOW],
-        [2 / 3, ZONE_MID],
+        [1 / 4, ZONE_LOW],
+        [1 / 2, ZONE_MID],
         [1, ZONE_HIGH],
       ]);
       expect(opt.series[0].data[0].value).toBe(60);
@@ -197,8 +200,8 @@ describe("buildGaugeOption", () => {
       expect(opt.series[0].min).toBe(0);
       expect(opt.series[0].max).toBe(120);
       expect(opt.series[0].axisLine.lineStyle.color).toEqual([
-        [1 / 3, ZONE_LOW],
-        [2 / 3, ZONE_MID],
+        [1 / 4, ZONE_LOW],
+        [1 / 2, ZONE_MID],
         [1, ZONE_HIGH],
       ]);
     });
@@ -246,5 +249,39 @@ describe("buildGaugeOption", () => {
       }) as any;
       expect(opt.series[0].axisLine.lineStyle.color).toEqual([[0.6, "green"], [1, "red"]]);
     });
+  });
+});
+
+describe("defaultGaugeSegments", () => {
+  // The whole point of the v/2 · v · 2v split: the needle sits ON a boundary, so a reader sees
+  // where they are without reading a number.
+  it("puts the value itself on the middle boundary", () => {
+    expect(defaultGaugeSegments(18760)).toEqual([
+      { min: 0, max: 9380, color: ZONE_LOW },
+      { min: 9380, max: 18760, color: ZONE_MID },
+      { min: 18760, max: 37520, color: ZONE_HIGH },
+    ]);
+  });
+
+  // Equal thirds of 0 -> 2v filled the editor's number inputs with `77512.66666666667` for this
+  // value — eleven decimals the user had to clear by hand before the panel read as anything but
+  // broken. Rounding happens here, not in the input, because the number the editor SHOWS is the
+  // number stored the moment any other field on the row is touched.
+  it("keeps derived bounds to something a person would type", () => {
+    for (const s of defaultGaugeSegments(116269)) {
+      for (const b of [s.min, s.max]) {
+        expect(String(b)).toMatch(/^-?\d+(\.\d{1,2})?$/);
+      }
+    }
+    expect(defaultGaugeSegments(116269)[1].max).toBe(116269);
+  });
+
+  it("keeps three decimals for a sub-unit value rather than collapsing it to zero", () => {
+    const [low] = defaultGaugeSegments(0.42);
+    expect(low.max).toBe(0.21);
+  });
+
+  it("falls back to a 0-100 arc when there is no value to scale to", () => {
+    expect(defaultGaugeSegments(0).at(-1)!.max).toBe(100);
   });
 });

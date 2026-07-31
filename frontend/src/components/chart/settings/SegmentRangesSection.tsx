@@ -91,6 +91,19 @@ export function SegmentRangesSection({
   return (
     <div className="space-y-1.5 pt-1.5">
       <div className="text-xs text-muted-foreground">Ranges</div>
+      {/* A header row, the way Metabase labels its own gauge ranges. Four controls sit on a row
+          and only the colour swatch reads as itself; which box was min, which was max and what the
+          trailing text box was for could only be worked out by typing into them. Hidden when there
+          is nothing to head, so the empty hint below is not preceded by column names. */}
+      {rows.length > 0 && (
+        <div className="flex items-center gap-1 pl-8 text-[10px] uppercase tracking-wide text-muted-foreground">
+          <span className="w-16 shrink-0">Min</span>
+          <span className="w-2 shrink-0" />
+          <span className="w-16 shrink-0">Max</span>
+          <span className="min-w-0 flex-1">Label</span>
+          <span className="w-[18px] shrink-0" />
+        </div>
+      )}
       {rows.length === 0 && emptyHint && (
         <div className="rounded border border-dashed px-2 py-1.5 text-xs text-muted-foreground">{emptyHint}</div>
       )}
@@ -125,7 +138,7 @@ export function SegmentRangesSection({
           <Input
             aria-label={`range ${i + 1} name`}
             className="h-7 min-w-0 flex-1 text-sm"
-            placeholder="Name"
+            placeholder="Optional"
             value={s.label ?? ""}
             onChange={(e) => patch(i, "label", e.target.value.trim() ? e.target.value : undefined)}
           />
