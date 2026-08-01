@@ -22,7 +22,7 @@ import { buildGaugeOption } from "@/components/chart/echarts/options/gauge";
 import { FunnelChart } from "@/components/chart/FunnelChart";
 import { buildWaterfallOption } from "@/components/chart/echarts/options/waterfall";
 import { buildBoxplotOption } from "@/components/chart/echarts/options/boxplot";
-import { buildSankeyOption } from "@/components/chart/echarts/options/sankey";
+import { buildSankeyOption, sankeyProblem } from "@/components/chart/echarts/options/sankey";
 import { ChartTable, type ResultColumn } from "@/components/chart/ChartTable";
 import { PivotTable } from "@/components/chart/pivot/PivotTable";
 import { BigNumber } from "@/components/chart/BigNumber";
@@ -542,11 +542,19 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
   }
 
   if (vizType === "sankey") {
+    // Checked BEFORE building, the way Metabase's `checkRenderable` is. A circular flow otherwise
+    // reaches ECharts, which throws "Sankey is a DAG, the original data has cycle!" onto the card —
+    // the library's own wording, naming an acronym rather than a fix.
+    const sankeyIssue = sankeyProblem(columns, rows, sankey);
     return (
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildSankeyOption(columns, rows, { ...sankey, columnSettings, metricTypes })} />}
+          : sankeyIssue
+            ? <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
+              {sankeyIssue}
+            </div>
+            : <EChartsRenderer option={buildSankeyOption(columns, rows, { ...sankey, columnSettings, metricTypes })} />}
       </div>
     );
   }

@@ -267,6 +267,13 @@ export interface SankeyConfig {
   source?: string;
   target?: string;
   metric?: string;
+  /** Metabase's `sankey.node_align`. Unset is "left". */
+  nodeAlign?: "left" | "right" | "justify";
+  /** Metabase's `sankey.edge_color`. Unset is "source". */
+  edgeColor?: "gray" | "source" | "target";
+  showEdgeLabels?: boolean;
+  /** Metabase's `sankey.label_value_formatting`, only meaningful with edge labels on. */
+  labelFormatting?: "auto" | "compact" | "full";
 }
 export interface MapConfig {
   mapKey: string;      // registry key: "us_states" | "world" | "vietnam"
