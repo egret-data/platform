@@ -520,6 +520,21 @@ A memo boundary that silently stopped working would cost performance with nothin
 exactly the failure mode the pie comment describes. This test fails if someone later inlines the
 arrow.
 
+> **Found during Task 3, deliberately not fixed there.** `EChartsRenderer` applies the option
+> **twice on mount**: the mount effect calls `applyOption` at `:133`, and the `[option]` effect at
+> `:206-211` also fires on the mount commit, because effects run in declaration order and
+> `chartRef.current` is already set. Both resolve against the same `sizeRef`, so the second apply is
+> a byte-identical `setOption(…, true)` — pure waste, no behaviour risk. Pie has paid it since
+> function-valued options existed; cartesian now pays it too, plus one more build for `meta`, so
+> mount runs `buildCartesianOption` three times and `buildPieOption` twice. Task 4 puts gauge and
+> sankey on the same path.
+>
+> It is **not** a regression from this PR — the second apply is a pre-existing effect's first run —
+> and it is mount-only, so it is orthogonal to the per-render cost the memo boundaries address. The
+> fix (a `didMount` ref guard in the `[option]` effect) changes shared effect ordering for **every**
+> viz type, so it needs its own change and its own test rather than riding along here. Recorded so
+> whoever picks it up has the mechanism rather than having to rediscover it.
+
 - [ ] **Step 1: Write the failing test**
 
 Append to `sizeAware.test.tsx`:
