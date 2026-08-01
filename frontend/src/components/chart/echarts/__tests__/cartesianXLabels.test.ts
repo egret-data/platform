@@ -34,6 +34,10 @@ import type { fitXLabels as FitXLabels } from "../axisLabelFit";
  */
 
 const cols = [{ name: "category", type: "varchar" }, { name: "revenue", type: "double" }];
+/** The four categories from the live defect. Four is comfortably clear of the hide threshold at
+ *  every width used below — the axis hides iff `plotWidth < 6n`, so 24px, and the narrowest card
+ *  here estimates 270px — which is the point: these rows exercise the DRAWN rungs, and
+ *  `crowdedRows` exercises the hidden one. */
 const rows: unknown[][] = [
   ["Widget", 10], ["Gadget", 20], ["Gizmo", 30], ["Doohickey", 40],
 ];
@@ -44,13 +48,19 @@ const cfg = { kind: "bar" as const, xAxis: "category", yMetrics: ["revenue"] };
  * between two labels — the "no room at all" end of the ladder, which is width-driven and so
  * survives a measurer that reports zero.
  *
- * Forty-eight, not a round sixty, and the count is load-bearing. On a 320px card the estimate is
+ * FORTY-SIX, and the exact count is load-bearing. With every label 0px wide the axis hides iff
+ * `plotWidth < 6n`, so at n = 46 the threshold is 276px. On a 320px card the estimate is
  * `320 − 8 (grid.left) − 16 (grid.right) − 0 (the gutter, zero under jsdom) − 26 (the value-axis
- * title)` = 270px, giving 5.6px per category against the 6px minimum gap. Drop any one of those
- * subtractions and it becomes 6.2px or more and the axis draws — so this fixture is what makes
- * `estimatePlotWidth`'s terms testable at all, rather than merely present.
+ * title)` = 270px — under 276, so it hides. Delete any one subtraction and it clears the
+ * threshold: without `grid.left` 278, without `grid.right` 286, without the title term 296. So
+ * every term of `estimatePlotWidth` that is non-zero under jsdom is genuinely pinned.
+ *
+ * This was 48 first, which pinned only the title term: the threshold was 288, and dropping
+ * `grid.left` (278) or `grid.right` (286) still hid the axis, so both mutations passed. Do not
+ * round this number off — check the arithmetic against 6n first. The gutter term stays unpinnable
+ * at any n, because `measureText` contributes exactly 0 here; see the header.
  */
-const crowdedRows: unknown[][] = Array.from({ length: 48 }, (_, i) => [`Category ${i}`, i]);
+const crowdedRows: unknown[][] = Array.from({ length: 46 }, (_, i) => [`Category ${i}`, i]);
 
 type FitArgs = Parameters<typeof FitXLabels>[0];
 
@@ -91,6 +101,22 @@ describe("cartesian x-axis labels", () => {
     expect(xAxisOf(narrow).axisLabel.interval).toBe(0);
   });
 
+  /**
+   * A zero size is not a very small chart, it is an UNMEASURED one — `EChartsRenderer` reads
+   * `getBoundingClientRect()` before `init`, so a hidden or not-yet-laid-out container reports
+   * `{0, 0}`. Measured anyway, `plotWidth` comes out negative and the fitter answers "draw every
+   * label upright" for a container nobody could see, while a zero height would make a rotated
+   * label's projected share infinite and hide the axis instead. Either way it is a decision taken
+   * against a width that was never observed, so it is declined and the size-blind behaviour stands.
+   */
+  it("treats a zero size as no measurement rather than as a tiny chart", () => {
+    fitCalls.length = 0;
+    const o = buildCartesianOption(cols, crowdedRows, cfg, { width: 0, height: 0 });
+    expect(fitCalls).toHaveLength(0);
+    expect(xAxisOf(o).axisLabel.interval).toBe("auto");
+    expect(xAxisOf(o).axisLabel.show).toBe(true);
+  });
+
   it("keeps today's behaviour when no size is available", () => {
     // Unit tests and any caller passing a plain option object have no measurement. Leaving ECharts
     // to thin the labels is worse than rotating, but it is what shipped, and guessing a width here
@@ -108,9 +134,10 @@ describe("cartesian x-axis labels", () => {
     const wide = buildCartesianOption(cols, crowdedRows, cfg, { width: 1200, height: 500 });
     const narrow = buildCartesianOption(cols, crowdedRows, cfg, { width: 320, height: 260 });
     expect(xAxisOf(wide).axisLabel.show).toBe(true);
-    // Forty-eight categories across ~270px of plot leaves 5.6px each — less than the 6px minimum
-    // gap between two labels, and far less than the 90° rung's `fontSize * 1.2`. Metabase hides
-    // the axis rather than drawing a wall of text or, as egret did, a few legible names out of 48.
+    // Forty-six categories across ~270px of plot leaves 5.87px each — under the 6px minimum gap
+    // between two labels, and far under the 90° rung's `fontSize * 1.2`. Metabase hides the axis
+    // rather than drawing a wall of text or, as egret did, a few legible names out of forty-six.
+    // At 1200px the same rows get 25px each and every name is drawn upright.
     expect(xAxisOf(narrow).axisLabel.show).toBe(false);
   });
 

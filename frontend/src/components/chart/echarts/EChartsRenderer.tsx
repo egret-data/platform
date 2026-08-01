@@ -58,10 +58,12 @@ export interface EChartsSize { width: number; height: number }
 /** `option` is either a plain, already-built ECharts option object or a FUNCTION of the chart's
  * measured size. The function form exists for the builders that need the REAL rendered pixel size
  * to lay themselves out — pie, to fit its slice labels (see options/pie.ts's `containerSize`), and
- * the cartesian family, which is handed its size for the axis-label decision it will make from it
- * (UNREAD today: `rotate` is still guessed from label count and length — see
- * `buildCartesianOption`'s `_size`, and `__tests__/sizeAware.test.ts`, which pins that passing a
- * size changes nothing yet). This component is the only place with actual DOM access to measure
+ * the cartesian family, which decides its x-axis label treatment from it — draw every category
+ * name upright, rotate every one, or hide the axis, never a subset (see `buildCartesianOption`'s
+ * `size` and `echarts/axisLabelFit.ts`; the old count-and-length guess is gone, and
+ * `__tests__/sizeAware.test.ts` now pins that the size changes the label decision and NOTHING
+ * else). Gauge and sankey still take the size unread. This component is the only place with
+ * actual DOM access to measure
  * that, so it accepts the function and calls it with the measured size on init and again whenever
  * the observed size changes, expecting the option built against that size back.
  *

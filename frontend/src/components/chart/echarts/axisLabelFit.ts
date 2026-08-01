@@ -95,9 +95,11 @@ export function fitXLabels({
 }: {
   labels: string[];
   /** The drawable width the categories share — INNER, after the grid insets and the value-axis
-   *  gutter. Deliberately an UNDER-estimate at the call site: erring small rotates a label that
-   *  would have fitted (mildly ugly, still readable), erring large leaves it upright and lets
-   *  ECharts drop it, which is the defect this exists to remove. */
+   *  gutter. The caller's estimate leans UNDER in the common case and is the better direction:
+   *  erring small rotates a label that would have fitted, which is mildly ugly and still readable.
+   *  Erring large leaves labels upright that should have turned — and since a fit makes the axis
+   *  `decided` (`interval: 0`), they are then drawn OVERLAPPING rather than dropped. See
+   *  `estimatePlotWidth` in `options/cartesian.ts` for the three cases where it does lean over. */
   plotWidth: number;
   /** The container's height, Metabase's `outerHeight` — deliberately NOT the inner counterpart of
    *  `plotWidth`, which is why it is not called `plotHeight`. The 70% guard is a share of the whole

@@ -837,14 +837,27 @@ function decorateSeries(
  *
  * `CHART_THEME.grid` sets `containLabel: true` (`palette.ts`), so ECharts — not this builder —
  * decides the real plot box, and it picks the value-axis ticks that eat into it. Neither is
- * knowable here, but both are bounded: the grid insets are ours, and a "nice" tick inside the data
- * extent cannot format wider than the extent's own widest value under any formatter this codebase
- * uses (grouped numbers, compact numbers, currency, percentages).
+ * knowable here. The grid insets are ours; the gutter is approximated by formatting the widest
+ * datum through the same formatter the axis uses.
  *
- * Deliberately an UNDER-estimate, and that direction is the point. Too small and we call a
- * collision that would not have happened, rotating a label that would have fitted — mildly ugly,
- * still readable. Too large and the labels stay upright and ECharts drops the ones that collide,
- * which is the defect this whole change exists to remove.
+ * WHICH WAY IT ERRS. It leans UNDER in the common case, and that is the direction to prefer: too
+ * small and we call a collision that would not have happened, rotating labels that would have
+ * fitted — mildly ugly, still readable. But it is known to lean OVER in three cases, and an
+ * over-estimate is not harmless, so they are named rather than waved at:
+ *
+ *   1. ECharts extends a value axis PAST the data to a round number. A max of 9,700 gives a top
+ *      tick of "10,000" — six characters where five were measured. (This is why there is no claim
+ *      here that a tick cannot format wider than the extent: it can, and routinely does.)
+ *   2. A dual-axis chart has a SECOND gutter on the right, and only one is subtracted. At 40-50px
+ *      against a ~270px estimate that is the most material of the three. `rightSide` is in scope
+ *      at the call site if this is ever fixed.
+ *   3. `widestOf` takes the widest ABSOLUTE datum, so a leading minus sign is not counted.
+ *
+ * WHAT AN OVER-ESTIMATE COSTS, stated exactly, because it is no longer what it was before this
+ * change: once a fit exists the axis is `decided` and `interval` is `0`, so ECharts can no longer
+ * drop anything. The failure is now every label drawn upright and OVERLAPPING its neighbour, not
+ * labels silently missing. Different look, different diagnosis — that is what to watch for when
+ * comparing against Metabase, and if it appears, this estimate is what to tighten.
  *
  * Do not "improve" this by turning `containLabel` off and computing the grid explicitly. That is
  * Metabase's design and it is defensible, but it moves the margins of every cartesian chart in the
@@ -947,8 +960,22 @@ function baseOption(
   // anyway and using it for `show` would honour the user's 45° and hide their axis in the same
   // breath, which is worse than either outcome alone and looks like the setting doing nothing.
   // Metabase's own auto-selection likewise applies only while the setting is untouched.
-  const fit: XLabelFit | undefined = size && ordinalX && cfg.xLabelRotation == null
+  const explicitRotate = cfg.xLabelRotation != null;
+  // A zero size is not a small chart, it is an UNMEASURED one: `EChartsRenderer` reads
+  // `getBoundingClientRect()` before `init`, so a hidden or not-yet-laid-out container reports
+  // `{0, 0}`. Measuring it would give a negative `plotWidth` — which the fitter answers "draw every
+  // label upright", from a container nobody could see — and a zero height would make the rotated
+  // label's projected share infinite and hide the axis. Both are decisions taken against a guessed
+  // width, which is the one thing `size`'s own doc says never to do, so decline instead.
+  const measurable = size != null && size.width > 0 && size.height > 0;
+  const fit: XLabelFit | undefined = measurable && size && ordinalX && !explicitRotate
     ? fitXLabels({
+        // The RAW category, where `axisLabel.formatter` below draws the FORMATTED one. Where the
+        // two differ — only when the x column carries a `columnSettings` entry — the formatted
+        // label is the wider of the two ("2026-01-01" measured, "January 2026" drawn; `1000`
+        // measured, "1,000" drawn), so this under-measures. That is the same direction as an
+        // over-estimated `plotWidth`, and carries the same cost: labels left upright that should
+        // have been rotated.
         labels: categories.map(String),
         plotWidth: estimatePlotWidth(size, fmtFor(leftSide)(widestOf(leftSide)), Boolean(yTitle)),
         // The CONTAINER's height, not an inset one: the 70% guard is a share of the whole card
@@ -966,7 +993,7 @@ function baseOption(
   const rotate = cfg.xLabelRotation ?? (fit?.kind === "rotate" ? fit.rotate : 0);
   // Either way the axis has now DECIDED, and a decided axis draws every label or none — never the
   // subset `interval: "auto"` leaves ECharts free to pick.
-  const decided = fit != null || cfg.xLabelRotation != null;
+  const decided = fit != null || explicitRotate;
   // Room below the plot for the tilted labels — `bottomPad` scales with the widest label, which is
   // what the measurement knows and the flat 18px fallback does not. Gated on `ordinalX` because
   // this is the BOTTOM margin: a row chart's rotated labels want room on the left (which
@@ -997,11 +1024,22 @@ function baseOption(
         return out === "" ? String(v) : out;
       },
     },
+    // TWO different `show`s sit on this axis and they are not the same switch. `xAxisTicks` is the
+    // axis LINE and the tick marks; the LABELS are `axisLabel.show` above, which only the measured
+    // fit ever writes. Metabase's single `axis_enabled: false` hides both, so egret's "Hide" is
+    // narrower than its namesake — a pre-existing, product-wide divergence (waterfall, box plot and
+    // sankey ship the same select today), but worth saying here now that a second `show` on the
+    // same axis could be mistaken for the one the panel writes.
     axisLine: { show: cfg.xAxisTicks !== false, lineStyle: { color: gridLine } },
     axisTick: { show: cfg.xAxisTicks !== false },
   };
   // Non-ordinal x: a value (linear) or time (timeseries) axis positioning points by
   // their real coordinate. Series carry [x, y] pairs (see applyXScale).
+  //
+  // No `rotate` here, deliberately: an explicit `xLabelRotation` is a NO-OP on a value x-axis. Its
+  // labels are ticks ECharts generates rather than the `categories` array, so rotating them is part
+  // of generating them, which is PR 03. Task 3 is about to ship the control that exposes this, so
+  // if someone reports the setting doing nothing on a linear or timeseries x-axis, this is why.
   const scaleAxis = {
     type: cfg.xScale === "timeseries" ? ("time" as const) : ("value" as const),
     name: xTitle, nameLocation: "middle" as const, nameGap: 28,

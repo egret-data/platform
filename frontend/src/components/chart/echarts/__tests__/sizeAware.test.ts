@@ -6,9 +6,10 @@ import { buildGaugeOption } from "../options/gauge";
 import { buildSankeyOption } from "../options/sankey";
 
 /**
- * These three builders grew a fourth, optional `_size` parameter so the size-dependent label work —
+ * These three builders grew a fourth, optional size parameter so the size-dependent label work —
  * x-label rotation, gauge graduations, sankey node labels; see each builder's own comment — has a
- * seam to attach to. Gauge and sankey still do not read it, and this file is what says so: build
+ * seam to attach to. Two of the three still do not read it, and keep the `_size` name to say so;
+ * cartesian's is `size` and is live. Gauge and sankey are what this file was written for: build
  * each chart twice, once with a size and once without, and the two options must be
  * indistinguishable. Cartesian's seam is live as of PR 02, so its case is inverted below rather
  * than deleted — the point is unchanged, that a size changes exactly what it is supposed to and
