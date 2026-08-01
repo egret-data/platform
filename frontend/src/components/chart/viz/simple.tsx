@@ -1,11 +1,11 @@
 import { PieDisplaySection } from "@/components/chart/settings/PieDisplaySection";
 import { GaugeSegmentsSection } from "@/components/chart/settings/GaugeSegmentsSection";
 import { ScalarDisplaySection } from "@/components/chart/settings/ScalarDisplaySection";
-import {
-  WaterfallAxesSection, WaterfallBarsSection, WaterfallFormatSection,
-} from "@/components/chart/settings/WaterfallDisplaySection";
+import { WaterfallBarsSection, WaterfallFormatSection } from "@/components/chart/settings/WaterfallDisplaySection";
+import { ChartAxesSection } from "@/components/chart/settings/ChartAxesSection";
+import { BoxplotDisplaySection } from "@/components/chart/settings/BoxplotDisplaySection";
 import { AXES_GROUP } from "@/components/chart/StudioPanel";
-import type { GaugeSegment, PieConfig, ScalarConfig, WaterfallConfig } from "@/api/charts";
+import type { BoxplotConfig, GaugeSegment, PieConfig, ScalarConfig, WaterfallConfig } from "@/api/charts";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SERIES_PALETTE } from "@/components/chart/echarts/palette";
@@ -183,7 +183,28 @@ const waterfallDisplay: VizControl<Cfg>[] = [
   {
     id: "axes", section: "display", group: AXES_GROUP,
     render: ({ config, onChange }: VizControlProps<Cfg>) => (
-      <WaterfallAxesSection config={config as WaterfallConfig} onChange={onChange as (p: Partial<WaterfallConfig>) => void} />
+      <ChartAxesSection idPrefix="wf" config={config as WaterfallConfig}
+        onChange={onChange as (p: Partial<WaterfallConfig>) => void} />
+    ),
+  },
+];
+
+/** The box plot's panel. Metabase gives it Data | Display | Axes, the same three tabs its waterfall
+ *  has; egret's had two fields and nothing else. The Axes tab is the SHARED one — a box plot's axes
+ *  are the same shape as a waterfall's, so they get the same controls rather than a second copy. */
+const boxplotDisplay: VizControl<Cfg>[] = [
+  {
+    id: "display", section: "display",
+    render: ({ config, onChange }: VizControlProps<Cfg>) => (
+      <BoxplotDisplaySection config={config as BoxplotConfig}
+        onChange={onChange as (p: Partial<BoxplotConfig>) => void} />
+    ),
+  },
+  {
+    id: "axes", section: "display", group: AXES_GROUP,
+    render: ({ config, onChange }: VizControlProps<Cfg>) => (
+      <ChartAxesSection idPrefix="bp" config={config as BoxplotConfig}
+        onChange={onChange as (p: Partial<BoxplotConfig>) => void} />
     ),
   },
 ];
@@ -292,7 +313,7 @@ export const SIMPLE_DESCRIPTORS: VizDescriptor<Cfg>[] = [
     legacyFromSpec: (spec) => ({ dimension: spec.dimensions?.[0], metric: spec.metrics?.[0] }),
   }),
   fieldDescriptor({
-    key: "boxplot", prefix: "boxplot.", legacyKey: "boxplot",
+    key: "boxplot", prefix: "boxplot.", legacyKey: "boxplot", display: boxplotDisplay,
     fields: [
       { id: "category", label: "Category", kind: "dimension", required: "a category", placeholder: "Pick a column…" },
       { id: "value", label: "Value column", kind: "dimension", required: "a value column", placeholder: "Pick a numeric column…" },
