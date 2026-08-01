@@ -393,6 +393,20 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
     expect(await screen.findByRole("option", { name: "Hide" })).not.toHaveAttribute("aria-disabled", "true");
   });
 
+  /**
+   * …but a HORIZONTAL chart is not a value-x chart, however its `xScale` reads. The x-scale select
+   * hides itself once a chart is horizontal, so a stored `linear` there is a leftover from before
+   * it was flipped — and the builder ignores it (`usesXScale` is `!isHorizontal && …`), drawing the
+   * ordinal categories down the left where the rotation does apply. Disabling on it would take a
+   * working setting away on the strength of a value nothing reads.
+   */
+  it("keeps them enabled on a horizontal chart carrying a leftover linear scale", async () => {
+    const user = userEvent.setup();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], horizontal: true, xScale: "linear" }} onChange={() => {}} />);
+    await open(user, "Y axis lines and ticks");
+    expect(await screen.findByRole("option", { name: "Rotate 90°" })).not.toHaveAttribute("aria-disabled", "true");
+  });
+
   it("leaves them enabled on an ordinal x-axis", async () => {
     const user = userEvent.setup();
     render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
