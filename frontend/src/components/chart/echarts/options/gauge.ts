@@ -1,5 +1,6 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { GaugeSegment } from "@/api/charts";
+import type { EChartsSize } from "../EChartsRenderer";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
 import { baseOption, itemTooltip } from "../base";
@@ -80,7 +81,27 @@ function sanitizeSegments(value: number, segments: GaugeSegment[] | undefined): 
 }
 
 // Metabase-style Gauge: one value on an arc between min and max.
-export function buildGaugeOption(columns: ResultColumn[], rows: unknown[][], cfg: GaugeBuildConfig): EChartsCoreOption {
+export function buildGaugeOption(
+  columns: ResultColumn[],
+  rows: unknown[][],
+  cfg: GaugeBuildConfig,
+  /** The chart's measured pixel size, when the caller has one — this builder is pure data with no
+   * DOM of its own, so EChartsRenderer measures the container and threads it through (see
+   * `buildPieOption`, the first to take one).
+   *
+   * Unread today. It is the seam the graduation work attaches to: how many numbers the arc can
+   * carry before they collide is a question about the RADIUS it was drawn at, which follows from
+   * the measured box and which this builder has never been able to see. Undefined means the caller
+   * has no measurement (every unit test, and any caller passing a plain option object rather than a
+   * size function), and the gauge keeps what it draws today rather than thinning against a guessed
+   * radius. That is not a chosen number: this builder sets no `splitNumber` at all, so ECharts'
+   * default of 10 intervals puts ELEVEN numbers round the arc at every size. `splitNumber` is the
+   * key to reach for.
+   *
+   * `__tests__/sizeAware.test.ts` pins that passing a size changes nothing yet — if you are about
+   * to delete this parameter as unused, that test is the thing to read first. */
+  _size?: EChartsSize,
+): EChartsCoreOption {
   const mi = cfg.metric != null ? columns.findIndex((c) => c.name === cfg.metric) : -1;
   const raw = mi >= 0 && rows.length > 0 ? rows[0][mi] : undefined;
   const value = raw != null && Number.isFinite(Number(raw)) ? Number(raw) : 0;

@@ -1,5 +1,6 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { CartesianViz, LineSeriesStyle } from "@/api/charts";
+import type { EChartsSize } from "../EChartsRenderer";
 import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue } from "../../format";
@@ -561,6 +562,21 @@ export function buildCartesianOption(
   columns: ResultColumn[],
   rows: unknown[][],
   cfg0: CartesianBuildConfig,
+  /** The chart's measured pixel size, when the caller has one — this builder is pure data with no
+   * DOM of its own, so EChartsRenderer measures the container and threads it through (see
+   * `buildPieOption`, the first to take one).
+   *
+   * Unread today. It is the seam the axis-label work attaches to: whether the x labels fit, and so
+   * whether they must rotate or thin out, is a question about WIDTH, and this builder has never
+   * been able to see it — `rotate` below is currently guessed from label count and length
+   * (`longest > 10 && categories.length > 6`), which are proxies for width, not width. Undefined
+   * means the caller has no measurement (every unit test, and any caller passing a plain option
+   * object rather than a size function); that must always keep the size-blind behaviour, since a
+   * decision made against a guessed width is worse than one that declines to guess.
+   *
+   * `__tests__/sizeAware.test.ts` pins that passing a size changes nothing yet — if you are about
+   * to delete this parameter as unused, that test is the thing to read first. */
+  _size?: EChartsSize,
 ): EChartsCoreOption {
   if (cfg0.kind === "scatter" && cfg0.xMetric && cfg0.yMetrics.length > 0) {
     return scatterXY(columns, rows, cfg0);

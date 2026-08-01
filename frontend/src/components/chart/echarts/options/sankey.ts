@@ -1,4 +1,5 @@
 import type { EChartsCoreOption } from "echarts/core";
+import type { EChartsSize } from "../EChartsRenderer";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
 import { ariaDescription, baseOption, tooltipSurface } from "../base";
@@ -116,7 +117,34 @@ export function hasCyclicFlow(rows: unknown[][], sourceIndex: number, targetInde
 }
 
 // Metabase-style Sankey: weighted flows from source category to target category.
-export function buildSankeyOption(columns: ResultColumn[], rows: unknown[][], cfg: SankeyBuildConfig): EChartsCoreOption {
+export function buildSankeyOption(
+  columns: ResultColumn[],
+  rows: unknown[][],
+  cfg: SankeyBuildConfig,
+  /** The chart's measured pixel size, when the caller has one — this builder is pure data with no
+   * DOM of its own, so EChartsRenderer measures the container and threads it through (see
+   * `buildPieOption`, the first to take one).
+   *
+   * Unread today. It is the seam node-label truncation attaches to: how much room a node's label
+   * has before it runs into the next column is a question about WIDTH divided between the depths,
+   * and this builder has never been able to see it. Today it asks for full labels and loses them
+   * two ways instead. `labelLayout.hideOverlap` below drops outright any label that would collide
+   * with another — so a lost label is GONE, not overlapping. And ECharts' `label.position` defaults
+   * to "right", which this file does not override, so every label is drawn to the right of its
+   * node, including the last column's; those have only the `right: "8%"` gutter set below to live
+   * in — ECharts' own default is 20% — and no `label.width` or `label.overflow` is set anywhere, so
+   * ECharts does no ellipsis of its own and the container edge simply cuts the text. That is why a
+   * narrow card shows one- and two-character node names on the target side
+   * (docs/en/specs/2026-08-01-chart-parity-design.md).
+   *
+   * Undefined means the caller has no measurement (every unit test, and any caller passing a plain
+   * option object rather than a size function), and labels keep exactly that behaviour rather than
+   * being fitted against a guessed width.
+   *
+   * `__tests__/sizeAware.test.ts` pins that passing a size changes nothing yet — if you are about
+   * to delete this parameter as unused, that test is the thing to read first. */
+  _size?: EChartsSize,
+): EChartsCoreOption {
   const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
   const si = cfg.source != null ? idx[cfg.source] : undefined;
   const ti = cfg.target != null ? idx[cfg.target] : undefined;
