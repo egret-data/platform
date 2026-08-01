@@ -191,13 +191,43 @@ describe("cartesian x-axis labels", () => {
     expect(fitCalls[0].labels).toEqual(["Widget", "Gadget", "Gizmo", "Doohickey"]);
   });
 
-  /** A row chart's categories run down the LEFT, where length costs nothing and rotation would
-   *  only make them harder to read. The measurement is a question about a bottom axis. */
-  it("leaves a horizontal chart's category axis alone", () => {
+  /** A row chart's categories run down the LEFT, where length costs nothing, so there is no
+   *  collision for the MEASUREMENT to find. It is not asked. */
+  it("does not measure a horizontal chart's category axis", () => {
+    fitCalls.length = 0;
     const o = buildCartesianOption(cols, crowdedRows, { ...cfg, horizontal: true }, { width: 320, height: 260 });
     const yAxis = (o as { yAxis: XAxisShape }).yAxis;
+    expect(fitCalls).toHaveLength(0);
     expect(yAxis.axisLabel.show).toBe(true);
     expect(yAxis.axisLabel.interval).toBe("auto");
+  });
+
+  /**
+   * …but an EXPLICIT rotation is a different question, and it is honoured wherever the category
+   * axis sits. Not measuring a row chart is a statement about collisions; refusing to rotate one
+   * would be the setting doing nothing, and the panel offers this control on row charts (where it
+   * names the vertical axis as the category one).
+   *
+   * ECharts does apply it there — `buildAxisLabel` reads `axisLabel.rotate` for every axis kind,
+   * and `innerTextLayout` composes it with the axis's own `PI/2`, so the names turn to run
+   * vertically alongside the axis rather than being ignored.
+   */
+  it("honours an explicit rotation on a row chart's vertical category axis", () => {
+    const o = buildCartesianOption(cols, crowdedRows, { ...cfg, horizontal: true, xLabelRotation: 90 }, { width: 320, height: 260 });
+    const yAxis = (o as { yAxis: XAxisShape }).yAxis;
+    expect(yAxis.axisLabel.rotate).toBe(90);
+    // Still all-or-nothing: the user chose, so every label is drawn.
+    expect(yAxis.axisLabel.interval).toBe(0);
+  });
+
+  /** …and the room it needs is on the LEFT, which `containLabel` reserves. Padding `grid.bottom`
+   *  for a rotation that happened on the left axis would open a gap under a chart that has no
+   *  bottom labels at all. */
+  it("does not pad the bottom for a rotation that happened on the left axis", () => {
+    const rowCfg = { ...cfg, horizontal: true };
+    const flat = buildCartesianOption(cols, crowdedRows, rowCfg, { width: 320, height: 260 }) as { grid: { bottom: number } };
+    const turned = buildCartesianOption(cols, crowdedRows, { ...rowCfg, xLabelRotation: 90 }, { width: 320, height: 260 }) as { grid: { bottom: number } };
+    expect(turned.grid.bottom).toBe(flat.grid.bottom);
   });
 
   /**

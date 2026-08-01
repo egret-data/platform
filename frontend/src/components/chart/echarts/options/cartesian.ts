@@ -935,20 +935,19 @@ function baseOption(
   // one-third-width card came out under that rule as "no rotation needed", and then
   // `interval: "auto"` let ECharts drop three of the four — an axis reading as missing data.
   //
-  // Only on a bottom ORDINAL axis. A horizontal chart stacks its categories down the left, where
-  // their length costs nothing and rotating them would only make them harder to read; and a
-  // linear/timeseries x is a value axis whose labels are ticks ECharts generates, not this array —
-  // deciding a fit from `categories` there would reserve room below a rotation that never gets
-  // applied, since `scaleAxis` carries no `rotate`. Fitting a value axis means generating its
-  // ticks first, which is PR 03.
-  //
+  // THE MEASUREMENT applies to a bottom ORDINAL axis and nothing else. A horizontal chart stacks
+  // its categories down the left, where their length costs nothing, so there is no collision to
+  // measure; and a linear/timeseries x is a value axis whose labels are ticks ECharts generates,
+  // not this array — deciding a fit from `categories` there would reserve room below a rotation
+  // that never gets applied, since `scaleAxis` carries no `rotate`. Fitting a value axis means
+  // generating its ticks first, which is PR 03.
+  const ordinalX = !horizontal && !usesXScale(cfg);
+
   // An explicit rotation SKIPS the measurement rather than merely outranking it. Computing the fit
   // anyway and using it for `show` would honour the user's 45° and hide their axis in the same
   // breath, which is worse than either outcome alone and looks like the setting doing nothing.
   // Metabase's own auto-selection likewise applies only while the setting is untouched.
-  const ordinalX = !horizontal && !usesXScale(cfg);
-  const explicitRotate = ordinalX ? cfg.xLabelRotation : undefined;
-  const fit: XLabelFit | undefined = size && ordinalX && explicitRotate == null
+  const fit: XLabelFit | undefined = size && ordinalX && cfg.xLabelRotation == null
     ? fitXLabels({
         labels: categories.map(String),
         plotWidth: estimatePlotWidth(size, fmtFor(leftSide)(widestOf(leftSide)), Boolean(yTitle)),
@@ -957,13 +956,22 @@ function baseOption(
         outerHeight: size.height,
       })
     : undefined;
-  const rotate = explicitRotate ?? (fit?.kind === "rotate" ? fit.rotate : 0);
+  // …but an explicit rotation is honoured WHEREVER the category axis sits, `ordinalX` or not. On a
+  // row chart it is the left-hand axis, and ECharts rotates that one too: `buildAxisLabel` reads
+  // `axisLabel.rotate` for every axis kind and `innerTextLayout` composes it with the axis's own
+  // rotation (`PI/2` for a y-axis, `cartesianAxisHelper.js`), so 90° there turns the names to run
+  // vertically alongside the axis. Dropping the setting because the axis is not at the bottom
+  // would be a silent no-op in the panel — and the panel offers this control on row charts, where
+  // it labels the vertical axis as the category one.
+  const rotate = cfg.xLabelRotation ?? (fit?.kind === "rotate" ? fit.rotate : 0);
   // Either way the axis has now DECIDED, and a decided axis draws every label or none — never the
   // subset `interval: "auto"` leaves ECharts free to pick.
-  const decided = fit != null || explicitRotate != null;
-  // Room below the plot for the tilted labels. `bottomPad` scales with the widest label, which is
-  // what the measurement knows and the flat 18px fallback does not.
-  const xLabelPad = fit ? (fit.kind === "rotate" ? fit.bottomPad : 0) : (rotate ? 18 : 0);
+  const decided = fit != null || cfg.xLabelRotation != null;
+  // Room below the plot for the tilted labels — `bottomPad` scales with the widest label, which is
+  // what the measurement knows and the flat 18px fallback does not. Gated on `ordinalX` because
+  // this is the BOTTOM margin: a row chart's rotated labels want room on the left (which
+  // `containLabel` gives them), and a value x-axis never applied the rotation in the first place.
+  const xLabelPad = fit ? (fit.kind === "rotate" ? fit.bottomPad : 0) : (rotate && ordinalX ? 18 : 0);
 
   const categoryAxis = {
     type: "category" as const, data: categories,

@@ -110,16 +110,20 @@ const rows: unknown[][] = [["Widget", 10], ["Gadget", 20]];
 describe("builders accept a container size", () => {
   /**
    * Cartesian is the one that now READS it (`fitXLabels`, PR 02), so its entry here inverts: the
-   * two builds must differ, and differ ONLY in the x-axis label decision. The narrow assertion —
-   * which rotation, which `interval` — is `cartesianXLabels.test.ts`; what this one adds is that
-   * the size did not leak anywhere else. The obvious way to make a builder size-aware is
-   * `formatter: (v) => truncate(v, widthFromSize)`, and this file's fingerprint probes closures
-   * precisely so that a formatter quietly becoming size-dependent shows up as a diff.
+   * two builds must differ, and differ only where the fit is entitled to make them differ. The
+   * narrow assertion — which rotation, which `interval` — is `cartesianXLabels.test.ts`; what this
+   * one adds is that the size did not leak anywhere else.
+   *
+   * ONLY THE THREE KEYS THE FIT WRITES are exempted, not the whole `axisLabel` subtree. Exempting
+   * the subtree would take `xAxis.axisLabel.formatter` — one of the three probed closures — out of
+   * the comparison, and a size-dependent formatter (`(v) => truncate(v, widthFromSize)`) is
+   * precisely the leak the fingerprint exists to catch, per this file's header. It would have been
+   * a net loss of coverage dressed as a gain.
    *
    * Two labels across 300px stay on the ladder's upright rung, so `grid.bottom` is the same in
    * both builds and the equality below is exact rather than approximate.
    */
-  it("cartesian reads the size, and reads it ONLY for the x-axis labels", () => {
+  it("cartesian reads the size, and reads it ONLY for the x-axis label decision", () => {
     const cfg = { kind: "bar" as const, xAxis: "k", yMetrics: ["v"] };
     const sized = fingerprint(buildCartesianOption(cols, rows, cfg, SMALL)) as Record<string, never>;
     const unsized = fingerprint(buildCartesianOption(cols, rows, cfg)) as Record<string, never>;
@@ -128,11 +132,14 @@ describe("builders accept a container size", () => {
     expect(functionsIn(sized)).toBe(3);
 
     const axisLabelOf = (fp: Record<string, never>) =>
-      (fp as unknown as { xAxis: { axisLabel: unknown } }).xAxis.axisLabel;
+      (fp as unknown as { xAxis: { axisLabel: Record<string, unknown> } }).xAxis.axisLabel;
     expect(axisLabelOf(sized)).not.toStrictEqual(axisLabelOf(unsized));
 
-    delete (sized as unknown as { xAxis: { axisLabel?: unknown } }).xAxis.axisLabel;
-    delete (unsized as unknown as { xAxis: { axisLabel?: unknown } }).xAxis.axisLabel;
+    for (const key of ["interval", "rotate", "show"]) {
+      delete axisLabelOf(sized)[key];
+      delete axisLabelOf(unsized)[key];
+    }
+    // `formatter` is still in here, and so is every other field of every other axis.
     expect(sized).toStrictEqual(unsized);
   });
 
