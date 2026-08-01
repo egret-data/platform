@@ -194,10 +194,10 @@ export function buildWaterfallOption(
   // Either way the axis has now DECIDED, and a decided axis draws every label or none — never the
   // subset `interval: "auto"` leaves ECharts free to pick.
   const decided = fit != null || explicitRotate;
-  // Room below the plot for the tilted labels. `bottomPad` scales with the widest label, which is
-  // what the measurement knows; the 44/18 ladder is the flat guess this builder has always used and
-  // stays as the fallback for an explicit rotation, which has no measurement behind it.
-  const xLabelPad = fit ? (fit.kind === "rotate" ? fit.bottomPad : 0) : (rotate >= 90 ? 44 : rotate ? 18 : 0);
+  // NO ROOM IS RESERVED BELOW THE PLOT FOR A TILTED LABEL, at any rotation, measured or explicit —
+  // the 44/18 ladder this builder used to add on the explicit path is gone with it. See
+  // `XLabelFit`'s doc in `../axisLabelFit.ts`: `containLabel` already expands the grid around the
+  // rotated labels, and every pixel added on top came off the plot one-for-one.
 
   const deltaSeries: Record<string, unknown> = {
     type: "bar",
@@ -241,7 +241,7 @@ export function buildWaterfallOption(
     // reason a shared `CHART_THEME.grid` alone is not enough once titles exist.
     grid: {
       ...CHART_THEME.grid,
-      bottom: (CHART_THEME.grid.bottom as number) + (xTitle ? 22 : 0) + xLabelPad,
+      bottom: (CHART_THEME.grid.bottom as number) + (xTitle ? 22 : 0),
       left: (CHART_THEME.grid.left as number) + (yTitle ? 26 : 0),
     },
     // The shared `axisTooltip()` reports the series' own value, and the bar's value is a MAGNITUDE

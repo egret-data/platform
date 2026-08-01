@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { buildCartesianOption } from "../options/cartesian";
 import { buildBoxplotOption } from "../options/boxplot";
 import { buildWaterfallOption } from "../options/waterfall";
+import { CHART_THEME } from "../palette";
 import type { fitXLabels as FitXLabels } from "../axisLabelFit";
 
 /**
@@ -19,8 +20,8 @@ import type { fitXLabels as FitXLabels } from "../axisLabelFit";
  *
  * `rotate: 45` and `rotate: 90` sit BETWEEN those two, and reaching them needs `dimensionWidth`
  * to be at once under 6 (to collide with zero-width labels) and at least 15.6 (to clear the 90°
- * rung) — impossible. So no test in this file asserts a MEASURED rotation or the `bottomPad` that
- * comes with it; those are `axisLabelFit.test.ts`'s job, where the measurer is injected, and the
+ * rung) — impossible. So no test in this file asserts a MEASURED rotation; that is
+ * `axisLabelFit.test.ts`'s job, where the measurer is injected, and the
  * live comparison's. What is asserted here is the wiring: that a size reaches the fitter, that the
  * decision reaches the option, and that an explicit setting stops the measurement entirely.
  *
@@ -165,43 +166,45 @@ describe("cartesian x-axis labels", () => {
     expect(xAxisOf(asked).axisLabel.interval).toBe(0);
   });
 
-  /** The explicit path has no measurement behind it, so the room below the axis is the flat guess
-   *  the builder has always reserved for a tilted label. The MEASURED padding (`bottomPad`, which
-   *  scales with the widest label) cannot be reached from jsdom — see this file's header. */
-  it("reserves more room below the axis when the labels rotate", () => {
-    const flat = buildCartesianOption(cols, rows, { ...cfg }, { width: 1600, height: 900 }) as { grid: { bottom: number } };
-    const turned = buildCartesianOption(cols, rows, { ...cfg, xLabelRotation: 90 }, { width: 1600, height: 900 }) as { grid: { bottom: number } };
-    expect(turned.grid.bottom).toBeGreaterThan(flat.grid.bottom);
-  });
-
   /**
-   * …and it reserves the SAME room the other two charts on this path do. Cartesian used to give a
-   * flat 18 at any angle where the box plot and the waterfall gave 44 past 90°, so identical labels
-   * at an identical rotation got different room depending on which chart drew them — a divergence
-   * that only became reachable from the panel when this task shipped the control. Written as an
-   * equality between the three builders rather than against the literal 44: the number is a guess,
-   * and the property worth pinning is that it is ONE guess.
+   * NO BUILDER RESERVES ROOM BELOW THE AXIS FOR A TILTED LABEL — the regression PR 02's live
+   * comparison caught, inverted into a test.
+   *
+   * All three used to add one: the fit's `bottomPad` on the measured path, and a flat 18/44 ladder
+   * on the explicit one. `CHART_THEME.grid` sets `containLabel: true` (`palette.ts:39`), and
+   * ECharts expands the grid around the axis labels INCLUDING their rotation — so every one of
+   * those pixels was reserving a band ECharts had already reserved, and came straight off the plot.
+   * On a one-third-width dashboard card the bars ended up about a fifth of the card's height with
+   * the bottom 45% of the SVG empty. `containLabelRotation.echarts.test.ts` measures the claim
+   * against real ECharts; this pins what the builders may put in `grid.bottom` because of it.
+   *
+   * Stated as an EQUALITY against the full expected value rather than as "the same for every
+   * rotation", so that re-adding any pad fails here whether or not it varies with the angle. The
+   * axis-title term is deliberately left in and exercised both ways — deleting that too would also
+   * make every rotation agree, and it is a different reservation with a real reason behind it (an
+   * unreserved axis name is drawn into the tick labels).
+   *
+   * This reaches only the EXPLICIT rotation, because a measured one is unreachable from jsdom (see
+   * the header). The measured path is guarded from the other end instead, and it takes both halves:
+   * `XLabelFit` no longer HAS a pad — so restoring `fit.bottomPad` fails `tsc`, and restoring the
+   * field to the type to go with it fails `axisLabelFit.test.ts`, which asserts the fit's shape
+   * with `toEqual` rather than `toMatchObject` for exactly this reason.
    */
-  it("reserves the same room for an explicit rotation as the box plot and the waterfall", () => {
+  it.each([
+    ["cartesian", (rotation?: 45 | 90, showXLabel?: boolean) =>
+      buildCartesianOption(cols, rows, { ...cfg, xLabelRotation: rotation, showXLabel }, { width: 1600, height: 900 })],
+    ["box plot", (rotation?: 45 | 90, showXLabel?: boolean) =>
+      buildBoxplotOption(cols, rows, { category: "category", value: "revenue", xLabelRotation: rotation, showXLabel }, { width: 1600, height: 900 })],
+    ["waterfall", (rotation?: 45 | 90, showXLabel?: boolean) =>
+      buildWaterfallOption(cols, rows, { xAxis: "category", metric: "revenue", xLabelRotation: rotation, showXLabel }, { width: 1600, height: 900 })],
+  ] as const)("%s adds nothing to grid.bottom for a rotated axis", (_what, build) => {
     const bottom = (o: unknown) => (o as { grid: { bottom: number } }).grid.bottom;
-    // No size anywhere here, which is the point: this is the unmeasured fallback on all three.
-    const pad = (rotation: 45 | 90) => ({
-      cartesian: bottom(buildCartesianOption(cols, rows, { ...cfg, xLabelRotation: rotation }))
-        - bottom(buildCartesianOption(cols, rows, cfg)),
-      boxplot: bottom(buildBoxplotOption(cols, rows, { category: "category", value: "revenue", xLabelRotation: rotation }))
-        - bottom(buildBoxplotOption(cols, rows, { category: "category", value: "revenue" })),
-      waterfall: bottom(buildWaterfallOption(cols, rows, { xAxis: "category", metric: "revenue", xLabelRotation: rotation }))
-        - bottom(buildWaterfallOption(cols, rows, { xAxis: "category", metric: "revenue" })),
-    });
-    for (const rotation of [45, 90] as const) {
-      const p = pad(rotation);
-      expect(p.cartesian).toBe(p.boxplot);
-      expect(p.cartesian).toBe(p.waterfall);
-      expect(p.cartesian).toBeGreaterThan(0);
+    const base = CHART_THEME.grid.bottom as number;
+    for (const rotation of [undefined, 45, 90] as const) {
+      // With the axis title (the default: `xTitle` falls back to the column name), and without it.
+      expect(bottom(build(rotation, undefined))).toBe(base + 22);
+      expect(bottom(build(rotation, false))).toBe(base);
     }
-    // And the ladder is a ladder: a 90° label's footprint below the axis is its whole width, not
-    // the 45° one's projection, so the two rungs must not be the same number either.
-    expect(pad(90).cartesian).toBeGreaterThan(pad(45).cartesian);
   });
 
   /**

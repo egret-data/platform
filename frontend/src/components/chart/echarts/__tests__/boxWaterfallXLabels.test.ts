@@ -27,8 +27,8 @@ import type { fitXLabels as FitXLabels, estimatePlotWidth as EstimatePlotWidth }
  *
  * `rotate: 45` and `rotate: 90` sit BETWEEN those two, and reaching them needs `dimensionWidth` to
  * be at once under 6 (to collide with zero-width labels) and at least 15.6 (to clear the 90° rung)
- * — impossible. So no test in this file asserts a MEASURED rotation or the `bottomPad` that comes
- * with it; those are `axisLabelFit.test.ts`'s job, where the measurer is injected, and the live
+ * — impossible. So no test in this file asserts a MEASURED rotation; that is
+ * `axisLabelFit.test.ts`'s job, where the measurer is injected, and the live
  * comparison's. What is asserted here is the wiring: that a size reaches the fitter, that the
  * decision reaches the option, and that an explicit setting stops the measurement entirely.
  *
@@ -221,17 +221,21 @@ CHARTS.forEach((c) => {
       expect(xAxisOf(asked).axisLabel.interval).toBe(0);
     });
 
-    /** The explicit path has no measurement behind it, so the room below the axis is the flat 18/44
-     *  ladder both builders have always reserved for a tilted label — kept, since a steeper tilt
-     *  does eat more vertical room. The MEASURED padding (`bottomPad`, which scales with the widest
-     *  label) cannot be reached from jsdom — see this file's header. */
-    it("reserves more room below the axis the further the labels turn", () => {
+    /**
+     * Both builders used to add a flat 18/44 to `grid.bottom` for a tilted label. They no longer
+     * add anything, at any angle: `containLabel: true` already expands the grid around the rotated
+     * labels, so that ladder reserved a band ECharts had reserved and took it off the plot instead
+     * — see `cartesianXLabels.test.ts`, which pins the same contract across all three builders and
+     * carries the argument, and `containLabelRotation.echarts.test.ts`, which measures it.
+     *
+     * Kept here as well, on the fixture each builder is table-driven over, because this is the file
+     * a reader lands in when they wonder why the box plot's tilted axis has no room reserved.
+     */
+    it("adds nothing to grid.bottom the further the labels turn", () => {
       const big = { width: 1600, height: 900 };
       const flat = gridBottomOf(c.build(c.rows, big));
-      const tilted = gridBottomOf(c.build(c.rows, big, 45));
-      const upended = gridBottomOf(c.build(c.rows, big, 90));
-      expect(tilted).toBeGreaterThan(flat);
-      expect(upended).toBeGreaterThan(tilted);
+      expect(gridBottomOf(c.build(c.rows, big, 45))).toBe(flat);
+      expect(gridBottomOf(c.build(c.rows, big, 90))).toBe(flat);
     });
 
     /**

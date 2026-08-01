@@ -18,7 +18,7 @@ describe("fitXLabels", () => {
   it("draws every label upright when they all fit", () => {
     // dimensionWidth = 800/4 = 200px. The worst adjacent pair is Gizmo/Doohickey at
     // 56/2 + 88/2 + 6 = 78, and the widest label alone is 88 + 3 = 91 — both far under 200.
-    expect(fit(CATEGORIES, 800)).toEqual({ kind: "show", rotate: 0, bottomPad: 0 });
+    expect(fit(CATEGORIES, 800)).toEqual({ kind: "show", rotate: 0 });
   });
 
   /**
@@ -28,16 +28,17 @@ describe("fitXLabels", () => {
   it("rotates 45° when labels collide but there is still room per label", () => {
     // dimensionWidth = 240/4 = 60px. Widget/Gadget need 64/2 + 64/2 + 6 = 70 > 60, so they collide;
     // 60 >= 13*2.1 (27.3) keeps it on the top rung, and 72/√2 = 51px is well under 70% of 400.
-    const r = fit(CATEGORIES, 240);
-    expect(r.kind).toBe("rotate");
-    expect(r).toMatchObject({ rotate: 45 });
+    // `toEqual`, not `toMatchObject`: the fit is a DECISION and carries nothing else. It used to
+    // carry a `bottomPad` that the builders added to `grid.bottom` on top of what `containLabel`
+    // had already reserved, which crushed the plot — so an exact shape here is what stops the pad
+    // coming back (`cartesianXLabels.test.ts` guards the builders' end of the same contract).
+    expect(fit(CATEGORIES, 240)).toEqual({ kind: "rotate", rotate: 45 });
   });
 
   it("rotates 90° when there is not even room for 45°", () => {
     // dimensionWidth = 60/4 = 15px. 15 >= 13*2.1 (27.3) is false; 15 >= 13*1.2 (15.6) is false too,
     // so widen slightly to land on the 90 branch rather than the hide branch.
-    const r = fit(CATEGORIES, 4 * 13 * 1.3);
-    expect(r).toMatchObject({ kind: "rotate", rotate: 90 });
+    expect(fit(CATEGORIES, 4 * 13 * 1.3)).toEqual({ kind: "rotate", rotate: 90 });
   });
 
   /**
@@ -109,38 +110,49 @@ describe("fitXLabels", () => {
    * The two spaces Metabase pads a label with are there to make the OVERLAP question pessimistic
    * (`getPaddedAxisLabel`); `getMaxXTickWidth` measures the bare formatted value. Sized so the
    * distinction is the whole answer: "Doohickeys" is 80px bare and 96px padded, and 0.7 x 120px
-   * falls between them — so padding the height guard would hide an axis that fits, and reserve 16px
-   * of room for whitespace that is never drawn. Exact `bottomPad` is safe to assert because the
-   * measurer is the stub; the real one returns zeroes under jsdom.
+   * falls between them — so padding the height guard would hide an axis that fits, over two spaces
+   * that are never drawn. Exact widths are safe to reason about because the measurer is the stub;
+   * the real one returns zeroes under jsdom.
    */
   it("measures the height guard on the bare label, not the padded one", () => {
     expect(fit(["Doohickeys", "Doohickeys", "Doohickeys", "Doohickeys"], 80, 120)).toEqual({
-      kind: "rotate", rotate: 90, bottomPad: 80,
+      kind: "rotate", rotate: 90,
     });
   });
 
   /**
-   * The √2, which is the module's only non-trivial arithmetic and was previously unguarded: a
-   * mutant projecting a 45° label at its full width passed all eleven other tests, because the
-   * only place the factor shows through is `bottomPad` on that rung and nothing asserted it
-   * exactly. Same labels, same widest label (72px bare), driven onto each rung by plot width alone,
-   * so the ONLY thing that can differ between the two answers is the projection.
+   * The √2, which is the module's only non-trivial arithmetic and is the easiest thing here to get
+   * wrong: a mutant projecting a 45° label at its FULL width passed every other test in this file.
+   *
+   * It used to be pinned through `bottomPad`, which was the only place the factor showed through.
+   * `bottomPad` is gone — `containLabel` reserves that room and adding it twice crushed the plot,
+   * see `XLabelFit` — so the projection is now internal, and its one remaining observable is the
+   * 70% height guard: a rotation is taken iff `projected(rotate) / outerHeight < 0.7`.
+   *
+   * So bracket it there. Same four labels (72px bare for "Doohickey"), each rung reached by plot
+   * width alone, and `outerHeight` walked across the guard's boundary. The boundary sits at
+   * `projected / 0.7`, so pinning the exact height at which each rung flips pins the projection to
+   * within a pixel:
+   *
+   *   - 45°: flips between 72 and 73  ->  projected(45) is in (50.4, 51.1]  -> 72/√2 = 50.91  ✓
+   *   - 90°: flips between 102 and 103 -> projected(90) is in (71.4, 72.1]  -> 72        ✓
+   *
+   * An unprojected 45° (72px, the mutant) would need an outerHeight of 103 to flip, so it fails on
+   * the very first assertion below. A projection applied to the 90° rung too (72/√2) would flip at
+   * 73 and fail the third.
    */
-  it("reserves bottom padding a factor of √2 apart across the two rotations", () => {
-    const rotated = (plotWidth: number) => {
-      const r = fit(CATEGORIES, plotWidth);
-      if (r.kind !== "rotate") throw new Error(`expected a rotation, got "${r.kind}"`);
-      return r;
-    };
-    const at45 = rotated(240);        // dimensionWidth 60 >= 27.3
-    const at90 = rotated(4 * 13 * 1.3); // dimensionWidth 16.9, below 27.3 and above 15.6
+  it("projects a 45° label at width/√2 and a 90° one at its full width", () => {
+    const at45 = (outerHeight: number) => fit(CATEGORIES, 240, outerHeight).kind;
+    // dimensionWidth 16.9: below the 45 rung's 27.3, above the 90 rung's 15.6.
+    const at90 = (outerHeight: number) => fit(CATEGORIES, 4 * 13 * 1.3, outerHeight).kind;
 
-    expect(at45).toMatchObject({ rotate: 45, bottomPad: 51 }); // ceil(72 / √2)
-    expect(at90).toMatchObject({ rotate: 90, bottomPad: 72 }); // the width itself
-    expect(at90.bottomPad / at45.bottomPad).toBeCloseTo(Math.SQRT2, 2);
+    expect(at45(73)).toBe("rotate");
+    expect(at45(72)).toBe("hide");
+    expect(at90(103)).toBe("rotate");
+    expect(at90(102)).toBe("hide");
   });
 
   it("draws upright when there are no labels rather than dividing by zero", () => {
-    expect(fit([], 800)).toEqual({ kind: "show", rotate: 0, bottomPad: 0 });
+    expect(fit([], 800)).toEqual({ kind: "show", rotate: 0 });
   });
 });

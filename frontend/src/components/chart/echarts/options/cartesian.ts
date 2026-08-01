@@ -950,21 +950,11 @@ function baseOption(
   // Either way the axis has now DECIDED, and a decided axis draws every label or none — never the
   // subset `interval: "auto"` leaves ECharts free to pick.
   const decided = fit != null || explicitRotate;
-  // Room below the plot for the tilted labels — `bottomPad` scales with the widest label, which is
-  // what the measurement knows and the flat fallback below does not. Gated on `ordinalX` because
-  // this is the BOTTOM margin: a row chart's rotated labels want room on the left (which
-  // `containLabel` gives them), and a value x-axis never applied the rotation in the first place.
-  // The flat fallback used to be 18 at ANY angle here where the box plot and the waterfall already
-  // reserved 44 past 90°, so the same labels at the same rotation got different room depending on
-  // the chart. Reconciled onto their ladder now that the panel can reach this path on a cartesian
-  // chart: a 90° label's footprint below the axis is its whole width, which is nothing like the
-  // 18px a 45° one needs, and 18 was simply the smaller of two guesses. Reconciled UPWARDS on
-  // purpose: until the panel could store `xLabelRotation` on a cartesian chart this branch was
-  // dead here, so raising cartesian re-lays-out nothing that was ever saved, where lowering the
-  // other two would move every waterfall and box plot already carrying an explicit 90°.
-  const xLabelPad = fit
-    ? (fit.kind === "rotate" ? fit.bottomPad : 0)
-    : (ordinalX ? (rotate >= 90 ? 44 : rotate ? 18 : 0) : 0);
+  // NO ROOM IS RESERVED BELOW THE PLOT FOR A TILTED LABEL, at any rotation, measured or explicit.
+  // See `XLabelFit`'s doc in `../axisLabelFit.ts` for the measurement that settled it: `containLabel`
+  // already expands the grid around the rotated labels, and everything this builder added on top
+  // came off the plot one-for-one. Deleted rather than set to zero — a `+ 0` in the grid below is
+  // an invitation to put a number back in it.
 
   const categoryAxis = {
     type: "category" as const, data: categories,
@@ -1074,7 +1064,7 @@ function baseOption(
   const grid = {
     ...CHART_THEME.grid,
     top: (CHART_THEME.grid.top as number) + (showLegend ? 24 : 0),
-    bottom: (CHART_THEME.grid.bottom as number) + (bottomTitle ? 22 : 0) + xLabelPad,
+    bottom: (CHART_THEME.grid.bottom as number) + (bottomTitle ? 22 : 0),
     left: (CHART_THEME.grid.left as number) + (leftTitle ? 26 : 0),
   };
 

@@ -15,9 +15,27 @@ import { measureText, type TextMeasurer } from "@/components/chart/measure-text"
 import type { EChartsSize } from "./EChartsRenderer";
 import { CHART_THEME, resolveFontFamily } from "./palette";
 
+/**
+ * WHAT THIS DELIBERATELY DOES NOT CARRY: a `bottomPad`. Metabase's `getXAxisTicksHeight` returns
+ * one because Metabase turns `containLabel` OFF and computes its grid by hand, so it has to say
+ * how much room the tilted labels need. egret leaves `containLabel: true` on
+ * (`CHART_THEME.grid`, `palette.ts:39`), which makes reserving that room ECharts' job, not this
+ * module's — and this type shipped a `bottomPad` that three builders dutifully ADDED to
+ * `grid.bottom`, reserving the same band twice and crushing the plot into the top of the card.
+ * Measured against real ECharts 6.1 (SSR, 193x214 canvas, four categories at 90°): `grid.bottom`
+ * of 12 gives a 117px plot with all four labels drawn, and 12 + 72 gives a 45px plot with all
+ * four labels still drawn — every added pixel came straight off the plot and bought nothing.
+ *
+ * So the answer this module returns is a DECISION (draw / turn / hide) and not a layout
+ * instruction. The projection the pad was computed from still exists below, because the 70%
+ * height guard genuinely needs it — but it stays internal, where it decides something this module
+ * owns. If `containLabel` is ever turned off (see `estimatePlotWidth`'s note on why that is its
+ * own change), reinstating a pad is two lines; leaving one here for a caller that must not use it
+ * is how the double-count comes back.
+ */
 export type XLabelFit =
-  | { kind: "show"; rotate: 0; bottomPad: number }
-  | { kind: "rotate"; rotate: 45 | 90; bottomPad: number }
+  | { kind: "show"; rotate: 0 }
+  | { kind: "rotate"; rotate: 45 | 90 }
   | { kind: "hide" };
 
 /** Metabase's own constants. Its names are shortened here, so each one gives the original — the
@@ -53,7 +71,7 @@ const MAX_LABEL_HEIGHT_RATIO = 0.7;
  * Both halves earn their place. Even spacing because character count is only a PROXY for width
  * ("WWWW" outruns "iiiiiiiiiiii"), so a sample that went by length alone could miss the widest
  * label outright. The longest-by-length because the widest label is usually also the longest one,
- * and it is the label that decides the height guard, `bottomPad` and both per-label overlap
+ * and it is the label that decides the height guard and both per-label overlap
  * conditions — so leaving it to chance is what lets a 40-character category on a 60-category axis
  * sit in a sampling gap and be drawn upright into its neighbour.
  */
@@ -165,11 +183,7 @@ export function fitXLabels({
    *  pixel that is always zero. */
   measure?: TextMeasurer;
 }): XLabelFit {
-  // `bottomPad: 0`, where Metabase's `getXAxisTicksHeight` returns `fontSize` for this rung. Not an
-  // omission: `CHART_THEME.grid` sets `containLabel: true` (`palette.ts:39`), so ECharts reserves
-  // the height of an upright label itself. Metabase turns `containLabel` off and computes the grid
-  // by hand, which is why it has to say the number.
-  const upright: XLabelFit = { kind: "show", rotate: 0, bottomPad: 0 };
+  const upright: XLabelFit = { kind: "show", rotate: 0 };
   if (labels.length === 0 || plotWidth <= 0) return upright;
 
   // The family the chart is actually DRAWN in (`echarts/base.ts` sets it from the same token), not
@@ -185,8 +199,8 @@ export function fitXLabels({
   // `getPaddedAxisLabel(...)`, `:680`/`:684`) and UNPADDED for the height guard
   // (`getMaxXTickWidth` measures the bare formatted value, `:394-398`). The two spaces exist to
   // make the collision question pessimistic; they have no business inflating a height guard, where
-  // they would fire the hide branch ~7px of label early and leave `bottomPad` reserving room for
-  // whitespace that is never drawn.
+  // they would fire the hide branch ~7px of label early — hiding an axis that fits, over two
+  // spaces that are never drawn.
   const widths = measured.map((l) => measure(pad(l), style).width);
   const dimensionWidth = plotWidth / labels.length;
 
@@ -215,19 +229,18 @@ export function fitXLabels({
 
   const maxWidth = Math.max(...measured.map((l) => measure(l, style).width));
   // `checkHeight`: a 45° label's vertical footprint is its width projected onto the vertical axis,
-  // i.e. width/√2; a 90° one's is the width itself.
+  // i.e. width/√2; a 90° one's is the width itself. This is the ONLY thing the projection is used
+  // for now — it decides whether a rotation is worth taking, and no longer also gets handed to a
+  // builder as a `grid.bottom` offset (see `XLabelFit`). Which means the √2 is observable only
+  // through this guard, and `axisLabelFit.test.ts` brackets it there.
   const projected = (rotate: 45 | 90) => (rotate === 90 ? maxWidth : maxWidth / Math.SQRT2);
   const fitsRotated = (rotate: 45 | 90) => projected(rotate) / outerHeight < MAX_LABEL_HEIGHT_RATIO;
 
-  // The room the axis needs below the plot, which is that same projection — Metabase's
-  // `getXAxisTicksHeight`. Whole pixels because it lands in a grid offset.
-  const padFor = (rotate: 45 | 90) => Math.ceil(projected(rotate));
-
   if (dimensionWidth >= fontSize * ROTATE_45_MIN_FACTOR) {
-    return fitsRotated(45) ? { kind: "rotate", rotate: 45, bottomPad: padFor(45) } : { kind: "hide" };
+    return fitsRotated(45) ? { kind: "rotate", rotate: 45 } : { kind: "hide" };
   }
   if (dimensionWidth >= fontSize * ROTATE_90_MIN_FACTOR) {
-    return fitsRotated(90) ? { kind: "rotate", rotate: 90, bottomPad: padFor(90) } : { kind: "hide" };
+    return fitsRotated(90) ? { kind: "rotate", rotate: 90 } : { kind: "hide" };
   }
   return { kind: "hide" };
 }

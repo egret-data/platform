@@ -154,9 +154,10 @@ describe("builders accept a container size", () => {
    * the x-axis label decision it was threaded in for.
    *
    * `grid.bottom` is deliberately left IN the comparison rather than exempted alongside the three
-   * keys: a few categories across 300px stay on the ladder's upright rung, where `bottomPad` is 0
-   * and the sized and unsized grids agree exactly. A fit that started padding a chart it decided to
-   * draw upright would fail here, which is the point of not exempting it.
+   * keys: no builder reserves room below the axis for a rotated label any more (`containLabel`
+   * does it — see `cartesianXLabels.test.ts`), so the sized and unsized grids agree exactly. A fit
+   * that started padding the grid again would fail here as well, which is the point of not
+   * exempting it.
    */
   it.each([
     ["box plot", (size?: EChartsSize) => buildBoxplotOption(
