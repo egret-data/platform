@@ -8,8 +8,9 @@ import type { PivotConfig } from "@/components/chart/viz/pivot";
 import { isCartesianViz } from "@/api/charts";
 import { vizConfig, shellSettings } from "@/components/chart/viz/renderConfig";
 import type { DrillContext, DrillDim } from "@/components/chart/drill";
-import { EChartsRenderer, type EChartsSize } from "@/components/chart/echarts/EChartsRenderer";
-import { buildCartesianOption } from "@/components/chart/echarts/options/cartesian";
+import { EChartsRenderer, type EChartsOptionInput, type EChartsSize } from "@/components/chart/echarts/EChartsRenderer";
+import { buildCartesianOption, type CartesianBuildConfig } from "@/components/chart/echarts/options/cartesian";
+import { cartesianMeta, type CartesianMeta } from "@/components/chart/echarts/options/cartesianMeta";
 import {
   buildPieOption, buildPieLegend, buildPieHole, buildPieHoleGraphic, pieLegendPlacement, pieHasSlices,
   buildPieBreakdown, pieSliceDrillPath,
@@ -249,6 +250,47 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
   );
 }
 
+/**
+ * The cartesian branch, as its own component for the same reason `PieChart` is one: the `option`
+ * becomes a FUNCTION of the measured size, and `EChartsRenderer`'s `[option]` effect re-applies
+ * the whole option whenever that function's identity changes. Built inline, the arrow would be
+ * fresh on every render of whatever renders the chart — a hover, a filter chip, a sibling's state
+ * change — and each one would re-run the builder and re-apply the option.
+ *
+ * Hooks cannot live in `ChartRenderer` itself past its early returns, so this is a component
+ * rather than a memo.
+ *
+ * Both memos are keyed on the SAME dependencies on purpose: `cartesianMeta` builds the option a
+ * second time (see its doc comment — it reads `__foldedCategory` and `series[].__raw` off a build
+ * rather than reimplementing the folding rules), so that second build has to be pinned to data and
+ * config changes too, or it runs on every render.
+ */
+function CartesianChart({ columns, rows, cfg, children }: {
+  columns: ResultColumn[];
+  rows: unknown[][];
+  cfg: CartesianBuildConfig;
+  children: (meta: CartesianMeta, option: EChartsOptionInput) => React.ReactNode;
+}) {
+  // A VALUE key, deliberately not an identity dep — the same treatment, for the same reason,
+  // `PieChart` gives its own config above. `cfg` CANNOT be an identity dep: `ChartRenderer`
+  // rebuilds it from scratch on every render (its `cartesian` is `{ yMetrics: [], ...vizConfig() }`,
+  // a fresh object each time), so `[cfg]` would memoise nothing at all while looking like it did.
+  // That is not a guess — with `[cfg]` the option's identity did not survive a parent render that
+  // changed nothing, which is precisely the case this component exists to make cheap. `cfg` is a
+  // small, flat, plain-data record; stringifying it once per render costs nothing next to the TWO
+  // option builds it saves. `columns`/`rows` stay identity deps — they're the big objects, and they
+  // come straight from the query cache, which does keep them stable between renders.
+  const cfgKey = JSON.stringify(cfg);
+  const option = useMemo(
+    () => (size: EChartsSize) => buildCartesianOption(columns, rows, cfg, size),
+    // cfgKey encodes cfg by value, so nothing here can go stale — a config edit changes the key and
+    // rebuilds. Listing `cfg` as well would defeat the point.
+    [columns, rows, cfgKey],
+  );
+  const meta = useMemo(() => cartesianMeta(columns, rows, cfg), [columns, rows, cfgKey]);
+  return <>{children(meta, option)}</>;
+}
+
 export interface ChartRendererProps {
   vizType: VizType;
   /** Either stored shape — the config is resolved through the viz's descriptor. */
@@ -331,9 +373,11 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
 
   if (isCartesianViz(vizType)) {
     const seriesUnit = cartesian.series ? params.spec.temporal_units?.[cartesian.series] : undefined;
-    // Hoisted so the click handler can read back what the builder put ON THE SERIES — `__raw`, the
-    // series' real column value behind whatever label the legend ended up showing.
-    const cartesianOption = buildCartesianOption(columns, rows, {
+    // Named rather than written inline on `CartesianChart` purely so the JSX below stays readable —
+    // this object is fresh on every render either way, which is exactly why `CartesianChart` keys
+    // its memos on its VALUE rather than its identity. Annotated, so a field that stops matching
+    // `CartesianBuildConfig` is caught here rather than silently widening the prop.
+    const cartesianCfg: CartesianBuildConfig = {
       // Spread rather than list the fields: this used to be a hand-maintained whitelist, and
       // four settings added in one branch were silently dropped between the panel and the
       // chart because nobody remembered to extend it.
@@ -345,17 +389,15 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       xAxisType: columns.find((c) => c.name === cartesian.xAxis)?.type,
       seriesUnit,
       seriesType: columns.find((c) => c.name === cartesian.series)?.type,
-    });
-    const foldedCategory = (cartesianOption as { __foldedCategory?: string }).__foldedCategory;
-    const rawSeriesAt = (i: number | undefined): string | undefined => {
-      const list = (cartesianOption as { series?: { __raw?: string }[] }).series;
-      return i == null ? undefined : list?.[i]?.__raw;
     };
     return (
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={cartesianOption}
+          : <CartesianChart columns={columns} rows={rows} cfg={cartesianCfg}>{(meta, option) =>
+            // `meta` is what the click handler used to read back off the built option — impossible
+            // now that the option is a function. See `cartesianMeta`.
+            <EChartsRenderer option={option}
             onPointClick={onValueClick && cartesian.xAxis ? (p) => {
               // The x value carries its temporal unit, so a bucketed axis drills to the whole
               // bucket. Without it a bar grouped by month filtered `= 2026-01-01`, which is one
@@ -370,7 +412,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
               // single to filter by — and because the fold merges into a real category of that
               // name when one exists, `= 'Other'` can even return a fraction of the bar and pass
               // for an answer. Same refusal the pie makes for its own folded slice.
-              if (foldedCategory != null && p.name === foldedCategory) return;
+              if (meta.foldedCategory != null && p.name === meta.foldedCategory) return;
               const unit = params.spec.temporal_units?.[cartesian.xAxis as string];
               const dims: DrillDim[] = [
                 unit
@@ -381,7 +423,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
               // renamed series (or one whose column carries a date format) filtered by text no
               // row holds and drilled to nothing at all.
               if (cartesian.series) {
-                const raw = rawSeriesAt(p.seriesIndex) ?? p.seriesName;
+                const raw = meta.rawSeriesAt(p.seriesIndex) ?? p.seriesName;
                 if (raw != null) {
                   dims.push(seriesUnit
                     ? { col: cartesian.series, value: raw, unit: seriesUnit }
@@ -390,7 +432,8 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
               }
               onValueClick({ dims }, p.x, p.y);
             } : undefined}
-          />}
+            />}
+          </CartesianChart>}
       </div>
     );
   }

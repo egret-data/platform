@@ -359,6 +359,12 @@ describe("ChartRenderer", () => {
 
   // These two pin the ChartRenderer -> buildCartesianOption seam itself: every field on
   // CartesianConfig must reach the option, not just the ones someone remembered to list.
+  //
+  // Cartesian's `option` prop is a FUNCTION of the measured container size, as pie's already was,
+  // so both read it by CALLING it with a size — see `pieOption` below, which does the same.
+  const cartesianOption = <T,>(): T =>
+    (mockLastOption as (s: { width: number; height: number }) => T)({ width: 640, height: 400 });
+
   it("forwards cartesian.maxCategories through to the built option", () => {
     render(
       <ChartRenderer
@@ -368,7 +374,7 @@ describe("ChartRenderer", () => {
         rows={[["a", 10], ["b", 8], ["c", 6], ["d", 4], ["e", 2]]}
       />,
     );
-    const data = (mockLastOption as { xAxis: { data: string[] } }).xAxis.data;
+    const data = cartesianOption<{ xAxis: { data: string[] } }>().xAxis.data;
     expect(data[data.length - 1]).toBe("Other");
   });
 
@@ -387,7 +393,7 @@ describe("ChartRenderer", () => {
         rows={[["a", "A", 10], ["a", "B", 5], ["b", "A", 20], ["b", "B", 15]]}
       />,
     );
-    const names = (mockLastOption as { series: { name?: string }[] }).series.map((s) => s.name);
+    const names = cartesianOption<{ series: { name?: string }[] }>().series.map((s) => s.name);
     expect(names).not.toContain("B");
     expect(names).toContain("A");
   });
