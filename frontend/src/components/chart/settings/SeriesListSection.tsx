@@ -25,7 +25,9 @@ export interface SeriesListPatch {
  * renderer assigns palette slots before it applies `seriesOrder`, so a reordered series keeps the
  * colour it is actually drawn in.
  */
-export function SeriesListSection({ names, order, hidden, colors, labels, types, defaultDisplay, defaultColor, onChange }: {
+export function SeriesListSection({
+  names, order, hidden, colors, labels, types, defaultDisplay, defaultColor, renameable = true, onChange,
+}: {
   names: string[];
   order?: string[];
   hidden?: string[];
@@ -36,7 +38,12 @@ export function SeriesListSection({ names, order, hidden, colors, labels, types,
   /** The display a series falls back to, by its NATURAL index — Metabase's first-is-a-line rule.
    *  Undefined means this chart kind offers no per-series display at all. */
   defaultDisplay?: (naturalIndex: number) => SeriesDisplay;
-  defaultColor: (naturalIndex: number) => string;
+  /** Omitted by a chart drawn in ONE colour — the funnel, whose bands differ only in opacity. A
+   *  swatch there would be a control that cannot change anything. */
+  defaultColor?: (naturalIndex: number) => string;
+  /** False where the renderer has no label override to read — the funnel labels its steps from the
+   *  dimension value itself. An editable name there accepts typing and then discards it. */
+  renameable?: boolean;
   onChange: (patch: SeriesListPatch) => void;
 }) {
   // The stored order can name series that are no longer plotted, and the data can bring new
@@ -74,13 +81,15 @@ export function SeriesListSection({ names, order, hidden, colors, labels, types,
             <button type="button" aria-label={`Move ${name} down`} disabled={i === ranked.length - 1}
               className="text-[10px] text-muted-foreground disabled:opacity-40" onClick={() => move(i, 1)}>▼</button>
           </div>
-          <input
-            type="color"
-            aria-label={`color ${name}`}
-            className="h-7 w-7 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
-            value={colors?.[name] ?? defaultColor(naturalIndex.get(name) ?? i)}
-            onChange={(e) => onChange({ seriesColors: { ...colors, [name]: e.target.value } })}
-          />
+          {defaultColor && (
+            <input
+              type="color"
+              aria-label={`color ${name}`}
+              className="h-7 w-7 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+              value={colors?.[name] ?? defaultColor(naturalIndex.get(name) ?? i)}
+              onChange={(e) => onChange({ seriesColors: { ...colors, [name]: e.target.value } })}
+            />
+          )}
           {defaultDisplay && (
             <Select
               value={types?.[name] ?? defaultDisplay(naturalIndex.get(name) ?? i)}
@@ -96,17 +105,25 @@ export function SeriesListSection({ names, order, hidden, colors, labels, types,
               </SelectContent>
             </Select>
           )}
-          <Input
-            className="h-7 min-w-0 flex-1"
-            aria-label={`label ${name}`}
-            placeholder={name}
-            value={labels?.[name] ?? ""}
-            onChange={(e) => {
-              const next = { ...labels };
-              if (e.target.value) next[name] = e.target.value; else delete next[name];
-              onChange({ seriesLabels: next });
-            }}
-          />
+          {renameable ? (
+            <Input
+              className="h-7 min-w-0 flex-1"
+              aria-label={`label ${name}`}
+              placeholder={name}
+              value={labels?.[name] ?? ""}
+              onChange={(e) => {
+                const next = { ...labels };
+                if (e.target.value) next[name] = e.target.value; else delete next[name];
+                onChange({ seriesLabels: next });
+              }}
+            />
+          ) : (
+            // Boxed like the editable variant, so a row without an input still reads as a row
+            // rather than as text floating beside a switch. Metabase frames these the same way.
+            <div className="flex h-7 min-w-0 flex-1 items-center rounded-md border px-3 text-sm" title={name}>
+              <span className="truncate">{name}</span>
+            </div>
+          )}
           <Switch aria-label={`Show ${name}`} checked={!hidden?.includes(name)}
             onCheckedChange={(v) => onChange({
               hiddenSeries: v ? (hidden ?? []).filter((n) => n !== name) : [...(hidden ?? []), name],

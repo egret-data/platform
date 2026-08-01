@@ -123,7 +123,7 @@ function FunnelStepsControl({ config, onChange, resultColumns, rows }: VizContro
         names={names}
         order={config.stepOrder as string[] | undefined}
         hidden={config.hiddenSteps as string[] | undefined}
-        defaultColor={() => "#000000"}
+        renameable={false}
         onChange={(patch) => onChange({
           ...(patch.seriesOrder ? { stepOrder: patch.seriesOrder } : {}),
           ...(patch.hiddenSeries ? { hiddenSteps: patch.hiddenSeries } : {}),
@@ -153,9 +153,11 @@ function FunnelTypeControl({ config, onChange }: VizControlProps<Cfg>) {
   );
 }
 
+// The steps list sits under DATA, beside the column that produces them, and only the funnel type
+// is a display choice — Metabase's own split, checked in its panel.
 const funnelDisplay: VizControl<Cfg>[] = [
+  { id: "steps", section: "data", render: FunnelStepsControl },
   { id: "type", section: "display", render: FunnelTypeControl },
-  { id: "steps", section: "display", render: FunnelStepsControl },
 ];
 
 /** The scalar's captions and conditional-colour bands. Unlike the gauge's, this control needs

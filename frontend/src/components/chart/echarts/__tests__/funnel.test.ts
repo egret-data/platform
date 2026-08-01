@@ -25,9 +25,15 @@ describe("funnelSteps — a sequence, not a ranking", () => {
     expect(steps.map((s) => s.name)).toEqual(["Visited", "Verified", "Paid"]);
   });
 
-  it("drops non-positive / non-finite values", () => {
-    const steps = funnelSteps(cols, [["A", 10], ["B", 0], ["C", -5]], { dimension: "stage", metric: "cnt" });
-    expect(steps.map((s) => s.name)).toEqual(["A"]);
+  // Only a value that is not a NUMBER goes. A zero step — "nobody got this far" — is the single
+  // most important thing a funnel can report, and Metabase keeps it; dropping the row silently
+  // shortens the sequence and makes the next step look like it followed the one before it.
+  it("keeps zero and negative steps, drops non-finite ones", () => {
+    const steps = funnelSteps(cols, [["A", 10], ["B", 0], ["C", -5], ["D", "n/a"]], {
+      dimension: "stage", metric: "cnt",
+    });
+    expect(steps.map((s) => s.name)).toEqual(["A", "B", "C"]);
+    expect(steps[1].share).toBe("0.00 %");
   });
 
   // Metabase prints each step's share of the FIRST one ("124.22 %"); egret printed only the raw

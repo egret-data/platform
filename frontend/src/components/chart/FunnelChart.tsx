@@ -1,23 +1,26 @@
-import { funnelSteps, type FunnelBuildConfig, type FunnelStep, type ResultColumn } from "./echarts/options/funnel";
+import { EChartsRenderer } from "./echarts/EChartsRenderer";
+import { buildCartesianOption } from "./echarts/options/cartesian";
+import {
+  funnelSteps, stepOpacity, type FunnelBuildConfig, type FunnelStep, type ResultColumn,
+} from "./echarts/options/funnel";
 import { SERIES_PALETTE } from "./echarts/palette";
 
 /**
- * Metabase-style Funnel.
+ * Metabase-style Funnel — a port of its `FunnelNormal`, not an ECharts `funnel` series.
  *
- * NOT an ECharts `funnel` series, which is what this used to be. Two things that series cannot do,
- * both measured on the live Metabase chart:
+ * The layout is N columns for N steps, but only N-1 of them hold a band:
  *
- *  - **Labels outside the shape.** Metabase puts the step name ABOVE its column and the value and
- *    share BELOW it; the ECharts series can only draw them inside, where a narrow step truncates
- *    them. Measured at three steps on an 830px card the labels fitted (87-182px inside 248px
- *    wedges), but six steps give ~138px columns and the 182px label does not.
- *  - **One trapezoid per ADJACENT PAIR.** Metabase emits N-1 polygons in a unit viewBox, each
- *    running from `value[i]/max` to `value[i+1]/max` in height, centred. `3976/5061 = 0.78562` is
- *    exactly the edge it drew. That is a shape between two steps, not a shape per step.
+ *  - **The first step is an INFO column, not a shape.** It prints the step's name, then its value
+ *    large and bold, vertically centred, with the metric's name under it. Nothing is drawn for it,
+ *    because a funnel's first step is the whole of the flow — there is no narrowing to show yet.
+ *    This is the part the previous rewrite got backwards: it drew a band for step 1 and a flat
+ *    sliver for step N, which put a meaningless slab at the wrong end and left the reader without
+ *    the one number the rest are shares of.
+ *  - **Each later column holds the band ARRIVING at it**, a trapezoid from the previous step's
+ *    edge to its own, plus that step's share of the first and its value underneath.
  *
- * One colour for every step, as Metabase draws it. A palette per step would say these are
- * categories to compare; they are stages of one flow narrowing, and colour should not argue
- * otherwise.
+ * Every band is the same brand colour at a falling opacity (`stepOpacity`). A palette per step
+ * would say these are categories to compare; they are stages of one flow narrowing.
  */
 const FUNNEL_COLOR = SERIES_PALETTE[0];
 
@@ -26,8 +29,8 @@ export function FunnelChart({
 }: FunnelBuildConfig & {
   columns: ResultColumn[];
   rows: unknown[][];
-  /** Metabase's `funnel.type`. "bar" draws each step as its own column instead of one narrowing
-   *  band — the reading it prefers when the steps are not really one flow. */
+  /** Metabase's `funnel.type`. "bar" is a real bar chart of the same steps — what its own
+   *  `funnelToBarTransform` produces — for when the steps are not really one flow. */
   type?: "funnel" | "bar";
 }) {
   const steps = funnelSteps(columns, rows, {
@@ -38,91 +41,109 @@ export function FunnelChart({
     return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>;
   }
 
+  const label = `Funnel chart of ${metric ?? "a metric"} by ${dimension ?? "a dimension"}. ${
+    steps.map((s) => `${s.name} ${s.label}${s.share ? `, ${s.share} of the first step` : ""}`).join("; ")
+  }.`;
+
+  if (type === "bar") {
+    return <StepBars steps={steps} columns={columns} dimension={dimension} metric={metric}
+      columnSettings={columnSettings} metricTypes={metricTypes} />;
+  }
+
+  const [first, ...rest] = steps;
+
   return (
-    <div className="flex h-full w-full gap-6 p-4"
-      role="img"
-      aria-label={`Funnel chart of ${metric ?? "a metric"} by ${dimension ?? "a dimension"}. ${
-        steps.map((s) => `${s.name} ${s.label}${s.share ? `, ${s.share} of the first step` : ""}`).join("; ")
-      }.`}>
-      {/* The step key Metabase lists down the left, so the names are readable even when a column
-          is too narrow to hold one. */}
-      <ul className="hidden w-32 shrink-0 flex-col justify-center gap-1 text-xs sm:flex">
-        {steps.map((s) => (
-          <li key={s.name} className="truncate font-medium text-foreground/80" title={s.name}>{s.name}</li>
-        ))}
-      </ul>
-
-      <div className="flex min-w-0 flex-1 flex-col">
-        {/* Name above each column. */}
-        <div className="flex">
-          {steps.map((s) => (
-            <div key={s.name} className="min-w-0 flex-1 truncate px-1 text-xs text-muted-foreground" title={s.name}>
-              {s.name}
-            </div>
-          ))}
+    <div className="flex h-full w-full p-4 text-sm text-muted-foreground" role="img" aria-label={label}>
+      {/* The first step: its value is what every share below is a share OF, so it is set large and
+          centred rather than drawn. `shrink-0` with no width — Metabase sizes this column to its
+          own text and gives the whole remaining width to the bands. */}
+      <div className="flex shrink-0 flex-col border-r">
+        <div className="truncate p-[0.5em] text-right" title={first.name}>{first.name}</div>
+        <div className="flex min-h-0 flex-1 flex-col justify-center pr-[0.5em] text-right text-[1.72em] leading-tight">
+          <div className="truncate font-bold tabular-nums text-foreground">{first.label}</div>
+          {metric && <div className="truncate text-[0.6875em]" title={metric}>{metric}</div>}
         </div>
-
-        <div className="min-h-0 flex-1">
-          {type === "bar" ? <Bars steps={steps} /> : <Trapezoids steps={steps} />}
-        </div>
-
-        {/* Value below, and the share for every step after the first. The first names the metric
-            instead — Metabase prints "Count" there, which is what the whole funnel is counting. */}
-        <div className="flex">
-          {steps.map((s, i) => (
-            <div key={s.name} className="min-w-0 flex-1 px-1">
-              {s.share && <div className="truncate text-xs text-muted-foreground">{s.share}</div>}
-              <div className="truncate text-sm font-semibold tabular-nums text-foreground">{s.label}</div>
-              {i === 0 && metric && (
-                <div className="truncate text-xs text-muted-foreground" title={metric}>{metric}</div>
-              )}
-            </div>
-          ))}
+        {/* Invisible twin of the label block the other columns end with, so every band's bottom
+            edge starts at the same y. Metabase reserves the space the same way. */}
+        <div aria-hidden className="invisible px-[0.5em] pt-[0.5em] text-[1.15em]">
+          <div>&nbsp;</div>
+          <div className="mt-[1em]">&nbsp;</div>
         </div>
       </div>
-    </div>
-  );
-}
 
-/** One trapezoid per adjacent pair, each in its own unit viewBox — Metabase's own construction.
- *  A single step has no pair and so no band; it draws as a full-height block. */
-function Trapezoids({ steps }: { steps: FunnelStep[] }) {
-  if (steps.length === 1) {
-    return <div className="h-full w-full" style={{ backgroundColor: FUNNEL_COLOR }} data-funnel-band />;
-  }
-  return (
-    <div className="flex h-full w-full">
-      {steps.slice(0, -1).map((s, i) => {
-        const a = s.fraction;
-        const b = steps[i + 1].fraction;
-        // Centred vertically: an edge of height `f` runs from (1-f)/2 to 1-(1-f)/2.
-        const pts = `0,${(1 - a) / 2} 1,${(1 - b) / 2} 1,${1 - (1 - b) / 2} 0,${1 - (1 - a) / 2}`;
-        return (
-          <svg key={s.name} data-funnel-band viewBox="0 0 1 1" preserveAspectRatio="none" className="h-full min-w-0 flex-1">
-            <polygon points={pts} fill={FUNNEL_COLOR} />
-          </svg>
-        );
-      })}
-      {/* The last step has no pair to its right; a sliver keeps its column the same width as the
-          others so the labels below stay under their own step. */}
-      <svg data-funnel-band viewBox="0 0 1 1" preserveAspectRatio="none" className="h-full min-w-0 flex-1">
-        <polygon
-          points={`0,${(1 - steps[steps.length - 1].fraction) / 2} 1,${(1 - steps[steps.length - 1].fraction) / 2} 1,${1 - (1 - steps[steps.length - 1].fraction) / 2} 0,${1 - (1 - steps[steps.length - 1].fraction) / 2}`}
-          fill={FUNNEL_COLOR}
-        />
-      </svg>
-    </div>
-  );
-}
-
-/** Metabase's `funnel.type: "bar"` — each step its own column, height by value. */
-function Bars({ steps }: { steps: FunnelStep[] }) {
-  return (
-    <div className="flex h-full w-full items-end gap-1">
-      {steps.map((s) => (
-        <div key={s.name} data-funnel-band className="min-w-0 flex-1 rounded-t"
-          style={{ height: `${Math.max(1, s.fraction * 100)}%`, backgroundColor: FUNNEL_COLOR }} />
+      {rest.map((step, i) => (
+        <div key={step.name} className="flex min-w-[20px] flex-1 flex-col border-r">
+          <div className="truncate p-[0.5em] text-right" title={step.name}>{step.name}</div>
+          <div className="min-h-0 flex-1">
+            <Band from={steps[i].fraction} to={step.fraction} opacity={stepOpacity(i, rest.length)} />
+          </div>
+          <div className="px-[0.5em] pt-[0.5em] text-right text-[1.15em]">
+            <div className="truncate">{step.share}</div>
+            <div className="mt-[1em] truncate tabular-nums">{step.label}</div>
+          </div>
+        </div>
       ))}
     </div>
   );
 }
+
+/**
+ * Metabase's `funnel.type: "bar"` — a genuine bar chart, axes and legend and all.
+ *
+ * Each step is its own SERIES, not one series of four points, which is what gives every step its
+ * own colour and its own legend entry: `funnelToBarTransform` builds one single-row card per step
+ * and stacks them. Reproduced here by widening the result — one column per step, each row carrying
+ * a value only in its own column — and stacking, so the four series land in four x positions
+ * instead of being grouped side by side inside each one.
+ */
+function StepBars({ steps, columns, dimension, metric, columnSettings, metricTypes }: {
+  steps: FunnelStep[];
+  columns: ResultColumn[];
+} & Pick<FunnelBuildConfig, "dimension" | "metric" | "columnSettings" | "metricTypes">) {
+  const dimName = dimension ?? "step";
+  const metricType = (metric ? metricTypes?.[metric] : undefined) ?? "double";
+  const format = metric ? columnSettings?.[metric] : undefined;
+  const names = steps.map((s) => s.name);
+
+  const wideColumns: ResultColumn[] = [
+    { name: dimName, type: columns.find((c) => c.name === dimName)?.type ?? "varchar" },
+    ...names.map((name) => ({ name, type: metricType })),
+  ];
+  const wideRows = steps.map((s, i) => [s.name, ...steps.map((_, j) => (i === j ? s.value : null))]);
+
+  return (
+    <EChartsRenderer
+      option={buildCartesianOption(wideColumns, wideRows, {
+        kind: "bar",
+        xAxis: dimName,
+        yMetrics: names,
+        // Stacked, and the y-axis never split: with one series per step an automatic split would
+        // read the steps as two different measures. Metabase pins both the same way.
+        stacked: true,
+        autoSplitY: false,
+        // The axis is still measuring the one metric, whatever the series are called.
+        yLabel: metric,
+        metricTypes: Object.fromEntries(names.map((n) => [n, metricType])),
+        columnSettings: format ? Object.fromEntries(names.map((n) => [n, format])) : undefined,
+      })}
+    />
+  );
+}
+
+/**
+ * One trapezoid, in a unit viewBox stretched to the column — Metabase's own construction, which is
+ * why the shape survives any column width without the slope distorting.
+ *
+ * An edge of height `f` is centred: it runs from `(1-f)/2` to `1-(1-f)/2`. Measured against the
+ * live chart, `0 0.10719 … 0.89281` for `3976/5061 = 0.78562`.
+ */
+function Band({ from, to, opacity }: { from: number; to: number; opacity: number }) {
+  const pts = `0,${(1 - from) / 2} 1,${(1 - to) / 2} 1,${1 - (1 - to) / 2} 0,${1 - (1 - from) / 2}`;
+  return (
+    <svg data-funnel-band viewBox="0 0 1 1" preserveAspectRatio="none" className="h-full w-full">
+      <polygon points={pts} fill={FUNNEL_COLOR} opacity={opacity} />
+    </svg>
+  );
+}
+
+export type { FunnelStep };

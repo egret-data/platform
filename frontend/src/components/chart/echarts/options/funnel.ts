@@ -26,6 +26,9 @@ export interface FunnelStep {
    *  trapezoids: its polygons run from `(1 - v/max)/2` to `1 - (1 - v/max)/2` in a unit viewBox,
    *  and `3976/5061 = 0.78562` is exactly the edge height it drew for that step. */
   fraction: number;
+  /** The result row this step came from, so a renderer that wants the whole row — the bar mode
+   *  builds a real bar chart out of them — gets the ordering and the hiding for free. */
+  row: unknown[];
 }
 
 /**
@@ -45,8 +48,10 @@ export function funnelSteps(columns: ResultColumn[], rows: unknown[][], cfg: Fun
   const hidden = new Set(cfg.hiddenSteps ?? []);
   const rank = new Map((cfg.stepOrder ?? []).map((n, i) => [n, i]));
   const raw = rows
-    .map((r) => ({ name: String(r[di] ?? ""), value: Number(r[mi]) }))
-    .filter((s) => Number.isFinite(s.value) && s.value > 0 && !hidden.has(s.name))
+    .map((r) => ({ name: String(r[di] ?? ""), value: Number(r[mi]), row: r }))
+    // A step worth ZERO is kept, as Metabase keeps it: "nobody got this far" is the single most
+    // important thing a funnel can say, and dropping the row silently shortens the sequence.
+    .filter((s) => Number.isFinite(s.value) && !hidden.has(s.name))
     // A stored order names the steps it knows; anything new keeps its natural place after them,
     // the rule `applySeriesOrder` and the pie's `sliceOrder` already use.
     .sort((a, b) => (rank.get(a.name) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.name) ?? Number.MAX_SAFE_INTEGER));
@@ -62,5 +67,19 @@ export function funnelSteps(columns: ResultColumn[], rows: unknown[][], cfg: Fun
     label: fmt(s.value),
     share: i > 0 && first ? `${((s.value / first) * 100).toFixed(2)} %` : "",
     fraction: max > 0 ? s.value / max : 0,
+    row: s.row,
   }));
+}
+
+/**
+ * How opaque the band leaving step `index` is, out of `bandCount` bands — Metabase's
+ * `calculateStepOpacity`, copied exactly: `1 - index * (0.9 / (bandCount + 1))`.
+ *
+ * This ramp is the whole reason a Metabase funnel reads as a sequence rather than one blue shape.
+ * Every band is the SAME brand colour; only its opacity falls, so the eye follows the flow left to
+ * right without being told the steps are different categories. Measured on the live chart with
+ * three bands: 1, 0.775, 0.55.
+ */
+export function stepOpacity(index: number, bandCount: number): number {
+  return 1 - index * (0.9 / (bandCount + 1));
 }
