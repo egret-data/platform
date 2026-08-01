@@ -143,11 +143,12 @@ describe("the nine simple descriptors", () => {
   it("gives a display control to the descriptors that have display settings, and none to the rest", () => {
     // Each of these owns settings that are presentation rather than query shape: pie (slice
     // colours), gauge (ranges), scalar (captions + conditional colours), smartscalar (colour
-    // direction + compact), progress (bar colour + goal-from-a-metric). A descriptor that is only
-    // field pickers must stay purely `data` — that is what keeps the Data tab asking one question.
-    for (const key of ["pie", "gauge", "scalar", "smartscalar", "progress"]) {
+    // direction + compact), progress (bar colour + goal-from-a-metric), funnel (step order and
+    // visibility). A descriptor that is only field pickers must stay purely `data` — that is what
+    // keeps the Data tab asking one question.
+    for (const key of ["pie", "gauge", "scalar", "smartscalar", "progress", "funnel"]) {
       expect(byKey[key].controls.some((c) => c.section === "display")).toBe(true);
     }
-    expect(byKey.funnel.controls.every((c) => c.section === "data")).toBe(true);
+    expect(byKey.boxplot.controls.every((c) => c.section === "data")).toBe(true);
   });
 });

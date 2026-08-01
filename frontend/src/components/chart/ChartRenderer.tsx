@@ -19,7 +19,7 @@ import { PieLegend } from "@/components/chart/PieLegend";
 import { useElementSize } from "@/components/chart/useElementSize";
 import { cn } from "@/lib/utils";
 import { buildGaugeOption } from "@/components/chart/echarts/options/gauge";
-import { buildFunnelOption } from "@/components/chart/echarts/options/funnel";
+import { FunnelChart } from "@/components/chart/FunnelChart";
 import { buildWaterfallOption } from "@/components/chart/echarts/options/waterfall";
 import { buildBoxplotOption } from "@/components/chart/echarts/options/boxplot";
 import { buildSankeyOption } from "@/components/chart/echarts/options/sankey";
@@ -464,7 +464,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildFunnelOption(columns, rows, { ...funnel, columnSettings, metricTypes })} />}
+          : <FunnelChart columns={columns} rows={rows} {...funnel} columnSettings={columnSettings} metricTypes={metricTypes} />}
       </div>
     );
   }

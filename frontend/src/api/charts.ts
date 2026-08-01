@@ -189,6 +189,12 @@ export interface GaugeConfig {
 export interface FunnelConfig {
   dimension?: string;
   metric?: string;
+  /** Metabase's `funnel.rows`: the steps in display order… */
+  stepOrder?: string[];
+  /** …and the ones left out. */
+  hiddenSteps?: string[];
+  /** Metabase's `funnel.type`: one narrowing band, or a column per step. */
+  type?: "funnel" | "bar";
 }
 export interface WaterfallConfig {
   xAxis?: string;

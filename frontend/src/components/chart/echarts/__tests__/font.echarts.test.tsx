@@ -3,7 +3,6 @@ import { render } from "@testing-library/react";
 import { EChartsRenderer } from "../EChartsRenderer";
 import { buildPieOption } from "../options/pie";
 import { buildCartesianOption } from "../options/cartesian";
-import { buildFunnelOption } from "../options/funnel";
 import { buildGaugeOption } from "../options/gauge";
 import { buildBoxplotOption } from "../options/boxplot";
 import { buildSankeyOption } from "../options/sankey";
@@ -67,7 +66,7 @@ const CHART_TYPES: [string, () => unknown][] = [
   ["area", () => buildCartesianOption(cols, rows, { kind: "area", xAxis: "d", yMetrics: ["m"] })],
   ["scatter", () => buildCartesianOption(cols, rows, { kind: "scatter", xAxis: "d", yMetrics: ["m"] })],
   ["pie", () => buildPieOption(cols, rows, { dimensions: ["d"], metric: "m", donut: true, showTotal: true })],
-  ["funnel", () => buildFunnelOption(cols, rows, { dimension: "d", metric: "m" })],
+  // The funnel left ECharts entirely (see FunnelChart.tsx) — it has no option to check a font on.
   ["gauge", () => buildGaugeOption(cols, [[30]], { metric: "m" })],
   ["boxplot", () => buildBoxplotOption(cols, [["A", 1], ["A", 2], ["A", 3], ["B", 4]], { category: "d", value: "m" })],
   ["waterfall", () => buildWaterfallOption(cols, rows, { xAxis: "d", metric: "m" })],

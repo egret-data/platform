@@ -9,6 +9,7 @@ import { SERIES_PALETTE } from "@/components/chart/echarts/palette";
 /** Metabase’s `color("accent1")`, the progress bar’s default. */
 const PROGRESS_DEFAULT_COLOR = SERIES_PALETTE[1];
 import { Switch } from "@/components/ui/switch";
+import { SeriesListSection } from "@/components/chart/settings/SeriesListSection";
 import { fieldDescriptor } from "./fields";
 import type { VizControl, VizControlProps, VizDescriptor } from "./types";
 
@@ -107,6 +108,58 @@ function ProgressDisplayControl({ config, onChange, metrics }: VizControlProps<C
 
 const progressDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display", render: ProgressDisplayControl }];
 
+/** The funnel's steps, in order, each hideable — Metabase's `funnel.rows`. Names come from the
+ *  last result rather than anything precomputed, the same way the cartesian series list works. */
+function FunnelStepsControl({ config, onChange, resultColumns, rows }: VizControlProps<Cfg>) {
+  const dim = typeof config.dimension === "string" ? config.dimension : undefined;
+  const di = dim ? resultColumns.findIndex((c) => c.name === dim) : -1;
+  if (di < 0) return null;
+  const names = [...new Set(rows.map((r) => String((r as unknown[])[di] ?? "")))].filter((n) => n !== "");
+  if (names.length === 0) return null;
+  return (
+    <div className="space-y-1.5">
+      <div className="text-xs text-muted-foreground">Steps</div>
+      <SeriesListSection
+        names={names}
+        order={config.stepOrder as string[] | undefined}
+        hidden={config.hiddenSteps as string[] | undefined}
+        renameable={false}
+        onChange={(patch) => onChange({
+          ...(patch.seriesOrder ? { stepOrder: patch.seriesOrder } : {}),
+          ...(patch.hiddenSeries ? { hiddenSteps: patch.hiddenSeries } : {}),
+        } as Partial<Cfg>)}
+      />
+      <p className="text-xs text-muted-foreground">
+        A funnel reads left to right in this order — it is not re-sorted by size.
+      </p>
+    </div>
+  );
+}
+
+/** Metabase's `funnel.type`. */
+function FunnelTypeControl({ config, onChange }: VizControlProps<Cfg>) {
+  return (
+    <div className="space-y-1">
+      <Label className="text-sm font-normal">Funnel type</Label>
+      <Select value={(config.type as string | undefined) ?? "funnel"}
+        onValueChange={(v) => onChange({ type: v === "funnel" ? undefined : v } as Partial<Cfg>)}>
+        <SelectTrigger aria-label="Funnel type" className="h-8 text-sm"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="funnel">Funnel — one narrowing band</SelectItem>
+          <SelectItem value="bar">Bar — a column per step</SelectItem>
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+// The steps list sits under DATA, beside the column that produces them, and only the funnel type
+// is a display choice — Metabase's own split, checked in its panel.
+const funnelDisplay: VizControl<Cfg>[] = [
+  { id: "steps", section: "data", render: FunnelStepsControl },
+  { id: "type", section: "display", render: FunnelTypeControl },
+];
+
 /** The scalar's captions and conditional-colour bands. Unlike the gauge's, this control needs
  * nothing from the result — a band is compared against whatever value renders, not against the
  * columns — so it takes only the config. */
@@ -179,7 +232,7 @@ export const SIMPLE_DESCRIPTORS: VizDescriptor<Cfg>[] = [
     legacyFromSpec: (spec) => ({ metric: spec.metrics?.[0] }),
   }),
   fieldDescriptor({
-    key: "funnel", prefix: "funnel.", legacyKey: "funnel",
+    key: "funnel", prefix: "funnel.", legacyKey: "funnel", display: funnelDisplay,
     fields: [
       { id: "dimension", label: "Stage (dimension)", kind: "dimension", required: "a dimension", temporal: true },
       { id: "metric", label: "Metric", kind: "metric", required: "a metric" },

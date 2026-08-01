@@ -885,15 +885,29 @@ describe("ChartRenderer", () => {
       expect(o.series[0].detail!.formatter(1234.5)).toBe(FORMATTED);    // columnSettings + metricTypes
     });
 
-    it("forwards every FunnelConfig field, and both shell settings, to the built option", () => {
-      const o = optionOf(
-        "funnel",
-        { funnel: { dimension: "d", metric: "m" } },
-        [{ name: "d", type: "varchar" }, { name: "decoy", type: "double" }, { name: "m", type: "double" }],
-        [["A", 999, 1234.5], ["B", 999, 10]],
+    // The funnel left ECharts entirely (see FunnelChart.tsx), so this one reads the DOM instead of
+    // an option — the seam it guards is the same: every config field, and both shell settings,
+    // reaching the renderer.
+    it("forwards every FunnelConfig field, and both shell settings, to the funnel", () => {
+      render(
+        <ChartRenderer
+          vizType="funnel"
+          params={params({
+            columnSettings: settings,
+            funnel: { dimension: "d", metric: "m", stepOrder: ["B", "A"], hiddenSteps: ["C"] },
+          })}
+          columns={[{ name: "d", type: "varchar" }, { name: "decoy", type: "double" }, { name: "m", type: "double" }]}
+          rows={[["A", 999, 1234.5], ["B", 999, 10], ["C", 999, 7]]}
+          metricTypes={types}
+        />,
       );
-      expect(o.series[0].data).toEqual([{ name: "A", value: 1234.5 }, { name: "B", value: 10 }]); // dimension + metric
-      expect(o.series[0].label!.formatter({ name: "A", value: 1234.5 })).toBe(`A: ${FORMATTED}`);
+      // dimension + metric + columnSettings + metricTypes, all at once
+      expect(screen.getByText(FORMATTED)).toBeInTheDocument();
+      // hiddenSteps
+      expect(screen.queryByText("C")).toBeNull();
+      // stepOrder — B before A, so B is the first step and the one that names the metric
+      const shares = screen.getAllByText(/%$/).map((e) => e.textContent);
+      expect(shares).toEqual(["12345.00 %"]);
     });
 
     it("forwards every WaterfallConfig field, and both shell settings, to the built option", () => {
