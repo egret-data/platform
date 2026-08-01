@@ -199,7 +199,32 @@ export interface FunnelConfig {
 export interface WaterfallConfig {
   xAxis?: string;
   metric?: string;
+  /** Unset means SHOWN, as in Metabase, whose `waterfall.show_total` defaults to true. */
   showTotal?: boolean;
+  /** Metabase's `waterfall.increase_color` / `decrease_color` / `total_color`. */
+  increaseColor?: string;
+  decreaseColor?: string;
+  totalColor?: string;
+  // Everything below is named after the identical `CartesianConfig` field, because the waterfall
+  // reads it for the same purpose and the settings panel renders the same control for it.
+  showLabels?: boolean;
+  labelDensity?: "fit" | "all";
+  compactValues?: boolean;
+  goalValue?: number;
+  goalLabel?: string;
+  xLabel?: string;
+  yLabel?: string;
+  showXLabel?: boolean;
+  showYLabel?: boolean;
+  xAxisTicks?: boolean;
+  yAxisTicks?: boolean;
+  /** Metabase folds label rotation into its "Show lines and tick marks" select. Unset lets the
+   *  chart tilt long names on its own. */
+  xLabelRotation?: 45 | 90;
+  yTickCount?: number;
+  yMin?: number;
+  yMax?: number;
+  logScale?: boolean;
 }
 export interface SmartScalarConfig {
   dimension?: string;
