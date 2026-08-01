@@ -8,7 +8,7 @@ import type { PivotConfig } from "@/components/chart/viz/pivot";
 import { isCartesianViz } from "@/api/charts";
 import { vizConfig, shellSettings } from "@/components/chart/viz/renderConfig";
 import type { DrillContext, DrillDim } from "@/components/chart/drill";
-import { EChartsRenderer, type EChartsOptionInput, type EChartsSize } from "@/components/chart/echarts/EChartsRenderer";
+import { EChartsRenderer, type EChartsPointClick, type EChartsSize } from "@/components/chart/echarts/EChartsRenderer";
 import { buildCartesianOption, type CartesianBuildConfig } from "@/components/chart/echarts/options/cartesian";
 import { cartesianMeta, type CartesianMeta } from "@/components/chart/echarts/options/cartesianMeta";
 import {
@@ -44,9 +44,10 @@ const EmptyState = ({ message = "No data" }: { message?: string }) => (
 const NO_METRIC_TYPES: Record<string, string> = {};
 
 /**
- * The pie branch, as its own component purely so the option can be memoised: pie is the one
- * viz whose `option` is a FUNCTION of the measured container size, and EChartsRenderer's
- * `[option]` effect re-applies the whole option whenever that function's identity changes.
+ * The pie branch, as its own component purely so the option can be memoised: pie is one of the
+ * vizzes whose `option` is a FUNCTION of the measured container size (the cartesian family too —
+ * see `CartesianChart` below, which is this component's shape for the same reason), and
+ * EChartsRenderer's `[option]` effect re-applies the whole option whenever that identity changes.
  * For pie, re-applying means re-running buildPieOption's per-slice fit pass — real canvas
  * `measureText` for every slice in every ring. Built inline in ChartRenderer, that arrow was
  * fresh on every render of whatever renders the chart (a hover, a filter chip, a sibling's
@@ -265,11 +266,18 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
  * rather than reimplementing the folding rules), so that second build has to be pinned to data and
  * config changes too, or it runs on every render.
  */
-function CartesianChart({ columns, rows, cfg, children }: {
+function CartesianChart({ columns, rows, cfg, onPointClick }: {
   columns: ResultColumn[];
   rows: unknown[][];
   cfg: CartesianBuildConfig;
-  children: (meta: CartesianMeta, option: EChartsOptionInput) => React.ReactNode;
+  /** The drill handler, handed the same `meta` this component derived — the click needs to know
+   *  the folded bucket and each series' raw value, and neither can be read back off a
+   *  function-valued option. A fresh arrow per render is fine here and deliberately not memoised:
+   *  `EChartsRenderer` keeps the handler in a ref it reassigns during render (`clickRef.current`)
+   *  and subscribes to ECharts' click ONCE, in its mount-only effect — `onPointClick` is in none
+   *  of its four dependency arrays, so a new identity costs one property assignment and nothing
+   *  else. Only `option` is expensive to hand over anew, which is what the memo below is for. */
+  onPointClick?: (p: EChartsPointClick, meta: CartesianMeta) => void;
 }) {
   // A VALUE key, deliberately not an identity dep — the same treatment, for the same reason,
   // `PieChart` gives its own config above. `cfg` CANNOT be an identity dep: `ChartRenderer`
@@ -288,7 +296,12 @@ function CartesianChart({ columns, rows, cfg, children }: {
     [columns, rows, cfgKey],
   );
   const meta = useMemo(() => cartesianMeta(columns, rows, cfg), [columns, rows, cfgKey]);
-  return <>{children(meta, option)}</>;
+  return (
+    <EChartsRenderer
+      option={option}
+      onPointClick={onPointClick && ((p) => onPointClick(p, meta))}
+    />
+  );
 }
 
 export interface ChartRendererProps {
@@ -394,11 +407,11 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <CartesianChart columns={columns} rows={rows} cfg={cartesianCfg}>{(meta, option) =>
-            // `meta` is what the click handler used to read back off the built option — impossible
-            // now that the option is a function. See `cartesianMeta`.
-            <EChartsRenderer option={option}
-            onPointClick={onValueClick && cartesian.xAxis ? (p) => {
+          : <CartesianChart columns={columns} rows={rows} cfg={cartesianCfg}
+            // `meta` is what this handler used to read back off the built option — impossible now
+            // that the option is a function, so `CartesianChart` derives it and hands it over. See
+            // `cartesianMeta`.
+            onPointClick={onValueClick && cartesian.xAxis ? (p, meta) => {
               // The x value carries its temporal unit, so a bucketed axis drills to the whole
               // bucket. Without it a bar grouped by month filtered `= 2026-01-01`, which is one
               // day of the month the bar actually covers — the same silent under-count the pivot
@@ -432,8 +445,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
               }
               onValueClick({ dims }, p.x, p.y);
             } : undefined}
-            />}
-          </CartesianChart>}
+          />}
       </div>
     );
   }

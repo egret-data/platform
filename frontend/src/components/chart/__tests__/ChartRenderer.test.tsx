@@ -421,7 +421,8 @@ describe("ChartRenderer", () => {
           rows={pieRows}
         />,
       );
-      // Pie is the one viz whose `option` prop is a function of the measured container size.
+      // Pie's `option` prop is a function of the measured container size, so it is read by CALLING
+      // it — the same way `cartesianOption` above reads the cartesian family's.
       return (mockLastOption as (s: { width: number; height: number }) => BuiltPie)({ width: 400, height: 400 });
     };
 
