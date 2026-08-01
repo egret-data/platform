@@ -1024,6 +1024,84 @@ describe("ChartRenderer", () => {
   });
 
   /**
+   * THE ARGUMENT ITSELF — a different question from the memo identity above, and from the
+   * field-forwarding seam below. Does the measured size `EChartsRenderer` hands back actually REACH
+   * the builder?
+   *
+   * NOTHING COVERED THIS ON ANY CHART until this block, on either side of it. Dropping the fourth
+   * argument at a call site — `() => (_size: EChartsSize) => buildXOption(columns, rows, cfg)` —
+   * left the entire suite green, on cartesian as well as on the two branches that had just gained
+   * it, while the chart rendered with `interval: "auto"` and ECharts silently dropping the labels
+   * that collided. That is the exact defect this PR exists to remove, invisible at the one seam
+   * between the component that can measure and the builder that needs the number.
+   *
+   * Why neither neighbour catches it. The identity block above DOES call the option with a size,
+   * but every assertion it makes is about content the size does not touch (categories, whisker
+   * numbers, gauge scale), so an option ignoring its argument answers identically. The seam block
+   * below reads a fixed 640x400 and asserts config fields, for the same reason. And
+   * `echarts/__tests__/*XLabels.test.ts` call the builders DIRECTLY, passing the size themselves —
+   * which is precisely what makes them blind to a caller that does not.
+   *
+   * ONE RENDER, TWO SIZES, on purpose. The captured option is a function and `EChartsRenderer`
+   * calls it afresh on every resize, so calling it twice here is what that component does rather
+   * than a test-only trick. The PAIR is what makes this an assertion about the size passed IN: a
+   * builder that ignored its argument and measured against some constant of its own would satisfy
+   * either width on its own.
+   */
+  describe("the measured size reaches the builder", () => {
+    /** Both widths, and why they land either side of the decision, are worked out in
+     *  `echarts/__tests__/boxWaterfallXLabels.test.ts`: with every label 0px wide under jsdom the
+     *  axis hides iff `plotWidth < 6n`, so 46 categories need 276px and a 320px card estimates
+     *  `320 − 8 − 16 − 26` = 270. At 1200px the same categories get 25px each and are drawn. */
+    const CROWDED = 46;
+    const NARROW = { width: 320, height: 260 };
+    const WIDE = { width: 1200, height: 500 };
+    const showAt = (o: unknown, size: { width: number; height: number }) =>
+      (o as (s: { width: number; height: number }) => { xAxis: { axisLabel: { show?: boolean } } })(size)
+        .xAxis.axisLabel.show;
+
+    const SIZED: { what: string; vizType: VizType; columns: { name: string; type: string }[]; rows: unknown[][]; params: Partial<ChartParams> }[] = [
+      {
+        what: "CartesianChart",
+        vizType: "bar",
+        columns: [{ name: "region", type: "varchar" }, { name: "revenue", type: "double" }],
+        rows: Array.from({ length: CROWDED }, (_, i) => [`Category ${i}`, i + 1]),
+        params: { cartesian: { xAxis: "region", yMetrics: ["revenue"] } },
+      },
+      {
+        what: "WaterfallChart",
+        vizType: "waterfall",
+        columns: [{ name: "step", type: "varchar" }, { name: "delta", type: "double" }],
+        // ONE FEWER ROW: `showTotal` defaults on, so the builder appends a "Total" of its own and
+        // the axis carries CROWDED categories from CROWDED - 1 rows.
+        rows: Array.from({ length: CROWDED - 1 }, (_, i) => [`Category ${i}`, i + 1]),
+        params: { waterfall: { xAxis: "step", metric: "delta" } },
+      },
+      {
+        what: "BoxplotChart",
+        vizType: "boxplot",
+        columns: [{ name: "grp", type: "varchar" }, { name: "v", type: "double" }],
+        rows: Array.from({ length: CROWDED }, (_, i) => [`Category ${i}`, i + 1]),
+        params: { boxplot: { category: "grp", value: "v" } },
+      },
+    ];
+
+    SIZED.forEach((s) => {
+      it(`${s.what} hands the size it was given to its builder`, () => {
+        render(
+          <ChartRenderer vizType={s.vizType} params={params(s.params)} columns={s.columns} rows={s.rows} />,
+        );
+        // Narrow enough that the fit hides the axis — reachable ONLY through the size argument,
+        // since without one the builder leaves `show` alone and the axis draws.
+        expect(showAt(mockLastOption, NARROW)).toBe(false);
+        // …and the same option function, at the same render, draws them when there is room. This is
+        // the half that says the decision follows the size rather than being baked in.
+        expect(showAt(mockLastOption, WIDE)).toBe(true);
+      });
+    });
+  });
+
+  /**
    * THE SAME SEAM, for the five viz types that hand-listed their fields at this line long after
    * cartesian and pie stopped: gauge, funnel, waterfall, boxplot and sankey.
    *
