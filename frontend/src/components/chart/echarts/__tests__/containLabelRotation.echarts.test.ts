@@ -72,6 +72,16 @@ describe("containLabel and a rotated x-axis", () => {
    * The claim itself. If `containLabel` only reserved an upright label's height, these three
    * layouts would have the same plot height and the rotated names would spill off the canvas —
    * which is exactly what would justify a builder adding the footprint by hand.
+   *
+   * NOT A GUARD ON `containLabel` ITSELF, and the mutation that proved it is worth writing down:
+   * flipping `CHART_THEME.grid.containLabel` to `false` leaves this test GREEN (the two below go
+   * red). ECharts 6 clamps axis labels to the canvas through `outerBounds` whether or not
+   * `containLabel` is set — 6.x routes `containLabel` itself through `layOutGridByOuterBounds`
+   * with `contain: 'axisLabel'` unless `use(LegacyGridContainLabel)` is registered, which this app
+   * does not do. So the room is reserved for the builders EITHER WAY, and the double-count this
+   * file exists to prevent does not depend on the flag. Which is the stronger position to be in,
+   * but it means "does the room get reserved" and "is `containLabel` on" are two questions, and
+   * this test answers only the first.
    */
   it("reserves more room below the plot as the labels turn, from the same grid inset", () => {
     const upright = layout({ rotate: 0, bottom: INSET });
