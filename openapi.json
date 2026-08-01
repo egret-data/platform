@@ -10777,6 +10777,16 @@
               }
             }
           },
+          "400": {
+            "description": "Malformed params (see the message)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Not authenticated",
             "content": {
@@ -11153,6 +11163,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ChartDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed params (see the message)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -15357,6 +15377,78 @@
           },
           "500": {
             "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/datasets/{id}/usage": {
+      "get": {
+        "tags": [
+          "datasets"
+        ],
+        "operationId": "ds_usage",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Dataset id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Charts that use this dataset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DatasetUsageDto"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing dataset:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such dataset in this workspace",
             "content": {
               "application/json": {
                 "schema": {
@@ -20100,6 +20192,87 @@
         }
       }
     },
+    "/api/ws/{workspace}/sqllab/databases/{db}/search": {
+      "get": {
+        "tags": [
+          "sqllab"
+        ],
+        "operationId": "search",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "db",
+            "in": "path",
+            "description": "Granted database id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Object-name search term",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching tables/views across the database",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SearchHit"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing query:run permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Database not granted to this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/sqllab/databases/{db}/tables": {
       "get": {
         "tags": [
@@ -20708,6 +20881,195 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/sqllab/snippets": {
+      "get": {
+        "tags": [
+          "sqllab"
+        ],
+        "operationId": "snippets_list",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace SQL snippets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SnippetDto"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "sqllab"
+        ],
+        "operationId": "snippets_create",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SnippetBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Created snippet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnippetDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/sqllab/snippets/{id}": {
+      "put": {
+        "tags": [
+          "sqllab"
+        ],
+        "operationId": "snippets_update",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Snippet id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SnippetBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated snippet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnippetDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Snippet not found in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "sqllab"
+        ],
+        "operationId": "snippets_remove",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Snippet id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
                 }
               }
             }
@@ -23039,7 +23401,11 @@
           "ordinal",
           "verbose_name",
           "description",
-          "is_calculated"
+          "is_calculated",
+          "groupby",
+          "filterable",
+          "format",
+          "semantic_type"
         ],
         "properties": {
           "column_name": {
@@ -23072,6 +23438,22 @@
           },
           "is_calculated": {
             "type": "boolean"
+          },
+          "groupby": {
+            "type": "boolean",
+            "description": "Usable as a groupby dimension in charts."
+          },
+          "filterable": {
+            "type": "boolean",
+            "description": "Usable as a filter in charts."
+          },
+          "format": {
+            "type": "string",
+            "description": "Display format (ColumnFormat JSON); empty = default."
+          },
+          "semantic_type": {
+            "type": "string",
+            "description": "Semantic role (category/country/currency/email/url/image/…); '' = none."
           }
         }
       },
@@ -23099,7 +23481,10 @@
           "kind",
           "updated_at",
           "columns",
-          "metrics"
+          "metrics",
+          "certified",
+          "certified_by",
+          "certification_details"
         ],
         "properties": {
           "id": {
@@ -23156,6 +23541,16 @@
             "items": {
               "$ref": "#/components/schemas/MetricDto"
             }
+          },
+          "certified": {
+            "type": "boolean",
+            "description": "Certified as a trusted/official dataset."
+          },
+          "certified_by": {
+            "type": "string"
+          },
+          "certification_details": {
+            "type": "string"
           }
         }
       },
@@ -23169,7 +23564,8 @@
           "kind",
           "column_count",
           "updated_at",
-          "bookmarked"
+          "bookmarked",
+          "certified"
         ],
         "properties": {
           "id": {
@@ -23228,6 +23624,26 @@
           },
           "bookmarked": {
             "type": "boolean"
+          },
+          "certified": {
+            "type": "boolean",
+            "description": "Certified as a trusted/official dataset (for a list badge)."
+          }
+        }
+      },
+      "DatasetUsageDto": {
+        "type": "object",
+        "description": "A chart that uses a dataset (for the dataset Usage view).",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
           }
         }
       },
@@ -24244,6 +24660,18 @@
           },
           "description": {
             "type": "string"
+          },
+          "format": {
+            "type": "string"
+          },
+          "certified": {
+            "type": "boolean"
+          },
+          "certified_by": {
+            "type": "string"
+          },
+          "certification_details": {
+            "type": "string"
           }
         }
       },
@@ -24257,7 +24685,11 @@
           "type_generic",
           "verbose_name",
           "description",
-          "ordinal"
+          "ordinal",
+          "format",
+          "certified",
+          "certified_by",
+          "certification_details"
         ],
         "properties": {
           "id": {
@@ -24284,6 +24716,20 @@
           "ordinal": {
             "type": "integer",
             "format": "int32"
+          },
+          "format": {
+            "type": "string",
+            "description": "Display format (ColumnFormat JSON); empty = default."
+          },
+          "certified": {
+            "type": "boolean",
+            "description": "Marked as a trusted/certified metric."
+          },
+          "certified_by": {
+            "type": "string"
+          },
+          "certification_details": {
+            "type": "string"
           }
         }
       },
@@ -25202,6 +25648,25 @@
           }
         }
       },
+      "QueryParam": {
+        "type": "object",
+        "description": "A single SQL-Lab template parameter. `value` is substituted for `{{name}}`\nas a typed, escaped SQL literal (never raw text) so parameters cannot inject.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "`string` (default; single-quoted + escaped), `number`, or `boolean`."
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
       "QuerySpec": {
         "type": "object",
         "required": [
@@ -25971,6 +26436,26 @@
           }
         }
       },
+      "SearchHit": {
+        "type": "object",
+        "description": "A schema-object search hit (a table/view matched by the SQL Lab global\nobject search). `catalog` is empty for engines without a catalog level.",
+        "required": [
+          "catalog",
+          "schema",
+          "table"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "string"
+          },
+          "schema": {
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
+          }
+        }
+      },
       "SearchResultDto": {
         "type": "object",
         "required": [
@@ -26202,6 +26687,54 @@
             "propertyNames": {
               "type": "string"
             }
+          }
+        }
+      },
+      "SnippetBody": {
+        "type": "object",
+        "description": "Create/update body for a SQL snippet.",
+        "required": [
+          "name",
+          "body"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      },
+      "SnippetDto": {
+        "type": "object",
+        "description": "A reusable SQL snippet (SQL Lab).",
+        "required": [
+          "id",
+          "name",
+          "body",
+          "description",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -26550,6 +27083,13 @@
               "null"
             ],
             "minimum": 0
+          },
+          "params": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QueryParam"
+            },
+            "description": "Template parameters substituted into `{{name}}` placeholders before the\nquery is sent to the engine."
           }
         }
       },
@@ -26892,6 +27432,36 @@
               "string",
               "null"
             ]
+          },
+          "groupby": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "filterable": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "is_temporal": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "semantic_type": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -26938,6 +27508,24 @@
             "type": "string"
           },
           "sql": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "certified": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "certified_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "certification_details": {
             "type": [
               "string",
               "null"

@@ -281,7 +281,9 @@ fn find_metric<'a>(metrics: &'a [Metric], name: &str) -> Option<&'a Metric> {
 /// `sql_literal` emits a bare quoted string for anything that is not numeric or boolean, and no
 /// engine will implicitly compare `date = varchar`:
 ///
-///     Cannot apply operator: date = varchar(10)
+/// ```text
+/// Cannot apply operator: date = varchar(10)
+/// ```
 ///
 /// Every drill on a time dimension produced exactly that — clicking a cell in a pivot, a bar or a
 /// line chart with a date on the axis returned a 502, on every chart type. The literal is already
