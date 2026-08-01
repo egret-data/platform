@@ -462,6 +462,62 @@ git commit -m "feat(charts): draw every x-axis label, rotate them, or draw none"
 
 ---
 
+## Task 2b: Box plot and waterfall
+
+**Added after Task 2's review, which found a scope hole in this plan.** The goal line above and
+Task 4's acceptance list both name box plot and waterfall, but no task wired them. Verified: both
+still carry the exact heuristic Task 2 deleted from cartesian —
+
+```
+echarts/options/boxplot.ts:179    const rotate = cfg.xLabelRotation ?? (longest > 10 && categories.length > 6 ? 30 : 0);
+echarts/options/boxplot.ts:246    axisLabel: { …, interval: "auto", rotate },
+echarts/options/waterfall.ts:134  (identical)
+echarts/options/waterfall.ts:212  (identical)
+```
+
+— and **neither builder takes a size at all**. PR 01 opened the seam on cartesian, gauge and sankey
+only, so `ChartRenderer` calls these two with a plain option object. Without this task, Task 4 fails
+its own acceptance check on two of its four charts.
+
+Note both already have `cfg.xLabelRotation` (they use `ChartAxesSection`), so only the *measured*
+path is missing.
+
+**Files:**
+- Modify: `frontend/src/components/chart/echarts/options/boxplot.ts`, `…/waterfall.ts`
+- Modify: `frontend/src/components/chart/ChartRenderer.tsx` (two branches → memo-boundary components)
+- Test: extend `frontend/src/components/chart/echarts/__tests__/cartesianXLabels.test.ts` or add a sibling
+
+- [ ] **Step 1: Open the seam, exactly as PR 01 did for the other three**
+
+Add a fourth optional `size?: EChartsSize` to `buildBoxplotOption` and `buildWaterfallOption`. Then
+in `ChartRenderer`, give each a memo-boundary component modelled on `GaugeChart` — **keyed on
+`JSON.stringify(cfg)`, not on `cfg`**, because `ChartRenderer` rebuilds its configs fresh every
+render and an identity dependency memoises nothing. That was a real defect in PR 01's plan; do not
+reintroduce it. Verify the memo holds in three directions (unrelated parent render keeps identity;
+a config change mints a new one; a data change mints a new one) as PR 01's tests do.
+
+- [ ] **Step 2: Replace both heuristics with the fitter**
+
+Mirror Task 2's cartesian wiring: measurement gated on having a size, an explicit
+`cfg.xLabelRotation` skipping measurement and honoured ungated, `interval: 0` once decided and never
+`"auto"`, `show: fit?.kind !== "hide"`, and the bottom margin from `bottomPad`.
+
+Neither of these has a horizontal mode or an `xScale`, so the `ordinalX` guard reduces to "does it
+have a size". Say so rather than copying a condition that is always true here.
+
+- [ ] **Step 3: Same verification bar as Task 2**
+
+Every assertion mutated and seen to fail; both new `ChartRenderer` call sites covered by their own
+test, since Task 2 found two of three cartesian sites wired but untested and only mutation caught it.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git commit -m "feat(charts): the box plot and the waterfall measure their labels too"
+```
+
+---
+
 ## Task 3: The setting and its control
 
 **Files:**
