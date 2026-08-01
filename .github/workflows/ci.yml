@@ -28,6 +28,23 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      # `cargo test --workspace` links 114 integration-test binaries, each pulling in the whole
+      # dependency graph, and the debug target directory measures ~12 GB. That does not fit beside
+      # the ~26 GB of preinstalled toolchains the image ships, and the linker dies part-way through
+      # with `ld terminated with signal 7 [Bus error]` — SIGBUS, not SIGKILL, because rust-lld
+      # mmaps its output file and the write cannot be backed once the disk is full. It reads like a
+      # compiler crash and is not one.
+      #
+      # None of these are used by this repo. Removed inline rather than via a third-party action so
+      # the reclaim is auditable and adds no supply-chain surface to a job holding a DB password.
+      - name: Reclaim runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /usr/local/share/boost \
+                      /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -38,6 +55,11 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      # Prints on failure too, so a future disk exhaustion is a number in the log rather than a
+      # mystery SIGBUS — this one cost a full investigation to identify.
+      - name: Disk after build
+        if: always()
+        run: df -h / && du -sh target 2>/dev/null || true
 
   frontend:
     runs-on: ubuntu-latest
