@@ -100,8 +100,8 @@ import type { TextMeasurer } from "@/components/chart/measure-text";
 const stub = (perChar: number): TextMeasurer =>
   (text, style) => ({ width: text.length * perChar, height: Number(style.size) });
 
-const fit = (labels: string[], plotWidth: number, plotHeight = 400, perChar = 8): XLabelFit =>
-  fitXLabels({ labels, plotWidth, plotHeight, fontSize: 13, measure: stub(perChar) });
+const fit = (labels: string[], plotWidth: number, outerHeight = 400, perChar = 8): XLabelFit =>
+  fitXLabels({ labels, plotWidth, outerHeight, fontSize: 13, measure: stub(perChar) });
 
 describe("fitXLabels", () => {
   it("draws every label upright when they all fit", () => {
@@ -209,12 +209,12 @@ function sample<T>(items: T[], n: number): T[] {
 }
 
 export function fitXLabels({
-  labels, plotWidth, plotHeight, fontSize = CHART_THEME.axisFontSize, measure = realMeasureText,
+  labels, plotWidth, outerHeight, fontSize = CHART_THEME.axisFontSize, measure = realMeasureText,
 }: {
   labels: string[];
   /** The drawable width the categories share. See the plan's note on why this is an UNDER-estimate. */
   plotWidth: number;
-  plotHeight: number;
+  outerHeight: number;
   fontSize?: number;
   /** Injectable: jsdom's real measurer returns zeroes, so tests drive the ladder with a stub. */
   measure?: TextMeasurer;
@@ -239,7 +239,7 @@ export function fitXLabels({
 
   const maxWidth = Math.max(...widths);
   const fitsRotated = (rotate: 45 | 90) =>
-    (rotate === 90 ? maxWidth : maxWidth / Math.SQRT2) / plotHeight < MAX_LABEL_HEIGHT_RATIO;
+    (rotate === 90 ? maxWidth : maxWidth / Math.SQRT2) / outerHeight < MAX_LABEL_HEIGHT_RATIO;
 
   // A rotated label's footprint below the axis IS its measured width, projected.
   const padFor = (rotate: 45 | 90) => Math.ceil(rotate === 90 ? maxWidth : maxWidth / Math.SQRT2);
@@ -404,7 +404,7 @@ const fit = size && !horizontal
   ? fitXLabels({
       labels: categories.map(String),
       plotWidth: estimatePlotWidth(size, fmtFor(leftSide)(widestOf(leftSide)), Boolean(yTitle)),
-      plotHeight: size.height,
+      outerHeight: size.height,
     })
   : undefined;
 // An explicit choice wins over anything measurement would pick — Metabase's auto-selection also
