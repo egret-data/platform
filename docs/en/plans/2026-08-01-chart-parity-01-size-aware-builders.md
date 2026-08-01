@@ -514,11 +514,20 @@ git commit -m "feat(charts): build the gauge and sankey options against their me
 ## Task 5: Prove the memo boundary actually holds
 
 **Files:**
-- Modify: `frontend/src/components/chart/echarts/__tests__/sizeAware.test.tsx`
+- Modify: `frontend/src/components/chart/__tests__/ChartRenderer.test.tsx`
 
 A memo boundary that silently stopped working would cost performance with nothing visibly wrong —
 exactly the failure mode the pie comment describes. This test fails if someone later inlines the
 arrow.
+
+> **Corrected before it was written.** This task originally targeted `sizeAware.test.tsx` and called
+> for a `data-option-id` attribute on `EChartsRenderer`'s root div as a test seam. **Neither was
+> needed, and neither was done.** Tasks 3 and 4 both wrote working throwaway probes with no
+> production seam at all, by capturing the `option` prop through the `EChartsRenderer` mock that
+> `ChartRenderer.test.tsx` already installs — which is also where `describe("pie option identity")`
+> already asserts these exact three directions for pie. The mock observes option identity directly,
+> so a production attribute would have added a shipped seam to report something a test could already
+> see. The steps below are what actually ran.
 
 > **Found during Task 3, deliberately not fixed there.** `EChartsRenderer` applies the option
 > **twice on mount**: the mount effect calls `applyOption` at `:133`, and the `[option]` effect at
@@ -535,99 +544,69 @@ arrow.
 > viz type, so it needs its own change and its own test rather than riding along here. Recorded so
 > whoever picks it up has the mechanism rather than having to rediscover it.
 
-- [ ] **Step 1: Write the failing test**
+> **Deferred, found while writing these tests.** A shared `useSizedOption(columns, rows, cfg, build)`
+> hook would collapse ~27 lines of near-identical "value key, not an identity dep" rationale across
+> the four boundaries. It is not written yet because it cannot serve all four: `buildPieOption`'s
+> signature interposes `measureText` between the config and the size, so pie would need a different
+> call shape; and cartesian needs `cfgKey` for a SECOND memo (`cartesianMeta`), so the hook would
+> either stringify the config twice or return the key alongside the option — leaking the mechanism
+> it exists to hide. Two boundaries' worth of duplication is not enough to pay for either. Revisit
+> when waterfall and boxplot convert, which makes it four call sites and settles the shape.
 
-Append to `sizeAware.test.tsx`:
+- [x] **Step 1: Extend the identity tests to the three new boundaries**
 
-```tsx
-import { render } from "@testing-library/react";
-import { useState } from "react";
-import { ChartRenderer } from "@/components/chart/ChartRenderer";
+`ChartRenderer.test.tsx` already carries `describe("pie option identity")` with these exact three
+directions, plus the `pieOption` / `cartesianOption` / `optionOf` helpers that read a size-function
+option by CALLING it. Add a sibling block for `CartesianChart`, `GaugeChart` and `SankeyChart` —
+table-driven, since the argument is identical per boundary and only the fixture differs. Pie stays
+written out, because its config arrives by a different route (the whole `params`, not a prebuilt
+`cfg` prop) and its assertions read slices.
 
-describe("cartesian option identity", () => {
-  /**
-   * A parent re-render that changes nothing the chart depends on must NOT produce a new option
-   * function. If it does, EChartsRenderer re-applies the whole option — the cost the PieChart
-   * boundary was introduced to avoid, now inherited by every converted builder.
-   */
-  it("does not rebuild the option when an unrelated parent state changes", () => {
-    const builds: number[] = [];
-    function Harness() {
-      const [n, setN] = useState(0);
-      builds.push(n);
-      return (
-        <div>
-          <button onClick={() => setN((v) => v + 1)}>bump</button>
-          <ChartRenderer
-            params={{ version: 2, spec: {
-              dimensions: ["k"], metrics: ["v"], columns: [], filters: [],
-              orderby: [], row_limit: 1000, rollup_groups: [], temporal_units: {},
-            }, settings: { "cartesian.xAxis": "k", "cartesian.yMetrics": ["v"] } }}
-            vizType="bar"
-            columns={cols}
-            rows={rows}
-          />
-        </div>
-      );
-    }
-    const { getByText, container } = render(<Harness />);
-    const before = container.querySelector("[data-echarts-root]")?.getAttribute("data-option-id");
-    getByText("bump").click();
-    const after = container.querySelector("[data-echarts-root]")?.getAttribute("data-option-id");
-    expect(builds.length).toBeGreaterThan(1); // the parent really did re-render
-    expect(after).toBe(before);
-  });
-});
-```
+Three directions per boundary, all three load-bearing:
 
-- [ ] **Step 2: Run it to see how it fails**
+1. **Holds** — an unrelated parent state change does not mint a new option identity.
+2. **Mints on config change** — a viz-setting edit does.
+3. **Mints on data change** — a new `rows` does.
 
-Run: `cd frontend && npx vitest run src/components/chart/echarts/__tests__/sizeAware.test.tsx -t "unrelated parent"`
+Direction 1 alone is worth nothing: a memo keyed on a constant holds one identity forever and sails
+through it. Directions 2 and 3 are what say the key is made of something real. Each of them also
+asserts the *content* of the rebuilt option (the cartesian fold's "Other", the gauge's segment-derived
+`max`, the sankey's `nodeAlign`), so a memo that mints a fresh arrow while closing over stale inputs
+fails too — that is a stale chart with a healthy-looking test.
 
-Expected: FAIL — `data-option-id` does not exist yet, so both reads are `null` and
-`expect(after).toBe(before)` passes vacuously while `builds.length` may also mislead. **Treat a pass
-here as a failure of the test, not a success of the code**, and continue to step 3, which gives the
-attribute something real to report.
+The harness rebuilds `params` on every render, because that is what every real call site does
+(`previewParams()`, `applyVizOverride()`) and it is the condition under which the `[cfg]` dependency
+this plan originally specified memoised nothing. `columns` and `rows` arrive by prop, so they stay
+identity-stable except in direction 3.
 
-- [ ] **Step 3: Emit the identity marker from EChartsRenderer**
+- [x] **Step 2: See every assertion fail**
 
-In `EChartsRenderer.tsx`, on the root `<div ref={elRef}>`, add a stable id derived from the option's
-identity:
+Nine tests, fifteen assertions, none of them trusted until it was watched to fail. Per boundary:
 
-```tsx
-const optionIdRef = useRef(0);
-const lastOptionRef = useRef<EChartsOptionInput | null>(null);
-if (lastOptionRef.current !== option) {
-  lastOptionRef.current = option;
-  optionIdRef.current += 1;
-}
-```
+| Mutation in `ChartRenderer.tsx` | Expected |
+| --- | --- |
+| that boundary's dep back to `[columns, rows, cfg]` | direction 1 fails, **for that viz only** |
+| that boundary's dep to `[]` | directions 2 and 3 fail (identity) |
+| all three deps `[]`, identity assertion neutered | all six *content* assertions fail |
 
-and render `data-echarts-root="" data-option-id={optionIdRef.current}` on that div.
+Observed, in that order: cartesian `1 failed | 8 passed` then `2 failed | 7 passed`; gauge the same
+pair; sankey the same pair; then `6 failed | 3 passed` with real stale values reported —
+`['a','b','c']` where `['a','Other']` was due, `200` where `5000` was, `nodeAlign: 'left'` where
+`'right'` was. **Do not skip this.** Seven defects on this branch looked right on reading, and one
+of them was an assertion that passed against a stubbed implementation.
 
-This is a test seam and should say so in a comment: it counts how many *distinct* option identities
-this renderer has seen, which is exactly the number of full re-applies it has been asked to do.
+- [x] **Step 3: Restore and confirm green**
 
-- [ ] **Step 4: Run the test to verify it now passes meaningfully**
+Run: `cd frontend && npx tsc --noEmit && npx vitest run src/components/chart`
 
-Run: `cd frontend && npx vitest run src/components/chart/echarts/__tests__/sizeAware.test.tsx -t "unrelated parent"`
+Expected: tsc clean, `121 passed (121)` files / `1460 passed (1460)` tests, and `git diff` touching
+the test file only — no production change, because none was needed.
 
-Expected: PASS, with `before` and `after` both being a real number string such as `"1"`.
-
-- [ ] **Step 5: Confirm the test can fail**
-
-Temporarily replace `<CartesianChart …>` usage in `ChartRenderer.tsx` with an inline
-`option={(size) => buildCartesianOption(columns, rows, cartesianCfg, size)}` and re-run the test.
-
-Expected: FAIL — `after` is `"2"` where `before` was `"1"`. Restore the memo boundary and confirm it
-passes again. **Do not skip this step.** A test that has never been seen to fail has not been shown
-to test anything, and four assertions in this programme have already survived their own mutation.
-
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
-git add frontend/src/components/chart/echarts/EChartsRenderer.tsx \
-        frontend/src/components/chart/echarts/__tests__/sizeAware.test.tsx
+git add frontend/src/components/chart/__tests__/ChartRenderer.test.tsx \
+        docs/en/plans/2026-08-01-chart-parity-01-size-aware-builders.md
 git commit -m "test(charts): pin the memo boundary that keeps size-built options from re-applying"
 ```
 
