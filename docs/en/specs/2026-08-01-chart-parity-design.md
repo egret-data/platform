@@ -50,7 +50,7 @@ and only then builds the option.
 | Canvas text measurement | `components/chart/measure-text.ts` — ported from Metabase, attached to the document so `rem` resolves correctly, with an injectable `measurer` for tests |
 | Option as a function of measured size | Working in production — but for **pie only** (`ChartRenderer.tsx`, `PieChart`) |
 | Resize coalescing | `EChartsRenderer` already rAF-coalesces, with the performance trap documented |
-| Grouped X/Y axis panel with a rotation field | `settings/ChartAxesSection.tsx` already has `xLabelRotation?: 45 \| 90`; used by waterfall, box plot and sankey |
+| Grouped X/Y axis panel with a rotation field | `settings/ChartAxesSection.tsx` already has `xLabelRotation?: 45 \| 90`; used by waterfall and box plot (sankey has no axes and borrows only `Toggle`) |
 
 The work is therefore mostly **extending an existing, proven pattern**, not building new machinery.
 
@@ -140,7 +140,7 @@ and give the cartesian Axes tab the same four-value select `ChartAxesSection` al
 Hide / Show / Rotate 45° / Rotate 90°.
 
 Metabase carries all of this in a single key (`graph.x_axis.axis_enabled`, which also has a fifth
-"Compact" option). egret deliberately does not follow that here: waterfall, box plot and sankey
+"Compact" option). egret deliberately does not follow that here: waterfall and box plot
 already store the two-field shape, and a cartesian family that stored a different shape for the same
 control would fragment the settings model to match a foreign one. The select is a UI projection over
 the two fields. "Compact" — which shortens labels rather than rotating them — is a separate feature

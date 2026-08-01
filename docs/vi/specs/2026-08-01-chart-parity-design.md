@@ -51,7 +51,7 @@ option.
 | Đo chữ bằng canvas | `components/chart/measure-text.ts` — port từ Metabase, gắn vào document để `rem` phân giải đúng, có `measurer` tiêm được cho test |
 | Option là hàm của kích thước đo được | Đang chạy thật — nhưng **chỉ pie** (`ChartRenderer.tsx`, `PieChart`) |
 | Gộp sự kiện resize | `EChartsRenderer` đã coalesce bằng rAF, kèm bẫy hiệu năng đã ghi lại |
-| Panel trục nhóm X/Y kèm trường xoay | `settings/ChartAxesSection.tsx` đã có `xLabelRotation?: 45 \| 90`; waterfall, box plot và sankey đang dùng |
+| Panel trục nhóm X/Y kèm trường xoay | `settings/ChartAxesSection.tsx` đã có `xLabelRotation?: 45 \| 90`; waterfall và box plot đang dùng (sankey không có trục, chỉ mượn `Toggle`) |
 
 Vì vậy công việc chủ yếu là **mở rộng một khuôn mẫu đã có và đã được kiểm chứng**, không phải dựng
 máy móc mới.
@@ -141,7 +141,7 @@ cho tab Axes của cartesian đúng select 4 mức mà `ChartAxesSection` đang 
 Hide / Show / Rotate 45° / Rotate 90°.
 
 Metabase gói tất cả vào **một** key (`graph.x_axis.axis_enabled`, còn có mức thứ năm là "Compact").
-egret **cố ý không** theo ở đây: waterfall, box plot và sankey đã lưu theo hình dạng hai trường, và
+egret **cố ý không** theo ở đây: waterfall và box plot đã lưu theo hình dạng hai trường, và
 nếu họ cartesian lưu một hình dạng khác cho cùng một điều khiển thì mô hình settings sẽ vỡ ra chỉ để
 giống một mô hình ngoại lai. Select chỉ là **phép chiếu UI** trên hai trường đó. Mức "Compact" — rút
 gọn nhãn chứ không xoay — là tính năng riêng, nằm ngoài phạm vi.
