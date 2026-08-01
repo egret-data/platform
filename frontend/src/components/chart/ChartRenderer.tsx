@@ -554,7 +554,36 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
             ? <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
               {sankeyIssue}
             </div>
-            : <EChartsRenderer option={buildSankeyOption(columns, rows, { ...sankey, columnSettings, metricTypes })} />}
+            : <EChartsRenderer
+              option={buildSankeyOption(columns, rows, { ...sankey, columnSettings, metricTypes })}
+              // Metabase's sankey drills from both kinds of element; egret's branch passed no
+              // handler at all — the third chart in a row with that gap. An EDGE names both of its
+              // ends, so it filters on both columns; a NODE names only itself, and which column
+              // that is depends on which side of the flow it sits on.
+              onPointClick={onValueClick && sankey.source && sankey.target ? (p) => {
+                const src = sankey.source as string;
+                const tgt = sankey.target as string;
+                if (p.dataType === "edge") {
+                  const link = p.data as { source?: unknown; target?: unknown } | undefined;
+                  if (link?.source == null || link?.target == null) return;
+                  onValueClick({ dims: [
+                    { col: src, value: String(link.source) },
+                    { col: tgt, value: String(link.target) },
+                  ] }, p.x, p.y);
+                  return;
+                }
+                if (p.dataType !== "node" || p.name == null) return;
+                // A node that anything FLOWS INTO is a value of the target column; one that only
+                // emits is a value of the source column. Metabase picks the same way, and it
+                // matters: the two columns can hold different vocabularies.
+                const si = columns.findIndex((c) => c.name === src);
+                const ti = columns.findIndex((c) => c.name === tgt);
+                const hasInputs = ti >= 0 && rows.some((r) => String(r[ti] ?? "") === p.name);
+                const col = hasInputs ? tgt : src;
+                if ((hasInputs ? ti : si) < 0) return;
+                onValueClick({ dims: [{ col, value: p.name }] }, p.x, p.y);
+              } : undefined}
+            />}
       </div>
     );
   }

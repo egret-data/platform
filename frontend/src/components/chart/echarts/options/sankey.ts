@@ -2,7 +2,7 @@ import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
 import { ariaDescription, baseOption, tooltipSurface } from "../base";
-import { CHART_THEME, COLOR_FALLBACK, resolveColor } from "../palette";
+import { CHART_THEME, COLOR_FALLBACK, resolveColor, seriesColor } from "../palette";
 
 export interface ResultColumn { name: string; type: string }
 
@@ -135,7 +135,12 @@ export function buildSankeyOption(columns: ResultColumn[], rows: unknown[][], cf
       names.add(target);
     }
   }
-  const data = [...names].map((name) => ({ name }));
+  // Each node states its OWN colour, cycling egret's accents. Left to itself ECharts INTERPOLATES
+  // along the palette array for a sankey rather than picking discrete entries: measured on seven
+  // nodes it drew #7EB967, #F3AF6C, #F6BF6A, #CA8AAA, #61A8B5 — five colours that are in no design
+  // system, muddied versions sitting between two accents. Metabase's nodes measure as clean
+  // accents (#88BF4D, #509EE3, #EF8C8C, #F9D45C, #98D9D9), which is what naming them here gives.
+  const data = [...names].map((name, i) => ({ name, itemStyle: { color: seriesColor(i) } }));
 
   const widest = links.reduce((n, l) => Math.max(n, l.value), 0);
   const fmt = (v: unknown, compact?: boolean) => {

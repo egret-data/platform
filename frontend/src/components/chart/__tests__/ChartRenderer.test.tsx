@@ -24,6 +24,8 @@ type MockClick = {
   seriesIndex?: number;
   /** The datum's index within its series. The box plot's drill reads the category from it. */
   dataIndex?: number;
+  /** Which kind of element was clicked — the sankey's node vs edge. */
+  dataType?: string;
   x: number;
   y: number;
 };
@@ -997,6 +999,49 @@ describe("ChartRenderer", () => {
       );
       fireEvent.click(screen.getAllByTestId("echarts")[0]);
       expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "c", value: "A" }] }, 1, 2);
+    });
+
+    // Metabase's sankey drills from both kinds of element. An EDGE names both of its ends, so it
+    // filters on both columns at once.
+    it("drills a sankey edge on both of the columns it joins", () => {
+      const onValueClick = vi.fn();
+      mockClickPayload = { name: "A > B", dataType: "edge", data: { source: "A", target: "B", value: 3 }, x: 5, y: 6 };
+      render(
+        <ChartRenderer
+          vizType="sankey"
+          params={params({ sankey: { source: "s", target: "t", metric: "v" } })}
+          columns={[{ name: "s", type: "varchar" }, { name: "t", type: "varchar" }, { name: "v", type: "double" }]}
+          rows={[["A", "B", 3], ["B", "C", 2]]}
+          onValueClick={onValueClick}
+        />,
+      );
+      fireEvent.click(screen.getAllByTestId("echarts")[0]);
+      expect(onValueClick).toHaveBeenCalledWith(
+        { dims: [{ col: "s", value: "A" }, { col: "t", value: "B" }] }, 5, 6);
+    });
+
+    // A node that anything flows INTO is a value of the target column; one that only emits is a
+    // value of the source column. The two columns can hold different vocabularies, so picking the
+    // wrong one drills to nothing.
+    it("drills a sankey node on the column its side of the flow belongs to", () => {
+      const cols = [{ name: "s", type: "varchar" }, { name: "t", type: "varchar" }, { name: "v", type: "double" }];
+      const rows = [["A", "B", 3], ["B", "C", 2]];
+      const drillFor = (name: string) => {
+        const onValueClick = vi.fn();
+        mockClickPayload = { name, dataType: "node", x: 5, y: 6 };
+        render(
+          <ChartRenderer
+            vizType="sankey"
+            params={params({ sankey: { source: "s", target: "t", metric: "v" } })}
+            columns={cols} rows={rows} onValueClick={onValueClick}
+          />,
+        );
+        fireEvent.click(screen.getAllByTestId("echarts").slice(-1)[0]);
+        return onValueClick.mock.calls[0]?.[0];
+      };
+      expect(drillFor("A")).toEqual({ dims: [{ col: "s", value: "A" }] });  // only emits
+      expect(drillFor("C")).toEqual({ dims: [{ col: "t", value: "C" }] });  // only receives
+      expect(drillFor("B")).toEqual({ dims: [{ col: "t", value: "B" }] });  // both — target wins
     });
 
     it("forwards every BoxplotConfig field, and both shell settings, to the built option", () => {

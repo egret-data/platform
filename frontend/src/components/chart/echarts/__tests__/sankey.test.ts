@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildSankeyOption, sankeyProblem, hasCyclicFlow, MAX_SANKEY_NODES } from "../options/sankey";
+import { SERIES_PALETTE } from "../palette";
 
 const cols = [{ name: "s", type: "varchar" }, { name: "t", type: "varchar" }, { name: "v", type: "double" }];
 const rows = [["A", "X", 10], ["A", "Y", 5], ["B", "X", 3]];
@@ -16,6 +17,19 @@ describe("buildSankeyOption", () => {
       { source: "A", target: "Y", value: 5 },
       { source: "B", target: "X", value: 3 },
     ]);
+  });
+
+  /**
+   * Each node states its OWN colour. Left to itself ECharts INTERPOLATES along the palette array
+   * for a sankey rather than picking discrete entries — measured live on seven nodes it drew
+   * #7EB967, #F3AF6C, #F6BF6A, #CA8AAA and #61A8B5, five colours in no design system. Metabase's
+   * nodes measure as clean accents.
+   */
+  it("colours each node with a palette accent, not something between two", () => {
+    const opt = buildSankeyOption(cols, rows, cfg) as any;
+    const fills = series(opt).data.map((n: any) => n.itemStyle.color);
+    expect(fills).toEqual([SERIES_PALETTE[0], SERIES_PALETTE[1], SERIES_PALETTE[2], SERIES_PALETTE[3]]);
+    for (const f of fills) expect(SERIES_PALETTE).toContain(f);
   });
 
   it("drops non-positive / non-finite links", () => {
