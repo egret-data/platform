@@ -866,14 +866,23 @@ describe("ChartRenderer", () => {
       tooltip?: { formatter: (p: { dataType?: string; name?: string; value?: unknown }) => string };
     };
 
+    /** The viz types this seam covers, spelled once so the set below and `optionOf` cannot disagree
+     * about them — and so a typo in either is a compile error rather than a runtime shape error. */
+    type SeamViz = "gauge" | "funnel" | "waterfall" | "boxplot" | "sankey";
+
     /** The viz types whose `option` prop is a FUNCTION of the measured container size rather than
      * an already-built object — read by CALLING it with a size, the same way `cartesianOption` and
-     * `pieOption` above read theirs. Listed rather than sniffed with `typeof`, so a branch that
-     * silently reverts to a plain option object fails here instead of being quietly accommodated. */
-    const SIZE_FUNCTION_VIZ = new Set(["gauge", "sankey"]);
+     * `pieOption` above read theirs.
+     *
+     * LISTED, deliberately, rather than sniffed with `typeof`. A sniff would be self-healing
+     * against the exact regression this guards: `buildGaugeOption` and `buildSankeyOption` ignore
+     * their size argument today, so a branch reverting to a plain option object produces a
+     * byte-identical option and every content assertion below still passes. This list is the only
+     * thing in the suite that would notice. */
+    const SIZE_FUNCTION_VIZ = new Set<SeamViz>(["gauge", "sankey"]);
 
     /** Renders a viz and hands back the option that actually reached EChartsRenderer. */
-    const optionOf = (vizType: "gauge" | "funnel" | "waterfall" | "boxplot" | "sankey", p: Partial<ChartParams>, columns: { name: string; type: string }[], rows: unknown[][]): Built => {
+    const optionOf = (vizType: SeamViz, p: Partial<ChartParams>, columns: { name: string; type: string }[], rows: unknown[][]): Built => {
       render(
         <ChartRenderer
           vizType={vizType}

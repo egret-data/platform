@@ -45,10 +45,11 @@ const NO_METRIC_TYPES: Record<string, string> = {};
 
 /**
  * The pie branch, as its own component purely so the option can be memoised: pie is one of the
- * vizzes whose `option` is a FUNCTION of the measured container size (so are the cartesian family,
- * the gauge and the sankey — `CartesianChart`, `GaugeChart` and `SankeyChart` below all have this
- * component's shape, for the same reason), and EChartsRenderer's `[option]` effect re-applies the
- * whole option whenever that identity changes.
+ * vizzes whose `option` is a FUNCTION of the measured container size (so are the other size-function
+ * components below, which all have this component's shape for the same reason — named as a set
+ * rather than listed, since a list correct today is the trap the branches below already argue
+ * against, and the last conversion falsified exactly this sentence), and EChartsRenderer's
+ * `[option]` effect re-applies the whole option whenever that identity changes.
  * For pie, re-applying means re-running buildPieOption's per-slice fit pass — real canvas
  * `measureText` for every slice in every ring. Built inline in ChartRenderer, that arrow was
  * fresh on every render of whatever renders the chart (a hover, a filter chip, a sibling's
@@ -314,7 +315,8 @@ function CartesianChart({ columns, rows, cfg, onPointClick }: {
  *
  * Simpler than `CartesianChart` in the one way that matters: nothing is read back off a gauge's
  * option, so there is one memo rather than two and no `meta` to derive. There is no click handler
- * either — a gauge draws a single value, so there is no element on it that names a row to drill to.
+ * either — a gauge draws a single value, so there is no element on it that names a row to drill to;
+ * Metabase's gauge has no drill either.
  *
  * Hooks cannot live in `ChartRenderer` itself past its early returns, so this is a component
  * rather than a memo.
@@ -586,6 +588,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
+          // no drill — see GaugeChart
           : <GaugeChart columns={columns} rows={rows} cfg={gaugeCfg} />}
       </div>
     );
@@ -677,6 +680,12 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
     // Checked BEFORE building, the way Metabase's `checkRenderable` is. A circular flow otherwise
     // reaches ECharts, which throws "Sankey is a DAG, the original data has cycle!" onto the card —
     // the library's own wording, naming an acronym rather than a fix.
+    //
+    // Deliberately OUTSIDE `SankeyChart`, unmemoised, despite that component existing to keep
+    // per-render work down: this check decides whether the boundary renders AT ALL — the ternary
+    // below puts a message div in its place — and hooks cannot live in `ChartRenderer` past its
+    // early returns. Memoising it would mean moving the error markup into `SankeyChart` too, which
+    // turns a component that draws a sankey into one that decides whether there is a sankey.
     const sankeyIssue = sankeyProblem(columns, rows, sankey);
     // Named for the same reason `gaugeCfg` and `cartesianCfg` are, and annotated for the same one.
     const sankeyCfg: SankeyBuildConfig = { ...sankey, columnSettings, metricTypes };
