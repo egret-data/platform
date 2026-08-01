@@ -121,10 +121,17 @@ Port bậc thang của Metabase từ `echarts/cartesian/layout/index.ts`:
    chính phần hợp của hai chiến lược làm cho giới hạn đó an toàn. Chỉ cách đều thì có thể bỏ sót
    nhãn rộng nhất, vì số ký tự chỉ là ước lượng gián tiếp của bề rộng (`WWWW` rộng hơn
    `iiiiiiiiiiii`); chỉ lấy nhãn dài nhất cũng bỏ sót y như vậy theo chiều ngược lại. Gộp cả hai thì
-   chắc chắn chạm tới nhãn quyết định ba trong bốn đầu ra: chốt chặn chiều cao, phần đệm dưới, và
-   hai điều kiện chồng lấn tính trên từng nhãn. Phần còn sót là một nhãn rộng hơn mọi nhãn đã lấy
-   mẫu *và* không phải nhãn dài nhất theo ký tự, lại rơi đúng vào khoảng trống lấy mẫu — sai về phía
-   vẽ thẳng thay vì xoay, và đó là rủi ro còn lại mà giới hạn này đánh đổi.
+   chắc chắn chạm tới nhãn quyết định chốt chặn chiều cao, phần đệm dưới và cả hai điều kiện chồng
+   lấn tính trên từng nhãn.
+
+   Còn lại hai khác biệt, theo hai chiều ngược nhau, và quá 50 nhãn thì cả hai đều có thể xảy ra.
+   Một nhãn rộng hơn mọi nhãn đã lấy mẫu *và* không phải nhãn dài nhất theo ký tự, lại rơi đúng vào
+   khoảng trống lấy mẫu, thì không bao giờ được đo — egret vẽ thẳng trong khi Metabase xoay. Và vì
+   quá 50 nhãn thì các nhãn đã lấy mẫu không còn kề nhau thật, điều kiện theo cặp có thể kích hoạt
+   trên một sự kề nhau *bịa ra*: hai nhãn đã lấy mẫu rộng 10 với `dimensionWidth` 15 thì chồng nhau
+   khi coi là một cặp, trong khi hàng xóm thật rộng 1 của chúng thì không — egret xoay trong khi
+   Metabase vẽ thẳng. Cả hai đều gượng ép, và không cái nào tạo ra một trục in dở dang, vốn là tính
+   chất mà hạng mục này sinh ra để bảo đảm.
 
 **Tính chất then chốt: nhãn không bao giờ in một phần.** Hoặc đủ, hoặc xoay, hoặc không có gì.
 `interval: "auto"` hiện tại của egret cho ra "một số" — đúng kết cục Metabase cố tình tránh.

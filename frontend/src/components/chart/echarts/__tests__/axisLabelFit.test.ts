@@ -7,15 +7,18 @@ import type { TextMeasurer } from "@/components/chart/measure-text";
 const stub = (perChar: number): TextMeasurer =>
   (text, style) => ({ width: text.length * perChar, height: Number(style.size) });
 
-const fit = (labels: string[], plotWidth: number, plotHeight = 400, perChar = 8): XLabelFit =>
-  fitXLabels({ labels, plotWidth, plotHeight, fontSize: 13, measure: stub(perChar) });
+const fit = (labels: string[], plotWidth: number, outerHeight = 400, perChar = 8): XLabelFit =>
+  fitXLabels({ labels, plotWidth, outerHeight, fontSize: 13, measure: stub(perChar) });
+
+/** The four the live comparison was run on, and every width below is arithmetic about these:
+ *  padded they measure 64, 64, 56 and 88px, and "Doohickey" is 72px bare. */
+const CATEGORIES = ["Widget", "Gadget", "Gizmo", "Doohickey"];
 
 describe("fitXLabels", () => {
   it("draws every label upright when they all fit", () => {
-    // 4 labels x 80px each = 320 of 800: no adjacent pair collides.
-    expect(fit(["Widget", "Gadget", "Gizmo", "Doohickey"], 800)).toEqual({
-      kind: "show", rotate: 0, bottomPad: 0,
-    });
+    // dimensionWidth = 800/4 = 200px. The worst adjacent pair is Gizmo/Doohickey at
+    // 56/2 + 88/2 + 6 = 78, and the widest label alone is 88 + 3 = 91 — both far under 200.
+    expect(fit(CATEGORIES, 800)).toEqual({ kind: "show", rotate: 0, bottomPad: 0 });
   });
 
   /**
@@ -23,7 +26,9 @@ describe("fitXLabels", () => {
    * collide, so today's `interval: "auto"` drew ONE of the four. Metabase rotates instead.
    */
   it("rotates 45° when labels collide but there is still room per label", () => {
-    const r = fit(["Widget", "Gadget", "Gizmo", "Doohickey"], 240);
+    // dimensionWidth = 240/4 = 60px. Widget/Gadget need 64/2 + 64/2 + 6 = 70 > 60, so they collide;
+    // 60 >= 13*2.1 (27.3) keeps it on the top rung, and 72/√2 = 51px is well under 70% of 400.
+    const r = fit(CATEGORIES, 240);
     expect(r.kind).toBe("rotate");
     expect(r).toMatchObject({ rotate: 45 });
   });
@@ -31,7 +36,7 @@ describe("fitXLabels", () => {
   it("rotates 90° when there is not even room for 45°", () => {
     // dimensionWidth = 60/4 = 15px. 15 >= 13*2.1 (27.3) is false; 15 >= 13*1.2 (15.6) is false too,
     // so widen slightly to land on the 90 branch rather than the hide branch.
-    const r = fit(["Widget", "Gadget", "Gizmo", "Doohickey"], 4 * 13 * 1.3);
+    const r = fit(CATEGORIES, 4 * 13 * 1.3);
     expect(r).toMatchObject({ kind: "rotate", rotate: 90 });
   });
 
@@ -95,7 +100,7 @@ describe("fitXLabels", () => {
       const labels = narrow.map((l, i) => (i === 10 ? "iiiiiiiiiiii" : i === 59 ? "WWWW" : l));
       // "WWWW" is 120px; 120 / 150 exceeds the 70% guard, while the 36px "iiiiiiiiiiii" does not.
       expect(fitXLabels({
-        labels, plotWidth: 1200, plotHeight: 150, fontSize: 13, measure: proportional,
+        labels, plotWidth: 1200, outerHeight: 150, fontSize: 13, measure: proportional,
       })).toEqual({ kind: "hide" });
     });
   });
@@ -114,11 +119,25 @@ describe("fitXLabels", () => {
     });
   });
 
-  it("reserves bottom padding proportional to the rotation", () => {
-    const upright = fit(["a", "b"], 800);
-    const rotated = fit(["Widget", "Gadget", "Gizmo", "Doohickey"], 240);
-    expect(upright.kind === "show" && upright.bottomPad).toBe(0);
-    expect(rotated.kind === "rotate" && rotated.bottomPad).toBeGreaterThan(0);
+  /**
+   * The √2, which is the module's only non-trivial arithmetic and was previously unguarded: a
+   * mutant projecting a 45° label at its full width passed all eleven other tests, because the
+   * only place the factor shows through is `bottomPad` on that rung and nothing asserted it
+   * exactly. Same labels, same widest label (72px bare), driven onto each rung by plot width alone,
+   * so the ONLY thing that can differ between the two answers is the projection.
+   */
+  it("reserves bottom padding a factor of √2 apart across the two rotations", () => {
+    const rotated = (plotWidth: number) => {
+      const r = fit(CATEGORIES, plotWidth);
+      if (r.kind !== "rotate") throw new Error(`expected a rotation, got "${r.kind}"`);
+      return r;
+    };
+    const at45 = rotated(240);        // dimensionWidth 60 >= 27.3
+    const at90 = rotated(4 * 13 * 1.3); // dimensionWidth 16.9, below 27.3 and above 15.6
+
+    expect(at45).toMatchObject({ rotate: 45, bottomPad: 51 }); // ceil(72 / √2)
+    expect(at90).toMatchObject({ rotate: 90, bottomPad: 72 }); // the width itself
+    expect(at90.bottomPad / at45.bottomPad).toBeCloseTo(Math.SQRT2, 2);
   });
 
   it("draws upright when there are no labels rather than dividing by zero", () => {

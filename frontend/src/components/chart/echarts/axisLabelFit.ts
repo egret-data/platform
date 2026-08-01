@@ -19,12 +19,16 @@ export type XLabelFit =
   | { kind: "rotate"; rotate: 45 | 90; bottomPad: number }
   | { kind: "hide" };
 
-/** Metabase's own constants, kept under its own names so the two files can be diffed by eye.
- *  `HORIZONTAL_TICKS_GAP` is the minimum ink-free space it demands between two neighbouring
- *  labels; the two factors are the multiples of the font size below which even a rotated label
- *  stops being worth drawing. */
+/** Metabase's own constants. Its names are shortened here, so each one gives the original — the
+ *  point is that whoever next diffs this file against upstream can grep for it.
+ *
+ *  `HORIZONTAL_TICKS_GAP` (its name too) is the minimum ink-free space it demands between two
+ *  neighbouring labels; the two factors are the multiples of the font size below which even a
+ *  rotated label stops being worth drawing. */
 const HORIZONTAL_TICKS_GAP = 6;
+/** `X_LABEL_ROTATE_45_THRESHOLD_FACTOR` */
 const ROTATE_45_MIN_FACTOR = 2.1;
+/** `X_LABEL_ROTATE_90_THRESHOLD_FACTOR` */
 const ROTATE_90_MIN_FACTOR = 1.2;
 /** `X_LABEL_HEIGHT_RATIO_THRESHOLD`: a rotated label may not eat more than this share of the
  *  chart's height. Past it Metabase hides the axis rather than turning the bottom two-thirds of
@@ -48,9 +52,9 @@ const MAX_LABEL_HEIGHT_RATIO = 0.7;
  * Both halves earn their place. Even spacing because character count is only a PROXY for width
  * ("WWWW" outruns "iiiiiiiiiiii"), so a sample that went by length alone could miss the widest
  * label outright. The longest-by-length because the widest label is usually also the longest one,
- * and it is the label that decides three of the four things here — the height guard, `bottomPad`,
- * and the two per-label overlap conditions — so leaving it to chance is what lets a 40-character
- * category on a 60-category axis sit in a sampling gap and be drawn upright into its neighbour.
+ * and it is the label that decides the height guard, `bottomPad` and both per-label overlap
+ * conditions — so leaving it to chance is what lets a 40-character category on a 60-category axis
+ * sit in a sampling gap and be drawn upright into its neighbour.
  */
 const TICKS_TO_MEASURE = 50;
 
@@ -85,23 +89,30 @@ function ticksToMeasure(labels: string[]): string[] {
 export function fitXLabels({
   labels,
   plotWidth,
-  plotHeight,
+  outerHeight,
   fontSize = CHART_THEME.axisFontSize,
   measure = realMeasureText,
 }: {
   labels: string[];
-  /** The drawable width the categories share. Deliberately an UNDER-estimate at the call site:
-   *  erring small rotates a label that would have fitted (mildly ugly, still readable), erring
-   *  large leaves it upright and lets ECharts drop it, which is the defect this exists to remove. */
+  /** The drawable width the categories share — INNER, after the grid insets and the value-axis
+   *  gutter. Deliberately an UNDER-estimate at the call site: erring small rotates a label that
+   *  would have fitted (mildly ugly, still readable), erring large leaves it upright and lets
+   *  ECharts drop it, which is the defect this exists to remove. */
   plotWidth: number;
-  /** The chart's outer height — Metabase's `outerHeight`, what the 70% guard is a share of. */
-  plotHeight: number;
+  /** The container's height, Metabase's `outerHeight` — deliberately NOT the inner counterpart of
+   *  `plotWidth`, which is why it is not called `plotHeight`. The 70% guard is a share of the whole
+   *  card (`checkHeight`), so passing an inset height silently tightens it. */
+  outerHeight: number;
   fontSize?: number;
   /** Injectable: `measure-text.ts` returns `{width: 0, height: 0}` under jsdom by design ("Size
    *  claims belong in a browser"), so tests drive the ladder with a stub rather than assert a
    *  pixel that is always zero. */
   measure?: TextMeasurer;
 }): XLabelFit {
+  // `bottomPad: 0`, where Metabase's `getXAxisTicksHeight` returns `fontSize` for this rung. Not an
+  // omission: `CHART_THEME.grid` sets `containLabel: true` (`palette.ts:39`), so ECharts reserves
+  // the height of an upright label itself. Metabase turns `containLabel` off and computes the grid
+  // by hand, which is why it has to say the number.
   const upright: XLabelFit = { kind: "show", rotate: 0, bottomPad: 0 };
   if (labels.length === 0 || plotWidth <= 0) return upright;
 
@@ -127,10 +138,16 @@ export function fitXLabels({
   // an axis whose mean label is narrow. The three conditions and the constant are Metabase's
   // `areHorizontalXAxisTicksOverlapping` verbatim; what differs is the input — it re-measures the
   // whole dataset here (twice per datum) and this runs on `measured`. The two per-label conditions
-  // are unaffected in the case that matters, since the longest label is always in that set; what is
-  // left is a label WIDER than every sampled one while not being the longest by character count,
-  // falling in a sampling gap, on an axis dense enough to rotate but not to hide. Narrow, contrived,
-  // and it errs toward drawing rather than rotating — but it is a real difference, not zero.
+  // are unaffected in the case that matters, since the longest label is always in that set. Two
+  // differences are left, in OPPOSITE directions, and past 50 labels either can occur:
+  //   - a label WIDER than every sampled one while not being the longest by character count, in a
+  //     sampling gap -> egret draws upright where Metabase rotates;
+  //   - past 50 labels the members of `measured` are no longer each other's neighbours, so the
+  //     pairwise condition can fire on a FABRICATED adjacency — two sampled labels of width 10 with
+  //     `dimensionWidth` 15 overlap as a pair while neither's real neighbour of width 1 does ->
+  //     egret rotates where Metabase draws upright.
+  // Both are narrow and contrived, and neither can produce a partial axis, which is the property
+  // this module exists for — but they are real differences, not zero.
   const overlaps = widths.some((right, i) => {
     if (i === 0) return false;
     const left = widths[i - 1];
@@ -144,7 +161,7 @@ export function fitXLabels({
   // `checkHeight`: a 45° label's vertical footprint is its width projected onto the vertical axis,
   // i.e. width/√2; a 90° one's is the width itself.
   const projected = (rotate: 45 | 90) => (rotate === 90 ? maxWidth : maxWidth / Math.SQRT2);
-  const fitsRotated = (rotate: 45 | 90) => projected(rotate) / plotHeight < MAX_LABEL_HEIGHT_RATIO;
+  const fitsRotated = (rotate: 45 | 90) => projected(rotate) / outerHeight < MAX_LABEL_HEIGHT_RATIO;
 
   // The room the axis needs below the plot, which is that same projection — Metabase's
   // `getXAxisTicksHeight`. Whole pixels because it lands in a grid offset.

@@ -121,10 +121,16 @@ Port Metabase's ladder from `echarts/cartesian/layout/index.ts`:
    and the union is what makes the cap safe. Even spacing alone can miss the widest label, because
    character count is only a proxy for width (`WWWW` outruns `iiiiiiiiiiii`); the longest-by-length
    alone can miss it for the same reason in reverse. Together they reliably reach the label that
-   decides three of the four outputs: the height guard, the bottom padding, and the two per-label
-   overlap conditions. What is left unmeasured is a label wider than every sampled one *and* not
-   the longest by characters, sitting in a sampling gap — which errs toward drawing rather than
-   rotating, and is the residual risk this cap buys.
+   decides the height guard, the bottom padding and both per-label overlap conditions.
+
+   Two residual differences remain, in opposite directions, and past 50 labels either can occur. A
+   label wider than every sampled one *and* not the longest by characters, sitting in a sampling
+   gap, is never measured — egret draws upright where Metabase rotates. And because the sampled
+   labels stop being each other's neighbours past 50, the adjacent-pair condition can fire on a
+   *fabricated* adjacency: two sampled labels of width 10 with `dimensionWidth` 15 overlap as a
+   pair while neither's real neighbour of width 1 does — egret rotates where Metabase draws
+   upright. Both are contrived, and neither can produce a partial axis, which is the property this
+   workstream exists for.
 
 **The load-bearing property is that labels are never partial.** All, rotated, or none. egret's
 current `interval: "auto"` produces "some", which is the one outcome Metabase deliberately avoids.
