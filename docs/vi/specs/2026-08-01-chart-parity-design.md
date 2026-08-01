@@ -109,9 +109,22 @@ Port bậc thang của Metabase từ `echarts/cartesian/layout/index.ts`:
 5. Có chồng → `dimensionWidth >= fontSize × 2,1` cho 45°, không thì `>= fontSize × 1,2` cho 90°, mỗi
    trường hợp chỉ khi chiều cao nhãn sau xoay còn dưới 70% chiều cao chart; không thì **giấu hẳn cả
    trục**.
-6. Đo nhiều nhất 50 tick cho đỡ tốn — lấy mẫu ở các chỉ số **cách đều** (`getEvenlySpacedIndices`),
-   không phải 50 tick đầu: trên một trục đã sắp xếp, nhãn rộng nhất có khả năng nằm cuối ngang với
-   nằm đầu, nên lấy phần đầu sẽ bỏ sót nó.
+6. Chọn nhãn nào để đo là bước duy nhất egret **không** chép nguyên. `getXTicksToMeasure`
+   (`layout/index.ts:347-373`) rẽ nhánh theo kiểu trục, mà trục ordinal chính là trục *category*:
+   Metabase đo **toàn bộ** nhãn category, chỉ lùi về 50 nhãn **dài nhất theo số ký tự** khi
+   `dimensionWidth <= fontSize` — tức dưới bậc thang mà không gì vừa nữa. Lấy mẫu cách đều
+   (`getEvenlySpacedIndices`) là nhánh numeric/time-series, không bao giờ chạy ở đây. Và không chỗ
+   nào lấy 50 tick *đầu* cả.
+
+   egret đo nhiều nhất 50: cách đều, **cộng thêm** nhãn dài nhất theo số ký tự. Giới hạn này là của
+   egret — Metabase tự tính layout và chỉ đo một lần, còn hàm này chạy lại mỗi lần dựng option — và
+   chính phần hợp của hai chiến lược làm cho giới hạn đó an toàn. Chỉ cách đều thì có thể bỏ sót
+   nhãn rộng nhất, vì số ký tự chỉ là ước lượng gián tiếp của bề rộng (`WWWW` rộng hơn
+   `iiiiiiiiiiii`); chỉ lấy nhãn dài nhất cũng bỏ sót y như vậy theo chiều ngược lại. Gộp cả hai thì
+   chắc chắn chạm tới nhãn quyết định ba trong bốn đầu ra: chốt chặn chiều cao, phần đệm dưới, và
+   hai điều kiện chồng lấn tính trên từng nhãn. Phần còn sót là một nhãn rộng hơn mọi nhãn đã lấy
+   mẫu *và* không phải nhãn dài nhất theo ký tự, lại rơi đúng vào khoảng trống lấy mẫu — sai về phía
+   vẽ thẳng thay vì xoay, và đó là rủi ro còn lại mà giới hạn này đánh đổi.
 
 **Tính chất then chốt: nhãn không bao giờ in một phần.** Hoặc đủ, hoặc xoay, hoặc không có gì.
 `interval: "auto"` hiện tại của egret cho ra "một số" — đúng kết cục Metabase cố tình tránh.

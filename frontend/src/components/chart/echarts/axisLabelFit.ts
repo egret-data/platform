@@ -30,21 +30,28 @@ const ROTATE_90_MIN_FACTOR = 1.2;
  *  chart's height. Past it Metabase hides the axis rather than turning the bottom two-thirds of
  *  the card into a wall of vertical text. */
 const MAX_LABEL_HEIGHT_RATIO = 0.7;
-/** Formatting and measuring thousands of labels is not free (`X_TICKS_TO_MEASURE_COUNT`). Sampled
- *  at EVENLY SPACED indices rather than as a prefix, because on a sorted axis the widest label is
- *  as likely to be the last as the first — Metabase's `getEvenlySpacedIndices`.
+/**
+ * Formatting and measuring thousands of labels is not free (`X_TICKS_TO_MEASURE_COUNT`).
  *
- *  DIVERGENCES, both of them simplifications — `getXTicksToMeasure` is where to check:
+ * WHAT METABASE DOES, since this is the one place the port is not a copy — `getXTicksToMeasure`
+ * (`layout/index.ts:347-373`) branches on the axis TYPE, and an ordinal axis is a category axis:
  *
- *  - Metabase caps only the *max-width* measurement and re-measures the full dataset (twice per
- *    datum) for the overlap test; this reuses the one sampled set for both, so an axis of >50
- *    categories could in principle hide a lone wide label between two samples. It cannot bite in
- *    practice: past 50 categories `dimensionWidth` is already down near the font size, where any
- *    label at all overlaps and the ladder has left the upright branch regardless.
- *  - Even spacing is Metabase's NUMERIC/TIME-SERIES path. On a category axis it either measures
- *    every label, or — once `dimensionWidth <= fontSize`, i.e. below this ladder's last rung —
- *    the 50 longest by character count. One rule for both is kept here because the difference only
- *    shows up on inputs where the answer is already "hide". */
+ *   - numeric / time-series -> 50 at evenly spaced indices (`getEvenlySpacedIndices`);
+ *   - category, `dimensionWidth <= fontSize` -> the 50 LONGEST by character count;
+ *   - category otherwise -> **every** label, uncapped.
+ *
+ * So on the axis this module runs on, Metabase caps nothing until the ladder has already fallen
+ * off its last rung. It can afford that because it computes its own layout and measures once;
+ * egret keeps a bound instead, and takes the union of the two capped strategies — 50 evenly spaced
+ * PLUS the longest by character count.
+ *
+ * Both halves earn their place. Even spacing because character count is only a PROXY for width
+ * ("WWWW" outruns "iiiiiiiiiiii"), so a sample that went by length alone could miss the widest
+ * label outright. The longest-by-length because the widest label is usually also the longest one,
+ * and it is the label that decides three of the four things here — the height guard, `bottomPad`,
+ * and the two per-label overlap conditions — so leaving it to chance is what lets a 40-character
+ * category on a 60-category axis sit in a sampling gap and be drawn upright into its neighbour.
+ */
 const TICKS_TO_MEASURE = 50;
 
 /** Metabase pads each label with a space per side before measuring, so the estimate is pessimistic
@@ -52,13 +59,27 @@ const TICKS_TO_MEASURE = 50;
  *  comment is "in some cases we render labels with extra spaces, so we have to be pessimistic". */
 const pad = (label: string) => ` ${label} `;
 
-/** `n` items spread across `items`, endpoints always included. Metabase's `getEvenlySpacedIndices`
- *  builds the same set (through a `Set`, so it can return fewer than `n` on short inputs; here the
- *  short case returns early instead, which is the same answer without the dedupe). */
-function sample<T>(items: T[], n: number): T[] {
-  if (items.length <= n) return items;
-  const step = (items.length - 1) / (n - 1);
-  return Array.from({ length: n }, (_, i) => items[Math.round(i * step)]);
+/** At most `n` indices spread evenly over `count`, endpoints included — Metabase's
+ *  `getEvenlySpacedIndices` (which builds the same set through a `Set`, so it can return fewer
+ *  than `n`; the short case returns early here instead, which is the same answer without the
+ *  dedupe). */
+function evenIndices(count: number, n: number): number[] {
+  if (count <= n) return Array.from({ length: count }, (_, i) => i);
+  const step = (count - 1) / (n - 1);
+  return Array.from({ length: n }, (_, i) => Math.round(i * step));
+}
+
+/** The labels actually measured: `evenIndices`, with the longest by character count folded in at
+ *  its own position so the adjacent-pair test still sees them in axis order. See
+ *  `TICKS_TO_MEASURE` for why it is the union of the two and not either one. */
+function ticksToMeasure(labels: string[]): string[] {
+  const indices = evenIndices(labels.length, TICKS_TO_MEASURE);
+  const longest = labels.reduce((best, l, i) => (l.length > labels[best].length ? i : best), 0);
+  if (!indices.includes(longest)) {
+    indices.push(longest);
+    indices.sort((a, b) => a - b);
+  }
+  return indices.map((i) => labels[i]);
 }
 
 export function fitXLabels({
@@ -92,12 +113,24 @@ export function fitXLabels({
   // stop. Same rule BigNumber follows: "a fit computed against the wrong family is wrong by however
   // much the two differ in advance width."
   const style = { size: fontSize, family: resolveFontFamily(), weight: CHART_THEME.axisWeight };
-  const widths = sample(labels, TICKS_TO_MEASURE).map((l) => measure(pad(l), style).width);
+  const measured = ticksToMeasure(labels);
+  // PADDED for the overlap test (`areHorizontalXAxisTicksOverlapping` measures
+  // `getPaddedAxisLabel(...)`, `:680`/`:684`) and UNPADDED for the height guard
+  // (`getMaxXTickWidth` measures the bare formatted value, `:394-398`). The two spaces exist to
+  // make the collision question pessimistic; they have no business inflating a height guard, where
+  // they would fire the hide branch ~7px of label early and leave `bottomPad` reserving room for
+  // whitespace that is never drawn.
+  const widths = measured.map((l) => measure(pad(l), style).width);
   const dimensionWidth = plotWidth / labels.length;
 
   // Adjacent PAIRS, not the widest label against the average: two wide neighbours collide even on
-  // an axis whose mean label is narrow. Conditions and constant are Metabase's
-  // `areHorizontalXAxisTicksOverlapping` verbatim.
+  // an axis whose mean label is narrow. The three conditions and the constant are Metabase's
+  // `areHorizontalXAxisTicksOverlapping` verbatim; what differs is the input — it re-measures the
+  // whole dataset here (twice per datum) and this runs on `measured`. The two per-label conditions
+  // are unaffected in the case that matters, since the longest label is always in that set; what is
+  // left is a label WIDER than every sampled one while not being the longest by character count,
+  // falling in a sampling gap, on an axis dense enough to rotate but not to hide. Narrow, contrived,
+  // and it errs toward drawing rather than rotating — but it is a real difference, not zero.
   const overlaps = widths.some((right, i) => {
     if (i === 0) return false;
     const left = widths[i - 1];
@@ -107,7 +140,7 @@ export function fitXLabels({
   });
   if (!overlaps) return upright;
 
-  const maxWidth = Math.max(...widths);
+  const maxWidth = Math.max(...measured.map((l) => measure(l, style).width));
   // `checkHeight`: a 45° label's vertical footprint is its width projected onto the vertical axis,
   // i.e. width/√2; a 90° one's is the width itself.
   const projected = (rotate: 45 | 90) => (rotate === 90 ? maxWidth : maxWidth / Math.SQRT2);

@@ -109,9 +109,22 @@ Port Metabase's ladder from `echarts/cartesian/layout/index.ts`:
 5. Overlap → `dimensionWidth >= fontSize * 2.1` gives 45°, else `>= fontSize * 1.2` gives 90°, in
    each case only if the rotated label height stays under 70% of chart height; otherwise hide the
    axis entirely.
-6. At most 50 ticks are measured, for cost — sampled at **evenly spaced** indices
-   (`getEvenlySpacedIndices`), not taken as a prefix: on a sorted axis the widest label is as
-   likely to be the last as the first, and a prefix would leave it unmeasured.
+6. Which labels get measured is the one step egret does **not** copy. `getXTicksToMeasure`
+   (`layout/index.ts:347-373`) branches on the axis type, and an ordinal axis is a *category* axis:
+   Metabase measures **every** category label, falling back to the 50 **longest by character
+   count** only once `dimensionWidth <= fontSize` — the rung below which nothing fits anyway. Even
+   spacing (`getEvenlySpacedIndices`) is its numeric/time-series path and is never reached here.
+   Nothing anywhere takes the *first* 50.
+
+   egret measures at most 50: evenly spaced, **plus** the longest by character count. The cap is
+   ours — Metabase computes its own layout and measures once, while this runs on every rebuild —
+   and the union is what makes the cap safe. Even spacing alone can miss the widest label, because
+   character count is only a proxy for width (`WWWW` outruns `iiiiiiiiiiii`); the longest-by-length
+   alone can miss it for the same reason in reverse. Together they reliably reach the label that
+   decides three of the four outputs: the height guard, the bottom padding, and the two per-label
+   overlap conditions. What is left unmeasured is a label wider than every sampled one *and* not
+   the longest by characters, sitting in a sampling gap — which errs toward drawing rather than
+   rotating, and is the residual risk this cap buys.
 
 **The load-bearing property is that labels are never partial.** All, rotated, or none. egret's
 current `interval: "auto"` produces "some", which is the one outcome Metabase deliberately avoids.

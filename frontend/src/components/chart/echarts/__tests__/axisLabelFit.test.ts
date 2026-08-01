@@ -47,21 +47,71 @@ describe("fitXLabels", () => {
   });
 
   /**
-   * An even sample, not a prefix: on a sorted axis the widest label is as likely to be last.
+   * Only 50 of an axis's labels are ever measured, so every one of these asks the same question:
+   * does the label that actually decides the answer get measured, wherever it happens to sit?
    *
-   * Written so a prefix sample would give a DIFFERENT answer, which the plan's original fixture
-   * (200 narrow labels + one wide one at 400px) did not — at that width `dimensionWidth` is ~2px
-   * and even a one-character label overlaps, so it left the upright branch whether or not the wide
-   * label was ever measured. Here 60 labels over 1200px puts `dimensionWidth` at 20px: wide enough
-   * that the 90° branch is reached, narrow enough that it is reached, and then only the last
-   * label's width decides between rotating and hiding.
+   * All three use 60 labels over 1200px — `dimensionWidth` 20px, above `fontSize`, so the ladder
+   * reaches the 90° rung and only the widest label's height decides rotate-vs-hide. That framing
+   * is the point: the plan's original fixture (200 narrow labels + one wide at 400px) could not
+   * detect anything, because at ~2px per dimension even a one-character label overlaps and the
+   * answer never depended on the wide label being measured at all. Verified — it passes against a
+   * prefix-sampling implementation.
    */
-  it("measures the widest label even when it is last", () => {
-    const labels = [...Array(59).fill("a"), "Enterprise Widget Assembly, North-West"];
-    // 38 chars padded x 8px = 320px > 0.7 x 400px, so the height guard fires — but only if the last
-    // label was in the sample at all. A prefix of 50 sees nothing but "a" and rotates 90°.
-    expect(fit(labels, 1200)).toEqual({ kind: "hide" });
-    expect(fit([...Array(60).fill("a")], 1200)).toMatchObject({ kind: "rotate", rotate: 90 });
+  describe("measures the label that decides the answer", () => {
+    const narrow = Array<string>(60).fill("a");
+    const wide = "Enterprise Widget Assembly, North-Western Region"; // 48 chars = 384px > 0.7 x 400
+    const withWideAt = (i: number) => narrow.map((l, j) => (j === i ? wide : l));
+
+    it("rotates when every label is narrow", () => {
+      expect(fit(narrow, 1200)).toMatchObject({ kind: "rotate", rotate: 90 });
+    });
+
+    it("finds the widest label when it is last", () => {
+      expect(fit(withWideAt(59), 1200)).toEqual({ kind: "hide" });
+    });
+
+    /**
+     * Index 3 is NOT in the even sample of 60 (which runs 0, 1, 2, 4, 5, …), so this is caught only
+     * by also measuring the longest label by character count — the same proxy Metabase's own
+     * category branch uses. Without it egret rotates a 48-character label to 90° where Metabase
+     * hides the axis.
+     */
+    it("finds the widest label when it falls in a sampling gap", () => {
+      expect(fit(withWideAt(3), 1200)).toEqual({ kind: "hide" });
+    });
+
+    /**
+     * And character count alone is not enough either, which is why the even sample stays: "WWWW" is
+     * wider than "iiiiiiiiiiii" while being a third of its length. The wide-in-pixels label sits at
+     * index 59 — inside the even sample, outside a 50-long prefix — and the longest-by-characters
+     * label at index 10 is inside both, so only even spacing can reach the one that matters.
+     */
+    it("finds the widest label when it is not the longest one", () => {
+      const perChar = (c: string) => (c === "W" ? 30 : c === "i" ? 3 : 8);
+      const proportional: TextMeasurer = (text, style) => ({
+        width: [...text].reduce((w, c) => w + perChar(c), 0),
+        height: Number(style.size),
+      });
+      const labels = narrow.map((l, i) => (i === 10 ? "iiiiiiiiiiii" : i === 59 ? "WWWW" : l));
+      // "WWWW" is 120px; 120 / 150 exceeds the 70% guard, while the 36px "iiiiiiiiiiii" does not.
+      expect(fitXLabels({
+        labels, plotWidth: 1200, plotHeight: 150, fontSize: 13, measure: proportional,
+      })).toEqual({ kind: "hide" });
+    });
+  });
+
+  /**
+   * The two spaces Metabase pads a label with are there to make the OVERLAP question pessimistic
+   * (`getPaddedAxisLabel`); `getMaxXTickWidth` measures the bare formatted value. Sized so the
+   * distinction is the whole answer: "Doohickeys" is 80px bare and 96px padded, and 0.7 x 120px
+   * falls between them — so padding the height guard would hide an axis that fits, and reserve 16px
+   * of room for whitespace that is never drawn. Exact `bottomPad` is safe to assert because the
+   * measurer is the stub; the real one returns zeroes under jsdom.
+   */
+  it("measures the height guard on the bare label, not the padded one", () => {
+    expect(fit(["Doohickeys", "Doohickeys", "Doohickeys", "Doohickeys"], 80, 120)).toEqual({
+      kind: "rotate", rotate: 90, bottomPad: 80,
+    });
   });
 
   it("reserves bottom padding proportional to the rotation", () => {
