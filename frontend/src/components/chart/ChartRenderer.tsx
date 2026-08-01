@@ -474,7 +474,23 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildWaterfallOption(columns, rows, { ...waterfall, columnSettings, metricTypes })} />}
+          : <EChartsRenderer
+            option={buildWaterfallOption(columns, rows, { ...waterfall, columnSettings, metricTypes })}
+            // A waterfall step IS a row, so it drills like a bar — Metabase's does, being a
+            // CartesianChart. This branch passed no handler at all, so clicking a waterfall did
+            // nothing; the same seam-level omission the pie had in the studio preview.
+            onPointClick={onValueClick && waterfall.xAxis ? (p) => {
+              // The Total is a bar the CHART invented by summing the steps; no row holds it, so
+              // `= 'Total'` would drill to nothing (or, worse, to a real category of that name).
+              // Same refusal the cartesian fold makes for its "Other".
+              if (waterfall.showTotal !== false && p.name === "Total") return;
+              const unit = params.spec.temporal_units?.[waterfall.xAxis as string];
+              const dim: DrillDim = unit
+                ? { col: waterfall.xAxis as string, value: p.name, unit }
+                : { col: waterfall.xAxis as string, value: p.name };
+              onValueClick({ dims: [dim] }, p.x, p.y);
+            } : undefined}
+          />}
       </div>
     );
   }

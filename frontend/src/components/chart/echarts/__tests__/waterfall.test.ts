@@ -93,6 +93,17 @@ describe("buildWaterfallOption", () => {
     expect(named.yAxis.name).toBeUndefined();
   });
 
+  // Metabase folds label rotation into its "Show lines and tick marks" select. egret tilted long
+  // names at 30° on a guess and had no way to be told otherwise.
+  it("takes an explicit label rotation over its own guess", () => {
+    const auto = buildWaterfallOption(cols, rows, noTotal) as any;
+    expect(auto.xAxis.axisLabel.rotate).toBe(0); // three short names: no tilt
+    const tilted = buildWaterfallOption(cols, rows, { ...noTotal, xLabelRotation: 90 }) as any;
+    expect(tilted.xAxis.axisLabel.rotate).toBe(90);
+    // A steeper tilt needs more room under the plot, or the names are clipped.
+    expect(tilted.grid.bottom).toBeGreaterThan(auto.grid.bottom);
+  });
+
   it("draws a goal line when one is set", () => {
     const opt = buildWaterfallOption(cols, rows, { ...noTotal, goalValue: 90, goalLabel: "Target" }) as any;
     expect(opt.series[1].markLine.data).toEqual([{ yAxis: 90 }]);

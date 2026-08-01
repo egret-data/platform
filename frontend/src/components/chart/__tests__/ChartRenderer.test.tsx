@@ -922,6 +922,44 @@ describe("ChartRenderer", () => {
       expect(o.yAxis!.axisLabel.formatter(1234.5)).toBe(FORMATTED);
     });
 
+    // Metabase's waterfall renders through its CartesianChart, so a step drills like a bar.
+    // egret's branch passed NO click handler, so clicking a waterfall did nothing at all — a seam
+    // omission no chart-level test can see, the same shape as the pie's in the studio preview.
+    it("drills a waterfall step by its own category", () => {
+      const onValueClick = vi.fn();
+      mockClickPayload = { name: "Q2", seriesName: "m", value: 5, x: 7, y: 8 };
+      render(
+        <ChartRenderer
+          vizType="waterfall"
+          params={params({ waterfall: { xAxis: "x", metric: "m" } })}
+          columns={[{ name: "x", type: "varchar" }, { name: "m", type: "double" }]}
+          rows={[["Q1", 10], ["Q2", 5]]}
+          onValueClick={onValueClick}
+        />,
+      );
+      fireEvent.click(screen.getAllByTestId("echarts")[0]);
+      expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "x", value: "Q2" }] }, 7, 8);
+    });
+
+    // The Total is a bar the CHART invented by summing the steps. No row holds it, so filtering
+    // `= 'Total'` drills to nothing — or to a real category of that name, which is worse because it
+    // looks like an answer.
+    it("refuses to drill the Total bar", () => {
+      const onValueClick = vi.fn();
+      mockClickPayload = { name: "Total", seriesName: "m", value: 15, x: 7, y: 8 };
+      render(
+        <ChartRenderer
+          vizType="waterfall"
+          params={params({ waterfall: { xAxis: "x", metric: "m" } })}
+          columns={[{ name: "x", type: "varchar" }, { name: "m", type: "double" }]}
+          rows={[["Q1", 10], ["Q2", 5]]}
+          onValueClick={onValueClick}
+        />,
+      );
+      fireEvent.click(screen.getAllByTestId("echarts")[0]);
+      expect(onValueClick).not.toHaveBeenCalled();
+    });
+
     it("forwards every BoxplotConfig field, and both shell settings, to the built option", () => {
       const o = optionOf(
         "boxplot",

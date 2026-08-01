@@ -218,6 +218,9 @@ export interface WaterfallConfig {
   showYLabel?: boolean;
   xAxisTicks?: boolean;
   yAxisTicks?: boolean;
+  /** Metabase folds label rotation into its "Show lines and tick marks" select. Unset lets the
+   *  chart tilt long names on its own. */
+  xLabelRotation?: 45 | 90;
   yTickCount?: number;
   yMin?: number;
   yMax?: number;

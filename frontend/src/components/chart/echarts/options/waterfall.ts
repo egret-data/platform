@@ -25,6 +25,7 @@ export interface WaterfallBuildConfig {
   showYLabel?: boolean;
   xAxisTicks?: boolean;
   yAxisTicks?: boolean;
+  xLabelRotation?: 45 | 90;
   yTickCount?: number;
   yMin?: number;
   yMax?: number;
@@ -127,9 +128,10 @@ export function buildWaterfallOption(columns: ResultColumn[], rows: unknown[][],
   const xTitle = cfg.showXLabel === false ? undefined : (cfg.xLabel ?? cfg.xAxis);
   const yTitle = cfg.showYLabel === false ? undefined : (cfg.yLabel ?? cfg.metric);
   // Long step names are unreadable upright however few of them there are — the same threshold the
-  // cartesian axis uses, so a waterfall and a bar chart of the same steps tilt together.
+  // cartesian axis uses, so a waterfall and a bar chart of the same steps tilt together. An
+  // explicit choice from the Axes tab always wins over the guess.
   const longest = categories.reduce((n, c) => Math.max(n, c.length), 0);
-  const rotate = longest > 10 && categories.length > 6 ? 30 : 0;
+  const rotate = cfg.xLabelRotation ?? (longest > 10 && categories.length > 6 ? 30 : 0);
 
   const deltaSeries: Record<string, unknown> = {
     type: "bar",
@@ -173,7 +175,8 @@ export function buildWaterfallOption(columns: ResultColumn[], rows: unknown[][],
     // reason a shared `CHART_THEME.grid` alone is not enough once titles exist.
     grid: {
       ...CHART_THEME.grid,
-      bottom: (CHART_THEME.grid.bottom as number) + (xTitle ? 22 : 0) + (rotate ? 18 : 0),
+      // A steeper tilt eats more vertical room than the 30° guess does.
+      bottom: (CHART_THEME.grid.bottom as number) + (xTitle ? 22 : 0) + (rotate >= 90 ? 44 : rotate ? 18 : 0),
       left: (CHART_THEME.grid.left as number) + (yTitle ? 26 : 0),
     },
     // The shared `axisTooltip()` reports the series' own value, and the bar's value is a MAGNITUDE
