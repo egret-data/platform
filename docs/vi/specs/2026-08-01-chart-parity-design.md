@@ -75,7 +75,14 @@ nét riêng của egret":
 ### Hạng mục 1 — option builder biết kích thước (hạ tầng)
 
 Tổng quát hoá khuôn mẫu `PieChart` đang dùng: `option` của chart trở thành **hàm của** `EChartsSize`
-đo được, thay vì một giá trị. Mở rộng cho họ cartesian, gauge, sankey và funnel.
+đo được, thay vì một giá trị. Mở rộng cho họ cartesian, gauge và sankey.
+
+**Đã đính chính 2026-08-01 khi lập kế hoạch:** bản nháp trước của mục này có kể funnel là builder thứ
+tư. Không phải — `options/funnel.ts` chỉ export `funnelSteps` và `stepOpacity`, **không có** option
+builder nào, vì funnel đã là component React vẽ hình thang từ PR #378 và không bao giờ đi qua
+`EChartsRenderer`. Nó tự đo container bằng ref, và việc đó thuộc về hạng mục 5 cùng với phần sửa cắt
+nhãn. Nhánh funnel duy nhất *có* dùng ECharts là `StepBars`, vẽ `funnel.type: "bar"` qua
+`buildCartesianOption` nên đã được phần cartesian bao phủ.
 
 Tiền lệ pie cũng kèm cảnh báo: dựng option phụ thuộc kích thước có thể chạy một lượt `measureText`
 cho từng phần tử, nên **định danh của hàm option phải ổn định** qua các lần re-render không liên

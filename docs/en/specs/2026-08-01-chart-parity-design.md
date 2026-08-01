@@ -74,8 +74,14 @@ own character":
 ### Workstream 1 — size-aware option builders (infrastructure)
 
 Generalise the pattern `PieChart` already uses: the chart's `option` becomes a function of the
-measured `EChartsSize` rather than a value. Extend it to the cartesian family, gauge, sankey and
-funnel.
+measured `EChartsSize` rather than a value. Extend it to the cartesian family, gauge and sankey.
+
+**Corrected 2026-08-01 while planning:** an earlier draft of this section named funnel as a fourth
+builder. It is not one — `options/funnel.ts` exports `funnelSteps` and `stepOpacity` and no option
+builder, because the funnel has been a React trapezoid component since PR #378 and never goes through
+`EChartsRenderer`. It measures its own container with a ref instead, and that work belongs with its
+label-truncation fix in workstream 5. The one funnel path that *is* ECharts is `StepBars`, which
+draws `funnel.type: "bar"` through `buildCartesianOption` and is covered by the cartesian change.
 
 The pie precedent also carries the warning: building a size-dependent option can run a `measureText`
 pass per element, so the option function's identity must be stable across unrelated re-renders.
