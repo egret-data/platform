@@ -954,10 +954,14 @@ function baseOption(
   // what the measurement knows and the flat 18px fallback does not. Gated on `ordinalX` because
   // this is the BOTTOM margin: a row chart's rotated labels want room on the left (which
   // `containLabel` gives them), and a value x-axis never applied the rotation in the first place.
-  // The flat fallback is 18 at any angle here, where the box plot and the waterfall reserve 44 past
-  // 90° — a pre-existing divergence, on the path a user's explicit choice takes. Task 3 is what
-  // makes that choice reachable from the panel on this chart, and is where the three should agree.
-  const xLabelPad = fit ? (fit.kind === "rotate" ? fit.bottomPad : 0) : (rotate && ordinalX ? 18 : 0);
+  // The flat fallback used to be 18 at ANY angle here where the box plot and the waterfall already
+  // reserved 44 past 90°, so the same labels at the same rotation got different room depending on
+  // the chart. Reconciled onto their ladder now that the panel can reach this path on a cartesian
+  // chart: a 90° label's footprint below the axis is its whole width, which is nothing like the
+  // 18px a 45° one needs, and 18 was simply the smaller of two guesses.
+  const xLabelPad = fit
+    ? (fit.kind === "rotate" ? fit.bottomPad : 0)
+    : (ordinalX ? (rotate >= 90 ? 44 : rotate ? 18 : 0) : 0);
 
   const categoryAxis = {
     type: "category" as const, data: categories,
@@ -997,8 +1001,10 @@ function baseOption(
   //
   // No `rotate` here, deliberately: an explicit `xLabelRotation` is a NO-OP on a value x-axis. Its
   // labels are ticks ECharts generates rather than the `categories` array, so rotating them is part
-  // of generating them, which is PR 03. Task 3 is about to ship the control that exposes this, so
-  // if someone reports the setting doing nothing on a linear or timeseries x-axis, this is why.
+  // of generating them, which is PR 03. A config can still CARRY a rotation here — one saved before
+  // the x-scale was changed to Linear — and the panel keeps showing it rather than pretending it is
+  // gone; what the panel will not do is let it be newly chosen (the two rotate options are disabled
+  // on a value x, `settings/CartesianDisplaySection.tsx`).
   const scaleAxis = {
     type: cfg.xScale === "timeseries" ? ("time" as const) : ("value" as const),
     name: xTitle, nameLocation: "middle" as const, nameGap: 28,

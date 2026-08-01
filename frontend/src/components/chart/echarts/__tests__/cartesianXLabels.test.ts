@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { buildCartesianOption } from "../options/cartesian";
+import { buildBoxplotOption } from "../options/boxplot";
+import { buildWaterfallOption } from "../options/waterfall";
 import type { fitXLabels as FitXLabels } from "../axisLabelFit";
 
 /**
@@ -163,13 +165,43 @@ describe("cartesian x-axis labels", () => {
     expect(xAxisOf(asked).axisLabel.interval).toBe(0);
   });
 
-  /** The explicit path has no measurement behind it, so the room below the axis is the flat 18px
-   *  the builder always reserved for a tilted label. The MEASURED padding (`bottomPad`, which
+  /** The explicit path has no measurement behind it, so the room below the axis is the flat guess
+   *  the builder has always reserved for a tilted label. The MEASURED padding (`bottomPad`, which
    *  scales with the widest label) cannot be reached from jsdom — see this file's header. */
   it("reserves more room below the axis when the labels rotate", () => {
     const flat = buildCartesianOption(cols, rows, { ...cfg }, { width: 1600, height: 900 }) as { grid: { bottom: number } };
     const turned = buildCartesianOption(cols, rows, { ...cfg, xLabelRotation: 90 }, { width: 1600, height: 900 }) as { grid: { bottom: number } };
     expect(turned.grid.bottom).toBeGreaterThan(flat.grid.bottom);
+  });
+
+  /**
+   * …and it reserves the SAME room the other two charts on this path do. Cartesian used to give a
+   * flat 18 at any angle where the box plot and the waterfall gave 44 past 90°, so identical labels
+   * at an identical rotation got different room depending on which chart drew them — a divergence
+   * that only became reachable from the panel when this task shipped the control. Written as an
+   * equality between the three builders rather than against the literal 44: the number is a guess,
+   * and the property worth pinning is that it is ONE guess.
+   */
+  it("reserves the same room for an explicit rotation as the box plot and the waterfall", () => {
+    const bottom = (o: unknown) => (o as { grid: { bottom: number } }).grid.bottom;
+    // No size anywhere here, which is the point: this is the unmeasured fallback on all three.
+    const pad = (rotation: 45 | 90) => ({
+      cartesian: bottom(buildCartesianOption(cols, rows, { ...cfg, xLabelRotation: rotation }))
+        - bottom(buildCartesianOption(cols, rows, cfg)),
+      boxplot: bottom(buildBoxplotOption(cols, rows, { category: "category", value: "revenue", xLabelRotation: rotation }))
+        - bottom(buildBoxplotOption(cols, rows, { category: "category", value: "revenue" })),
+      waterfall: bottom(buildWaterfallOption(cols, rows, { xAxis: "category", metric: "revenue", xLabelRotation: rotation }))
+        - bottom(buildWaterfallOption(cols, rows, { xAxis: "category", metric: "revenue" })),
+    });
+    for (const rotation of [45, 90] as const) {
+      const p = pad(rotation);
+      expect(p.cartesian).toBe(p.boxplot);
+      expect(p.cartesian).toBe(p.waterfall);
+      expect(p.cartesian).toBeGreaterThan(0);
+    }
+    // And the ladder is a ladder: a 90° label's footprint below the axis is its whole width, not
+    // the 45° one's projection, so the two rungs must not be the same number either.
+    expect(pad(90).cartesian).toBeGreaterThan(pad(45).cartesian);
   });
 
   /**

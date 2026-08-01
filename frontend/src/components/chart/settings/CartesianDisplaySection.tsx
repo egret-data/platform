@@ -8,6 +8,7 @@ import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
 import { AutoToggle } from "./AutoToggle";
+import { xTicksChoiceOf, xTicksPatch, type XTicksChoice } from "./ChartAxesSection";
 
 function Toggle({ id, label, checked, onChange }: { id: string; label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -221,13 +222,57 @@ export function AxisRangeOptions({ kind, config, onChange }: SectionProps) {
   const horiz = kind === "row" || !!config.horizontal;
   const catAx = horiz ? "Y" : "X";   // the dimension axis
   const valAx = horiz ? "X" : "Y";   // the measure axis
+  // Is the chart's x a VALUE axis rather than the ordinal category one? Mirrors `usesXScale` in
+  // echarts/options/cartesian.ts, plus the metric-vs-metric scatter, which leaves through
+  // `scatterXY` before the category axis is ever built. A horizontal chart is NOT one of these: its
+  // categories run down the left and ECharts rotates a y-axis label too, so the choice still bites.
+  const valueX = (!horiz && (config.xScale === "linear" || config.xScale === "timeseries"))
+    || (kind === "scatter" && config.xMetric != null);
   return (
     <div className="space-y-2.5">
       {kind !== "scatter" && <Toggle id="cz-log" label="Log scale" checked={!!config.logScale} onChange={(v) => onChange({ logScale: v })} />}
-      {/* Metabase's "Show lines and tick marks", one per axis. Stored as `false` only when turned
-          off, so a chart saved before these existed keeps drawing both. */}
-      <Toggle id="cz-xticks" label={`${catAx} axis lines and ticks`} checked={config.xAxisTicks !== false}
-        onChange={(v) => onChange({ xAxisTicks: v ? undefined : false })} />
+      {/* Metabase's `graph.x_axis.axis_enabled`, whose four choices this select projects onto
+          `xAxisTicks` + `xLabelRotation` through the SHARED mapping the waterfall/box-plot tab uses
+          (`xTicksChoiceOf`/`xTicksPatch`). It replaces a switch, because rotation was the part egret
+          had no way to ask for at all: the builder now measures the labels and picks an angle, and
+          without this control there was no way to overrule it.
+
+          What "Hide" hides is the axis LINE and its TICK MARKS — which is what this row is named
+          after — and NOT the labels, where Metabase's single `axis_enabled: false` drops both. The
+          divergence is pre-existing and product-wide (`xAxisTicks` means the same narrow thing on
+          waterfall, box plot and sankey today) and is deliberately left alone: widening it would
+          change what every already-saved chart with the axis off renders. Naming the row for the
+          lines and ticks rather than for the axis keeps the wording honest about the narrower
+          meaning; a label reading just "X-axis" would not be.
+
+          Stored as `false` only when turned off, so a chart saved before these existed keeps
+          drawing both. */}
+      <div className="flex items-center justify-between gap-2">
+        <Label htmlFor="cz-xticks" className="text-sm font-normal">{catAx} axis lines and ticks</Label>
+        <Select value={xTicksChoiceOf(config)} onValueChange={(v) => onChange(xTicksPatch(v as XTicksChoice))}>
+          <SelectTrigger id="cz-xticks" aria-label={`${catAx} axis lines and ticks`} className="h-7 w-28"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="hide">Hide</SelectItem>
+            <SelectItem value="show">Show</SelectItem>
+            {/* Offered but DISABLED where the rotation would be stored and then never applied: a
+                linear/timeseries x and a metric-vs-metric scatter both draw a VALUE axis, whose
+                labels are ticks ECharts generates rather than the category array, and `scaleAxis`
+                in echarts/options/cartesian.ts carries no `rotate` (rotating generated ticks means
+                generating them first, which is PR 03). Disabled rather than hidden, for two
+                reasons: a chart that stored 45° and later moved to Linear must still SHOW what it
+                stored instead of an empty trigger, and options that appear and disappear as a
+                neighbouring select changes read as a glitch rather than as a rule. */}
+            {(["rotate45", "rotate90"] as const).map((v) => (
+              <SelectItem
+                key={v} value={v} disabled={valueX}
+                title={valueX ? "Rotation applies to a category axis; this chart's x-axis is a value axis" : undefined}
+              >
+                {v === "rotate45" ? "Rotate 45°" : "Rotate 90°"}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
       {/* Only meaningful with two or more metrics on one axis to separate. Metabase gates it the
           same way, and computes the split rather than asking which metric goes where — egret's
           per-metric Axis selects still win when they name anything. */}

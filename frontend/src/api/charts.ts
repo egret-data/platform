@@ -87,6 +87,14 @@ export interface CartesianConfig {
   showXLabel?: boolean;          // Metabase "Show label" (x), separate from the label text.
   showYLabel?: boolean;          // …and the same for y.
   xAxisTicks?: boolean;          // Metabase "Show lines and tick marks" (x). Unset = shown.
+  /** An explicit category-label rotation, which SUPPRESSES the measured choice (see
+   *  `echarts/axisLabelFit.ts`): Metabase's auto-selection likewise applies only while the setting
+   *  is untouched. Metabase folds this into `graph.x_axis.axis_enabled` as one five-value key;
+   *  egret keeps two fields because waterfall, box plot and sankey already store this shape
+   *  (`settings/ChartAxesSection.tsx`), and one control storing two different shapes across the
+   *  chart module would be worse than differing from Metabase's key. The panel select is a
+   *  projection over both. */
+  xLabelRotation?: 45 | 90;
   yAxisTicks?: boolean;          // …and the same for y.
   yTickCount?: number;           // Metabase "Number of tick marks" on the value axis. Unset = auto.
   normalized?: boolean;          // 100% stacking
