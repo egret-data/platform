@@ -167,8 +167,8 @@ export function EChartsRenderer({ option, className, onPointClick, onPointHover,
     // drag-resize, many times a second. Rebuilding a function-valued option re-runs the whole
     // builder; pie is the motivating example and still the dearest (its per-slice label-fit pass
     // is real text measurement + geometry for every slice in every ring), but it is no longer the
-    // only one taking this path — the cartesian family is function-valued too. So that work is
-    // guarded on two fronts:
+    // only one taking this path — the cartesian family, the gauge and the sankey are
+    // function-valued too. So that work is guarded on two fronts:
     //  - skipped outright when the measured size hasn't actually changed (rounded to whole
     //    pixels — sub-pixel layout jitter isn't a real resize and shouldn't count as one);
     //  - otherwise coalesced to at most once per animation frame via requestAnimationFrame, so a

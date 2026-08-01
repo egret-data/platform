@@ -866,6 +866,12 @@ describe("ChartRenderer", () => {
       tooltip?: { formatter: (p: { dataType?: string; name?: string; value?: unknown }) => string };
     };
 
+    /** The viz types whose `option` prop is a FUNCTION of the measured container size rather than
+     * an already-built object — read by CALLING it with a size, the same way `cartesianOption` and
+     * `pieOption` above read theirs. Listed rather than sniffed with `typeof`, so a branch that
+     * silently reverts to a plain option object fails here instead of being quietly accommodated. */
+    const SIZE_FUNCTION_VIZ = new Set(["gauge", "sankey"]);
+
     /** Renders a viz and hands back the option that actually reached EChartsRenderer. */
     const optionOf = (vizType: "gauge" | "funnel" | "waterfall" | "boxplot" | "sankey", p: Partial<ChartParams>, columns: { name: string; type: string }[], rows: unknown[][]): Built => {
       render(
@@ -877,7 +883,9 @@ describe("ChartRenderer", () => {
           metricTypes={types}
         />,
       );
-      return mockLastOption as Built;
+      return SIZE_FUNCTION_VIZ.has(vizType)
+        ? (mockLastOption as (s: { width: number; height: number }) => Built)({ width: 640, height: 400 })
+        : (mockLastOption as Built);
     };
 
     it("forwards every GaugeConfig field, and both shell settings, to the built option", () => {

@@ -174,7 +174,9 @@ describe("EChartsRenderer highlightDataIndex", () => {
   });
 });
 
-// A function-valued `option` (pie only — see options/pie.ts's `containerSize`) needs the chart's
+// A function-valued `option` (pie was the first — see options/pie.ts's `containerSize`; the
+// cartesian family, the gauge and the sankey take the same path now, and the list grows — see
+// `EChartsOptionInput`, which deliberately does not track it) needs the chart's
 // REAL rendered pixel size, which this component is the one place with actual DOM access to
 // measure (via ResizeObserver, already used here for `chart.resize()`). These tests drive a
 // controllable ResizeObserver mock directly — jsdom has no ResizeObserver at all, and the plain

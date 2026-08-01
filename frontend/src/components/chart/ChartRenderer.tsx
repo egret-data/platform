@@ -19,11 +19,11 @@ import { PieBreakdown } from "@/components/chart/PieBreakdown";
 import { PieLegend } from "@/components/chart/PieLegend";
 import { useElementSize } from "@/components/chart/useElementSize";
 import { cn } from "@/lib/utils";
-import { buildGaugeOption } from "@/components/chart/echarts/options/gauge";
+import { buildGaugeOption, type GaugeBuildConfig } from "@/components/chart/echarts/options/gauge";
 import { FunnelChart } from "@/components/chart/FunnelChart";
 import { buildWaterfallOption } from "@/components/chart/echarts/options/waterfall";
 import { buildBoxplotOption } from "@/components/chart/echarts/options/boxplot";
-import { buildSankeyOption, sankeyProblem } from "@/components/chart/echarts/options/sankey";
+import { buildSankeyOption, sankeyProblem, type SankeyBuildConfig } from "@/components/chart/echarts/options/sankey";
 import { ChartTable, type ResultColumn } from "@/components/chart/ChartTable";
 import { PivotTable } from "@/components/chart/pivot/PivotTable";
 import { BigNumber } from "@/components/chart/BigNumber";
@@ -45,9 +45,10 @@ const NO_METRIC_TYPES: Record<string, string> = {};
 
 /**
  * The pie branch, as its own component purely so the option can be memoised: pie is one of the
- * vizzes whose `option` is a FUNCTION of the measured container size (the cartesian family too —
- * see `CartesianChart` below, which is this component's shape for the same reason), and
- * EChartsRenderer's `[option]` effect re-applies the whole option whenever that identity changes.
+ * vizzes whose `option` is a FUNCTION of the measured container size (so are the cartesian family,
+ * the gauge and the sankey — `CartesianChart`, `GaugeChart` and `SankeyChart` below all have this
+ * component's shape, for the same reason), and EChartsRenderer's `[option]` effect re-applies the
+ * whole option whenever that identity changes.
  * For pie, re-applying means re-running buildPieOption's per-slice fit pass — real canvas
  * `measureText` for every slice in every ring. Built inline in ChartRenderer, that arrow was
  * fresh on every render of whatever renders the chart (a hover, a filter chip, a sibling's
@@ -304,6 +305,77 @@ function CartesianChart({ columns, rows, cfg, onPointClick }: {
   );
 }
 
+/**
+ * The gauge branch, as its own component for the same reason `PieChart` and `CartesianChart` are
+ * ones: the `option` becomes a FUNCTION of the measured size, and `EChartsRenderer`'s `[option]`
+ * effect re-applies the whole option whenever that function's identity changes. Built inline, the
+ * arrow would be fresh on every render of whatever renders the chart — a hover, a filter chip, a
+ * sibling's state change — and each one would re-run the builder and re-apply the option.
+ *
+ * Simpler than `CartesianChart` in the one way that matters: nothing is read back off a gauge's
+ * option, so there is one memo rather than two and no `meta` to derive. There is no click handler
+ * either — a gauge draws a single value, so there is no element on it that names a row to drill to.
+ *
+ * Hooks cannot live in `ChartRenderer` itself past its early returns, so this is a component
+ * rather than a memo.
+ */
+function GaugeChart({ columns, rows, cfg }: {
+  columns: ResultColumn[];
+  rows: unknown[][];
+  cfg: GaugeBuildConfig;
+}) {
+  // A VALUE key, deliberately not an identity dep — the same treatment, for the same reason,
+  // `PieChart` and `CartesianChart` give their own configs above. `cfg` CANNOT be an identity dep:
+  // `ChartRenderer` rebuilds it from scratch on every render (`{ ...gauge, columnSettings,
+  // metricTypes }`, a fresh object each time), so `[cfg]` would memoise nothing at all while
+  // looking like it did — the component would be pure overhead and this comment a lie. Measured,
+  // not assumed: with `[cfg]` a parent render that changed nothing minted a new option identity.
+  // `cfg` is a small, flat, plain-data record; stringifying it once per render costs nothing next
+  // to the option build it saves. `columns`/`rows` stay identity deps — they're the big objects,
+  // and they come straight from the query cache, which does keep them stable between renders.
+  const cfgKey = JSON.stringify(cfg);
+  const option = useMemo(
+    () => (size: EChartsSize) => buildGaugeOption(columns, rows, cfg, size),
+    // cfgKey encodes cfg by value, so nothing here can go stale — a config edit changes the key and
+    // rebuilds. Listing `cfg` as well would defeat the point.
+    [columns, rows, cfgKey],
+  );
+  return <EChartsRenderer option={option} />;
+}
+
+/**
+ * The sankey branch, as its own component for exactly the reason `GaugeChart` above is one: its
+ * `option` is a FUNCTION of the measured size, and an inline arrow would be a fresh identity on
+ * every render of whatever renders the chart, re-running the builder and re-applying the whole
+ * option through `EChartsRenderer`'s `[option]` effect each time.
+ *
+ * Also like the gauge, and unlike `CartesianChart`: nothing is read back off the built option. The
+ * sankey DOES drill, but from what the click itself carries — an edge's `data.source`/`data.target`
+ * and a node's `name` — plus the raw rows, none of which needs the option. So the handler stays in
+ * `ChartRenderer`, where the columns and config it filters by already are, and arrives here as a
+ * plain prop. A fresh arrow per render costs nothing: `EChartsRenderer` keeps it in a ref it
+ * reassigns during render and subscribes to ECharts' click once, in its mount-only effect (see
+ * `CartesianChart.onPointClick`). Only `option` is expensive to hand over anew.
+ *
+ * Hooks cannot live in `ChartRenderer` itself past its early returns, so this is a component
+ * rather than a memo.
+ */
+function SankeyChart({ columns, rows, cfg, onPointClick }: {
+  columns: ResultColumn[];
+  rows: unknown[][];
+  cfg: SankeyBuildConfig;
+  onPointClick?: (p: EChartsPointClick) => void;
+}) {
+  // A VALUE key, not an identity dep, for the reason spelled out in `GaugeChart` above:
+  // `ChartRenderer` builds this config fresh on every render, so `[cfg]` would memoise nothing.
+  const cfgKey = JSON.stringify(cfg);
+  const option = useMemo(
+    () => (size: EChartsSize) => buildSankeyOption(columns, rows, cfg, size),
+    [columns, rows, cfgKey],
+  );
+  return <EChartsRenderer option={option} onPointClick={onPointClick} />;
+}
+
 export interface ChartRendererProps {
   vizType: VizType;
   /** Either stored shape — the config is resolved through the viz's descriptor. */
@@ -505,11 +577,16 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
   // `columnSettings` and `metricTypes` come AFTER the spread deliberately: they are the shell's,
   // not the viz's, so a stray same-named key in stored settings cannot shadow them.
   if (vizType === "gauge") {
+    // Named rather than written inline on `GaugeChart`, the way the cartesian branch names its own:
+    // this object is fresh on every render either way, which is exactly why `GaugeChart` keys its
+    // memo on its VALUE rather than its identity. Annotated, so a field that stops matching
+    // `GaugeBuildConfig` is caught here rather than silently widening the prop.
+    const gaugeCfg: GaugeBuildConfig = { ...gauge, columnSettings, metricTypes };
     return (
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildGaugeOption(columns, rows, { ...gauge, columnSettings, metricTypes })} />}
+          : <GaugeChart columns={columns} rows={rows} cfg={gaugeCfg} />}
       </div>
     );
   }
@@ -601,6 +678,8 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
     // reaches ECharts, which throws "Sankey is a DAG, the original data has cycle!" onto the card —
     // the library's own wording, naming an acronym rather than a fix.
     const sankeyIssue = sankeyProblem(columns, rows, sankey);
+    // Named for the same reason `gaugeCfg` and `cartesianCfg` are, and annotated for the same one.
+    const sankeyCfg: SankeyBuildConfig = { ...sankey, columnSettings, metricTypes };
     return (
       <div className="h-full w-full">
         {rows.length === 0
@@ -609,8 +688,10 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
             ? <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
               {sankeyIssue}
             </div>
-            : <EChartsRenderer
-              option={buildSankeyOption(columns, rows, { ...sankey, columnSettings, metricTypes })}
+            : <SankeyChart
+              columns={columns}
+              rows={rows}
+              cfg={sankeyCfg}
               // Metabase's sankey drills from both kinds of element; egret's branch passed no
               // handler at all — the third chart in a row with that gap. An EDGE names both of its
               // ends, so it filters on both columns; a NODE names only itself, and which column
