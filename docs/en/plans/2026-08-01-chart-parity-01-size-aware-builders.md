@@ -469,11 +469,32 @@ grounds that the first one explains it, because the reason is easy to undo and h
 
 Replace `<EChartsRenderer option={buildGaugeOption(columns, rows, {...})} />` with
 `<GaugeChart columns={columns} rows={rows} cfg={gaugeCfg} />`, hoisting the inline config object
-into a `const gaugeCfg` above the `return` so the memo dependency is a stable reference rather than
-a fresh object literal. Do the same for sankey.
+into a `const gaugeCfg` above the `return`. Do the same for sankey.
 
-This hoisting is the whole point: leaving the config inline would make the memo's dependency array
-change on every render and defeat the boundary that was just added.
+> **Corrected during Task 3.** An earlier version of this plan said to key the memo on
+> `[columns, rows, cfg]` and claimed that hoisting the config to a `const` made the reference
+> stable. **It does not.** `ChartRenderer` rebuilds its config from scratch on every render — for
+> cartesian, `const cartesian = { yMetrics: [], ...cfg }` at `ChartRenderer.tsx:311` — so the object
+> is fresh whether it is inline or hoisted, and `[cfg]` memoises nothing. The component would have
+> been pure overhead while its own doc comment claimed to prevent re-applies. Task 3 verified this
+> with a probe test before fixing it.
+>
+> Key on a **value**, the way `PieChart` already does in this same file
+> (`const settingsKey = JSON.stringify([pie, columnSettings, metricTypes, dimensionUnits])`,
+> `ChartRenderer.tsx:80`):
+>
+> ```ts
+> const cfgKey = JSON.stringify(cfg);
+> const option = useMemo(
+>   () => (size: EChartsSize) => buildGaugeOption(columns, rows, cfg, size),
+>   [columns, rows, cfgKey],
+> );
+> ```
+>
+> Do not assume the memo works because it compiles. Verify it: render the component inside a parent
+> with unrelated state, bump that state, and assert the option's identity is unchanged — then assert
+> the negative direction too (a config change DOES produce a new identity), so the test cannot pass
+> by memoising everything forever.
 
 - [ ] **Step 3: Typecheck and run the suite**
 
