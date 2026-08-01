@@ -1,7 +1,11 @@
 import { PieDisplaySection } from "@/components/chart/settings/PieDisplaySection";
 import { GaugeSegmentsSection } from "@/components/chart/settings/GaugeSegmentsSection";
 import { ScalarDisplaySection } from "@/components/chart/settings/ScalarDisplaySection";
-import type { GaugeSegment, PieConfig, ScalarConfig } from "@/api/charts";
+import {
+  WaterfallAxesSection, WaterfallBarsSection, WaterfallFormatSection,
+} from "@/components/chart/settings/WaterfallDisplaySection";
+import { AXES_GROUP } from "@/components/chart/StudioPanel";
+import type { GaugeSegment, PieConfig, ScalarConfig, WaterfallConfig } from "@/api/charts";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SERIES_PALETTE } from "@/components/chart/echarts/palette";
@@ -160,6 +164,30 @@ const funnelDisplay: VizControl<Cfg>[] = [
   { id: "type", section: "display", render: FunnelTypeControl },
 ];
 
+/** Metabase's waterfall has the same Data | Display | Axes panel its cartesian charts do; egret's
+ *  had no Display or Axes controls at all. `group: "Axes"` is the shell's cue to give that group
+ *  its own tab. */
+const waterfallDisplay: VizControl<Cfg>[] = [
+  {
+    id: "bars", section: "display", group: "Bars",
+    render: ({ config, onChange }: VizControlProps<Cfg>) => (
+      <WaterfallBarsSection config={config as WaterfallConfig} onChange={onChange as (p: Partial<WaterfallConfig>) => void} />
+    ),
+  },
+  {
+    id: "format", section: "display", group: "Format",
+    render: ({ config, onChange }: VizControlProps<Cfg>) => (
+      <WaterfallFormatSection config={config as WaterfallConfig} onChange={onChange as (p: Partial<WaterfallConfig>) => void} />
+    ),
+  },
+  {
+    id: "axes", section: "display", group: AXES_GROUP,
+    render: ({ config, onChange }: VizControlProps<Cfg>) => (
+      <WaterfallAxesSection config={config as WaterfallConfig} onChange={onChange as (p: Partial<WaterfallConfig>) => void} />
+    ),
+  },
+];
+
 /** The scalar's captions and conditional-colour bands. Unlike the gauge's, this control needs
  * nothing from the result — a band is compared against whatever value renders, not against the
  * columns — so it takes only the config. */
@@ -241,11 +269,11 @@ export const SIMPLE_DESCRIPTORS: VizDescriptor<Cfg>[] = [
     legacyFromSpec: (spec) => ({ dimension: spec.dimensions?.[0], metric: spec.metrics?.[0] }),
   }),
   fieldDescriptor({
-    key: "waterfall", prefix: "waterfall.", legacyKey: "waterfall",
+    key: "waterfall", prefix: "waterfall.", legacyKey: "waterfall", display: waterfallDisplay,
     fields: [
       { id: "xAxis", label: "X-axis (steps)", kind: "dimension", required: "an x-axis", temporal: true },
       { id: "metric", label: "Metric (delta)", kind: "metric", required: "a metric" },
-      { id: "showTotal", label: "Show total bar", kind: "boolean" },
+      // "Show total" is a DISPLAY choice and now lives there, beside the colour it paints the bar.
     ],
     buildSpec: (c, s, h) => h.dimsAndMetrics([c.xAxis], [c.metric], s),
     legacyFromSpec: (spec) => ({ xAxis: spec.dimensions?.[0], metric: spec.metrics?.[0] }),
