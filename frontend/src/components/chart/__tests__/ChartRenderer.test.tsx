@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import { useState } from "react";
 import { ChartRenderer } from "../ChartRenderer";
-import type { ChartParams, PieConfig } from "@/api/charts";
+import type { ChartParams, PieConfig, VizType } from "@/api/charts";
 
 // Captures the `option` prop each render passes to EChartsRenderer, so tests can assert on
 // what actually reaches the renderer — the exact seam where four settings (maxCategories,
@@ -359,6 +359,12 @@ describe("ChartRenderer", () => {
 
   // These two pin the ChartRenderer -> buildCartesianOption seam itself: every field on
   // CartesianConfig must reach the option, not just the ones someone remembered to list.
+  //
+  // Cartesian's `option` prop is a FUNCTION of the measured container size, as pie's already was,
+  // so both read it by CALLING it with a size — see `pieOption` below, which does the same.
+  const cartesianOption = <T,>(): T =>
+    (mockLastOption as (s: { width: number; height: number }) => T)({ width: 640, height: 400 });
+
   it("forwards cartesian.maxCategories through to the built option", () => {
     render(
       <ChartRenderer
@@ -368,7 +374,7 @@ describe("ChartRenderer", () => {
         rows={[["a", 10], ["b", 8], ["c", 6], ["d", 4], ["e", 2]]}
       />,
     );
-    const data = (mockLastOption as { xAxis: { data: string[] } }).xAxis.data;
+    const data = cartesianOption<{ xAxis: { data: string[] } }>().xAxis.data;
     expect(data[data.length - 1]).toBe("Other");
   });
 
@@ -387,7 +393,7 @@ describe("ChartRenderer", () => {
         rows={[["a", "A", 10], ["a", "B", 5], ["b", "A", 20], ["b", "B", 15]]}
       />,
     );
-    const names = (mockLastOption as { series: { name?: string }[] }).series.map((s) => s.name);
+    const names = cartesianOption<{ series: { name?: string }[] }>().series.map((s) => s.name);
     expect(names).not.toContain("B");
     expect(names).toContain("A");
   });
@@ -415,7 +421,8 @@ describe("ChartRenderer", () => {
           rows={pieRows}
         />,
       );
-      // Pie is the one viz whose `option` prop is a function of the measured container size.
+      // Pie's `option` prop is a function of the measured container size, so it is read by CALLING
+      // it — the same way `cartesianOption` above reads the cartesian family's.
       return (mockLastOption as (s: { width: number; height: number }) => BuiltPie)({ width: 400, height: 400 });
     };
 
@@ -790,6 +797,10 @@ describe("ChartRenderer", () => {
       const rows = [["A", 10], ["B", 30]];
       render(<Harness pie={{}} rows={rows} />);
       const first = mockLastOption;
+      // Cleared FIRST, so this cannot pass by the parent's render never reaching the chart at all —
+      // the one way "the identity survived" is true and means nothing. It was: deleting the click
+      // below left this test green until the clear was added.
+      mockLastOption = undefined;
       fireEvent.click(screen.getByTestId("bump"));
       // Same identity => EChartsRenderer's [option] effect doesn't fire => no rebuild.
       expect(mockLastOption).toBe(first);
@@ -816,6 +827,170 @@ describe("ChartRenderer", () => {
         series: { data: { name: string }[] }[];
       })({ width: 400, height: 400 });
       expect(built.series[0].data.map((d) => d.name)).toContain("C");
+    });
+  });
+
+  /**
+   * THE SAME BOUNDARY, for the three branches that grew one alongside pie's: `CartesianChart`,
+   * `GaugeChart` and `SankeyChart`. Table-driven because the argument is identical for each and
+   * only the fixture differs — pie stays written out above, since its config arrives by a different
+   * route (the whole `params`, not a prebuilt `cfg` prop) and its assertions read slices.
+   *
+   * Identity is the whole assertion because identity is the whole mechanism: `EChartsRenderer`'s
+   * `[option]` effect re-applies the ENTIRE option whenever the function's identity changes, so an
+   * inline arrow means a rebuild plus a full `setOption` on every render of whatever renders the
+   * chart — a hover, a filter chip, a sibling's state change. And a boundary that stops working is
+   * INVISIBLE: the chart still draws the right thing, just at several times the cost, so nothing
+   * short of these tests would report it. That is why they exist at all.
+   *
+   * ALL THREE DIRECTIONS ARE LOAD-BEARING, and direction 1 alone is worth nothing: a memo keyed on
+   * a constant holds one identity forever, so it sails through "parent changed nothing" while being
+   * completely wrong. Directions 2 and 3 are what say the key is made of something real. That is not
+   * a hypothetical — the dependency these boundaries ship with is the SECOND one tried. `[cfg]`
+   * memoised nothing at all, because `ChartRenderer` rebuilds every one of these configs from
+   * scratch on each render, which is exactly why `Harness` below rebuilds `params` on each of its
+   * own: a harness that hoisted `params` out would let `[cfg]` pass and pin the wrong thing.
+   *
+   * Not covered here, on purpose: `EChartsRenderer` applies the option a SECOND time on mount (its
+   * mount effect, then that same `[option]` effect's first run on the same commit — byte-identical,
+   * pre-existing, and paid by every function-valued viz). Left alone because the fix reorders shared
+   * effects for all viz types and needs its own change and test; Task 5 of the plan doc carries the
+   * mechanism. It is mount-only, so it is orthogonal to the per-render cost these tests pin.
+   */
+  describe("option identity, for the branches that grew a boundary alongside pie's", () => {
+    type Built = {
+      xAxis?: { data: string[] };
+      series: {
+        data?: unknown;
+        max?: number;
+        nodeAlign?: string;
+        links?: { source: string; target: string; value: number }[];
+      }[];
+    };
+    /** Reads a captured option the only way a size-function option CAN be read — by calling it.
+     *
+     * The cast is deliberately UNGUARDED. A branch that reverted to handing over a plain option
+     * object would still satisfy every identity assertion below (a memoised object holds its
+     * identity exactly as a memoised arrow does), and every content assertion would then read the
+     * object's own fields and quietly agree. Calling it instead means that branch dies here, with
+     * `o is not a function` — verified by mutation, not assumed. That is a side effect of how this
+     * helper reads the option, not a guard designed for the purpose; `SIZE_FUNCTION_VIZ` below is
+     * the one that states the shape on purpose. */
+    const built = (o: unknown): Built =>
+      (o as (s: { width: number; height: number }) => Built)({ width: 640, height: 400 });
+
+    /** One boundary's fixture: a base chart, a viz-setting edit, and a changed row — each of the
+     * latter two paired with what it must be VISIBLE as in the rebuilt option. Identity alone would
+     * pass for a memo that mints a fresh arrow while still closing over the old inputs, which is a
+     * stale chart with a healthy-looking test. */
+    type Boundary = {
+      what: string;
+      vizType: VizType;
+      columns: { name: string; type: string }[];
+      rows: unknown[][];
+      /** Both a different identity and different content from `rows` — direction 3 varies only it. */
+      changedRows: unknown[][];
+      base: Partial<ChartParams>;
+      edited: Partial<ChartParams>;
+      expectEdited: (o: Built) => void;
+      expectChangedRows: (o: Built) => void;
+    };
+
+    const BOUNDARIES: Boundary[] = [
+      {
+        what: "CartesianChart",
+        vizType: "bar",
+        columns: [{ name: "region", type: "varchar" }, { name: "revenue", type: "double" }],
+        rows: [["a", 10], ["b", 8], ["c", 6]],
+        changedRows: [["a", 10], ["b", 8], ["c", 6], ["d", 4]],
+        base: { cartesian: { xAxis: "region", yMetrics: ["revenue"] } },
+        edited: { cartesian: { xAxis: "region", yMetrics: ["revenue"], maxCategories: 2 } },
+        // The fold keeps the largest `maxCategories - 1` and invents "Other" for the rest, so the
+        // edit is unmistakable in the categories the builder settled on.
+        expectEdited: (o) => expect(o.xAxis!.data).toEqual(["a", "Other"]),
+        expectChangedRows: (o) => expect(o.xAxis!.data).toContain("d"),
+      },
+      {
+        what: "GaugeChart",
+        vizType: "gauge",
+        columns: [{ name: "m", type: "double" }],
+        rows: [[100]],
+        changedRows: [[500]],
+        base: { gauge: { metric: "m" } },
+        edited: { gauge: { metric: "m", segments: [{ min: 0, max: 5000, color: "#111111" }] } },
+        // Segments ARE the gauge's scale. Unset, it derives one from the value itself (100 -> 200),
+        // so a stale option reports 200 where the edited one reports 5000.
+        expectEdited: (o) => expect(o.series[0].max).toBe(5000),
+        expectChangedRows: (o) => expect(o.series[0].data).toEqual([{ value: 500 }]),
+      },
+      {
+        what: "SankeyChart",
+        vizType: "sankey",
+        columns: [
+          { name: "s", type: "varchar" }, { name: "t", type: "varchar" }, { name: "v", type: "double" },
+        ],
+        rows: [["A", "B", 3]],
+        changedRows: [["A", "B", 3], ["B", "C", 2]],
+        base: { sankey: { source: "s", target: "t", metric: "v" } },
+        edited: { sankey: { source: "s", target: "t", metric: "v", nodeAlign: "right" } },
+        expectEdited: (o) => expect(o.series[0].nodeAlign).toBe("right"),
+        expectChangedRows: (o) => expect(o.series[0].links).toHaveLength(2),
+      },
+    ];
+
+    /** Re-renders `ChartRenderer` on a state change of its own parent, as the studio and a dashboard
+     * card do. `params` is rebuilt on EVERY render deliberately — that is what every real call site
+     * does (ChartExplore's `previewParams()` spreads a fresh object, the dashboard's
+     * `applyVizOverride()` returns a new one), and it is the condition under which an identity
+     * dependency on the config memoises nothing while looking like it does. `columns` and `rows`
+     * come in by prop, so they stay identity-stable unless a test varies them — as the query cache
+     * keeps them in production. */
+    function Harness({ b, cfg, rows }: { b: Boundary; cfg: "base" | "edited"; rows: unknown[][] }) {
+      const [, bump] = useState(0);
+      return (
+        <>
+          <button data-testid="bump" onClick={() => bump((n) => n + 1)} />
+          <ChartRenderer
+            vizType={b.vizType}
+            params={params(cfg === "base" ? b.base : b.edited)}
+            columns={b.columns}
+            rows={rows}
+          />
+        </>
+      );
+    }
+
+    BOUNDARIES.forEach((b) => {
+      describe(b.what, () => {
+        it("keeps the same option across a parent render that changed nothing", () => {
+          render(<Harness b={b} cfg="base" rows={b.rows} />);
+          const first = mockLastOption;
+          // Cleared FIRST, so the assertion below cannot pass by the parent's render never reaching
+          // the chart at all — the one way "the identity survived" is true and means nothing. It
+          // has to arrive again, and be the same one.
+          mockLastOption = undefined;
+          fireEvent.click(screen.getByTestId("bump"));
+          // Same identity => EChartsRenderer's [option] effect doesn't fire => no rebuild, no
+          // re-apply. This is the assertion an inlined arrow, or a dep list back on `[cfg]`, fails.
+          expect(mockLastOption).toBe(first);
+        });
+
+        it("rebuilds the option when a viz setting changes", () => {
+          const { rerender } = render(<Harness b={b} cfg="base" rows={b.rows} />);
+          const first = mockLastOption;
+          rerender(<Harness b={b} cfg="edited" rows={b.rows} />);
+          expect(mockLastOption).not.toBe(first);
+          b.expectEdited(built(mockLastOption));
+        });
+
+        it("rebuilds the option when the rows change", () => {
+          const { rerender } = render(<Harness b={b} cfg="base" rows={b.rows} />);
+          const first = mockLastOption;
+          rerender(<Harness b={b} cfg="base" rows={b.changedRows} />);
+          expect(mockLastOption).not.toBe(first);
+          b.expectChangedRows(built(mockLastOption));
+        });
+      });
     });
   });
 
@@ -859,8 +1034,30 @@ describe("ChartRenderer", () => {
       tooltip?: { formatter: (p: { dataType?: string; name?: string; value?: unknown }) => string };
     };
 
+    /** The viz types this seam covers, spelled once so the set below and `optionOf` cannot disagree
+     * about them — and so a typo in either is a compile error rather than a runtime shape error. */
+    type SeamViz = "gauge" | "funnel" | "waterfall" | "boxplot" | "sankey";
+
+    /** The viz types whose `option` prop is a FUNCTION of the measured container size rather than
+     * an already-built object — read by CALLING it with a size, the same way `cartesianOption` and
+     * `pieOption` above read theirs.
+     *
+     * LISTED, deliberately, rather than sniffed with `typeof`. A sniff would be self-healing
+     * against the exact regression this guards: `buildGaugeOption` and `buildSankeyOption` ignore
+     * their size argument today, so a branch reverting to a plain option object produces a
+     * byte-identical option and every content assertion below still passes.
+     *
+     * The identity block above also dies on such a branch — `built()` calls the captured option
+     * with the cast unguarded, so it throws `o is not a function` — but that is a side effect of
+     * how it reads the option rather than a guard, and it covers only the three vizzes that have a
+     * memo boundary. This list is the one place that states the shape ON PURPOSE, and the only
+     * cover for a viz that gains a size-function option without gaining an identity test.
+     * (Measured, both halves: pointing `GaugeChart` at a plain memoised object fails three tests —
+     * this one, and the gauge's two content directions above.) */
+    const SIZE_FUNCTION_VIZ = new Set<SeamViz>(["gauge", "sankey"]);
+
     /** Renders a viz and hands back the option that actually reached EChartsRenderer. */
-    const optionOf = (vizType: "gauge" | "funnel" | "waterfall" | "boxplot" | "sankey", p: Partial<ChartParams>, columns: { name: string; type: string }[], rows: unknown[][]): Built => {
+    const optionOf = (vizType: SeamViz, p: Partial<ChartParams>, columns: { name: string; type: string }[], rows: unknown[][]): Built => {
       render(
         <ChartRenderer
           vizType={vizType}
@@ -870,7 +1067,9 @@ describe("ChartRenderer", () => {
           metricTypes={types}
         />,
       );
-      return mockLastOption as Built;
+      return SIZE_FUNCTION_VIZ.has(vizType)
+        ? (mockLastOption as (s: { width: number; height: number }) => Built)({ width: 640, height: 400 })
+        : (mockLastOption as Built);
     };
 
     it("forwards every GaugeConfig field, and both shell settings, to the built option", () => {

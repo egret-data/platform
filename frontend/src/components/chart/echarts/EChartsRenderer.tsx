@@ -55,12 +55,18 @@ export interface EChartsPointHover {
 
 export interface EChartsSize { width: number; height: number }
 
-/** `option` is normally a plain, already-built ECharts option object — every chart type except
- * pie. Pie is the one builder (see options/pie.ts's `containerSize`) that needs the chart's REAL
- * rendered pixel size to fit its slice labels correctly, and this component is the only place
- * with actual DOM access to measure that — so it ALSO accepts a function, called with the
- * measured size on init and again whenever the observed size changes, and expected to return the
- * option built against that size. */
+/** `option` is either a plain, already-built ECharts option object or a FUNCTION of the chart's
+ * measured size. The function form exists for the builders that need the REAL rendered pixel size
+ * to lay themselves out — pie, to fit its slice labels (see options/pie.ts's `containerSize`), and
+ * the cartesian family, which is handed its size for the axis-label decision it will make from it
+ * (UNREAD today: `rotate` is still guessed from label count and length — see
+ * `buildCartesianOption`'s `_size`, and `__tests__/sizeAware.test.ts`, which pins that passing a
+ * size changes nothing yet). This component is the only place with actual DOM access to measure
+ * that, so it accepts the function and calls it with the measured size on init and again whenever
+ * the observed size changes, expecting the option built against that size back.
+ *
+ * The list of function-valued builders grows; nothing here needs to know which they are, since
+ * `resolveOption` branches on `typeof` rather than on chart type. */
 export type EChartsOptionInput = EChartsCoreOption | ((size: EChartsSize) => EChartsCoreOption);
 
 /**
@@ -158,9 +164,11 @@ export function EChartsRenderer({ option, className, onPointClick, onPointHover,
     chart.on("mouseout", "series", () => hoverRef.current?.(null));
 
     // A ResizeObserver tick fires on every layout change — including, during an active
-    // drag-resize, many times a second. Rebuilding a function-valued option re-runs pie's whole
-    // per-slice label-fit pass (real text measurement + geometry for every slice), so that work
-    // is guarded on two fronts:
+    // drag-resize, many times a second. Rebuilding a function-valued option re-runs the whole
+    // builder; pie is the motivating example and still the dearest (its per-slice label-fit pass
+    // is real text measurement + geometry for every slice in every ring), but it is no longer the
+    // only one taking this path — the cartesian family, the gauge and the sankey are
+    // function-valued too. So that work is guarded on two fronts:
     //  - skipped outright when the measured size hasn't actually changed (rounded to whole
     //    pixels — sub-pixel layout jitter isn't a real resize and shouldn't count as one);
     //  - otherwise coalesced to at most once per animation frame via requestAnimationFrame, so a
