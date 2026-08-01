@@ -66,8 +66,13 @@ async fn create_service(pool: &sqlx::PgPool) -> i64 {
     .execute(pool)
     .await
     .expect("insert service-def");
+    // `authz_services.type` is a FOREIGN KEY onto `authz_service_defs(name)`, so the service must
+    // name the def this function just created. It said 'trino', which no migration seeds — the row
+    // only ever existed because some OTHER test had called `upsert_service_def` against the same
+    // database first. That made this test pass on a developer's accumulated database and on a
+    // `--workspace` run where the other binary happened to go first, and fail on a clean one.
     sqlx::query_scalar(
-        "INSERT INTO policy.authz_services (name, type, config_jsonb) VALUES ($1,'trino','{}'::jsonb) RETURNING id",
+        "INSERT INTO policy.authz_services (name, type, config_jsonb) VALUES ($1,'trino_tv','{}'::jsonb) RETURNING id",
     )
     .bind(format!("trino_tv_{}", Uuid::new_v4().simple()))
     .fetch_one(pool)

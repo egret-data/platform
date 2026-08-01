@@ -40,6 +40,11 @@ pub struct TagAssignmentRow {
     pub tag_name: String,
 }
 
+/// Postgres' `23505 unique_violation`, whichever index raised it.
+fn is_unique_violation(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
+}
+
 impl PolicyStore {
     pub fn new(db: Db) -> Self {
         Self { db }
@@ -52,15 +57,37 @@ impl PolicyStore {
         name: &str,
         def: &Value,
     ) -> Result<(), PolicyStoreError> {
-        sqlx::query(
-            r#"INSERT INTO policy.authz_service_defs (id, name, def_jsonb) VALUES ($1,$2,$3)
-               ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, def_jsonb = EXCLUDED.def_jsonb"#,
-        )
-        .bind(id)
-        .bind(name)
-        .bind(def)
-        .execute(&self.db.pool)
-        .await?;
+        // `authz_service_defs` has TWO unique constraints — the `id` primary key and a unique
+        // `name` — and `ON CONFLICT (id)` names only the first as its arbiter. A violation on the
+        // OTHER index is not absorbed by the DO UPDATE; Postgres raises it.
+        //
+        // That is reachable whenever two callers seed the same def at once: each engine runs this
+        // at startup, and three test binaries run it in parallel against one database. The loser
+        // inserts a row whose `id` is not yet visible to it but whose `name` collides on the index,
+        // and gets `23505 authz_service_defs_name_key`. Reproduced locally by running those three
+        // binaries concurrently — it fails roughly one round in four.
+        //
+        // Retrying is the whole fix: this is an IDEMPOTENT SEED, so a concurrent caller having
+        // already written the row is the desired end state, and by the second attempt that row has
+        // committed and `ON CONFLICT (id)` absorbs it. One retry is enough — the race is with a
+        // transaction that is already committing, not an unbounded stream of writers.
+        for attempt in 0..2 {
+            let result = sqlx::query(
+                r#"INSERT INTO policy.authz_service_defs (id, name, def_jsonb) VALUES ($1,$2,$3)
+                   ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, def_jsonb = EXCLUDED.def_jsonb"#,
+            )
+            .bind(id)
+            .bind(name)
+            .bind(def)
+            .execute(&self.db.pool)
+            .await;
+
+            match result {
+                Ok(_) => return Ok(()),
+                Err(e) if attempt == 0 && is_unique_violation(&e) => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
         Ok(())
     }
 
