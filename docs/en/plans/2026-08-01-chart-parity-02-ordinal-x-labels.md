@@ -227,7 +227,7 @@ export function fitXLabels({
   const upright: XLabelFit = { kind: "show", rotate: 0, bottomPad: 0 };
   if (labels.length === 0 || plotWidth <= 0) return upright;
 
-  const style = { size: fontSize, family: "inherit", weight: 400 } as const;
+  const style = { size: fontSize, family: resolveFontFamily(), weight: CHART_THEME.axisWeight } as const;
   const widths = sample(labels, TICKS_TO_MEASURE).map((l) => measure(pad(l), style).width);
   const dimensionWidth = plotWidth / labels.length;
 
@@ -361,7 +361,7 @@ In `cartesian.ts`, just above the current `rotate` computation, add a helper tha
 function estimatePlotWidth(size: EChartsSize, widestValueLabel: string, hasAxisTitle: boolean): number {
   const g = CHART_THEME.grid;
   const gutter = measureText(widestValueLabel, {
-    size: CHART_THEME.axisFontSize, family: "inherit", weight: 400,
+    size: CHART_THEME.axisFontSize, family: resolveFontFamily(), weight: CHART_THEME.axisWeight,
   }).width;
   return size.width - (g.left as number) - (g.right as number) - gutter - (hasAxisTitle ? 26 : 0);
 }
