@@ -831,10 +831,11 @@ describe("ChartRenderer", () => {
   });
 
   /**
-   * THE SAME BOUNDARY, for the three branches that grew one alongside pie's: `CartesianChart`,
-   * `GaugeChart` and `SankeyChart`. Table-driven because the argument is identical for each and
-   * only the fixture differs — pie stays written out above, since its config arrives by a different
-   * route (the whole `params`, not a prebuilt `cfg` prop) and its assertions read slices.
+   * THE SAME BOUNDARY, for the five branches that grew one alongside pie's: `CartesianChart`,
+   * `GaugeChart`, `WaterfallChart`, `BoxplotChart` and `SankeyChart`. Table-driven because the
+   * argument is identical for each and only the fixture differs — pie stays written out above,
+   * since its config arrives by a different route (the whole `params`, not a prebuilt `cfg` prop)
+   * and its assertions read slices.
    *
    * Identity is the whole assertion because identity is the whole mechanism: `EChartsRenderer`'s
    * `[option]` effect re-applies the ENTIRE option whenever the function's identity changes, so an
@@ -922,6 +923,34 @@ describe("ChartRenderer", () => {
         // so a stale option reports 200 where the edited one reports 5000.
         expectEdited: (o) => expect(o.series[0].max).toBe(5000),
         expectChangedRows: (o) => expect(o.series[0].data).toEqual([{ value: 500 }]),
+      },
+      {
+        what: "WaterfallChart",
+        vizType: "waterfall",
+        columns: [{ name: "step", type: "varchar" }, { name: "delta", type: "double" }],
+        rows: [["Q1", 10], ["Q2", -4]],
+        changedRows: [["Q1", 10], ["Q2", -4], ["Q3", 7]],
+        base: { waterfall: { xAxis: "step", metric: "delta" } },
+        edited: { waterfall: { xAxis: "step", metric: "delta", showTotal: false } },
+        // The Total is a category the BUILDER invents by summing the steps, so turning it off is
+        // visible in the axis itself — a stale option still carries it.
+        expectEdited: (o) => expect(o.xAxis!.data).toEqual(["Q1", "Q2"]),
+        expectChangedRows: (o) => expect(o.xAxis!.data).toContain("Q3"),
+      },
+      {
+        what: "BoxplotChart",
+        vizType: "boxplot",
+        columns: [{ name: "grp", type: "varchar" }, { name: "v", type: "double" }],
+        // Group B carries an outlier ON PURPOSE: the two whisker types agree on any group without
+        // one, so a tidier fixture would make the edit invisible and the assertion below vacuous.
+        rows: [["A", 1], ["A", 3], ["B", 5], ["B", 5], ["B", 5], ["B", 5], ["B", 100]],
+        changedRows: [["A", 1], ["A", 3], ["B", 5], ["B", 5], ["B", 5], ["B", 5], ["B", 100], ["C", 2]],
+        base: { boxplot: { category: "grp", value: "v" } },
+        edited: { boxplot: { category: "grp", value: "v", whiskers: "min-max" as const } },
+        // Whisker type IS the box's five numbers. Tukey excludes B's 100 and pulls the upper
+        // whisker back to the quartile ([5, 5, 5, 5, 5]); min/max reaches the extreme.
+        expectEdited: (o) => expect((o.series[0].data as number[][])[1]).toEqual([5, 5, 5, 5, 100]),
+        expectChangedRows: (o) => expect(o.xAxis!.data).toContain("C"),
       },
       {
         what: "SankeyChart",
@@ -1045,16 +1074,19 @@ describe("ChartRenderer", () => {
      * LISTED, deliberately, rather than sniffed with `typeof`. A sniff would be self-healing
      * against the exact regression this guards: `buildGaugeOption` and `buildSankeyOption` ignore
      * their size argument today, so a branch reverting to a plain option object produces a
-     * byte-identical option and every content assertion below still passes.
+     * byte-identical option and every content assertion below still passes. The waterfall and the
+     * box plot DO read theirs now, but only for the x-axis label decision (`interval`, `rotate`,
+     * `show`, `grid.bottom`) — none of which any assertion in this block reads either, so the same
+     * self-healing would apply to them.
      *
      * The identity block above also dies on such a branch — `built()` calls the captured option
      * with the cast unguarded, so it throws `o is not a function` — but that is a side effect of
-     * how it reads the option rather than a guard, and it covers only the three vizzes that have a
-     * memo boundary. This list is the one place that states the shape ON PURPOSE, and the only
-     * cover for a viz that gains a size-function option without gaining an identity test.
+     * how it reads the option rather than a guard, and it covers only the vizzes that have a memo
+     * boundary. This list is the one place that states the shape ON PURPOSE, and the only cover for
+     * a viz that gains a size-function option without gaining an identity test.
      * (Measured, both halves: pointing `GaugeChart` at a plain memoised object fails three tests —
      * this one, and the gauge's two content directions above.) */
-    const SIZE_FUNCTION_VIZ = new Set<SeamViz>(["gauge", "sankey"]);
+    const SIZE_FUNCTION_VIZ = new Set<SeamViz>(["gauge", "sankey", "waterfall", "boxplot"]);
 
     /** Renders a viz and hands back the option that actually reached EChartsRenderer. */
     const optionOf = (vizType: SeamViz, p: Partial<ChartParams>, columns: { name: string; type: string }[], rows: unknown[][]): Built => {

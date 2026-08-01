@@ -21,8 +21,8 @@ import { useElementSize } from "@/components/chart/useElementSize";
 import { cn } from "@/lib/utils";
 import { buildGaugeOption, type GaugeBuildConfig } from "@/components/chart/echarts/options/gauge";
 import { FunnelChart } from "@/components/chart/FunnelChart";
-import { buildWaterfallOption } from "@/components/chart/echarts/options/waterfall";
-import { buildBoxplotOption } from "@/components/chart/echarts/options/boxplot";
+import { buildWaterfallOption, type WaterfallBuildConfig } from "@/components/chart/echarts/options/waterfall";
+import { buildBoxplotOption, type BoxplotBuildConfig } from "@/components/chart/echarts/options/boxplot";
 import { buildSankeyOption, sankeyProblem, type SankeyBuildConfig } from "@/components/chart/echarts/options/sankey";
 import { ChartTable, type ResultColumn } from "@/components/chart/ChartTable";
 import { PivotTable } from "@/components/chart/pivot/PivotTable";
@@ -378,6 +378,86 @@ function SankeyChart({ columns, rows, cfg, onPointClick }: {
   return <EChartsRenderer option={option} onPointClick={onPointClick} />;
 }
 
+/**
+ * The waterfall branch, as its own component for exactly the reason `GaugeChart` and `SankeyChart`
+ * above are ones: its `option` became a FUNCTION of the measured size when the builder started
+ * deciding its x-axis label treatment from the width (`echarts/axisLabelFit.ts`), and an inline
+ * arrow would be a fresh identity on every render of whatever renders the chart — re-running the
+ * builder and re-applying the WHOLE option through `EChartsRenderer`'s `[option]` effect each time.
+ *
+ * Like the sankey and unlike `CartesianChart`, nothing is read back off the built option: a
+ * waterfall step drills from what the click itself carries (`p.name`), so the handler stays in
+ * `ChartRenderer` beside the columns and config it filters by and arrives here as a plain prop. A
+ * fresh arrow per render costs nothing there — `EChartsRenderer` keeps it in a ref it reassigns
+ * during render and subscribes to ECharts' click once, in its mount-only effect.
+ *
+ * Hooks cannot live in `ChartRenderer` itself past its early returns, so this is a component
+ * rather than a memo.
+ */
+function WaterfallChart({ columns, rows, cfg, onPointClick }: {
+  columns: ResultColumn[];
+  rows: unknown[][];
+  cfg: WaterfallBuildConfig;
+  onPointClick?: (p: EChartsPointClick) => void;
+}) {
+  // A VALUE key, not an identity dep, for the reason spelled out in `GaugeChart` above:
+  // `ChartRenderer` builds this config fresh on every render, so `[cfg]` would memoise nothing.
+  const cfgKey = JSON.stringify(cfg);
+  const option = useMemo(
+    () => (size: EChartsSize) => buildWaterfallOption(columns, rows, cfg, size),
+    [columns, rows, cfgKey],
+  );
+  return <EChartsRenderer option={option} onPointClick={onPointClick} />;
+}
+
+/**
+ * The box plot branch, as its own component for the same reason `WaterfallChart` above is one: its
+ * `option` became a FUNCTION of the measured size when the builder started deciding its x-axis
+ * label treatment from the width, and an inline arrow would re-run the builder and re-apply the
+ * whole option on every render of whatever renders the chart.
+ *
+ * Shaped like `CartesianChart` rather than like the waterfall in one way: the drill needs something
+ * read back off a BUILD, so there are two memos on the same key. A `boxplot` element reports no
+ * usable `name`, so the clicked category has to come from `xAxis.data[dataIndex]` — and a
+ * size-function option cannot be read, only called, so the categories come from a second,
+ * SIZE-LESS build. That build is the cheap one: the size changes only the x-axis label decision
+ * (`interval`, `rotate`, `show` and the bottom margin), never `xAxis.data`, so which size it was
+ * built at is immaterial to the answer, and passing none keeps this memo independent of the
+ * container. Reading them back rather than regrouping the rows here is deliberate — the grouping
+ * rules (insertion order, non-finite values skipped) live in the builder and would be a second
+ * copy to drift.
+ *
+ * Hooks cannot live in `ChartRenderer` itself past its early returns, so this is a component
+ * rather than a memo.
+ */
+function BoxplotChart({ columns, rows, cfg, onPointClick }: {
+  columns: ResultColumn[];
+  rows: unknown[][];
+  cfg: BoxplotBuildConfig;
+  /** Handed the categories this component derived — see the second memo below. */
+  onPointClick?: (p: EChartsPointClick, categories: string[]) => void;
+}) {
+  // A VALUE key, not an identity dep, for the reason spelled out in `GaugeChart` above:
+  // `ChartRenderer` builds this config fresh on every render, so `[cfg]` would memoise nothing.
+  const cfgKey = JSON.stringify(cfg);
+  const option = useMemo(
+    () => (size: EChartsSize) => buildBoxplotOption(columns, rows, cfg, size),
+    // cfgKey encodes cfg by value, so nothing here can go stale — a config edit changes the key and
+    // rebuilds. Listing `cfg` as well would defeat the point.
+    [columns, rows, cfgKey],
+  );
+  const categories = useMemo(
+    () => (buildBoxplotOption(columns, rows, cfg) as { xAxis?: { data?: string[] } }).xAxis?.data ?? [],
+    [columns, rows, cfgKey],
+  );
+  return (
+    <EChartsRenderer
+      option={option}
+      onPointClick={onPointClick && ((p) => onPointClick(p, categories))}
+    />
+  );
+}
+
 export interface ChartRendererProps {
   vizType: VizType;
   /** Either stored shape — the config is resolved through the viz's descriptor. */
@@ -605,12 +685,20 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
   }
 
   if (vizType === "waterfall") {
+    // Named rather than written inline on `WaterfallChart`, the way the gauge and sankey branches
+    // name their own: this object is fresh on every render either way, which is exactly why
+    // `WaterfallChart` keys its memo on its VALUE rather than its identity. Annotated, so a field
+    // that stops matching `WaterfallBuildConfig` is caught here rather than silently widening the
+    // prop.
+    const waterfallCfg: WaterfallBuildConfig = { ...waterfall, columnSettings, metricTypes };
     return (
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer
-            option={buildWaterfallOption(columns, rows, { ...waterfall, columnSettings, metricTypes })}
+          : <WaterfallChart
+            columns={columns}
+            rows={rows}
+            cfg={waterfallCfg}
             // A waterfall step IS a row, so it drills like a bar — Metabase's does, being a
             // CartesianChart. This branch passed no handler at all, so clicking a waterfall did
             // nothing; the same seam-level omission the pie had in the studio preview.
@@ -649,19 +737,22 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
   }
 
   if (vizType === "boxplot") {
-    const boxOption = buildBoxplotOption(columns, rows, { ...box, columnSettings, metricTypes });
-    // The categories the builder settled on, read back rather than recomputed — a box's own
-    // `dataIndex` and a point's `data[0]` are both indexes into this list.
-    const boxCategories = ((boxOption as { xAxis?: { data?: string[] } }).xAxis?.data ?? []);
+    // Named for the same reason `gaugeCfg` and `waterfallCfg` are, and annotated for the same one.
+    const boxCfg: BoxplotBuildConfig = { ...box, columnSettings, metricTypes };
     return (
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer
-            option={boxOption}
+          : <BoxplotChart
+            columns={columns}
+            rows={rows}
+            cfg={boxCfg}
             // Metabase's box plot drills; egret's branch passed no handler, so clicking a box did
-            // nothing. A box IS a category, and so is the point drawn above it.
-            onPointClick={onValueClick && box.category ? (p) => {
+            // nothing. A box IS a category, and so is the point drawn above it. The categories the
+            // builder settled on arrive from `BoxplotChart`, read back off a build rather than
+            // recomputed — a box's own `dataIndex` and a point's `data[0]` are both indexes into
+            // that list.
+            onPointClick={onValueClick && box.category ? (p, boxCategories) => {
               const i = Array.isArray(p.data) ? Number((p.data as unknown[])[0]) : p.dataIndex;
               const value = boxCategories[i ?? -1] ?? p.name;
               if (value == null) return;

@@ -11,7 +11,8 @@
  * this module answers it from a width: draw all of them, rotate all of them, or hide the axis.
  */
 
-import { measureText as realMeasureText, type TextMeasurer } from "@/components/chart/measure-text";
+import { measureText, type TextMeasurer } from "@/components/chart/measure-text";
+import type { EChartsSize } from "./EChartsRenderer";
 import { CHART_THEME, resolveFontFamily } from "./palette";
 
 export type XLabelFit =
@@ -63,6 +64,59 @@ const TICKS_TO_MEASURE = 50;
  *  comment is "in some cases we render labels with extra spaces, so we have to be pessimistic". */
 const pad = (label: string) => ` ${label} `;
 
+/**
+ * The width the categories share, estimated — the `plotWidth` every caller of `fitXLabels` below
+ * passes, and the one number the whole ladder turns on.
+ *
+ * `CHART_THEME.grid` sets `containLabel: true` (`palette.ts`), so ECharts — not the builder —
+ * decides the real plot box, and it picks the value-axis ticks that eat into it. Neither is
+ * knowable here. The grid insets are ours; the gutter is approximated by formatting the widest
+ * datum through the same formatter the axis uses, which is why the caller passes a STRING it has
+ * already formatted rather than a number.
+ *
+ * WHICH WAY IT ERRS. It leans UNDER in the common case, and that is the direction to prefer: too
+ * small and we call a collision that would not have happened, rotating labels that would have
+ * fitted — mildly ugly, still readable. But it is known to lean OVER in three cases, and an
+ * over-estimate is not harmless, so they are named rather than waved at:
+ *
+ *   1. ECharts extends a value axis PAST the data to a round number. A max of 9,700 gives a top
+ *      tick of "10,000" — six characters where five were measured. (This is why there is no claim
+ *      here that a tick cannot format wider than the extent: it can, and routinely does.)
+ *   2. A dual-axis chart has a SECOND gutter on the right, and only one is subtracted. At 40-50px
+ *      against a ~270px estimate that is the most material of the three. Cartesian only — the box
+ *      plot and the waterfall each draw a single value axis — and `rightSide` is in scope at that
+ *      call site if it is ever fixed.
+ *   3. The caller's widest datum is an ABSOLUTE magnitude on all three charts, so a leading minus
+ *      sign is not counted.
+ *
+ * WHAT AN OVER-ESTIMATE COSTS, stated exactly, because it is no longer what it was before this
+ * change: once a fit exists the axis is `decided` and `interval` is `0`, so ECharts can no longer
+ * drop anything. The failure is now every label drawn upright and OVERLAPPING its neighbour, not
+ * labels silently missing. Different look, different diagnosis — that is what to watch for when
+ * comparing against Metabase, and if it appears, this estimate is what to tighten.
+ *
+ * Do not "improve" this by turning `containLabel` off and computing the grid explicitly. That is
+ * Metabase's design and it is defensible, but it moves the margins of every cartesian chart in the
+ * product and belongs in its own change with its own before/after.
+ *
+ * SHARED, not copied per builder: cartesian, the box plot and the waterfall lay out the same grid
+ * from the same `CHART_THEME.grid` and reserve the same 26px for a value-axis title, so three
+ * copies of this arithmetic would be three places for it to drift from the grid it is meant to
+ * mirror.
+ */
+export function estimatePlotWidth(size: EChartsSize, widestValueLabel: string, hasAxisTitle: boolean): number {
+  const g = CHART_THEME.grid;
+  // The family the chart is actually DRAWN in, never the literal "inherit": a CSS-wide keyword is
+  // not a legal family in the `font` shorthand, so the canvas would reject the whole declaration
+  // and measure at its 10px sans-serif default. Same rule, and the same reason, as `fitXLabels`.
+  const gutter = measureText(widestValueLabel, {
+    size: CHART_THEME.axisFontSize, family: resolveFontFamily(), weight: CHART_THEME.axisWeight,
+  }).width;
+  // `26` is the room each builder's `grid.left` reserves for a value-axis title, kept in step with
+  // it — all three add exactly that when their value axis is named.
+  return size.width - (g.left as number) - (g.right as number) - gutter - (hasAxisTitle ? 26 : 0);
+}
+
 /** At most `n` indices spread evenly over `count`, endpoints included — Metabase's
  *  `getEvenlySpacedIndices` (which builds the same set through a `Set`, so it can return fewer
  *  than `n`; the short case returns early here instead, which is the same answer without the
@@ -91,7 +145,7 @@ export function fitXLabels({
   plotWidth,
   outerHeight,
   fontSize = CHART_THEME.axisFontSize,
-  measure = realMeasureText,
+  measure = measureText,
 }: {
   labels: string[];
   /** The drawable width the categories share — INNER, after the grid insets and the value-axis
@@ -99,7 +153,7 @@ export function fitXLabels({
    *  erring small rotates a label that would have fitted, which is mildly ugly and still readable.
    *  Erring large leaves labels upright that should have turned — and since a fit makes the axis
    *  `decided` (`interval: 0`), they are then drawn OVERLAPPING rather than dropped. See
-   *  `estimatePlotWidth` in `options/cartesian.ts` for the three cases where it does lean over. */
+   *  `estimatePlotWidth` above for the three cases where it does lean over. */
   plotWidth: number;
   /** The container's height, Metabase's `outerHeight` — deliberately NOT the inner counterpart of
    *  `plotWidth`, which is why it is not called `plotHeight`. The 70% guard is a share of the whole

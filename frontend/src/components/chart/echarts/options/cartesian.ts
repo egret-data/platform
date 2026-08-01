@@ -5,11 +5,10 @@ import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue } from "../../format";
 import { ariaDescription, baseTextStyle, tooltipSurface } from "../base";
-import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, resolveFontFamily, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
+import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
 import { foldTail, OTHER_LABEL } from "../fold";
-import { fitXLabels, type XLabelFit } from "../axisLabelFit";
-import { measureText } from "@/components/chart/measure-text";
+import { estimatePlotWidth, fitXLabels, type XLabelFit } from "../axisLabelFit";
 
 export interface ResultColumn { name: string; type: string }
 export interface CartesianBuildConfig {
@@ -830,49 +829,6 @@ function decorateSeries(
     if (cfg.labelDensity !== "all") out.labelLayout = { hideOverlap: true };
   }
   return out;
-}
-
-/**
- * The width the categories share, estimated.
- *
- * `CHART_THEME.grid` sets `containLabel: true` (`palette.ts`), so ECharts — not this builder —
- * decides the real plot box, and it picks the value-axis ticks that eat into it. Neither is
- * knowable here. The grid insets are ours; the gutter is approximated by formatting the widest
- * datum through the same formatter the axis uses.
- *
- * WHICH WAY IT ERRS. It leans UNDER in the common case, and that is the direction to prefer: too
- * small and we call a collision that would not have happened, rotating labels that would have
- * fitted — mildly ugly, still readable. But it is known to lean OVER in three cases, and an
- * over-estimate is not harmless, so they are named rather than waved at:
- *
- *   1. ECharts extends a value axis PAST the data to a round number. A max of 9,700 gives a top
- *      tick of "10,000" — six characters where five were measured. (This is why there is no claim
- *      here that a tick cannot format wider than the extent: it can, and routinely does.)
- *   2. A dual-axis chart has a SECOND gutter on the right, and only one is subtracted. At 40-50px
- *      against a ~270px estimate that is the most material of the three. `rightSide` is in scope
- *      at the call site if this is ever fixed.
- *   3. `widestOf` takes the widest ABSOLUTE datum, so a leading minus sign is not counted.
- *
- * WHAT AN OVER-ESTIMATE COSTS, stated exactly, because it is no longer what it was before this
- * change: once a fit exists the axis is `decided` and `interval` is `0`, so ECharts can no longer
- * drop anything. The failure is now every label drawn upright and OVERLAPPING its neighbour, not
- * labels silently missing. Different look, different diagnosis — that is what to watch for when
- * comparing against Metabase, and if it appears, this estimate is what to tighten.
- *
- * Do not "improve" this by turning `containLabel` off and computing the grid explicitly. That is
- * Metabase's design and it is defensible, but it moves the margins of every cartesian chart in the
- * product and belongs in its own change with its own before/after.
- */
-function estimatePlotWidth(size: EChartsSize, widestValueLabel: string, hasAxisTitle: boolean): number {
-  const g = CHART_THEME.grid;
-  // The family the chart is actually DRAWN in, never the literal "inherit": a CSS-wide keyword is
-  // not a legal family in the `font` shorthand, so the canvas would reject the whole declaration
-  // and measure at its 10px sans-serif default. Same rule, and the same reason, as `axisLabelFit`.
-  const gutter = measureText(widestValueLabel, {
-    size: CHART_THEME.axisFontSize, family: resolveFontFamily(), weight: CHART_THEME.axisWeight,
-  }).width;
-  // `26` is the room `grid.left` below reserves for a value-axis title, kept in step with it.
-  return size.width - (g.left as number) - (g.right as number) - gutter - (hasAxisTitle ? 26 : 0);
 }
 
 function baseOption(
