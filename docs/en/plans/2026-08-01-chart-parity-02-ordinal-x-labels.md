@@ -38,9 +38,14 @@ From `frontend/src/metabase/visualizations/echarts/cartesian/layout/index.ts` in
    - `leftW + GAP/2 > dimensionWidth`
 4. No overlap → draw all labels upright.
 5. Overlap → `dimensionWidth >= fontSize * 2.1` gives 45°; else `dimensionWidth >= fontSize * 1.2` gives 90°; in each case only if the rotated label height stays under 70% of chart height (`checkHeight`, `:280` — `maxW / √2 / outerHeight` for 45°, `maxW / outerHeight` for 90°); otherwise **hide the axis entirely**.
-6. At most 50 ticks are measured, sampled at **evenly spaced indices** (`getEvenlySpacedIndices`, `:357`) — not the first 50. On a sorted axis the widest label is as likely to be last as first.
+6. Which labels get measured depends on the axis type (`getXTicksToMeasure`, `:347-373`). For a **category** axis — the only kind this workstream covers — Metabase measures **every** label, falling back to the 50 **longest by character count** only once `dimensionWidth <= fontSize`. `getEvenlySpacedIndices` is its numeric/time-series path and is never reached here.
 
-> **Correction to the spec.** `docs/en/specs/2026-08-01-chart-parity-design.md` says "only the first 50 ticks are measured". That is wrong — it is an even sample across the whole dataset. Fix that line as part of Task 1.
+> **Two corrections already applied, recorded so they are not undone.** The spec first said "only the
+> first 50 ticks are measured" — wrong. This plan then said "50 evenly spaced" — wrong in a different
+> direction, since that is the numeric branch. Task 1 established the three branches above by reading
+> `:347-373`, and both spec translations now state them. egret caps at 50 as a **simplification of its
+> own** (Metabase measures once per layout; this runs per option rebuild), taking the union of an even
+> sample and the longest-by-character-count label. Do not "restore" either earlier claim.
 
 ### The plot-width problem, and how this plan handles it
 
