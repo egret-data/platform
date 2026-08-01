@@ -109,7 +109,9 @@ Port bậc thang của Metabase từ `echarts/cartesian/layout/index.ts`:
 5. Có chồng → `dimensionWidth >= fontSize × 2,1` cho 45°, không thì `>= fontSize × 1,2` cho 90°, mỗi
    trường hợp chỉ khi chiều cao nhãn sau xoay còn dưới 70% chiều cao chart; không thì **giấu hẳn cả
    trục**.
-6. Chỉ đo 50 tick đầu cho đỡ tốn.
+6. Đo nhiều nhất 50 tick cho đỡ tốn — lấy mẫu ở các chỉ số **cách đều** (`getEvenlySpacedIndices`),
+   không phải 50 tick đầu: trên một trục đã sắp xếp, nhãn rộng nhất có khả năng nằm cuối ngang với
+   nằm đầu, nên lấy phần đầu sẽ bỏ sót nó.
 
 **Tính chất then chốt: nhãn không bao giờ in một phần.** Hoặc đủ, hoặc xoay, hoặc không có gì.
 `interval: "auto"` hiện tại của egret cho ra "một số" — đúng kết cục Metabase cố tình tránh.

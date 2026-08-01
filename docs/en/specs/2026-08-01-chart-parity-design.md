@@ -109,7 +109,9 @@ Port Metabase's ladder from `echarts/cartesian/layout/index.ts`:
 5. Overlap → `dimensionWidth >= fontSize * 2.1` gives 45°, else `>= fontSize * 1.2` gives 90°, in
    each case only if the rotated label height stays under 70% of chart height; otherwise hide the
    axis entirely.
-6. Only the first 50 ticks are measured, for cost.
+6. At most 50 ticks are measured, for cost — sampled at **evenly spaced** indices
+   (`getEvenlySpacedIndices`), not taken as a prefix: on a sorted axis the widest label is as
+   likely to be the last as the first, and a prefix would leave it unmeasured.
 
 **The load-bearing property is that labels are never partial.** All, rotated, or none. egret's
 current `interval: "auto"` produces "some", which is the one outcome Metabase deliberately avoids.
