@@ -420,10 +420,12 @@ function WaterfallChart({ columns, rows, cfg, onPointClick }: {
  * read back off a BUILD, so there are two memos on the same key. A `boxplot` element reports no
  * usable `name`, so the clicked category has to come from `xAxis.data[dataIndex]` — and a
  * size-function option cannot be read, only called, so the categories come from a second,
- * SIZE-LESS build. That build is the cheap one: the size changes only the x-axis label decision
- * (`interval`, `rotate`, `show` and the bottom margin), never `xAxis.data`, so which size it was
- * built at is immaterial to the answer, and passing none keeps this memo independent of the
- * container. Reading them back rather than regrouping the rows here is deliberate — the grouping
+ * SIZE-LESS build. That build is the one to READ, not a cheaper one — it repeats the whole
+ * grouping, sort and quantile pass, and saves only the measurement. What passing no size buys is
+ * soundness: the size changes only the x-axis label decision (`interval`, `rotate`, `show` and the
+ * bottom margin), never `xAxis.data`, so which size it was built at is immaterial to the answer,
+ * and omitting it keeps this memo independent of the container rather than re-running on every
+ * resize. Reading them back rather than regrouping the rows here is deliberate — the grouping
  * rules (insertion order, non-finite values skipped) live in the builder and would be a second
  * copy to drift.
  *

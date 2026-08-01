@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import type { EChartsSize } from "../EChartsRenderer";
 import { buildBoxplotOption } from "../options/boxplot";
 import { buildWaterfallOption } from "../options/waterfall";
-import type { fitXLabels as FitXLabels } from "../axisLabelFit";
+import type { fitXLabels as FitXLabels, estimatePlotWidth as EstimatePlotWidth } from "../axisLabelFit";
 
 /**
  * The wiring between `fitXLabels` and the two OTHER builders that draw a bottom category axis —
@@ -37,22 +37,29 @@ import type { fitXLabels as FitXLabels } from "../axisLabelFit";
  * 0px, and 0/anything clears the guard — so passing a grid-adjusted height instead of the
  * container's would silently tighten the guard in a browser and change nothing in this file.
  *
- * The value-axis gutter inside `plotWidth` is not pinned by anything here AT ALL, and cannot be:
- * it is a `measureText` call, so it contributes exactly 0 under jsdom whatever the numbers on the
- * axis, and deleting the term from `estimatePlotWidth` leaves every test in the repo green. It is
- * a browser question and stays one — the live comparison against Metabase is where it is answered.
+ * The value-axis gutter is pinned by its INPUT and not by its width. Which value string a builder
+ * hands `estimatePlotWidth` is a decision, and the block at the foot of this file asserts it. The
+ * PIXELS that string turns into are a `measureText` call, so they contribute exactly 0 under jsdom
+ * whatever the numbers on the axis, and deleting the whole `gutter` term from `estimatePlotWidth`
+ * leaves every test in the repo green. That half is a browser question and stays one — the live
+ * comparison against Metabase is where it is answered.
  */
 
 type FitArgs = Parameters<typeof FitXLabels>[0];
+type EstimateArgs = Parameters<typeof EstimatePlotWidth>;
 
-/** Every argument a builder hands the fitter, in call order. `vi.hoisted` because the `vi.mock`
- *  factory below is hoisted above this file's imports and would otherwise touch this binding in
- *  its temporal dead zone. */
-const { fitCalls } = vi.hoisted(() => ({ fitCalls: [] as FitArgs[] }));
+/** Every argument a builder hands the fitter and the plot-width estimate, in call order.
+ *  `vi.hoisted` because the `vi.mock` factory below is hoisted above this file's imports and would
+ *  otherwise touch these bindings in their temporal dead zone. */
+const { fitCalls, gutterLabels } = vi.hoisted(() => ({
+  fitCalls: [] as FitArgs[],
+  gutterLabels: [] as string[],
+}));
 
-/** A pass-through spy, not a stub: the real ladder still decides, so every assertion in this file
- *  about what the AXIS ends up as remains an assertion about the real module. All the spy adds is
- *  a view of what went IN — see the header on `outerHeight`. */
+/** Pass-through spies, not stubs: the real ladder and the real estimate still decide, so every
+ *  assertion in this file about what the AXIS ends up as remains an assertion about the real
+ *  module. All they add is a view of what went IN — see the header on `outerHeight`, and the
+ *  gutter block at the foot of the file. */
 vi.mock("../axisLabelFit", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../axisLabelFit")>();
   return {
@@ -60,6 +67,10 @@ vi.mock("../axisLabelFit", async (importOriginal) => {
     fitXLabels: (args: FitArgs) => {
       fitCalls.push(args);
       return actual.fitXLabels(args);
+    },
+    estimatePlotWidth: (...args: EstimateArgs) => {
+      gutterLabels.push(args[1]);
+      return actual.estimatePlotWidth(...args);
     },
   };
 });
@@ -126,7 +137,7 @@ const CHARTS: Chart[] = [
     build: (rows, size, rotation) => buildWaterfallOption(
       wfCols, rows, { xAxis: "x", metric: "m", ...(rotation != null ? { xLabelRotation: rotation } : {}) }, size,
     ),
-    // ONE FEWER ROW than the box plot's, at both sizes: `showTotal` defaults on, so the builder
+    // ONE FEWER ROW than the box plot's, in both fixtures: `showTotal` defaults on, so the builder
     // appends a "Total" category of its own. It is drawn like any other, so it is measured like any
     // other — the counts below are the categories on the axis, not the rows in the result.
     rows: [["Widget", 10], ["Gadget", 20], ["Gizmo", 30]],
@@ -240,5 +251,55 @@ CHARTS.forEach((c) => {
       expect(fitCalls[0].plotWidth).toBeGreaterThan(0);
       expect(fitCalls[0].labels).toEqual(c.labels);
     });
+  });
+});
+
+/**
+ * WHICH VALUE the box plot's gutter is measured from — an assertion about the estimate's INPUT, not
+ * about a pixel. The width that value turns into is still `measureText`'s, still 0 under jsdom, and
+ * still unpinnable here (see this file's header); what is pinnable, and what was wrong, is which
+ * number gets handed over.
+ *
+ * The bug: `widest` is the max over the BOXES, and with Tukey whiskers a box deliberately stops at
+ * the largest value inside the fence — `boxStats`' own rule, so that a whisker never reaches out to
+ * the outlier it just excluded. Those outliers are still drawn, on a scatter series sharing this
+ * axis, and so is the mean, which an outlier drags past its own box. So the axis extends past
+ * `widest` and prints a wider top tick than the boxes ever suggested, and the gutter under-reserved
+ * by that difference — which over-estimates `plotWidth` and leaves labels upright and overlapping.
+ * At ~40px on a ~270px card that is larger than any case `estimatePlotWidth`'s doc names.
+ *
+ * Compared against the axis's OWN formatter rather than against a literal, so this pins the
+ * invariant the comment states — "through the same formatter the axis uses" — without hard-coding
+ * this repo's number format, which would make the test fail on an unrelated formatting change.
+ */
+describe("the box plot's value-axis gutter", () => {
+  const cols = [{ name: "c", type: "varchar" }, { name: "v", type: "double" }];
+  /** Four 1s and a 1000. The quartiles all land on 1, so the IQR is zero, the Tukey fence is
+   *  [1, 1], and 1000 is an OUTLIER: the box tops out at 1 while the point is drawn separately on
+   *  this same axis. The mean (200.8) is dragged out with it — the same defect, one series over. */
+  const rows: unknown[][] = [["A", 1], ["A", 1], ["A", 1], ["A", 1], ["A", 1000]];
+  const SIZE = { width: 640, height: 480 };
+  const yFmtOf = (o: unknown) =>
+    (o as { yAxis: { axisLabel: { formatter: (v: number) => string } } }).yAxis.axisLabel.formatter;
+
+  it("measures every value the axis can print, not only the boxes", () => {
+    gutterLabels.length = 0;
+    const o = buildBoxplotOption(cols, rows, { category: "c", value: "v" }, SIZE);
+    expect(gutterLabels).toHaveLength(1);
+    expect(gutterLabels[0]).toBe(yFmtOf(o)(1000));
+    // Named explicitly: this is the value the gutter WAS measured from, and the assertion above
+    // would still read plausibly if the two happened to format alike.
+    expect(gutterLabels[0]).not.toBe(yFmtOf(o)(1));
+  });
+
+  it("counts a point series only when that series is actually drawn", () => {
+    // With no points and no mean, nothing but the boxes reaches the axis — so the gutter is back to
+    // the boxes, and `axisWidest` must not be "the extent of the data" in general.
+    gutterLabels.length = 0;
+    const o = buildBoxplotOption(
+      cols, rows, { category: "c", value: "v", points: "none", showMean: false }, SIZE,
+    );
+    expect(gutterLabels).toHaveLength(1);
+    expect(gutterLabels[0]).toBe(yFmtOf(o)(1));
   });
 });

@@ -954,6 +954,9 @@ function baseOption(
   // what the measurement knows and the flat 18px fallback does not. Gated on `ordinalX` because
   // this is the BOTTOM margin: a row chart's rotated labels want room on the left (which
   // `containLabel` gives them), and a value x-axis never applied the rotation in the first place.
+  // The flat fallback is 18 at any angle here, where the box plot and the waterfall reserve 44 past
+  // 90° — a pre-existing divergence, on the path a user's explicit choice takes. Task 3 is what
+  // makes that choice reachable from the panel on this chart, and is where the three should agree.
   const xLabelPad = fit ? (fit.kind === "rotate" ? fit.bottomPad : 0) : (rotate && ordinalX ? 18 : 0);
 
   const categoryAxis = {

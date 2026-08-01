@@ -142,9 +142,19 @@ export function buildWaterfallOption(
   // length and count are only proxies for width. The same rule was deleted from the cartesian
   // builder for the same reason — four categories whose longest is "Doohickey" on a
   // one-third-width card came out as "no rotation needed", and then `interval: "auto"` let ECharts
-  // drop three of the four, an axis reading as missing data. See `echarts/axisLabelFit.ts`. A
-  // waterfall and a bar chart of the same steps still tilt together; they now do it by measuring
-  // the same way rather than by sharing the same guess.
+  // drop three of the four, an axis reading as missing data. See `echarts/axisLabelFit.ts`.
+  //
+  // A waterfall and a bar chart of the same steps now measure the same WAY, but not necessarily to
+  // the same ANSWER — the deleted rule made them share a guess, and this does not restore that.
+  // Two inputs differ on identical rows, and both push this chart towards rotating first:
+  //   - `showTotal` defaults on, so this axis carries n+1 categories where the bar chart has n.
+  //     That is 14% less `dimensionWidth` at six steps, and it is a real extra label, not an
+  //     accounting artefact.
+  //   - `widest` below is the running-total ENVELOPE, where cartesian's `widestOf` is the largest
+  //     single datum. Deltas of 10/20/30 give a bar chart a "30" gutter and this one a "60" gutter,
+  //     and the gap widens with every step.
+  // A waterfall therefore tilts slightly sooner than the bar chart of its own steps, by design.
+  // Worth knowing before reading the two side by side and calling the difference a bug.
   //
   // Cartesian guards this on `ordinalX` — is the category axis the BOTTOM one, and are its labels
   // the array we hold? A waterfall has neither a horizontal mode nor an `xScale`, so both halves of

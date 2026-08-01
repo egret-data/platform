@@ -174,6 +174,30 @@ export function buildBoxplotOption(
 
   const widest = stats.reduce((n, s) => Math.max(n, ...s.box.map((v) => Math.abs(v))), 0);
   const compact = cfg.compactValues ?? widest >= 10_000;
+  /**
+   * The widest value the Y-AXIS can print, which is NOT `widest` — deliberately a second number.
+   *
+   * `widest` is the boxes alone, and with Tukey whiskers a box stops at `whiskerMax`, the largest
+   * value INSIDE the fence (`boxStats` above). The outliers it just excluded are still drawn, on a
+   * scatter series sharing this axis, and so is the mean, which an outlier drags past the box it
+   * belongs to. So the axis extends past `widest` and its top tick can format far wider than the
+   * boxes suggest: boxes topping at 500 with one outlier at 1,200,000 leave `compact` false (it
+   * keys off `widest`, correctly — it is about the numbers a reader is asked to compare) and the
+   * axis then draws "1,200,000", ~60px, where a gutter measured from "500" reserved ~21px. On a
+   * ~270px card that ~40px over-estimate of `plotWidth` is larger than any case
+   * `estimatePlotWidth` names, and it would show up as labels drawn upright and overlapping.
+   *
+   * Taken from the point arrays THEMSELVES rather than from `stats`, so it counts a series exactly
+   * when that series is drawn: "no points" omits the outliers from the chart and from this, and
+   * `showMean: false` does the same for the means. `allPoints` are non-outliers and so can never
+   * extend the axis, but they are included anyway to keep the rule "every point series on this
+   * axis" rather than a list of the ones that happen to matter.
+   *
+   * `compact` is deliberately left on `widest`: the shorthand a reader sees should follow the
+   * distribution, not one far-flung outlier. Only the GUTTER needs the true extent.
+   */
+  const axisWidest = [...outlierPoints, ...allPoints, ...meanPoints]
+    .reduce((n, p) => Math.max(n, Math.abs(p[1])), widest);
   const fmt = (v: unknown, useCompact = false, force?: boolean) => {
     if (cfg.value == null) return String(v);
     const col = cfg.columnSettings?.[cfg.value];
@@ -215,9 +239,11 @@ export function buildBoxplotOption(
         // The categories as DRAWN: this axis has no `axisLabel.formatter`, so the raw group key is
         // the label — unlike the cartesian and waterfall axes, which format theirs.
         labels: categories,
-        // The gutter is the widest value the y-axis can print, through the y-axis's own formatter
-        // (`fmt(v, true)` below), and `yTitle` is what adds 26 to `grid.left` below.
-        plotWidth: estimatePlotWidth(size, fmt(widest, true), Boolean(yTitle)),
+        // The gutter is the widest value the y-axis can print — `axisWidest`, which counts the
+        // outlier and mean points too, NOT the boxes-only `widest`; see its comment above — through
+        // the y-axis's own formatter (`fmt(v, true)` below). `yTitle` is what adds 26 to
+        // `grid.left` below.
+        plotWidth: estimatePlotWidth(size, fmt(axisWidest, true), Boolean(yTitle)),
         // The CONTAINER's height, not an inset one: the 70% guard is a share of the whole card
         // (Metabase's `checkHeight`), so passing a grid-adjusted height silently tightens it.
         outerHeight: size.height,
