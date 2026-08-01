@@ -34,11 +34,17 @@ const MAX_LABEL_HEIGHT_RATIO = 0.7;
  *  at EVENLY SPACED indices rather than as a prefix, because on a sorted axis the widest label is
  *  as likely to be the last as the first — Metabase's `getEvenlySpacedIndices`.
  *
- *  DIVERGENCE: Metabase caps only the *max-width* measurement this way and re-measures the full
- *  dataset (twice per datum) for the overlap test; this reuses the one sampled set for both, so an
- *  axis of >50 categories could in principle hide a lone wide label between two samples. It cannot
- *  bite in practice: past 50 categories `dimensionWidth` is already down near the font size, where
- *  any label at all overlaps and the ladder has left the upright branch regardless. */
+ *  DIVERGENCES, both of them simplifications — `getXTicksToMeasure` is where to check:
+ *
+ *  - Metabase caps only the *max-width* measurement and re-measures the full dataset (twice per
+ *    datum) for the overlap test; this reuses the one sampled set for both, so an axis of >50
+ *    categories could in principle hide a lone wide label between two samples. It cannot bite in
+ *    practice: past 50 categories `dimensionWidth` is already down near the font size, where any
+ *    label at all overlaps and the ladder has left the upright branch regardless.
+ *  - Even spacing is Metabase's NUMERIC/TIME-SERIES path. On a category axis it either measures
+ *    every label, or — once `dimensionWidth <= fontSize`, i.e. below this ladder's last rung —
+ *    the 50 longest by character count. One rule for both is kept here because the difference only
+ *    shows up on inputs where the answer is already "hide". */
 const TICKS_TO_MEASURE = 50;
 
 /** Metabase pads each label with a space per side before measuring, so the estimate is pessimistic
