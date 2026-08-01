@@ -345,6 +345,61 @@ function shiftLightness(color: string, points: number): string {
  * right for the pie's three ring levels but wrong here — copying Metabase's numbers into an
  * additive shift would agree only for the one colour they were measured against.
  */
+/**
+ * The two ends of a choropleth's colour ramp, derived from ONE accent — Metabase's
+ * `getColorplethColorScale`: the light end is that colour set to 92% lightness, the dark end is it
+ * darkened by 0.2, and both are saturated by a further 0.1.
+ *
+ * egret hard-coded `["#e6f4f1", "#0f9b8e"]`, two teals belonging to no palette. They agree with
+ * each other and with nothing else, so the map was the one chart drawing in a colour the design
+ * system had never heard of — and a configurable accent could not have worked at all.
+ */
+export function choroplethScale(color: string): [string, string] {
+  return [
+    saturateColor(setLightness(color, 0.92), 1.1),
+    saturateColor(scaleLightness(color, 0.8), 1.1),
+  ];
+}
+
+/** HSL lightness set ABSOLUTELY (Metabase's `Color.lightness(n)`), not scaled. */
+export function setLightness(color: string, l: number): string {
+  return hslAdjust(color, (h, s) => [h, s, Math.min(1, Math.max(0, l))]);
+}
+
+/** HSL saturation scaled — Metabase's `Color.saturate(r)` is a multiply by `1 + r`. */
+export function saturateColor(color: string, factor: number): string {
+  return hslAdjust(color, (h, s, l) => [h, Math.min(1, s * factor), l]);
+}
+
+/** Round-trip a colour through HSL, letting the caller move any channel. */
+function hslAdjust(color: string, f: (h: number, s: number, l: number) => [number, number, number]): string {
+  const rgb = parseColor(color);
+  if (!rgb) return color;
+  const [r, g, b] = rgb.map((v) => v / 255);
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l0 = (max + min) / 2;
+  const d = max - min;
+  const s0 = d === 0 ? 0 : d / (1 - Math.abs(2 * l0 - 1));
+  let h0 = 0;
+  if (d !== 0) {
+    if (max === r) h0 = ((g - b) / d) % 6;
+    else if (max === g) h0 = (b - r) / d + 2;
+    else h0 = (r - g) / d + 4;
+    h0 *= 60;
+    if (h0 < 0) h0 += 360;
+  }
+  const [h, s, l] = f(h0, s0, l0);
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  const [r2, g2, b2] =
+    h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x]
+    : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  const hex = (v: number) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+  return `#${hex(r2)}${hex(g2)}${hex(b2)}`;
+}
+
 export function scaleLightness(color: string, factor: number): string {
   const rgb = parseColor(color);
   if (!rgb) return color;

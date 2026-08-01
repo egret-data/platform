@@ -5,20 +5,23 @@ import { vizConfig, shellSettings } from "@/components/chart/viz/renderConfig";
 import { formatValue } from "@/components/chart/format";
 import { EChartsRenderer } from "@/components/chart/echarts/EChartsRenderer";
 import { buildMapOption } from "@/components/chart/echarts/options/map";
-import { MAPS } from "@/components/chart/echarts/maps/registry";
+import { MAPS, indexRegionNames, resolveRegion } from "@/components/chart/echarts/maps/registry";
 import type { ResultColumn } from "@/components/chart/ChartTable";
+import type { DrillContext } from "@/components/chart/drill";
 
 const registered = new Set<string>();
 
 /** Choropleth map. Lazy-loads + registers the selected geojson, then renders via EChartsRenderer. */
-export function MapChart({ columns, rows, params, metricTypes = {} }: {
+export function MapChart({ columns, rows, params, metricTypes = {}, onValueClick }: {
   columns: ResultColumn[]; rows: unknown[][]; params: AnyChartParams; metricTypes?: Record<string, string>;
+  onValueClick?: (ctx: DrillContext, x: number, y: number) => void;
 }) {
   const map = vizConfig<MapConfig>("map", params);
   const { columnSettings } = shellSettings(params);
   const fmt = (v: unknown) =>
     map.metric ? formatValue(v, metricTypes[map.metric] ?? "double", columnSettings[map.metric]) : String(v);
   const def = MAPS[map.mapKey ?? "us_states"] ?? MAPS.us_states;
+  const normalizeKey = (v: unknown) => resolveRegion(def, v);
   const [, forceUpdate] = useReducer((n: number) => n + 1, 0);
   const [error, setError] = useState(false);
   // Derive readiness from the registration set every render, so switching to a not-yet-registered
@@ -33,6 +36,9 @@ export function MapChart({ columns, rows, params, metricTypes = {} }: {
       .load()
       .then((geojson) => {
         if (!alive) return;
+        // Index the names BEFORE registering: the render that follows resolves every region cell
+        // through this, and an unindexed map silently matches nothing.
+        indexRegionNames(def.key, geojson);
         registerMap(def.echartsName, geojson as never);
         registered.add(def.echartsName);
         forceUpdate();
@@ -54,10 +60,23 @@ export function MapChart({ columns, rows, params, metricTypes = {} }: {
           echartsName: def.echartsName,
           region: map.region,
           metric: map.metric,
-          normalize: def.normalize,
+          normalize: normalizeKey,
           format: fmt,
           annotations: def.annotations,
+          color: map.color,
         })}
+        // Metabase's region map drills; egret's branch passed no handler — the same seam gap the
+        // waterfall, box plot and sankey each had. A region is a row, so it filters by the RAW
+        // dimension value, not by the normalised key the geojson is matched on: those differ
+        // (`us_states` matches on a two-letter code while the column may hold "California"), and
+        // filtering by the key would drill to nothing.
+        onPointClick={onValueClick && map.region ? (p) => {
+          const ri = columns.findIndex((c) => c.name === map.region);
+          if (ri < 0 || p.name == null) return;
+          const raw = rows.find((r) => normalizeKey(r[ri]) === p.name)?.[ri];
+          if (raw == null) return;
+          onValueClick({ dims: [{ col: map.region as string, value: String(raw) }] }, p.x, p.y);
+        } : undefined}
       />
     </div>
   );

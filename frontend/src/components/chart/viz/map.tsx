@@ -5,6 +5,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@
 import { isParamsV2 } from "@/api/charts";
 import type { MapConfig, QuerySpec } from "@/api/charts";
 import type { SharedQueryState, VizControlProps, VizDescriptor } from "./types";
+import { SERIES_PALETTE } from "@/components/chart/echarts/palette";
 
 const LABEL_CLASS = "text-xs font-medium uppercase tracking-wide text-muted-foreground";
 
@@ -42,6 +43,23 @@ function MapControls({ config, onChange, columns, metrics }: VizControlProps<Map
   );
 }
 
+/** Metabase's `map.colors`. ONE accent, because both ends of the choropleth ramp are derived from
+ *  it (see `choroplethScale`) — offering two swatches would let them disagree, which is the state
+ *  the derivation exists to prevent. */
+function MapColorControl({ config, onChange }: VizControlProps<MapConfig>) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <Label className="text-sm font-normal">Color</Label>
+      <input
+        type="color" aria-label="Color"
+        className="h-7 w-10 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+        value={config.color ?? SERIES_PALETTE[0]}
+        onChange={(e) => onChange({ color: e.target.value })}
+      />
+    </div>
+  );
+}
+
 export function mapDescriptor(): VizDescriptor<MapConfig> {
   return {
     key: "map",
@@ -54,6 +72,7 @@ export function mapDescriptor(): VizDescriptor<MapConfig> {
           mapKey: (p.settings["map.key"] as string) ?? "us_states",
           region: p.settings["map.region"] as string | undefined,
           metric: p.settings["map.metric"] as string | undefined,
+          color: p.settings["map.colors"] as string | undefined,
         };
       }
       return p.map ?? { mapKey: "us_states" };
@@ -62,6 +81,7 @@ export function mapDescriptor(): VizDescriptor<MapConfig> {
       const out: Record<string, unknown> = { "map.key": cfg.mapKey };
       if (cfg.region !== undefined) out["map.region"] = cfg.region;
       if (cfg.metric !== undefined) out["map.metric"] = cfg.metric;
+      if (cfg.color !== undefined) out["map.colors"] = cfg.color;
       return out;
     },
     requiredFields: (cfg) => {
@@ -75,6 +95,9 @@ export function mapDescriptor(): VizDescriptor<MapConfig> {
       dimensions: cfg.region ? [cfg.region] : [],
       columns: [], filters: shared.filters, orderby: [], row_limit: shared.rowLimit, rollup_groups: [],
     }),
-    controls: [{ id: "map", section: "data", render: MapControls }],
+    controls: [
+      { id: "map", section: "data", render: MapControls },
+      { id: "color", section: "display", render: MapColorControl },
+    ],
   };
 }

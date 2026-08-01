@@ -34,4 +34,72 @@ describe("ObjectDetail", () => {
     render(<ObjectDetail columns={cols} rows={[]} />);
     expect(screen.getByText("No data")).toBeTruthy();
   });
+
+  /**
+   * Metabase prints the word "Empty" in a muted tone for an absent value. egret rendered "", a
+   * blank row — which in a view of ONE record reads as a rendering fault rather than as "this
+   * field has no value", the single most important thing a detail view has to be able to say.
+   */
+  it("says Empty rather than leaving the row blank", () => {
+    render(<ObjectDetail columns={cols} rows={[[null, ""]]} />);
+    expect(screen.getAllByText("Empty")).toHaveLength(2);
+  });
+
+  // A JSON column arrives as one long line. Metabase pretty-prints it in a <pre>; egret ran it
+  // through the plain formatter, so a nested object was an unreadable single row.
+  it("pretty-prints a JSON value", () => {
+    const { container } = render(
+      <ObjectDetail columns={[{ name: "meta", type: "text" }]} rows={[['{"a":1,"b":[2,3]}']]} />,
+    );
+    const pre = container.querySelector("pre");
+    expect(pre).toBeTruthy();
+    expect(pre!.textContent).toContain('"a": 1');
+    expect(pre!.textContent!.split("\n").length).toBeGreaterThan(3);
+  });
+
+  it("leaves a string that only looks like JSON alone", () => {
+    const { container } = render(
+      <ObjectDetail columns={[{ name: "note", type: "text" }]} rows={[["{not json}"]]} />,
+    );
+    expect(container.querySelector("pre")).toBeNull();
+    expect(screen.getByText("{not json}")).toBeTruthy();
+  });
+
+  // One 4,000-character note otherwise pushes every other field off the card.
+  it("folds a long value behind Show more, and unfolds it", () => {
+    const long = "x".repeat(400);
+    render(<ObjectDetail columns={[{ name: "note", type: "text" }]} rows={[[long]]} />);
+    expect(screen.queryByText(long)).toBeNull();
+    fireEvent.click(screen.getByText("Show more"));
+    expect(screen.getByText(long, { exact: false })).toBeTruthy();
+    expect(screen.getByText("Show less")).toBeTruthy();
+  });
+
+  // Paging must not carry one record's expanded state onto a different record's value.
+  it("collapses an expanded value when the record changes", () => {
+    const long = "y".repeat(400);
+    render(<ObjectDetail columns={[{ name: "note", type: "text" }]} rows={[[long], ["short"]]} />);
+    fireEvent.click(screen.getByText("Show more"));
+    expect(screen.getByText("Show less")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("next record"));
+    fireEvent.click(screen.getByLabelText("previous record"));
+    expect(screen.getByText("Show more")).toBeTruthy();
+  });
+
+  it("renders an image URL as the image", () => {
+    const { container } = render(
+      <ObjectDetail columns={[{ name: "avatar", type: "text" }]} rows={[["https://x.test/a.png"]]} />,
+    );
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("https://x.test/a.png");
+  });
+
+  // A plain link is NOT an image. Replacing a readable URL with a broken-image icon is worse than
+  // showing the URL, so the match is deliberately narrow.
+  it("leaves a non-image URL as text", () => {
+    const { container } = render(
+      <ObjectDetail columns={[{ name: "site", type: "text" }]} rows={[["https://x.test/page"]]} />,
+    );
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByText("https://x.test/page")).toBeTruthy();
+  });
 });

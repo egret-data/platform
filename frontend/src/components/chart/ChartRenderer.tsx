@@ -284,7 +284,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
   }
 
   if (vizType === "map") {
-    return <MapChart columns={columns} rows={rows} params={params} metricTypes={metricTypes} />;
+    return <MapChart columns={columns} rows={rows} params={params} metricTypes={metricTypes} onValueClick={onValueClick} />;
   }
 
   if (vizType === "table") {
