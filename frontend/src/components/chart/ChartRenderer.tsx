@@ -22,7 +22,7 @@ import { buildGaugeOption } from "@/components/chart/echarts/options/gauge";
 import { FunnelChart } from "@/components/chart/FunnelChart";
 import { buildWaterfallOption } from "@/components/chart/echarts/options/waterfall";
 import { buildBoxplotOption } from "@/components/chart/echarts/options/boxplot";
-import { buildSankeyOption } from "@/components/chart/echarts/options/sankey";
+import { buildSankeyOption, sankeyProblem } from "@/components/chart/echarts/options/sankey";
 import { ChartTable, type ResultColumn } from "@/components/chart/ChartTable";
 import { PivotTable } from "@/components/chart/pivot/PivotTable";
 import { BigNumber } from "@/components/chart/BigNumber";
@@ -542,11 +542,48 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
   }
 
   if (vizType === "sankey") {
+    // Checked BEFORE building, the way Metabase's `checkRenderable` is. A circular flow otherwise
+    // reaches ECharts, which throws "Sankey is a DAG, the original data has cycle!" onto the card —
+    // the library's own wording, naming an acronym rather than a fix.
+    const sankeyIssue = sankeyProblem(columns, rows, sankey);
     return (
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildSankeyOption(columns, rows, { ...sankey, columnSettings, metricTypes })} />}
+          : sankeyIssue
+            ? <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
+              {sankeyIssue}
+            </div>
+            : <EChartsRenderer
+              option={buildSankeyOption(columns, rows, { ...sankey, columnSettings, metricTypes })}
+              // Metabase's sankey drills from both kinds of element; egret's branch passed no
+              // handler at all — the third chart in a row with that gap. An EDGE names both of its
+              // ends, so it filters on both columns; a NODE names only itself, and which column
+              // that is depends on which side of the flow it sits on.
+              onPointClick={onValueClick && sankey.source && sankey.target ? (p) => {
+                const src = sankey.source as string;
+                const tgt = sankey.target as string;
+                if (p.dataType === "edge") {
+                  const link = p.data as { source?: unknown; target?: unknown } | undefined;
+                  if (link?.source == null || link?.target == null) return;
+                  onValueClick({ dims: [
+                    { col: src, value: String(link.source) },
+                    { col: tgt, value: String(link.target) },
+                  ] }, p.x, p.y);
+                  return;
+                }
+                if (p.dataType !== "node" || p.name == null) return;
+                // A node that anything FLOWS INTO is a value of the target column; one that only
+                // emits is a value of the source column. Metabase picks the same way, and it
+                // matters: the two columns can hold different vocabularies.
+                const si = columns.findIndex((c) => c.name === src);
+                const ti = columns.findIndex((c) => c.name === tgt);
+                const hasInputs = ti >= 0 && rows.some((r) => String(r[ti] ?? "") === p.name);
+                const col = hasInputs ? tgt : src;
+                if ((hasInputs ? ti : si) < 0) return;
+                onValueClick({ dims: [{ col, value: p.name }] }, p.x, p.y);
+              } : undefined}
+            />}
       </div>
     );
   }

@@ -147,18 +147,17 @@ describe("the nine simple descriptors", () => {
     // visibility), waterfall and boxplot (their whole Display + Axes tabs). A descriptor that is
     // only field pickers must stay purely `data` — that is what keeps the Data tab asking one
     // question.
-    for (const key of ["pie", "gauge", "scalar", "smartscalar", "progress", "funnel", "waterfall", "boxplot"]) {
+    for (const key of ["pie", "gauge", "scalar", "smartscalar", "progress", "funnel", "waterfall", "boxplot", "sankey"]) {
       expect(byKey[key].controls.some((c) => c.section === "display")).toBe(true);
     }
-    // Sankey is still field pickers only.
-    expect(byKey.sankey.controls.every((c) => c.section === "data")).toBe(true);
   });
 
-  // Both charts declare an Axes group, which is the shell's cue to give it its own tab rather than
-  // a heading inside Display.
-  it("puts the waterfall's and the box plot's axis controls in the Axes group", () => {
+  // The waterfall and the box plot declare an Axes group, which is the shell's cue to give it its
+  // own tab. The SANKEY must not: it has no axes, and Metabase gives it two tabs, not three.
+  it("gives an Axes tab to the charts that have axes, and not to the sankey", () => {
     for (const key of ["waterfall", "boxplot"]) {
       expect(byKey[key].controls.some((c) => c.section === "display" && c.group === "Axes")).toBe(true);
     }
+    expect(byKey.sankey.controls.some((c) => c.group === "Axes")).toBe(false);
   });
 });

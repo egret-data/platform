@@ -4,8 +4,9 @@ import { ScalarDisplaySection } from "@/components/chart/settings/ScalarDisplayS
 import { WaterfallBarsSection, WaterfallFormatSection } from "@/components/chart/settings/WaterfallDisplaySection";
 import { ChartAxesSection } from "@/components/chart/settings/ChartAxesSection";
 import { BoxplotDisplaySection } from "@/components/chart/settings/BoxplotDisplaySection";
+import { SankeyDisplaySection } from "@/components/chart/settings/SankeyDisplaySection";
 import { AXES_GROUP } from "@/components/chart/StudioPanel";
-import type { BoxplotConfig, GaugeSegment, PieConfig, ScalarConfig, WaterfallConfig } from "@/api/charts";
+import type { BoxplotConfig, GaugeSegment, PieConfig, SankeyConfig, ScalarConfig, WaterfallConfig } from "@/api/charts";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SERIES_PALETTE } from "@/components/chart/echarts/palette";
@@ -189,6 +190,17 @@ const waterfallDisplay: VizControl<Cfg>[] = [
   },
 ];
 
+/** The sankey's panel. Metabase gives it Data | Display — no Axes, because a sankey has none. */
+const sankeyDisplay: VizControl<Cfg>[] = [
+  {
+    id: "display", section: "display",
+    render: ({ config, onChange }: VizControlProps<Cfg>) => (
+      <SankeyDisplaySection config={config as SankeyConfig}
+        onChange={onChange as (p: Partial<SankeyConfig>) => void} />
+    ),
+  },
+];
+
 /** The box plot's panel. Metabase gives it Data | Display | Axes, the same three tabs its waterfall
  *  has; egret's had two fields and nothing else. The Axes tab is the SHARED one — a box plot's axes
  *  are the same shape as a waterfall's, so they get the same controls rather than a second copy. */
@@ -323,7 +335,7 @@ export const SIMPLE_DESCRIPTORS: VizDescriptor<Cfg>[] = [
     legacyFromSpec: (spec) => ({ category: spec.columns?.[0], value: spec.columns?.[1] }),
   }),
   fieldDescriptor({
-    key: "sankey", prefix: "sankey.", legacyKey: "sankey",
+    key: "sankey", prefix: "sankey.", legacyKey: "sankey", display: sankeyDisplay,
     fields: [
       { id: "source", label: "Source", kind: "dimension", required: "a source" },
       { id: "target", label: "Target", kind: "dimension", required: "a target", excludes: "source" },

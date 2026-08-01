@@ -27,6 +27,10 @@ export interface EChartsPointClick {
   /** The datum's index within its series. The box plot's drill needs it: a `boxplot` element
    * reports no usable `name`, so the clicked category is `xAxis.data[dataIndex]`. */
   dataIndex?: number;
+  /** Which KIND of element was clicked, for series that draw more than one. The sankey is the only
+   * chart with two: `"node"` and `"edge"`, which drill to different things — a node to itself, an
+   * edge to the pair of ends it joins. */
+  dataType?: string;
   x: number;
   y: number;
 }
@@ -130,13 +134,14 @@ export function EChartsRenderer({ option, className, onPointClick, onPointHover,
     chart.on("click", (params: unknown) => {
       const p = params as {
         name?: string; seriesName?: string; value?: unknown; data?: unknown; seriesIndex?: number;
-        dataIndex?: number;
+        dataIndex?: number; dataType?: string;
         treePathInfo?: { name?: string }[];
         event?: { event?: { clientX?: number; clientY?: number } };
       };
       clickRef.current?.({
         name: p.name, seriesName: p.seriesName, value: p.value, data: p.data,
-        seriesIndex: p.seriesIndex, dataIndex: p.dataIndex, treePathInfo: p.treePathInfo,
+        seriesIndex: p.seriesIndex, dataIndex: p.dataIndex, dataType: p.dataType,
+        treePathInfo: p.treePathInfo,
         x: p.event?.event?.clientX ?? 0, y: p.event?.event?.clientY ?? 0,
       });
     });
