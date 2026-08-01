@@ -532,7 +532,7 @@ In `CartesianConfig`, beside the existing `xAxisTicks?: boolean`:
 ```ts
 /** An explicit rotation, which suppresses the measured choice. Metabase folds this into
  *  `graph.x_axis.axis_enabled` as one five-value key; egret keeps two fields because waterfall,
- *  box plot and sankey already store this shape (`settings/ChartAxesSection.tsx`), and one control
+ *  box plot already store this shape (`settings/ChartAxesSection.tsx`), and one control
  *  storing two different shapes across the chart module would be worse than differing from
  *  Metabase's key. The panel select is a projection over both. */
 xLabelRotation?: 45 | 90;
