@@ -276,6 +276,8 @@ export interface SankeyConfig {
   labelFormatting?: "auto" | "compact" | "full";
 }
 export interface MapConfig {
+  /** Metabase's `map.colors` — the one accent the choropleth ramp derives from. */
+  color?: string;
   mapKey: string;      // registry key: "us_states" | "world" | "vietnam"
   region?: string;     // dimension column holding the region code/name
   metric?: string;
