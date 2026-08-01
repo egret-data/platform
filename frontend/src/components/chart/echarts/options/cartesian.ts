@@ -5,9 +5,11 @@ import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue } from "../../format";
 import { ariaDescription, baseTextStyle, tooltipSurface } from "../base";
-import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
+import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, resolveFontFamily, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
 import { foldTail, OTHER_LABEL } from "../fold";
+import { fitXLabels, type XLabelFit } from "../axisLabelFit";
+import { measureText } from "@/components/chart/measure-text";
 
 export interface ResultColumn { name: string; type: string }
 export interface CartesianBuildConfig {
@@ -52,6 +54,11 @@ export interface CartesianBuildConfig {
    *  chart drew before the toggles existed. */
   xAxisTicks?: boolean;
   yAxisTicks?: boolean;
+  /** An explicit x-label rotation, which SUPPRESSES the measured choice — Metabase's
+   *  auto-selection likewise applies only while the setting is untouched. Same field name and
+   *  values waterfall and box plot already store (`options/waterfall.ts`, `options/boxplot.ts`).
+   *  The panel control that writes it is Task 3; this is the field the builder reads. */
+  xLabelRotation?: 45 | 90;
   /** Metabase's "Number of tick marks" on the value axis. Unset lets ECharts choose. */
   yTickCount?: number;
   seriesUnit?: string;           // temporal unit of the BREAKOUT dimension, same role as xAxisUnit
@@ -566,17 +573,16 @@ export function buildCartesianOption(
    * DOM of its own, so EChartsRenderer measures the container and threads it through (see
    * `buildPieOption`, the first to take one).
    *
-   * Unread today. It is the seam the axis-label work attaches to: whether the x labels fit, and so
-   * whether they must rotate or thin out, is a question about WIDTH, and this builder has never
-   * been able to see it — `rotate` below is currently guessed from label count and length
-   * (`longest > 10 && categories.length > 6`), which are proxies for width, not width. Undefined
-   * means the caller has no measurement (every unit test, and any caller passing a plain option
-   * object rather than a size function); that must always keep the size-blind behaviour, since a
-   * decision made against a guessed width is worse than one that declines to guess.
+   * Read by the x-axis label fit (`baseOption` -> `fitXLabels`): whether the category labels fit
+   * is a question about WIDTH, which this builder could not see until this parameter existed —
+   * the rule it replaced guessed from label count and length (`longest > 10 &&
+   * categories.length > 6`), which are proxies for width, not width.
    *
-   * `__tests__/sizeAware.test.ts` pins that passing a size changes nothing yet — if you are about
-   * to delete this parameter as unused, that test is the thing to read first. */
-  _size?: EChartsSize,
+   * Undefined means the caller has no measurement (every unit test, `cartesianMeta`, and any
+   * caller passing a plain option object rather than a size function); that keeps the size-blind
+   * behaviour, since a decision made against a guessed width is worse than one that declines to
+   * guess. `__tests__/cartesianXLabels.test.ts` pins both halves. */
+  size?: EChartsSize,
 ): EChartsCoreOption {
   if (cfg0.kind === "scatter" && cfg0.xMetric && cfg0.yMetrics.length > 0) {
     return scatterXY(columns, rows, cfg0);
@@ -602,7 +608,7 @@ export function buildCartesianOption(
     formatValue(v, cfg.metricTypes?.[metric] ?? "double", cfg.columnSettings?.[metric]);
 
   if (xi == null || cfg.yMetrics.length === 0) {
-    return baseOption(cfg, [], []);
+    return baseOption(cfg, [], [], size);
   }
 
   // Drop rows with a null x value, then order categories by the x column's type.
@@ -640,7 +646,7 @@ export function buildCartesianOption(
     if (usesXScale(cfg)) applyXScale(categories, series, cfg);
     applyMarkers(series as unknown as SeriesLike[]);
     const displayCats = isExtractUnit(cfg.xAxisUnit) ? categories.map((v) => temporalLabel(cfg.xAxisUnit, v)) : categories;
-    return baseOption(cfg, displayCats as (string | number)[], series);
+    return baseOption(cfg, displayCats as (string | number)[], series, size);
   }
 
   const rowByCat = new Map(xrows.map((r) => [catKey(r[xi]), r]));
@@ -699,7 +705,7 @@ export function buildCartesianOption(
   // `__foldedCategory` is not an ECharts key — ECharts ignores what it doesn't know. It rides on
   // the option because the drill needs to recognise the one bar it must refuse, and the option is
   // the only thing both the builder and the click handler hold.
-  return { ...baseOption(cfg, displayCats as (string | number)[], series), __foldedCategory: foldedCategory };
+  return { ...baseOption(cfg, displayCats as (string | number)[], series, size), __foldedCategory: foldedCategory };
 }
 
 // Shared decoration: type, color, stack, areaStyle, labels, smooth, symbol.
@@ -826,7 +832,43 @@ function decorateSeries(
   return out;
 }
 
-function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], series: unknown[]): EChartsCoreOption {
+/**
+ * The width the categories share, estimated.
+ *
+ * `CHART_THEME.grid` sets `containLabel: true` (`palette.ts`), so ECharts — not this builder —
+ * decides the real plot box, and it picks the value-axis ticks that eat into it. Neither is
+ * knowable here, but both are bounded: the grid insets are ours, and a "nice" tick inside the data
+ * extent cannot format wider than the extent's own widest value under any formatter this codebase
+ * uses (grouped numbers, compact numbers, currency, percentages).
+ *
+ * Deliberately an UNDER-estimate, and that direction is the point. Too small and we call a
+ * collision that would not have happened, rotating a label that would have fitted — mildly ugly,
+ * still readable. Too large and the labels stay upright and ECharts drops the ones that collide,
+ * which is the defect this whole change exists to remove.
+ *
+ * Do not "improve" this by turning `containLabel` off and computing the grid explicitly. That is
+ * Metabase's design and it is defensible, but it moves the margins of every cartesian chart in the
+ * product and belongs in its own change with its own before/after.
+ */
+function estimatePlotWidth(size: EChartsSize, widestValueLabel: string, hasAxisTitle: boolean): number {
+  const g = CHART_THEME.grid;
+  // The family the chart is actually DRAWN in, never the literal "inherit": a CSS-wide keyword is
+  // not a legal family in the `font` shorthand, so the canvas would reject the whole declaration
+  // and measure at its 10px sans-serif default. Same rule, and the same reason, as `axisLabelFit`.
+  const gutter = measureText(widestValueLabel, {
+    size: CHART_THEME.axisFontSize, family: resolveFontFamily(), weight: CHART_THEME.axisWeight,
+  }).width;
+  // `26` is the room `grid.left` below reserves for a value-axis title, kept in step with it.
+  return size.width - (g.left as number) - (g.right as number) - gutter - (hasAxisTitle ? 26 : 0);
+}
+
+function baseOption(
+  cfg: CartesianBuildConfig,
+  categories: (string | number)[],
+  series: unknown[],
+  /** Absent when the caller has no measurement; see the x-label fit below. */
+  size?: EChartsSize,
+): EChartsCoreOption {
   const horizontal = isHorizontal(cfg);
   const gridLine = resolveColor(CHART_THEME.gridLine, COLOR_FALLBACK.gridLine);
   const axisLabelColor = resolveColor(CHART_THEME.axisLabel, COLOR_FALLBACK.axisLabel);
@@ -887,16 +929,41 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     };
   };
 
-  // Always ECharts' own `'auto'`: it measures the rendered labels and drops the ones that
-  // would collide. Any rule of ours is a function of the category COUNT, and the thing that
-  // decides whether labels fit is the axis WIDTH — which the option builder never sees. An
-  // evenly-spaced every-Nth rule looks tidier on a wide builder canvas and is illegible on a
-  // dashboard card.
-  const longest = categories.reduce((n: number, c) => Math.max(n, String(c).length), 0);
-  // Long names are unreadable upright regardless of how many survive thinning (there is no
-  // thinning any more) — only on a bottom axis; a horizontal chart stacks categories down
-  // the left, where length costs nothing.
-  const rotate = !horizontal && longest > 10 && categories.length > 6 ? 30 : 0;
+  // Whether the labels fit is a question about WIDTH, and until `size` existed this builder could
+  // not ask it: the rule here was `longest > 10 && categories.length > 6 ? 30 : 0`, and length and
+  // count are only proxies for width. Four categories whose longest is "Doohickey" on a
+  // one-third-width card came out under that rule as "no rotation needed", and then
+  // `interval: "auto"` let ECharts drop three of the four — an axis reading as missing data.
+  //
+  // Only on a bottom ORDINAL axis. A horizontal chart stacks its categories down the left, where
+  // their length costs nothing and rotating them would only make them harder to read; and a
+  // linear/timeseries x is a value axis whose labels are ticks ECharts generates, not this array —
+  // deciding a fit from `categories` there would reserve room below a rotation that never gets
+  // applied, since `scaleAxis` carries no `rotate`. Fitting a value axis means generating its
+  // ticks first, which is PR 03.
+  //
+  // An explicit rotation SKIPS the measurement rather than merely outranking it. Computing the fit
+  // anyway and using it for `show` would honour the user's 45° and hide their axis in the same
+  // breath, which is worse than either outcome alone and looks like the setting doing nothing.
+  // Metabase's own auto-selection likewise applies only while the setting is untouched.
+  const ordinalX = !horizontal && !usesXScale(cfg);
+  const explicitRotate = ordinalX ? cfg.xLabelRotation : undefined;
+  const fit: XLabelFit | undefined = size && ordinalX && explicitRotate == null
+    ? fitXLabels({
+        labels: categories.map(String),
+        plotWidth: estimatePlotWidth(size, fmtFor(leftSide)(widestOf(leftSide)), Boolean(yTitle)),
+        // The CONTAINER's height, not an inset one: the 70% guard is a share of the whole card
+        // (Metabase's `checkHeight`), so passing a grid-adjusted height silently tightens it.
+        outerHeight: size.height,
+      })
+    : undefined;
+  const rotate = explicitRotate ?? (fit?.kind === "rotate" ? fit.rotate : 0);
+  // Either way the axis has now DECIDED, and a decided axis draws every label or none — never the
+  // subset `interval: "auto"` leaves ECharts free to pick.
+  const decided = fit != null || explicitRotate != null;
+  // Room below the plot for the tilted labels. `bottomPad` scales with the widest label, which is
+  // what the measurement knows and the flat 18px fallback does not.
+  const xLabelPad = fit ? (fit.kind === "rotate" ? fit.bottomPad : 0) : (rotate ? 18 : 0);
 
   const categoryAxis = {
     type: "category" as const, data: categories,
@@ -910,7 +977,11 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     // formatter only changes what is drawn; `data` stays the raw value, so a drill still filters
     // on what the engine returned.
     axisLabel: {
-      fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, interval: "auto" as const, rotate,
+      fontSize: CHART_THEME.axisFontSize, color: axisLabelColor,
+      interval: decided ? (0 as const) : ("auto" as const), rotate,
+      // The third answer the ladder can give: when even a rotated label would eat 70% of the
+      // card's height, Metabase draws no axis rather than a wall of text.
+      show: fit?.kind !== "hide",
       formatter: (v: string) => {
         const fmt = cfg.xAxis ? cfg.columnSettings?.[cfg.xAxis] : undefined;
         if (!fmt || v == null) return String(v ?? "");
@@ -988,7 +1059,7 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   const grid = {
     ...CHART_THEME.grid,
     top: (CHART_THEME.grid.top as number) + (showLegend ? 24 : 0),
-    bottom: (CHART_THEME.grid.bottom as number) + (bottomTitle ? 22 : 0) + (rotate ? 18 : 0),
+    bottom: (CHART_THEME.grid.bottom as number) + (bottomTitle ? 22 : 0) + xLabelPad,
     left: (CHART_THEME.grid.left as number) + (leftTitle ? 26 : 0),
   };
 

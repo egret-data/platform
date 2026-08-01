@@ -8,8 +8,11 @@ import { buildSankeyOption } from "../options/sankey";
 /**
  * These three builders grew a fourth, optional `_size` parameter so the size-dependent label work —
  * x-label rotation, gauge graduations, sankey node labels; see each builder's own comment — has a
- * seam to attach to. Nothing reads it yet, and this file is what says so: build each chart twice,
- * once with a size and once without, and the two options must be indistinguishable.
+ * seam to attach to. Gauge and sankey still do not read it, and this file is what says so: build
+ * each chart twice, once with a size and once without, and the two options must be
+ * indistinguishable. Cartesian's seam is live as of PR 02, so its case is inverted below rather
+ * than deleted — the point is unchanged, that a size changes exactly what it is supposed to and
+ * nothing else.
  *
  * Naively that is `expect(build(cols, rows, cfg, SMALL)).toEqual(build(cols, rows, cfg))`, and that
  * does not work. Every one of these options carries FUNCTIONS — axis-label formatters, tooltip
@@ -105,10 +108,32 @@ const cols = [{ name: "k", type: "varchar" }, { name: "v", type: "double" }];
 const rows: unknown[][] = [["Widget", 10], ["Gadget", 20]];
 
 describe("builders accept a container size", () => {
-  it("cartesian builds identically with and without a size", () => {
+  /**
+   * Cartesian is the one that now READS it (`fitXLabels`, PR 02), so its entry here inverts: the
+   * two builds must differ, and differ ONLY in the x-axis label decision. The narrow assertion —
+   * which rotation, which `interval` — is `cartesianXLabels.test.ts`; what this one adds is that
+   * the size did not leak anywhere else. The obvious way to make a builder size-aware is
+   * `formatter: (v) => truncate(v, widthFromSize)`, and this file's fingerprint probes closures
+   * precisely so that a formatter quietly becoming size-dependent shows up as a diff.
+   *
+   * Two labels across 300px stay on the ladder's upright rung, so `grid.bottom` is the same in
+   * both builds and the equality below is exact rather than approximate.
+   */
+  it("cartesian reads the size, and reads it ONLY for the x-axis labels", () => {
     const cfg = { kind: "bar" as const, xAxis: "k", yMetrics: ["v"] };
-    // tooltip, category-axis label, value-axis label.
-    expectSizeIsUnread((size) => buildCartesianOption(cols, rows, cfg, size), 3);
+    const sized = fingerprint(buildCartesianOption(cols, rows, cfg, SMALL)) as Record<string, never>;
+    const unsized = fingerprint(buildCartesianOption(cols, rows, cfg)) as Record<string, never>;
+    // tooltip, category-axis label, value-axis label — pinned exactly, for the reason
+    // `expectSizeIsUnread` gives.
+    expect(functionsIn(sized)).toBe(3);
+
+    const axisLabelOf = (fp: Record<string, never>) =>
+      (fp as unknown as { xAxis: { axisLabel: unknown } }).xAxis.axisLabel;
+    expect(axisLabelOf(sized)).not.toStrictEqual(axisLabelOf(unsized));
+
+    delete (sized as unknown as { xAxis: { axisLabel?: unknown } }).xAxis.axisLabel;
+    delete (unsized as unknown as { xAxis: { axisLabel?: unknown } }).xAxis.axisLabel;
+    expect(sized).toStrictEqual(unsized);
   });
 
   it("gauge builds identically with and without a size", () => {

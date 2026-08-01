@@ -53,7 +53,10 @@ describe("value-axis labels", () => {
   });
 });
 
-describe("category-axis labels", () => {
+/** `opt` never passes a size, so this block describes the SIZE-BLIND path throughout. What the
+ *  builder does once it can measure — draw every label, rotate every label, or draw none — is
+ *  `cartesianXLabels.test.ts`. */
+describe("category-axis labels, with nothing to measure against", () => {
   it("leaves label spacing to ECharts at any length, because only ECharts knows the width", () => {
     expect(opt(base, small).xAxis.axisLabel.interval).toBe("auto");
     expect(opt(base).xAxis.axisLabel.interval).toBe("auto"); // 40 categories — still auto
@@ -63,13 +66,26 @@ describe("category-axis labels", () => {
     expect(opt({ ...base, kind: "row" }).yAxis.axisLabel.interval).toBe("auto");
   });
 
-  it("rotates long labels rather than only dropping them", () => {
+  /**
+   * This block used to assert the opposite — that twelve labels of twenty-odd characters came back
+   * tilted, from `longest > 10 && categories.length > 6 ? 30 : 0`. That rule is gone rather than
+   * kept as a fallback, and deliberately: length and count are proxies for width, and the rule got
+   * the case that mattered backwards, declining to rotate four "Doohickey"-length names on a
+   * one-third-width card and leaving `interval: "auto"` to drop three of the four. A guess made
+   * without a width is what this workstream removes, so with no width there is no guess.
+   */
+  it("does not guess a rotation from label length when it cannot see the width", () => {
     const wordy = Array.from({ length: 12 }, (_, i) => [`Metropolitan region ${i}`, i * 10]);
-    expect(opt(base, wordy).xAxis.axisLabel.rotate).toBeGreaterThan(0);
+    expect(opt(base, wordy).xAxis.axisLabel.rotate).toBe(0);
   });
 
   it("leaves short labels upright", () => {
     expect(opt(base).xAxis.axisLabel.rotate).toBe(0);
+  });
+
+  it("still draws the axis — hiding it is a decision only measurement can take", () => {
+    const wordy = Array.from({ length: 12 }, (_, i) => [`Metropolitan region ${i}`, i * 10]);
+    expect(opt(base, wordy).xAxis.axisLabel.show).toBe(true);
   });
 });
 
