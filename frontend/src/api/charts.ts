@@ -90,7 +90,7 @@ export interface CartesianConfig {
   /** An explicit category-label rotation, which SUPPRESSES the measured choice (see
    *  `echarts/axisLabelFit.ts`): Metabase's auto-selection likewise applies only while the setting
    *  is untouched. Metabase folds this into `graph.x_axis.axis_enabled` as one five-value key;
-   *  egret keeps two fields because waterfall, box plot and sankey already store this shape
+   *  egret keeps two fields because the waterfall and the box plot already store this shape
    *  (`settings/ChartAxesSection.tsx`), and one control storing two different shapes across the
    *  chart module would be worse than differing from Metabase's key. The panel select is a
    *  projection over both. */

@@ -35,7 +35,8 @@ export interface AxesConfig {
  * explicit rotation, which suppresses the measured one; see `echarts/axisLabelFit.ts`).
  *
  * Exported as a pair of pure functions, the way `stackModeOf`/`stackModePatch` already are, because
- * TWO panels offer this choice — this tab (waterfall, box plot, sankey) and cartesian's
+ * TWO panels offer this choice — this tab (the waterfall and the box plot, its only two callers in
+ * `viz/simple.tsx`; a sankey has no axes and stores neither field) and cartesian's
  * `AxisRangeOptions` — and a second hand-written projection is how the same stored pair ends up
  * meaning different things depending on which tab the user opened. The layout differs between the
  * two panels; the mapping must not.

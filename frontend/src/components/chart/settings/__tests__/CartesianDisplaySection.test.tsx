@@ -422,6 +422,45 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
     expect(await screen.findByRole("option", { name: "Rotate 90°" })).toHaveAttribute("aria-disabled", "true");
   });
 
+  /** …and the converse, which is the half of that arm doing the work: a scatter with a DIMENSION on
+   *  x falls through to `baseOption` like any other chart and gets an ordinal category axis, where
+   *  the rotation applies. Testing `kind === "scatter"` alone would grey out a live setting on
+   *  every one of them — and every other assertion in this file passes under that mutation. */
+  it("leaves them enabled on a scatter with a category x-axis", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xAxis: "region" }} onChange={onChange} />);
+    await open(user);
+    const opt = await screen.findByRole("option", { name: "Rotate 45°" });
+    expect(opt).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(opt);
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xLabelRotation: 45, xAxisTicks: undefined });
+  });
+
+  /**
+   * WHERE THE REASON LIVES, and why it is asserted at all. It first sat on the disabled items as a
+   * native `title`, which no class of user could reach: `data-[disabled]:pointer-events-none` stops
+   * a mouse hovering them, Radix skips disabled items in its roving focus so a keyboard never lands
+   * on one, and a screen reader is handed `aria-disabled` and nothing else. So the reason hangs off
+   * the trigger — focusable, pointer-events intact — and is wired with `aria-describedby`, which is
+   * what puts it in the accessibility tree rather than merely on screen.
+   */
+  it("explains the greying-out on the trigger, where it can actually be read", async () => {
+    const user = userEvent.setup();
+    render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"], xScale: "timeseries" }} onChange={() => {}} />);
+    const hint = screen.getByText(/Rotation applies to a category axis/);
+    expect(screen.getByLabelText("X axis lines and ticks")).toHaveAttribute("aria-describedby", hint.id);
+    // …and NOT on the items, where it would look like an explanation and reach nobody.
+    await open(user);
+    expect(await screen.findByRole("option", { name: "Rotate 45°" })).not.toHaveAttribute("title");
+  });
+
+  it("says nothing where every choice is live", () => {
+    render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    expect(screen.queryByText(/Rotation applies to a category axis/)).toBeNull();
+    expect(screen.getByLabelText("X axis lines and ticks")).not.toHaveAttribute("aria-describedby");
+  });
+
   it("still shows a rotation stored before the scale changed", () => {
     render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"], xScale: "linear", xLabelRotation: 45 }} onChange={() => {}} />);
     expect(screen.getByLabelText("X axis lines and ticks")).toHaveTextContent("Rotate 45°");

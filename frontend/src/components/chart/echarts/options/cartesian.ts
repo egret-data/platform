@@ -951,14 +951,17 @@ function baseOption(
   // subset `interval: "auto"` leaves ECharts free to pick.
   const decided = fit != null || explicitRotate;
   // Room below the plot for the tilted labels — `bottomPad` scales with the widest label, which is
-  // what the measurement knows and the flat 18px fallback does not. Gated on `ordinalX` because
+  // what the measurement knows and the flat fallback below does not. Gated on `ordinalX` because
   // this is the BOTTOM margin: a row chart's rotated labels want room on the left (which
   // `containLabel` gives them), and a value x-axis never applied the rotation in the first place.
   // The flat fallback used to be 18 at ANY angle here where the box plot and the waterfall already
   // reserved 44 past 90°, so the same labels at the same rotation got different room depending on
   // the chart. Reconciled onto their ladder now that the panel can reach this path on a cartesian
   // chart: a 90° label's footprint below the axis is its whole width, which is nothing like the
-  // 18px a 45° one needs, and 18 was simply the smaller of two guesses.
+  // 18px a 45° one needs, and 18 was simply the smaller of two guesses. Reconciled UPWARDS on
+  // purpose: until the panel could store `xLabelRotation` on a cartesian chart this branch was
+  // dead here, so raising cartesian re-lays-out nothing that was ever saved, where lowering the
+  // other two would move every waterfall and box plot already carrying an explicit 90°.
   const xLabelPad = fit
     ? (fit.kind === "rotate" ? fit.bottomPad : 0)
     : (ordinalX ? (rotate >= 90 ? 44 : rotate ? 18 : 0) : 0);
@@ -990,9 +993,10 @@ function baseOption(
     // TWO different `show`s sit on this axis and they are not the same switch. `xAxisTicks` is the
     // axis LINE and the tick marks; the LABELS are `axisLabel.show` above, which only the measured
     // fit ever writes. Metabase's single `axis_enabled: false` hides both, so egret's "Hide" is
-    // narrower than its namesake — a pre-existing, product-wide divergence (waterfall, box plot and
-    // sankey ship the same select today), but worth saying here now that a second `show` on the
-    // same axis could be mistaken for the one the panel writes.
+    // narrower than its namesake — a pre-existing divergence shared with the other two charts that
+    // ship this select (the waterfall and the box plot, via `settings/ChartAxesSection.tsx`; a
+    // sankey has no axes and stores neither field), but worth saying here now that a second `show`
+    // on the same axis could be mistaken for the one the panel writes.
     axisLine: { show: cfg.xAxisTicks !== false, lineStyle: { color: gridLine } },
     axisTick: { show: cfg.xAxisTicks !== false },
   };
