@@ -22,6 +22,8 @@ type MockClick = {
   data?: unknown;
   /** Which series the clicked element belongs to. The cartesian drill reads `__raw` through it. */
   seriesIndex?: number;
+  /** The datum's index within its series. The box plot's drill reads the category from it. */
+  dataIndex?: number;
   x: number;
   y: number;
 };
@@ -958,6 +960,43 @@ describe("ChartRenderer", () => {
       );
       fireEvent.click(screen.getAllByTestId("echarts")[0]);
       expect(onValueClick).not.toHaveBeenCalled();
+    });
+
+    // Metabase's box plot drills; egret's branch passed no click handler at all. A `boxplot`
+    // element reports no usable `name`, so the category has to come from its `dataIndex` — which
+    // is why `EChartsPointClick` had to start carrying one.
+    it("drills a box by its own category, from the datum index", () => {
+      const onValueClick = vi.fn();
+      mockClickPayload = { name: "", seriesName: "", value: [1, 2, 3, 4, 5], dataIndex: 1, x: 7, y: 8 };
+      render(
+        <ChartRenderer
+          vizType="boxplot"
+          params={params({ boxplot: { category: "c", value: "m" } })}
+          columns={[{ name: "c", type: "varchar" }, { name: "m", type: "double" }]}
+          rows={[["A", 1], ["A", 3], ["B", 5], ["B", 9]]}
+          onValueClick={onValueClick}
+        />,
+      );
+      fireEvent.click(screen.getAllByTestId("echarts")[0]);
+      expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "c", value: "B" }] }, 7, 8);
+    });
+
+    // An outlier point carries `[categoryIndex, value]` instead of a datum index; it drills to the
+    // same category the box it sits above does.
+    it("drills an outlier point to the category it belongs to", () => {
+      const onValueClick = vi.fn();
+      mockClickPayload = { name: "", seriesName: "", value: 99, data: [0, 99], x: 1, y: 2 };
+      render(
+        <ChartRenderer
+          vizType="boxplot"
+          params={params({ boxplot: { category: "c", value: "m" } })}
+          columns={[{ name: "c", type: "varchar" }, { name: "m", type: "double" }]}
+          rows={[["A", 1], ["A", 3], ["B", 5], ["B", 9]]}
+          onValueClick={onValueClick}
+        />,
+      );
+      fireEvent.click(screen.getAllByTestId("echarts")[0]);
+      expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "c", value: "A" }] }, 1, 2);
     });
 
     it("forwards every BoxplotConfig field, and both shell settings, to the built option", () => {

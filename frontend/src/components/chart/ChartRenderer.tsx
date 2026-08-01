@@ -514,11 +514,29 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
   }
 
   if (vizType === "boxplot") {
+    const boxOption = buildBoxplotOption(columns, rows, { ...box, columnSettings, metricTypes });
+    // The categories the builder settled on, read back rather than recomputed — a box's own
+    // `dataIndex` and a point's `data[0]` are both indexes into this list.
+    const boxCategories = ((boxOption as { xAxis?: { data?: string[] } }).xAxis?.data ?? []);
     return (
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <EChartsRenderer option={buildBoxplotOption(columns, rows, { ...box, columnSettings, metricTypes })} />}
+          : <EChartsRenderer
+            option={boxOption}
+            // Metabase's box plot drills; egret's branch passed no handler, so clicking a box did
+            // nothing. A box IS a category, and so is the point drawn above it.
+            onPointClick={onValueClick && box.category ? (p) => {
+              const i = Array.isArray(p.data) ? Number((p.data as unknown[])[0]) : p.dataIndex;
+              const value = boxCategories[i ?? -1] ?? p.name;
+              if (value == null) return;
+              const unit = params.spec.temporal_units?.[box.category as string];
+              const dim: DrillDim = unit
+                ? { col: box.category as string, value, unit }
+                : { col: box.category as string, value };
+              onValueClick({ dims: [dim] }, p.x, p.y);
+            } : undefined}
+          />}
       </div>
     );
   }

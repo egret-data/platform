@@ -237,6 +237,31 @@ export interface SmartScalarConfig {
 export interface BoxplotConfig {
   category?: string;
   value?: string;
+  /** The one colour the chart derives from — box fill, border, mean and points all come from it. */
+  color?: string;
+  /** Metabase's `boxplot.whisker_type`. Unset is Tukey (1.5 × IQR). */
+  whiskers?: "tukey" | "min-max";
+  /** Metabase's `boxplot.points_mode`. Unset is "outliers", and Min/Max whiskers force "none". */
+  points?: "none" | "outliers" | "all";
+  /** Unset means SHOWN — `boxplot.show_mean` defaults to true. */
+  showMean?: boolean;
+  showLabels?: boolean;
+  /** Metabase's `boxplot.show_values_mode`. */
+  labelMode?: "median" | "all";
+  compactValues?: boolean;
+  goalValue?: number;
+  goalLabel?: string;
+  xLabel?: string;
+  yLabel?: string;
+  showXLabel?: boolean;
+  showYLabel?: boolean;
+  xAxisTicks?: boolean;
+  yAxisTicks?: boolean;
+  xLabelRotation?: 45 | 90;
+  yTickCount?: number;
+  yMin?: number;
+  yMax?: number;
+  logScale?: boolean;
 }
 export interface SankeyConfig {
   source?: string;
