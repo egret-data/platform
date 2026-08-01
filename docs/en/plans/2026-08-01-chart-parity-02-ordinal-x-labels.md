@@ -414,7 +414,26 @@ const rotate = cfg.xLabelRotation ?? (fit?.kind === "rotate" ? fit.rotate : 0);
 
 Rename the parameter from `_size` to `size` now that it is read, and update its doc comment: it is no longer "unread today". Leave `buildGaugeOption`'s and `buildSankeyOption`'s parameters as `_size` — they are still unread, and PR 05 is where they stop being.
 
-Then in the `axisLabel` at `:913`, replace `interval: "auto" as const` with `interval: fit ? 0 : ("auto" as const)`, and add `show: fit?.kind !== "hide"` to the `axisLabel`. In the `grid` at `:990`, replace `(rotate ? 18 : 0)` with the fit's `bottomPad` when there is one, falling back to `18` for an explicit rotation with no measurement.
+Then in the `axisLabel` at `:913`, replace `interval: "auto" as const` with `interval: fit ? 0 : ("auto" as const)`, and add `show: fit?.kind !== "hide"`. In the `grid` at `:990`, replace `(rotate ? 18 : 0)` with the fit's `bottomPad` when there is one, falling back to `18` for an explicit rotation with no measurement.
+
+> **Corrected after Task 1's review.** An earlier version of this step computed `fit` unconditionally
+> and then wrote `show: fit?.kind !== "hide"`. That contradicts this plan's own rule that auto-selection
+> applies **only while the setting is untouched**: a user who explicitly picks 45° on a narrow card
+> would get their rotation honoured *and their axis hidden anyway*, which is worse than either
+> outcome alone and would look like the setting doing nothing.
+>
+> Skip the measurement entirely when the user has chosen:
+>
+> ```ts
+> const fit = size && !horizontal && cfg.xLabelRotation == null ? fitXLabels({ … }) : undefined;
+> const rotate = cfg.xLabelRotation ?? (fit?.kind === "rotate" ? fit.rotate : 0);
+> ```
+>
+> With `fit` undefined on the explicit path, `interval` falls back to `"auto"` — which is wrong for a
+> different reason, since the whole point is that labels are never partial. So on the explicit path
+> set `interval: 0` too. Write the guard as "did the user choose?", not as "is there a fit?", and add
+> a test: an explicit rotation on a card narrow enough that measurement would have said `hide` must
+> still draw the axis, rotated as asked.
 
 - [ ] **Step 5: Run both new test files and the whole chart suite**
 
