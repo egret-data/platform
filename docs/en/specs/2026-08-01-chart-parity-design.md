@@ -167,6 +167,22 @@ so a date column is plotted on a category axis with raw string labels.
 **Fixes:** line, area, combo x-labels; scatter's `15.69 / 48.93 / 84.14` ticks; and the trend card
 printing `December 1, 2026` where it should name the period.
 
+**Amended as built (PR 03).** Item 1 is deliberately **not** done for the temporal case, and this
+records the decision rather than leaving it looking like an oversight. Switching a temporal x to a
+real `time` axis changes bar width, stacking and the breakout path for every temporal chart in the
+product; the visible defect — unreadable and then, after PR 02's all-or-nothing ladder, absent
+labels — is fixed by naming the periods (item 4) and thinning to boundaries (items 2 and 3) on the
+category axis egret already uses. Item 1 *is* done for the numeric scatter, where the same change is
+local.
+
+Items 2 and 3 are therefore adapted rather than ported verbatim: the ladder still starts at the
+data's own bucketing and walks up, but each rung is converted into a count of BUCKETS, because
+ECharts strides a category axis by index (`temporal-period.ts`'s `boundarySteps`). Two consequences
+follow and are recorded where they live: the stride aligns on the first bucket rather than on the
+calendar, and `minTickCount = 2` is not ported — one label is a legitimate rung where two would be
+drawn overlapping. If a later change wants the time axis for its own reasons, `applyXScale` and
+`scaleAxis` are already there.
+
 ### Workstream 4 — colour assignment
 
 The palettes are already identical: egret's `SERIES_PALETTE` is Metabase's eight accents, and

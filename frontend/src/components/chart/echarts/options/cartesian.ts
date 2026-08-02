@@ -1032,6 +1032,16 @@ function baseOption(
       // the `decided` arm below has always meant, and every 6th is `5`. Off by one here is invisible
       // in a screenshot: it draws Jan/Jun/Nov instead of Jan/Jul, which looks like a date axis.
       //
+      // Two more things checked in that source rather than assumed, because both would undo the
+      // "every drawn label is a period boundary" property this rests on. The stride starts at INDEX
+      // ZERO — `startTick` is only re-aligned when the extent starts past 0, i.e. under a data zoom
+      // this axis does not have (`:238-241`) — so the first bucket is always one of the drawn ones.
+      // And the last index is appended `offInterval` (`:250-252`) but then IGNORED by `AxisBuilder`
+      // while `showMinLabel`/`showMaxLabel` are unset, which they are (`AxisBuilder.js:675`); so a
+      // December that is not on the stride is not quietly drawn beside July. The tick MARKS follow
+      // the labels for free: `axisTick` carries no `interval`, which defaults to "auto", and "auto"
+      // on a tick model means "whatever the labels decided" (`axisTickLabelBuilder.js:182-187`).
+      //
       // AND THIS IS NOT PR 02's RULE BEING UNDONE, which is the reading to head off — PR 02 banned
       // `interval: "auto"` three weeks ago and the ban stands. What "auto" does is drop WHICHEVER
       // labels happen to collide: an arbitrary subset, chosen by geometry, that reads as missing
