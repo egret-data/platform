@@ -75,3 +75,81 @@ describe("SmartScalarChart — Metabase parity", () => {
     expect(screen.getByText("March 2026")).toBeInTheDocument();
   });
 });
+
+/**
+ * The label above the number names the PERIOD the latest row covers. It printed that period's first
+ * DAY — "December 1, 2026" directly above a caption reading "vs previous month", which is the card
+ * contradicting itself. Observed live on the ZZ Chart Parity harness.
+ */
+describe("SmartScalarChart — the label names the period, not its first day", () => {
+  const cols = [{ name: "d", type: "date" }, { name: "m", type: "double" }];
+  const rows = [["2026-02-01", 36860], ["2026-03-01", 36513]];
+
+  it("names the period at the unit the caption beneath it already uses", () => {
+    render(<SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month" />);
+    expect(screen.getByText("March 2026")).toBeInTheDocument();
+    expect(screen.queryByText("March 1, 2026")).toBeNull();
+    // The two now agree about the granularity, which is the point.
+    expect(screen.getByText(/vs previous month:/)).toBeInTheDocument();
+  });
+
+  it("names a quarter and a year the same way", () => {
+    const { rerender } = render(
+      <SmartScalarChart columns={cols} rows={[["2026-04-01", 1], ["2026-07-01", 2]]}
+        dimension="d" metric="m" unit="quarter" />,
+    );
+    expect(screen.getByText("Q3 2026")).toBeInTheDocument();
+    rerender(
+      <SmartScalarChart columns={cols} rows={[["2025-01-01", 1], ["2026-01-01", 2]]}
+        dimension="d" metric="m" unit="year" />,
+    );
+    expect(screen.getByText("2026")).toBeInTheDocument();
+  });
+
+  /**
+   * A WEEK is named by its first day here, not by Metabase's span. Metabase's trend card runs this
+   * label through `formatDateTimeRangeWithUnit(..., {compact: true})` (`SmartScalar/compute.ts:702`)
+   * and gets "Jan 5–11, 2026" — and, at every OTHER unit, an abbreviated month ("Mar 2026" above,
+   * not "March 2026"). That is a condensed-range formatter this codebase does not have; building it
+   * is a change of its own, not an argument to `periodName`. Pinned so the divergence is a decision
+   * on the record rather than something rediscovered.
+   */
+  it("names a week by its first day — the known, deliberate gap from Metabase's span form", () => {
+    render(
+      <SmartScalarChart columns={cols} rows={[["2025-12-29", 1], ["2026-01-05", 2]]}
+        dimension="d" metric="m" unit="week" />,
+    );
+    expect(screen.getByText("January 5, 2026")).toBeInTheDocument();
+  });
+
+  // Same order as the x-axis: a stored format outranks the bucketing, because a setting the panel
+  // offers, stores and then ignores is a defect this codebase has fixed three times already.
+  it("lets the dimension's own format win over the period name", () => {
+    render(
+      <SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month"
+        dimensionFormat={{ date_style: "YYYY-MM-DD" }} />,
+    );
+    expect(screen.getByText("2026-03-01")).toBeInTheDocument();
+    expect(screen.queryByText("March 2026")).toBeNull();
+  });
+
+  /**
+   * The negative, and the one a wrong guard would break: with no unit the card is NOT bucketed, so
+   * the label keeps `formatValue`'s default date style. Naming a period here would invent a
+   * granularity; returning the raw "2026-03-01" would be a regression from what shipped.
+   */
+  it("keeps the default date style when the dimension carries no unit", () => {
+    render(<SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" />);
+    expect(screen.getByText("March 1, 2026")).toBeInTheDocument();
+  });
+
+  it("leaves a non-temporal dimension alone even under a unit", () => {
+    // An extraction unit's value is already a finished word; `periodName` must not read "3" as a
+    // date, which dayjs would happily do (`dayjs("3")` formats as March 2001).
+    render(
+      <SmartScalarChart columns={[{ name: "dow", type: "varchar" }, { name: "m", type: "double" }]}
+        rows={[["2", 1], ["3", 2]]} dimension="dow" metric="m" unit="day_of_week" />,
+    );
+    expect(screen.getByText("3")).toBeInTheDocument();
+  });
+});

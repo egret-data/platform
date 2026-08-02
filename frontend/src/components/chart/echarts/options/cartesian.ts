@@ -7,6 +7,7 @@ import { formatValue } from "../../format";
 import { ariaDescription, baseTextStyle, tooltipSurface } from "../base";
 import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
+import { periodName } from "@/components/chart/temporal-period";
 import { foldTail, OTHER_LABEL } from "../fold";
 import { estimatePlotWidth, fitXLabels, type XLabelFit } from "../axisLabelFit";
 
@@ -963,7 +964,7 @@ function baseOption(
     // than the values beneath it, and ECharts' default nameTextStyle colour reads paler.
     nameTextStyle: { color: axisLabelColor },
     // Category labels go through the column's own format. Extraction units are already
-    // substituted above (`displayCats`), but a TRUNCATION unit left the raw bucket on the axis —
+    // substituted above (`displayCats`); a TRUNCATION unit is named by the formatter below —
     // a chart grouped by month read "2026-01-01" where the bucket is really January 2026. The
     // formatter only changes what is drawn; `data` stays the raw value, so a drill still filters
     // on what the engine returned.
@@ -973,11 +974,24 @@ function baseOption(
       // The third answer the ladder can give: when even a rotated label would eat 70% of the
       // card's height, Metabase draws no axis rather than a wall of text.
       show: fit?.kind !== "hide",
+      // THREE answers in priority order, and the middle one is what PR 03 added:
+      //   1. the column's own format, when the user set one — they have said what they want, and
+      //      a stored-then-ignored setting is the defect the pivot, the pie and the breakout
+      //      legend each had in turn;
+      //   2. otherwise the NAME OF THE PERIOD the bucket covers, when the axis is bucketed by a
+      //      truncation unit — "January 2026" for a month, not its first day;
+      //   3. otherwise the raw value, which is every non-temporal axis and every temporal column
+      //      that was not bucketed.
+      // `periodName` is total and falls through to the raw string itself, so it IS answer 3 as
+      // well — there is no separate guard on the unit here, and adding one would only be a second
+      // place for the two to disagree.
       formatter: (v: string) => {
         const fmt = cfg.xAxis ? cfg.columnSettings?.[cfg.xAxis] : undefined;
-        if (!fmt || v == null) return String(v ?? "");
-        const out = formatValue(v, cfg.xAxisType ?? "varchar", fmt);
-        return out === "" ? String(v) : out;
+        if (fmt && v != null) {
+          const out = formatValue(v, cfg.xAxisType ?? "varchar", fmt);
+          if (out !== "") return out;
+        }
+        return periodName(cfg.xAxisUnit, v);
       },
     },
     // TWO different `show`s sit on this axis and they are not the same switch. `xAxisTicks` is the

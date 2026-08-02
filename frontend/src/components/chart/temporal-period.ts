@@ -147,6 +147,22 @@ export function periodName(unit: string | undefined, value: unknown): string {
   return d.isValid() ? d.format(fmt) : String(value);
 }
 
+/**
+ * Whether this unit names a period at all — i.e. whether `periodName` will do anything with it.
+ *
+ * Derived from `PERIOD_FORMAT` rather than from `temporal-units`' trunc/extract split, so it cannot
+ * drift from what `periodName` actually implements: a unit that is a truncation token but has no
+ * format entry yet would be reported as naming a period while `periodName` fell through to raw.
+ *
+ * `periodName` is total, so a caller whose fallback IS the raw string does not need this — the axis
+ * formatter simply calls `periodName`. It exists for the trend card, whose fallback is `formatValue`
+ * (a date column with no format there still reads "March 1, 2026", and dropping that would be a
+ * regression), so it has to know which of the two paths to take BEFORE calling.
+ */
+export function namesAPeriod(unit: string | undefined): boolean {
+  return unit != null && PERIOD_FORMAT[unit] != null;
+}
+
 /** The reference year every candidate below is built in. Fixed, because a year is four digits
  *  either way and the alternative — `dayjs()` — would make the tick layout of a chart depend on
  *  the day it is looked at. */
