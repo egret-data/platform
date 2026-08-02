@@ -9,6 +9,12 @@
  * against Metabase on byte-identical data — and an axis missing three of its four names reads as
  * missing data rather than as a layout decision. Whether labels fit is a question about width, so
  * this module answers it from a width: draw all of them, rotate all of them, or hide the axis.
+ *
+ * PR 03 ADDS A FOURTH ANSWER, and it is not a hole in the third. A BUCKETED TEMPORAL axis — and only
+ * one of those, see `XLabelBoundary` — may draw every Nth label upright, where the drawn ones are
+ * regular period boundaries. That is not the arbitrary subset banned above: "auto" keeps whichever
+ * labels happen not to collide, while a stride keeps January and July. The full argument is on the
+ * `thin` arm of `XLabelFit`, where the next reader of `interval: N` will be looking.
  */
 
 import { measureText, type TextMeasurer } from "@/components/chart/measure-text";
@@ -35,8 +41,55 @@ import { CHART_THEME, resolveFontFamily } from "./palette";
  */
 export type XLabelFit =
   | { kind: "show"; rotate: 0 }
+  /**
+   * Every `every`th label, upright, starting at the first — reachable ONLY through the `boundary`
+   * input, i.e. only on an axis whose categories are temporal buckets.
+   *
+   * THIS IS NOT THE `interval: "auto"` THE HEADER ABOVE BANS, and the distinction is the whole
+   * justification rather than a caveat on it. "auto" drops whichever labels happen to collide: an
+   * arbitrary subset, chosen by geometry, which reads as missing data because nothing about which
+   * ones survived means anything. A regular stride over BUCKETS is the opposite — the drawn labels
+   * are period boundaries, every one of them the same distance apart, which is what Metabase's tick
+   * interval produces (`computeTimeseriesTicksInterval`) and what a reader already expects a date
+   * axis to do. Twelve months on a one-third-width card: Metabase draws "January 2026" and
+   * "July 2026" and nothing between them, and a reader understands the axis at a glance.
+   *
+   * `rotate: 0` is part of the decision and not a default. Thinning is tried BEFORE the rotate
+   * ladder because two upright labels beat twelve tilted ones; if no stride fits, the ladder below
+   * runs unchanged and this arm is never returned.
+   */
+  | { kind: "thin"; rotate: 0; every: number }
   | { kind: "rotate"; rotate: 45 | 90 }
   | { kind: "hide" };
+
+/**
+ * What a BUCKETED temporal axis needs to be thinned, and the only door to `kind: "thin"`.
+ *
+ * Both fields come from `temporal-period.ts`, keyed on the truncation unit the chart spec carries
+ * (`cfg.xAxisUnit`), and neither can be manufactured here — this module holds no temporal knowledge
+ * at all, which is what makes "an ordinal axis of product names is never thinned" a fact about the
+ * types rather than a rule someone has to remember. There is no such thing as every second product.
+ */
+export interface XLabelBoundary {
+  /**
+   * The worst-case label FOR THE UNIT, not the widest in this dataset — `widestPeriodName(unit,
+   * drawLabel)`. Metabase sizes its ticks the same way, against `getRepresentativeDates` rather
+   * than its data (`maxTicksForChartWidth`, `timeseries.ts:280-299`), and the reason is that the
+   * alternative makes a chart's layout depend on which slice of it you are looking at: a month axis
+   * whose visible range happens to be May–July would size itself on "May 2026" and start clipping
+   * the moment the range moved to September.
+   *
+   * It must be a string the axis would actually DRAW — hence `drawLabel`, the caller's own label
+   * closure, threaded through `widestPeriodName`. Measuring one string while another is rendered is
+   * the drift the caller closed one level down; introducing a candidate here that bypasses it would
+   * reopen it one level up.
+   */
+  widestLabel: string;
+  /** Candidate strides in BUCKETS, cheapest first — `boundarySteps(unit)`, Metabase's
+   *  `TICKS_TIMESERIES_INTERVALS` at and above the data's own unit. Empty for a unit that names no
+   *  period, which is the second thing making a non-temporal stride unreachable. */
+  steps: number[];
+}
 
 /** Metabase's own constants. Its names are shortened here, so each one gives the original — the
  *  point is that whoever next diffs this file against upstream can grep for it.
@@ -158,10 +211,60 @@ function ticksToMeasure(labels: string[]): string[] {
   return indices.map((i) => labels[i]);
 }
 
+/**
+ * The cheapest stride from `boundary.steps` whose drawn labels fit, or `undefined` if none does —
+ * Metabase's `computeTimeseriesTicksInterval` (`timeseries.ts:216-263`) walking its ladder upwards
+ * from the data's own unit and stopping at the first rung under the width budget.
+ *
+ * A label drawn every `every`th bucket owns `every * dimensionWidth` of the axis, and it fits when
+ * the worst case for the unit plus one gap of clear ink does. `HORIZONTAL_TICKS_GAP` rather than
+ * Metabase's own `TICK_BUFFER_PIXELS` of 10: this module already answers "how much ink-free space
+ * between two neighbouring labels" with 6, above, and two constants for one question in one file is
+ * how they drift apart. Padding matches upstream, which measures
+ * `getPaddedAxisLabel(formatter(date))` at `:298` — the same pessimism the overlap test uses.
+ *
+ * THREE OF METABASE'S RULES ARE DELIBERATELY NOT PORTED, since each would be wrong here:
+ *
+ *   - `minTickCount = 2`, which steps BACK a rung when the chosen one would draw fewer than two
+ *     ticks and accepts the overflow. On a category axis that draws two labels overlapping; the
+ *     honest answer at that width is one label, or none and a rotation. So the last rung stands.
+ *   - the `interval` FALLBACK to the largest rung when nothing fits. Returning `undefined` hands the
+ *     axis back to the rotate ladder, which is PR 02's behaviour and the right one — Metabase has no
+ *     rotate ladder to hand back to.
+ *   - stride 1, skipped outright. "Every label" was already asked and answered above, against the
+ *     labels this axis actually has rather than against the unit's worst case; re-asking it here
+ *     could only overrule a measurement with an estimate.
+ *
+ * Rungs at or past the label count all draw the same single label at index 0, so the first of them
+ * is the last one worth testing — and it IS worth testing, because "one label or none" is a real
+ * rung of the ladder (twelve months at every 12th is "January 2026" alone) and not a degenerate
+ * case to skip.
+ */
+function strideThatFits(
+  boundary: XLabelBoundary,
+  count: number,
+  dimensionWidth: number,
+  widthOf: (label: string) => number,
+): number | undefined {
+  const { widestLabel, steps } = boundary;
+  // Both are empty for a unit that names no period. Belt and braces against the caller's own
+  // `namesAPeriod` guard: a zero-width candidate would otherwise "fit" every stride and thin an
+  // ordinal axis on the strength of having measured nothing.
+  if (widestLabel === "" || steps.length === 0) return undefined;
+  const needed = widthOf(widestLabel) + HORIZONTAL_TICKS_GAP;
+  for (const every of steps) {
+    if (every < 2) continue;
+    if (needed <= every * dimensionWidth) return every;
+    if (every >= count) break;
+  }
+  return undefined;
+}
+
 export function fitXLabels({
   labels,
   plotWidth,
   outerHeight,
+  boundary,
   fontSize = CHART_THEME.axisFontSize,
   measure = measureText,
 }: {
@@ -177,6 +280,9 @@ export function fitXLabels({
    *  `plotWidth`, which is why it is not called `plotHeight`. The 70% guard is a share of the whole
    *  card (`checkHeight`), so passing an inset height silently tightens it. */
   outerHeight: number;
+  /** Present only when the categories are temporal BUCKETS; see `XLabelBoundary`. Absent is the
+   *  normal case and means PR 02's all-or-nothing ladder, unchanged. */
+  boundary?: XLabelBoundary;
   fontSize?: number;
   /** Injectable: `measure-text.ts` returns `{width: 0, height: 0}` under jsdom by design ("Size
    *  claims belong in a browser"), so tests drive the ladder with a stub rather than assert a
@@ -226,6 +332,13 @@ export function fitXLabels({
       || left + HORIZONTAL_TICKS_GAP / 2 > dimensionWidth;
   });
   if (!overlaps) return upright;
+
+  // BEFORE the rotate ladder, never instead of it: on a bucketed date axis two upright period names
+  // beat twelve tilted ones, which is what Metabase draws — but a stride that does not fit falls
+  // straight through to the rungs below with nothing changed.
+  const every = boundary && strideThatFits(boundary, labels.length, dimensionWidth,
+    (l) => measure(pad(l), style).width);
+  if (every != null) return { kind: "thin", rotate: 0, every };
 
   const maxWidth = Math.max(...measured.map((l) => measure(l, style).width));
   // `checkHeight`: a 45° label's vertical footprint is its width projected onto the vertical axis,

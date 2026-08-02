@@ -19,6 +19,13 @@
  * Extraction units ("day_of_week", "month_of_year", ...) are not periods and are not this module's
  * business — `temporalLabel` in `./temporal-units` has already turned their values into finished
  * words upstream (`options/cartesian.ts`, the `displayCats` line).
+ *
+ * IT ALSO OWNS THE TICK LADDER (`boundarySteps`), because that is the same knowledge asked a second
+ * way. `namesAPeriod` is the single membership rule for "this unit denotes a period", and the two
+ * questions a thinned axis asks — how wide can a label at this unit get, and how many buckets apart
+ * may two of them be — are both keyed on it. `echarts/axisLabelFit.ts` stays free of any temporal
+ * knowledge as a result: it takes the answers as an input it cannot manufacture, which is what
+ * makes "an ordinal axis is never thinned" structural rather than a rule someone must remember.
  */
 
 import dayjs from "dayjs";
@@ -27,12 +34,18 @@ import dayjs from "dayjs";
 // so registering it here too costs nothing and stops this module depending on whether some other
 // module happened to be imported first.
 import advancedFormat from "dayjs/plugin/advancedFormat";
+// `add(n, "quarter")` is NOT core dayjs either, and its failure mode is silent rather than loud:
+// an unrecognised unit falls through to MILLISECONDS, so `dayjs(0).add(1, "quarter")` without this
+// is `1970-01-01T00:00:00.001Z` and `TICK_INTERVALS`' quarter rungs would come out as a stride of
+// zero rather than of three months. Verified against dayjs 1.11.21 before this line was written.
+import quarterOfYear from "dayjs/plugin/quarterOfYear";
 // For `dayjs.utc`, which is how a value carrying an explicit offset keeps its OWN wall clock — see
 // `parseInOwnZone`.
 import utc from "dayjs/plugin/utc";
 import { isExtractUnit } from "./temporal-units";
 
 dayjs.extend(advancedFormat);
+dayjs.extend(quarterOfYear);
 dayjs.extend(utc);
 
 /**
@@ -228,8 +241,8 @@ const WIDEST_BY_UNIT = new Map<string, string>();
 /**
  * The longest name this unit can produce, BY CHARACTER COUNT — a candidate to measure, not a width.
  *
- * Not the longest name in the data. The tick chooser sizes an axis against this (PR 03 task 3), the
- * way Metabase measures `getRepresentativeDates` rather than its dataset
+ * Not the longest name in the data. The tick chooser sizes an axis against this (`axisLabelFit.ts`,
+ * the `boundary` arm), the way Metabase measures `getRepresentativeDates` rather than its dataset
  * (`timeseries.ts:280-299`). A month axis whose visible range happens to be May–July would
  * otherwise size itself on "May 2026" and clip "September 2026" the moment the range moved — a
  * chart whose layout depends on which slice of it you are looking at.
@@ -239,18 +252,124 @@ const WIDEST_BY_UNIT = new Map<string, string>();
  * returned string with the real measurer, so the proxy only chooses BETWEEN candidates — it never
  * decides a width.
  *
+ * `draw` IS THE POINT OF THE PARAMETER, not a convenience. The tick chooser's candidate has to be a
+ * string the axis would actually DRAW, or the fit is computed against one string while another is
+ * rendered — the exact drift `options/cartesian.ts` closed by hoisting its `drawLabel` closure so
+ * the fitter measures the axis's own output. A bucketed axis does not always draw the period name:
+ * a stored column format outranks it (arm 1 there), and "September 2026" is then neither drawn nor
+ * a bound on what is. So the axis passes its own `drawLabel` and this maps the same representative
+ * VALUES through it. The default reproduces the plain period name, which is what the name says and
+ * what this module's own tests pin.
+ *
+ * COST, since the default is memoised and the `draw` form cannot be — the closure is fresh per
+ * build, so there is no sound key. It is one parse-and-format per representative value: 12 at
+ * `year`/`quarter`/`month`/`week`, 84 at `day`, 168 at `hour`/`minute` (~1.3ms). Bounded by the
+ * unit rather than by the data, and the one caller pays it only on a bucketed temporal axis that
+ * has a measured size — never on an ordinal axis and never on an unmeasured container.
+ *
  * TOTAL, and "" for anything that is not a truncation unit: a caller measuring "" gets a width of
- * zero, which is a visible nonsense rather than a plausible wrong answer, and the only caller
- * already guards on the unit being a truncation one before asking.
+ * zero, which is a visible nonsense rather than a plausible wrong answer. That is also the SECOND
+ * of the two things stopping a non-temporal axis being thinned — the caller's own `namesAPeriod`
+ * guard is the first — since a zero-width candidate is not what makes an axis fit, an empty
+ * `boundarySteps` is.
  */
-export function widestPeriodName(unit: string | undefined): string {
+export function widestPeriodName(
+  unit: string | undefined,
+  draw?: (value: string) => string,
+): string {
   if (!namesAPeriod(unit)) return "";
-  const cached = WIDEST_BY_UNIT.get(unit);
+  const label = draw ?? ((v: string) => periodName(unit, v));
+  const cached = draw == null ? WIDEST_BY_UNIT.get(unit) : undefined;
   if (cached != null) return cached;
   const widest = representativeValues(unit).reduce((longest, v) => {
-    const name = periodName(unit, v);
+    const name = label(v);
     return name.length > longest.length ? name : longest;
   }, "");
-  WIDEST_BY_UNIT.set(unit, widest);
+  if (draw == null) WIDEST_BY_UNIT.set(unit, widest);
   return widest;
+}
+
+/**
+ * Metabase's `TICKS_TIMESERIES_INTERVALS` (`echarts/cartesian/utils/timeseries.ts:45-75`), from
+ * `minute` up. Its `ms` and `second` rungs are dropped because no egret truncation unit is finer
+ * than a minute, so `boundarySteps` could never start on one; everything from `minute` is carried
+ * verbatim, INCLUDING the half-steps that carry no `testFn` upstream (2 weeks, 2 months,
+ * 2 quarters, 2/5/50/100 years). Those exist there precisely because only the TICK chooser uses
+ * them — `DATA_TIMESERIES_INTERVALS` filters them back out — and the tick chooser is what this is.
+ *
+ * Order is load-bearing twice over: `boundarySteps` finds its starting rung by unit-with-count-1
+ * (Metabase's `_.findIndex`, `:229-236`) and then walks UP, taking the first stride that fits.
+ */
+/** `"quarter"` is spelled out beside `ManipulateType` rather than folded into it because the
+ *  `quarterOfYear` plugin adds `add` as a SECOND overload (`quarterOfYear.d.ts`: `add(value, unit:
+ *  QUnitType)`) rather than widening the first, and no overload accepts the union of the two — so a
+ *  rung typed as that union matches no signature. Keeping the literal separate lets the call site
+ *  narrow on it, which is a real check where a cast would be a promise. */
+const TICK_INTERVALS: { unit: dayjs.ManipulateType | "quarter"; count: number }[] = [
+  { unit: "minute", count: 1 }, { unit: "minute", count: 5 },
+  { unit: "minute", count: 15 }, { unit: "minute", count: 30 },
+  { unit: "hour", count: 1 }, { unit: "hour", count: 3 },
+  { unit: "hour", count: 6 }, { unit: "hour", count: 12 },
+  { unit: "day", count: 1 },
+  { unit: "week", count: 1 }, { unit: "week", count: 2 },
+  { unit: "month", count: 1 }, { unit: "month", count: 2 },
+  { unit: "quarter", count: 1 }, { unit: "quarter", count: 2 },
+  { unit: "year", count: 1 }, { unit: "year", count: 2 }, { unit: "year", count: 5 },
+  { unit: "year", count: 10 }, { unit: "year", count: 50 }, { unit: "year", count: 100 },
+];
+
+/** Fixed and UTC, so a stride is a property of the ladder and not of the day or the zone it is
+ *  computed in. The epoch is also what Metabase measures its own rung durations from
+ *  (`getTimeSeriesIntervalDuration`, `:160-166`: `dayjs(0).add(count, unit)`). */
+const STRIDE_REFERENCE = "1970-01-01T00:00:00Z";
+
+const STEPS_BY_UNIT = new Map<string, number[]>();
+
+/**
+ * How many BUCKETS apart two drawn labels may be, cheapest rung first — the candidate strides a
+ * bucketed category axis picks from.
+ *
+ * Metabase strides a real time axis in time, so its rungs stay `{unit, count}` and land on calendar
+ * boundaries (`expectedTickCount`, `:169`). egret plots one CATEGORY per bucket and ECharts strides
+ * a category axis by INDEX, so each rung is converted here into a count of the data's own unit:
+ * every 3rd bucket of a month-bucketed axis is Metabase's 1-quarter rung. The conversion is a dayjs
+ * `diff` in the data unit rather than a duration ratio, because a ratio is wrong at the rungs that
+ * matter — 5 years is 1826 days including leap days, which over a 31-day "month" is 58.9 and rounds
+ * to 59 rather than to 60.
+ *
+ * WHAT THAT COSTS, stated because it is the one place this is not Metabase: the stride is aligned
+ * on the FIRST BUCKET, not on the calendar. Twelve months starting in January draw January and July
+ * at stride 6, which is the parity case and the common one; twelve starting in March draw March and
+ * September. Metabase would draw January and July there too. Fixing it means an `interval` CALLBACK
+ * rather than a number (ECharts accepts one — `axisTickLabelBuilder.js:142`), which is a bigger
+ * change than the defect needs and would break the "regular stride" property the justification at
+ * the `interval` line rests on.
+ *
+ * `diff` truncates toward zero, which is why a month over a week-bucketed axis is 4 weeks and not
+ * 4.43; the ladder is deduplicated and kept strictly increasing so a rung that collapses into its
+ * predecessor is dropped rather than retried.
+ *
+ * EMPTY for anything that is not a truncation unit — an ordinal axis of product names has no such
+ * thing as "every second product", and this is what makes that unrepresentable rather than merely
+ * discouraged.
+ */
+export function boundarySteps(unit: string | undefined): number[] {
+  if (!namesAPeriod(unit)) return [];
+  const cached = STEPS_BY_UNIT.get(unit);
+  if (cached != null) return cached;
+  const start = TICK_INTERVALS.findIndex((i) => i.unit === unit && i.count === 1);
+  // Not reachable while every `PERIOD_FORMAT` key has a count-1 rung above, which a test pins. It
+  // is here so that adding a truncation unit to one table and not the other degrades to "no
+  // thinning" rather than to a stride of `NaN` buckets.
+  if (start < 0) return [];
+  const ref = dayjs.utc(STRIDE_REFERENCE);
+  const steps: number[] = [];
+  for (let i = start; i < TICK_INTERVALS.length; i++) {
+    const rung = TICK_INTERVALS[i];
+    const end = rung.unit === "quarter" ? ref.add(rung.count, "quarter") : ref.add(rung.count, rung.unit);
+    const step = end.diff(ref, unit as dayjs.QUnitType);
+    if (step >= 1 && step > (steps[steps.length - 1] ?? 0)) steps.push(step);
+  }
+  STEPS_BY_UNIT.set(unit, steps);
+  return steps;
 }

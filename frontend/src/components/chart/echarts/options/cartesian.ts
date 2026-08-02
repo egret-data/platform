@@ -7,7 +7,7 @@ import { formatValue, specifiesDateRendering } from "../../format";
 import { ariaDescription, baseTextStyle, tooltipSurface } from "../base";
 import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
-import { namesAPeriod, periodName } from "@/components/chart/temporal-period";
+import { boundarySteps, namesAPeriod, periodName, widestPeriodName } from "@/components/chart/temporal-period";
 import { foldTail, OTHER_LABEL } from "../fold";
 import { estimatePlotWidth, fitXLabels, type XLabelFit } from "../axisLabelFit";
 
@@ -978,6 +978,20 @@ function baseOption(
         // The CONTAINER's height, not an inset one: the 70% guard is a share of the whole card
         // (Metabase's `checkHeight`), so passing a grid-adjusted height silently tightens it.
         outerHeight: size.height,
+        // THE PRECONDITION FOR THINNING, enforced here rather than assumed downstream: only a
+        // BUCKETED temporal axis gets one. `bucketedX` is `namesAPeriod(cfg.xAxisUnit)`, the same
+        // single membership rule `drawLabel` above uses, so an axis that is thinned is by
+        // construction an axis whose labels are period names. On an ordinal axis of product names
+        // this is `undefined` and the fitter cannot reach its stride arm at all — there is no such
+        // thing as every second product. (Both fields are also empty for a non-period unit, so the
+        // guard holds a second time even if this line is ever loosened.)
+        //
+        // `widestPeriodName` is handed `drawLabel` — the SAME closure the axis draws with, for the
+        // same reason `labels:` above is — so the stride is chosen against a string this axis would
+        // really render, including when a stored column format outranks the period name.
+        boundary: bucketedX
+          ? { widestLabel: widestPeriodName(cfg.xAxisUnit, drawLabel), steps: boundarySteps(cfg.xAxisUnit) }
+          : undefined,
       })
     : undefined;
   // …but an explicit rotation is honoured WHEREVER the category axis sits, `ordinalX` or not. On a
@@ -988,8 +1002,9 @@ function baseOption(
   // would be a silent no-op in the panel — and the panel offers this control on row charts, where
   // it labels the vertical axis as the category one.
   const rotate = cfg.xLabelRotation ?? (fit?.kind === "rotate" ? fit.rotate : 0);
-  // Either way the axis has now DECIDED, and a decided axis draws every label or none — never the
-  // subset `interval: "auto"` leaves ECharts free to pick.
+  // Either way the axis has now DECIDED, and a decided axis never leaves ECharts the subset
+  // `interval: "auto"` would let it pick. What it draws is every label, none, or — on a bucketed
+  // temporal axis only — every Nth, which the `interval` line below argues is not the same thing.
   const decided = fit != null || explicitRotate;
   // NO ROOM IS RESERVED BELOW THE PLOT FOR A TILTED LABEL, at any rotation, measured or explicit.
   // See `XLabelFit`'s doc in `../axisLabelFit.ts` for the measurement that settled it: `containLabel`
@@ -1010,7 +1025,26 @@ function baseOption(
     // on what the engine returned.
     axisLabel: {
       fontSize: CHART_THEME.axisFontSize, color: axisLabelColor,
-      interval: decided ? (0 as const) : ("auto" as const), rotate,
+      // `fit.every - 1`, NOT `fit.every`: ECharts' category `interval` counts the labels SKIPPED
+      // between two drawn ones, not the stride. `ordinalScaleCreateTicks`
+      // (`echarts/lib/scale/helper.js:236`) reads it as `step = max((categoryInterval || 0) + 1, 1)`
+      // and walks `tickValue += step` from the extent's start — so `0` is every label, which is what
+      // the `decided` arm below has always meant, and every 6th is `5`. Off by one here is invisible
+      // in a screenshot: it draws Jan/Jun/Nov instead of Jan/Jul, which looks like a date axis.
+      //
+      // AND THIS IS NOT PR 02's RULE BEING UNDONE, which is the reading to head off — PR 02 banned
+      // `interval: "auto"` three weeks ago and the ban stands. What "auto" does is drop WHICHEVER
+      // labels happen to collide: an arbitrary subset, chosen by geometry, that reads as missing
+      // data because the survivors mean nothing. A regular stride over BUCKETS is the opposite. The
+      // categories here are periods, so every drawn label is a period boundary and they are all the
+      // same distance apart — "January 2026", "July 2026" — which is exactly what Metabase's tick
+      // interval produces (`computeTimeseriesTicksInterval`) and how a reader already expects a date
+      // axis to behave. It is reachable ONLY through `boundary` above, i.e. only when
+      // `namesAPeriod(cfg.xAxisUnit)`; an ordinal axis still gets all-or-nothing. Restoring a flat
+      // `interval: 0` here would not restore PR 02 — it would put the one-third-width line, area and
+      // combo cards back to drawing NO x labels at all, which is the defect PR 03 exists for.
+      interval: fit?.kind === "thin" ? fit.every - 1 : decided ? (0 as const) : ("auto" as const),
+      rotate,
       // The third answer the ladder can give: when even a rotated label would eat 70% of the
       // card's height, Metabase draws no axis rather than a wall of text.
       show: fit?.kind !== "hide",

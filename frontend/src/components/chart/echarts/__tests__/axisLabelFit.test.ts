@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { fitXLabels, type XLabelFit } from "../axisLabelFit";
+import { boundarySteps } from "@/components/chart/temporal-period";
 import type { TextMeasurer } from "@/components/chart/measure-text";
 
 /** Every label is `perChar` wide per character and `fontSize` tall. Injected so the ladder can be
@@ -154,5 +155,137 @@ describe("fitXLabels", () => {
 
   it("draws upright when there are no labels rather than dividing by zero", () => {
     expect(fit([], 800)).toEqual({ kind: "show", rotate: 0 });
+  });
+
+  /**
+   * THE FOURTH OUTCOME: a bucketed date axis draws every Nth label upright rather than none.
+   *
+   * Twelve months at "September 2026" on a one-third-width card is ~22px per category against a
+   * ~95px label, so every adjacent pair collides and PR 02's ladder rotates or hides — on the ZZ
+   * Chart Parity harness, line, area and combo drew NO x labels at all. Metabase draws two:
+   * "January 2026" and "July 2026". See the `thin` arm of `XLabelFit` for why a regular stride over
+   * period boundaries is not the arbitrary subset PR 02 banned.
+   *
+   * The arithmetic every case below is stated in, at the stub's 8px per character:
+   *   - the widest name the MONTH unit can produce is "September 2026", 14 chars, padded 16 -> 128px,
+   *     and a stride fits when 128 + 6 (the ink-free gap) <= every x dimensionWidth. So 134px.
+   *   - the widest name in this DATASET is the same string, so the overlap test above fires at any
+   *     dimensionWidth under 128 + 3 = 131px, i.e. any plot narrower than 1572px.
+   * `MONTH_STEPS` is the real ladder rather than a literal, so "every 6th" here is the same rung a
+   * month-bucketed chart gets — `temporal-period.test.ts` pins its contents.
+   */
+  describe("thins a bucketed temporal axis to period boundaries", () => {
+    const MONTH_STEPS = boundarySteps("month");
+    const MONTHS = [
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December",
+    ].map((m) => `${m} 2026`);
+    const MONTH_BOUNDARY = { widestLabel: "September 2026", steps: MONTH_STEPS };
+    /** `boundary` is REQUIRED here and passed explicitly at every call, including the negative
+     *  cases. It had a default of `MONTH_BOUNDARY`, and `thin(..., undefined)` — the case that
+     *  proves an unbucketed axis is never thinned — quietly took the default and asserted the
+     *  opposite of its name. It failed, which is the only reason this comment exists rather than a
+     *  green test that checked nothing. */
+    const thin = (
+      labels: string[],
+      plotWidth: number,
+      boundary: { widestLabel: string; steps: number[] } | undefined,
+      outerHeight = 400,
+    ) => fitXLabels({ labels, plotWidth, outerHeight, boundary, fontSize: 13, measure: stub(8) });
+
+    it("draws every label when they all fit, without consulting the ladder", () => {
+      // dimensionWidth 150 >= 131, so nothing overlaps and thinning is never reached.
+      expect(thin(MONTHS, 1800, MONTH_BOUNDARY)).toEqual({ kind: "show", rotate: 0 });
+    });
+
+    it("takes the CHEAPEST rung that fits rather than the first one that helps", () => {
+      // 900 -> dimensionWidth 75: 2 x 75 = 150 >= 134, so every 2nd, not every 6th.
+      expect(thin(MONTHS, 900, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 2 });
+      // 600 -> 50: 2 x 50 = 100 is short, 3 x 50 = 150 clears. Every quarter, which is the rung
+      // Metabase's ladder has above `month` x 2 and is why the steps are not just powers of two.
+      expect(thin(MONTHS, 600, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 3 });
+    });
+
+    /**
+     * Brackets the two constants the budget is built from, neither of which any case above can
+     * detect on its own. 780 -> dimensionWidth 65, so a rung of 2 offers 130px against a budget of
+     * 128 (padded) + 6 (gap) = 134 and loses; drop EITHER the padding Metabase measures with
+     * (`getPaddedAxisLabel(formatter(date))`, `timeseries.ts:298`) or the ink-free gap and 2 wins.
+     */
+    it("budgets the padded label plus a gap, not the bare one", () => {
+      expect(thin(MONTHS, 780, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 3 });
+    });
+
+    /**
+     * THE UNIT'S WORST CASE, NOT THIS DATASET'S — Metabase's reason for measuring
+     * `getRepresentativeDates` rather than its data, and the one claim every other case here is
+     * blind to because their widest label happens to be "September 2026" either way.
+     *
+     * Three months of May–July: the widest label PRESENT is "August 2026" at 11 padded chars (88px,
+     * budget 94), while the unit can still produce "September 2026" (128px, budget 134). At
+     * dimensionWidth 60 a rung of 2 offers 120px — enough for the data, short for the unit. Sizing
+     * on the data draws every 2nd and clips the moment the range slides to September; sizing on the
+     * unit draws every 3rd and keeps drawing it.
+     */
+    it("sizes on what the unit can produce, not on what this dataset happens to contain", () => {
+      const summer = ["May 2026", "June 2026", "July 2026"];
+      expect(thin(summer, 180, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 3 });
+    });
+
+    /** The parity case, and the one the harness is judged on: a one-third-width card draws
+     *  "January 2026" and "July 2026" — indices 0 and 6 of twelve — where PR 02 drew nothing. */
+    it("draws January and July on a card too narrow for twelve", () => {
+      // 300 -> 25: 2, 3 give 50 and 75 against 134; 6 gives 150.
+      expect(thin(MONTHS, 300, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 6 });
+    });
+
+    /**
+     * One label is a rung, not a degenerate case — Metabase's `minTickCount = 2` is deliberately
+     * not ported (see `strideThatFits`), because stepping back to two labels at this width draws
+     * them overlapping, and "January 2026" alone is a truthful axis where two smeared names are not.
+     */
+    it("draws a single period rather than two that would collide", () => {
+      // 150 -> 12.5: 12 x 12.5 = 150 >= 134, and every 12th of twelve is index 0 alone.
+      expect(thin(MONTHS, 150, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 12 });
+    });
+
+    /**
+     * PR 02'S LADDER, UNCHANGED, when no stride fits — this is the half that makes the fourth
+     * outcome an addition rather than a replacement. Both rungs are exercised: a plot too narrow
+     * for even one label falls to `hide`, and one merely too narrow for a stride falls to `rotate`,
+     * exactly as it did before this arm existed.
+     */
+    it("falls through to rotation when even the widest stride is too tight", () => {
+      // Two labels: the only rung at or above the count is 2, and 2 x 50 = 100 < 134. Then the
+      // ladder below runs untouched — dimensionWidth 50 >= 13 x 2.1, and 112/√2 is under 70% of 400.
+      expect(thin(["January 2026", "September 2026"], 100, MONTH_BOUNDARY)).toEqual({ kind: "rotate", rotate: 45 });
+    });
+
+    it("falls through to hiding when the plot is narrower than one label", () => {
+      // 100 -> 8.33: the last rung gives 100px for a label needing 134, and 8.33 clears neither
+      // rotation threshold.
+      expect(thin(MONTHS, 100, MONTH_BOUNDARY)).toEqual({ kind: "hide" });
+    });
+
+    /**
+     * THE NEGATIVE, and the property that keeps this from being `interval: "auto"` under another
+     * name: the stride is reachable only through `boundary`, which only a bucketed temporal axis
+     * has. Same labels, same width, same everything — an ordinal axis of twelve product names gets
+     * PR 02's answer, because there is no such thing as every second product.
+     *
+     * All three shapes are asserted because they are three different guards. `undefined` is what
+     * `options/cartesian.ts` passes when `namesAPeriod(cfg.xAxisUnit)` is false; the empty pair is
+     * what `boundarySteps`/`widestPeriodName` return for a unit that names no period, which holds
+     * even if that call site is ever loosened; and the empty-steps-with-a-label case is the one a
+     * partial loosening would produce.
+     */
+    it("never thins an axis that is not bucketed, at the width that would have thinned it", () => {
+      const ordinal = { kind: "rotate", rotate: 90 };
+      expect(thin(MONTHS, 300, undefined)).toEqual(ordinal);
+      expect(thin(MONTHS, 300, { widestLabel: "", steps: [] })).toEqual(ordinal);
+      expect(thin(MONTHS, 300, { widestLabel: "September 2026", steps: [] })).toEqual(ordinal);
+      // A zero-width candidate must not "fit" every stride on the strength of measuring nothing.
+      expect(thin(MONTHS, 300, { widestLabel: "", steps: MONTH_STEPS })).toEqual(ordinal);
+    });
   });
 });

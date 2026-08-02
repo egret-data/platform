@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import dayjs from "dayjs";
-import { periodName, widestPeriodName } from "../temporal-period";
+import { boundarySteps, periodName, widestPeriodName } from "../temporal-period";
 import { TEMPORAL_UNITS } from "../temporal-units";
 
 describe("periodName", () => {
@@ -154,5 +154,95 @@ describe("widestPeriodName", () => {
     expect(widestPeriodName(undefined)).toBe("");
     expect(widestPeriodName("day_of_week")).toBe("");
     expect(widestPeriodName("fortnight")).toBe("");
+  });
+
+  /**
+   * `draw` is why the parameter exists: the tick chooser's candidate has to be a string the axis
+   * would really RENDER, and a bucketed axis does not always render the period name — a stored
+   * column format outranks it (`options/cartesian.ts`'s `drawLabel`, arm 1). Sizing a stride
+   * against "September 2026" while the axis draws "2026-09-10" is the same measure-one-draw-another
+   * drift that made the fitter rotate labels which would have fitted, one level up.
+   *
+   * Asserted on the same representative VALUES rather than on the names, which is the contract:
+   * this maps the candidates through `draw` and picks the longest of the results.
+   */
+  it("picks the widest of what the caller actually draws, not of the period names", () => {
+    // The longest period name is September's; the longest of THESE is the shortest month's.
+    const inverted = (v: string) => "x".repeat(40 - periodName("month", v).length);
+    expect(widestPeriodName("month", inverted)).toBe("x".repeat(40 - "May 2026".length));
+    // …and the default still reproduces the plain period name, memo and all.
+    expect(widestPeriodName("month")).toBe("September 2026");
+  });
+
+  it("offers a drawn candidate no more than the plain one for a unit that names no period", () => {
+    expect(widestPeriodName("day_of_week", () => "a very wide drawn label")).toBe("");
+  });
+});
+
+/**
+ * The candidate strides a bucketed category axis picks from — Metabase's
+ * `TICKS_TIMESERIES_INTERVALS` at and above the data's own unit, converted from `{unit, count}`
+ * into a count of the data's own buckets because ECharts strides a category axis by INDEX.
+ */
+describe("boundarySteps", () => {
+  /**
+   * The two the plan names, and the reason the ladder is not just doubling: a reader expects a
+   * month axis to break at quarters and half-years, so 3 and 6 have to be rungs — every 4th month
+   * is an arbitrary stride even though it is a regular one. 3 is Metabase's `quarter` x 1 rung and
+   * 6 its `quarter` x 2; 12 is `year` x 1.
+   */
+  it("lands a month axis on the boundaries a reader expects", () => {
+    expect(boundarySteps("month")).toEqual([1, 2, 3, 6, 12, 24, 60, 120, 600, 1200]);
+    expect(boundarySteps("quarter")).toEqual([1, 2, 4, 8, 20, 40, 200, 400]);
+    expect(boundarySteps("year")).toEqual([1, 2, 5, 10, 50, 100]);
+  });
+
+  /**
+   * The sub-month units, whose rungs are where the ladder stops being arithmetic about the data's
+   * own unit: a day axis breaks at a week (7) and a fortnight (14) before it reaches a month, and
+   * an hour axis at 3, 6 and 12 before a day (24).
+   *
+   * `week` is the one place the conversion cannot be exact — `diff` truncates, so Metabase's
+   * 1-month rung is 4 weeks (31/7 = 4.43) and its quarter is 12 (90/7 = 12.85). Pinned rather than
+   * corrected: 13 would be a nicer quarter but it is not what a truncating `diff` gives, and a test
+   * that asserts the intention rather than the behaviour is how the two drift apart.
+   */
+  it("keeps every rung Metabase has between the data's unit and a year", () => {
+    expect(boundarySteps("day")).toEqual([1, 7, 14, 31, 59, 90, 181, 365, 730, 1826, 3652, 18262, 36525]);
+    expect(boundarySteps("week")).toEqual([1, 2, 4, 8, 12, 25, 52, 104, 260, 521, 2608, 5217]);
+    expect(boundarySteps("hour").slice(0, 6)).toEqual([1, 3, 6, 12, 24, 168]);
+    expect(boundarySteps("minute").slice(0, 6)).toEqual([1, 5, 15, 30, 60, 180]);
+  });
+
+  /**
+   * Strictly increasing and starting at 1, for both of `strideThatFits`' loop invariants: it walks
+   * UP and takes the first rung that fits, so a non-monotonic ladder would return a stride that a
+   * cheaper later rung beat, and a repeated rung would be measured twice for the same answer.
+   */
+  it("is strictly increasing at every unit, which is what the walk up assumes", () => {
+    for (const unit of ["minute", "hour", "day", "week", "month", "quarter", "year"] as const) {
+      const steps = boundarySteps(unit);
+      expect(steps[0], unit).toBe(1);
+      for (let i = 1; i < steps.length; i++) expect(steps[i], `${unit} at ${i}`).toBeGreaterThan(steps[i - 1]);
+    }
+  });
+
+  /**
+   * THE NEGATIVE, and the half that keeps a stride from ever reaching an ordinal axis. An empty
+   * ladder is not a fallback — `strideThatFits` has nothing to try and hands the axis back to PR
+   * 02's rotate/hide. There is no such thing as every second product.
+   *
+   * Driven off `TEMPORAL_UNITS` for the positive half, like `widestPeriodName`'s own coverage test
+   * above, so a truncation unit added upstream turns this red rather than silently getting no
+   * ladder — that unit's charts would go on drawing no labels at all on a narrow card.
+   */
+  it("offers no stride for anything that is not a truncation unit", () => {
+    expect(boundarySteps(undefined)).toEqual([]);
+    expect(boundarySteps("day_of_week")).toEqual([]);
+    expect(boundarySteps("month_of_year")).toEqual([]);
+    expect(boundarySteps("fortnight")).toEqual([]);
+    for (const u of TEMPORAL_UNITS.filter((u) => u.group === "trunc")) {
+      expect(boundarySteps(u.token).length, `no stride ladder for "${u.token}"`).toBeGreaterThan(1);
+    }
   });
 });
