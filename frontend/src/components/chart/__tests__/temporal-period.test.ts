@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
+import dayjs from "dayjs";
 import { periodName, widestPeriodName } from "../temporal-period";
+import { TEMPORAL_UNITS } from "../temporal-units";
 
 describe("periodName", () => {
   /**
@@ -60,6 +62,17 @@ describe("periodName", () => {
     expect(periodName("day_of_week", "3")).toBe("3");
     expect(periodName("month", null)).toBe("");
   });
+
+  /**
+   * Pins the premise of the extraction guard rather than the guard, which nothing can reach past
+   * while there is no fallback below it. The guard exists because dayjs ACCEPTS an extraction
+   * value as a date — so if this ever stops being true, the comment justifying the guard has gone
+   * stale and the guard's cost is no longer bought.
+   */
+  it("dayjs would happily read an extraction value as a date", () => {
+    expect(dayjs("3").isValid()).toBe(true);
+    expect(dayjs("3").format("MMMM YYYY")).toBe("March 2001");
+  });
 });
 
 describe("widestPeriodName", () => {
@@ -75,12 +88,16 @@ describe("widestPeriodName", () => {
     expect(widestPeriodName("year").length).toBe("2026".length);
   });
 
+  /** Both a one- and a two-digit day: feeding only `-05` leaves `day` and `week` three characters
+   *  of slack, and the assertion would keep passing if the representative days were wrong. */
   it("is at least as wide as any name that unit actually produces", () => {
     for (const unit of ["year", "quarter", "month", "day", "week"] as const) {
       const widest = widestPeriodName(unit).length;
       for (let m = 0; m < 12; m++) {
-        const v = `2026-${String(m + 1).padStart(2, "0")}-05`;
-        expect(periodName(unit, v).length).toBeLessThanOrEqual(widest);
+        for (const d of [5, 28]) {
+          const v = `2026-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+          expect(periodName(unit, v).length).toBeLessThanOrEqual(widest);
+        }
       }
     }
   });
@@ -99,6 +116,23 @@ describe("widestPeriodName", () => {
           expect(periodName(unit, v).length).toBeLessThanOrEqual(widest);
         }
       }
+    }
+  });
+
+  /**
+   * The one assertion here that guards a FUTURE change rather than this one. Nothing ties
+   * `PERIOD_FORMAT`'s keys to `TEMPORAL_UNITS`, so a truncation unit added upstream — the backend's
+   * `TemporalUnit::parse` and this list move together — would silently reinstate the exact defect
+   * this module exists to fix: its buckets fall through to the raw first day on the axis, and Task
+   * 3 sizes its ticks against a zero width. Driven off `TEMPORAL_UNITS` rather than a copied list,
+   * so adding the unit is what turns this red.
+   */
+  it("can name every truncation unit egret supports", () => {
+    const trunc = TEMPORAL_UNITS.filter((u) => u.group === "trunc").map((u) => u.token);
+    expect(trunc.length).toBeGreaterThan(0);
+    for (const token of trunc) {
+      expect(widestPeriodName(token), `no period name for "${token}"`).not.toBe("");
+      expect(periodName(token, "2026-01-05T13:00:00")).not.toBe("2026-01-05T13:00:00");
     }
   });
 
