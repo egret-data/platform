@@ -249,6 +249,72 @@ describe("ChartRenderer", () => {
     expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "region", value: "EU" }] }, 3, 4);
   });
 
+  /**
+   * The drill on the axis PR 03 gave a numeric scatter. A value axis has no categories, so ECharts
+   * reports `name: ""` for a clicked point and puts the coordinates in `data` — checked against real
+   * ECharts, not assumed. The drill was reading `p.name`, so the filter came out `price = ''`,
+   * matching nothing and looking like a chart with no rows behind it.
+   *
+   * The payload here is that real one: an empty name beside an [x, y] pair.
+   */
+  it("drills a value-axis point on its coordinate, which is where the value now is", () => {
+    const onValueClick = vi.fn();
+    mockClickPayload = { name: "", seriesName: "rating", value: [15.69, 3], data: [15.69, 3], x: 3, y: 4 };
+    render(
+      <ChartRenderer
+        vizType="scatter"
+        params={params({ cartesian: { xAxis: "price", yMetrics: ["rating"] } })}
+        columns={[{ name: "price", type: "double" }, { name: "rating", type: "double" }]}
+        rows={[[15.69, 3]]}
+        onValueClick={onValueClick}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "price", value: 15.69 }] }, 3, 4);
+  });
+
+  /**
+   * A TIMESERIES X IS DELIBERATELY OUTSIDE THAT ARM, and this RECORDS that rather than endorsing it.
+   * `applyXScale` puts `Date.parse`'s epoch milliseconds in `data[0]` there, which is not a value
+   * the column has ever held, so reading it would swap one filter that matches nothing for another
+   * — and the second one looks like a real answer. The drill on a timeseries x has been broken since
+   * that scale existed and PR 03 neither reaches it (its automatic scale is only ever `linear`) nor
+   * fixes it. If it is fixed, this is the test to rewrite.
+   */
+  it("leaves a timeseries x-axis drill exactly as broken as it was, rather than filtering on an epoch", () => {
+    const onValueClick = vi.fn();
+    mockClickPayload = { name: "", seriesName: "rev", value: [Date.parse("2026-01-01"), 10], data: [Date.parse("2026-01-01"), 10], x: 3, y: 4 };
+    render(
+      <ChartRenderer
+        vizType="line"
+        params={params({ cartesian: { xAxis: "d", yMetrics: ["rev"], xScale: "timeseries" } })}
+        columns={[{ name: "d", type: "date" }, { name: "rev", type: "double" }]}
+        rows={[["2026-01-01", 10]]}
+        onValueClick={onValueClick}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "d", value: "" }] }, 3, 4);
+  });
+
+  /** …and the category axis is untouched by that arm: a varchar-x scatter still names its point,
+   *  and `p.data` is a bare number there, so nothing about the click looks like a coordinate. */
+  it("still drills a category-axis scatter on the clicked category", () => {
+    const onValueClick = vi.fn();
+    mockClickPayload = { name: "Doohickey", seriesName: "rating", value: 3, data: 3, x: 3, y: 4 };
+    render(
+      <ChartRenderer
+        vizType="scatter"
+        params={params({ cartesian: { xAxis: "category", yMetrics: ["rating"] } })}
+        columns={[{ name: "category", type: "varchar" }, { name: "rating", type: "double" }]}
+        rows={[["Doohickey", 3]]}
+        onValueClick={onValueClick}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "category", value: "Doohickey" }] }, 3, 4);
+  });
+
   // A pie click reports the slice's display NAME, which on a nested chart names only the innermost
   // ring. The drill reads the datum's aggregation key instead — the whole root-to-here path in raw
   // values — so an outer slice filters by its ancestors too. `␟` is options/pie.ts' KEY_SEP.

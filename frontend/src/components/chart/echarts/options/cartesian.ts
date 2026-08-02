@@ -414,6 +414,40 @@ const isHorizontal = (cfg: CartesianBuildConfig) =>
 const usesXScale = (cfg: CartesianBuildConfig) =>
   !isHorizontal(cfg) && (cfg.xScale === "linear" || cfg.xScale === "timeseries");
 
+/**
+ * The x-scale a chart is DRAWN at, which is the stored one whenever there is one and otherwise
+ * `linear` for a scatter whose x column holds numbers.
+ *
+ * Why: a scatter over `price` plotted 196 distinct prices as 196 CATEGORIES, evenly spaced and each
+ * carrying its own label. ECharts kept whichever of those labels did not collide — three arbitrary
+ * prices, `15.69 48.93 84.14` — and once PR 02 made the axis all-or-nothing it drew none at all.
+ * Metabase draws `0 20 40 60 80 100` there, and not because it thins better: its x is a VALUE axis,
+ * so the labels are round ticks ECharts generates from the extent rather than a subset of the data.
+ * egret has had that axis all along (`usesXScale` -> `scaleAxis`); nothing ever selected it.
+ *
+ * SCATTER ONLY, and that is a rule rather than a starting point. A bar chart's categories are
+ * discrete even when they are numbers — bar width, grouping and stacking are all computed off the
+ * axis type — so putting bars on a value axis is a much larger change than this defect asks for.
+ * A scatter has no such geometry: a point sits where its coordinates say.
+ *
+ * RESOLVED AT RENDER TIME, never written into the stored config. That is this programme's standing
+ * rule and it is what makes a scatter saved before this change pick the new axis up. It also means
+ * the answer moves with the data: re-point the chart at a varchar column and the category axis
+ * comes back on its own.
+ *
+ * An explicit `xScale` — including `"ordinal"` — always wins, so a user who has said what they want
+ * is never overridden.
+ */
+export function resolveXScale(
+  kind: CartesianViz,
+  xScale: CartesianBuildConfig["xScale"],
+  xColumnType: string | undefined,
+): CartesianBuildConfig["xScale"] {
+  if (xScale != null) return xScale;
+  if (kind !== "scatter") return undefined;
+  return xColumnType != null && isNumericType(xColumnType) ? "linear" : undefined;
+}
+
 // Re-key category-aligned series onto real x coordinates: each value becomes an
 // [x, y] pair, dropping points whose x can't be parsed. Mutates the series in place.
 function applyXScale(categories: unknown[], series: unknown[], cfg: CartesianBuildConfig) {
@@ -600,20 +634,33 @@ export function buildCartesianOption(
   if (cfg0.kind === "scatter" && cfg0.xMetric && cfg0.yMetrics.length > 0) {
     return scatterXY(columns, rows, cfg0);
   }
+  // Resolve the x-scale ONCE, here, on the same principle as the axis split below it: every
+  // downstream reader — `usesXScale`, `applyXScale`, `foldable`, `ordinalX`, `scaleAxis` — goes on
+  // asking `cfg.xScale` exactly as it always did, and a computed scale is indistinguishable from
+  // one the user chose. Read off the RESULT column rather than `cfg.xAxisType`, which is the same
+  // type by a longer route (`ChartRenderer` looks it up in this very list) but is optional and
+  // absent from every caller that builds a config by hand.
+  //
+  // Above the `scatterXY` early return would be wrong and below it is unnecessary: a scatter with
+  // an `xMetric` leaves through that return and builds its own pair of value axes, so this line is
+  // reached only by the scatter whose x is a DIMENSION — the one that was drawing 196 categories.
+  const xColumn = cfg0.xAxis != null ? columns.find((c) => c.name === cfg0.xAxis) : undefined;
+  const xScale = resolveXScale(cfg0.kind, cfg0.xScale, xColumn?.type);
+  const cfgX: CartesianBuildConfig = xScale === cfg0.xScale ? cfg0 : { ...cfg0, xScale };
   // Resolve the automatic axis split ONCE, here, and hand the rest of the builder a config that
   // already names the right-axis metrics. Every downstream reader — `isDualAxis`, the per-series
   // `yAxisIndex`, the axis titles — then goes on asking the same question it always did, and a
   // computed split is indistinguishable from one the user assigned by hand.
-  const cfg: CartesianBuildConfig = (cfg0.rightAxisMetrics ?? []).length > 0
-    ? cfg0
+  const cfg: CartesianBuildConfig = (cfgX.rightAxisMetrics ?? []).length > 0
+    ? cfgX
     : (() => {
-        const extents = metricExtents(columns, rows, cfg0.yMetrics);
-        if (!shouldAutoSplitY(cfg0, extents)) return cfg0;
-        const right = computeAxisSplit(cfg0.yMetrics, extents);
+        const extents = metricExtents(columns, rows, cfgX.yMetrics);
+        if (!shouldAutoSplitY(cfgX, extents)) return cfgX;
+        const right = computeAxisSplit(cfgX.yMetrics, extents);
         // A split that puts everything on one side is not a split.
-        return right.length > 0 && right.length < cfg0.yMetrics.length
-          ? { ...cfg0, rightAxisMetrics: right }
-          : cfg0;
+        return right.length > 0 && right.length < cfgX.yMetrics.length
+          ? { ...cfgX, rightAxisMetrics: right }
+          : cfgX;
       })();
   const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
   const xi = cfg.xAxis != null ? idx[cfg.xAxis] : undefined;
@@ -1082,12 +1129,23 @@ function baseOption(
   // Non-ordinal x: a value (linear) or time (timeseries) axis positioning points by
   // their real coordinate. Series carry [x, y] pairs (see applyXScale).
   //
-  // No `rotate` here, deliberately: an explicit `xLabelRotation` is a NO-OP on a value x-axis. Its
-  // labels are ticks ECharts generates rather than the `categories` array, so rotating them is part
-  // of generating them, which is PR 03. A config can still CARRY a rotation here — one saved before
-  // the x-scale was changed to Linear — and the panel keeps showing it rather than pretending it is
-  // gone; what the panel will not do is let it be newly chosen (the two rotate options are disabled
-  // on a value x, `settings/CartesianDisplaySection.tsx`).
+  // No `rotate` here, and PR 03 did NOT change that — this note used to say rotating these labels
+  // "is PR 03", and PR 03 turned out to be about which axis a scatter gets, not about laying out
+  // the ticks on it. An explicit `xLabelRotation` is still a NO-OP on a value x-axis, so the setting
+  // is one the panel must not offer where it would land here; the reason it is not merely dropped is
+  // that ECharts would happily apply it (`AxisBuilder.buildAxisLabel` reads `axisLabel.rotate` for
+  // every axis kind), and applying it would silently start rotating charts saved as Linear years
+  // ago while carrying a rotation from before the switch. Deciding that is a change of behaviour
+  // for existing charts, not a gap in this one.
+  //
+  // WHAT PR 03 ADDED TO THIS AXIS'S CATCHMENT, and the reason the panel rule had to move with it: a
+  // scatter over a numeric dimension now arrives here WITHOUT anyone having chosen a scale
+  // (`resolveXScale`). Before, `usesXScale` was true only where the user had picked Linear or
+  // Timeseries and the panel could grey the rotations out by reading `config.xScale` alone. It now
+  // has to resolve the scale the same way this builder does, from the x column's type —
+  // `settings/CartesianDisplaySection.tsx`, `valueX`, which calls `resolveXScale` rather than
+  // restating it. A config can still CARRY a rotation here, and the panel still shows it rather
+  // than pretending it is gone; what it will not do is let one be newly chosen.
   const scaleAxis = {
     type: cfg.xScale === "timeseries" ? ("time" as const) : ("value" as const),
     name: xTitle, nameLocation: "middle" as const, nameGap: 28,

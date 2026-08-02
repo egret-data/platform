@@ -194,8 +194,16 @@ function displayControls(kind: CartesianViz): VizControl<CartesianConfig>[] {
     },
     {
       id: "range", section: "display", group: "Axes", advanced: true,
-      render: ({ config, onChange }: VizControlProps<CartesianConfig>) => (
-        <AxisRangeOptions kind={kind} config={config} onChange={onChange} />
+      // `resultColumns`, not `columns`: the x-axis rotation rule inside turns on the type the
+      // BUILDER will resolve against, and the builder reads the result's columns. The dataset's
+      // own list is the same types by a different route until a chart is pointed at an expression
+      // or the dataset drifts from the last run, at which point the two disagree and the result is
+      // the one on screen.
+      render: ({ config, onChange, resultColumns }: VizControlProps<CartesianConfig>) => (
+        <AxisRangeOptions
+          kind={kind} config={config} onChange={onChange}
+          xColumnType={resultColumns.find((c) => c.name === config.xAxis)?.type}
+        />
       ),
     },
     {

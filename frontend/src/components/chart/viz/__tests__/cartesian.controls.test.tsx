@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { createElement } from "react";
 import { cartesianDescriptor } from "../cartesian";
+import type { VizControlProps } from "../types";
+import type { CartesianConfig } from "@/api/charts";
 
 const ctrls = (k: Parameters<typeof cartesianDescriptor>[0]) => cartesianDescriptor(k).controls;
 
@@ -40,6 +45,30 @@ describe("cartesian controls are grouped and per-kind", () => {
     for (const k of ["bar", "row", "scatter", "combo"] as const) {
       expect(ctrls(k).map((c) => c.id), `${k} should not offer seriesLineStyle`).not.toContain("seriesLineStyle");
     }
+  });
+
+  /**
+   * THE DESCRIPTOR -> PANEL SEAM, which is what PR 02 found untested on all three chart families
+   * and only a mutation caught. `AxisRangeOptions` greys out the x-label rotations wherever the
+   * builder will draw a value axis, and since PR 03 that answer turns on the x column's TYPE — so
+   * the type has to travel from the last result, through this descriptor, into the control. Asserted
+   * through the descriptor's own `render` rather than by rendering the section directly: a section
+   * test passes just as happily when nothing hands the prop over.
+   */
+  it("hands the x column's result type to the range control, which greys out a dead rotation", async () => {
+    const user = userEvent.setup();
+    const control = ctrls("scatter").find((c) => c.id === "range");
+    const props: VizControlProps<CartesianConfig> = {
+      config: { yMetrics: ["rating"], xAxis: "price" },
+      onChange: () => {},
+      columns: [], metrics: [],
+      resultColumns: [{ name: "price", type: "double" }, { name: "rating", type: "double" }],
+      rows: [],
+      unitRow: () => null,
+    };
+    render(createElement(control!.render, props));
+    await user.click(screen.getByLabelText("X axis lines and ticks"));
+    expect(await screen.findByRole("option", { name: "Rotate 45°" })).toHaveAttribute("aria-disabled", "true");
   });
 
   it("gives every control a unique id, for every kind", () => {

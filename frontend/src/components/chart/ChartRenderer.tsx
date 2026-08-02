@@ -9,7 +9,7 @@ import { isCartesianViz } from "@/api/charts";
 import { vizConfig, shellSettings } from "@/components/chart/viz/renderConfig";
 import type { DrillContext, DrillDim } from "@/components/chart/drill";
 import { EChartsRenderer, type EChartsPointClick, type EChartsSize } from "@/components/chart/echarts/EChartsRenderer";
-import { buildCartesianOption, type CartesianBuildConfig } from "@/components/chart/echarts/options/cartesian";
+import { buildCartesianOption, resolveXScale, type CartesianBuildConfig } from "@/components/chart/echarts/options/cartesian";
 import { cartesianMeta, type CartesianMeta } from "@/components/chart/echarts/options/cartesianMeta";
 import {
   buildPieOption, buildPieLegend, buildPieHole, buildPieHoleGraphic, pieLegendPlacement, pieHasSlices,
@@ -583,10 +583,32 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
               // for an answer. Same refusal the pie makes for its own folded slice.
               if (meta.foldedCategory != null && p.name === meta.foldedCategory) return;
               const unit = params.spec.temporal_units?.[cartesian.xAxis as string];
+              // ON A LINEAR X THE CLICKED VALUE IS IN THE DATUM, NOT IN `p.name`. A value axis has
+              // no categories to name a point after, so ECharts reports `name: ""` for one — and a
+              // drill built on that filters `price = ''`, which matches nothing and looks like a
+              // chart with no rows behind it. `applyXScale` re-keys each point to `[x, y]`, so the
+              // x IS `data[0]`, and on a linear scale it is the same number the category string
+              // held. Verified against ECharts under jsdom rather than assumed: a value-axis
+              // scatter reports `name: ""` and `data: [15.69, 3]` where the category-axis one
+              // reports `name: "15.69"`.
+              //
+              // This became reachable without anyone asking for it when a numeric scatter started
+              // resolving to a value axis (`resolveXScale`); it was already the behaviour of a
+              // chart set to Linear by hand, where the drill was broken in the same way and is
+              // fixed by the same line.
+              //
+              // TIMESERIES IS DELIBERATELY NOT INCLUDED. Its `data[0]` is `Date.parse`'s epoch
+              // milliseconds, not the bucket value a filter needs, so there is nothing here to
+              // recover — a separate defect, still open, and not one this arm should paper over by
+              // filtering on a number the column has never held.
+              const scale = resolveXScale(vizType, cartesian.xScale, cartesianCfg.xAxisType);
+              const xValue = scale === "linear" && Array.isArray(p.data)
+                ? (p.data as unknown[])[0]
+                : p.name;
               const dims: DrillDim[] = [
                 unit
-                  ? { col: cartesian.xAxis as string, value: p.name, unit }
-                  : { col: cartesian.xAxis as string, value: p.name },
+                  ? { col: cartesian.xAxis as string, value: xValue, unit }
+                  : { col: cartesian.xAxis as string, value: xValue },
               ];
               // The series' RAW value, not `p.seriesName` — that is the legend's label, so a
               // renamed series (or one whose column carries a date format) filtered by text no

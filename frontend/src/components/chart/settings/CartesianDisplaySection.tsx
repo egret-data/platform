@@ -3,7 +3,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { seriesColor, SUMMARIZE_COLOR } from "@/components/chart/echarts/palette";
-import { stackModeOf, stackModePatch, type StackMode } from "@/components/chart/echarts/options/cartesian";
+import { resolveXScale, stackModeOf, stackModePatch, type StackMode } from "@/components/chart/echarts/options/cartesian";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
@@ -214,7 +214,12 @@ export function OrientationOption({ kind, config, onChange }: SectionProps) {
 }
 
 /** Manual axis bounds and log scale — not meaningful on a scatter's continuous axes. */
-export function AxisRangeOptions({ kind, config, onChange }: SectionProps) {
+export function AxisRangeOptions({ kind, config, onChange, xColumnType }: SectionProps & {
+  /** The SQL type of the result column on `config.xAxis`, which decides whether the x is drawn as a
+   *  value axis when no scale is stored (`resolveXScale`). Optional: a caller with no result yet
+   *  simply cannot know, and `valueX` below says what it does with that. */
+  xColumnType?: string;
+}) {
   // On a horizontal chart the CATEGORY axis is the vertical one, so naming these controls after
   // the config keys (`xLabel` is the category axis, `yLabel` the value axis) prints them backwards
   // from what the reader sees: "Y min" would govern the horizontal extent. Metabase relabels the
@@ -226,10 +231,20 @@ export function AxisRangeOptions({ kind, config, onChange }: SectionProps) {
   // echarts/options/cartesian.ts, plus one case it does not cover: the METRIC-VS-METRIC scatter,
   // which leaves through `scatterXY` before the category axis is ever built. Both halves of that
   // arm are load-bearing — a scatter WITHOUT an `xMetric` falls through to `baseOption` like any
-  // other chart and gets an ordinal category axis, where the rotation works, so testing `kind`
-  // alone would grey out a live setting on every category-x scatter. A horizontal chart is not one
-  // of these either: its categories run down the left and ECharts rotates a y-axis label too.
-  const valueX = (!horiz && (config.xScale === "linear" || config.xScale === "timeseries"))
+  // other chart, so testing `kind` alone would grey out a live setting on every category-x scatter.
+  // A horizontal chart is not one of these either: its categories run down the left and ECharts
+  // rotates a y-axis label too.
+  //
+  // The scale is RESOLVED, not read: since PR 03 a scatter over a numeric dimension gets a value
+  // axis with nothing stored on `xScale` at all, so `config.xScale === "linear"` no longer answers
+  // the question. `resolveXScale` is the builder's own function, called rather than restated — a
+  // second copy of that rule here is exactly how a control ends up greyed out on charts that would
+  // have honoured it, or live on charts that will not. `xColumnType` comes from the last RESULT,
+  // which is the same list the builder resolves against; before a query has run it is undefined and
+  // this falls back to the stored scale, which is the honest answer when the column's type is not
+  // yet known.
+  const xScale = resolveXScale(kind, config.xScale, xColumnType);
+  const valueX = (!horiz && (xScale === "linear" || xScale === "timeseries"))
     || (kind === "scatter" && config.xMetric != null);
   return (
     <div className="space-y-2.5">
@@ -409,19 +424,21 @@ export function TrendOption({ kind, config, onChange }: SectionProps) {
 }
 
 export function CartesianDisplaySection({
-  kind, config, onChange, seriesNames = [],
+  kind, config, onChange, seriesNames = [], xColumnType,
 }: {
   kind: CartesianViz;
   config: CartesianConfig;
   onChange: (patch: Partial<CartesianConfig>) => void;
   seriesNames?: string[];
+  /** Passed straight through to `AxisRangeOptions` — see the prop's doc there. */
+  xColumnType?: string;
 }) {
   return (
     <div className="space-y-2.5 pt-1.5">
       <SeriesOptions kind={kind} config={config} onChange={onChange} seriesNames={seriesNames} />
       <OrientationOption kind={kind} config={config} onChange={onChange} />
       <TrendOption kind={kind} config={config} onChange={onChange} />
-      <AxisRangeOptions kind={kind} config={config} onChange={onChange} />
+      <AxisRangeOptions kind={kind} config={config} onChange={onChange} xColumnType={xColumnType} />
       <AxesOptions kind={kind} config={config} onChange={onChange} />
       <GoalOptions kind={kind} config={config} onChange={onChange} />
       <FormatOptions kind={kind} config={config} onChange={onChange} />

@@ -381,7 +381,8 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
    * A linear or timeseries x is a VALUE axis: its labels are ticks ECharts generates, and
    * `scaleAxis` carries no `rotate`, so a rotation chosen there would store and do nothing. Offered
    * disabled rather than removed, so a chart that stored 45° before its scale changed still shows
-   * what it stored instead of an empty control.
+   * what it stored instead of an empty control. PR 03 did not change that — it changed which charts
+   * ARRIVE on that axis, which is the numeric-scatter case further down.
    */
   it.each(["linear", "timeseries"] as const)("disables the rotations on a %s x-axis", async (xScale) => {
     const user = userEvent.setup();
@@ -423,18 +424,55 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
   });
 
   /** …and the converse, which is the half of that arm doing the work: a scatter with a DIMENSION on
-   *  x falls through to `baseOption` like any other chart and gets an ordinal category axis, where
-   *  the rotation applies. Testing `kind === "scatter"` alone would grey out a live setting on
-   *  every one of them — and every other assertion in this file passes under that mutation. */
-  it("leaves them enabled on a scatter with a category x-axis", async () => {
+   *  x falls through to `baseOption` like any other chart, so testing `kind === "scatter"` alone
+   *  would grey out a live setting on every one of them — and every other assertion in this file
+   *  passes under that mutation. Which axis it lands on now depends on the COLUMN, which is the
+   *  pair of cases below; with no type to go on it stays enabled, the answer the two after that
+   *  pin. */
+  it("leaves them enabled on a scatter with a varchar x-axis", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
-    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xAxis: "region" }} onChange={onChange} />);
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xAxis: "region" }} onChange={onChange} xColumnType="varchar" />);
     await open(user);
     const opt = await screen.findByRole("option", { name: "Rotate 45°" });
     expect(opt).not.toHaveAttribute("aria-disabled", "true");
     await user.click(opt);
     expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xLabelRotation: 45, xAxisTicks: undefined });
+  });
+
+  /**
+   * THE CASE PR 03 CREATED. A scatter over a numeric dimension is drawn on a value axis with
+   * nothing at all stored on `xScale` (`resolveXScale`), so a rotation chosen here would store and
+   * do nothing — the same dead control the two rows above are greyed out for, reached without the
+   * user having chosen anything. Reading `config.xScale` alone, as this predicate did before, leaves
+   * it live.
+   */
+  it("disables them on a scatter over a numeric dimension, which is now a value axis", async () => {
+    const user = userEvent.setup();
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xAxis: "price" }} onChange={() => {}} xColumnType="double" />);
+    await open(user);
+    expect(await screen.findByRole("option", { name: "Rotate 45°" })).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByText(/Rotation applies to a category axis/)).toBeInTheDocument();
+  });
+
+  /** A numeric column under any other kind is still a category axis — the builder's rule is scatter
+   *  only, and this predicate has to carry the same restriction or it greys out a working control
+   *  on every bar chart grouped by a number. */
+  it("leaves them enabled on a bar chart over a numeric dimension", async () => {
+    const user = userEvent.setup();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xAxis: "price" }} onChange={() => {}} xColumnType="double" />);
+    await open(user);
+    expect(await screen.findByRole("option", { name: "Rotate 45°" })).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  /** Before a query has run there is no result column to read a type off. Staying enabled is the
+   *  honest answer to "unknown" — the alternative greys the control out on charts that will honour
+   *  it, on the strength of a type nobody has looked up yet. */
+  it("leaves them enabled on a scatter whose column type is not known yet", async () => {
+    const user = userEvent.setup();
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xAxis: "price" }} onChange={() => {}} />);
+    await open(user);
+    expect(await screen.findByRole("option", { name: "Rotate 45°" })).not.toHaveAttribute("aria-disabled", "true");
   });
 
   /**
