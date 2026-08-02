@@ -74,14 +74,18 @@ describe("SeriesListSection — one row per series", () => {
   });
 
   // The two old lists disagreed: colours drew in natural order, order/visibility drew ranked. A
-  // swatch therefore stopped belonging to the name beside it as soon as anything was moved. The
-  // default colour still has to follow the series' NATURAL slot, which is the one it is drawn in.
-  it("keeps a reordered series' default colour tied to the slot the renderer paints it in", () => {
-    const palette = ["#111111", "#222222", "#333333"];
+  // swatch therefore stopped belonging to the name beside it as soon as anything was moved.
+  //
+  // The default colour is now asked for BY NAME, so a reorder cannot move it at all — where the
+  // index form only kept them aligned as long as this component and its caller agreed about what an
+  // index meant. The stub keys on the name for that reason: an index-keyed stub would pass here
+  // whichever way the component asked.
+  it("keeps a reordered series' default colour tied to the series, not to its row", () => {
+    const palette: Record<string, string> = { a: "#111111", b: "#222222", c: "#333333" };
     render(
       <SeriesListSection
         names={["a", "b", "c"]} order={["c", "a", "b"]}
-        defaultColor={(i) => palette[i]} onChange={() => {}}
+        defaultColor={(name) => palette[name]} onChange={() => {}}
       />,
     );
     const rows = screen.getAllByRole("switch").map((el) => el.getAttribute("aria-label"));

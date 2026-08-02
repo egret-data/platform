@@ -21,9 +21,16 @@ export interface SeriesListPatch {
  * list and not the other, and the swatch beside a name stopped belonging to the row above it.
  * Metabase gives a series exactly one row; so does this.
  *
- * `defaultColor` is indexed by the series' NATURAL position, not its position in this list: the
- * renderer assigns palette slots before it applies `seriesOrder`, so a reordered series keeps the
- * colour it is actually drawn in.
+ * `defaultColor` is asked by NAME. It used to be asked by the series' natural INDEX, with a comment
+ * explaining that the renderer assigns palette slots before it applies `seriesOrder` so a reordered
+ * series keeps the colour it is drawn in. That is no longer how the renderer decides: a colour comes
+ * from a hash of the series' NAME (`colorsForKeys`), so there is no slot to line an index up with —
+ * and asking by name makes "a reorder cannot move a swatch" true by construction rather than by the
+ * caller and this component agreeing about what an index means. It also leaves no index that can be
+ * out of range, so a row can no longer be handed `undefined` and turn a controlled input loose.
+ *
+ * `defaultDisplay` IS still asked by natural index, and that is not an oversight: Metabase's
+ * first-is-a-line combo rule is genuinely about position, not about what a series is called.
  */
 export function SeriesListSection({
   names, order, hidden, colors, labels, types, defaultDisplay, defaultColor, renameable = true, onChange,
@@ -40,7 +47,7 @@ export function SeriesListSection({
   defaultDisplay?: (naturalIndex: number) => SeriesDisplay;
   /** Omitted by a chart drawn in ONE colour — the funnel, whose bands differ only in opacity. A
    *  swatch there would be a control that cannot change anything. */
-  defaultColor?: (naturalIndex: number) => string;
+  defaultColor?: (name: string) => string;
   /** False where the renderer has no label override to read — the funnel labels its steps from the
    *  dimension value itself. An editable name there accepts typing and then discards it. */
   renameable?: boolean;
@@ -86,7 +93,7 @@ export function SeriesListSection({
               type="color"
               aria-label={`color ${name}`}
               className="h-7 w-7 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
-              value={colors?.[name] ?? defaultColor(naturalIndex.get(name) ?? i)}
+              value={colors?.[name] ?? defaultColor(name)}
               onChange={(e) => onChange({ seriesColors: { ...colors, [name]: e.target.value } })}
             />
           )}

@@ -2,7 +2,6 @@ import type { CartesianConfig, CartesianViz } from "@/api/charts";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
-import { colorsForKeys } from "@/components/chart/echarts/keyColors";
 import { resolveXScale, stackModeOf, stackModePatch, type StackMode } from "@/components/chart/echarts/options/cartesian";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
@@ -30,29 +29,20 @@ interface SectionProps {
  * per-series colour/label, and the combo per-metric series type. Per-series style and size
  * live in their own control (SeriesLineStyleSection) so they can hide behind "More options".
  */
-/**
- * The colour a series shows before any override — the renderer's own answer, asked the same way.
+/*
+ * `defaultSeriesColor` used to live here. It took `(hasBreakout, count, index)` and re-derived a
+ * colour rule from the INDEX — which is how a panel comes to offer a swatch the chart does not draw:
+ * once the builder keyed colours on the series' NAME (`colorsForKeys`), every single-series card
+ * showed `#689735` in the picker and something else on screen, and a user could "fix" a colour that
+ * was never wrong.
  *
- * This took `(hasBreakout, count, index)` and re-derived the rule from the INDEX, which is how a
- * panel comes to offer a swatch the chart does not draw: once the builder started keying colours on
- * the series' NAME (`colorsForKeys`), every single-series card showed `#689735` in the picker and
- * something else on screen, and a user could "fix" a colour that was never wrong.
- *
- * `seriesNames` must be the same list the builder keys on — the y-metrics for a plain cartesian,
- * the breakout values for a breakout, which is exactly what `cartesianSeriesNames` returns.
- *
- * `seriesColors` is folded in because the BUILDER folds it in: an explicit colour does two things
- * in `colorsForKeys`, it paints its own series AND consumes that slot, so whoever would have hashed
- * onto it moves along. A panel that computed its defaults without the overrides would disagree with
- * the chart about every OTHER series the moment one was pinned.
+ * Its replacement is not a fixed version of it. `SeriesListControl` (viz/cartesian.tsx) calls
+ * `colorsForKeys` directly, once for the whole list, exactly as `PieDisplaySection` does — because a
+ * wrapper here would be a SECOND name for the renderer's colour rule, and the next person to reach
+ * for it to cover a case the mapping does not would get a swatch that no longer matches the chart.
+ * That is the same argument `decorateSeries` makes for not re-reading `seriesColors` after the
+ * mapping has folded it in.
  */
-export function defaultSeriesColor(
-  seriesNames: string[],
-  i: number,
-  seriesColors?: Record<string, string> | null,
-): string {
-  return colorsForKeys(seriesNames, seriesColors)[seriesNames[i]];
-}
 
 export function SeriesOptions({ kind, config, onChange }: SectionProps & { seriesNames?: string[] }) {
   // Combo stacks too — Metabase's own per-series display setting hides itself on

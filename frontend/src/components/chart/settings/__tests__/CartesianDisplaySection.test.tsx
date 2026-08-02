@@ -1,9 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { CartesianDisplaySection, defaultSeriesColor } from "../CartesianDisplaySection";
-import { colorsForKeys, PREFERRED_COLORS } from "@/components/chart/echarts/keyColors";
-import { buildCartesianOption, cartesianSeriesNames } from "@/components/chart/echarts/options/cartesian";
+import { CartesianDisplaySection } from "../CartesianDisplaySection";
 
 describe("CartesianDisplaySection", () => {
   // Legend and "Shorten large numbers" both default from the data at render time (see
@@ -597,161 +595,13 @@ describe("CartesianDisplaySection — axis names follow the chart's orientation"
   });
 });
 
-/**
- * THE SWATCH IS THE COLOUR THE CHART DRAWS.
+/*
+ * THE PANEL-SIDE COLOUR RULE IS ASSERTED IN `viz/__tests__/cartesian.controls.test.tsx`, not here.
  *
- * `defaultSeriesColor` used to re-derive a colour rule from the series' INDEX
- * (`!hasBreakout && count === 1 ? SUMMARIZE_COLOR : seriesColor(i)`), which is how a panel comes to
- * offer a swatch the chart does not draw: as soon as the builder started keying colours on the
- * series' NAME, every single-series card showed `#689735` in the picker and something else on
- * screen, and a user could "fix" a colour that was never wrong.
- *
- * So these tests do not compare the panel against `colorsForKeys` alone — that proves wiring, not
- * agreement. They BUILD THE CHART and read the colours back off its series, then compare them to
- * what the panel would put in each row's swatch for the same config. That is the property, and it
- * is the one that would have caught the defect.
+ * A block of tests stood at this spot comparing a locally-rebuilt swatch against the chart's own
+ * series. It caught the defect it was written for, but its `panelSwatch` helper RESTATED the line
+ * the app actually runs (`SeriesListControl`), so it could not see that line being wrong — proved
+ * by mutating that line and watching the whole chart suite stay green. Those cases now render the
+ * control the descriptor declares and read the swatch out of the DOM, which is coverage of the
+ * decision rather than of a copy of it.
  */
-describe("defaultSeriesColor — the panel's swatch and the chart's series", () => {
-  const cols = [
-    { name: "month", type: "varchar" },
-    { name: "category", type: "varchar" },
-    { name: "revenue", type: "double" },
-    { name: "orders", type: "bigint" },
-  ];
-  /**
-   * The four Sample-Database categories in breakout (first-seen) order, which is NOT alphabetical —
-   * and neither is `["revenue", "orders"]` below.
-   *
-   * THAT IS LOAD-BEARING. `colorsForKeys` assigns in sorted key order, so its returned Record is in
-   * sorted order too: with a pre-sorted fixture a by-name lookup and a by-position one hand back the
-   * identical sequence, and a test named for the distinction passes against either. Two of this PR's
-   * own cartesian tests shipped exactly that way. "Gadget" and "Widget" also hash onto the same
-   * palette slot, so this data walks `colorsForKeys`' collision path rather than only its happy one.
-   */
-  const rows: unknown[][] = [
-    ["2026-01", "Widget", 10, 1],
-    ["2026-01", "Doohickey", 20, 2],
-    ["2026-01", "Gizmo", 30, 3],
-    ["2026-01", "Gadget", 40, 4],
-    ["2026-02", "Widget", 50, 5],
-    ["2026-02", "Doohickey", 60, 6],
-    ["2026-02", "Gizmo", 70, 7],
-    ["2026-02", "Gadget", 80, 8],
-  ];
-
-  type Cfg = Parameters<typeof buildCartesianOption>[2];
-  interface SeriesShape { name: string; __raw?: string; itemStyle?: { color?: string }; lineStyle?: { color?: string } }
-
-  /** Every series the chart actually draws, keyed by the RAW name the settings key on. `__raw ||
-   *  name` rather than `__raw ?? name`: an un-broken-out scatter's one group is named "" and is
-   *  labelled with its y-metric, which is the key both the builder and `cartesianSeriesNames` use. */
-  const chartColors = (cfg: Cfg): Record<string, string | undefined> => {
-    const { series } = buildCartesianOption(cols, rows, cfg) as unknown as { series: SeriesShape[] };
-    return Object.fromEntries(series.map((s) => [s.__raw || s.name, s.itemStyle?.color ?? s.lineStyle?.color]));
-  };
-
-  /** What SeriesListSection puts in a row's swatch, as that component's own expression — the user's
-   *  pinned colour if there is one, otherwise this default, indexed by the series' NATURAL place. */
-  const panelSwatch = (names: string[], cfg: Cfg, name: string) =>
-    cfg.seriesColors?.[name] ?? defaultSeriesColor(names, names.indexOf(name), cfg.seriesColors);
-
-  /** The comparison itself: the panel's rows (built the way viz/cartesian.tsx builds them, from
-   *  `cartesianSeriesNames`) against the chart's own series. */
-  const compare = (cfg: Cfg) => {
-    const names = cartesianSeriesNames(cols, rows, cfg);
-    const chart = chartColors(cfg);
-    // No vacuous match: a lookup that missed on both sides would compare undefined to undefined.
-    expect(names.length).toBeGreaterThan(0);
-    expect(names.map((n) => chart[n])).toEqual(names.map(() => expect.any(String)));
-    return { names, panel: names.map((n) => panelSwatch(names, cfg, n)), chart: names.map((n) => chart[n]) };
-  };
-
-  it("shows the swatch the chart actually draws", () => {
-    const names = ["revenue", "orders"];
-    expect(names.map((_n, i) => defaultSeriesColor(names, i)))
-      .toEqual(names.map((n) => colorsForKeys(names)[n]));
-  });
-
-  it("shows a lone series its hashed colour, not the summarize green", () => {
-    expect(defaultSeriesColor(["revenue"], 0)).not.toBe(PREFERRED_COLORS.success);
-  });
-
-  it("agrees with the chart on a lone series — the case this defect was live in", () => {
-    const { panel, chart } = compare({ kind: "bar", xAxis: "month", yMetrics: ["revenue"] });
-    expect(panel).toEqual(chart);
-    expect(panel).not.toContain(PREFERRED_COLORS.success);
-  });
-
-  it("agrees with the chart on two metrics", () => {
-    const { names, panel, chart } = compare({ kind: "bar", xAxis: "month", yMetrics: ["revenue", "orders"] });
-    expect(names).toEqual(["revenue", "orders"]); // the unsorted order these pin against
-    expect(panel).toEqual(chart);
-  });
-
-  it("agrees with the chart on a breakout", () => {
-    const { names, panel, chart } = compare({ kind: "bar", xAxis: "month", yMetrics: ["revenue"], series: "category" });
-    expect(names).toEqual(["Widget", "Doohickey", "Gizmo", "Gadget"]);
-    expect(panel).toEqual(chart);
-  });
-
-  /**
-   * A metric-vs-metric scatter has no breakout, so the builder's single group is named "" — and it
-   * keys that group on the Y-METRIC instead, precisely because "" is not a name the settings panel
-   * is ever offered (`cartesianSeriesNames` returns the metrics). The two have to agree on which key
-   * that is or a pinned colour lands on a series that does not exist.
-   */
-  it("agrees with the chart on an un-broken-out scatter, which the builder keys by its y-metric", () => {
-    const { names, panel, chart } = compare({ kind: "scatter", xMetric: "orders", yMetrics: ["revenue"] });
-    expect(names).toEqual(["revenue"]);
-    expect(panel).toEqual(chart);
-  });
-
-  it("agrees with the chart on a scatter broken out into bands", () => {
-    const { panel, chart } = compare({ kind: "scatter", xMetric: "orders", yMetrics: ["revenue"], series: "category" });
-    expect(panel).toEqual(chart);
-  });
-
-  /**
-   * …AND IT PASSES THE WHOLE LIST, hidden series included — which is the opposite of what the pie
-   * panel has to do, so it is worth stating rather than inheriting.
-   *
-   * `buildCartesianOption` colours every series and only then drops the hidden ones
-   * (`applySeriesOrder` runs after `colorsForKeys`), so hiding one does not move the rest. The pie
-   * drops hidden slices BEFORE its ring is built, so there they do re-key.
-   *
-   * "Gadget" and "Widget" hash onto one slot — Gadget sorts first and takes it, Widget walks — so
-   * hiding Gadget is the case that can tell the two rules apart: a panel that filtered it out would
-   * move Widget onto the freed slot while the chart kept it where it is.
-   */
-  it("passes hidden series too — the cartesian colours before it hides, unlike the pie", () => {
-    const cfg: Cfg = { kind: "bar", xAxis: "month", yMetrics: ["revenue"], series: "category", hiddenSeries: ["Gadget"] };
-    const names = cartesianSeriesNames(cols, rows, cfg);
-    expect(names).toEqual(["Widget", "Doohickey", "Gizmo", "Gadget"]); // still listed, so the hide is undoable
-    const chart = chartColors(cfg);
-    expect(chart.Gadget).toBeUndefined(); // …and the chart really has dropped it
-    for (const n of ["Widget", "Doohickey", "Gizmo"]) expect(panelSwatch(names, cfg, n)).toBe(chart[n]);
-    expect(chart.Widget).toBe(chartColors({ ...cfg, hiddenSeries: [] }).Widget);
-  });
-
-  /**
-   * THE ANSWER ON `seriesColors`: the panel folds them in, because the builder does.
-   *
-   * An explicit colour does two things in `colorsForKeys` — it paints its own series AND CONSUMES
-   * that slot, so whoever would have hashed onto it moves along. A panel that computed its defaults
-   * without the overrides would therefore disagree with the chart about every OTHER series the
-   * moment one was pinned. The fixture pins `orders` to the ink `revenue` would otherwise have
-   * taken, which is the case where the two answers differ.
-   */
-  it("folds the pinned colours in, so an override moves the series it displaced here too", () => {
-    const metrics = ["revenue", "orders"];
-    const pinned = colorsForKeys(metrics).revenue;
-    const cfg: Cfg = { kind: "bar", xAxis: "month", yMetrics: metrics, seriesColors: { orders: pinned } };
-    const { panel, chart } = compare(cfg);
-    expect(panel).toEqual(chart);
-    // …which is to say `orders` took the ink, and `revenue` moved off it rather than being drawn
-    // identically. (`expect(panel[0]).not.toBe(colorsForKeys(metrics).revenue)` stood here as a
-    // second line: `pinned` IS that expression, so it asserted the same thing twice.)
-    expect(panel[1]).toBe(pinned);
-    expect(panel[0]).not.toBe(pinned);
-  });
-});
