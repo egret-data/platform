@@ -245,6 +245,58 @@ git commit -m "feat(charts): a date axis draws every Nth period rather than none
 
 ---
 
+## Task 3b: The waterfall
+
+**Added after Task 3's implementer found a scope hole in this plan** — the same class of hole PR 02
+had, where the goal and the acceptance list named a chart no task touched.
+
+This plan's Background names the waterfall among the charts that now draw nothing, and Task 5's
+acceptance list says "**waterfall** draws its month labels". But `WaterfallBuildConfig` has **no
+`xAxisUnit` at all** and `ChartRenderer` never passes one, so Task 2 could not name its periods and
+Task 3 cannot thin it. A month-bucketed waterfall still draws raw `"2026-01-01"` and gets PR 02's
+rotate-or-hide on a narrow card. Verified before adding this task.
+
+**Files:**
+- Modify: `frontend/src/components/chart/echarts/options/waterfall.ts`
+- Modify: `frontend/src/components/chart/ChartRenderer.tsx`
+- Test: extend `frontend/src/components/chart/echarts/__tests__/boxWaterfallXLabels.test.ts`
+
+- [ ] **Step 1: Thread the unit in**
+
+Add `xAxisUnit?: string` to `WaterfallBuildConfig` and pass it from `ChartRenderer`'s waterfall
+branch, from `params.spec.temporal_units[<the x column>]` — the same source cartesian reads
+(`ChartRenderer.tsx`, the cartesian branch, is the shape to copy).
+
+- [ ] **Step 2: Name the periods and allow thinning**
+
+Mirror what Task 2 and Task 3 did for cartesian, and mirror it *exactly* — the same three ordered
+arms (column format if it **specifies date rendering** → `periodName` → the previous fallback), and
+the same single `drawLabel` closure feeding both the fitter's `labels` and `axisLabel.formatter`.
+
+Two traps, both already paid for once:
+
+- **Arm 1 must use `specifiesDateRendering(fmt)`, not `fmt` truthiness.** Task 2 shipped truthiness
+  and a reviewer found the panel mints date-silent format objects today (`FormatSection.tsx:104`
+  writes `{ column_title }`), so renaming a column silently reverted the axis. The predicate lives
+  in `format.ts` beside `formatDate`.
+- **One `drawLabel`, not two.** Task 2 first measured the raw category while drawing the period name,
+  which made a `year` axis over-measure 10 characters against 4 and rotate labels that would have sat
+  upright.
+
+- [ ] **Step 3: Same verification bar**
+
+Every rung mutated and seen to fail; the negative case (a non-bucketed waterfall is never thinned)
+asserted; and the `ChartRenderer` → builder seam covered, because PR 02 found that seam untested on
+all three charts and only a mutation caught it.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git commit -m "feat(charts): the waterfall's steps read as periods too"
+```
+
+---
+
 ## Task 4: Round ticks for a numeric x-axis
 
 **Files:**
