@@ -1,4 +1,4 @@
-import { SERIES_PALETTE } from "./palette";
+import { chartShade, chartTint, SERIES_PALETTE } from "./palette";
 
 /** Names that carry meaning, so the colour should carry it too rather than fall out of a hash.
  *  Metabase's `getPreferredColor` (ui/colors/groups.ts); the hex values are its `success`,
@@ -66,14 +66,19 @@ const canon = (color: string) => color.toLowerCase();
  * The used/unused bookkeeping, as one object so that BOTH mapping strategies are case-insensitive
  * by construction rather than by each remembering to be. Only the comparisons normalise — what gets
  * written into the mapping is the caller's own spelling, untouched.
+ *
+ * `unset` is the hash path's worklist, and is OPTIONAL because the order path has no attempt loop to
+ * drive: it walks the keys once and every key it visits it assigns, so there is nothing to track.
+ * Handing it a Set it would only write to and never read would be bookkeeping pretending to be a
+ * shared contract.
  */
-function colorLedger(values: string[], mapping: Record<string, string>, unset: Set<string>) {
+function colorLedger(values: string[], mapping: Record<string, string>, unset?: Set<string>) {
   const used = new Set<string>();
   const unused = new Set(values.map(canon));
   return {
     take(key: string, value: string) {
       mapping[key] = value;
-      unset.delete(key);
+      unset?.delete(key);
       used.add(canon(value));
       unused.delete(canon(value));
     },
@@ -81,6 +86,18 @@ function colorLedger(values: string[], mapping: Record<string, string>, unset: S
     isFree: (value: string) => unused.has(canon(value)),
     get spent() {
       return unused.size === 0;
+    },
+    /**
+     * The first still-free value in `values`' OWN order — what the order path hands out, and
+     * `undefined` once nothing is free (or when there were no values to begin with).
+     *
+     * Scans `values` rather than reading the head of `unused`, and that is the whole point: `unused`
+     * holds canonicalised spellings, so taking its first element would write a lower-cased colour
+     * into the mapping where the caller passed `#509EE3`. Insertion order makes the two scans pick
+     * the same slot either way; only this one preserves the caller's spelling.
+     */
+    get nextFree(): string | undefined {
+      return values.find((v) => unused.has(canon(v)));
     },
     refill: () => values.forEach((v) => unused.add(canon(v))),
   };
@@ -124,23 +141,58 @@ function hashMapping(
   return mapping;
 }
 
-// --- Task 2 replaces both of these with the real harmony path. -----------------------------------
-// They exist so this file compiles and the hash path can be tested on its own; nothing above eight
-// keys is correct yet.
-//
-// TASK 2: build the real `orderMapping` on `colorLedger` too. It is the same three passes over the
-// same two sets, and the reason to share it is not brevity — comparing colours as raw strings is a
-// live bug (see `canon`), and routing every comparison through the ledger is what stops the harmony
-// path from having to rediscover that.
-
-function harmonyColors(_count: number): string[] {
-  return [...SERIES_PALETTE];
+/**
+ * The palette, widened by interleaving each accent with its variants — Metabase's
+ * `getAccentColors({ harmony: true })`, which unzips [main, light, dark] rather than concatenating
+ * them, so neighbouring series stay far apart in hue instead of walking through eight blues.
+ *
+ * The light variants join only past twice the accent count, exactly as Metabase gates them: at
+ * nine keys a base/dark pair per accent is already sixteen colours, and pulling in a third
+ * near-identical tint would make two series harder to tell apart, not easier.
+ */
+function harmonyColors(count: number): string[] {
+  const ranges = count > SERIES_PALETTE.length * 2
+    ? [SERIES_PALETTE, SERIES_PALETTE.map(chartTint), SERIES_PALETTE.map(chartShade)]
+    : [SERIES_PALETTE, SERIES_PALETTE.map(chartShade)];
+  return SERIES_PALETTE.flatMap((_, i) => ranges.map((r) => r[i]));
 }
 
+/**
+ * The same three passes as `hashMapping`, in the keys' own order and with no hash: past eight keys
+ * there are enough colours that position is as good a spread as a hash, and Metabase makes the same
+ * switch (`getOrderBasedMapping`).
+ *
+ * Shares `colorLedger` with the hash path rather than keeping its own `Set<string>` pair — not for
+ * brevity, but because comparing colours as raw strings is a live bug (see `canon`): a pinned
+ * `#509ee3` that does not consume `#509EE3`'s slot gets handed straight back out to the next key,
+ * and two series are drawn identically. Routing every comparison through the ledger is what stops
+ * this path from having to rediscover that.
+ */
 function orderMapping(
   keys: string[],
   values: string[],
   existing?: Record<string, string> | null,
 ): Record<string, string> {
-  return hashMapping(keys, values, existing);
+  const mapping: Record<string, string> = {};
+  const ledger = colorLedger(values, mapping);
+
+  keys.forEach((key) => {
+    const value = existing?.[key];
+    if (value) ledger.take(key, value);
+  });
+  keys.forEach((key) => {
+    if (mapping[key]) return;
+    const value = preferredFor(key);
+    if (value && !ledger.isUsed(value)) ledger.take(key, value);
+  });
+  keys.forEach((key) => {
+    if (mapping[key]) return;
+    // More keys than colours: start the harmony over rather than leave the tail uncoloured. The
+    // repeat is Metabase's own answer too, and unlike the hash path's loop this pass visits each key
+    // exactly once, so it cannot spin — an empty `values` just leaves keys unmapped.
+    if (ledger.spent) ledger.refill();
+    const value = ledger.nextFree;
+    if (value) ledger.take(key, value);
+  });
+  return mapping;
 }
