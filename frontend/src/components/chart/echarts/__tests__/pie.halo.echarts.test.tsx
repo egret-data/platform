@@ -49,13 +49,18 @@ afterEach(() => {
 const columns = [
   { name: "region", type: "varchar" }, { name: "category", type: "varchar" }, { name: "n", type: "double" },
 ];
-/** Two rings. APAC is the largest region, so it takes palette slot 0 — and at ring 0 that is drawn
- * as the DARK variant, `#227FD2`: one of the exactly two fills in the whole palette that no ink
- * clears. Nothing here forces a colour; the failing fill arises from the ring rule itself. */
+/** Two rings. "EU" is the region whose NAME hashes onto palette slot 0 — and at ring 0 that is
+ * drawn as the DARK variant, `#227FD2`: one of the exactly two fills in the whole palette that no
+ * ink clears. "Asia" lands on slot 2, whose dark variant `#8a5eb0` is the near-miss case the last
+ * test in this file needs. Nothing here forces a colour through `sliceColors`; both fills arise
+ * from the ring rule itself, exactly as they would on a user's chart — the region NAMES are what
+ * choose them, which is the whole of the by-name colour rule (see keyColors.ts). "APAC" sat here
+ * before and hashes to slot 1, which has no unservable variant, so nothing this file exists to
+ * check would have been drawn at all. */
 const rows: unknown[][] = [
   ["NA", "Widgets", 5000], ["NA", "Gadgets", 3000],
   ["EU", "Widgets", 4000], ["EU", "Gadgets", 2000],
-  ["APAC", "Widgets", 6000], ["APAC", "Gadgets", 2437],
+  ["Asia", "Widgets", 6000], ["Asia", "Gadgets", 2437],
 ];
 const cfg = { dimensions: ["region", "category"], metric: "n" };
 
@@ -90,18 +95,18 @@ describe("a slice label whose fill no ink can serve", () => {
     // The premise: this chart really does draw the unservable fill.
     expect(fills).toContain("#227fd2");
 
-    const [apac] = find(labels, "APAC");
-    expect(apac).toBeDefined();
+    const [eu] = find(labels, "EU");
+    expect(eu).toBeDefined();
     // Near-black ink (its better option at 4.253, still short of 4.5) — outlined in white.
-    expect(apac.ink).toBe(COLOR_FALLBACK.text);
-    expect(apac.halo).toBe(COLOR_FALLBACK.textInverse);
-    expect(apac.halo).not.toBe(apac.ink);
-    expect(apac.haloWidth).toBe(String(LABEL_HALO_WIDTH));
+    expect(eu.ink).toBe(COLOR_FALLBACK.text);
+    expect(eu.halo).toBe(COLOR_FALLBACK.textInverse);
+    expect(eu.halo).not.toBe(eu.ink);
+    expect(eu.haloWidth).toBe(String(LABEL_HALO_WIDTH));
   });
 
   it("has the outline painted UNDER the glyph, so it separates the text without thinning it", () => {
-    const [apac] = find(draw().labels, "APAC");
-    expect(apac.paintOrder).toBe("stroke");
+    const [eu] = find(draw().labels, "EU");
+    expect(eu.paintOrder).toBe("stroke");
   });
 
   it("does the same for #7172AD, the accent any 8-series chart reaches", () => {
@@ -131,17 +136,18 @@ describe("every other label", () => {
   it("is drawn with no outline at all — the halo is not a look change", () => {
     const { labels } = draw();
     const outlined = labels.filter((l) => l.halo != null).map((l) => l.text);
-    expect(outlined).toEqual(["APAC"]);
+    expect(outlined).toEqual(["EU"]);
   });
 
   it("includes a genuinely dark fill whose white ink clears on its own", () => {
-    // EU takes palette slot 2 at ring 0, i.e. `#8a5eb0` — dark enough that white reads at well
-    // over 4.5:1 against it. It is the case a "dark fill ⇒ outline" shortcut would get wrong.
+    // "Asia" hashes onto palette slot 2, so at ring 0 it is `#8a5eb0` — dark enough that white
+    // reads at well over 4.5:1 against it. It is the case a "dark fill ⇒ outline" shortcut gets
+    // wrong.
     const { labels, fills } = draw();
     expect(fills).toContain("#8a5eb0");
-    const [eu] = find(labels, "EU");
-    expect(eu.ink).toBe(COLOR_FALLBACK.textInverse);
-    expect(eu.halo).toBeNull();
+    const [asia] = find(labels, "Asia");
+    expect(asia.ink).toBe(COLOR_FALLBACK.textInverse);
+    expect(asia.halo).toBeNull();
   });
 
   it("leaves the hole's own readout bare, since it sits on no fill", () => {

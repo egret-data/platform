@@ -9,7 +9,8 @@ import {
   tooltipInk,
   tooltipSurface,
 } from "../base";
-import { OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor, resolveFontFamily, seriesColor, ringVariantColor, fadeColor, getTextColorForBackground, getTextHaloForBackground } from "../palette";
+import { OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor, resolveFontFamily, ringVariantColor, fadeColor, getTextColorForBackground, getTextHaloForBackground } from "../palette";
+import { colorsForKeys } from "../keyColors";
 import {
   calcAvailableDonutSliceLabelLength,
   calcInnerOuterRadiusesForRing,
@@ -933,14 +934,26 @@ function buildPieRings(
   // fallback, and an empty-string fallback (not a colour, so unambiguous) turns that into "no
   // override": the slice keeps its palette slot instead of being painted with a value ECharts
   // would ignore and `getTextColorForBackground` would then silently mis-contrast against.
-  if (cfg.sliceColors) {
-    for (const ring of effectiveRings) {
-      for (const s of ring) {
-        const c = cfg.sliceColors[s.name];
-        if (!c || s.name === OTHER_NAME) continue;
-        const resolved = resolveColor(c, "");
-        if (resolved) s.itemStyle = { color: resolved };
-      }
+  const sliceOverride = (name: string): string | undefined => {
+    const c = cfg.sliceColors?.[name];
+    if (!c || name === OTHER_NAME) return undefined;
+    return resolveColor(c, "") || undefined;
+  };
+  // Applied HERE for rings below 0 only. Ring 0's overrides are handed to `colorsForKeys` instead
+  // (just below), because there an override does two things rather than one: it paints its own
+  // slice AND consumes that colour, so the slice that would have hashed onto it moves along instead
+  // of being drawn identically. Painting ring 0 here as well would be harmless-looking and wrong in
+  // one case — an override the renderer can't draw is rejected above, and `colorsForKeys` has no
+  // opinion about that, so the raw string would come back through the `??=` default and be pinned
+  // after all. One validated map, consulted once, is what stops that.
+  //
+  // Rings below 0 have no such mapping: their colour is DERIVED from an ancestor's (see the anchor
+  // pass below), and an override there is not competing for a palette slot with anybody, it is
+  // starting a new family. So it stays a straight assignment.
+  for (const ring of effectiveRings.slice(1)) {
+    for (const s of ring) {
+      const resolved = sliceOverride(s.name);
+      if (resolved) s.itemStyle = { color: resolved };
     }
   }
 
@@ -984,17 +997,45 @@ function buildPieRings(
   // (sunburstVisual.js -> `getColorFromPalette(current.name, paletteScope)`) and skips that call
   // entirely for a node that already has a colour — so one `sliceColors` override on ring 0 would
   // consume no slot and slide every LATER slice's colour up by one, while the React legend and the
-  // label-contrast pass (which both compute `seriesColor(i)` from the ring index) kept naming the
-  // old ones. Pinning removes the divergence by construction: every ring-0 slice states the colour
-  // it is drawn in, and there is only one answer to read.
+  // label-contrast pass (which both computed a colour from the ring INDEX) kept naming the old
+  // ones. Pinning removes the divergence by construction: every ring-0 slice states the colour it
+  // is drawn in, and there is only one answer to read.
+  //
+  // That argument is untouched by keying the slot on the slice's NAME rather than its index — and
+  // the two now agree about what ECharts would have done anyway, since a sunburst's own palette is
+  // name-keyed too. The reason to keep stating the colour is that egret's answer is not ECharts'
+  // (`colorsForKeys` is Metabase's hash, plus the preferred names, plus `sliceColors` consuming a
+  // slot) and the label-contrast pass and the React legend both have to read the same one.
+  //
+  // Note also what the two rules differ on, which is what the tests below pin: a slice's colour no
+  // longer depends on how many slices are drawn before it, so a value keeps its colour when another
+  // category appears, when the sort order changes, and across every card on a dashboard that
+  // breaks out by the same column.
   type ColorAnchor = { base: string; sinceLevel: number; baseVariant: number };
   // Ring 0's own variant: the DARK one on a nested pie, the base itself on a single-ring pie —
   // which is Metabase's `hasMultipleRings` gate, and what leaves every saved one-ring pie looking
   // exactly as it does today.
   const ring0Variant = effectiveRings.length > 1 ? -1 : 0;
 
-  (effectiveRings[0] ?? []).forEach((s, i) => {
-    s.itemStyle ??= { color: seriesColor(i) };
+  // One decision about the whole ring, not one per slice: a hash collision moves a name along, and
+  // an override takes its colour out of circulation, so neither can be worked out a slice at a time.
+  // `sliceColors` goes in as `existing` — the single place ring 0's overrides are applied.
+  //
+  // Every ring-0 name is a key, including the synthetic "Other" bucket: it already carries its muted
+  // colour so the `??=` below leaves it alone, and letting it hold a key of its own keeps the
+  // mapping something the settings panel and the legend can rebuild from the ring's names alone.
+  const ring0Slices = effectiveRings[0] ?? [];
+  const ring0Colors = colorsForKeys(
+    ring0Slices.map((s) => s.name),
+    Object.fromEntries(
+      ring0Slices.flatMap((s) => {
+        const c = sliceOverride(s.name);
+        return c ? [[s.name, c] as [string, string]] : [];
+      }),
+    ),
+  );
+  ring0Slices.forEach((s) => {
+    s.itemStyle ??= { color: ring0Colors[s.name] };
   });
   let anchors = new Map<string, ColorAnchor>();
   (effectiveRings[0] ?? []).forEach((s) => {
@@ -1113,12 +1154,21 @@ export function buildPieLegend(
   const toggledOff = new Set(cfg.toggledOffSlices ?? []);
   let nextDataIndex = 1;
 
-  return ring0.map((s, i) => {
+  // Belt and braces, and nothing more: `buildPieRings` pins every ring-0 slice's colour, so this
+  // mapping is not read on any path today. It is by NAME rather than by ring index because the
+  // index one was a second colour RULE — the swatch beside a slice would have disagreed with the
+  // arc as soon as an override consumed a slot, which is the exact divergence pinning ring 0 was
+  // introduced to remove. Built from the names the legend itself sees (ring 0 is renamed last in
+  // buildPieRings), so every lookup hits; on a nested pie it is the family's base rather than the
+  // dark variant the arc is drawn in, which the unreachable path makes moot and the reachable one
+  // never consults.
+  const ring0Colors = colorsForKeys(ring0.map((s) => s.name), cfg.sliceColors);
+
+  return ring0.map((s) => {
     // The colour the slice is actually drawn in — read off the slice rather than re-derived, since
     // buildPieRings now pins every ring-0 slice's colour explicitly (see the note there on why the
-    // sunburst's name-keyed palette made an implicit slot unsafe). `?? seriesColor(i)` is a
-    // belt-and-braces default, not a second source of truth.
-    const color = s.itemStyle?.color ?? seriesColor(i);
+    // sunburst's name-keyed palette made an implicit slot unsafe).
+    const color = s.itemStyle?.color ?? ring0Colors[s.name];
     let sliceDataIndex: number | undefined;
     if (!toggledOff.has(s.name)) {
       sliceDataIndex = nextDataIndex;
