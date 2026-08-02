@@ -1050,7 +1050,10 @@ function baseOption(
         // PR whose entire motivation is labels not fitting. Formatting here retires the
         // `columnSettings` skew too, which that comment conceded and left standing.
         labels: categories.map((c) => drawLabel(String(c))),
-        plotWidth: estimatePlotWidth(size, fmtFor(leftSide)(widestOf(leftSide)), Boolean(yTitle)),
+        // The widest VALUE the left axis carries and the axis's own formatter — not the formatted
+        // datum, which is what this passed until the gutter was found reserving 10px for "24.7K" on
+        // an axis whose top tick is "25K". `estimatePlotWidth` rounds to a tick it would draw.
+        plotWidth: estimatePlotWidth(size, widestOf(leftSide), fmtFor(leftSide), Boolean(yTitle)),
         // The CONTAINER's height, not an inset one: the 70% guard is a share of the whole card
         // (Metabase's `checkHeight`), so passing a grid-adjusted height silently tightens it.
         outerHeight: size.height,

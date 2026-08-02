@@ -141,48 +141,98 @@ const TICKS_TO_MEASURE = 50;
 const pad = (label: string) => ` ${label} `;
 
 /**
+ * The tick a value axis draws WIDEST, approximated — the string the gutter below is measured from,
+ * and `widestPeriodName`'s opposite number for a value axis rather than a temporal one.
+ *
+ * WHAT IT REPLACED, because the replacement only makes sense against it: the caller used to hand
+ * over its widest DATUM formatted. A value axis does not draw data, it draws ROUND TICKS, and under
+ * compact formatting the round one is routinely the SHORTER string — measured on the ZZ Chart Parity
+ * line card, revenue peaking at 24,730 was charged `"24.7K"` at 34.6px while ECharts settled on
+ * 0/5K/10K/15K/20K/"25K" and drew 24.2px. Ten pixels of a ~119px plot, reserved and never used, and
+ * decisive: with them the x axis missed its last stride by 0.86px and was HIDDEN; without them the
+ * same axis clears by 9.5px and draws "January 2026". The waterfall beside it was charged "205K" and
+ * drew "250K" — both 32.3px — so it paid nothing, which is how one dataset produced two different
+ * answers on one card.
+ *
+ * IT DOES NOT PREDICT `intervalScale`, and must not start. Which ticks ECharts picks is its own
+ * `nice()` over an interval drawn from {1,2,5}x10^n, and a builder that reimplemented it would be a
+ * second copy to keep in step with an upgrade. What this does instead is exactly what
+ * `representativeValues` does for the temporal axis: SAMPLE a handful of values the axis plausibly
+ * draws and take the widest, so the answer is a bound rather than a guess. The samples are the
+ * fifths of a one-significant-figure ceiling — ECharts' default `splitNumber` is 5, and the ceiling
+ * is at or above whatever `nice()` settles on — computed as `ceiling * n / 5` in integers so no
+ * rung arrives as 18000.000000000004.
+ *
+ * WHY FIFTHS AND NOT MORE SAMPLES. Every extra rung can only widen the answer, and rungs ECharts
+ * would never draw widen it wrongly: quarters of 30,000 include 7,500, which formats "7.5K" and
+ * would re-introduce the phantom character this exists to remove — no interval in {1,2,5}x10^n
+ * produces it. The fifths, by contrast, catch the case a bare ceiling misses, which is the FORMATTER
+ * changing magnitude part way up the axis: a ceiling of 2,000,000 formats "2M" at two characters
+ * while 0.8 and 0.2 of it give "1.6M" and "400K" at four, and four is what ECharts draws (500K, 1M,
+ * 1.5M, 2M). Character count is the same proxy `widestPeriodName` uses and for the same reason — it
+ * only chooses BETWEEN candidates, and the caller measures the winner with the real measurer.
+ *
+ * WHERE IT IS STILL WRONG, both directions named because "closer" is not "right":
+ *
+ *   - a user-set `yTickCount` becomes ECharts' `splitNumber`, so a 4-split axis lands on quarters
+ *     this sample does not hold. Ticks stay round, so the miss is at most the digit that quartering
+ *     adds — and the sample is not widened to cover it, for the reason above.
+ *   - `yMin`/`yMax` extend the axis past the data, and this samples from the DATA's ceiling, so an
+ *     explicit max far above the values is charged too little.
+ *   - a LOG axis draws powers of ten, not fifths. The sample still bounds it in practice (a decade
+ *     below the ceiling is never the wider string) but it bounds it by luck rather than by argument.
+ *
+ * All three under-charge, which is the direction that leaves x labels overlapping rather than the
+ * one that hides them — see `estimatePlotWidth` below, which states both costs. That is the trade
+ * this change deliberately takes: it removes an over-charge that hid whole axes and accepts a
+ * smaller residual under-charge that at worst crowds them.
+ */
+export function widestTickLabel(widestValue: number, format: (v: number) => string): string {
+  if (!Number.isFinite(widestValue) || widestValue <= 0) return format(0);
+  // One significant figure, rounded UP: 24,730 -> 30,000, 9,700 -> 10,000, 205,256 -> 300,000. At or
+  // above ECharts' own nice maximum in every case this samples, which is what makes the sample a
+  // bound. `Math.log10` is not exact at every power of ten (`log10(1000)` is 2.9999999999999996), so
+  // an off-by-one magnitude is possible — `ceil(v / magnitude) * magnitude` still lands on a value
+  // at or above `v`, which is all this needs.
+  const magnitude = 10 ** Math.floor(Math.log10(widestValue));
+  const ceiling = Math.ceil(widestValue / magnitude) * magnitude;
+  let widest = "";
+  for (let n = 1; n <= 5; n++) {
+    const label = format((ceiling * n) / 5);
+    if (label.length > widest.length) widest = label;
+  }
+  return widest;
+}
+
+/**
  * The width the categories share, estimated — the `plotWidth` every caller of `fitXLabels` below
  * passes, and the one number the whole ladder turns on.
  *
  * `CHART_THEME.grid` sets `containLabel: true` (`palette.ts`), so ECharts — not the builder —
  * decides the real plot box, and it picks the value-axis ticks that eat into it. Neither is
- * knowable here. The grid insets are ours; the gutter is approximated by formatting the widest
- * datum through the same formatter the axis uses, which is why the caller passes a STRING it has
- * already formatted rather than a number.
+ * knowable here. The grid insets are ours; the gutter is approximated by `widestTickLabel` above,
+ * through the same formatter the axis draws its own ticks with — which is why the caller passes the
+ * widest VALUE and that formatter, rather than a string it has already made. It handed a string
+ * until PR 03, and what it handed was the widest datum; see `widestTickLabel` for what that cost.
  *
  * WHICH WAY IT ERRS. It leans UNDER in the common case, and that is the direction to prefer: too
  * small and we call a collision that would not have happened, rotating labels that would have
  * fitted — mildly ugly, still readable. But it is known to lean OVER in three cases, and an
  * over-estimate is not harmless, so they are named rather than waved at:
  *
- *   1. ECharts extends a value axis PAST the data to a round number. A max of 9,700 gives a top
- *      tick of "10,000" — six characters where five were measured. (This is why there is no claim
- *      here that a tick cannot format wider than the extent: it can, and routinely does.)
- *   2. A dual-axis chart has a SECOND gutter on the right, and only one is subtracted. At 40-50px
+ *   1. A dual-axis chart has a SECOND gutter on the right, and only one is subtracted. At 40-50px
  *      against a ~270px estimate that is the most material of the three. Cartesian only — the box
  *      plot and the waterfall each draw a single value axis — and `rightSide` is in scope at that
  *      call site if it is ever fixed.
- *   3. The caller's widest datum is an ABSOLUTE magnitude on all three charts, so a leading minus
+ *   2. The caller's widest value is an ABSOLUTE magnitude on all three charts, so a leading minus
  *      sign is not counted.
+ *   3. The three cases `widestTickLabel` names, where the sampled tick can come out narrower than
+ *      the drawn one.
  *
- * AND ONE THAT CUTS THE OTHER WAY, which is not a fourth item on that list because it makes the
- * estimate too SMALL rather than too large — the gutter is over-charged and the plot comes out
- * narrower than it is. Case 1 above is this one's mirror and stops half way: a value axis draws
- * ROUND TICKS, and the caller hands over its widest DATUM, so under compact formatting the drawn
- * tick is routinely the SHORTER string. Measured on the ZZ Chart Parity line card (193px, revenue
- * peaking at 24,730): the fitter is charged `formatValue(24730, {compact}) = "24.7K"` at 34.6px
- * while ECharts settles on ticks of 0/5K/10K/15K/20K/"25K" — 24.2px, verified by rendering the
- * built option through real ECharts — so 10.4px of a ~119px plot is reserved and never used. It is
- * decisive there: with it the axis misses the last stride by 0.86px and is HIDDEN; without it the
- * same axis clears by 9.5px and draws "January 2026". The waterfall on the same data is charged
- * "205K" and draws "250K", both 32.3px, so it does not pay this at all — which is why two charts of
- * one dataset can still differ at one card width with nothing wrong in `strideThatFits`.
- *
- * NOT FIXED HERE, and this is the same boundary the paragraph below draws: closing it means knowing
- * the ticks before they are generated, which is ECharts' `intervalScale` and not arithmetic this
- * module can do from a datum. `options/cartesian.ts` names the same missing owner at its `ordinalX`
- * comment. Recorded with its measurement so the next reader of a hidden axis at card width can
- * check this before suspecting the ladder.
+ * (A fourth used to head this list — "ECharts extends a value axis past the data to a round number,
+ * so a max of 9,700 draws a tick of 10,000" — and it is gone because `widestTickLabel` now samples
+ * from that round ceiling rather than from the datum. It was half of a symmetry whose other half
+ * was over-charging by ten pixels on every compact axis.)
  *
  * WHAT AN OVER-ESTIMATE COSTS, and it is NOT one thing — PR 03 split this in two, so read the arm
  * that matches the axis in front of you. Neither is "labels silently missing": once a fit exists the
@@ -207,12 +257,23 @@ const pad = (label: string) => ` ${label} `;
  * copies of this arithmetic would be three places for it to drift from the grid it is meant to
  * mirror.
  */
-export function estimatePlotWidth(size: EChartsSize, widestValueLabel: string, hasAxisTitle: boolean): number {
+export function estimatePlotWidth(
+  size: EChartsSize,
+  /** The largest magnitude the value axis has to accommodate. A NUMBER, not a formatted label:
+   *  handing over a string is what let three builders charge the gutter for a datum the axis never
+   *  draws, and taking the value plus the formatter makes that unrepresentable rather than merely
+   *  discouraged. */
+  widestValue: number,
+  /** The axis's OWN tick formatter, so the candidate is a string this axis would really render —
+   *  the same reason `widestPeriodName` is handed the caller's `drawLabel`. */
+  format: (v: number) => string,
+  hasAxisTitle: boolean,
+): number {
   const g = CHART_THEME.grid;
   // The family the chart is actually DRAWN in, never the literal "inherit": a CSS-wide keyword is
   // not a legal family in the `font` shorthand, so the canvas would reject the whole declaration
   // and measure at its 10px sans-serif default. Same rule, and the same reason, as `fitXLabels`.
-  const gutter = measureText(widestValueLabel, {
+  const gutter = measureText(widestTickLabel(widestValue, format), {
     size: CHART_THEME.axisFontSize, family: resolveFontFamily(), weight: CHART_THEME.axisWeight,
   }).width;
   // `26` is the room each builder's `grid.left` reserves for a value-axis title, kept in step with

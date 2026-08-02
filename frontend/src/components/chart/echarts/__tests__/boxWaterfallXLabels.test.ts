@@ -53,9 +53,13 @@ type EstimateArgs = Parameters<typeof EstimatePlotWidth>;
  *  optional CANNED decision to hand back in place of the real ladder's. `vi.hoisted` because the
  *  `vi.mock` factory below is hoisted above this file's imports and would otherwise touch these
  *  bindings in their temporal dead zone. */
-const { fitCalls, gutterLabels, fitResult } = vi.hoisted(() => ({
+const { fitCalls, gutterCalls, fitResult } = vi.hoisted(() => ({
   fitCalls: [] as FitArgs[],
-  gutterLabels: [] as string[],
+  /** The VALUE the gutter was measured from and the FORMATTER it was measured through — the two
+   *  halves of the decision, since PR 03 stopped this taking a pre-formatted string. Both are
+   *  asserted at the foot of this file: the value because it is what the builder chose, and the
+   *  formatter because "through the same formatter the axis uses" is the invariant beside it. */
+  gutterCalls: [] as { widest: number; format: (v: number) => string }[],
   fitResult: { value: undefined as XLabelFit | undefined },
 }));
 
@@ -77,7 +81,7 @@ vi.mock("../axisLabelFit", async (importOriginal) => {
       return fitResult.value ?? actual.fitXLabels(args);
     },
     estimatePlotWidth: (...args: EstimateArgs) => {
-      gutterLabels.push(args[1]);
+      gutterCalls.push({ widest: args[1], format: args[2] });
       return actual.estimatePlotWidth(...args);
     },
   };
@@ -534,9 +538,13 @@ describe("a bucketed temporal waterfall thins to period boundaries", () => {
  * by that difference — which over-estimates `plotWidth` and leaves labels upright and overlapping.
  * At ~40px on a ~270px card that is larger than any case `estimatePlotWidth`'s doc names.
  *
- * Compared against the axis's OWN formatter rather than against a literal, so this pins the
- * invariant the comment states — "through the same formatter the axis uses" — without hard-coding
- * this repo's number format, which would make the test fail on an unrelated formatting change.
+ * The VALUE is asserted directly and the FORMATTER through its own output. Until PR 03 the builder
+ * handed over a finished string, so both halves had to be inferred from it and the first assertion
+ * would have read plausibly if the two numbers happened to format alike — the reason the second
+ * assertion existed. Now the estimate takes `(widest, format)`, so which number was chosen is
+ * asserted as a number, and "through the same formatter the axis uses" is asserted by running the
+ * captured closure and the axis's own on the same input. Neither hard-codes this repo's number
+ * format, which would make these fail on an unrelated formatting change.
  */
 describe("the box plot's value-axis gutter", () => {
   const cols = [{ name: "c", type: "varchar" }, { name: "v", type: "double" }];
@@ -549,23 +557,24 @@ describe("the box plot's value-axis gutter", () => {
     (o as { yAxis: { axisLabel: { formatter: (v: number) => string } } }).yAxis.axisLabel.formatter;
 
   it("measures every value the axis can print, not only the boxes", () => {
-    gutterLabels.length = 0;
+    gutterCalls.length = 0;
     const o = buildBoxplotOption(cols, rows, { category: "c", value: "v" }, SIZE);
-    expect(gutterLabels).toHaveLength(1);
-    expect(gutterLabels[0]).toBe(yFmtOf(o)(1000));
-    // Named explicitly: this is the value the gutter WAS measured from, and the assertion above
-    // would still read plausibly if the two happened to format alike.
-    expect(gutterLabels[0]).not.toBe(yFmtOf(o)(1));
+    expect(gutterCalls).toHaveLength(1);
+    expect(gutterCalls[0].widest).toBe(1000);
+    // And through the axis's own formatter, which is the other half of the decision: a candidate
+    // measured in a format the axis does not draw in is measured against the wrong string.
+    expect(gutterCalls[0].format(1000)).toBe(yFmtOf(o)(1000));
   });
 
   it("counts a point series only when that series is actually drawn", () => {
     // With no points and no mean, nothing but the boxes reaches the axis — so the gutter is back to
     // the boxes, and `axisWidest` must not be "the extent of the data" in general.
-    gutterLabels.length = 0;
+    gutterCalls.length = 0;
     const o = buildBoxplotOption(
       cols, rows, { category: "c", value: "v", points: "none", showMean: false }, SIZE,
     );
-    expect(gutterLabels).toHaveLength(1);
-    expect(gutterLabels[0]).toBe(yFmtOf(o)(1));
+    expect(gutterCalls).toHaveLength(1);
+    expect(gutterCalls[0].widest).toBe(1);
+    expect(gutterCalls[0].format(1)).toBe(yFmtOf(o)(1));
   });
 });

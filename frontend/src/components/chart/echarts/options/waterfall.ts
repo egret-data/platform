@@ -246,8 +246,10 @@ export function buildWaterfallOption(
         // whose entire motivation is labels not fitting.
         labels: categories.map(drawLabel),
         // The gutter is the widest value the y-axis can print, through the y-axis's own formatter
-        // (`fmt(v, true)` below), and `yTitle` is what adds 26 to `grid.left` below.
-        plotWidth: estimatePlotWidth(size, fmt(widest, true), Boolean(yTitle)),
+        // (`fmt(v, true)` below), and `yTitle` is what adds 26 to `grid.left` below. The VALUE and
+        // the formatter, not the formatted value: `estimatePlotWidth` rounds to a tick the axis
+        // would actually draw before measuring, which a pre-formatted string cannot be.
+        plotWidth: estimatePlotWidth(size, widest, (v) => fmt(v, true), Boolean(yTitle)),
         // The CONTAINER's height, not an inset one: the 70% guard is a share of the whole card
         // (Metabase's `checkHeight`), so passing a grid-adjusted height silently tightens it.
         outerHeight: size.height,
