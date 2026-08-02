@@ -293,6 +293,66 @@ describe("CartesianDisplaySection — the per-metric axis select", () => {
   });
 });
 
+/**
+ * THE X-AXIS-SCALE SELECT, and the one place this PR could have made egret LESS like Metabase.
+ *
+ * The select was hidden on scatter while hiding it was inert — a scatter always drew a category
+ * axis, which is what the hidden control would have said. `resolveXScale` ended that: a scatter over
+ * a numeric dimension is now drawn on a value axis nobody chose, and with the control hidden the
+ * automatic answer would also have been the only answer, underneath a rotation select greyed out
+ * with an explanation and no lever to act on. Metabase computes the same default and shows it
+ * (`ScatterPlot.tsx` spreads `GRAPH_AXIS_SETTINGS`, carrying `graph.x_axis.scale`).
+ */
+describe("CartesianDisplaySection — the x-axis scale select", () => {
+  it("offers the scale on a scatter with a dimension on x, where it was hidden before", () => {
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xAxis: "price" }} onChange={() => {}} xColumnType="double" />);
+    expect(screen.getByLabelText("X axis scale")).toBeInTheDocument();
+  });
+
+  /** The trigger reads the RESOLVED scale. Reading `config.xScale` would print "Ordinal" underneath
+   *  a chart visibly plotting values across, which is worse than not offering the control at all. */
+  it("shows Linear on a numeric scatter that stored no scale at all", () => {
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xAxis: "price" }} onChange={() => {}} xColumnType="double" />);
+    expect(screen.getByLabelText("X axis scale")).toHaveTextContent("Linear");
+  });
+
+  it("shows Ordinal on a varchar scatter, which is what that one is drawn on", () => {
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xAxis: "region" }} onChange={() => {}} xColumnType="varchar" />);
+    expect(screen.getByLabelText("X axis scale")).toHaveTextContent("Ordinal");
+  });
+
+  /** The lever itself: choosing Ordinal on an auto-linear scatter must STORE it, because a stored
+   *  scale is the only thing `resolveXScale` lets outrank the automatic one. */
+  it("stores an explicit Ordinal, which is how the automatic value axis is overridden", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xAxis: "price" }} onChange={onChange} xColumnType="double" />);
+    await user.click(screen.getByLabelText("X axis scale"));
+    await user.click(await screen.findByRole("option", { name: "Ordinal" }));
+    expect(onChange).toHaveBeenCalledWith({ xScale: "ordinal" });
+  });
+
+  /**
+   * A METRIC-VS-METRIC scatter keeps the exclusion, and for a different reason than the one that
+   * has just been retired: it leaves through `scatterXY`, which builds its own two value axes and
+   * never reads `xScale`. Offering it there would store a setting nothing consults.
+   */
+  it("still hides the scale on a metric-vs-metric scatter, whose axes ignore it", () => {
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xMetric: "cnt" }} onChange={() => {}} xColumnType="double" />);
+    expect(screen.queryByLabelText("X axis scale")).toBeNull();
+  });
+
+  /** Unchanged: a row chart and a flipped bar draw their categories down the left, where
+   *  `usesXScale`'s `!isHorizontal` guard means an x-scale would be stored and ignored. */
+  it.each([
+    ["row" as const, {}],
+    ["bar" as const, { horizontal: true }],
+  ])("still hides the scale on a %s chart", (kind, extra) => {
+    render(<CartesianDisplaySection kind={kind} config={{ yMetrics: ["rev"], xAxis: "price", ...extra }} onChange={() => {}} xColumnType="double" />);
+    expect(screen.queryByLabelText("X axis scale")).toBeNull();
+  });
+});
+
 describe("CartesianDisplaySection — a combo can stack", () => {
   // Metabase hides the per-series display on `stackable.stack_type`, which only means anything
   // because a combo can reach that state there. egret excluded combo from `canStack`, so a combo

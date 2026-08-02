@@ -436,7 +436,17 @@ const usesXScale = (cfg: CartesianBuildConfig) =>
  * comes back on its own.
  *
  * An explicit `xScale` — including `"ordinal"` — always wins, so a user who has said what they want
- * is never overridden.
+ * is never overridden. The panel offers that choice on a dimension-x scatter for exactly this
+ * reason (`settings/CartesianDisplaySection.tsx`, `AxesOptions`): an automatic answer with no lever
+ * beside it is not a default, it is a rule.
+ *
+ * ONE KNOWN EDGE, PRE-EXISTING BUT NEWLY REACHABLE. `isNumericType` matches `bigint` and `long`,
+ * and a value axis coerces with `Number()` (`applyXScale`), which is a float64 — so a scatter over
+ * an id column with values above 2^53 plots and drills on a rounded id. That has been true of a
+ * hand-set Linear scale since it existed; what is new is that such a column reaches it without
+ * anyone choosing. Narrowing the numeric test to exclude 64-bit integer types would also exclude
+ * the ordinary bigint counts that make perfectly good scatter axes, so it is left alone and named
+ * here rather than silently traded away.
  */
 export function resolveXScale(
   kind: CartesianViz,
@@ -641,9 +651,13 @@ export function buildCartesianOption(
   // type by a longer route (`ChartRenderer` looks it up in this very list) but is optional and
   // absent from every caller that builds a config by hand.
   //
-  // Above the `scatterXY` early return would be wrong and below it is unnecessary: a scatter with
-  // an `xMetric` leaves through that return and builds its own pair of value axes, so this line is
-  // reached only by the scatter whose x is a DIMENSION — the one that was drawing 196 categories.
+  // Below the `scatterXY` early return, because above it would be wasted: a scatter with an
+  // `xMetric` AND at least one y-metric leaves through that return and builds its own pair of value
+  // axes, so the common metric-vs-metric case never reads this. Not "unreachable" — an `xMetric`
+  // scatter with NO y-metric fails that return's second condition and arrives here, where it has no
+  // series to draw anyway and leaves through the empty-option branch a few lines down. What this
+  // line is really FOR is the scatter whose x is a DIMENSION: the one that was drawing 196
+  // categories.
   const xColumn = cfg0.xAxis != null ? columns.find((c) => c.name === cfg0.xAxis) : undefined;
   const xScale = resolveXScale(cfg0.kind, cfg0.xScale, xColumn?.type);
   const cfgX: CartesianBuildConfig = xScale === cfg0.xScale ? cfg0 : { ...cfg0, xScale };
@@ -970,7 +984,9 @@ function baseOption(
   // measure; and a linear/timeseries x is a value axis whose labels are ticks ECharts generates,
   // not this array — deciding a fit from `categories` there would reserve room below a rotation
   // that never gets applied, since `scaleAxis` carries no `rotate`. Fitting a value axis means
-  // generating its ticks first, which is PR 03.
+  // generating its ticks first, and NOTHING OWNS THAT: this said "which is PR 03", and PR 03 turned
+  // out to be about which axis a scatter gets (`resolveXScale`), not about laying out the ticks on
+  // it. The deferral stands; the owner named for it never existed.
   const ordinalX = !horizontal && !usesXScale(cfg);
 
   /**
@@ -1130,13 +1146,17 @@ function baseOption(
   // their real coordinate. Series carry [x, y] pairs (see applyXScale).
   //
   // No `rotate` here, and PR 03 did NOT change that — this note used to say rotating these labels
-  // "is PR 03", and PR 03 turned out to be about which axis a scatter gets, not about laying out
-  // the ticks on it. An explicit `xLabelRotation` is still a NO-OP on a value x-axis, so the setting
-  // is one the panel must not offer where it would land here; the reason it is not merely dropped is
-  // that ECharts would happily apply it (`AxisBuilder.buildAxisLabel` reads `axisLabel.rotate` for
-  // every axis kind), and applying it would silently start rotating charts saved as Linear years
-  // ago while carrying a rotation from before the switch. Deciding that is a change of behaviour
-  // for existing charts, not a gap in this one.
+  // "is PR 03", and PR 03 turned out to be about which axis a scatter gets, not about laying out the
+  // ticks on it. An explicit `xLabelRotation` is still a NO-OP on a value x-axis.
+  //
+  // NOT BECAUSE IT COULD NOT BE APPLIED. ECharts would honour it: `AxisBuilder.buildAxisLabel` reads
+  // `axisLabel.rotate` with no branch on the axis kind (`AxisBuilder.js:875`), so adding one key
+  // here would rotate these generated ticks today. The reason not to is PARITY — Metabase greys the
+  // rotation out on a value axis too, so honouring it would be a divergence dressed up as a fix, in
+  // the workstream whose whole point is to stop diverging. A second reason, real but thinner in a
+  // product this young: a chart saved as Linear can still CARRY a rotation from before the switch,
+  // and applying it would silently turn labels nobody has touched in months. Either way the setting
+  // is one the panel must not OFFER where it would land here, which is what `valueX` is for.
   //
   // WHAT PR 03 ADDED TO THIS AXIS'S CATCHMENT, and the reason the panel rule had to move with it: a
   // scatter over a numeric dimension now arrives here WITHOUT anyone having chosen a scale

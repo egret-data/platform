@@ -67,9 +67,16 @@ describe("resolveXScale — which axis a scatter gets", () => {
   /**
    * SCATTER ONLY. A bar chart's categories are discrete even when they are numbers, and bar width,
    * grouping and stacking are all computed off the axis type — putting bars on a value axis is a
-   * far larger change than the defect above asks for. The other four kinds are here because the
-   * rule is `kind !== "scatter"`, and a rule that only bar was checked against would pass while
-   * being written the other way round.
+   * far larger change than the defect above asks for. The other three vertical kinds are here
+   * because the rule is `kind !== "scatter"`, and a rule that only bar was checked against would
+   * pass while being written the other way round.
+   *
+   * `row` IS DIFFERENT AND IS KEPT DELIBERATELY. Mutating `resolveXScale`'s `kind !== "scatter"`
+   * guard away fails bar, line, area and combo — and NOT row, because a row chart is caught one
+   * layer further down by `usesXScale`'s `!isHorizontal` guard, which is the only thing in the suite
+   * pinning that guard for a numeric x. So this case is inert against the rule its name describes
+   * and load-bearing for a different one. Do not delete it as redundant, and do not read a pass here
+   * as evidence about the scatter rule.
    */
   it.each(["bar", "line", "area", "combo", "row"] as const)("does not change the axis under a numeric %s", (kind) => {
     const opt = build(priceCols, priceRows, { kind, xAxis: "price", yMetrics: ["rating"] });
@@ -140,5 +147,41 @@ describe("what ECharts draws on the axis it was given", () => {
   it("draws one label per row on the category axis, which is what it was doing", () => {
     expect(xLabels({ kind: "scatter", xAxis: "price", yMetrics: ["rating"], xScale: "ordinal" }))
       .toEqual(["0.2", "15.69", "48.93", "84.14", "99.5"]);
+  });
+
+  /**
+   * THE CLICK PAYLOAD THE DRILL IS BUILT ON, pinned against real ECharts instead of only asserted
+   * about in a comment.
+   *
+   * `ChartRenderer`'s cartesian drill reads `data[0]` on a linear x and `name` otherwise, because a
+   * value axis has no category to name a point after: `getDataParams` fills `name` from
+   * `SeriesData.getName`, which returns `''` when the series has no name list and no `itemName`
+   * dimension — which is every series `applyXScale` produces. The drill's own test hand-writes that
+   * payload into a mocked renderer, so on its own it proves the drill handles the shape, not that
+   * the shape is real. If an ECharts upgrade started reporting a name here, that fixture would
+   * quietly stop describing anything and the arm would go wrong with a green suite. This is the
+   * assertion that fails instead.
+   */
+  function clickParams(cfg: CartesianBuildConfig): { name: string; data: unknown } {
+    registerEChartsModules();
+    const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 400, height: 300 });
+    chart.setOption({ animation: false, ...buildCartesianOption(priceCols, priceRows, cfg) });
+    // Index 2 of the sorted categories is 48.93 — a point in the middle, so nothing here can pass
+    // by accidentally matching an extreme.
+    const p = (chart as unknown as {
+      getModel(): { getSeriesByIndex(i: number): { getDataParams(i: number): { name: string; data: unknown } } };
+    }).getModel().getSeriesByIndex(0).getDataParams(2);
+    chart.dispose();
+    return { name: p.name, data: p.data };
+  }
+
+  it("reports no name and an [x, y] datum for a value-axis point, which is why the drill reads data[0]", () => {
+    expect(clickParams({ kind: "scatter", xAxis: "price", yMetrics: ["rating"] }))
+      .toEqual({ name: "", data: [48.93, 7] });
+  });
+
+  it("still reports the category name and a bare value on the category axis", () => {
+    expect(clickParams({ kind: "scatter", xAxis: "price", yMetrics: ["rating"], xScale: "ordinal" }))
+      .toEqual({ name: "48.93", data: 7 });
   });
 });

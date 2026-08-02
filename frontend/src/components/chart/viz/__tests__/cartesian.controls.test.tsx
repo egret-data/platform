@@ -55,20 +55,31 @@ describe("cartesian controls are grouped and per-kind", () => {
    * through the descriptor's own `render` rather than by rendering the section directly: a section
    * test passes just as happily when nothing hands the prop over.
    */
+  const numericScatterProps: VizControlProps<CartesianConfig> = {
+    config: { yMetrics: ["rating"], xAxis: "price" },
+    onChange: () => {},
+    columns: [], metrics: [],
+    resultColumns: [{ name: "price", type: "double" }, { name: "rating", type: "double" }],
+    rows: [],
+    unitRow: () => null,
+  };
+
   it("hands the x column's result type to the range control, which greys out a dead rotation", async () => {
     const user = userEvent.setup();
     const control = ctrls("scatter").find((c) => c.id === "range");
-    const props: VizControlProps<CartesianConfig> = {
-      config: { yMetrics: ["rating"], xAxis: "price" },
-      onChange: () => {},
-      columns: [], metrics: [],
-      resultColumns: [{ name: "price", type: "double" }, { name: "rating", type: "double" }],
-      rows: [],
-      unitRow: () => null,
-    };
-    render(createElement(control!.render, props));
+    render(createElement(control!.render, numericScatterProps));
     await user.click(screen.getByLabelText("X axis lines and ticks"));
     expect(await screen.findByRole("option", { name: "Rotate 45°" })).toHaveAttribute("aria-disabled", "true");
+  });
+
+  /** The same seam on the OTHER control that grew the prop. `AxesOptions` prints the RESOLVED scale
+   *  on its trigger, so without the type travelling it would read "Ordinal" under a scatter drawing
+   *  a value axis — and the two controls are threaded separately, so one being right says nothing
+   *  about the other. */
+  it("hands it to the axes control too, which prints the resolved scale rather than the stored one", () => {
+    const control = ctrls("scatter").find((c) => c.id === "axes");
+    render(createElement(control!.render, numericScatterProps));
+    expect(screen.getByLabelText("X axis scale")).toHaveTextContent("Linear");
   });
 
   it("gives every control a unique id, for every kind", () => {

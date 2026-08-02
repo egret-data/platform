@@ -279,7 +279,11 @@ describe("ChartRenderer", () => {
    * the column has ever held, so reading it would swap one filter that matches nothing for another
    * — and the second one looks like a real answer. The drill on a timeseries x has been broken since
    * that scale existed and PR 03 neither reaches it (its automatic scale is only ever `linear`) nor
-   * fixes it. If it is fixed, this is the test to rewrite.
+   * fixes it.
+   *
+   * TRACKED AS egretdb/egret#387, which carries the mechanism and a sketch of the fix. This test is
+   * the one to rewrite when that lands — a characterization test with no issue behind it is how a
+   * defect turns into a documented feature.
    */
   it("leaves a timeseries x-axis drill exactly as broken as it was, rather than filtering on an epoch", () => {
     const onValueClick = vi.fn();

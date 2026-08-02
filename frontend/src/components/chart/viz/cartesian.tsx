@@ -188,8 +188,14 @@ function displayControls(kind: CartesianViz): VizControl<CartesianConfig>[] {
     }] : []),
     {
       id: "axes", section: "display", group: "Axes",
-      render: ({ config, onChange }: VizControlProps<CartesianConfig>) => (
-        <AxesOptions kind={kind} config={config} onChange={onChange} />
+      // Same `resultColumns` lookup, and for the same reason, as the "range" control below — see
+      // the comment there. Here it decides what the X-axis-scale trigger READS on a chart whose
+      // scale was resolved rather than stored.
+      render: ({ config, onChange, resultColumns }: VizControlProps<CartesianConfig>) => (
+        <AxesOptions
+          kind={kind} config={config} onChange={onChange}
+          xColumnType={resultColumns.find((c) => c.name === config.xAxis)?.type}
+        />
       ),
     },
     {

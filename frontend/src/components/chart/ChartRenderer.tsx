@@ -588,19 +588,33 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
               // drill built on that filters `price = ''`, which matches nothing and looks like a
               // chart with no rows behind it. `applyXScale` re-keys each point to `[x, y]`, so the
               // x IS `data[0]`, and on a linear scale it is the same number the category string
-              // held. Verified against ECharts under jsdom rather than assumed: a value-axis
-              // scatter reports `name: ""` and `data: [15.69, 3]` where the category-axis one
-              // reports `name: "15.69"`.
+              // held. The payload both arms rest on is pinned against real ECharts in
+              // `echarts/__tests__/scatterValueX.echarts.test.ts` — `{name: "", data: [48.93, 7]}`
+              // on the value axis, `{name: "48.93", data: 7}` on the category one — so this comment
+              // is not the only thing holding it up.
               //
               // This became reachable without anyone asking for it when a numeric scatter started
-              // resolving to a value axis (`resolveXScale`); it was already the behaviour of a
-              // chart set to Linear by hand, where the drill was broken in the same way and is
-              // fixed by the same line.
+              // resolving to a value axis (`resolveXScale`). Because that function returns a STORED
+              // scale before it computes anything, the same arm also repairs a line, area, bar or
+              // combo chart set to Linear by hand, where the drill has been broken in exactly this
+              // way for as long as the setting has existed.
+              //
+              // `Array.isArray(p.data)` IS DOING GATING, NOT JUST NARROWING, and it has to be read
+              // that way. `resolveXScale` answers "what scale would this config resolve to", not
+              // "what axis is on screen", and it is called here without the two gates the builder
+              // applies around it: the `scatterXY` early return (an `xMetric` scatter over a numeric
+              // dimension computes "linear" while `scatterXY` draws axes named after the METRICS)
+              // and `isHorizontal` (a row chart, or a flipped bar, with a stored `xScale: "linear"`
+              // computes "linear" while `usesXScale` ignores it and draws categories down the left).
+              // In both the axis really on screen is a category one, ECharts reports a name and a
+              // bare number, and `Array.isArray` is what keeps this arm off them. Reproducing the
+              // builder's gates here would mean a second copy of them to drift; testing the datum
+              // shape asks the drawn chart directly, which is the thing the answer depends on.
               //
               // TIMESERIES IS DELIBERATELY NOT INCLUDED. Its `data[0]` is `Date.parse`'s epoch
               // milliseconds, not the bucket value a filter needs, so there is nothing here to
-              // recover — a separate defect, still open, and not one this arm should paper over by
-              // filtering on a number the column has never held.
+              // recover — a separate defect, tracked as egretdb/egret#387, and not one this arm
+              // should paper over by filtering on a number the column has never held.
               const scale = resolveXScale(vizType, cartesian.xScale, cartesianCfg.xAxisType);
               const xValue = scale === "linear" && Array.isArray(p.data)
                 ? (p.data as unknown[])[0]

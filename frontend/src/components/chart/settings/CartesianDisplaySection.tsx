@@ -118,7 +118,12 @@ export function SeriesOptions({ kind, config, onChange }: SectionProps & { serie
 }
 
 /** X-axis scale, the left/right axis split for multi-metric charts, and the axis titles. */
-export function AxesOptions({ kind, config, onChange }: SectionProps) {
+export function AxesOptions({ kind, config, onChange, xColumnType }: SectionProps & {
+  /** The SQL type of the result column on `config.xAxis` — see the identical prop on
+   *  `AxisRangeOptions`. Here it decides what the X-axis-scale trigger READS on a chart whose scale
+   *  was resolved rather than stored. */
+  xColumnType?: string;
+}) {
   // On a horizontal chart the CATEGORY axis is the vertical one, so naming these controls after
   // the config keys (`xLabel` is the category axis, `yLabel` the value axis) prints them backwards
   // from what the reader sees: "Y min" would govern the horizontal extent. Metabase relabels the
@@ -128,10 +133,33 @@ export function AxesOptions({ kind, config, onChange }: SectionProps) {
   const valAx = horiz ? "X" : "Y";   // the measure axis
   return (
     <div className="space-y-2.5">
-      {kind !== "scatter" && kind !== "row" && !config.horizontal && (
+      {/*
+        WHY A SCATTER NOW GETS THIS SELECT. It was excluded while the exclusion was inert: a scatter
+        always drew a category axis, which is what the hidden select would have said, so hiding it
+        cost nothing. `resolveXScale` ended that — a scatter over a numeric dimension is drawn on a
+        VALUE axis that nobody chose, and with the select hidden the automatic answer was also the
+        only answer, under a rotation select greyed out with an explanation and no lever to act on.
+
+        Metabase computes the same default and SHOWS it: `ScatterPlot.tsx` spreads
+        `GRAPH_AXIS_SETTINGS`, which carries `graph.x_axis.scale` with `persistDefault: true`. egret
+        shows it without persisting — the resolution stays at render time, which is this programme's
+        standing rule and what lets a saved chart pick up a better default later — so the two differ
+        only in what is written to the database, not in what the user sees or can change.
+
+        STILL HIDDEN for the METRIC-VS-METRIC scatter, and that is not the same exclusion: that
+        chart leaves through `scatterXY`, which builds its own two value axes and never reads
+        `xScale` at all. Offering the select there would store a setting nothing consults — the very
+        defect the rotation rows below are greyed out to avoid.
+      */}
+      {(kind !== "scatter" || config.xMetric == null) && kind !== "row" && !config.horizontal && (
         <div className="flex items-center justify-between gap-2">
           <Label className="text-sm font-normal">X axis scale</Label>
-          <Select value={config.xScale ?? "ordinal"} onValueChange={(v) => onChange({ xScale: v as CartesianConfig["xScale"] })}>
+          {/* The RESOLVED scale, not the stored one. Reading `config.xScale` here would print
+              "Ordinal" underneath a chart visibly drawing a value axis, which is the same
+              stored-says-one-thing-screen-says-another defect the "Auto" Y-axis rows below were
+              added to fix. Off a resolved chart the two are identical, since `resolveXScale`
+              returns a stored scale unchanged. */}
+          <Select value={resolveXScale(kind, config.xScale, xColumnType) ?? "ordinal"} onValueChange={(v) => onChange({ xScale: v as CartesianConfig["xScale"] })}>
             <SelectTrigger aria-label="X axis scale" className="h-7 w-28"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="ordinal">Ordinal</SelectItem>
@@ -261,8 +289,10 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType }: Sectio
           run through its column format — does NOT hold here: cartesian is the one family with a
           `timeseries` x-scale, which is exactly where a temporal shortener would bite. But that
           axis is `scaleAxis`, whose tick labels ECharts generates rather than this builder, so
-          offering Compact means owning that tick generation first. That is PR 03, and this is a
-          divergence Task 4's side-by-side should record rather than a gap to paper over.
+          offering Compact means owning that tick generation first. THAT IS NOT PR 03 EITHER — this
+          said "that is PR 03", and PR 03 turned out to be about which axis a scatter gets, not about
+          laying out the ticks on it. Nothing owns it yet, and PR 03's side-by-side (Task 5) should
+          record the divergence rather than paper over it.
 
           What "Hide" hides is the axis LINE and its TICK MARKS — which is what this row is named
           after — and NOT the labels, where Metabase's single `axis_enabled: false` drops both. The
@@ -295,11 +325,22 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType }: Sectio
               {/* Offered but DISABLED where the rotation would be stored and then never applied: a
                   linear/timeseries x and a metric-vs-metric scatter both draw a VALUE axis, whose
                   labels are ticks ECharts generates rather than the category array, and `scaleAxis`
-                  in echarts/options/cartesian.ts carries no `rotate` (rotating generated ticks means
-                  generating them first, which is PR 03). Disabled rather than hidden, for two
-                  reasons: a chart that stored 45° and later moved to Linear must still SHOW what it
-                  stored instead of an empty trigger, and options that appear and disappear as a
-                  neighbouring select changes read as a glitch rather than as a rule. */}
+                  in echarts/options/cartesian.ts carries no `rotate`.
+
+                  IT COULD, and this used to claim otherwise — "rotating generated ticks means
+                  generating them first, which is PR 03" is wrong twice over. ECharts applies
+                  `axisLabel.rotate` to any axis kind (`AxisBuilder.js:875` reads it with no branch
+                  on the axis), so nothing has to be generated first; and PR 03 does not own tick
+                  generation, it only decides which axis a scatter gets. The reason `scaleAxis`
+                  carries no `rotate` is PARITY: Metabase greys the rotation out on a value axis too,
+                  so honouring it would be a divergence dressed up as a fix. A secondary reason, real
+                  but thinner in a product this young, is that charts saved as Linear can still carry
+                  a rotation from before the switch, and applying it would silently turn their labels.
+
+                  Disabled rather than hidden, for two reasons: a chart that stored 45° and later
+                  moved to Linear must still SHOW what it stored instead of an empty trigger, and
+                  options that appear and disappear as a neighbouring select changes read as a glitch
+                  rather than as a rule. */}
               {(["rotate45", "rotate90"] as const).map((v) => (
                 <SelectItem key={v} value={v} disabled={valueX}>
                   {v === "rotate45" ? "Rotate 45°" : "Rotate 90°"}
@@ -430,7 +471,7 @@ export function CartesianDisplaySection({
   config: CartesianConfig;
   onChange: (patch: Partial<CartesianConfig>) => void;
   seriesNames?: string[];
-  /** Passed straight through to `AxisRangeOptions` — see the prop's doc there. */
+  /** Passed straight through to `AxisRangeOptions` and `AxesOptions` — see the prop's doc there. */
   xColumnType?: string;
 }) {
   return (
@@ -439,7 +480,7 @@ export function CartesianDisplaySection({
       <OrientationOption kind={kind} config={config} onChange={onChange} />
       <TrendOption kind={kind} config={config} onChange={onChange} />
       <AxisRangeOptions kind={kind} config={config} onChange={onChange} xColumnType={xColumnType} />
-      <AxesOptions kind={kind} config={config} onChange={onChange} />
+      <AxesOptions kind={kind} config={config} onChange={onChange} xColumnType={xColumnType} />
       <GoalOptions kind={kind} config={config} onChange={onChange} />
       <FormatOptions kind={kind} config={config} onChange={onChange} />
     </div>

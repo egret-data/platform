@@ -296,7 +296,13 @@ describe("cartesian x-axis labels", () => {
    * A linear or timeseries x is a VALUE axis: ECharts generates its tick labels, and `categories`
    * is not what gets drawn. Measuring them anyway would reserve room below the plot for a rotation
    * that is never applied — `scaleAxis` carries no `rotate` — so the fitter is not called at all.
-   * Fitting a value axis means generating its ticks first, which is PR 03's job.
+   * Fitting a value axis means generating its ticks first, and no PR owns that: this said "which is
+   * PR 03's job", and PR 03 turned out to be about which axis a scatter gets, not about laying out
+   * the ticks on it.
+   *
+   * `xScale: "linear"` here is EXPLICIT and stays that way. `resolveXScale` reaches a value axis on
+   * its own only for a scatter, and this is a bar chart, so the case below is the stored one — but
+   * an automatically resolved scale lands on the same `usesXScale` and gets the same treatment.
    */
   it("does not measure a value x-axis, whose labels it does not know", () => {
     const ncols = [{ name: "category", type: "double" }, { name: "revenue", type: "double" }];
