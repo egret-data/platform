@@ -125,8 +125,8 @@ function hashMapping(
   });
   // Nothing left to hash into. Guarded because the loop below only ever exits by assigning every
   // key, and with no values to assign `% values.length` is NaN, `values[NaN]` is undefined, and it
-  // would spin forever. Unreachable from either call site today — but the loop's termination should
-  // not rest on an invariant held somewhere else.
+  // would spin forever. Unreachable from its one remaining call site today — but the loop's
+  // termination should not rest on an invariant held somewhere else.
   if (!values.length) return mapping;
   // `attempt` walks the key off its first choice when that one is taken. Refilling `unused` when it
   // empties is what makes this terminate for more keys than colours — with a repeat, not a hang.
