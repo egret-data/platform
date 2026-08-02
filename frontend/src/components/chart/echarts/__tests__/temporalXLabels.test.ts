@@ -1,5 +1,29 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { buildCartesianOption, type CartesianBuildConfig } from "../options/cartesian";
+import type { fitXLabels as FitXLabels } from "../axisLabelFit";
+
+type FitArgs = Parameters<typeof FitXLabels>[0];
+
+/** Every argument the builder hands the fitter, in call order. `vi.hoisted` for the same reason
+ *  `cartesianXLabels.test.ts` needs it: the `vi.mock` factory below is hoisted above these
+ *  imports and would otherwise touch the binding in its temporal dead zone. */
+const { fitCalls } = vi.hoisted(() => ({ fitCalls: [] as FitArgs[] }));
+
+/** A pass-through spy, not a stub — the real ladder still decides. All it adds is a view of the
+ *  `labels` the builder measures, which is otherwise UNOBSERVABLE from here: `measure-text.ts`
+ *  returns `{0, 0}` under jsdom by design, so every label is 0px wide and measuring the wrong
+ *  string yields the same decision as measuring the right one. The consequence is a browser
+ *  question; which strings were handed over is not, and that is what is asserted. */
+vi.mock("../axisLabelFit", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../axisLabelFit")>();
+  return {
+    ...actual,
+    fitXLabels: (args: FitArgs) => {
+      fitCalls.push(args);
+      return actual.fitXLabels(args);
+    },
+  };
+});
 
 /**
  * A bucketed temporal x-axis draws the NAME OF THE PERIOD, not the bucket's first day.
@@ -13,13 +37,17 @@ import { buildCartesianOption, type CartesianBuildConfig } from "../options/cart
 const COLS = [{ name: "d", type: "date" }, { name: "rev", type: "bigint" }];
 const ROWS = [["2026-01-01", 10], ["2026-02-01", 4]];
 
+// `satisfies`, not a bare object: spread properties escape excess-property checking, so `xAxisTyp`
+// here would compile clean and silently make every case below a `varchar` column — the "format
+// wins" test would then go green while testing nothing it names. Same hole `as never` opened on
+// the argument, one scope out.
 const base = {
   kind: "bar" as const,
   xAxis: "d",
   yMetrics: ["rev"],
   metricTypes: { rev: "bigint" },
   xAxisType: "date",
-};
+} satisfies Partial<CartesianBuildConfig>;
 
 type Axis = { axisLabel?: { formatter?: (v: unknown) => string } };
 const axisOf = (opt: unknown) => {
@@ -93,6 +121,75 @@ describe("a bucketed temporal x-axis names its periods", () => {
 
   it("draws nothing for an empty category rather than naming a period from it", () => {
     expect(label({ xAxisUnit: "month" }, null)).toBe("");
+  });
+
+  /**
+   * A format object SILENT ABOUT DATES does not outrank the period name, and this is not
+   * hypothetical: `FormatSection`'s `patch` spreads into `{...fmt, ...p}` (`settings/
+   * FormatSection.tsx:67`) and `styleColumnsFor` offers the x dimension to it for every cartesian
+   * viz (`settings/SharedDisplaySections.tsx:27-38`). So renaming the date column to "Month" on a
+   * month-bucketed bar stored `{column_title: "Month"}` — truthy — which took arm 1, and the axis
+   * reverted from "January 2026" to `formatDate`'s default "January 1, 2026" with nothing in the
+   * panel to explain it. An unrelated rename undoing this task's fix.
+   */
+  it("is not displaced by a format that says nothing about dates", () => {
+    expect(label({ xAxisUnit: "month", columnSettings: { d: { column_title: "Month" } } }))
+      .toBe("January 2026");
+    // A title typed and then deleted persists the key with no value. Still a truthy object.
+    expect(label({ xAxisUnit: "month", columnSettings: { d: { column_title: undefined } } }))
+      .toBe("January 2026");
+    // A date switch toggled on and back off leaves the falsy value, which means "not set".
+    expect(label({ xAxisUnit: "month", columnSettings: { d: { date_abbreviate: false } } }))
+      .toBe("January 2026");
+    // …but the same switch left ON is a date instruction, and takes arm 1 with the default style.
+    expect(label({ xAxisUnit: "month", columnSettings: { d: { date_abbreviate: true } } }))
+      .toBe("Jan 1, 2026");
+  });
+
+  /**
+   * The higher bar applies ONLY where a period name is in play. On an unbucketed axis there is
+   * nothing for the format to outrank, so it keeps winning on existence — anything else would be
+   * this task changing behaviour it was not sent to change.
+   */
+  it("keeps the old existence test where there is no period name to outrank", () => {
+    expect(label({ columnSettings: { d: { column_title: "When" } } })).toBe("January 1, 2026");
+  });
+
+  /**
+   * THE FITTER MEASURES THE STRING THE AXIS DRAWS.
+   *
+   * It measured `categories.map(String)` — the raw bucket — while the formatter drew the period
+   * name, and the comment there justified the gap as "the formatted label is wider, so this
+   * under-measures". Naming the periods falsified both halves at once: the two now differ whenever
+   * the axis is bucketed, which is this PR's whole subject rather than the rare `columnSettings`
+   * case that comment named, and the period name is often NARROWER — a year measured "2026-01-01"
+   * at ten characters to draw "2026" at four. Over-measuring rotates labels that would have sat
+   * upright, in the PR that exists because labels did not fit.
+   *
+   * Asserted as the ARGUMENT rather than as a rotation, because no rotation is reachable from
+   * here: every label is 0px wide under jsdom, so both strings produce the same decision. See the
+   * spy above.
+   */
+  it("hands the fitter the drawn labels, not the raw buckets", () => {
+    fitCalls.length = 0;
+    buildCartesianOption(
+      COLS,
+      [["2025-01-01", 1], ["2026-01-01", 2]],
+      { ...base, xAxisUnit: "year" },
+      { width: 320, height: 200 },
+    );
+    expect(fitCalls).toHaveLength(1);
+    expect(fitCalls[0].labels).toEqual(["2025", "2026"]);
+  });
+
+  it("measures the column's format too, where that is what wins", () => {
+    fitCalls.length = 0;
+    buildCartesianOption(
+      COLS, ROWS,
+      { ...base, xAxisUnit: "month", columnSettings: { d: { date_style: "YYYY-MM-DD" } } },
+      { width: 320, height: 200 },
+    );
+    expect(fitCalls[0].labels).toEqual(["2026-01-01", "2026-02-01"]);
   });
 
   /**

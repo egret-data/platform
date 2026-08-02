@@ -66,7 +66,11 @@ describe("SmartScalarChart — Metabase parity", () => {
     expect(screen.getByText(/36\.5k/i)).toBeInTheDocument();
   });
 
-  // The period label should read at the grouping's granularity, as Metabase's "Apr 2029" does.
+  // A PRECEDENCE test, not a granularity one — there is no `unit` here, so nothing competes with
+  // the format. Its comment used to say the label "should read at the grouping's granularity",
+  // true while the format was the only thing that COULD set the granularity; since PR 03 the unit
+  // sets it, and this case says which wins when both are present, except that it cannot, because
+  // only one is. The case with both is "lets the dimension's own format win" below.
   it("formats the period label through the dimension's own format", () => {
     render(
       <SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m"
@@ -113,6 +117,12 @@ describe("SmartScalarChart — the label names the period, not its first day", (
    * not "March 2026"). That is a condensed-range formatter this codebase does not have; building it
    * is a change of its own, not an argument to `periodName`. Pinned so the divergence is a decision
    * on the record rather than something rediscovered.
+   *
+   * WHAT THIS TEST CANNOT DO, said plainly because the assertion looks stronger than it is: it
+   * pins the STRING, not the code path. `periodName`'s week format and `formatValue`'s default
+   * date style are the same "MMMM D, YYYY", so making this card ignore the unit entirely leaves it
+   * green — verified by mutation, not assumed. It dies to a change in the week format itself,
+   * which is what it is for. `temporal-period.test.ts` pins the path, on the namer directly.
    */
   it("names a week by its first day — the known, deliberate gap from Metabase's span form", () => {
     render(
@@ -134,6 +144,28 @@ describe("SmartScalarChart — the label names the period, not its first day", (
   });
 
   /**
+   * The same hazard the axis has, through the same writer. `styleColumnsFor` falls through to
+   * `return resultColumns` for a smartscalar (`settings/SharedDisplaySections.tsx:52`), so the
+   * dimension reaches `FormatSection`, whose `patch` spreads into `{...fmt, ...p}` (`:67`).
+   * Renaming the date column stored `{column_title: "Month"}` — truthy, silent about dates — which
+   * took the format arm and put "March 1, 2026" back above a caption reading "vs previous month".
+   * A rename undoing this task's fix, with nothing in the panel to explain it.
+   */
+  it("is not displaced by a format that says nothing about dates", () => {
+    const { rerender } = render(
+      <SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month"
+        dimensionFormat={{ column_title: "Month" }} />,
+    );
+    expect(screen.getByText("March 2026")).toBeInTheDocument();
+    // A title typed and then deleted persists the key with no value.
+    rerender(
+      <SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month"
+        dimensionFormat={{ column_title: undefined }} />,
+    );
+    expect(screen.getByText("March 2026")).toBeInTheDocument();
+  });
+
+  /**
    * The negative, and the one a wrong guard would break: with no unit the card is NOT bucketed, so
    * the label keeps `formatValue`'s default date style. Naming a period here would invent a
    * granularity; returning the raw "2026-03-01" would be a regression from what shipped.
@@ -144,8 +176,11 @@ describe("SmartScalarChart — the label names the period, not its first day", (
   });
 
   it("leaves a non-temporal dimension alone even under a unit", () => {
-    // An extraction unit's value is already a finished word; `periodName` must not read "3" as a
-    // date, which dayjs would happily do (`dayjs("3")` formats as March 2001).
+    // TWO guards defend this and only the outer one belongs to this site. `namesAPeriod`
+    // ("day_of_week") is false, so arm 2 is skipped and `periodName` is never reached — widening
+    // either guard alone leaves this green, and it takes both to turn a `day_of_week` of 3 into
+    // "March 2001", which dayjs will happily do with it. The axis twin of this test is the one
+    // that pins `periodName`'s own `isExtractUnit` guard, because there arm 2 is not gated.
     render(
       <SmartScalarChart columns={[{ name: "dow", type: "varchar" }, { name: "m", type: "double" }]}
         rows={[["2", 1], ["3", 2]]} dimension="dow" metric="m" unit="day_of_week" />,

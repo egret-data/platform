@@ -18,7 +18,7 @@
  *
  * Extraction units ("day_of_week", "month_of_year", ...) are not periods and are not this module's
  * business — `temporalLabel` in `./temporal-units` has already turned their values into finished
- * words upstream (`options/cartesian.ts:647`).
+ * words upstream (`options/cartesian.ts`, the `displayCats` line).
  */
 
 import dayjs from "dayjs";
@@ -154,12 +154,17 @@ export function periodName(unit: string | undefined, value: unknown): string {
  * drift from what `periodName` actually implements: a unit that is a truncation token but has no
  * format entry yet would be reported as naming a period while `periodName` fell through to raw.
  *
- * `periodName` is total, so a caller whose fallback IS the raw string does not need this — the axis
- * formatter simply calls `periodName`. It exists for the trend card, whose fallback is `formatValue`
- * (a date column with no format there still reads "March 1, 2026", and dropping that would be a
- * regression), so it has to know which of the two paths to take BEFORE calling.
+ * `periodName` is total, so a caller whose fallback IS the raw string does not need this to make
+ * the call — the axis formatter still calls `periodName` unguarded. What both callers need it for
+ * is to know whether a period name is IN PLAY at all: the trend card because its own fallback is
+ * `formatValue` rather than the raw string (a date column with no format there still reads
+ * "March 1, 2026", and dropping that would be a regression), and both of them because a stored
+ * column format only has to clear a higher bar when there is a period name for it to outrank.
+ *
+ * A type predicate rather than a bare `boolean` so `widestPeriodName` can use it as its own
+ * membership check instead of restating the same lookup ten lines below it.
  */
-export function namesAPeriod(unit: string | undefined): boolean {
+export function namesAPeriod(unit: string | undefined): unit is string {
   return unit != null && PERIOD_FORMAT[unit] != null;
 }
 
@@ -239,7 +244,7 @@ const WIDEST_BY_UNIT = new Map<string, string>();
  * already guards on the unit being a truncation one before asking.
  */
 export function widestPeriodName(unit: string | undefined): string {
-  if (unit == null || PERIOD_FORMAT[unit] == null) return "";
+  if (!namesAPeriod(unit)) return "";
   const cached = WIDEST_BY_UNIT.get(unit);
   if (cached != null) return cached;
   const widest = representativeValues(unit).reduce((longest, v) => {

@@ -3,11 +3,11 @@ import type { CartesianViz, LineSeriesStyle } from "@/api/charts";
 import type { EChartsSize } from "../EChartsRenderer";
 import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
-import { formatValue } from "../../format";
+import { formatValue, specifiesDateRendering } from "../../format";
 import { ariaDescription, baseTextStyle, tooltipSurface } from "../base";
 import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
-import { periodName } from "@/components/chart/temporal-period";
+import { namesAPeriod, periodName } from "@/components/chart/temporal-period";
 import { foldTail, OTHER_LABEL } from "../fold";
 import { estimatePlotWidth, fitXLabels, type XLabelFit } from "../axisLabelFit";
 
@@ -913,6 +913,41 @@ function baseOption(
   // generating its ticks first, which is PR 03.
   const ordinalX = !horizontal && !usesXScale(cfg);
 
+  /**
+   * What a category is DRAWN AS. Hoisted above the fit below rather than written inline on
+   * `axisLabel.formatter`, because the fitter has to measure THIS STRING and nothing else — see
+   * the `labels:` line at the call site for what happened when it measured the other one.
+   *
+   * THREE answers in priority order, and the middle one is what PR 03 added:
+   *   1. the column's own format, when it says something the formatter for this column would
+   *      consult — a stored-then-ignored setting is the defect the pivot, the pie and the breakout
+   *      legend each had in turn. "Says something" rather than "exists": on a BUCKETED axis, where
+   *      arm 2 is in play, a format silent about dates would otherwise beat the period name with
+   *      `formatDate`'s DEFAULTS, and the panel mints exactly such objects — renaming the column to
+   *      "Month" stores `{column_title: "Month"}` and reverted this axis from "January 2026" to
+   *      "January 1, 2026" (see `specifiesDateRendering`). Off a bucketed axis there is nothing for
+   *      the format to outrank, so it still wins on existence there, as it always did.
+   *   2. otherwise the NAME OF THE PERIOD the bucket covers, when the axis is bucketed by a
+   *      truncation unit — "January 2026" for a month, not its first day;
+   *   3. otherwise the raw value, which is every non-temporal axis and every temporal column that
+   *      was not bucketed.
+   * `periodName` is total and falls through to the raw string itself, so it IS answer 3 as well —
+   * `namesAPeriod` is asked only whether arm 2 EXISTS to be outranked, never to guard the call.
+   *
+   * The trend card answers the same question about the same column and has to stay in step:
+   * `SmartScalarChart.tsx`, where arms 1 and 2 are these and ARM 3 IS NOT, and says so.
+   */
+  const bucketedX = namesAPeriod(cfg.xAxisUnit);
+  const drawLabel = (v: string) => {
+    const fmt = cfg.xAxis ? cfg.columnSettings?.[cfg.xAxis] : undefined;
+    const formatWins = fmt != null && (bucketedX ? specifiesDateRendering(fmt) : true);
+    if (formatWins && v != null) {
+      const out = formatValue(v, cfg.xAxisType ?? "varchar", fmt);
+      if (out !== "") return out;
+    }
+    return periodName(cfg.xAxisUnit, v);
+  };
+
   // An explicit rotation SKIPS the measurement rather than merely outranking it. Computing the fit
   // anyway and using it for `show` would honour the user's 45° and hide their axis in the same
   // breath, which is worse than either outcome alone and looks like the setting doing nothing.
@@ -927,13 +962,18 @@ function baseOption(
   const measurable = size != null && size.width > 0 && size.height > 0;
   const fit: XLabelFit | undefined = measurable && size && ordinalX && !explicitRotate
     ? fitXLabels({
-        // The RAW category, where `axisLabel.formatter` below draws the FORMATTED one. Where the
-        // two differ — only when the x column carries a `columnSettings` entry — the formatted
-        // label is the wider of the two ("2026-01-01" measured, "January 2026" drawn; `1000`
-        // measured, "1,000" drawn), so this under-measures. That is the same direction as an
-        // over-estimated `plotWidth`, and carries the same cost: labels left upright that should
-        // have been rotated.
-        labels: categories.map(String),
+        // THE STRING THE AXIS ACTUALLY DRAWS, by construction — same closure, same argument.
+        //
+        // This measured `categories.map(String)`, the RAW value, and justified the gap as "the
+        // formatted label is the wider of the two, so this under-measures". PR 03 falsified both
+        // halves at once. The two now differ whenever `xAxisUnit` is a truncation unit — the
+        // common case and this PR's whole subject, not the rare `columnSettings` one that comment
+        // named — and the period name is often NARROWER, not wider: a year measured "2026-01-01"
+        // at ten characters and drew "2026" at four, a quarter ten against "Q3 2026" at seven. So
+        // it had begun to OVER-measure, which rotates labels that would have sat upright, in the
+        // PR whose entire motivation is labels not fitting. Formatting here retires the
+        // `columnSettings` skew too, which that comment conceded and left standing.
+        labels: categories.map((c) => drawLabel(String(c))),
         plotWidth: estimatePlotWidth(size, fmtFor(leftSide)(widestOf(leftSide)), Boolean(yTitle)),
         // The CONTAINER's height, not an inset one: the 70% guard is a share of the whole card
         // (Metabase's `checkHeight`), so passing a grid-adjusted height silently tightens it.
@@ -974,25 +1014,9 @@ function baseOption(
       // The third answer the ladder can give: when even a rotated label would eat 70% of the
       // card's height, Metabase draws no axis rather than a wall of text.
       show: fit?.kind !== "hide",
-      // THREE answers in priority order, and the middle one is what PR 03 added:
-      //   1. the column's own format, when the user set one — they have said what they want, and
-      //      a stored-then-ignored setting is the defect the pivot, the pie and the breakout
-      //      legend each had in turn;
-      //   2. otherwise the NAME OF THE PERIOD the bucket covers, when the axis is bucketed by a
-      //      truncation unit — "January 2026" for a month, not its first day;
-      //   3. otherwise the raw value, which is every non-temporal axis and every temporal column
-      //      that was not bucketed.
-      // `periodName` is total and falls through to the raw string itself, so it IS answer 3 as
-      // well — there is no separate guard on the unit here, and adding one would only be a second
-      // place for the two to disagree.
-      formatter: (v: string) => {
-        const fmt = cfg.xAxis ? cfg.columnSettings?.[cfg.xAxis] : undefined;
-        if (fmt && v != null) {
-          const out = formatValue(v, cfg.xAxisType ?? "varchar", fmt);
-          if (out !== "") return out;
-        }
-        return periodName(cfg.xAxisUnit, v);
-      },
+      // `drawLabel`, defined above so the FITTER measures this same string. Do not inline it back:
+      // the two drifting apart is what made the fit rotate labels that would have fitted upright.
+      formatter: drawLabel,
     },
     // TWO different `show`s sit on this axis and they are not the same switch. `xAxisTicks` is the
     // axis LINE and the tick marks; the LABELS are `axisLabel.show` above, which only the measured
