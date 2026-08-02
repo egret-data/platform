@@ -13,6 +13,7 @@ import { OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor, resolveFontFamily, rin
 import { colorsForKeys } from "../keyColors";
 import {
   calcAvailableDonutSliceLabelLength,
+  calcAvailableFullPieSliceLabelLength,
   calcInnerOuterRadiusesForRing,
   fitSliceLabel,
   measureText as defaultMeasureText,
@@ -1494,13 +1495,13 @@ export function buildPieOption(
   // EChartsRenderer measures it (ResizeObserver) and threads it through by calling this function
   // itself rather than a plain option object (see that file). Undefined (no caller-supplied size —
   // most unit tests that aren't testing label fit at all) means "unknown": the radii stay in
-  // ECharts' percent units and every ring's pixel radius is 0, which takes the SAME "true full pie"
-  // path this file already uses when there's genuinely no donut hole (see the comment on
-  // `availableSpace` further down) — the per-slice fit check is skipped entirely and every label is
-  // shown in full, backstopped only by `labelLayout.hideOverlap`. That's the safe direction for "we
-  // don't know the real size": it never falsely truncates against a guessed number that could just
-  // as easily be wrong, the same reasoning that ruled out NOMINAL_CONTAINER_MIN_DIMENSION_PX in the
-  // first place.
+  // ECharts' percent units, every ring's pixel radius is 0, and the per-slice fit check is skipped
+  // entirely, every label shown in full (see the comment on `availableSpace` further down). That's
+  // the safe direction for "we don't know the real size": it never falsely truncates against a
+  // guessed number that could just as easily be wrong, the same reasoning that ruled out
+  // NOMINAL_CONTAINER_MIN_DIMENSION_PX in the first place. It is NOT what a KNOWN size with no
+  // donut hole gets — that shape has real geometry to measure, and used to be folded in here as
+  // if it had none.
   containerSize?: { width: number; height: number },
 ): EChartsCoreOption {
   const dims = cfg.dimensions ?? [];
@@ -1537,10 +1538,18 @@ export function buildPieOption(
 
   // ECharts has no built-in shrink-or-truncate for a label that doesn't fit its slice (unlike
   // Metabase's sunburst, which measures text against the slice's own arc length and truncates or
-  // drops it). What it DOES have is `labelLayout.hideOverlap`: a post-layout pass that hides
-  // whichever labels collide, keeping the rest legible — the same graceful-degradation Metabase
-  // reaches for (`labelLayout: { hideOverlap: true }` in its own option.ts). A tiny slice's label
-  // disappears instead of overlapping into mush; it is still reachable via the tooltip.
+  // drops it — ported below as `availableSpace`). What it DOES have is `labelLayout.hideOverlap`:
+  // a post-layout pass that hides whichever labels collide, the same graceful degradation Metabase
+  // reaches for (`labelLayout: { hideOverlap: true }` in its own option.ts).
+  //
+  // KEPT, BUT NOT RELIED ON, and the distinction is not academic. This option is honoured under
+  // Vitest and under Vite's dev server, and is DEAD IN A PRODUCTION BUILD: echarts installs the
+  // label-layout feature as a top-level `use(installLabelLayout)` inside `lib/export/core.js`, a
+  // file its package's `sideEffects` allowlist does not name, so Rollup drops the call and no
+  // LabelManager reaches the bundle — the shipped `assets/index-*.js` contains none of it. So a
+  // label this builder decides to draw WILL be drawn, on top of whatever is already there. Every
+  // decision about what fits is made above, where it can be measured; this line is what the app
+  // gets back for free if that install is ever restored, and costs nothing meanwhile.
   const labelLayout = { hideOverlap: true };
 
   // Geometry and the hole are both computed by the shared helpers above (pieGeometry /
@@ -1689,22 +1698,32 @@ export function buildPieOption(
       ((parentValue > 0 ? s.value / parentValue : 0) * 100).toFixed(decimals),
     );
 
-    // Each label is measured against ITS OWN slice's geometry and truncated or dropped, rather
-    // than relying solely on labelLayout.hideOverlap's post-layout backstop.
+    // Each label is measured against ITS OWN slice's geometry and truncated or dropped. NOT
+    // "rather than relying on labelLayout.hideOverlap's post-layout backstop", which is how this
+    // read until the backstop was checked: `labelLayout` is honoured under Vite's dev server and
+    // under Vitest, and is DEAD IN THE SHIPPED BUNDLE. `use(installLabelLayout)` is a top-level
+    // side effect of echarts' own `lib/export/core.js`, and that file is not in the package's
+    // `sideEffects` allowlist, so Rollup drops the call from a production build — no LabelManager
+    // reaches the bundle at all. This measurement is therefore the ONLY thing standing between a
+    // label and its neighbour in the app a reader actually loads.
     //
-    // calcAvailableDonutSliceLabelLength is, as its name says, a DONUT formula — with a true zero
-    // inner radius (egret's "one ring, donut off" case) its inner chord is degenerate (a single
-    // point), which would collapse every slice's space to 0 and drop every label outright.
-    // Metabase never hits this because its own ratios always leave some hole, even at one ring. So
-    // a true full pie skips the fit check entirely and keeps showing full labels, with hideOverlap
-    // as its sole backstop. An unknown `containerSize` takes the same path, for the same reason it
-    // always has: "we don't know the real size" must not become "guess small", which is what a
-    // fixed 300px reference container once did — truncating "LATAM" to "L…" in a real ~530px card.
+    // calcAvailableDonutSliceLabelLength is, as its name says, a DONUT formula, and egret has a
+    // shape Metabase does not: "one ring, donut off", whose inner chord is degenerate (a single
+    // point). That case gets its own geometry — see calcAvailableFullPieSliceLabelLength — rather
+    // than the blanket Infinity it used to get, which is what let a 166x129 card write `Doohickey`
+    // and `Widget` through each other.
+    //
+    // An UNKNOWN container size still takes the Infinity path (every pixel radius is 0 then), for
+    // the same reason it always has: "we don't know the real size" must not become "guess small",
+    // which is what a fixed 300px reference container once did — truncating "LATAM" to "L…" in a
+    // real ~530px card.
     const availableSpace =
-      ringInnerPx > 0
-        ? calcAvailableDonutSliceLabelLength(ringInnerPx, ringOuterPx, startAngle, endAngle, sliceFontSize, labelsPosition) -
-          2 * SLICE_LABEL_PADDING
-        : Infinity;
+      ringOuterPx <= 0
+        ? Infinity
+        : (ringInnerPx > 0
+            ? calcAvailableDonutSliceLabelLength(ringInnerPx, ringOuterPx, startAngle, endAngle, sliceFontSize, labelsPosition)
+            : calcAvailableFullPieSliceLabelLength(ringOuterPx, startAngle, endAngle, sliceFontSize)) -
+          2 * SLICE_LABEL_PADDING;
     const displayLabel = fitSliceLabel({
       label: composeSliceLabel(s.name, slicePercent),
       availableSpace,
