@@ -10,12 +10,23 @@ import { buildWaterfallOption } from "../options/waterfall";
 /**
  * These five builders grew a fourth, optional size parameter so the size-dependent label work —
  * x-label rotation, gauge graduations, sankey node labels; see each builder's own comment — has a
- * seam to attach to. Only the GAUGE still does not read it, and keeps the `_size` name to say so;
- * cartesian, the box plot, the waterfall and the sankey each call it `size` and read it. The gauge
- * is what this file is now written for: build the chart twice, once with a size and once without,
- * and the two options must be indistinguishable. The four live seams have their cases inverted
- * below rather than deleted — the point is unchanged, that a size changes exactly what it is
- * supposed to and nothing else.
+ * seam to attach to. All five now read it. The point is unchanged: a size changes exactly what it
+ * is supposed to and nothing else, so each builder is built twice, once with a size and once
+ * without, and the two options must differ only where that builder's fit is entitled to differ.
+ *
+ * THE GAUGE'S CASE IS THE ODD ONE, and the reason is worth reading before trusting it. Its fit is
+ * the only one that DECLINES when nothing can be measured — `measure-text.ts` returns `{width: 0}`
+ * under jsdom by design ("Size claims belong in a browser"), and a zero-width label clears any
+ * budget, so a gauge that decided from those numbers would be told that eleven labels fit at every
+ * size. `gaugeSplitNumber` refuses to answer instead. Which means that in THIS file, whose whole
+ * environment is jsdom and which mocks nothing, a sized gauge and an unsized one really are
+ * identical — and asserting that would be asserting the environment, not the builder. It is still
+ * worth pinning, because "decide from a width, or decline" is the contract every builder here
+ * keeps and a fit that started guessing a radius would break it. So the case below says that and
+ * only that; the claim it used to make — that the gauge does not read the size at all — is now
+ * false, and the leak it was guarding against is asserted in
+ * `gaugeGraduations.echarts.test.ts` ("reads the size, and reads it ONLY for the graduations"),
+ * which mocks in zrender's own estimator and can therefore see the fit answer.
  *
  * Naively that is `expect(build(cols, rows, cfg, SMALL)).toEqual(build(cols, rows, cfg))`, and that
  * does not work. Every one of these options carries FUNCTIONS — axis-label formatters, tooltip
@@ -184,7 +195,7 @@ describe("builders accept a container size", () => {
     expect(sized).toStrictEqual(unsized);
   });
 
-  it("gauge builds identically with and without a size", () => {
+  it("gauge declines to decide where nothing can be measured, so it builds identically", () => {
     // tooltip, arc axis label, centre detail.
     expectSizeIsUnread((size) => buildGaugeOption(cols, rows, { metric: "v" }, size), 3);
   });

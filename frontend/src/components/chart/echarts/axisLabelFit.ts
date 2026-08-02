@@ -95,8 +95,16 @@ export interface XLabelBoundary {
  *
  *  `HORIZONTAL_TICKS_GAP` (its name too) is the minimum ink-free space it demands between two
  *  neighbouring labels; the two factors are the multiples of the font size below which even a
- *  rotated label stops being worth drawing. */
-const HORIZONTAL_TICKS_GAP = 6;
+ *  rotated label stops being worth drawing.
+ *
+ *  EXPORTED for `options/gauge.ts`, which asks the same question about labels that are not on a
+ *  cartesian axis at all — a gauge's graduations sit on an ARC, so the pair it separates can be
+ *  apart in both dimensions rather than only in x. The quantity is unchanged (how much clear ink two
+ *  neighbouring pieces of axis text need between them), and this module already argues that two
+ *  constants for one question is how they drift; the gauge staying on this one is that argument
+ *  applied across a file boundary rather than an exception to it. Nothing else about this module is
+ *  reachable from there, so the export is the constant and not the ladder. */
+export const HORIZONTAL_TICKS_GAP = 6;
 /** ECharts' own default `axisLabel.margin`: the clear space between an axis line and its labels.
  *  Not a constant of this module's invention — it is read here because a LEFT axis's name has to be
  *  placed past labels that sit that far out (`nameGapClearOf`), and because `nameGap` is measured
