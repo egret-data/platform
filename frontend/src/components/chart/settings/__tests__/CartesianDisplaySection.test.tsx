@@ -748,9 +748,10 @@ describe("defaultSeriesColor — the panel's swatch and the chart's series", () 
     const cfg: Cfg = { kind: "bar", xAxis: "month", yMetrics: metrics, seriesColors: { orders: pinned } };
     const { panel, chart } = compare(cfg);
     expect(panel).toEqual(chart);
-    // …which is to say `revenue` has moved off the ink it now shares with nobody.
-    expect(panel[0]).not.toBe(pinned);
-    expect(panel[0]).not.toBe(colorsForKeys(metrics).revenue);
+    // …which is to say `orders` took the ink, and `revenue` moved off it rather than being drawn
+    // identically. (`expect(panel[0]).not.toBe(colorsForKeys(metrics).revenue)` stood here as a
+    // second line: `pinned` IS that expression, so it asserted the same thing twice.)
     expect(panel[1]).toBe(pinned);
+    expect(panel[0]).not.toBe(pinned);
   });
 });

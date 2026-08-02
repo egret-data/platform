@@ -3,6 +3,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createElement } from "react";
 import { cartesianDescriptor } from "../cartesian";
+import { buildCartesianOption } from "@/components/chart/echarts/options/cartesian";
 import type { VizControlProps } from "../types";
 import type { CartesianConfig } from "@/api/charts";
 
@@ -80,6 +81,74 @@ describe("cartesian controls are grouped and per-kind", () => {
     const control = ctrls("scatter").find((c) => c.id === "axes");
     render(createElement(control!.render, numericScatterProps));
     expect(screen.getByLabelText("X axis scale")).toHaveTextContent("Linear");
+  });
+
+  /**
+   * THE SAME SEAM, ON THE COLOUR SWATCH — and the one place `defaultSeriesColor` is called in the
+   * running app (`SeriesListControl`, viz/cartesian.tsx).
+   *
+   * That call was covered by NOTHING. `CartesianDisplaySection.test.tsx` exercises the function
+   * directly through a helper that REIMPLEMENTS the call; `SeriesListSection.test.tsx` stubs
+   * `defaultColor` with a constant. Mutating the line to `defaultSeriesColor([...names].sort(), i)`
+   * — which drops `seriesColors` and mis-indexes every breakout — left the whole of
+   * `src/components/chart` green. A helper that restates the line under test is not coverage of it;
+   * it is the pre-sorted-fixture mistake one level up.
+   *
+   * So these render the control the descriptor actually declares and read the swatch out of the DOM,
+   * exactly as the pie panel's own tests do.
+   */
+  describe("the series colour swatch, through the descriptor's own control", () => {
+    const cols = [
+      { name: "month", type: "varchar" },
+      { name: "category", type: "varchar" },
+      { name: "revenue", type: "double" },
+    ];
+    /** Breakout order is first-seen and deliberately NOT alphabetical — `colorsForKeys` assigns in
+     *  sorted key order, so a pre-sorted fixture cannot tell a by-name lookup from a by-position one.
+     *  "Gadget" and "Widget" also hash onto one slot, so this walks the collision path. */
+    const rows: unknown[][] = [
+      ["2026-01", "Widget", 10], ["2026-01", "Doohickey", 20],
+      ["2026-01", "Gizmo", 30], ["2026-01", "Gadget", 40],
+    ];
+    const GROUPS = ["Widget", "Doohickey", "Gizmo", "Gadget"];
+
+    const renderSeriesList = (config: CartesianConfig) => {
+      const control = ctrls("bar").find((c) => c.id === "seriesList");
+      render(createElement(control!.render, {
+        config, onChange: () => {}, columns: [], metrics: [],
+        resultColumns: cols, rows, unitRow: () => null,
+      } as VizControlProps<CartesianConfig>));
+    };
+    /** A native `<input type="color">` normalises its value to lower-case (HTML spec), which is also
+     *  what this control writes back — so both sides are compared in that casing. */
+    const swatch = (name: string) => (screen.getByLabelText(`color ${name}`) as HTMLInputElement).value.toLowerCase();
+    const chartColors = (config: CartesianConfig): Record<string, string> => {
+      const { series } = buildCartesianOption(cols, rows, { kind: "bar", ...config }) as unknown as {
+        series: { name: string; __raw?: string; itemStyle?: { color?: string } }[];
+      };
+      return Object.fromEntries(series.map((s) => [s.__raw || s.name, (s.itemStyle?.color ?? "").toLowerCase()]));
+    };
+
+    it("shows every breakout band the colour the chart draws it in", () => {
+      const config: CartesianConfig = { yMetrics: ["revenue"], xAxis: "month", series: "category" };
+      const chart = chartColors(config);
+      expect(Object.keys(chart)).toEqual(GROUPS); // the unsorted emission order this pins against
+      renderSeriesList(config);
+      for (const g of GROUPS) expect(swatch(g)).toBe(chart[g]);
+    });
+
+    it("hands the pinned colours over too, so an override moves the band it displaced", () => {
+      // `revenue`'s own ink pinned onto a band instead: `colorsForKeys` CONSUMES it, so whichever
+      // band would have hashed onto that slot moves along — in the chart, and so in this panel.
+      const config: CartesianConfig = {
+        yMetrics: ["revenue"], xAxis: "month", series: "category",
+        seriesColors: { Gizmo: "#f2a86f" },
+      };
+      const chart = chartColors(config);
+      renderSeriesList(config);
+      for (const g of GROUPS) expect(swatch(g)).toBe(chart[g]);
+      expect(new Set(GROUPS.map(swatch)).size).toBe(4); // nobody was handed the pinned ink twice
+    });
   });
 
   it("gives every control a unique id, for every kind", () => {
