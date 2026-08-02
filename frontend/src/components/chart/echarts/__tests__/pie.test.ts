@@ -4,7 +4,8 @@ import {
   PIE_LEGEND_COLUMN_WIDTH_PX, computeMaxPercentDecimals, pieHasSlices, buildPieBreakdown,
   pieSliceDrillPath,
 } from "../options/pie";
-import { SERIES_PALETTE, seriesColor, chartShade, COLOR_FALLBACK } from "../palette";
+import { SERIES_PALETTE, chartShade, COLOR_FALLBACK } from "../palette";
+import { colorsForKeys } from "../keyColors";
 import { calcAvailableDonutSliceLabelLength } from "../sliceLabel";
 import { itemTooltip } from "../base";
 
@@ -203,15 +204,16 @@ describe("buildPieOption — data robustness (Metabase parity)", () => {
     const d = slices([["A", 50], ["B", 45], ["C", 2], ["D", 2], ["E", 1]], { sliceThreshold: 0 });
     expect(d.map((s: any) => s.name)).toEqual(["A", "B", "C", "D", "E"]);
   });
-  it("the Other slice is muted; normal slices take their palette slot", () => {
+  it("the Other slice is muted; normal slices take the colour their name hashes to", () => {
     const d = slices([["A", 50], ["B", 45], ["C", 2], ["D", 2], ["E", 1]]);
     const other = d.find((s: any) => s.name === "Other").itemStyle.color;
     expect(other).toBeTruthy();
     // Ring 0's palette slots are pinned onto the slice rather than left implicit — a sunburst
     // assigns them by NAME and skips any slice that already has a colour, so an implicit slot
     // would shift the moment one slice carried an override. See the colour-inheritance block.
-    expect(d.find((s: any) => s.name === "A").itemStyle.color).toBe(seriesColor(0));
-    expect(other).not.toBe(seriesColor(0));
+    const byName = colorsForKeys(["A", "B", "Other"]);
+    expect(d.find((s: any) => s.name === "A").itemStyle.color).toBe(byName.A);
+    expect(other).not.toBe(byName.A);
   });
 });
 
@@ -588,8 +590,9 @@ describe("buildPieOption — per-parent Other fold (bug fix)", () => {
 // makes safe — it colours by datum INDEX. A `sunburst` colours a top-level node by NAME and skips
 // the palette entirely for a node that already has a colour, so one `sliceColors` override on
 // ring 0 would have consumed no slot and slid every later slice's colour up by one, while the
-// React legend and the label-contrast pass (both computing `seriesColor(i)` from the ring index)
-// went on naming the old ones.
+// React legend and the label-contrast pass (both deriving a colour from the ring INDEX) went on
+// naming the old ones. What ring 0 is pinned TO is now the colour each slice's NAME hashes to
+// (see the by-name block further down); the variants below still derive from whatever that is.
 describe("buildPieOption — ring colour inheritance (task 5)", () => {
   const cols2 = [
     { name: "region", type: "varchar" }, { name: "category", type: "varchar" }, { name: "rev", type: "double" },
@@ -608,33 +611,44 @@ describe("buildPieOption — ring colour inheritance (task 5)", () => {
       { name: "a", type: "varchar" }, { name: "b", type: "varchar" }, { name: "c", type: "varchar" },
       { name: "m", type: "double" },
     ];
-    const rows3 = [["A", "B", "C", 10]];
+    // "H" is not decorative: ring 0's base is the colour its NAME hashes to, and "H" is the
+    // shortest name that hashes to accent0 — which is what lets this state Metabase's published
+    // accent0 variants rather than a call to the derivation under test.
+    const rows3 = [["H", "B", "C", 10]];
     const opt = buildPieOption(cols3, rows3, { dimensions: ["a", "b", "c"], metric: "m" }) as any;
-    expect(seriesColor(0)).toBe("#509EE3");
+    expect(colorsForKeys(["H"]).H).toBe("#509EE3");
     expect(ring(opt, 0)[0].itemStyle.color.toUpperCase()).toBe("#227FD2"); // accent0-dark
     expect(ring(opt, 1)[0].itemStyle.color.toUpperCase()).toBe("#509EE3"); // accent0
     expect(ring(opt, 2)[0].itemStyle.color.toUpperCase()).toBe("#87BCEC"); // accent0-light
   });
 
+  // Ring 0's own colour is now keyed on the slice's NAME (see the by-name block below); what this
+  // pins is that the deeper rings still VARY FROM IT — dark inside base — whatever that base is.
+  const REGIONS = ["US", "EU"];
+
   it("a two-ring pie is the dark variant inside its base, per family", () => {
     const opt = buildPieOption(cols2, rows2, { dimensions: ["region", "category"], metric: "rev" }) as any;
-    const inner = ring(opt, 0); // [US(40), EU(10)]
-    expect(inner.map((d: any) => d.itemStyle.color)).toEqual([chartShade(seriesColor(0)), chartShade(seriesColor(1))]);
+    const inner = ring(opt, 0); // [US(40), EU(10)] — value-desc, so NOT alphabetical
+    expect(inner.map((d: any) => d.name)).toEqual(REGIONS);
+    const byName = colorsForKeys(REGIONS);
+    expect(inner.map((d: any) => d.itemStyle.color)).toEqual(REGIONS.map((r) => chartShade(byName[r])));
 
     const outer = ring(opt, 1);
     const widgetsUnderUS = outer.find((d: any) => d.name === "Widgets" && d.value === 30);
     const widgetsUnderEU = outer.find((d: any) => d.name === "Widgets" && d.value === 5);
     // The middle ring is the family's base colour itself, undarkened — so a family reads as one
     // hue at two lightnesses rather than as two unrelated colours.
-    expect(widgetsUnderUS.itemStyle.color).toBe(seriesColor(0));
-    expect(widgetsUnderEU.itemStyle.color).toBe(seriesColor(1));
+    expect(widgetsUnderUS.itemStyle.color).toBe(byName.US);
+    expect(widgetsUnderEU.itemStyle.color).toBe(byName.EU);
   });
 
   // A single ring is deliberately left as it was: Metabase's own `hasMultipleRings` gate, and the
   // one case where changing the variant would restyle every saved pie in the product.
   it("a single-ring pie keeps the base colours, undarkened", () => {
     const opt = buildPieOption(cols2, rows2, { dimensions: ["region"], metric: "rev" }) as any;
-    expect(ring(opt, 0).map((d: any) => d.itemStyle.color)).toEqual([seriesColor(0), seriesColor(1)]);
+    expect(ring(opt, 0).map((d: any) => d.itemStyle.color)).toEqual(
+      REGIONS.map((r) => colorsForKeys(REGIONS)[r]),
+    );
   });
 
   it("a sliceColors override wins, and its rings vary from the override, not the palette colour it replaced", () => {
@@ -649,25 +663,52 @@ describe("buildPieOption — ring colour inheritance (task 5)", () => {
 
     const outer = ring(opt, 1);
     const widgetsUnderUS = outer.find((d: any) => d.name === "Widgets" && d.value === 30);
-    // Must derive from the OVERRIDE ("#123456"), not from seriesColor(0) — the palette colour US
+    // Must derive from the OVERRIDE ("#123456"), not from the colour "US" hashes to — the one it
     // would otherwise have gotten.
     expect(widgetsUnderUS.itemStyle.color).toBe("#123456");
-    expect(widgetsUnderUS.itemStyle.color).not.toBe(seriesColor(0));
+    expect(widgetsUnderUS.itemStyle.color).not.toBe(colorsForKeys(REGIONS).US);
   });
 
   // Chart settings are JSONB and never whitelisted server-side, so a slice colour can arrive as
   // anything at all. resolveColor is this codebase's one validator for a colour from a less
   // trusted source; an override that skipped it could paint a slice with a value the renderer
   // can't draw, which getTextColorForBackground would then silently mis-contrast a label against.
-  it("a slice colour override the renderer can't draw is rejected, leaving the palette slot", () => {
+  //
+  // It matters twice over now that ring 0's overrides reach `colorsForKeys` as its `existing` map:
+  // that function has no opinion about what a colour is, so an unvalidated "banana" would be taken
+  // as the slice's pinned colour and written straight onto the datum. Validation happens before the
+  // map is built, which is why there is one map and not two applications.
+  it("a slice colour override the renderer can't draw is rejected, leaving the hashed colour", () => {
     const opt = buildPieOption(cols2, rows2, {
       dimensions: ["region"], metric: "rev", sliceColors: { US: "banana", EU: "rgb(1,2,3)" },
     }) as any;
     const inner = ring(opt, 0);
-    // Not a colour: no override at all, so the slice keeps the palette slot for its own index.
-    expect(inner.find((d: any) => d.name === "US").itemStyle.color).toBe(seriesColor(0));
+    // Not a colour: no override at all, so the slice keeps the colour its own name hashes to.
+    expect(inner.find((d: any) => d.name === "US").itemStyle.color)
+      .toBe(colorsForKeys(REGIONS, { EU: "rgb(1,2,3)" }).US);
+    expect(inner.find((d: any) => d.name === "US").itemStyle.color).not.toBe("banana");
     // A valid non-hex colour still comes through verbatim.
     expect(inner.find((d: any) => d.name === "EU").itemStyle.color).toBe("rgb(1,2,3)");
+  });
+
+  /**
+   * An override matches by NAME on EVERY ring, not just ring 0 — a value used as a category as
+   * well as a region takes it in both places. Long-standing behaviour that had no test of its own,
+   * which is why it is pinned here: ring 0's overrides now travel a different route (they are
+   * `colorsForKeys`' `existing` map, so they consume their colour as well as claim it), and the
+   * deeper rings' straight assignment is all that is left of the original loop. Deleting that loop
+   * used to leave the whole suite green.
+   */
+  it("an override on a name that only appears on an outer ring still reaches it", () => {
+    const opt = buildPieOption(cols2, rows2, {
+      dimensions: ["region", "category"], metric: "rev", sliceColors: { Widgets: "#123456" },
+    }) as any;
+    // "Widgets" is a ring-1 value and appears under both parents, so both arcs take it.
+    expect(ring(opt, 1).filter((d: any) => d.name === "Widgets").map((d: any) => d.itemStyle.color))
+      .toEqual(["#123456", "#123456"]);
+    // ...and ring 0, which never carries that name, is untouched.
+    expect(ring(opt, 0).map((d: any) => d.itemStyle.color))
+      .toEqual(REGIONS.map((r) => chartShade(colorsForKeys(REGIONS)[r])));
   });
 
   it("a ring's children whose parent folded into the PARENT ring's Other bucket inherit Other's own muted colour", () => {
@@ -704,7 +745,132 @@ describe("buildPieOption — ring colour inheritance (task 5)", () => {
     expect(x.itemStyle.color).toBe(muted);
     expect(y1.itemStyle.color).toBe(muted);
     // ...and NOT one of the palette families, which is the whole point of the Other anchor.
-    expect(x.itemStyle.color).not.toBe(seriesColor(0));
+    expect(SERIES_PALETTE).not.toContain(x.itemStyle.color);
+  });
+});
+
+/**
+ * WHICH colour a ring-0 slice is drawn in — Metabase's rule, which is a hash of the slice's NAME
+ * rather than its position in the ring. A category is then the same colour on every card of a
+ * dashboard that breaks out by it, and it does not change when the sort order does or when another
+ * category appears beside it.
+ *
+ * The ring VARIANTS (dark inner, base, light outer) are a separate question and are pinned by the
+ * inheritance block above; all this changes is the base each family varies from.
+ */
+describe("buildPieOption — a ring-0 slice takes its colour from its name", () => {
+  const cols2 = [{ name: "category", type: "varchar" }, { name: "m", type: "double" }];
+  /**
+   * The four Sample-Database product categories. Ring 0 is emitted value-DESC, so this fixture's
+   * emission order is Widget, Doohickey, Gizmo, Gadget — deliberately NOT alphabetical.
+   *
+   * THE ORDER IS LOAD-BEARING. `colorsForKeys` assigns in sorted key order on the hash path, so its
+   * returned Record is in sorted order too: a fixture whose slices are already sorted makes a
+   * by-name lookup and a by-position one produce the identical sequence, and a test named for the
+   * distinction passes against either. Two of PR 04's cartesian tests shipped exactly that way.
+   * `SLICE_ORDER` is asserted below so re-sorting these rows cannot re-blind them quietly.
+   *
+   * "Gadget" and "Widget" also hash onto the SAME palette slot, so this data exercises the
+   * collision walk rather than only the happy path.
+   */
+  const rows2 = [["Widget", 40], ["Doohickey", 30], ["Gizmo", 20], ["Gadget", 10]];
+  const SLICE_ORDER = ["Widget", "Doohickey", "Gizmo", "Gadget"];
+  const NAMES = ["Doohickey", "Gadget", "Gizmo", "Widget"];
+  const pieCfg = { dimensions: ["category"], metric: "m" };
+  const buildPie = (extra: Record<string, unknown> = {}) =>
+    buildPieOption(cols2, rows2, { ...pieCfg, ...extra }) as any;
+  const ring0ColorOf = (opt: any, name: string) =>
+    ring(opt, 0).find((d: any) => d.name === name).itemStyle.color;
+
+  it("colours each slice by its name rather than by its place in the ring", () => {
+    const opt = buildPie();
+    expect(ring(opt, 0).map((d: any) => d.name)).toEqual(SLICE_ORDER); // the order this pins against
+    const byName = colorsForKeys(NAMES);
+    expect(ring(opt, 0).map((d: any) => d.itemStyle.color)).toEqual(SLICE_ORDER.map((n) => byName[n]));
+  });
+
+  it("keys a slice's colour to its name, and honours sliceColors", () => {
+    // The override is itself a palette accent, which is the interesting case: `colorsForKeys`
+    // CONSUMES it, so whichever slice would have hashed onto that slot moves along instead of
+    // being drawn in the same ink as the pinned one.
+    const sliceColors = { Gadget: SERIES_PALETTE[6] };
+    const opt = buildPie({ sliceColors });
+    expect(ring0ColorOf(opt, "Gadget")).toBe(SERIES_PALETTE[6]);
+    expect(ring0ColorOf(opt, "Widget")).toBe(colorsForKeys(NAMES, sliceColors).Widget);
+    expect(new Set(ring(opt, 0).map((d: any) => d.itemStyle.color)).size).toBe(4);
+  });
+
+  it("keeps a slice's colour when the ring is drawn in a different order", () => {
+    const flipped = buildPieOption(cols2, [...rows2].reverse(), { ...pieCfg, sortRows: false }) as any;
+    expect(ring(flipped, 0).map((d: any) => d.name)).toEqual([...SLICE_ORDER].reverse());
+    for (const name of SLICE_ORDER) {
+      expect(ring0ColorOf(flipped, name)).toBe(ring0ColorOf(buildPie(), name));
+    }
+  });
+
+  /**
+   * THE SYNTHETIC "OTHER" BUCKET IS NOT A KEY.
+   *
+   * Its colour is fixed in `buildSlices` (the muted tint) and nothing ever reads a hashed one for
+   * it — but a name handed to `colorsForKeys` costs a SLOT whether or not the answer is used, and
+   * "Other" hashes onto the same slot as "Q1" and sorts before it. So including it moved Q1 off
+   * accent0 for no reason a reader could see.
+   *
+   * Whether ring 0 has an Other bucket at all is data-dependent: `buildSlices` folds whatever falls
+   * under the threshold. A real category's colour would therefore have changed when some unrelated,
+   * SMALLER category crossed into or out of the fold — the exact instability the by-name rule exists
+   * to remove, reintroduced in the one place a reader would not look for it.
+   *
+   * The two fixtures differ only in three tiny rows that fold away. Q1 is 45 in both.
+   */
+  const otherCols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+  const foldPie = (rws: unknown[][]) =>
+    buildPieOption(otherCols, rws, { dimensions: ["d"], metric: "m" }) as any;
+  /** C, D and E are each under the 2.5% fold threshold, so ring 0 gains an "Other". */
+  const WITH_OTHER: unknown[][] = [["Widget", 50], ["Q1", 45], ["C", 2], ["D", 2], ["E", 1]];
+  const WITHOUT_OTHER: unknown[][] = [["Widget", 50], ["Q1", 45]];
+
+  it("does not let the Other bucket take a real slice's colour", () => {
+    const folded = foldPie(WITH_OTHER);
+    const plain = foldPie(WITHOUT_OTHER);
+    // The premise: the fold really did happen in one case and not the other.
+    expect(ring(folded, 0).map((d: any) => d.name)).toEqual(["Widget", "Q1", "Other"]);
+    expect(ring(plain, 0).map((d: any) => d.name)).toEqual(["Widget", "Q1"]);
+    // "Other" and "Q1" hash onto the same slot, and "Other" sorts first — so a Q1 that is still
+    // accent0 here is a Q1 the synthetic bucket did not push along.
+    expect(colorsForKeys(["Widget", "Q1"]).Q1).toBe(SERIES_PALETTE[0]);
+    expect(ring0ColorOf(folded, "Q1")).toBe(SERIES_PALETTE[0]);
+    // Stated as an identity too, since that is the property: a category's colour does not depend
+    // on whether some smaller, unrelated category folded away.
+    expect(ring0ColorOf(folded, "Q1")).toBe(ring0ColorOf(plain, "Q1"));
+    expect(ring0ColorOf(folded, "Widget")).toBe(ring0ColorOf(plain, "Widget"));
+  });
+
+  it("a sliceColors entry aimed at Other neither repaints it nor costs a real slice its colour", () => {
+    // `sliceColors` reaches ring 0 as `colorsForKeys`' `existing` map, where an entry CONSUMES its
+    // colour. An "Other" entry must get no further than it did before: the bucket keeps its muted
+    // tint (it is not offered to the override at all), and no accent is spent on its behalf.
+    const pinned = foldPie(WITH_OTHER.map((r) => r)) as any;
+    const withEntry = buildPieOption(otherCols, WITH_OTHER, {
+      dimensions: ["d"], metric: "m", sliceColors: { Other: SERIES_PALETTE[0] },
+    }) as any;
+    expect(ring0ColorOf(withEntry, "Other")).toBe(ring0ColorOf(pinned, "Other"));
+    expect(ring0ColorOf(withEntry, "Other")).not.toBe(SERIES_PALETTE[0]);
+    expect(ring0ColorOf(withEntry, "Q1")).toBe(SERIES_PALETTE[0]);
+  });
+
+  /**
+   * ...and a dimension value that genuinely IS the string "Other" is a real category, not the
+   * bucket. The two are told apart by the OTHER_KEY sentinel rather than by the name (this file
+   * accepts the name collision knowingly), so excluding the bucket from the key set must not
+   * silently leave such a slice unpainted.
+   */
+  it("a real category literally named Other still hashes to a colour", () => {
+    const opt = foldPie([["Other", 60], ["Widget", 40]]);
+    expect(ring(opt, 0).map((d: any) => d.name)).toEqual(["Other", "Widget"]);
+    const byName = colorsForKeys(["Other", "Widget"]);
+    expect(ring(opt, 0).map((d: any) => d.itemStyle.color)).toEqual([byName.Other, byName.Widget]);
+    expect(SERIES_PALETTE).toContain(ring0ColorOf(opt, "Other"));
   });
 });
 
@@ -1371,7 +1537,11 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
     // longer inside the canvas, so nothing else keeps the two in step.
     it("each entry carries its slice's own render colour", () => {
       const entries = buildPieLegend(cols, rows, { dimensions: ["region"], metric: "rev" });
-      expect(entries.map((e) => e.color)).toEqual([seriesColor(0), seriesColor(1)]);
+      // Value-desc, so [US(30), EU(10)] — and each swatch is the colour that NAME hashes to.
+      expect(entries.map((e) => e.name)).toEqual(["US", "EU"]);
+      expect(entries.map((e) => e.color)).toEqual(
+        ["US", "EU"].map((r) => colorsForKeys(["US", "EU"])[r]),
+      );
       const overridden = buildPieLegend(cols, rows, {
         dimensions: ["region"], metric: "rev", sliceColors: { US: "#123456" },
       });
@@ -1881,13 +2051,15 @@ describe("a toggled-off legend entry drops its ring-0 slice", () => {
 
   // The survivors keep their own colours. A re-deal would otherwise slide every survivor up a
   // palette slot and the React swatches — built from the FULL ring — would then name a colour the
-  // chart no longer draws.
+  // chart no longer draws. Keying the colour on the NAME makes that structural rather than careful:
+  // "EU" is the same ink whether or not "US" is showing beside it.
   it("keeps each surviving slice's colour rather than re-dealing the palette", () => {
     const opt = buildPieOption(cols2, rows2, { ...cfg, toggledOffSlices: ["US"] }) as any;
-    // Two rings, so ring 0 draws each family's dark variant — EU keeps ITS slot's variant
-    // (accent1-dark), rather than sliding up into the one US vacated.
-    expect(ring(opt, 0)[0].itemStyle.color).toBe(chartShade(seriesColor(1)));
-    expect(buildPieLegend(cols2, rows2, cfg).find((e) => e.name === "EU")!.color).toBe(chartShade(seriesColor(1)));
+    // Two rings, so ring 0 draws each family's dark variant — EU keeps the dark variant of the
+    // colour ITS name hashes to, rather than sliding into the one US vacated.
+    const euDark = chartShade(colorsForKeys(["US", "EU"]).EU);
+    expect(ring(opt, 0)[0].itemStyle.color).toBe(euDark);
+    expect(buildPieLegend(cols2, rows2, cfg).find((e) => e.name === "EU")!.color).toBe(euDark);
   });
 
   // Also matching the ECharts legend: neither the hole's total nor the legend's own percentages
@@ -1906,7 +2078,7 @@ describe("a toggled-off legend entry drops its ring-0 slice", () => {
       ring(plain, 0).map((d: any) => d.itemStyle.color),
     );
     expect(ring(plain, 0).map((d: any) => d.itemStyle.color)).toEqual(
-      [seriesColor(0), seriesColor(1)].map(chartShade),
+      ["US", "EU"].map((r) => chartShade(colorsForKeys(["US", "EU"])[r])),
     );
   });
 });

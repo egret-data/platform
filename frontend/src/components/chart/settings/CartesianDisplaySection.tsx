@@ -2,7 +2,6 @@ import type { CartesianConfig, CartesianViz } from "@/api/charts";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
-import { seriesColor, SUMMARIZE_COLOR } from "@/components/chart/echarts/palette";
 import { resolveXScale, stackModeOf, stackModePatch, type StackMode } from "@/components/chart/echarts/options/cartesian";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
@@ -30,11 +29,20 @@ interface SectionProps {
  * per-series colour/label, and the combo per-metric series type. Per-series style and size
  * live in their own control (SeriesLineStyleSection) so they can hide behind "More options".
  */
-/** The colour a series shows before any override: a lone (non-breakout) metric gets the summarize
- *  green, everything else cycles the accent palette — mirrors the renderer's own choice. */
-export function defaultSeriesColor(hasBreakout: boolean, count: number, i: number): string {
-  return !hasBreakout && count === 1 ? SUMMARIZE_COLOR : seriesColor(i);
-}
+/*
+ * `defaultSeriesColor` used to live here. It took `(hasBreakout, count, index)` and re-derived a
+ * colour rule from the INDEX — which is how a panel comes to offer a swatch the chart does not draw:
+ * once the builder keyed colours on the series' NAME (`colorsForKeys`), every single-series card
+ * showed `#689735` in the picker and something else on screen, and a user could "fix" a colour that
+ * was never wrong.
+ *
+ * Its replacement is not a fixed version of it. `SeriesListControl` (viz/cartesian.tsx) calls
+ * `colorsForKeys` directly, once for the whole list, exactly as `PieDisplaySection` does — because a
+ * wrapper here would be a SECOND name for the renderer's colour rule, and the next person to reach
+ * for it to cover a case the mapping does not would get a swatch that no longer matches the chart.
+ * That is the same argument `decorateSeries` makes for not re-reading `seriesColors` after the
+ * mapping has folded it in.
+ */
 
 export function SeriesOptions({ kind, config, onChange }: SectionProps & { seriesNames?: string[] }) {
   // Combo stacks too — Metabase's own per-series display setting hides itself on

@@ -1,11 +1,48 @@
 import { describe, it, expect } from "vitest";
 import { buildSankeyOption, sankeyProblem, hasCyclicFlow, MAX_SANKEY_NODES } from "../options/sankey";
 import { SERIES_PALETTE } from "../palette";
+import { colorsForKeys } from "../keyColors";
 
 const cols = [{ name: "s", type: "varchar" }, { name: "t", type: "varchar" }, { name: "v", type: "double" }];
 const rows = [["A", "X", 10], ["A", "Y", 5], ["B", "X", 3]];
 const cfg = { source: "s", target: "t", metric: "v" };
 const series = (opt: any) => opt.series[0];
+
+const buildSankey = (rws: unknown[][]) => buildSankeyOption(cols, rws, cfg) as any;
+/** Node names in the order the builder emits them — source then target, row by row, first seen. */
+const nodeNamesOf = (opt: any): string[] => series(opt).data.map((n: any) => n.name);
+const nodeColorsOf = (opt: any): string[] => series(opt).data.map((n: any) => n.itemStyle.color);
+const colorOf = (opt: any, name: string): string =>
+  series(opt).data.find((n: any) => n.name === name).itemStyle.color;
+
+/**
+ * NINE nodes, one more than the palette has colours.
+ *
+ * That count is the point: the colours used to be `seriesColor(i)`, i.e. `i % 8`, so on a chart
+ * whose own ceiling is 150 nodes the ninth was drawn in the first one's blue — two nodes, one ink,
+ * on the one diagram read entirely by following a colour from column to column.
+ *
+ * THE EMISSION ORDER IS LOAD-BEARING AND MUST NOT BE SORTED. `colorsForKeys` builds its Record in
+ * an order of its own (sorted, on the hash path; preferred names first, on the harmony path this
+ * fixture takes), so a fixture whose nodes are already in that order makes a by-NAME lookup and a
+ * by-POSITION one return the identical sequence — and the tests named for the distinction pass
+ * against either. That is not hypothetical: it is exactly how two of PR 04's cartesian tests
+ * shipped blind. `Pending` is a preferred name (`PREFERRED_COLORS.error`), so `colorsForKeys`
+ * assigns it BEFORE the other eight and its entry leads the Record while the node sits fourth —
+ * which is what makes `Object.values(...)[i]` disagree with `colors[name]` here. Reordering these
+ * rows, or renaming `Pending`, re-blinds the tests below; `NINE_NODES` is asserted so it cannot
+ * happen quietly.
+ */
+const nineNodeRows: unknown[][] = [
+  ["Widget", "Shipped", 40],
+  ["Doohickey", "Pending", 30],
+  ["Gizmo", "Returned", 20],
+  ["Gadget", "Delivered", 10],
+  ["Widget", "Refunded", 5],
+];
+const NINE_NODES = [
+  "Widget", "Shipped", "Doohickey", "Pending", "Gizmo", "Returned", "Gadget", "Delivered", "Refunded",
+];
 
 describe("buildSankeyOption", () => {
   it("builds unique nodes and weighted links", () => {
@@ -26,10 +63,36 @@ describe("buildSankeyOption", () => {
    * nodes measure as clean accents.
    */
   it("colours each node with a palette accent, not something between two", () => {
-    const opt = buildSankeyOption(cols, rows, cfg) as any;
-    const fills = series(opt).data.map((n: any) => n.itemStyle.color);
-    expect(fills).toEqual([SERIES_PALETTE[0], SERIES_PALETTE[1], SERIES_PALETTE[2], SERIES_PALETTE[3]]);
+    const opt = buildSankey(rows);
+    // Emitted source-then-target, so NOT alphabetical — which is what makes the by-name lookup
+    // below distinguishable from a positional one. See `nineNodeRows`.
+    expect(nodeNamesOf(opt)).toEqual(["A", "X", "Y", "B"]);
+    const fills = nodeColorsOf(opt);
+    expect(fills).toEqual(nodeNamesOf(opt).map((n) => colorsForKeys(["A", "X", "Y", "B"])[n]));
     for (const f of fills) expect(SERIES_PALETTE).toContain(f);
+  });
+
+  /**
+   * A node's colour comes from a hash of its NAME, as Metabase's does — so a category is the same
+   * colour on the flow diagram as on every other card of the dashboard that plots it, and it does
+   * not change the moment a row is added that introduces an earlier node.
+   */
+  it("keys a node's colour to its name, not the order it was met in", () => {
+    const opt = buildSankey(nineNodeRows);
+    expect(nodeNamesOf(opt)).toEqual(NINE_NODES); // the emission order this pins against
+    expect(colorOf(opt, "Widget")).toBe(colorsForKeys(NINE_NODES).Widget);
+    expect(nodeColorsOf(opt)).toEqual(NINE_NODES.map((n) => colorsForKeys(NINE_NODES)[n]));
+  });
+
+  /**
+   * Nine nodes, nine colours. `seriesColor(i)` was `i % 8`, so node nine took node one's blue on a
+   * diagram whose own limit is 150 nodes; past eight keys `colorsForKeys` widens the harmony
+   * (each accent plus its dark variant) rather than starting the palette over.
+   */
+  it("gives nine nodes nine distinct colours", () => {
+    const opt = buildSankey(nineNodeRows);
+    expect(nodeNamesOf(opt)).toHaveLength(9);
+    expect(new Set(nodeColorsOf(opt)).size).toBe(9);
   });
 
   it("drops non-positive / non-finite links", () => {

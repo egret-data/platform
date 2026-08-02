@@ -594,3 +594,14 @@ describe("CartesianDisplaySection — axis names follow the chart's orientation"
     expect(screen.getByLabelText("Show X label")).toBeInTheDocument();
   });
 });
+
+/*
+ * THE PANEL-SIDE COLOUR RULE IS ASSERTED IN `viz/__tests__/cartesian.controls.test.tsx`, not here.
+ *
+ * A block of tests stood at this spot comparing a locally-rebuilt swatch against the chart's own
+ * series. It caught the defect it was written for, but its `panelSwatch` helper RESTATED the line
+ * the app actually runs (`SeriesListControl`), so it could not see that line being wrong — proved
+ * by mutating that line and watching the whole chart suite stay green. Those cases now render the
+ * control the descriptor declares and read the swatch out of the DOM, which is coverage of the
+ * decision rather than of a copy of it.
+ */

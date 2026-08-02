@@ -71,9 +71,14 @@ export const symbolShape = (i: number) => SYMBOLS[i % SYMBOLS.length];
  *  `symbolShape`), which is the same affordance without covering the fill. */
 export const ARIA_A11Y = { enabled: true, decal: { show: false } } as const;
 
-// Metabase colours a single (un-broken-out) series with its "summarize" green
-// (palm/50 = hsl(89 48% 40%)) rather than the first accent.
-export const SUMMARIZE_COLOR = "#689735";
+// Metabase's "summarize" green (palm/50 = hsl(89 48% 40%)) used to live here as SUMMARIZE_COLOR,
+// described as the colour of a lone series. Measured on identical data on the parity dashboards it
+// is not: a single-metric card takes the colour its column name hashes to, like every other series.
+// What the green actually is, is Metabase's `success` theme colour, handed by `getPreferredColor` to
+// a series NAMED for a good outcome ("profit", "completed") — and that rule already lives in
+// `keyColors.ts` as `PREFERRED_COLORS.success`, byte for byte. Its last caller was the chart
+// settings panel's default swatch, which now asks `colorsForKeys` like the renderer does, so the
+// second spelling is gone rather than left about to be reached for again.
 
 /** Muted color for the aggregated "Other" pie slice (Metabase uses text-tertiary). */
 export const OTHER_SLICE_COLOR = "var(--muted-foreground)";

@@ -3,8 +3,8 @@ import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { FieldZone } from "@/components/chart/config/FieldZone";
 import {
   SeriesOptions, AxesOptions, OrientationOption, AxisRangeOptions, FormatOptions, GoalOptions, TrendOption,
-  defaultSeriesColor,
 } from "@/components/chart/settings/CartesianDisplaySection";
+import { colorsForKeys } from "@/components/chart/echarts/keyColors";
 import { SeriesListSection } from "@/components/chart/settings/SeriesListSection";
 import { SeriesLineStyleSection } from "@/components/chart/settings/SeriesLineStyleSection";
 import { cartesianSeriesNames, stackModeOf } from "@/components/chart/echarts/options/cartesian";
@@ -127,6 +127,26 @@ function MaxCategoriesControl({ config, onChange }: VizControlProps<CartesianCon
 function SeriesListControl({ kind, config, onChange, resultColumns, rows }: VizControlProps<CartesianConfig> & { kind: CartesianViz }) {
   const names = cartesianSeriesNames(resultColumns, rows, config);
   if (names.length === 0) return null;
+  /**
+   * The swatch each row shows before any override — `buildCartesianOption`'s own answer, asked with
+   * the same function and the same keys, so the picker cannot offer a colour the chart does not
+   * draw. (It used to re-derive a rule from the row's index and hand a lone series the summarize
+   * green, which the renderer stopped drawing once colours keyed on the series' NAME.)
+   *
+   * ONE CALL FOR THE WHOLE LIST, hoisted out of the rows deliberately — `SeriesListSection` asks for
+   * a default once per rendered row, so a per-row call would redo the sort, the hash and the ledger
+   * N times per render, on every unrelated edit in the panel. `PieDisplaySection` hoists its own for
+   * the same reason. It is also the honest shape: the assignment is a decision about the whole set
+   * (a collision moves one key along, a pinned colour takes its slot out of circulation) and cannot
+   * be made a series at a time.
+   *
+   * EVERY name goes in, hidden series included. `applySeriesOrder` drops the hidden ones AFTER
+   * `colorsForKeys` has run, so hiding one does not move the rest — the opposite of the pie, whose
+   * hidden slices are dropped before its ring is built. `config.seriesColors` goes in as `existing`
+   * because the builder passes it there too: a pinned colour consumes its slot, so leaving it out
+   * would disagree with the chart about every OTHER series the moment one was pinned.
+   */
+  const swatchColors = colorsForKeys(names, config.seriesColors);
   return (
     <SeriesListSection
       names={names}
@@ -140,7 +160,7 @@ function SeriesListControl({ kind, config, onChange, resultColumns, rows }: VizC
       defaultDisplay={kind === "combo" && stackModeOf({ kind, stacked: config.stacked, normalized: config.normalized }) === "none"
         ? (i) => (i === 0 ? "line" : "bar")
         : undefined}
-      defaultColor={(i) => defaultSeriesColor(!!config.series, names.length, i)}
+      defaultColor={(name) => swatchColors[name]}
       onChange={onChange}
     />
   );
