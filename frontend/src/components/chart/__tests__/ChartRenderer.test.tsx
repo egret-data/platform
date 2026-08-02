@@ -1292,12 +1292,12 @@ describe("ChartRenderer", () => {
      * `pieOption` above read theirs.
      *
      * LISTED, deliberately, rather than sniffed with `typeof`. A sniff would be self-healing
-     * against the exact regression this guards: `buildGaugeOption` and `buildSankeyOption` ignore
-     * their size argument today, so a branch reverting to a plain option object produces a
-     * byte-identical option and every content assertion below still passes. The waterfall and the
-     * box plot DO read theirs now, but only for the x-axis label decision (`interval`, `rotate`,
-     * `show`, `grid.bottom`) — none of which any assertion in this block reads either, so the same
-     * self-healing would apply to them.
+     * against the exact regression this guards: `buildGaugeOption` ignores its size argument today,
+     * so a branch reverting to a plain option object produces a byte-identical option and every
+     * content assertion below still passes. The waterfall, the box plot and the sankey DO read
+     * theirs now — the first two only for the x-axis label decision (`interval`, `rotate`, `show`,
+     * `grid.bottom`), the sankey only for its node-label gutter (`series[0].right`) — none of which
+     * any assertion in this block reads either, so the same self-healing would apply to them.
      *
      * The identity block above also dies on such a branch — `built()` calls the captured option
      * with the cast unguarded, so it throws `o is not a function` — but that is a side effect of
