@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildCartesianOption } from "../options/cartesian";
+import { buildCartesianOption, type CartesianBuildConfig } from "../options/cartesian";
 
 /**
  * A bucketed temporal x-axis draws the NAME OF THE PERIOD, not the bucket's first day.
@@ -26,8 +26,8 @@ const axisOf = (opt: unknown) => {
   const o = opt as { xAxis: Axis | Axis[]; yAxis: Axis | Axis[] };
   return (Array.isArray(o.xAxis) ? o.xAxis[0] : o.xAxis) as Axis;
 };
-const label = (cfg: Record<string, unknown>, v: unknown = "2026-01-01") =>
-  axisOf(buildCartesianOption(COLS, ROWS, { ...base, ...cfg } as never)).axisLabel?.formatter?.(v);
+const label = (cfg: Partial<CartesianBuildConfig>, v: unknown = "2026-01-01") =>
+  axisOf(buildCartesianOption(COLS, ROWS, { ...base, ...cfg })).axisLabel?.formatter?.(v);
 
 describe("a bucketed temporal x-axis names its periods", () => {
   it("names the period at each truncation unit the chart can be grouped by", () => {
@@ -69,7 +69,7 @@ describe("a bucketed temporal x-axis names its periods", () => {
     const opt = buildCartesianOption(
       [{ name: "d", type: "date" }, { name: "rev", type: "bigint" }],
       [[3, 10]],
-      { ...base, xAxisUnit: "day_of_week" } as never,
+      { ...base, xAxisUnit: "day_of_week" },
     );
     expect(axisOf(opt).axisLabel?.formatter?.("Wed")).toBe("Wed");
     expect(axisOf(opt).axisLabel?.formatter?.("3")).toBe("3");
@@ -100,7 +100,7 @@ describe("a bucketed temporal x-axis names its periods", () => {
    * the axis this formatter lands on is not the one it is named after.
    */
   it("names the periods on the category axis of a horizontal bar, which is Y", () => {
-    const opt = buildCartesianOption(COLS, ROWS, { ...base, horizontal: true, xAxisUnit: "month" } as never) as {
+    const opt = buildCartesianOption(COLS, ROWS, { ...base, horizontal: true, xAxisUnit: "month" }) as {
       yAxis: Axis | Axis[];
     };
     const y = (Array.isArray(opt.yAxis) ? opt.yAxis[0] : opt.yAxis) as Axis;
