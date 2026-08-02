@@ -29,6 +29,38 @@ export interface AxesConfig {
   logScale?: boolean;
 }
 
+/**
+ * Metabase's `graph.x_axis.axis_enabled` — one control with four choices — projected onto the two
+ * fields egret stores: `xAxisTicks` (the axis line and its tick marks) and `xLabelRotation` (an
+ * explicit rotation, which suppresses the measured one; see `echarts/axisLabelFit.ts`).
+ *
+ * Exported as a pair of pure functions, the way `stackModeOf`/`stackModePatch` already are, because
+ * TWO panels offer this choice — this tab (the waterfall and the box plot, its only two callers in
+ * `viz/simple.tsx`; a sankey has no axes and stores neither field) and cartesian's
+ * `AxisRangeOptions` — and a second hand-written projection is how the same stored pair ends up
+ * meaning different things depending on which tab the user opened. The layout differs between the
+ * two panels; the mapping must not.
+ */
+export type XTicksChoice = "hide" | "show" | "rotate45" | "rotate90";
+
+export function xTicksChoiceOf(cfg: { xAxisTicks?: boolean; xLabelRotation?: 45 | 90 }): XTicksChoice {
+  // "Hide" wins over a stored rotation: with the axis off there is nothing to tilt, and the select
+  // can only show one of the four.
+  if (cfg.xAxisTicks === false) return "hide";
+  return cfg.xLabelRotation === 90 ? "rotate90" : cfg.xLabelRotation === 45 ? "rotate45" : "show";
+}
+
+/** Both keys are always written, `undefined` included: picking Rotate 45° while hidden has to CLEAR
+ *  `xAxisTicks`, and picking Show has to clear the rotation. A patch that omitted the key it is not
+ *  setting would leave the other half of the pair behind and let the select display a state it did
+ *  not put the config in. */
+export function xTicksPatch(v: XTicksChoice): { xAxisTicks: false | undefined; xLabelRotation: 45 | 90 | undefined } {
+  return {
+    xAxisTicks: v === "hide" ? false : undefined,
+    xLabelRotation: v === "rotate45" ? 45 : v === "rotate90" ? 90 : undefined,
+  };
+}
+
 /** Label on the left, switch on the right — the row shape this panel and Metabase's both use. */
 export function Toggle({ id, label, checked, onChange }: {
   id: string; label: string; checked: boolean; onChange: (v: boolean) => void;
@@ -90,9 +122,7 @@ export function ChartAxesSection<C extends AxesConfig>({ config, onChange, idPre
   // usually say "auto". Derived from the two values instead of a fourth stored key, so there is no
   // state where the switch and the inputs can disagree.
   const autoRange = config.yMin == null && config.yMax == null;
-  const xTicks = config.xAxisTicks === false
-    ? "hide"
-    : config.xLabelRotation === 90 ? "rotate90" : config.xLabelRotation === 45 ? "rotate45" : "show";
+  const xTicks = xTicksChoiceOf(config);
 
   return (
     <div className="space-y-3">
@@ -104,10 +134,7 @@ export function ChartAxesSection<C extends AxesConfig>({ config, onChange, idPre
           <Label htmlFor={`${idPrefix}-xticks`} className="text-sm font-normal">Show lines and tick marks</Label>
           <Select
             value={xTicks}
-            onValueChange={(v) => onChange({
-              xAxisTicks: v === "hide" ? false : undefined,
-              xLabelRotation: v === "rotate45" ? 45 : v === "rotate90" ? 90 : undefined,
-            } as Partial<C>)}
+            onValueChange={(v) => onChange(xTicksPatch(v as XTicksChoice) as Partial<C>)}
           >
             <SelectTrigger id={`${idPrefix}-xticks`} aria-label="X show lines and tick marks" className="h-8 w-full"><SelectValue /></SelectTrigger>
             <SelectContent>

@@ -831,10 +831,11 @@ describe("ChartRenderer", () => {
   });
 
   /**
-   * THE SAME BOUNDARY, for the three branches that grew one alongside pie's: `CartesianChart`,
-   * `GaugeChart` and `SankeyChart`. Table-driven because the argument is identical for each and
-   * only the fixture differs — pie stays written out above, since its config arrives by a different
-   * route (the whole `params`, not a prebuilt `cfg` prop) and its assertions read slices.
+   * THE SAME BOUNDARY, for the five branches that grew one alongside pie's: `CartesianChart`,
+   * `GaugeChart`, `WaterfallChart`, `BoxplotChart` and `SankeyChart`. Table-driven because the
+   * argument is identical for each and only the fixture differs — pie stays written out above,
+   * since its config arrives by a different route (the whole `params`, not a prebuilt `cfg` prop)
+   * and its assertions read slices.
    *
    * Identity is the whole assertion because identity is the whole mechanism: `EChartsRenderer`'s
    * `[option]` effect re-applies the ENTIRE option whenever the function's identity changes, so an
@@ -924,6 +925,34 @@ describe("ChartRenderer", () => {
         expectChangedRows: (o) => expect(o.series[0].data).toEqual([{ value: 500 }]),
       },
       {
+        what: "WaterfallChart",
+        vizType: "waterfall",
+        columns: [{ name: "step", type: "varchar" }, { name: "delta", type: "double" }],
+        rows: [["Q1", 10], ["Q2", -4]],
+        changedRows: [["Q1", 10], ["Q2", -4], ["Q3", 7]],
+        base: { waterfall: { xAxis: "step", metric: "delta" } },
+        edited: { waterfall: { xAxis: "step", metric: "delta", showTotal: false } },
+        // The Total is a category the BUILDER invents by summing the steps, so turning it off is
+        // visible in the axis itself — a stale option still carries it.
+        expectEdited: (o) => expect(o.xAxis!.data).toEqual(["Q1", "Q2"]),
+        expectChangedRows: (o) => expect(o.xAxis!.data).toContain("Q3"),
+      },
+      {
+        what: "BoxplotChart",
+        vizType: "boxplot",
+        columns: [{ name: "grp", type: "varchar" }, { name: "v", type: "double" }],
+        // Group B carries an outlier ON PURPOSE: the two whisker types agree on any group without
+        // one, so a tidier fixture would make the edit invisible and the assertion below vacuous.
+        rows: [["A", 1], ["A", 3], ["B", 5], ["B", 5], ["B", 5], ["B", 5], ["B", 100]],
+        changedRows: [["A", 1], ["A", 3], ["B", 5], ["B", 5], ["B", 5], ["B", 5], ["B", 100], ["C", 2]],
+        base: { boxplot: { category: "grp", value: "v" } },
+        edited: { boxplot: { category: "grp", value: "v", whiskers: "min-max" as const } },
+        // Whisker type IS the box's five numbers. Tukey excludes B's 100 and pulls the upper
+        // whisker back to the quartile ([5, 5, 5, 5, 5]); min/max reaches the extreme.
+        expectEdited: (o) => expect((o.series[0].data as number[][])[1]).toEqual([5, 5, 5, 5, 100]),
+        expectChangedRows: (o) => expect(o.xAxis!.data).toContain("C"),
+      },
+      {
         what: "SankeyChart",
         vizType: "sankey",
         columns: [
@@ -995,6 +1024,84 @@ describe("ChartRenderer", () => {
   });
 
   /**
+   * THE ARGUMENT ITSELF — a different question from the memo identity above, and from the
+   * field-forwarding seam below. Does the measured size `EChartsRenderer` hands back actually REACH
+   * the builder?
+   *
+   * NOTHING COVERED THIS ON ANY CHART until this block, on either side of it. Dropping the fourth
+   * argument at a call site — `() => (_size: EChartsSize) => buildXOption(columns, rows, cfg)` —
+   * left the entire suite green, on cartesian as well as on the two branches that had just gained
+   * it, while the chart rendered with `interval: "auto"` and ECharts silently dropping the labels
+   * that collided. That is the exact defect this PR exists to remove, invisible at the one seam
+   * between the component that can measure and the builder that needs the number.
+   *
+   * Why neither neighbour catches it. The identity block above DOES call the option with a size,
+   * but every assertion it makes is about content the size does not touch (categories, whisker
+   * numbers, gauge scale), so an option ignoring its argument answers identically. The seam block
+   * below reads a fixed 640x400 and asserts config fields, for the same reason. And
+   * `echarts/__tests__/*XLabels.test.ts` call the builders DIRECTLY, passing the size themselves —
+   * which is precisely what makes them blind to a caller that does not.
+   *
+   * ONE RENDER, TWO SIZES, on purpose. The captured option is a function and `EChartsRenderer`
+   * calls it afresh on every resize, so calling it twice here is what that component does rather
+   * than a test-only trick. The PAIR is what makes this an assertion about the size passed IN: a
+   * builder that ignored its argument and measured against some constant of its own would satisfy
+   * either width on its own.
+   */
+  describe("the measured size reaches the builder", () => {
+    /** Both widths, and why they land either side of the decision, are worked out in
+     *  `echarts/__tests__/boxWaterfallXLabels.test.ts`: with every label 0px wide under jsdom the
+     *  axis hides iff `plotWidth < 6n`, so 46 categories need 276px and a 320px card estimates
+     *  `320 − 8 − 16 − 26` = 270. At 1200px the same categories get 25px each and are drawn. */
+    const CROWDED = 46;
+    const NARROW = { width: 320, height: 260 };
+    const WIDE = { width: 1200, height: 500 };
+    const showAt = (o: unknown, size: { width: number; height: number }) =>
+      (o as (s: { width: number; height: number }) => { xAxis: { axisLabel: { show?: boolean } } })(size)
+        .xAxis.axisLabel.show;
+
+    const SIZED: { what: string; vizType: VizType; columns: { name: string; type: string }[]; rows: unknown[][]; params: Partial<ChartParams> }[] = [
+      {
+        what: "CartesianChart",
+        vizType: "bar",
+        columns: [{ name: "region", type: "varchar" }, { name: "revenue", type: "double" }],
+        rows: Array.from({ length: CROWDED }, (_, i) => [`Category ${i}`, i + 1]),
+        params: { cartesian: { xAxis: "region", yMetrics: ["revenue"] } },
+      },
+      {
+        what: "WaterfallChart",
+        vizType: "waterfall",
+        columns: [{ name: "step", type: "varchar" }, { name: "delta", type: "double" }],
+        // ONE FEWER ROW: `showTotal` defaults on, so the builder appends a "Total" of its own and
+        // the axis carries CROWDED categories from CROWDED - 1 rows.
+        rows: Array.from({ length: CROWDED - 1 }, (_, i) => [`Category ${i}`, i + 1]),
+        params: { waterfall: { xAxis: "step", metric: "delta" } },
+      },
+      {
+        what: "BoxplotChart",
+        vizType: "boxplot",
+        columns: [{ name: "grp", type: "varchar" }, { name: "v", type: "double" }],
+        rows: Array.from({ length: CROWDED }, (_, i) => [`Category ${i}`, i + 1]),
+        params: { boxplot: { category: "grp", value: "v" } },
+      },
+    ];
+
+    SIZED.forEach((s) => {
+      it(`${s.what} hands the size it was given to its builder`, () => {
+        render(
+          <ChartRenderer vizType={s.vizType} params={params(s.params)} columns={s.columns} rows={s.rows} />,
+        );
+        // Narrow enough that the fit hides the axis — reachable ONLY through the size argument,
+        // since without one the builder leaves `show` alone and the axis draws.
+        expect(showAt(mockLastOption, NARROW)).toBe(false);
+        // …and the same option function, at the same render, draws them when there is room. This is
+        // the half that says the decision follows the size rather than being baked in.
+        expect(showAt(mockLastOption, WIDE)).toBe(true);
+      });
+    });
+  });
+
+  /**
    * THE SAME SEAM, for the five viz types that hand-listed their fields at this line long after
    * cartesian and pie stopped: gauge, funnel, waterfall, boxplot and sankey.
    *
@@ -1045,16 +1152,19 @@ describe("ChartRenderer", () => {
      * LISTED, deliberately, rather than sniffed with `typeof`. A sniff would be self-healing
      * against the exact regression this guards: `buildGaugeOption` and `buildSankeyOption` ignore
      * their size argument today, so a branch reverting to a plain option object produces a
-     * byte-identical option and every content assertion below still passes.
+     * byte-identical option and every content assertion below still passes. The waterfall and the
+     * box plot DO read theirs now, but only for the x-axis label decision (`interval`, `rotate`,
+     * `show`, `grid.bottom`) — none of which any assertion in this block reads either, so the same
+     * self-healing would apply to them.
      *
      * The identity block above also dies on such a branch — `built()` calls the captured option
      * with the cast unguarded, so it throws `o is not a function` — but that is a side effect of
-     * how it reads the option rather than a guard, and it covers only the three vizzes that have a
-     * memo boundary. This list is the one place that states the shape ON PURPOSE, and the only
-     * cover for a viz that gains a size-function option without gaining an identity test.
+     * how it reads the option rather than a guard, and it covers only the vizzes that have a memo
+     * boundary. This list is the one place that states the shape ON PURPOSE, and the only cover for
+     * a viz that gains a size-function option without gaining an identity test.
      * (Measured, both halves: pointing `GaugeChart` at a plain memoised object fails three tests —
      * this one, and the gauge's two content directions above.) */
-    const SIZE_FUNCTION_VIZ = new Set<SeamViz>(["gauge", "sankey"]);
+    const SIZE_FUNCTION_VIZ = new Set<SeamViz>(["gauge", "sankey", "waterfall", "boxplot"]);
 
     /** Renders a viz and hands back the option that actually reached EChartsRenderer. */
     const optionOf = (vizType: SeamViz, p: Partial<ChartParams>, columns: { name: string; type: string }[], rows: unknown[][]): Built => {

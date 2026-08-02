@@ -100,8 +100,13 @@ describe("buildWaterfallOption", () => {
     expect(auto.xAxis.axisLabel.rotate).toBe(0); // three short names: no tilt
     const tilted = buildWaterfallOption(cols, rows, { ...noTotal, xLabelRotation: 90 }) as any;
     expect(tilted.xAxis.axisLabel.rotate).toBe(90);
-    // A steeper tilt needs more room under the plot, or the names are clipped.
-    expect(tilted.grid.bottom).toBeGreaterThan(auto.grid.bottom);
+    // …and takes no room under the plot for it. This used to reserve 44px, on the reasoning that a
+    // steeper tilt needs more room or the names are clipped — true of the room, wrong about who
+    // reserves it. `containLabel: true` already expands the grid around the rotated labels, so the
+    // 44 was a second reservation of the same band and came off the plot instead; see
+    // `cartesianXLabels.test.ts` for the contract and `containLabelRotation.echarts.test.ts` for
+    // the measurement against real ECharts.
+    expect(tilted.grid.bottom).toBe(auto.grid.bottom);
   });
 
   it("draws a goal line when one is set", () => {

@@ -1,15 +1,21 @@
 import { describe, it, expect } from "vitest";
 import type { EChartsCoreOption } from "echarts/core";
 import type { EChartsSize } from "../EChartsRenderer";
+import { buildBoxplotOption } from "../options/boxplot";
 import { buildCartesianOption } from "../options/cartesian";
 import { buildGaugeOption } from "../options/gauge";
 import { buildSankeyOption } from "../options/sankey";
+import { buildWaterfallOption } from "../options/waterfall";
 
 /**
- * These three builders grew a fourth, optional `_size` parameter so the size-dependent label work —
+ * These five builders grew a fourth, optional size parameter so the size-dependent label work —
  * x-label rotation, gauge graduations, sankey node labels; see each builder's own comment — has a
- * seam to attach to. Nothing reads it yet, and this file is what says so: build each chart twice,
- * once with a size and once without, and the two options must be indistinguishable.
+ * seam to attach to. Two of the five still do not read it, and keep the `_size` name to say so;
+ * cartesian, the box plot and the waterfall each call it `size` and read it. Gauge and sankey are
+ * what this file was written for: build each chart twice, once with a size and once without, and
+ * the two options must be indistinguishable. The three live seams have their cases inverted below
+ * rather than deleted — the point is unchanged, that a size changes exactly what it is supposed to
+ * and nothing else.
  *
  * Naively that is `expect(build(cols, rows, cfg, SMALL)).toEqual(build(cols, rows, cfg))`, and that
  * does not work. Every one of these options carries FUNCTIONS — axis-label formatters, tooltip
@@ -105,10 +111,77 @@ const cols = [{ name: "k", type: "varchar" }, { name: "v", type: "double" }];
 const rows: unknown[][] = [["Widget", 10], ["Gadget", 20]];
 
 describe("builders accept a container size", () => {
-  it("cartesian builds identically with and without a size", () => {
+  /**
+   * Cartesian is the one that now READS it (`fitXLabels`, PR 02), so its entry here inverts: the
+   * two builds must differ, and differ only where the fit is entitled to make them differ. The
+   * narrow assertion — which rotation, which `interval` — is `cartesianXLabels.test.ts`; what this
+   * one adds is that the size did not leak anywhere else.
+   *
+   * ONLY THE THREE KEYS THE FIT WRITES are exempted, not the whole `axisLabel` subtree. Exempting
+   * the subtree would take `xAxis.axisLabel.formatter` — one of the three probed closures — out of
+   * the comparison, and a size-dependent formatter (`(v) => truncate(v, widthFromSize)`) is
+   * precisely the leak the fingerprint exists to catch, per this file's header. It would have been
+   * a net loss of coverage dressed as a gain.
+   *
+   * Two labels across 300px stay on the ladder's upright rung, so `grid.bottom` is the same in
+   * both builds and the equality below is exact rather than approximate.
+   */
+  it("cartesian reads the size, and reads it ONLY for the x-axis label decision", () => {
     const cfg = { kind: "bar" as const, xAxis: "k", yMetrics: ["v"] };
-    // tooltip, category-axis label, value-axis label.
-    expectSizeIsUnread((size) => buildCartesianOption(cols, rows, cfg, size), 3);
+    const sized = fingerprint(buildCartesianOption(cols, rows, cfg, SMALL)) as Record<string, never>;
+    const unsized = fingerprint(buildCartesianOption(cols, rows, cfg)) as Record<string, never>;
+    // tooltip, category-axis label, value-axis label — pinned exactly, for the reason
+    // `expectSizeIsUnread` gives.
+    expect(functionsIn(sized)).toBe(3);
+
+    const axisLabelOf = (fp: Record<string, never>) =>
+      (fp as unknown as { xAxis: { axisLabel: Record<string, unknown> } }).xAxis.axisLabel;
+    expect(axisLabelOf(sized)).not.toStrictEqual(axisLabelOf(unsized));
+
+    for (const key of ["interval", "rotate", "show"]) {
+      delete axisLabelOf(sized)[key];
+      delete axisLabelOf(unsized)[key];
+    }
+    // `formatter` is still in here, and so is every other field of every other axis.
+    expect(sized).toStrictEqual(unsized);
+  });
+
+  /**
+   * The box plot and the waterfall read the size for exactly the same one decision cartesian does,
+   * and are checked the same inverted way: the two builds must differ, and differ ONLY in the three
+   * `axisLabel` keys the fit writes. Their whole reason for being here is the leak this file's
+   * header describes — a size that reaches a formatter, a grid inset, a series, anything other than
+   * the x-axis label decision it was threaded in for.
+   *
+   * `grid.bottom` is deliberately left IN the comparison rather than exempted alongside the three
+   * keys: no builder reserves room below the axis for a rotated label any more (`containLabel`
+   * does it — see `cartesianXLabels.test.ts`), so the sized and unsized grids agree exactly. A fit
+   * that started padding the grid again would fail here as well, which is the point of not
+   * exempting it.
+   */
+  it.each([
+    ["box plot", (size?: EChartsSize) => buildBoxplotOption(
+      cols, [["Widget", 10], ["Widget", 20], ["Gadget", 30], ["Gadget", 40]], { category: "k", value: "v" }, size,
+    // Two: the tooltip and the value-axis label. The box plot's CATEGORY axis has no formatter of
+    // its own — it draws the raw group key — where the waterfall's four include one.
+    ), 2],
+    ["waterfall", (size?: EChartsSize) => buildWaterfallOption(cols, rows, { xAxis: "k", metric: "v" }, size), 4],
+  ] as const)("%s reads the size, and reads it ONLY for the x-axis label decision", (_what, build, fns) => {
+    const sized = fingerprint(build(SMALL)) as Record<string, never>;
+    const unsized = fingerprint(build()) as Record<string, never>;
+    // Pinned exactly, for the reason `expectSizeIsUnread` gives: a formatter that collapsed to a
+    // plain string would otherwise take itself out of the comparison unnoticed.
+    expect(functionsIn(sized)).toBe(fns);
+
+    const axisLabelOf = (fp: Record<string, never>) =>
+      (fp as unknown as { xAxis: { axisLabel: Record<string, unknown> } }).xAxis.axisLabel;
+    expect(axisLabelOf(sized)).not.toStrictEqual(axisLabelOf(unsized));
+
+    for (const key of ["interval", "rotate", "show"]) {
+      delete axisLabelOf(sized)[key];
+      delete axisLabelOf(unsized)[key];
+    }
+    expect(sized).toStrictEqual(unsized);
   });
 
   it("gauge builds identically with and without a size", () => {

@@ -85,8 +85,9 @@ describe("CartesianDisplaySection", () => {
   it("offers Metabase's axis line/tick toggles and the value-axis tick count", () => {
     const onChange = vi.fn();
     render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={onChange} />);
-    // Unset means shown, so a chart saved before these existed keeps drawing both.
-    expect(screen.getByLabelText("X axis lines and ticks")).toBeChecked();
+    // Unset means shown, so a chart saved before these existed keeps drawing both. The category
+    // axis is a four-way select (it carries the rotation too); the value axis is still a switch.
+    expect(screen.getByLabelText("X axis lines and ticks")).toHaveTextContent("Show");
     expect(screen.getByLabelText("Y axis lines and ticks")).toBeChecked();
     fireEvent.click(screen.getByLabelText("Y axis lines and ticks"));
     expect(onChange).toHaveBeenCalledWith({ yAxisTicks: false });
@@ -304,6 +305,165 @@ describe("CartesianDisplaySection — a combo can stack", () => {
   it("still offers none where stacking makes no sense", () => {
     render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
     expect(screen.queryByLabelText("Stacking")).toBeNull();
+  });
+});
+
+/**
+ * The category axis' four-way control, which replaced a switch. It is ONE select over TWO stored
+ * fields, so every assertion here is on the emitted patch rather than on the DOM: the failure mode
+ * this guards is a patch that sets half the pair and leaves the other half saying something else.
+ * `toStrictEqual` on purpose — `toEqual` ignores `undefined` properties, so it cannot tell a patch
+ * that CLEARS the other key from one that silently leaves it alone.
+ */
+describe("CartesianDisplaySection — the category-axis lines/ticks/rotation select", () => {
+  const open = async (user: ReturnType<typeof userEvent.setup>, label = "X axis lines and ticks") =>
+    user.click(screen.getByLabelText(label));
+
+  it("choosing Rotate 45° stores the rotation and clears the hide", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xAxisTicks: false }} onChange={onChange} />);
+    await open(user);
+    await user.click(await screen.findByRole("option", { name: "Rotate 45°" }));
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xLabelRotation: 45, xAxisTicks: undefined });
+  });
+
+  it("choosing Rotate 90° stores 90, not 45", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={onChange} />);
+    await open(user);
+    await user.click(await screen.findByRole("option", { name: "Rotate 90°" }));
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xLabelRotation: 90, xAxisTicks: undefined });
+  });
+
+  it("choosing Hide turns the axis off and drops the rotation with it", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xLabelRotation: 45 }} onChange={onChange} />);
+    await open(user);
+    await user.click(await screen.findByRole("option", { name: "Hide" }));
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xAxisTicks: false, xLabelRotation: undefined });
+  });
+
+  // The path back to "let the builder decide": Show must clear the rotation, or the measured fit
+  // stays suppressed forever by a setting the user believes they have turned off.
+  it("choosing Show clears the rotation", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xLabelRotation: 90 }} onChange={onChange} />);
+    await open(user);
+    await user.click(await screen.findByRole("option", { name: "Show" }));
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xAxisTicks: undefined, xLabelRotation: undefined });
+  });
+
+  it("displays what is stored: a rotation, and Hide winning over one", () => {
+    const { rerender } = render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xLabelRotation: 90 }} onChange={() => {}} />);
+    expect(screen.getByLabelText("X axis lines and ticks")).toHaveTextContent("Rotate 90°");
+    rerender(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xLabelRotation: 90, xAxisTicks: false }} onChange={() => {}} />);
+    expect(screen.getByLabelText("X axis lines and ticks")).toHaveTextContent("Hide");
+  });
+
+  // A row chart's categories run down the LEFT, so this control names the vertical axis — and the
+  // rotation is real there: ECharts applies `axisLabel.rotate` to a y-axis too.
+  it("names the category axis Y on a row chart and still offers the rotation", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<CartesianDisplaySection kind="row" config={{ yMetrics: ["rev"] }} onChange={onChange} />);
+    await open(user, "Y axis lines and ticks");
+    const opt = await screen.findByRole("option", { name: "Rotate 45°" });
+    expect(opt).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(opt);
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xLabelRotation: 45, xAxisTicks: undefined });
+  });
+
+  /**
+   * A linear or timeseries x is a VALUE axis: its labels are ticks ECharts generates, and
+   * `scaleAxis` carries no `rotate`, so a rotation chosen there would store and do nothing. Offered
+   * disabled rather than removed, so a chart that stored 45° before its scale changed still shows
+   * what it stored instead of an empty control.
+   */
+  it.each(["linear", "timeseries"] as const)("disables the rotations on a %s x-axis", async (xScale) => {
+    const user = userEvent.setup();
+    render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"], xScale }} onChange={() => {}} />);
+    await open(user);
+    expect(await screen.findByRole("option", { name: "Rotate 45°" })).toHaveAttribute("aria-disabled", "true");
+    expect(await screen.findByRole("option", { name: "Rotate 90°" })).toHaveAttribute("aria-disabled", "true");
+    // Hiding the axis line still works on a value axis, so those two stay live.
+    expect(await screen.findByRole("option", { name: "Hide" })).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  /**
+   * …but a HORIZONTAL chart is not a value-x chart, however its `xScale` reads. The x-scale select
+   * hides itself once a chart is horizontal, so a stored `linear` there is a leftover from before
+   * it was flipped — and the builder ignores it (`usesXScale` is `!isHorizontal && …`), drawing the
+   * ordinal categories down the left where the rotation does apply. Disabling on it would take a
+   * working setting away on the strength of a value nothing reads.
+   */
+  it("keeps them enabled on a horizontal chart carrying a leftover linear scale", async () => {
+    const user = userEvent.setup();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], horizontal: true, xScale: "linear" }} onChange={() => {}} />);
+    await open(user, "Y axis lines and ticks");
+    expect(await screen.findByRole("option", { name: "Rotate 90°" })).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("leaves them enabled on an ordinal x-axis", async () => {
+    const user = userEvent.setup();
+    render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    await open(user);
+    expect(await screen.findByRole("option", { name: "Rotate 45°" })).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  // metric-vs-metric: this scatter leaves through `scatterXY` before a category axis is ever built.
+  it("disables them on a metric-vs-metric scatter", async () => {
+    const user = userEvent.setup();
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xMetric: "cnt" }} onChange={() => {}} />);
+    await open(user);
+    expect(await screen.findByRole("option", { name: "Rotate 90°" })).toHaveAttribute("aria-disabled", "true");
+  });
+
+  /** …and the converse, which is the half of that arm doing the work: a scatter with a DIMENSION on
+   *  x falls through to `baseOption` like any other chart and gets an ordinal category axis, where
+   *  the rotation applies. Testing `kind === "scatter"` alone would grey out a live setting on
+   *  every one of them — and every other assertion in this file passes under that mutation. */
+  it("leaves them enabled on a scatter with a category x-axis", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xAxis: "region" }} onChange={onChange} />);
+    await open(user);
+    const opt = await screen.findByRole("option", { name: "Rotate 45°" });
+    expect(opt).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(opt);
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xLabelRotation: 45, xAxisTicks: undefined });
+  });
+
+  /**
+   * WHERE THE REASON LIVES, and why it is asserted at all. It first sat on the disabled items as a
+   * native `title`, which no class of user could reach: `data-[disabled]:pointer-events-none` stops
+   * a mouse hovering them, Radix skips disabled items in its roving focus so a keyboard never lands
+   * on one, and a screen reader is handed `aria-disabled` and nothing else. So the reason hangs off
+   * the trigger — focusable, pointer-events intact — and is wired with `aria-describedby`, which is
+   * what puts it in the accessibility tree rather than merely on screen.
+   */
+  it("explains the greying-out on the trigger, where it can actually be read", async () => {
+    const user = userEvent.setup();
+    render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"], xScale: "timeseries" }} onChange={() => {}} />);
+    const hint = screen.getByText(/Rotation applies to a category axis/);
+    expect(screen.getByLabelText("X axis lines and ticks")).toHaveAttribute("aria-describedby", hint.id);
+    // …and NOT on the items, where it would look like an explanation and reach nobody.
+    await open(user);
+    expect(await screen.findByRole("option", { name: "Rotate 45°" })).not.toHaveAttribute("title");
+  });
+
+  it("says nothing where every choice is live", () => {
+    render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    expect(screen.queryByText(/Rotation applies to a category axis/)).toBeNull();
+    expect(screen.getByLabelText("X axis lines and ticks")).not.toHaveAttribute("aria-describedby");
+  });
+
+  it("still shows a rotation stored before the scale changed", () => {
+    render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"], xScale: "linear", xLabelRotation: 45 }} onChange={() => {}} />);
+    expect(screen.getByLabelText("X axis lines and ticks")).toHaveTextContent("Rotate 45°");
   });
 });
 

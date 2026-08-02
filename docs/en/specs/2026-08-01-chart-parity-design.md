@@ -50,7 +50,7 @@ and only then builds the option.
 | Canvas text measurement | `components/chart/measure-text.ts` — ported from Metabase, attached to the document so `rem` resolves correctly, with an injectable `measurer` for tests |
 | Option as a function of measured size | Working in production — but for **pie only** (`ChartRenderer.tsx`, `PieChart`) |
 | Resize coalescing | `EChartsRenderer` already rAF-coalesces, with the performance trap documented |
-| Grouped X/Y axis panel with a rotation field | `settings/ChartAxesSection.tsx` already has `xLabelRotation?: 45 \| 90`; used by waterfall, box plot and sankey |
+| Grouped X/Y axis panel with a rotation field | `settings/ChartAxesSection.tsx` already has `xLabelRotation?: 45 \| 90`; used by waterfall and box plot (sankey has no axes and borrows only `Toggle`) |
 
 The work is therefore mostly **extending an existing, proven pattern**, not building new machinery.
 
@@ -109,7 +109,28 @@ Port Metabase's ladder from `echarts/cartesian/layout/index.ts`:
 5. Overlap → `dimensionWidth >= fontSize * 2.1` gives 45°, else `>= fontSize * 1.2` gives 90°, in
    each case only if the rotated label height stays under 70% of chart height; otherwise hide the
    axis entirely.
-6. Only the first 50 ticks are measured, for cost.
+6. Which labels get measured is the one step egret does **not** copy. `getXTicksToMeasure`
+   (`layout/index.ts:347-373`) branches on the axis type, and an ordinal axis is a *category* axis:
+   Metabase measures **every** category label, falling back to the 50 **longest by character
+   count** only once `dimensionWidth <= fontSize` — the rung below which nothing fits anyway. Even
+   spacing (`getEvenlySpacedIndices`) is its numeric/time-series path and is never reached here.
+   Nothing anywhere takes the *first* 50.
+
+   egret measures at most 50: evenly spaced, **plus** the longest by character count. The cap is
+   ours — Metabase computes its own layout and measures once, while this runs on every rebuild —
+   and the union is what makes the cap safe. Even spacing alone can miss the widest label, because
+   character count is only a proxy for width (`WWWW` outruns `iiiiiiiiiiii`); the longest-by-length
+   alone can miss it for the same reason in reverse. Together they reliably reach the label that
+   decides the height guard, the bottom padding and both per-label overlap conditions.
+
+   Two residual differences remain, in opposite directions, and past 50 labels either can occur. A
+   label wider than every sampled one *and* not the longest by characters, sitting in a sampling
+   gap, is never measured — egret draws upright where Metabase rotates. And because the sampled
+   labels stop being each other's neighbours past 50, the adjacent-pair condition can fire on a
+   *fabricated* adjacency: two sampled labels of width 10 with `dimensionWidth` 15 overlap as a
+   pair while neither's real neighbour of width 1 does — egret rotates where Metabase draws
+   upright. Both are contrived, and neither can produce a partial axis, which is the property this
+   workstream exists for.
 
 **The load-bearing property is that labels are never partial.** All, rotated, or none. egret's
 current `interval: "auto"` produces "some", which is the one outcome Metabase deliberately avoids.
@@ -119,7 +140,7 @@ and give the cartesian Axes tab the same four-value select `ChartAxesSection` al
 Hide / Show / Rotate 45° / Rotate 90°.
 
 Metabase carries all of this in a single key (`graph.x_axis.axis_enabled`, which also has a fifth
-"Compact" option). egret deliberately does not follow that here: waterfall, box plot and sankey
+"Compact" option). egret deliberately does not follow that here: waterfall and box plot
 already store the two-field shape, and a cartesian family that stored a different shape for the same
 control would fragment the settings model to match a foreign one. The select is a UI projection over
 the two fields. "Compact" — which shortens labels rather than rotating them — is a separate feature

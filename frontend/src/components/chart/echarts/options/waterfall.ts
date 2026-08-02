@@ -1,7 +1,9 @@
 import type { EChartsCoreOption } from "echarts/core";
+import type { EChartsSize } from "../EChartsRenderer";
 import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue } from "../../format";
+import { estimatePlotWidth, fitXLabels, type XLabelFit } from "../axisLabelFit";
 import { ariaDescription, baseOption, tooltipSurface, TOOLTIP_WEIGHT } from "../base";
 import { CHART_THEME, SERIES_PALETTE, COLOR_FALLBACK, resolveColor } from "../palette";
 
@@ -59,7 +61,15 @@ const TOTAL_TOKEN = "var(--foreground)";
  * from −20 to −15. Silently wrong, and no assertion about the option's shape can see it — the
  * numbers handed to ECharts were right both before and after.
  */
-export function buildWaterfallOption(columns: ResultColumn[], rows: unknown[][], cfg: WaterfallBuildConfig): EChartsCoreOption {
+export function buildWaterfallOption(
+  columns: ResultColumn[],
+  rows: unknown[][],
+  cfg: WaterfallBuildConfig,
+  /** The container's measured size, from `EChartsRenderer`. Absent when the caller has no
+   *  measurement — a unit test, or anything handing over a plain option object; see the x-label fit
+   *  below, which is the only thing that reads it. */
+  size?: EChartsSize,
+): EChartsCoreOption {
   const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
   const xi = cfg.xAxis != null ? idx[cfg.xAxis] : undefined;
   const mi = cfg.metric != null ? idx[cfg.metric] : undefined;
@@ -127,11 +137,67 @@ export function buildWaterfallOption(columns: ResultColumn[], rows: unknown[][],
 
   const xTitle = cfg.showXLabel === false ? undefined : (cfg.xLabel ?? cfg.xAxis);
   const yTitle = cfg.showYLabel === false ? undefined : (cfg.yLabel ?? cfg.metric);
-  // Long step names are unreadable upright however few of them there are — the same threshold the
-  // cartesian axis uses, so a waterfall and a bar chart of the same steps tilt together. An
-  // explicit choice from the Axes tab always wins over the guess.
-  const longest = categories.reduce((n, c) => Math.max(n, c.length), 0);
-  const rotate = cfg.xLabelRotation ?? (longest > 10 && categories.length > 6 ? 30 : 0);
+  // Whether the step names fit is a question about WIDTH, and until `size` existed this builder
+  // could not ask it: the rule here was `longest > 10 && categories.length > 6 ? 30 : 0`, and
+  // length and count are only proxies for width. The same rule was deleted from the cartesian
+  // builder for the same reason — four categories whose longest is "Doohickey" on a
+  // one-third-width card came out as "no rotation needed", and then `interval: "auto"` let ECharts
+  // drop three of the four, an axis reading as missing data. See `echarts/axisLabelFit.ts`.
+  //
+  // A waterfall and a bar chart of the same steps now measure the same WAY, but not necessarily to
+  // the same ANSWER — the deleted rule made them share a guess, and this does not restore that.
+  // Two inputs differ on identical rows, and both push this chart towards rotating first:
+  //   - `showTotal` defaults on, so this axis carries n+1 categories where the bar chart has n.
+  //     That is 14% less `dimensionWidth` at six steps, and it is a real extra label, not an
+  //     accounting artefact.
+  //   - `widest` below is the running-total ENVELOPE, where cartesian's `widestOf` is the largest
+  //     single datum. Deltas of 10/20/30 give a bar chart a "30" gutter and this one a "60" gutter,
+  //     and the gap widens with every step.
+  // A waterfall therefore tilts slightly sooner than the bar chart of its own steps, by design.
+  // Worth knowing before reading the two side by side and calling the difference a bug.
+  //
+  // Cartesian guards this on `ordinalX` — is the category axis the BOTTOM one, and are its labels
+  // the array we hold? A waterfall has neither a horizontal mode nor an `xScale`, so both halves of
+  // that question are settled by construction: this axis is always a bottom category axis over
+  // exactly these `categories`. All that is left to ask is whether there is a size to measure
+  // against, and copying a condition that is always true here would read as if there were more.
+  //
+  // A zero size is not a small chart, it is an UNMEASURED one: `EChartsRenderer` reads
+  // `getBoundingClientRect()` before `init`, so a hidden or not-yet-laid-out container reports
+  // `{0, 0}`. Measuring it would give a negative `plotWidth` — which the fitter answers "draw every
+  // label upright", from a container nobody could see — and a zero height would make the rotated
+  // label's projected share infinite and hide the axis. Both are decisions taken against a guessed
+  // width, so decline instead.
+  const measurable = size != null && size.width > 0 && size.height > 0;
+  // An explicit rotation SKIPS the measurement rather than merely outranking it. Computing the fit
+  // anyway and using it for `show` would honour the user's 45° and hide their axis in the same
+  // breath, which is worse than either outcome alone and looks like the setting doing nothing.
+  // Metabase's own auto-selection likewise applies only while the setting is untouched.
+  const explicitRotate = cfg.xLabelRotation != null;
+  const fit: XLabelFit | undefined = measurable && size && !explicitRotate
+    ? fitXLabels({
+        // The RAW step name, where `axisLabel.formatter` below draws the FORMATTED one. Where the
+        // two differ — only when the x column carries a `columnSettings` entry — the formatted
+        // label is the wider of the two ("2026-01-01" measured, "January 2026" drawn), so this
+        // under-measures. Same direction, and same cost, as an over-estimated `plotWidth`: labels
+        // left upright that should have been rotated. Cartesian's axis has the identical seam.
+        labels: categories,
+        // The gutter is the widest value the y-axis can print, through the y-axis's own formatter
+        // (`fmt(v, true)` below), and `yTitle` is what adds 26 to `grid.left` below.
+        plotWidth: estimatePlotWidth(size, fmt(widest, true), Boolean(yTitle)),
+        // The CONTAINER's height, not an inset one: the 70% guard is a share of the whole card
+        // (Metabase's `checkHeight`), so passing a grid-adjusted height silently tightens it.
+        outerHeight: size.height,
+      })
+    : undefined;
+  const rotate = cfg.xLabelRotation ?? (fit?.kind === "rotate" ? fit.rotate : 0);
+  // Either way the axis has now DECIDED, and a decided axis draws every label or none — never the
+  // subset `interval: "auto"` leaves ECharts free to pick.
+  const decided = fit != null || explicitRotate;
+  // NO ROOM IS RESERVED BELOW THE PLOT FOR A TILTED LABEL, at any rotation, measured or explicit —
+  // the 44/18 ladder this builder used to add on the explicit path is gone with it. See
+  // `XLabelFit`'s doc in `../axisLabelFit.ts`: `containLabel` already expands the grid around the
+  // rotated labels, and every pixel added on top came off the plot one-for-one.
 
   const deltaSeries: Record<string, unknown> = {
     type: "bar",
@@ -175,8 +241,7 @@ export function buildWaterfallOption(columns: ResultColumn[], rows: unknown[][],
     // reason a shared `CHART_THEME.grid` alone is not enough once titles exist.
     grid: {
       ...CHART_THEME.grid,
-      // A steeper tilt eats more vertical room than the 30° guess does.
-      bottom: (CHART_THEME.grid.bottom as number) + (xTitle ? 22 : 0) + (rotate >= 90 ? 44 : rotate ? 18 : 0),
+      bottom: (CHART_THEME.grid.bottom as number) + (xTitle ? 22 : 0),
       left: (CHART_THEME.grid.left as number) + (yTitle ? 26 : 0),
     },
     // The shared `axisTooltip()` reports the series' own value, and the bar's value is a MAGNITUDE
@@ -209,7 +274,11 @@ export function buildWaterfallOption(columns: ResultColumn[], rows: unknown[][],
       name: xTitle, nameLocation: "middle", nameGap: 28,
       nameTextStyle: { color: axisLabelColor },
       axisLabel: {
-        fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, interval: "auto", rotate,
+        fontSize: CHART_THEME.axisFontSize, color: axisLabelColor,
+        interval: decided ? (0 as const) : ("auto" as const), rotate,
+        // The third answer the ladder can give: when even a rotated label would eat 70% of the
+        // card's height, Metabase draws no axis rather than a wall of text.
+        show: fit?.kind !== "hide",
         formatter: (v: string) => {
           const f = cfg.xAxis ? cfg.columnSettings?.[cfg.xAxis] : undefined;
           if (!f || v == null) return String(v ?? "");

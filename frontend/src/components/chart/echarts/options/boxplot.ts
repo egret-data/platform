@@ -1,6 +1,8 @@
 import type { EChartsCoreOption } from "echarts/core";
+import type { EChartsSize } from "../EChartsRenderer";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
+import { estimatePlotWidth, fitXLabels, type XLabelFit } from "../axisLabelFit";
 import { ariaDescription, baseOption, tooltipSurface } from "../base";
 import {
   CHART_THEME, SERIES_PALETTE, COLOR_FALLBACK, resolveColor, fadeColor, scaleLightness,
@@ -124,7 +126,15 @@ export function pointsModeFor(cfg: Pick<BoxplotBuildConfig, "whiskers" | "points
 
 // Metabase-style Box plot: the distribution of a value per category, computed client-side from the
 // raw rows — its own comment says "a boxplot needs unaggregated data", and so does egret's spec.
-export function buildBoxplotOption(columns: ResultColumn[], rows: unknown[][], cfg: BoxplotBuildConfig): EChartsCoreOption {
+export function buildBoxplotOption(
+  columns: ResultColumn[],
+  rows: unknown[][],
+  cfg: BoxplotBuildConfig,
+  /** The container's measured size, from `EChartsRenderer`. Absent when the caller has no
+   *  measurement — a unit test, or anything handing over a plain option object; see the x-label fit
+   *  below, which is the only thing that reads it. */
+  size?: EChartsSize,
+): EChartsCoreOption {
   const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
   const ci = cfg.category != null ? idx[cfg.category] : undefined;
   const vi = cfg.value != null ? idx[cfg.value] : undefined;
@@ -164,6 +174,30 @@ export function buildBoxplotOption(columns: ResultColumn[], rows: unknown[][], c
 
   const widest = stats.reduce((n, s) => Math.max(n, ...s.box.map((v) => Math.abs(v))), 0);
   const compact = cfg.compactValues ?? widest >= 10_000;
+  /**
+   * The widest value the Y-AXIS can print, which is NOT `widest` — deliberately a second number.
+   *
+   * `widest` is the boxes alone, and with Tukey whiskers a box stops at `whiskerMax`, the largest
+   * value INSIDE the fence (`boxStats` above). The outliers it just excluded are still drawn, on a
+   * scatter series sharing this axis, and so is the mean, which an outlier drags past the box it
+   * belongs to. So the axis extends past `widest` and its top tick can format far wider than the
+   * boxes suggest: boxes topping at 500 with one outlier at 1,200,000 leave `compact` false (it
+   * keys off `widest`, correctly — it is about the numbers a reader is asked to compare) and the
+   * axis then draws "1,200,000", ~60px, where a gutter measured from "500" reserved ~21px. On a
+   * ~270px card that ~40px over-estimate of `plotWidth` is larger than any case
+   * `estimatePlotWidth` names, and it would show up as labels drawn upright and overlapping.
+   *
+   * Taken from the point arrays THEMSELVES rather than from `stats`, so it counts a series exactly
+   * when that series is drawn: "no points" omits the outliers from the chart and from this, and
+   * `showMean: false` does the same for the means. `allPoints` are non-outliers and so can never
+   * extend the axis, but they are included anyway to keep the rule "every point series on this
+   * axis" rather than a list of the ones that happen to matter.
+   *
+   * `compact` is deliberately left on `widest`: the shorthand a reader sees should follow the
+   * distribution, not one far-flung outlier. Only the GUTTER needs the true extent.
+   */
+  const axisWidest = [...outlierPoints, ...allPoints, ...meanPoints]
+    .reduce((n, p) => Math.max(n, Math.abs(p[1])), widest);
   const fmt = (v: unknown, useCompact = false, force?: boolean) => {
     if (cfg.value == null) return String(v);
     const col = cfg.columnSettings?.[cfg.value];
@@ -175,8 +209,54 @@ export function buildBoxplotOption(columns: ResultColumn[], rows: unknown[][], c
 
   const xTitle = cfg.showXLabel === false ? undefined : (cfg.xLabel ?? cfg.category);
   const yTitle = cfg.showYLabel === false ? undefined : (cfg.yLabel ?? cfg.value);
-  const longest = categories.reduce((n, c) => Math.max(n, c.length), 0);
-  const rotate = cfg.xLabelRotation ?? (longest > 10 && categories.length > 6 ? 30 : 0);
+  // Whether the labels fit is a question about WIDTH, and until `size` existed this builder could
+  // not ask it: the rule here was `longest > 10 && categories.length > 6 ? 30 : 0`, and length and
+  // count are only proxies for width. The same rule was deleted from the cartesian builder for the
+  // same reason — four categories whose longest is "Doohickey" on a one-third-width card came out
+  // as "no rotation needed", and then `interval: "auto"` let ECharts drop three of the four, an
+  // axis reading as missing data. See `echarts/axisLabelFit.ts`.
+  //
+  // Cartesian guards this on `ordinalX` — is the category axis the BOTTOM one, and are its labels
+  // the array we hold? A box plot has neither a horizontal mode nor an `xScale`, so both halves of
+  // that question are settled by construction: this axis is always a bottom category axis over
+  // exactly these `categories`. All that is left to ask is whether there is a size to measure
+  // against, and copying a condition that is always true here would read as if there were more.
+  //
+  // A zero size is not a small chart, it is an UNMEASURED one: `EChartsRenderer` reads
+  // `getBoundingClientRect()` before `init`, so a hidden or not-yet-laid-out container reports
+  // `{0, 0}`. Measuring it would give a negative `plotWidth` — which the fitter answers "draw every
+  // label upright", from a container nobody could see — and a zero height would make the rotated
+  // label's projected share infinite and hide the axis. Both are decisions taken against a guessed
+  // width, so decline instead.
+  const measurable = size != null && size.width > 0 && size.height > 0;
+  // An explicit rotation SKIPS the measurement rather than merely outranking it. Computing the fit
+  // anyway and using it for `show` would honour the user's 45° and hide their axis in the same
+  // breath, which is worse than either outcome alone and looks like the setting doing nothing.
+  // Metabase's own auto-selection likewise applies only while the setting is untouched.
+  const explicitRotate = cfg.xLabelRotation != null;
+  const fit: XLabelFit | undefined = measurable && size && !explicitRotate
+    ? fitXLabels({
+        // The categories as DRAWN: this axis has no `axisLabel.formatter`, so the raw group key is
+        // the label — unlike the cartesian and waterfall axes, which format theirs.
+        labels: categories,
+        // The gutter is the widest value the y-axis can print — `axisWidest`, which counts the
+        // outlier and mean points too, NOT the boxes-only `widest`; see its comment above — through
+        // the y-axis's own formatter (`fmt(v, true)` below). `yTitle` is what adds 26 to
+        // `grid.left` below.
+        plotWidth: estimatePlotWidth(size, fmt(axisWidest, true), Boolean(yTitle)),
+        // The CONTAINER's height, not an inset one: the 70% guard is a share of the whole card
+        // (Metabase's `checkHeight`), so passing a grid-adjusted height silently tightens it.
+        outerHeight: size.height,
+      })
+    : undefined;
+  const rotate = cfg.xLabelRotation ?? (fit?.kind === "rotate" ? fit.rotate : 0);
+  // Either way the axis has now DECIDED, and a decided axis draws every label or none — never the
+  // subset `interval: "auto"` leaves ECharts free to pick.
+  const decided = fit != null || explicitRotate;
+  // NO ROOM IS RESERVED BELOW THE PLOT FOR A TILTED LABEL, at any rotation, measured or explicit —
+  // the 44/18 ladder this builder used to add on the explicit path is gone with it. See
+  // `XLabelFit`'s doc in `../axisLabelFit.ts`: `containLabel` already expands the grid around the
+  // rotated labels, and every pixel added on top came off the plot one-for-one.
 
   // Metabase labels the median by default and every statistic on "All"; a box's five numbers are
   // `[min, q1, median, q3, max]`, so the median is index 2.
@@ -213,7 +293,7 @@ export function buildBoxplotOption(columns: ResultColumn[], rows: unknown[][], c
     }),
     grid: {
       ...CHART_THEME.grid,
-      bottom: (CHART_THEME.grid.bottom as number) + (xTitle ? 22 : 0) + (rotate >= 90 ? 44 : rotate ? 18 : 0),
+      bottom: (CHART_THEME.grid.bottom as number) + (xTitle ? 22 : 0),
       left: (CHART_THEME.grid.left as number) + (yTitle ? 26 : 0),
     },
     // The series-level `tooltip: { trigger: "item" }` entries below only make the point series
@@ -243,7 +323,13 @@ export function buildBoxplotOption(columns: ResultColumn[], rows: unknown[][], c
       type: "category", data: categories,
       name: xTitle, nameLocation: "middle", nameGap: 28,
       nameTextStyle: { color: axisLabelColor },
-      axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, interval: "auto", rotate },
+      axisLabel: {
+        fontSize: CHART_THEME.axisFontSize, color: axisLabelColor,
+        interval: decided ? (0 as const) : ("auto" as const), rotate,
+        // The third answer the ladder can give: when even a rotated label would eat 70% of the
+        // card's height, Metabase draws no axis rather than a wall of text.
+        show: fit?.kind !== "hide",
+      },
       axisLine: { show: cfg.xAxisTicks !== false, lineStyle: { color: gridLine } },
       axisTick: { show: cfg.xAxisTicks !== false },
     },

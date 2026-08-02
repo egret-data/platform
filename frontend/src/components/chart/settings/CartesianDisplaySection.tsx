@@ -8,6 +8,7 @@ import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
 import { AutoToggle } from "./AutoToggle";
+import { xTicksChoiceOf, xTicksPatch, type XTicksChoice } from "./ChartAxesSection";
 
 function Toggle({ id, label, checked, onChange }: { id: string; label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -221,13 +222,87 @@ export function AxisRangeOptions({ kind, config, onChange }: SectionProps) {
   const horiz = kind === "row" || !!config.horizontal;
   const catAx = horiz ? "Y" : "X";   // the dimension axis
   const valAx = horiz ? "X" : "Y";   // the measure axis
+  // Is the chart's x a VALUE axis rather than the ordinal category one? Follows `usesXScale` in
+  // echarts/options/cartesian.ts, plus one case it does not cover: the METRIC-VS-METRIC scatter,
+  // which leaves through `scatterXY` before the category axis is ever built. Both halves of that
+  // arm are load-bearing — a scatter WITHOUT an `xMetric` falls through to `baseOption` like any
+  // other chart and gets an ordinal category axis, where the rotation works, so testing `kind`
+  // alone would grey out a live setting on every category-x scatter. A horizontal chart is not one
+  // of these either: its categories run down the left and ECharts rotates a y-axis label too.
+  const valueX = (!horiz && (config.xScale === "linear" || config.xScale === "timeseries"))
+    || (kind === "scatter" && config.xMetric != null);
   return (
     <div className="space-y-2.5">
       {kind !== "scatter" && <Toggle id="cz-log" label="Log scale" checked={!!config.logScale} onChange={(v) => onChange({ logScale: v })} />}
-      {/* Metabase's "Show lines and tick marks", one per axis. Stored as `false` only when turned
-          off, so a chart saved before these existed keeps drawing both. */}
-      <Toggle id="cz-xticks" label={`${catAx} axis lines and ticks`} checked={config.xAxisTicks !== false}
-        onChange={(v) => onChange({ xAxisTicks: v ? undefined : false })} />
+      {/* Metabase's `graph.x_axis.axis_enabled`, a FIVE-choice key of which this select offers four
+          — Hide / Show / Rotate 45° / Rotate 90° — projected onto `xAxisTicks` + `xLabelRotation`
+          through the SHARED mapping the waterfall/box-plot tab uses (`xTicksChoiceOf`/
+          `xTicksPatch`). It replaces a switch, because rotation was the part egret had no way to
+          ask for at all: the builder now measures the labels and picks an angle, and without this
+          control there was no way to overrule it.
+
+          THE FIFTH, "Compact", IS DEFERRED RATHER THAN DISMISSED. It shortens temporal axis labels,
+          and the reason it is absent from the waterfall/box-plot tab — their x is always a category
+          run through its column format — does NOT hold here: cartesian is the one family with a
+          `timeseries` x-scale, which is exactly where a temporal shortener would bite. But that
+          axis is `scaleAxis`, whose tick labels ECharts generates rather than this builder, so
+          offering Compact means owning that tick generation first. That is PR 03, and this is a
+          divergence Task 4's side-by-side should record rather than a gap to paper over.
+
+          What "Hide" hides is the axis LINE and its TICK MARKS — which is what this row is named
+          after — and NOT the labels, where Metabase's single `axis_enabled: false` drops both. The
+          divergence is pre-existing and shared with the other two charts that ship this select (the
+          waterfall and the box plot) and is deliberately left alone: widening it would change what
+          every already-saved chart with the axis off renders. Naming the row for the lines and ticks
+          rather than for the axis keeps the wording honest about the narrower meaning; a label
+          reading just "X-axis" would not be.
+
+          Stored as `false` only when turned off, so a chart saved before these existed keeps
+          drawing both. */}
+      <div className="space-y-1">
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="cz-xticks" className="text-sm font-normal">{catAx} axis lines and ticks</Label>
+          <Select value={xTicksChoiceOf(config)} onValueChange={(v) => onChange(xTicksPatch(v as XTicksChoice))}>
+            {/* The reason the rotations are greyed out hangs off the TRIGGER, which is focusable and
+                keeps its pointer events, and is read out by `aria-describedby`. It cannot hang off
+                the disabled items themselves: `data-[disabled]:pointer-events-none` (ui/select.tsx)
+                means a mouse never hovers them so a native `title` never fires, Radix skips disabled
+                items in its roving focus so a keyboard never lands on one, and a screen reader is
+                told only `aria-disabled`. A `title` there would have looked like an explanation and
+                been reachable by nobody. */}
+            <SelectTrigger
+              id="cz-xticks" aria-label={`${catAx} axis lines and ticks`} className="h-7 w-28"
+              aria-describedby={valueX ? "cz-xticks-rotation" : undefined}
+            ><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="hide">Hide</SelectItem>
+              <SelectItem value="show">Show</SelectItem>
+              {/* Offered but DISABLED where the rotation would be stored and then never applied: a
+                  linear/timeseries x and a metric-vs-metric scatter both draw a VALUE axis, whose
+                  labels are ticks ECharts generates rather than the category array, and `scaleAxis`
+                  in echarts/options/cartesian.ts carries no `rotate` (rotating generated ticks means
+                  generating them first, which is PR 03). Disabled rather than hidden, for two
+                  reasons: a chart that stored 45° and later moved to Linear must still SHOW what it
+                  stored instead of an empty trigger, and options that appear and disappear as a
+                  neighbouring select changes read as a glitch rather than as a rule. */}
+              {(["rotate45", "rotate90"] as const).map((v) => (
+                <SelectItem key={v} value={v} disabled={valueX}>
+                  {v === "rotate45" ? "Rotate 45°" : "Rotate 90°"}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        {/* Visible, not a tooltip: the two greyed-out rows are invisible until the select is opened,
+            so an explanation gated on hovering or focusing something inside it is reachable only
+            after the reader has already hit the wall. A caption states the rule before it is met,
+            and it costs a line only in the state that needs one. */}
+        {valueX && (
+          <p id="cz-xticks-rotation" className="text-xs text-muted-foreground">
+            Rotation applies to a category axis; this chart plots values across.
+          </p>
+        )}
+      </div>
       {/* Only meaningful with two or more metrics on one axis to separate. Metabase gates it the
           same way, and computes the split rather than asking which metric goes where — egret's
           per-metric Axis selects still win when they name anything. */}

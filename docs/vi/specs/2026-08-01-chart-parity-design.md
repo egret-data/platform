@@ -51,7 +51,7 @@ option.
 | Đo chữ bằng canvas | `components/chart/measure-text.ts` — port từ Metabase, gắn vào document để `rem` phân giải đúng, có `measurer` tiêm được cho test |
 | Option là hàm của kích thước đo được | Đang chạy thật — nhưng **chỉ pie** (`ChartRenderer.tsx`, `PieChart`) |
 | Gộp sự kiện resize | `EChartsRenderer` đã coalesce bằng rAF, kèm bẫy hiệu năng đã ghi lại |
-| Panel trục nhóm X/Y kèm trường xoay | `settings/ChartAxesSection.tsx` đã có `xLabelRotation?: 45 \| 90`; waterfall, box plot và sankey đang dùng |
+| Panel trục nhóm X/Y kèm trường xoay | `settings/ChartAxesSection.tsx` đã có `xLabelRotation?: 45 \| 90`; waterfall và box plot đang dùng (sankey không có trục, chỉ mượn `Toggle`) |
 
 Vì vậy công việc chủ yếu là **mở rộng một khuôn mẫu đã có và đã được kiểm chứng**, không phải dựng
 máy móc mới.
@@ -109,7 +109,29 @@ Port bậc thang của Metabase từ `echarts/cartesian/layout/index.ts`:
 5. Có chồng → `dimensionWidth >= fontSize × 2,1` cho 45°, không thì `>= fontSize × 1,2` cho 90°, mỗi
    trường hợp chỉ khi chiều cao nhãn sau xoay còn dưới 70% chiều cao chart; không thì **giấu hẳn cả
    trục**.
-6. Chỉ đo 50 tick đầu cho đỡ tốn.
+6. Chọn nhãn nào để đo là bước duy nhất egret **không** chép nguyên. `getXTicksToMeasure`
+   (`layout/index.ts:347-373`) rẽ nhánh theo kiểu trục, mà trục ordinal chính là trục *category*:
+   Metabase đo **toàn bộ** nhãn category, chỉ lùi về 50 nhãn **dài nhất theo số ký tự** khi
+   `dimensionWidth <= fontSize` — tức dưới bậc thang mà không gì vừa nữa. Lấy mẫu cách đều
+   (`getEvenlySpacedIndices`) là nhánh numeric/time-series, không bao giờ chạy ở đây. Và không chỗ
+   nào lấy 50 tick *đầu* cả.
+
+   egret đo nhiều nhất 50: cách đều, **cộng thêm** nhãn dài nhất theo số ký tự. Giới hạn này là của
+   egret — Metabase tự tính layout và chỉ đo một lần, còn hàm này chạy lại mỗi lần dựng option — và
+   chính phần hợp của hai chiến lược làm cho giới hạn đó an toàn. Chỉ cách đều thì có thể bỏ sót
+   nhãn rộng nhất, vì số ký tự chỉ là ước lượng gián tiếp của bề rộng (`WWWW` rộng hơn
+   `iiiiiiiiiiii`); chỉ lấy nhãn dài nhất cũng bỏ sót y như vậy theo chiều ngược lại. Gộp cả hai thì
+   chắc chắn chạm tới nhãn quyết định chốt chặn chiều cao, phần đệm dưới và cả hai điều kiện chồng
+   lấn tính trên từng nhãn.
+
+   Còn lại hai khác biệt, theo hai chiều ngược nhau, và quá 50 nhãn thì cả hai đều có thể xảy ra.
+   Một nhãn rộng hơn mọi nhãn đã lấy mẫu *và* không phải nhãn dài nhất theo ký tự, lại rơi đúng vào
+   khoảng trống lấy mẫu, thì không bao giờ được đo — egret vẽ thẳng trong khi Metabase xoay. Và vì
+   quá 50 nhãn thì các nhãn đã lấy mẫu không còn kề nhau thật, điều kiện theo cặp có thể kích hoạt
+   trên một sự kề nhau *bịa ra*: hai nhãn đã lấy mẫu rộng 10 với `dimensionWidth` 15 thì chồng nhau
+   khi coi là một cặp, trong khi hàng xóm thật rộng 1 của chúng thì không — egret xoay trong khi
+   Metabase vẽ thẳng. Cả hai đều gượng ép, và không cái nào tạo ra một trục in dở dang, vốn là tính
+   chất mà hạng mục này sinh ra để bảo đảm.
 
 **Tính chất then chốt: nhãn không bao giờ in một phần.** Hoặc đủ, hoặc xoay, hoặc không có gì.
 `interval: "auto"` hiện tại của egret cho ra "một số" — đúng kết cục Metabase cố tình tránh.
@@ -119,7 +141,7 @@ cho tab Axes của cartesian đúng select 4 mức mà `ChartAxesSection` đang 
 Hide / Show / Rotate 45° / Rotate 90°.
 
 Metabase gói tất cả vào **một** key (`graph.x_axis.axis_enabled`, còn có mức thứ năm là "Compact").
-egret **cố ý không** theo ở đây: waterfall, box plot và sankey đã lưu theo hình dạng hai trường, và
+egret **cố ý không** theo ở đây: waterfall và box plot đã lưu theo hình dạng hai trường, và
 nếu họ cartesian lưu một hình dạng khác cho cùng một điều khiển thì mô hình settings sẽ vỡ ra chỉ để
 giống một mô hình ngoại lai. Select chỉ là **phép chiếu UI** trên hai trường đó. Mức "Compact" — rút
 gọn nhãn chứ không xoay — là tính năng riêng, nằm ngoài phạm vi.

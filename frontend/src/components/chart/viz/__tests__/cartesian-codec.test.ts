@@ -58,6 +58,19 @@ describe("cartesianFromParams", () => {
     expect(cartesianFromParams({ version: 2, spec: EMPTY_SPEC, settings: cartesianToSettings(cfg) })).toEqual(cfg);
   });
 
+  /**
+   * `KEYS` is `as const satisfies readonly (keyof CartesianConfig)[]`, which checks that every key
+   * listed EXISTS and says nothing about the ones missing — so a new setting left out of it
+   * typechecks, renders, redraws the chart, and is gone the next time the chart is opened. Saving
+   * and reloading is the only thing that catches it, so each setting that reaches the panel gets a
+   * round-trip here.
+   */
+  it("round-trips xLabelRotation, which nothing but a reload can prove", () => {
+    const cfg: CartesianConfig = { yMetrics: ["total_revenue"], xLabelRotation: 45, xAxisTicks: false };
+    expect(cartesianToSettings(cfg)["cartesian.xLabelRotation"]).toBe(45);
+    expect(cartesianFromParams({ version: 2, spec: EMPTY_SPEC, settings: cartesianToSettings(cfg) })).toEqual(cfg);
+  });
+
   it("round-trips labelDensity", () => {
     const cfg: CartesianConfig = { yMetrics: ["total_revenue"], labelDensity: "all" };
     expect(cartesianFromParams({ version: 2, spec: EMPTY_SPEC, settings: cartesianToSettings(cfg) })).toEqual(cfg);
