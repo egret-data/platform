@@ -5,7 +5,8 @@ import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue, specifiesDateRendering } from "../../format";
 import { ariaDescription, baseTextStyle, tooltipSurface } from "../base";
-import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
+import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, symbolShape } from "../palette";
+import { colorsForKeys } from "../keyColors";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
 import { boundarySteps, namesAPeriod, periodName } from "@/components/chart/temporal-period";
 import { foldTail, OTHER_LABEL } from "../fold";
@@ -585,10 +586,19 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
   };
 
   const groups = cfg.series != null ? distinct(points.map((p) => p.group)).map(String) : [""];
-  const series = groups.map((g, si) => {
+  // Keyed by GROUP NAME so a breakout value keeps its colour across every card that breaks out by
+  // it — and so an explicit `seriesColors` entry consumes its colour rather than shadowing it.
+  //
+  // An un-broken-out scatter has one group whose name is the empty string, and hashing THAT would
+  // give every such card the same colour whatever it plots. It is keyed by the y-metric instead —
+  // which is also the name the series is labelled with two lines below, and the key
+  // `cartesianSeriesNames` hands the settings panel, so a pinned colour now actually finds its
+  // series. Keying the lookup on "" meant `cfg.seriesColors` could never match on this path.
+  const groupKey = (g: string) => (g === "" ? yMetric : g);
+  const groupColors = colorsForKeys(groups.map(groupKey), cfg.seriesColors);
+  const series = groups.map((g) => {
     const own = points.filter((p) => p.group === g);
-    // A lone series takes the summarize green, as everywhere else in the family.
-    const color = cfg.seriesColors?.[g] ?? (groups.length === 1 ? SUMMARIZE_COLOR : seriesColor(si));
+    const color = groupColors[groupKey(g)];
     return {
       type: "scatter" as const,
       name: cfg.seriesLabels?.[g] ?? (g === "" ? yMetric : g),
@@ -704,14 +714,20 @@ export function buildCartesianOption(
     // per-series display the answer is no longer one lookup — a combo can mix them.
     const barCount = seriesValues.filter((_, si) => seriesDisplayFor(cfg.kind, "", si, cfg.seriesTypes) === "bar").length;
     const grouped = !resolveStacked(cfg) && barCount > 1;
+    // Metabase parity: null / empty-string breakout values render as "(empty)".
+    const groupName = (sv: unknown) => (sv == null || sv === "" ? "(empty)" : String(sv));
+    // Keyed by GROUP NAME so a breakout value keeps its colour across every card that breaks out by
+    // it — a `Gadget` band is the same yellow whether the card also plots `Widget` or not, and
+    // whether it is drawn second or fourth. An explicit `seriesColors` entry is folded in rather
+    // than layered on top, so it CONSUMES its colour and the series that would have hashed onto it
+    // moves along instead of being drawn identically.
+    const groupColors = colorsForKeys(seriesValues.map(groupName), cfg.seriesColors);
     const builtSeries = seriesValues.map((sv, si) => {
       const data = categories.map((c) => {
         const v = cell.get(`${catKey(c)} ${catKey(sv)}`);
         return v === undefined ? null : v;
       });
-      // Metabase parity: null / empty-string breakout values render as "(empty)".
-      const name = sv == null || sv === "" ? "(empty)" : String(sv);
-      return decorateSeries({ name, data }, metric, si, cfg, fmt, grouped);
+      return decorateSeries({ name: groupName(sv), data }, metric, si, cfg, fmt, groupColors, grouped);
     });
     const series = applySeriesOrder(builtSeries as unknown as SeriesLike[], cfg) as unknown as typeof builtSeries;
     if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
@@ -726,15 +742,27 @@ export function buildCartesianOption(
   const rowByCat = new Map(xrows.map((r) => [catKey(r[xi]), r]));
   const barMetrics = cfg.yMetrics.filter((m, si) => seriesDisplayFor(cfg.kind, m, si, cfg.seriesTypes) === "bar").length;
   const grouped = !resolveStacked(cfg) && barMetrics > 1;
-  // Metabase tints a lone series with its summarize green rather than accent blue.
-  const singleColor = cfg.yMetrics.length === 1 ? SUMMARIZE_COLOR : undefined;
+  // The comment this replaces said Metabase tints a lone series with its summarize green. Measured
+  // on identical data it does not: a single-metric bar card draws #f9d45c, the colour "revenue"
+  // hashes to. The green is Metabase's `success`, which `colorsForKeys` still returns — for a series
+  // actually NAMED "profit" or "completed", which is the rule that was mistaken for a lone-series
+  // one.
+  //
+  // A DUPLICATE metric would now draw both series in one colour, where the positional scheme gave
+  // them separate slots — `colorsForKeys` returns a Record, so one name is one entry. Not reachable
+  // from the picker (`FieldZone` offers only metrics not already selected, and its chips are keyed
+  // by name), but chart settings are stored JSON and are not whitelisted server-side, so a
+  // hand-written config can hold one. Left as is rather than guarded: two series that ARE the same
+  // metric being drawn the same is a fair reading of that config, and the old scheme already
+  // collapsed them the moment either had a `seriesColors` entry, which is keyed by name too.
+  const metricColors = colorsForKeys(cfg.yMetrics, cfg.seriesColors);
   let series = cfg.yMetrics.map((metric, si) => {
     const mi = idx[metric];
     const data = categories.map((c) => {
       const r = rowByCat.get(catKey(c));
       return r == null ? null : (r[mi] as number | null);
     });
-    return decorateSeries({ name: metric, data }, metric, si, cfg, fmt, grouped, singleColor);
+    return decorateSeries({ name: metric, data }, metric, si, cfg, fmt, metricColors, grouped);
   });
 
   // Folding is offered only where "Other" means one clear thing: a single metric, no
@@ -789,14 +817,23 @@ function decorateSeries(
   colorIdx: number,
   cfg: CartesianBuildConfig,
   fmt: (metric: string, v: unknown) => string,
+  /** The colour of every series this chart will draw, keyed by its RAW name — built once by the
+   *  caller, because the assignment is a decision about the whole set (a hash collision moves one
+   *  key along, and a pinned colour takes its slot out of circulation) and cannot be made one
+   *  series at a time. Both call paths pass a complete mapping, so there is no `??` fallback here:
+   *  a positional one would be a second, silent colour rule that no test could see. */
+  colors: Record<string, string>,
   grouped = false,
-  colorOverride?: string,
 ) {
   const display = seriesDisplayFor(cfg.kind, s.name ?? metric, colorIdx, cfg.seriesTypes);
   const type = echartsTypeOf(display);
-  // Per-series colour (keyed by the original series name) wins over the single-series
-  // green and the palette slot — clean-room of Metabase's series colour settings.
-  const color = cfg.seriesColors?.[s.name] ?? colorOverride ?? seriesColor(colorIdx);
+  // `cfg.seriesColors` is NOT consulted again here. The `?? cfg.seriesColors?.[s.name]` this
+  // replaces was redundant rather than wrong — `colorsForKeys` has already folded the user's pinned
+  // colours in, so re-reading them changes no pixel today (measured: restoring the chain leaves the
+  // whole chart suite green). It goes because it reads as a SECOND authority on colour, and the next
+  // person to reach for it — to add a case the mapping does not cover — gets a series that is pinned
+  // here but still in circulation there, and two series drawn in the same ink.
+  const color = colors[s.name];
   const out: Record<string, unknown> = {
     ...s,
     // Display label, in falling order of authority: the user's explicit rename, then the series

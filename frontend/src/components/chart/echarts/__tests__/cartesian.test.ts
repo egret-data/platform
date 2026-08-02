@@ -3,7 +3,8 @@ import {
   buildCartesianOption, cartesianSeriesNames, resolveStacked, stackModeOf, stackModePatch,
   shouldAutoSplitY, computeAxisSplit, seriesDisplayFor, bubbleDiameter,
 } from "../options/cartesian";
-import { CHART_THEME, SERIES_PALETTE, SUMMARIZE_COLOR } from "../palette";
+import { CHART_THEME, SERIES_PALETTE } from "../palette";
+import { colorsForKeys } from "../keyColors";
 
 const columns = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }, { name: "cnt", type: "bigint" }];
 const rows = [["EU", 10, 3], ["US", 20, 5]];
@@ -97,14 +98,24 @@ describe("buildCartesianOption — Metabase-parity styling & axes", () => {
     const opt = buildCartesianOption(cols, r, base) as any;
     expect(opt.xAxis.data).toEqual(["EU", "US"]);
   });
-  it("cycles the categorical palette so each series gets a distinct color", () => {
+  it("takes each series' colour from its NAME, not its position (Metabase parity)", () => {
     const opt = buildCartesianOption(cols, rows, { ...base, yMetrics: ["rev", "cnt"] }) as any;
-    expect(opt.series[0].itemStyle.color).toBe(SERIES_PALETTE[0]);
-    expect(opt.series[1].itemStyle.color).toBe(SERIES_PALETTE[1]);
+    const byName = colorsForKeys(["rev", "cnt"]);
+    expect(opt.series[0].itemStyle.color).toBe(byName.rev);
+    expect(opt.series[1].itemStyle.color).toBe(byName.cnt);
+    // Distinct, and NOT the first two palette slots — which is what a positional rule would give.
+    expect(byName.rev).not.toBe(byName.cnt);
+    expect(opt.series[0].itemStyle.color).not.toBe(SERIES_PALETTE[0]);
   });
-  it("colours a lone series with the summarize green (Metabase parity)", () => {
+  it("gives a lone series its hashed colour too — there is no lone-series rule", () => {
+    // This asserted `SUMMARIZE_COLOR` and called it Metabase parity. Measured on identical data,
+    // Metabase draws a single-metric card in the colour its column NAME hashes to; the green is
+    // its `success` colour, reserved for names like "profit". A chart's colours must not depend on
+    // how many series happen to be on it, or the same column changes colour when another is added.
     const opt = buildCartesianOption(cols, rows, base) as any; // single metric
-    expect(opt.series[0].itemStyle.color).toBe(SUMMARIZE_COLOR);
+    expect(opt.series[0].itemStyle.color).toBe(colorsForKeys(["rev"]).rev);
+    // …and it is the same ink the two-series card above gave it.
+    expect(opt.series[0].itemStyle.color).toBe(colorsForKeys(["rev", "cnt"]).rev);
   });
   it("bar series carry barWidth", () => {
     const opt = buildCartesianOption(cols, rows, base) as any;
@@ -417,10 +428,11 @@ describe("buildCartesianOption — per-series color (Metabase parity)", () => {
   it("overrides a metric series colour by series name", () => {
     const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev", "cnt"], seriesColors: { cnt: "#ff0000" } }) as any;
     expect(opt.series.find((s: any) => s.name === "cnt").itemStyle.color).toBe("#ff0000");
-    // untouched series keep their palette slot
-    expect(opt.series.find((s: any) => s.name === "rev").itemStyle.color).toBe(SERIES_PALETTE[0]);
+    // The untouched series keeps the colour its own name hashes to.
+    expect(opt.series.find((s: any) => s.name === "rev").itemStyle.color)
+      .toBe(colorsForKeys(["rev", "cnt"], { cnt: "#ff0000" }).rev);
   });
-  it("override beats the single-series summarize green", () => {
+  it("an explicit colour beats the one a lone series' name hashes to", () => {
     const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev"], seriesColors: { rev: "#123456" } }) as any;
     expect(opt.series[0].itemStyle.color).toBe("#123456");
   });
