@@ -165,6 +165,25 @@ const pad = (label: string) => ` ${label} `;
  *   3. The caller's widest datum is an ABSOLUTE magnitude on all three charts, so a leading minus
  *      sign is not counted.
  *
+ * AND ONE THAT CUTS THE OTHER WAY, which is not a fourth item on that list because it makes the
+ * estimate too SMALL rather than too large — the gutter is over-charged and the plot comes out
+ * narrower than it is. Case 1 above is this one's mirror and stops half way: a value axis draws
+ * ROUND TICKS, and the caller hands over its widest DATUM, so under compact formatting the drawn
+ * tick is routinely the SHORTER string. Measured on the ZZ Chart Parity line card (193px, revenue
+ * peaking at 24,730): the fitter is charged `formatValue(24730, {compact}) = "24.7K"` at 34.6px
+ * while ECharts settles on ticks of 0/5K/10K/15K/20K/"25K" — 24.2px, verified by rendering the
+ * built option through real ECharts — so 10.4px of a ~119px plot is reserved and never used. It is
+ * decisive there: with it the axis misses the last stride by 0.86px and is HIDDEN; without it the
+ * same axis clears by 9.5px and draws "January 2026". The waterfall on the same data is charged
+ * "205K" and draws "250K", both 32.3px, so it does not pay this at all — which is why two charts of
+ * one dataset can still differ at one card width with nothing wrong in `strideThatFits`.
+ *
+ * NOT FIXED HERE, and this is the same boundary the paragraph below draws: closing it means knowing
+ * the ticks before they are generated, which is ECharts' `intervalScale` and not arithmetic this
+ * module can do from a datum. `options/cartesian.ts` names the same missing owner at its `ordinalX`
+ * comment. Recorded with its measurement so the next reader of a hidden axis at card width can
+ * check this before suspecting the ladder.
+ *
  * WHAT AN OVER-ESTIMATE COSTS, and it is NOT one thing — PR 03 split this in two, so read the arm
  * that matches the axis in front of you. Neither is "labels silently missing": once a fit exists the
  * axis is `decided`, and a decided axis never leaves ECharts free to drop anything.
@@ -260,6 +279,50 @@ function ticksToMeasure(labels: string[]): string[] {
  * is the last one worth testing — and it IS worth testing, because "one label or none" is a real
  * rung of the ladder (twelve months at every 12th is "January 2026" alone) and not a degenerate
  * case to skip.
+ *
+ * THAT LAST RUNG IS BUDGETED DIFFERENTLY FROM THE ONES BELOW IT, and getting that wrong is what
+ * made two builders written to mirror each other disagree on the same axis. Both halves of the
+ * interior budget — `every * dimensionWidth` of owned axis, minus a gap of clear ink — describe a
+ * label with NEIGHBOURS. The single label this rung draws has none:
+ *
+ *   - IT CANNOT OWN MORE THAN THE PLOT. `every * dimensionWidth` runs off the end of the axis as
+ *     soon as `every` passes the bucket count, so a rung of 24 over 13 categories "offers" nearly
+ *     twice the width that exists. Hence `Math.min(every, count)`, which at this rung is the whole
+ *     plot and not a pixel more.
+ *   - IT IS NOT CHARGED THE GAP. `HORIZONTAL_TICKS_GAP` is the ink-free space demanded BETWEEN two
+ *     neighbouring labels (see the constant, and the overlap test that is its other user). Charging
+ *     it here bills a label for clearance from a neighbour that is not drawn.
+ *
+ * MEASURED, on the ZZ Chart Parity dashboard at a 193x214 card, twelve monthly buckets, both charts
+ * `xAxisUnit: "month"` and both titled "revenue" — the case this whole arm exists for. The pixels
+ * are Chrome's, at `400 13px` in the app's own `--font-sans` stack; " September 2026 " is 109.3px.
+ *
+ *   - the LINE chart has 12 categories and a 108.4px plot, so rung 12 is its last and its budget is
+ *     the plot exactly. The label plus the phantom gap asked 115.3px and lost by 6.9; no stride
+ *     fitted, the rotate ladder found 9px per category, and the axis was HIDDEN — the exact defect
+ *     PR 03 exists to fix, surviving in the charts it was written for.
+ *   - the WATERFALL appends a "Total", so it has 13 categories, rung 12 is no longer the last, and
+ *     rung 24 was tested with a 204px budget against a 110.7px plot. It "fitted", and the axis drew
+ *     "January 2026" correctly — by accident, on a budget that could not exist.
+ *
+ * So the visible difference between the two was decided by whether a chart appends a Total, which is
+ * a fact about a chart's data shape and has no business deciding whether a date axis is legible. It
+ * cut both ways at once: the waterfall accepted a rung it had not really measured, and the line
+ * chart was refused one it had. Both arms above are needed to close it — dropping the phantom gap
+ * alone leaves the two disagreeing at any width narrow enough for the min to bite, and clamping
+ * alone hides the waterfall's label rather than restoring the line chart's.
+ *
+ * WHAT THAT FIXES AND WHAT IT DOES NOT, on those same two cards, because a fix reported by the
+ * defect it names rather than by the pixels it leaves is how the next reader gets misled:
+ *
+ *   - the waterfall keeps its label and now earns it — 109.3px of single label against a 110.7px
+ *     plot, a rung whose budget is the plot rather than twice it.
+ *   - the LINE CHART IS STILL HIDDEN, by 0.86px. Its remaining margin is not this function's: it is
+ *     charged a gutter for "24.7K" where its value axis draws "25K", 10.4px of plot that exists and
+ *     is not counted (see `estimatePlotWidth`, the arm that cuts the other way). Charge the drawn
+ *     tick and the same rung clears by 9.5px. So the two builders now AGREE — they measure the same
+ *     label against the same rule — and what separates their answers is the 2.25px their two gutter
+ *     strings differ by, which is an input, not a divergence.
  */
 function strideThatFits(
   boundary: XLabelBoundary,
@@ -272,11 +335,15 @@ function strideThatFits(
   // `namesAPeriod` guard: a zero-width candidate would otherwise "fit" every stride and thin an
   // ordinal axis on the strength of having measured nothing.
   if (widestLabel === "" || steps.length === 0) return undefined;
-  const needed = widthOf(widestLabel) + HORIZONTAL_TICKS_GAP;
+  const width = widthOf(widestLabel);
   for (const every of steps) {
     if (every < 2) continue;
-    if (needed <= every * dimensionWidth) return every;
-    if (every >= count) break;
+    // At or past the count this rung draws index 0 and nothing else — see the two arms above for
+    // what that changes, and why it is also the last rung worth testing.
+    const alone = every >= count;
+    const budget = Math.min(every, count) * dimensionWidth;
+    if (width + (alone ? 0 : HORIZONTAL_TICKS_GAP) <= budget) return every;
+    if (alone) break;
   }
   return undefined;
 }

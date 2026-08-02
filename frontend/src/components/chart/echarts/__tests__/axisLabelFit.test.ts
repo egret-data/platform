@@ -250,6 +250,63 @@ describe("fitXLabels", () => {
     });
 
     /**
+     * THE SINGLE LABEL IS NOT CHARGED CLEARANCE FROM A NEIGHBOUR IT DOES NOT HAVE — the gap arm of
+     * the last rung's budget in `strideThatFits`, and the half that decided the live defect.
+     *
+     * Both cases are the same axis at a plot four pixels apart, bracketing the padded label's own
+     * 128px from each side. Reinstating `HORIZONTAL_TICKS_GAP` on this rung turns the first into
+     * `hide`, because 130 sits inside the 128–134 window the phantom gap opens; without the
+     * bracket's second half the rule could be "never budget anything at the last rung", which the
+     * 126px case refuses.
+     *
+     * The window is not academic. Measured in Chrome at 400 13px in the app's own `--font-sans`
+     * stack, on the ZZ Chart Parity card: " September 2026 " is 109.3px against a 108.4px plot, so
+     * the axis was refused its last rung by 6.9px, of which 6 were clearance from a neighbour that
+     * is not drawn.
+     */
+    it("does not charge a between-labels gap to the rung that draws one label", () => {
+      expect(thin(MONTHS, 130, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 12 });
+      // 126 -> 10.5: the label itself does not fit the plot, so there is nothing to draw upright.
+      expect(thin(MONTHS, 126, MONTH_BOUNDARY)).toEqual({ kind: "hide" });
+    });
+
+    /**
+     * A LABEL CANNOT OWN MORE AXIS THAN THERE IS — the `Math.min` arm of the same budget.
+     *
+     * Thirteen categories, because that is what a waterfall of twelve months has: it appends a
+     * "Total". Rung 12 is then no longer the last, and rung 24 was budgeted at `24 x dimensionWidth`
+     * — 184px of an axis 100px wide — so a label needing 128px "fitted" a plot that could not hold
+     * it. Clamped to the plot it does not, and the axis falls through to PR 02's ladder as it should.
+     */
+    it("budgets a stride past the bucket count against the plot, not against the stride", () => {
+      const withTotal = [...MONTHS, "Total"];
+      expect(thin(withTotal, 100, MONTH_BOUNDARY)).toEqual({ kind: "hide" });
+    });
+
+    /**
+     * THE REGRESSION THIS PAIR WAS FOUND THROUGH, stated as the property rather than as two widths:
+     * appending one non-period category must not decide whether the axis is thinned at all.
+     *
+     * On the live dashboard it did. Twelve monthly buckets on a 193x214 card: the line chart's last
+     * rung was 12, its budget the plot exactly, and the padded name plus a phantom gap lost by a
+     * third of a pixel — no stride, rotate ladder, axis HIDDEN. The waterfall of the same twelve
+     * months had thirteen categories, so rung 24 was reachable, and its 208px budget against a 113px
+     * plot "fitted" — the axis drew "January 2026", correctly, for a reason that was not true. Same
+     * unit, same card, same period names, opposite answers.
+     *
+     * 130px is the width where the old code reproduced exactly that split (12 -> hide, 13 -> thin at
+     * 24). The two still choose different RUNGS, which is not the defect and is not asserted: 12 of
+     * twelve and 24 of thirteen both draw index 0 and nothing else. What has to agree is that the
+     * axis is thinned rather than hidden.
+     */
+    it("thins or does not thin regardless of one extra non-period category", () => {
+      const bare = thin(MONTHS, 130, MONTH_BOUNDARY);
+      const withTotal = thin([...MONTHS, "Total"], 130, MONTH_BOUNDARY);
+      expect(bare.kind).toBe("thin");
+      expect(withTotal.kind).toBe("thin");
+    });
+
+    /**
      * PR 02'S LADDER, UNCHANGED, when no stride fits — this is the half that makes the fourth
      * outcome an addition rather than a replacement. Both rungs are exercised: a plot too narrow
      * for even one label falls to `hide`, and one merely too narrow for a stride falls to `rotate`,

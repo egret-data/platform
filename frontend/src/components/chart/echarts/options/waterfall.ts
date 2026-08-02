@@ -281,6 +281,14 @@ export function buildWaterfallOption(
         //     gap absorb the difference, so this is recorded rather than fixed. Fixing it means
         //     folding the drawn labels into the candidate, which would make the stride depend on
         //     the data again — the property `widestPeriodName` exists to remove.
+        //   - IT MOVES WHICH RUNG IS THE LAST ONE. `strideThatFits` stops at the first rung at or
+        //     past the CATEGORY count, and the Total makes that count one higher — so twelve months
+        //     here reach the 24 rung where a bar chart of the same twelve stops at 12. That was a
+        //     defect until the budget was clamped: rung 24 was offered `24 x dimensionWidth`, near
+        //     twice the plot it had, so this axis thinned on the live dashboard at a width where the
+        //     line chart beside it hid. Both now measure the same single label against the same plot;
+        //     what survives is only that the two land on different RUNGS, and every rung at or past
+        //     the count draws index 0 and nothing else, so they draw the same axis.
         boundary: bucketedX
           ? { widestLabel: widestPeriodName(cfg.xAxisUnit, drawLabel), steps: boundarySteps(cfg.xAxisUnit) }
           : undefined,
