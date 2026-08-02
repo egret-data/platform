@@ -52,6 +52,19 @@ describe("periodName", () => {
   });
 
   /**
+   * The two offset forms the zone regex's `:?` is there for, and the one it deliberately does not
+   * take. Without these the `:?` is unbought — dropping it leaves every test above passing.
+   */
+  it("takes ISO 8601's basic offset form, and leaves the one dayjs rejects alone", () => {
+    expect(periodName("hour", "2026-01-01T13:00:00+0530")).toBe("January 1, 2026, 1:00 PM");
+    expect(periodName("hour", "2026-01-01T13:00:00-0800")).toBe("January 1, 2026, 1:00 PM");
+    // Bare `±HH` is legal ISO 8601 that dayjs will not parse, so it falls through to the raw
+    // string rather than being read in the viewer's zone — the safe direction, and the reason
+    // this is recorded rather than patched.
+    expect(periodName("hour", "2026-01-01T13:00:00+05")).toBe("2026-01-01T13:00:00+05");
+  });
+
+  /**
    * Total, like `temporalLabel` beside it: an unknown unit, a value that is not a date, and an
    * extraction unit all fall through to the raw string rather than throwing inside a formatter
    * that ECharts calls per label.

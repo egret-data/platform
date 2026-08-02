@@ -80,8 +80,9 @@ const PERIOD_FORMAT: Record<string, string | undefined> = {
  * `frontend/src/metabase/utils/time-dayjs.ts:95`, character class included, along with two of its
  * quirks that are recorded rather than fixed so the two stay diffable:
  *
- *   - `:?` also accepts the basic form `±HHMM`, which ISO 8601 allows; bare `±HH`, which it also
- *     allows, matches neither and is read in the viewer's zone.
+ *   - `:?` also accepts the basic form `±HHMM`, which ISO 8601 allows. Bare `±HH`, which it also
+ *     allows, matches neither — and dayjs rejects that form outright, so such a value does not get
+ *     read in the wrong zone, it falls through to the raw string. Both are covered by tests.
  *   - CASE-SENSITIVE. A lowercase `z` is legal RFC 3339 and falls through to a local parse. Trino
  *     and StarRocks both emit uppercase, which is why this has never been seen, and Metabase has
  *     the identical blind spot.
