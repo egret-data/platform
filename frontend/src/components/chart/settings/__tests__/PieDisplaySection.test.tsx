@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { PieDisplaySection } from "../PieDisplaySection";
+import { buildPieOption } from "@/components/chart/echarts/options/pie";
 
 describe("PieDisplaySection", () => {
   // Legend and Show labels both default from buildPieOption at render time (a pie's colours
@@ -286,5 +287,81 @@ describe("PieDisplaySection", () => {
     expect((screen.getByLabelText("Decimal places") as HTMLInputElement).value).toBe("3");
     fireEvent.change(screen.getByLabelText("Decimal places"), { target: { value: "" } });
     expect(onChange).toHaveBeenCalledWith({ decimals: undefined });
+  });
+});
+
+/**
+ * THE SWATCH IS THE COLOUR THE PIE DRAWS.
+ *
+ * The default was `SERIES_PALETTE[i % length]` — a by-POSITION rule the renderer stopped following
+ * when ring 0 moved to `colorsForKeys`. So these tests BUILD THE PIE and read ring 0's colours back,
+ * rather than comparing the panel to `colorsForKeys` (which would prove wiring, not agreement).
+ */
+describe("PieDisplaySection — the slice swatch and the slice the chart draws", () => {
+  const cols = [{ name: "category", type: "varchar" }, { name: "m", type: "double" }];
+  /**
+   * Value-desc, which is ring 0's own emission order, and deliberately NOT alphabetical: on the hash
+   * path `colorsForKeys` assigns in sorted key order and so returns its Record in sorted order, and
+   * a pre-sorted fixture makes a by-name lookup and a by-position one hand back the same sequence.
+   * "Gadget" and "Widget" also hash onto one slot, so this walks the collision path too.
+   */
+  const rows: unknown[][] = [["Widget", 40], ["Doohickey", 30], ["Gizmo", 20], ["Gadget", 10]];
+  /** What `PieDisplayControl` (viz/simple.tsx) hands the panel: the distinct raw values of the first
+   *  dimension, in row order. */
+  const SLICES = ["Widget", "Doohickey", "Gizmo", "Gadget"];
+
+  /** Ring 0's colours, keyed by slice name. */
+  const pieColors = (cfg: Record<string, unknown> = {}): Record<string, string> => {
+    const opt = buildPieOption(cols, rows, { dimensions: ["category"], metric: "m", ...cfg }) as unknown as {
+      series: { data: { name: string; itemStyle: { color: string } }[] }[];
+    };
+    return Object.fromEntries(opt.series[0].data.map((d) => [d.name, d.itemStyle.color.toLowerCase()]));
+  };
+  /** A native `<input type="color">` normalises its value to lower-case (HTML spec), which is also
+   *  what the panel writes back — so both sides are compared in that casing. */
+  const swatch = (name: string) => (screen.getByLabelText(`color ${name}`) as HTMLInputElement).value.toLowerCase();
+
+  it("shows each slice the colour the pie draws it in, not the palette slot of its row", () => {
+    const chart = pieColors();
+    expect(Object.keys(chart)).toEqual(SLICES); // the emission order this pins against
+    render(<PieDisplaySection config={{ dimensions: ["category"] }} onChange={() => {}} slices={SLICES} />);
+    for (const name of SLICES) expect(swatch(name)).toBe(chart[name]);
+  });
+
+  it("keeps a slice's swatch when the rows are reordered", () => {
+    const { rerender } = render(<PieDisplaySection config={{ dimensions: ["category"] }} onChange={() => {}} slices={SLICES} />);
+    const before = Object.fromEntries(SLICES.map((n) => [n, swatch(n)]));
+    rerender(<PieDisplaySection config={{ dimensions: ["category"] }} onChange={() => {}} slices={[...SLICES].reverse()} />);
+    for (const name of SLICES) expect(swatch(name)).toBe(before[name]);
+  });
+
+  /** `sliceColors` reaches ring 0 as `colorsForKeys`' `existing` map, where an entry CONSUMES its
+   *  colour — so a pin moves whichever slice would have hashed onto it, in the chart and here. */
+  it("folds a pinned colour in, so the slice it displaced moves here too", () => {
+    const sliceColors = { Gadget: "#98d9d9" }; // SERIES_PALETTE[6], lower-cased as the picker gives it back
+    const chart = pieColors({ sliceColors });
+    render(<PieDisplaySection config={{ dimensions: ["category"], sliceColors }} onChange={() => {}} slices={SLICES} />);
+    for (const name of SLICES) expect(swatch(name)).toBe(chart[name]);
+    expect(new Set(SLICES.map(swatch)).size).toBe(4); // nobody was handed the pinned ink twice
+  });
+
+  /**
+   * A hidden slice's rows are dropped before the ring is built (buildPieRings), so it is not a key
+   * and spends no colour: the slices that remain must show what the chart now draws them in.
+   *
+   * GADGET IS THE ONE TO HIDE, not Widget. The two collide on one palette slot, and "Gadget" sorts
+   * first and takes it while "Widget" walks along — so hiding Gadget frees that slot and MOVES
+   * Widget, which is the only way this fixture can tell a re-keyed panel from one that quietly kept
+   * every name. Hiding Widget instead leaves the other three exactly where they were, and this test
+   * passed with the filter deleted.
+   */
+  it("re-keys on the slices that survive a hide, as the chart does", () => {
+    const chart = pieColors({ hiddenSlices: ["Gadget"] });
+    expect(Object.keys(chart)).not.toContain("Gadget");
+    expect(chart["Widget"]).not.toBe(pieColors()["Widget"]); // the premise: hiding Gadget moved it
+    render(<PieDisplaySection config={{ dimensions: ["category"], hiddenSlices: ["Gadget"] }} onChange={() => {}} slices={SLICES} />);
+    for (const name of Object.keys(chart)) expect(swatch(name)).toBe(chart[name]);
+    // …and the hidden row still shows something: what it will be given when it is turned back on.
+    expect(swatch("Gadget")).toBe(pieColors()["Gadget"]);
   });
 });

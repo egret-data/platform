@@ -140,7 +140,11 @@ function SeriesListControl({ kind, config, onChange, resultColumns, rows }: VizC
       defaultDisplay={kind === "combo" && stackModeOf({ kind, stacked: config.stacked, normalized: config.normalized }) === "none"
         ? (i) => (i === 0 ? "line" : "bar")
         : undefined}
-      defaultColor={(i) => defaultSeriesColor(!!config.series, names.length, i)}
+      // The names the BUILDER keys its colours on, not a count and a flag to re-derive a rule from:
+      // `names` is `cartesianSeriesNames`, which is the y-metrics or the breakout values, exactly
+      // what `buildCartesianOption` hands `colorsForKeys`. `seriesColors` goes with them because an
+      // override consumes its slot there — see defaultSeriesColor.
+      defaultColor={(i) => defaultSeriesColor(names, i, config.seriesColors)}
       onChange={onChange}
     />
   );

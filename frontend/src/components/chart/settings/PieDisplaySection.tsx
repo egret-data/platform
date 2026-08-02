@@ -1,5 +1,5 @@
 import type { PieConfig } from "@/api/charts";
-import { SERIES_PALETTE } from "@/components/chart/echarts/palette";
+import { colorsForKeys } from "@/components/chart/echarts/keyColors";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
@@ -43,6 +43,41 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
   const ranked = [...slices].sort(
     (a, b) => (rank.get(a) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b) ?? Number.MAX_SAFE_INTEGER),
   );
+  /**
+   * The swatch a slice shows before any override — buildPieRings' own answer, asked the same way.
+   *
+   * It used to be `SERIES_PALETTE[i % length]`, a by-POSITION rule the renderer stopped following
+   * when ring 0 moved to `colorsForKeys`: the panel then offered a colour the pie did not draw, and
+   * a slice's swatch moved every time another slice was reordered.
+   *
+   * The key set is the slices the chart DRAWS. `hiddenSlices` rows are dropped before the ring is
+   * built at all (buildPieRings), so a hidden slice is not a key and spends no colour — a hidden
+   * row's own swatch therefore shows what it will be given when it comes back, which is its name
+   * added to that set. `sliceColors` goes in as `existing` for the same reason it does there: an
+   * override consumes its slot, so the slice that would have hashed onto it moves along.
+   *
+   * TWO DIVERGENCES REMAIN, both from the panel not having the data the builder does, and neither
+   * introduced here:
+   *  - slices below the fold threshold are merged into "Other" by `buildSlices` and drop out of the
+   *    key set. This panel is handed slice NAMES only, not their values, so it cannot run that fold.
+   *    (The synthetic bucket itself is not a problem: it is created inside the builder and never
+   *    reaches `slices`, so the panel excludes it by construction — and a real dimension value that
+   *    happens to be the string "Other" is a genuine key on both sides, which is why the builder
+   *    identifies the bucket by its OTHER_KEY sentinel rather than by name.)
+   *  - with a column format on the pie's dimension, the builder keys ring 0 on the FORMATTED label
+   *    while this panel is handed raw values. That mismatch is older and wider than colour — it
+   *    already governs which slice a rename, a hide or a pinned colour lands on.
+   *
+   * On a NESTED pie the swatch is the family's BASE colour, which ring 0 is then drawn as the dark
+   * variant of (`ring0Variant`). That is deliberate rather than a third divergence: whatever this
+   * control shows is what a nudge of the picker stores, and the builder reads a stored colour as the
+   * base. Showing the darkened one would make the pie darken it again on every edit.
+   */
+  const drawn = ranked.filter((n) => !config.hiddenSlices?.includes(n));
+  const drawnColors = colorsForKeys(drawn, config.sliceColors);
+  const defaultSliceColor = (name: string) =>
+    drawnColors[name] ?? colorsForKeys(ranked.filter((n) => n === name || !config.hiddenSlices?.includes(n)), config.sliceColors)[name];
+
   const move = (i: number, delta: number) => {
     const j = i + delta;
     if (j < 0 || j >= ranked.length) return;
@@ -167,7 +202,7 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
                   type="color"
                   aria-label={`color ${name}`}
                   className="h-7 w-8 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
-                  value={config.sliceColors?.[name] ?? SERIES_PALETTE[i % SERIES_PALETTE.length]}
+                  value={config.sliceColors?.[name] ?? defaultSliceColor(name)}
                   onChange={(e) => onChange({ sliceColors: { ...config.sliceColors, [name]: e.target.value } })}
                 />
                 <Input
