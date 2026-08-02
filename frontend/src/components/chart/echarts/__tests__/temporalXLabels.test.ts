@@ -314,7 +314,7 @@ describe("a bucketed temporal x-axis thins to period boundaries", () => {
 
   /**
    * `interval` COUNTS THE LABELS SKIPPED, NOT THE STRIDE. ECharts reads it as
-   * `step = max((interval || 0) + 1, 1)` (`echarts/lib/scale/helper.js:236`), so every 6th is 5. An
+   * `step = max((interval || 0) + 1, 1)` (`echarts/lib/scale/helper.js:235`), so every 6th is 5. An
    * off-by-one here draws January, June and November instead of January and July, which still looks
    * like a plausible date axis in a screenshot — hence an assertion rather than an eyeball.
    */
@@ -344,8 +344,11 @@ describe("a bucketed temporal x-axis thins to period boundaries", () => {
     }
   });
 
-  /** A stride of 1 is every label, so it must write 0 and not -1 — which ECharts' `|| 0` would
-   *  silently read as 0 anyway, hiding the arithmetic error rather than the behaviour. */
+  /** A stride of 1 is every label, so it must write 0 and not -1. ECharts would render the two the
+   *  same — `-1` is truthy, so the `|| 0` never fires; it is the `Math.max(…, 1)` in the SAME
+   *  expression (`helper.js:235`) that clamps the step back to 1. So the behaviour is safe either
+   *  way and only the arithmetic is wrong, which is exactly the kind of error that survives a
+   *  screenshot and then stops being harmless the day the expression changes. */
   it("writes 0 for a stride of one rather than a negative interval", () => {
     fitResult.value = { kind: "thin", rotate: 0, every: 1 };
     expect(axisOf(buildWithSize({ xAxisUnit: "month" })).axisLabel?.interval).toBe(0);

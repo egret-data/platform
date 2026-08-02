@@ -1027,7 +1027,7 @@ function baseOption(
       fontSize: CHART_THEME.axisFontSize, color: axisLabelColor,
       // `fit.every - 1`, NOT `fit.every`: ECharts' category `interval` counts the labels SKIPPED
       // between two drawn ones, not the stride. `ordinalScaleCreateTicks`
-      // (`echarts/lib/scale/helper.js:236`) reads it as `step = max((categoryInterval || 0) + 1, 1)`
+      // (`echarts/lib/scale/helper.js:235`) reads it as `step = max((categoryInterval || 0) + 1, 1)`
       // and walks `tickValue += step` from the extent's start — so `0` is every label, which is what
       // the `decided` arm below has always meant, and every 6th is `5`. Off by one here is invisible
       // in a screenshot: it draws Jan/Jun/Nov instead of Jan/Jul, which looks like a date axis.
@@ -1035,27 +1035,21 @@ function baseOption(
       // Two more things checked in that source rather than assumed, because both would undo the
       // "every drawn label is a period boundary" property this rests on. The stride starts at INDEX
       // ZERO — `startTick` is only re-aligned when the extent starts past 0, i.e. under a data zoom
-      // this axis does not have (`:238-241`) — so the first bucket is always one of the drawn ones.
-      // And the last index is appended `offInterval` (`:250-252`) but then IGNORED by `AxisBuilder`
+      // this axis does not have (`:239-241`) — so the first bucket is always one of the drawn ones.
+      // And the last index is appended `offInterval` (`:251-253`) but then IGNORED by `AxisBuilder`
       // while `showMinLabel`/`showMaxLabel` are unset, which they are (`AxisBuilder.js:675`); so a
       // December that is not on the stride is not quietly drawn beside July. The tick MARKS follow
       // the labels for free: `axisTick` carries no `interval`, which defaults to "auto", and "auto"
       // on a tick model means "whatever the labels decided" (`axisTickLabelBuilder.js:182-187`).
       //
-      // AND THIS IS NOT PR 02's RULE BEING UNDONE, which is the reading to head off — PR 02 banned
-      // `interval: "auto"` three weeks ago and the ban stands. What "auto" does is drop WHICHEVER
-      // labels happen to collide: an arbitrary subset, chosen by geometry, that reads as missing
-      // data because the survivors mean nothing. A regular stride over BUCKETS is the opposite. The
-      // categories here are periods, so every drawn label is a period boundary and they are all the
-      // same distance apart — "January 2026", "July 2026" — which is exactly what Metabase's tick
-      // interval produces (`computeTimeseriesTicksInterval`) and how a reader already expects a date
-      // axis to behave. It is reachable ONLY through `boundary` above, i.e. only when
-      // `namesAPeriod(cfg.xAxisUnit)`; an ordinal axis still gets all-or-nothing. Restoring a flat
-      // `interval: 0` here would not restore PR 02 — it would put the one-third-width line, area and
-      // combo cards back to drawing NO x labels at all, which is the defect PR 03 exists for.
+      // AND THIS IS NOT PR 02's RULE BEING UNDONE, which is the reading to head off: "auto" drops
+      // whichever labels happen to collide, an arbitrary subset, while a stride over buckets draws
+      // period boundaries — the full argument, and why restoring a flat `interval: 0` here would
+      // NOT restore PR 02, is on the `thin` arm of `XLabelFit` in `../axisLabelFit.ts`, which is
+      // its one copy.
       interval: fit?.kind === "thin" ? fit.every - 1 : decided ? (0 as const) : ("auto" as const),
       rotate,
-      // The third answer the ladder can give: when even a rotated label would eat 70% of the
+      // The last answer the ladder can give: when even a rotated label would eat 70% of the
       // card's height, Metabase draws no axis rather than a wall of text.
       show: fit?.kind !== "hide",
       // `drawLabel`, defined above so the FITTER measures this same string. Do not inline it back:

@@ -13,8 +13,13 @@
  * PR 03 ADDS A FOURTH ANSWER, and it is not a hole in the third. A BUCKETED TEMPORAL axis — and only
  * one of those, see `XLabelBoundary` — may draw every Nth label upright, where the drawn ones are
  * regular period boundaries. That is not the arbitrary subset banned above: "auto" keeps whichever
- * labels happen not to collide, while a stride keeps January and July. The full argument is on the
- * `thin` arm of `XLabelFit`, where the next reader of `interval: N` will be looking.
+ * labels happen not to collide, while a stride keeps January and July.
+ *
+ * The full argument is on the `thin` arm of `XLabelFit` below, and it is the ONE copy. The reader
+ * who lands on `interval: 5` in a built option lands in `options/cartesian.ts` instead, so that line
+ * carries a one-sentence version and a pointer back here — plus the ECharts semantics the stride
+ * depends on, which are load-bearing where they are written and belong nowhere else. Restating the
+ * argument in both files is the drift this module refuses a second gap constant to avoid.
  */
 
 import { measureText, type TextMeasurer } from "@/components/chart/measure-text";
@@ -160,11 +165,19 @@ const pad = (label: string) => ` ${label} `;
  *   3. The caller's widest datum is an ABSOLUTE magnitude on all three charts, so a leading minus
  *      sign is not counted.
  *
- * WHAT AN OVER-ESTIMATE COSTS, stated exactly, because it is no longer what it was before this
- * change: once a fit exists the axis is `decided` and `interval` is `0`, so ECharts can no longer
- * drop anything. The failure is now every label drawn upright and OVERLAPPING its neighbour, not
- * labels silently missing. Different look, different diagnosis — that is what to watch for when
- * comparing against Metabase, and if it appears, this estimate is what to tighten.
+ * WHAT AN OVER-ESTIMATE COSTS, and it is NOT one thing — PR 03 split this in two, so read the arm
+ * that matches the axis in front of you. Neither is "labels silently missing": once a fit exists the
+ * axis is `decided`, and a decided axis never leaves ECharts free to drop anything.
+ *
+ *   - ORDINAL axis, unchanged since PR 02: `interval` is `0`, so the failure is every label drawn
+ *     upright and OVERLAPPING its neighbour.
+ *   - BUCKETED TEMPORAL axis, new in PR 03: the axis may be thinned, and an over-estimate buys a
+ *     stride one rung too CHEAP — every 2nd month where every 3rd was needed. The drawn labels then
+ *     overlap too, but there are fewer of them, so it looks like a correctly thinned axis whose
+ *     names happen to touch rather than like a crowded one. Different diagnosis, and the fix is the
+ *     same: tighten this estimate, not the stride ladder.
+ *
+ * Either way, overlapping labels in the live comparison point HERE and not at `fitXLabels`.
  *
  * Do not "improve" this by turning `containLabel` off and computing the grid explicitly. That is
  * Metabase's design and it is defensible, but it moves the margins of every cartesian chart in the
@@ -221,7 +234,15 @@ function ticksToMeasure(labels: string[]): string[] {
  * Metabase's own `TICK_BUFFER_PIXELS` of 10: this module already answers "how much ink-free space
  * between two neighbouring labels" with 6, above, and two constants for one question in one file is
  * how they drift apart. Padding matches upstream, which measures
- * `getPaddedAxisLabel(formatter(date))` at `:298` — the same pessimism the overlap test uses.
+ * `getPaddedAxisLabel(formatter(date))` at `timeseries.ts:290-291` — the same pessimism the overlap
+ * test uses.
+ *
+ * WHICH WAY THE 4px CUTS, since it is a real parity difference and not a rounding detail: Metabase
+ * fits `floor(width / (widest + 10))` ticks and egret `floor(width / (widest + 6))`, so egret's
+ * budget is the looser one and egret thins LESS aggressively. At a boundary width egret draws every
+ * 2nd month where Metabase draws every 3rd — more labels, more tightly spaced. That is the
+ * difference a side-by-side will photograph; if it reads as crowded rather than as generous, this
+ * constant is the one to reconcile.
  *
  * THREE OF METABASE'S RULES ARE DELIBERATELY NOT PORTED, since each would be wrong here:
  *
@@ -272,9 +293,9 @@ export function fitXLabels({
   /** The drawable width the categories share — INNER, after the grid insets and the value-axis
    *  gutter. The caller's estimate leans UNDER in the common case and is the better direction:
    *  erring small rotates a label that would have fitted, which is mildly ugly and still readable.
-   *  Erring large leaves labels upright that should have turned — and since a fit makes the axis
-   *  `decided` (`interval: 0`), they are then drawn OVERLAPPING rather than dropped. See
-   *  `estimatePlotWidth` above for the three cases where it does lean over. */
+   *  Erring large leaves labels upright that should have turned — or, on a bucketed axis, thinned
+   *  one rung less than they needed — and since a fit makes the axis `decided`, they are then drawn
+   *  OVERLAPPING rather than dropped. See `estimatePlotWidth` above, which states both failures. */
   plotWidth: number;
   /** The container's height, Metabase's `outerHeight` — deliberately NOT the inner counterpart of
    *  `plotWidth`, which is why it is not called `plotHeight`. The 70% guard is a share of the whole

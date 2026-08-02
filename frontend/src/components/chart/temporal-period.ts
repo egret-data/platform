@@ -232,10 +232,29 @@ function representativeValues(unit: string): string[] {
   return out;
 }
 
-/** Memoised: the answer is a pure function of the unit and there are seven of them, while the work
- *  is not free — `hour` is 168 parse-and-format round trips, ~1.3ms. Task 3 calls this from a
- *  layout path that re-runs on every resize, and three lines here beat reopening this module later
- *  to fix a hot loop in that one. */
+/**
+ * Memoised, but ONLY FOR THE DEFAULT FORM — and since this comment used to claim otherwise, the
+ * correction is the point of it. A `draw` mapper is a closure the axis builds fresh per render, so
+ * there is no key this Map could hold it under; `widestPeriodName` reads and writes here only when
+ * `draw` is absent.
+ *
+ * The sole production caller (`options/cartesian.ts`, the `boundary:` line) PASSES `draw`. So this
+ * cache does not serve the layout path — an earlier version of this comment said it did, naming
+ * exactly the caller that bypasses it, which is the shape of a performance claim nobody rechecks.
+ * What it serves now is the plain `widestPeriodName(unit)` form and this module's own tests.
+ *
+ * WHAT THE LAYOUT PATH THEREFORE PAYS, measured rather than estimated (dayjs 1.11.21, Node 22, per
+ * call, warm): 0.01ms at `year`, 0.03ms at `quarter`, 0.06ms at `month` and `week`, 0.36ms at `day`,
+ * 0.83ms at `hour` and `minute`. `EChartsRenderer` coalesces to one rebuild per animation frame, so
+ * the worst case is ~0.8ms of a 16.7ms frame for the whole of a drag-resize, on the two bucketings
+ * that are rarest — and it sits beside a full option rebuild and an ECharts re-render that cost
+ * considerably more. Left uncached deliberately: a cache keyed on anything less than the closure's
+ * real inputs is a correctness risk, and this is not the frame budget's problem.
+ *
+ * If it ever becomes one, the key is constructible at the call site rather than here — `drawLabel`'s
+ * output depends only on `cfg.xAxisUnit`, `cfg.xAxis`, `cfg.columnSettings?.[cfg.xAxis]` and
+ * `cfg.xAxisType`.
+ */
 const WIDEST_BY_UNIT = new Map<string, string>();
 
 /**
@@ -261,11 +280,13 @@ const WIDEST_BY_UNIT = new Map<string, string>();
  * VALUES through it. The default reproduces the plain period name, which is what the name says and
  * what this module's own tests pin.
  *
- * COST, since the default is memoised and the `draw` form cannot be — the closure is fresh per
- * build, so there is no sound key. It is one parse-and-format per representative value: 12 at
- * `year`/`quarter`/`month`/`week`, 84 at `day`, 168 at `hour`/`minute` (~1.3ms). Bounded by the
- * unit rather than by the data, and the one caller pays it only on a bucketed temporal axis that
- * has a measured size — never on an ordinal axis and never on an unmeasured container.
+ * COST — one parse-and-format per representative value, and `representativeValues` collapses hard at
+ * the coarse units rather than always producing twelve: **1** at `year` (one month, one day, one
+ * hour), **4** at `quarter`, **12** at `month` and `week`, **84** at `day`, **168** at `hour` and
+ * `minute`. Bounded by the unit rather than by the data, and the one caller pays it only on a
+ * bucketed temporal axis that has a measured size — never on an ordinal axis and never on an
+ * unmeasured container. The `draw` form is not memoised; `WIDEST_BY_UNIT` above says why, what the
+ * layout path actually pays in milliseconds, and where a key would go if it ever mattered.
  *
  * TOTAL, and "" for anything that is not a truncation unit: a caller measuring "" gets a width of
  * zero, which is a visible nonsense rather than a plausible wrong answer. That is also the SECOND
@@ -298,7 +319,7 @@ export function widestPeriodName(
  * them — `DATA_TIMESERIES_INTERVALS` filters them back out — and the tick chooser is what this is.
  *
  * Order is load-bearing twice over: `boundarySteps` finds its starting rung by unit-with-count-1
- * (Metabase's `_.findIndex`, `:229-236`) and then walks UP, taking the first stride that fits.
+ * (Metabase's `_.findIndex`, `:225-230`) and then walks UP, taking the first stride that fits.
  */
 /** `"quarter"` is spelled out beside `ManipulateType` rather than folded into it because the
  *  `quarterOfYear` plugin adds `add` as a SECOND overload (`quarterOfYear.d.ts`: `add(value, unit:

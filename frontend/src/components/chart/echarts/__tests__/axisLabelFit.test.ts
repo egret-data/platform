@@ -210,7 +210,7 @@ describe("fitXLabels", () => {
      * Brackets the two constants the budget is built from, neither of which any case above can
      * detect on its own. 780 -> dimensionWidth 65, so a rung of 2 offers 130px against a budget of
      * 128 (padded) + 6 (gap) = 134 and loses; drop EITHER the padding Metabase measures with
-     * (`getPaddedAxisLabel(formatter(date))`, `timeseries.ts:298`) or the ink-free gap and 2 wins.
+     * (`getPaddedAxisLabel(formatter(date))`, `timeseries.ts:290-291`) or the ink-free gap and 2 wins.
      */
     it("budgets the padded label plus a gap, not the bare one", () => {
       expect(thin(MONTHS, 780, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 3 });
@@ -221,7 +221,7 @@ describe("fitXLabels", () => {
      * `getRepresentativeDates` rather than its data, and the one claim every other case here is
      * blind to because their widest label happens to be "September 2026" either way.
      *
-     * Three months of May–July: the widest label PRESENT is "August 2026" at 11 padded chars (88px,
+     * Three months of May–July: the widest label PRESENT is "July 2026" at 11 padded chars (88px,
      * budget 94), while the unit can still produce "September 2026" (128px, budget 134). At
      * dimensionWidth 60 a rung of 2 offers 120px — enough for the data, short for the unit. Sizing
      * on the data draws every 2nd and clips the moment the range slides to September; sizing on the
