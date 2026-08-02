@@ -164,7 +164,7 @@ export function buildSankeyOption(
       names.add(target);
     }
   }
-  // Each node states its OWN colour, cycling egret's accents. Left to itself ECharts INTERPOLATES
+  // Each node states its OWN colour, drawn from egret's accents. Left to itself ECharts INTERPOLATES
   // along the palette array for a sankey rather than picking discrete entries: measured on seven
   // nodes it drew #7EB967, #F3AF6C, #F6BF6A, #CA8AAA, #61A8B5 — five colours that are in no design
   // system, muddied versions sitting between two accents. Metabase's nodes measure as clean

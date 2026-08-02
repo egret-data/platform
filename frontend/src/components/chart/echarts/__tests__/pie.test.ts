@@ -807,6 +807,71 @@ describe("buildPieOption — a ring-0 slice takes its colour from its name", () 
       expect(ring0ColorOf(flipped, name)).toBe(ring0ColorOf(buildPie(), name));
     }
   });
+
+  /**
+   * THE SYNTHETIC "OTHER" BUCKET IS NOT A KEY.
+   *
+   * Its colour is fixed in `buildSlices` (the muted tint) and nothing ever reads a hashed one for
+   * it — but a name handed to `colorsForKeys` costs a SLOT whether or not the answer is used, and
+   * "Other" hashes onto the same slot as "Q1" and sorts before it. So including it moved Q1 off
+   * accent0 for no reason a reader could see.
+   *
+   * Whether ring 0 has an Other bucket at all is data-dependent: `buildSlices` folds whatever falls
+   * under the threshold. A real category's colour would therefore have changed when some unrelated,
+   * SMALLER category crossed into or out of the fold — the exact instability the by-name rule exists
+   * to remove, reintroduced in the one place a reader would not look for it.
+   *
+   * The two fixtures differ only in three tiny rows that fold away. Q1 is 45 in both.
+   */
+  const otherCols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+  const foldPie = (rws: unknown[][]) =>
+    buildPieOption(otherCols, rws, { dimensions: ["d"], metric: "m" }) as any;
+  /** C, D and E are each under the 2.5% fold threshold, so ring 0 gains an "Other". */
+  const WITH_OTHER: unknown[][] = [["Widget", 50], ["Q1", 45], ["C", 2], ["D", 2], ["E", 1]];
+  const WITHOUT_OTHER: unknown[][] = [["Widget", 50], ["Q1", 45]];
+
+  it("does not let the Other bucket take a real slice's colour", () => {
+    const folded = foldPie(WITH_OTHER);
+    const plain = foldPie(WITHOUT_OTHER);
+    // The premise: the fold really did happen in one case and not the other.
+    expect(ring(folded, 0).map((d: any) => d.name)).toEqual(["Widget", "Q1", "Other"]);
+    expect(ring(plain, 0).map((d: any) => d.name)).toEqual(["Widget", "Q1"]);
+    // "Other" and "Q1" hash onto the same slot, and "Other" sorts first — so a Q1 that is still
+    // accent0 here is a Q1 the synthetic bucket did not push along.
+    expect(colorsForKeys(["Widget", "Q1"]).Q1).toBe(SERIES_PALETTE[0]);
+    expect(ring0ColorOf(folded, "Q1")).toBe(SERIES_PALETTE[0]);
+    // Stated as an identity too, since that is the property: a category's colour does not depend
+    // on whether some smaller, unrelated category folded away.
+    expect(ring0ColorOf(folded, "Q1")).toBe(ring0ColorOf(plain, "Q1"));
+    expect(ring0ColorOf(folded, "Widget")).toBe(ring0ColorOf(plain, "Widget"));
+  });
+
+  it("a sliceColors entry aimed at Other neither repaints it nor costs a real slice its colour", () => {
+    // `sliceColors` reaches ring 0 as `colorsForKeys`' `existing` map, where an entry CONSUMES its
+    // colour. An "Other" entry must get no further than it did before: the bucket keeps its muted
+    // tint (it is not offered to the override at all), and no accent is spent on its behalf.
+    const pinned = foldPie(WITH_OTHER.map((r) => r)) as any;
+    const withEntry = buildPieOption(otherCols, WITH_OTHER, {
+      dimensions: ["d"], metric: "m", sliceColors: { Other: SERIES_PALETTE[0] },
+    }) as any;
+    expect(ring0ColorOf(withEntry, "Other")).toBe(ring0ColorOf(pinned, "Other"));
+    expect(ring0ColorOf(withEntry, "Other")).not.toBe(SERIES_PALETTE[0]);
+    expect(ring0ColorOf(withEntry, "Q1")).toBe(SERIES_PALETTE[0]);
+  });
+
+  /**
+   * ...and a dimension value that genuinely IS the string "Other" is a real category, not the
+   * bucket. The two are told apart by the OTHER_KEY sentinel rather than by the name (this file
+   * accepts the name collision knowingly), so excluding the bucket from the key set must not
+   * silently leave such a slice unpainted.
+   */
+  it("a real category literally named Other still hashes to a colour", () => {
+    const opt = foldPie([["Other", 60], ["Widget", 40]]);
+    expect(ring(opt, 0).map((d: any) => d.name)).toEqual(["Other", "Widget"]);
+    const byName = colorsForKeys(["Other", "Widget"]);
+    expect(ring(opt, 0).map((d: any) => d.itemStyle.color)).toEqual([byName.Other, byName.Widget]);
+    expect(SERIES_PALETTE).toContain(ring0ColorOf(opt, "Other"));
+  });
 });
 
 // Task 6 — slice curation: rename / hide / reorder the FIRST dimension's slices only

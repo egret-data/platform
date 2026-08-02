@@ -1021,14 +1021,30 @@ function buildPieRings(
   // an override takes its colour out of circulation, so neither can be worked out a slice at a time.
   // `sliceColors` goes in as `existing` — the single place ring 0's overrides are applied.
   //
-  // Every ring-0 name is a key, including the synthetic "Other" bucket: it already carries its muted
-  // colour so the `??=` below leaves it alone, and letting it hold a key of its own keeps the
-  // mapping something the settings panel and the legend can rebuild from the ring's names alone.
+  // The synthetic "Other" bucket is NOT a key. Its colour was fixed in `buildSlices` (the muted
+  // tint), so the `??=` below never reads its entry — but `colorsForKeys` would still spend a slot
+  // resolving the name, and "Other" can hash onto the slot a real category wanted. It does: with
+  // keys ["Widget", "Q1"] the quarter takes accent0; add "Other", which hashes to the same slot and
+  // sorts first, and the quarter moves to accent1 having changed nothing about itself.
+  //
+  // That matters because whether ring 0 HAS an Other bucket is data-dependent — `buildSlices` folds
+  // whatever falls under the threshold — so a real category's colour would shift when some
+  // unrelated, smaller category crossed into or out of the fold. That is precisely the instability
+  // keying on the name exists to remove, so letting the one synthetic name back in would undo it in
+  // the one place a reader is least likely to look.
+  // Identified by its KEY sentinel rather than by its name, as `pieSharePrecision` and
+  // `buildPieBreakdown` already do. A dimension value can genuinely BE the string "Other" (the file
+  // accepts that collision knowingly, see OTHER_KEY), and such a slice is a real category that must
+  // keep hashing to a colour like any other — only the synthetic bucket carries the sentinel.
   const ring0Slices = effectiveRings[0] ?? [];
+  const ring0Named = ring0Slices.filter((s) => !(s.key != null && s.key.startsWith(OTHER_KEY)));
+  // One decision about the whole ring, not one per slice: a hash collision moves a name along, and
+  // an override takes its colour out of circulation, so neither can be worked out a slice at a time.
+  // `sliceColors` goes in as `existing` — the single place ring 0's overrides are applied.
   const ring0Colors = colorsForKeys(
-    ring0Slices.map((s) => s.name),
+    ring0Named.map((s) => s.name),
     Object.fromEntries(
-      ring0Slices.flatMap((s) => {
+      ring0Named.flatMap((s) => {
         const c = sliceOverride(s.name);
         return c ? [[s.name, c] as [string, string]] : [];
       }),
@@ -1154,21 +1170,21 @@ export function buildPieLegend(
   const toggledOff = new Set(cfg.toggledOffSlices ?? []);
   let nextDataIndex = 1;
 
-  // Belt and braces, and nothing more: `buildPieRings` pins every ring-0 slice's colour, so this
-  // mapping is not read on any path today. It is by NAME rather than by ring index because the
-  // index one was a second colour RULE — the swatch beside a slice would have disagreed with the
-  // arc as soon as an override consumed a slot, which is the exact divergence pinning ring 0 was
-  // introduced to remove. Built from the names the legend itself sees (ring 0 is renamed last in
-  // buildPieRings), so every lookup hits; on a nested pie it is the family's base rather than the
-  // dark variant the arc is drawn in, which the unreachable path makes moot and the reachable one
-  // never consults.
-  const ring0Colors = colorsForKeys(ring0.map((s) => s.name), cfg.sliceColors);
-
   return ring0.map((s) => {
-    // The colour the slice is actually drawn in — read off the slice rather than re-derived, since
-    // buildPieRings now pins every ring-0 slice's colour explicitly (see the note there on why the
-    // sunburst's name-keyed palette made an implicit slot unsafe).
-    const color = s.itemStyle?.color ?? ring0Colors[s.name];
+    // The colour the slice is actually drawn in, READ OFF THE SLICE and never re-derived —
+    // buildPieRings pins every ring-0 slice's colour explicitly (see the note there on why the
+    // sunburst's name-keyed palette made an implicit slot unsafe), so there is always one to read.
+    //
+    // There is deliberately no by-name mapping rebuilt here. The `?? seriesColor(i)` this replaces
+    // was a second colour RULE keyed on the ring index, so the swatch and its arc would disagree
+    // the moment an override consumed a slot; a second call to `colorsForKeys` would be no better —
+    // a second COPY of the rule, one that never sees `resolveColor` (the legend holds `cfg` raw,
+    // and `sliceColors` comes from un-whitelisted settings JSONB), that would key on the
+    // post-rename names, and that on a nested pie would answer with the family's base rather than
+    // the dark variant the arc is actually drawn in. The muted tint instead is the same answer
+    // `buildPieBreakdown` already gives an uncoloured slice, and it is a DEFAULT rather than a
+    // rule: if it is ever reached, the bug is upstream, in a ring-0 slice that arrived unpainted.
+    const color = s.itemStyle?.color ?? resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel);
     let sliceDataIndex: number | undefined;
     if (!toggledOff.has(s.name)) {
       sliceDataIndex = nextDataIndex;
