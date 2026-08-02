@@ -261,13 +261,13 @@ rotate-or-hide on a narrow card. Verified before adding this task.
 - Modify: `frontend/src/components/chart/ChartRenderer.tsx`
 - Test: extend `frontend/src/components/chart/echarts/__tests__/boxWaterfallXLabels.test.ts`
 
-- [ ] **Step 1: Thread the unit in**
+- [x] **Step 1: Thread the unit in**
 
 Add `xAxisUnit?: string` to `WaterfallBuildConfig` and pass it from `ChartRenderer`'s waterfall
 branch, from `params.spec.temporal_units[<the x column>]` — the same source cartesian reads
 (`ChartRenderer.tsx`, the cartesian branch, is the shape to copy).
 
-- [ ] **Step 2: Name the periods and allow thinning**
+- [x] **Step 2: Name the periods and allow thinning**
 
 Mirror what Task 2 and Task 3 did for cartesian, and mirror it *exactly* — the same three ordered
 arms (column format if it **specifies date rendering** → `periodName` → the previous fallback), and
@@ -283,13 +283,13 @@ Two traps, both already paid for once:
   which made a `year` axis over-measure 10 characters against 4 and rotate labels that would have sat
   upright.
 
-- [ ] **Step 3: Same verification bar**
+- [x] **Step 3: Same verification bar**
 
 Every rung mutated and seen to fail; the negative case (a non-bucketed waterfall is never thinned)
 asserted; and the `ChartRenderer` → builder seam covered, because PR 02 found that seam untested on
 all three charts and only a mutation caught it.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git commit -m "feat(charts): the waterfall's steps read as periods too"

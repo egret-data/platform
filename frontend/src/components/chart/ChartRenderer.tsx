@@ -692,7 +692,16 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
     // `WaterfallChart` keys its memo on its VALUE rather than its identity. Annotated, so a field
     // that stops matching `WaterfallBuildConfig` is caught here rather than silently widening the
     // prop.
-    const waterfallCfg: WaterfallBuildConfig = { ...waterfall, columnSettings, metricTypes };
+    const waterfallCfg: WaterfallBuildConfig = {
+      ...waterfall, columnSettings, metricTypes,
+      // The same line the cartesian branch above carries, from the same source, and it was missing
+      // here: without it `buildWaterfallOption` cannot tell a month-bucketed step from a raw date,
+      // so it drew "2026-01-01" for a step covering January and — after the axis became
+      // all-or-nothing — drew nothing at all on a narrow card. The drill below already reads this
+      // unit for the same column; the axis now reads it too, which is what keeps what a step is
+      // LABELLED as and what it FILTERS by answers to one question.
+      xAxisUnit: params.spec.temporal_units?.[waterfall.xAxis ?? ""],
+    };
     return (
       <div className="h-full w-full">
         {rows.length === 0

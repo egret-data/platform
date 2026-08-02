@@ -1,8 +1,9 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import type { EChartsSize } from "../EChartsRenderer";
 import { buildBoxplotOption } from "../options/boxplot";
-import { buildWaterfallOption } from "../options/waterfall";
-import type { fitXLabels as FitXLabels, estimatePlotWidth as EstimatePlotWidth } from "../axisLabelFit";
+import { buildWaterfallOption, type WaterfallBuildConfig } from "../options/waterfall";
+import type { fitXLabels as FitXLabels, estimatePlotWidth as EstimatePlotWidth, XLabelFit } from "../axisLabelFit";
+import { boundarySteps } from "@/components/chart/temporal-period";
 
 /**
  * The wiring between `fitXLabels` and the two OTHER builders that draw a bottom category axis —
@@ -48,25 +49,32 @@ import type { fitXLabels as FitXLabels, estimatePlotWidth as EstimatePlotWidth }
 type FitArgs = Parameters<typeof FitXLabels>[0];
 type EstimateArgs = Parameters<typeof EstimatePlotWidth>;
 
-/** Every argument a builder hands the fitter and the plot-width estimate, in call order.
- *  `vi.hoisted` because the `vi.mock` factory below is hoisted above this file's imports and would
- *  otherwise touch these bindings in their temporal dead zone. */
-const { fitCalls, gutterLabels } = vi.hoisted(() => ({
+/** Every argument a builder hands the fitter and the plot-width estimate, in call order, and an
+ *  optional CANNED decision to hand back in place of the real ladder's. `vi.hoisted` because the
+ *  `vi.mock` factory below is hoisted above this file's imports and would otherwise touch these
+ *  bindings in their temporal dead zone. */
+const { fitCalls, gutterLabels, fitResult } = vi.hoisted(() => ({
   fitCalls: [] as FitArgs[],
   gutterLabels: [] as string[],
+  fitResult: { value: undefined as XLabelFit | undefined },
 }));
 
-/** Pass-through spies, not stubs: the real ladder and the real estimate still decide, so every
- *  assertion in this file about what the AXIS ends up as remains an assertion about the real
- *  module. All they add is a view of what went IN — see the header on `outerHeight`, and the
- *  gutter block at the foot of the file. */
+/** Pass-through spies, not stubs, WHILE `fitResult` IS UNSET — which it is for every test above the
+ *  temporal block at the foot of this file, so the real ladder and the real estimate still decide
+ *  there and those assertions remain assertions about the real module. All the spies add is a view
+ *  of what went IN; see the header on `outerHeight`, and the gutter block.
+ *
+ *  `fitResult` is the one exception and it exists for a reason the header states: no `plotWidth`
+ *  reachable from jsdom can make a 0px label collide, so `kind: "thin"` cannot be produced by the
+ *  real fitter here. The LADDER is driven with a stub measurer in `axisLabelFit.test.ts`; what a
+ *  canned `thin` buys is the BUILDER's half — what that decision turns into on the axis. */
 vi.mock("../axisLabelFit", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../axisLabelFit")>();
   return {
     ...actual,
     fitXLabels: (args: FitArgs) => {
       fitCalls.push(args);
-      return actual.fitXLabels(args);
+      return fitResult.value ?? actual.fitXLabels(args);
     },
     estimatePlotWidth: (...args: EstimateArgs) => {
       gutterLabels.push(args[1]);
@@ -75,8 +83,12 @@ vi.mock("../axisLabelFit", async (importOriginal) => {
   };
 });
 
+afterEach(() => {
+  fitResult.value = undefined;
+});
+
 interface XAxisShape {
-  axisLabel: { interval: unknown; rotate?: number; show?: boolean };
+  axisLabel: { interval: unknown; rotate?: number; show?: boolean; formatter?: (v: unknown) => string };
 }
 const xAxisOf = (o: unknown) => (o as { xAxis: XAxisShape }).xAxis;
 const gridBottomOf = (o: unknown) => (o as { grid: { bottom: number } }).grid.bottom;
@@ -255,6 +267,256 @@ CHARTS.forEach((c) => {
       expect(fitCalls[0].plotWidth).toBeGreaterThan(0);
       expect(fitCalls[0].labels).toEqual(c.labels);
     });
+  });
+});
+
+/**
+ * THE WATERFALL'S STEPS READ AS PERIODS — the cartesian axis's treatment, on the other builder the
+ * plan named and no task had touched.
+ *
+ * The defect: `WaterfallBuildConfig` carried no `xAxisUnit` and `ChartRenderer` passed none, so a
+ * waterfall grouped by month labelled its steps "2026-01-01" — the bucket's first DAY — and after
+ * the axis became all-or-nothing, twelve of those ten-character labels on a one-third-width card
+ * meant NO x labels at all. `temporalXLabels.test.ts` is this file's opposite number for the
+ * cartesian family; the arguments are the same because the implementation is deliberately the same
+ * closure shape, and only the fixture and the appended "Total" differ.
+ *
+ * THE BOX PLOT IS NOT HERE, on purpose: its categories are group names, not temporal buckets.
+ *
+ * WHAT THIS BLOCK CAN AND CANNOT REACH is the same split the file header states, applied one level
+ * up. The naming arms and the fitter's ARGUMENTS are pure decisions and are asserted directly. The
+ * `thin` DECISION is not reachable through the real fitter under jsdom — every label measures 0px,
+ * so nothing collides — so the stride ladder is driven with a stub measurer in `axisLabelFit.test.ts`
+ * and what is left here is the builder's half: the precondition it enforces before a stride is
+ * offered, the candidate it sizes one against, and the `interval` a `thin` turns into.
+ */
+describe("a bucketed temporal waterfall", () => {
+  const COLS = [{ name: "d", type: "date" }, { name: "m", type: "double" }];
+  const ROWS: unknown[][] = [["2026-01-01", 10], ["2026-02-01", 4]];
+  const SIZE: EChartsSize = { width: 320, height: 200 };
+  // `satisfies`, not a bare object: spread properties escape excess-property checking, so `xAxs`
+  // here would compile clean and silently leave every case below without an x column.
+  const base = { xAxis: "d", metric: "m" } satisfies Partial<WaterfallBuildConfig>;
+  const build = (cfg: Partial<WaterfallBuildConfig>, size?: EChartsSize) =>
+    buildWaterfallOption(COLS, ROWS, { ...base, ...cfg }, size);
+  const label = (cfg: Partial<WaterfallBuildConfig>, v: unknown = "2026-01-01") =>
+    xAxisOf(build(cfg)).axisLabel.formatter?.(v);
+
+  it("names the period at each truncation unit the chart can be grouped by", () => {
+    expect(label({ xAxisUnit: "year" })).toBe("2026");
+    expect(label({ xAxisUnit: "quarter" }, "2026-07-01")).toBe("Q3 2026");
+    expect(label({ xAxisUnit: "month" })).toBe("January 2026");
+    expect(label({ xAxisUnit: "day" })).toBe("January 1, 2026");
+    expect(label({ xAxisUnit: "hour" }, "2026-01-01T13:00:00Z")).toBe("January 1, 2026, 1:00 PM");
+  });
+
+  /**
+   * The guard, and the negative half matters more than the positive. A column that was NOT bucketed
+   * reaches the axis as whatever the engine returned, and naming a period from it would invent a
+   * granularity the query never asked for. An extraction unit is the same case from the other side:
+   * its value is a finished word, and `dayjs("3")` for a `day_of_week` of 3 is VALID and formats as
+   * "March 2001", so the arm has to be refused rather than left to fail on its own.
+   */
+  it("leaves an unbucketed column, and an extraction unit's value, raw", () => {
+    expect(label({})).toBe("2026-01-01");
+    expect(label({ xAxisUnit: "day_of_week" }, "3")).toBe("3");
+  });
+
+  /** The Total is a bar the CHART invented by summing the steps; it is not a bucket and there is no
+   *  period to name from it. It survives arm 3 because `periodName` is total — `dayjs("Total")` is
+   *  invalid — rather than because anything special-cases it. */
+  it("leaves the invented Total step alone on a bucketed axis", () => {
+    expect(label({ xAxisUnit: "month" }, "Total")).toBe("Total");
+  });
+
+  it("draws nothing for an empty step rather than naming a period from it", () => {
+    expect(label({ xAxisUnit: "month" }, null)).toBe("");
+  });
+
+  /** A user who set a date style has SAID what they want, and a stored-then-ignored setting is the
+   *  defect the pivot, the pie and the breakout legend each shipped with in turn. */
+  it("lets the column's own format win over the period name", () => {
+    expect(label({ xAxisUnit: "month", columnSettings: { d: { date_style: "YYYY-MM-DD" } } }))
+      .toBe("2026-01-01");
+  });
+
+  it("still names the period when the format is on a DIFFERENT column", () => {
+    expect(label({ xAxisUnit: "month", columnSettings: { m: { date_style: "YYYY-MM-DD" } } }))
+      .toBe("January 2026");
+  });
+
+  /**
+   * A format object SILENT ABOUT DATES does not outrank the period name, and this is not
+   * hypothetical: `FormatSection`'s `patch` spreads into `{...fmt, ...p}` (`settings/
+   * FormatSection.tsx:104`), so renaming the step column to "Month" stores `{column_title: "Month"}`
+   * — truthy, which the cartesian axis took as arm 1 until a reviewer caught it, reverting that axis
+   * from "January 2026" to `formatDate`'s default "January 1, 2026" with nothing in the panel to
+   * explain it. Shipping truthiness here would have been the same defect a second time.
+   */
+  it("is not displaced by a format that says nothing about dates", () => {
+    expect(label({ xAxisUnit: "month", columnSettings: { d: { column_title: "Month" } } }))
+      .toBe("January 2026");
+    // A title typed and then deleted persists the key with no value. Still a truthy object.
+    expect(label({ xAxisUnit: "month", columnSettings: { d: { column_title: undefined } } }))
+      .toBe("January 2026");
+    // A date switch toggled on and back off leaves the falsy value, which means "not set".
+    expect(label({ xAxisUnit: "month", columnSettings: { d: { date_abbreviate: false } } }))
+      .toBe("January 2026");
+    // …but the same switch left ON is a date instruction, and takes arm 1 with the default style.
+    expect(label({ xAxisUnit: "month", columnSettings: { d: { date_abbreviate: true } } }))
+      .toBe("Jan 1, 2026");
+  });
+
+  /** The higher bar applies ONLY where a period name is in play. On an unbucketed axis there is
+   *  nothing for the format to outrank, so it keeps winning on existence — anything else would be
+   *  this task changing behaviour it was not sent to change. */
+  it("keeps the old existence test where there is no period name to outrank", () => {
+    expect(label({ columnSettings: { d: { column_title: "When" } } })).toBe("January 1, 2026");
+  });
+
+  /**
+   * THE FITTER MEASURES THE STRING THE AXIS DRAWS.
+   *
+   * It measured `categories`, the raw bucket, while the formatter now draws the period name, and the
+   * comment there justified the gap as "the formatted label is wider, so this under-measures".
+   * Naming the periods falsifies both halves at once: the two differ whenever the axis is bucketed,
+   * and the period name is often NARROWER — a year measured "2026-01-01" at ten characters to draw
+   * "2026" at four. Over-measuring rotates labels that would have sat upright, in the change that
+   * exists because labels did not fit.
+   *
+   * Asserted as the ARGUMENT rather than as a rotation, because no rotation is reachable from here:
+   * every label is 0px wide under jsdom, so both strings produce the same decision.
+   */
+  it("hands the fitter the drawn labels, not the raw buckets", () => {
+    fitCalls.length = 0;
+    buildWaterfallOption(
+      COLS, [["2025-01-01", 1], ["2026-01-01", 2]], { ...base, xAxisUnit: "year" }, SIZE,
+    );
+    expect(fitCalls).toHaveLength(1);
+    // "Total" included: it is drawn like any other category, so it is measured like any other.
+    expect(fitCalls[0].labels).toEqual(["2025", "2026", "Total"]);
+  });
+
+  it("measures the column's format too, where that is what wins", () => {
+    fitCalls.length = 0;
+    build({ xAxisUnit: "month", columnSettings: { d: { date_style: "YYYY-MM-DD" } } }, SIZE);
+    expect(fitCalls[0].labels).toEqual(["2026-01-01", "2026-02-01", "Total"]);
+  });
+});
+
+/**
+ * The waterfall's half of the thinning contract. `temporalXLabels.test.ts` makes the same four
+ * claims about the cartesian axis; they are repeated rather than shared because the two builders
+ * hold their own copy of this wiring, which is precisely how the waterfall came to be missing it.
+ */
+describe("a bucketed temporal waterfall thins to period boundaries", () => {
+  const COLS = [{ name: "d", type: "date" }, { name: "m", type: "double" }];
+  const ROWS: unknown[][] = [["2026-01-01", 10], ["2026-02-01", 4]];
+  const SIZE: EChartsSize = { width: 320, height: 200 };
+  const base = { xAxis: "d", metric: "m" } satisfies Partial<WaterfallBuildConfig>;
+  const build = (cfg: Partial<WaterfallBuildConfig>) =>
+    buildWaterfallOption(COLS, ROWS, { ...base, ...cfg }, SIZE);
+  /** Clears the spy's log first, so a test that builds more than once reads THIS build's argument
+   *  and not the first one it happened to make. */
+  const boundaryOf = (cfg: Partial<WaterfallBuildConfig>) => {
+    fitCalls.length = 0;
+    build(cfg);
+    expect(fitCalls, "the fitter was not consulted at all").toHaveLength(1);
+    return fitCalls[0].boundary;
+  };
+
+  /** The candidate a stride is measured against is the worst case for the UNIT — "September 2026" —
+   *  and the ladder is the one Metabase's `TICKS_TIMESERIES_INTERVALS` gives at and above `month`.
+   *  Both are read from `temporal-period.ts`, so this asserts the wiring rather than restating the
+   *  values, which `temporal-period.test.ts` pins. */
+  it("sizes the stride against the widest label the unit can produce", () => {
+    expect(boundaryOf({ xAxisUnit: "month" })).toEqual({
+      widestLabel: "September 2026",
+      steps: boundarySteps("month"),
+    });
+    expect(boundaryOf({ xAxisUnit: "quarter" })?.widestLabel).toBe("Q1 2026");
+  });
+
+  /** AND THAT CANDIDATE IS A STRING THE AXIS DRAWS, which is the property the hoisted `drawLabel`
+   *  closure exists to keep. Proved by feeding the formatter the value the candidate was derived
+   *  from and demanding the same string back — not by re-deriving the candidate, which would compare
+   *  the implementation to itself. */
+  it("sizes it against a string the axis would really draw", () => {
+    expect(xAxisOf(build({ xAxisUnit: "month" })).axisLabel.formatter?.("2026-09-10T10:00:00"))
+      .toBe("September 2026");
+    expect(boundaryOf({ xAxisUnit: "month" })?.widestLabel).toBe("September 2026");
+  });
+
+  /** A stored column format outranks the period name on the axis (`drawLabel`, arm 1), so it has to
+   *  outrank it in the candidate too — otherwise a chart whose labels read "2026-01-10" picks its
+   *  stride from the width of "September 2026", four characters wider, and thins further than it
+   *  needs to. This is what `widestPeriodName`'s `draw` parameter is for. */
+  it("sizes it against the column's format where that is what wins", () => {
+    const columnSettings = { d: { date_style: "YYYY-MM-DD" } };
+    expect(boundaryOf({ xAxisUnit: "month", columnSettings })?.widestLabel).toBe("2026-01-10");
+    expect(xAxisOf(build({ xAxisUnit: "month", columnSettings })).axisLabel
+      .formatter?.("2026-01-10T10:00:00")).toBe("2026-01-10");
+  });
+
+  /**
+   * THE NEGATIVE, and the one the whole design rests on. A waterfall of named stages gets no
+   * `boundary` at all, so `fitXLabels` cannot reach its stride arm — the all-or-nothing ladder is
+   * what a non-bucketed axis still gets, because there is no such thing as every second stage. An
+   * unbucketed DATE column is the same case: its values are whatever the engine returned. An
+   * EXTRACTION unit is the third: "Mon"/"Tue" are seven finished words, not a period each.
+   */
+  it("offers no stride to a waterfall that is not bucketed", () => {
+    fitCalls.length = 0;
+    buildWaterfallOption(
+      [{ name: "stage", type: "varchar" }, { name: "m", type: "double" }],
+      [["Leads", 10], ["Demos", 4]], { xAxis: "stage", metric: "m" }, SIZE,
+    );
+    expect(fitCalls).toHaveLength(1);
+    expect(fitCalls[0].boundary).toBeUndefined();
+
+    expect(boundaryOf({})).toBeUndefined();
+    expect(boundaryOf({ xAxisUnit: "day_of_week" })).toBeUndefined();
+  });
+
+  /**
+   * `interval` COUNTS THE LABELS SKIPPED, NOT THE STRIDE. ECharts reads it as
+   * `step = max((interval || 0) + 1, 1)` (`echarts/lib/scale/helper.js:235`), so every 6th is 5. An
+   * off-by-one draws January, June and November instead of January and July, which still looks like
+   * a plausible date axis in a screenshot — hence an assertion rather than an eyeball. The waterfall
+   * had `interval: decided ? 0 : "auto"` and nothing else, so wiring a `boundary` in without this
+   * line would have drawn every label under a `thin` decision.
+   */
+  it("writes the stride as the count of labels ECharts should skip", () => {
+    fitResult.value = { kind: "thin", rotate: 0, every: 6 };
+    const axis = xAxisOf(build({ xAxisUnit: "month" })).axisLabel;
+    expect(axis.interval).toBe(5);
+    // Upright and shown: thinning is what lets the labels stay horizontal, and it is not a hide.
+    expect(axis.rotate).toBe(0);
+    expect(axis.show).toBe(true);
+  });
+
+  /** The other three arms are untouched, which is the claim "the all-or-nothing rule was not undone"
+   *  has to survive: a decided axis still writes 0 — every label or none — and only `thin` writes
+   *  anything else. */
+  it("still writes every-label-or-none for every other decision", () => {
+    for (const value of [
+      { kind: "show", rotate: 0 },
+      { kind: "rotate", rotate: 45 },
+      { kind: "hide" },
+    ] as XLabelFit[]) {
+      fitResult.value = value;
+      expect(xAxisOf(build({ xAxisUnit: "month" })).axisLabel.interval, value.kind).toBe(0);
+    }
+  });
+
+  /** A stride of 1 is every label, so it must write 0 and not -1. ECharts would render the two the
+   *  same — `-1` is truthy, so the `|| 0` never fires; it is the `Math.max(…, 1)` in the SAME
+   *  expression that clamps the step back to 1. So the behaviour is safe either way and only the
+   *  arithmetic is wrong, which is exactly the kind of error that survives a screenshot and then
+   *  stops being harmless the day the expression changes. */
+  it("writes 0 for a stride of one rather than a negative interval", () => {
+    fitResult.value = { kind: "thin", rotate: 0, every: 1 };
+    expect(xAxisOf(build({ xAxisUnit: "month" })).axisLabel.interval).toBe(0);
   });
 });
 

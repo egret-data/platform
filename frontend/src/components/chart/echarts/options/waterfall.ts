@@ -2,7 +2,8 @@ import type { EChartsCoreOption } from "echarts/core";
 import type { EChartsSize } from "../EChartsRenderer";
 import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
-import { formatValue } from "../../format";
+import { formatValue, specifiesDateRendering } from "../../format";
+import { boundarySteps, namesAPeriod, periodName, widestPeriodName } from "../../temporal-period";
 import { estimatePlotWidth, fitXLabels, type XLabelFit } from "../axisLabelFit";
 import { ariaDescription, baseOption, tooltipSurface, TOOLTIP_WEIGHT } from "../base";
 import { CHART_THEME, SERIES_PALETTE, COLOR_FALLBACK, resolveColor } from "../palette";
@@ -34,6 +35,22 @@ export interface WaterfallBuildConfig {
   logScale?: boolean;
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
+  /**
+   * The truncation unit the x column was BUCKETED by, from `params.spec.temporal_units` —
+   * `CartesianBuildConfig.xAxisUnit` is the same field fed from the same place, and `ChartRenderer`
+   * fills both on the same line of its own branch.
+   *
+   * It arrived late. This builder shipped without it, so a waterfall grouped by month drew
+   * "2026-01-01" — the bucket's first DAY — where the step covers January, and after PR 02 made the
+   * axis all-or-nothing those ten characters × twelve steps meant a one-third-width card drew NO
+   * x labels at all. It is what `drawLabel` names the period from and the only door to thinning.
+   *
+   * An EXTRACTION unit ("day_of_week") may arrive here too, and must do nothing: `namesAPeriod`
+   * rejects it and `periodName` hands its value back untouched. Unlike cartesian this builder does
+   * not substitute extraction values through `temporalLabel` at all — a pre-existing gap, out of
+   * this change's scope, and named so the silence is not read as a claim.
+   */
+  xAxisUnit?: string;
 }
 
 /** Metabase's `waterfall.increase_color` default is `accent1`, `decrease_color` is `accent3`, and
@@ -137,6 +154,47 @@ export function buildWaterfallOption(
 
   const xTitle = cfg.showXLabel === false ? undefined : (cfg.xLabel ?? cfg.xAxis);
   const yTitle = cfg.showYLabel === false ? undefined : (cfg.yLabel ?? cfg.metric);
+
+  /**
+   * What a step is DRAWN AS — the cartesian builder's `drawLabel`, same three arms in the same
+   * order, and deliberately not a second idiom. Hoisted above the fit below rather than written
+   * inline on `axisLabel.formatter`, because the fitter has to measure THIS STRING and nothing
+   * else; see the `labels:` line at the call site for what measuring the other one cost there.
+   *
+   *   1. the x column's own format, when it says something the formatter for this column would
+   *      consult. "Says something" rather than "exists": on a BUCKETED axis, where arm 2 is in play,
+   *      a format silent about dates would otherwise beat the period name with `formatDate`'s
+   *      DEFAULTS, and the panel mints exactly such objects — renaming the column to "Month" stores
+   *      `{column_title: "Month"}`, which is truthy (`settings/FormatSection.tsx`, `patch`). That
+   *      reverted the cartesian axis from "January 2026" to "January 1, 2026" with nothing in the
+   *      panel to explain it, and this arm would have shipped the same defect a second time. Off a
+   *      bucketed axis there is nothing for the format to outrank, so it still wins on existence
+   *      there, exactly as this formatter always did.
+   *   2. otherwise the NAME OF THE PERIOD the step's bucket covers — "January 2026" for a month,
+   *      not its first day.
+   *   3. otherwise the raw value. `periodName` is total and falls through to the raw string itself,
+   *      so it IS answer 3 as well — the previous `String(v ?? "")` is what it returns for a step
+   *      with no unit, and `""` for a null. `namesAPeriod` is asked only whether arm 2 EXISTS to be
+   *      outranked, never to guard the call.
+   *
+   * The "Total" step goes through this too and comes out unchanged: `dayjs("Total")` is invalid, so
+   * `periodName` returns it verbatim. That is arm 3 doing its job, not a special case.
+   *
+   * `columns[xi ?? 0]?.type` is the pre-existing lookup, kept: `xi` is undefined only when `cfg.xAxis`
+   * names no column in the result, and then `columnSettings?.[cfg.xAxis]` decides nothing anyway
+   * because there are no categories to draw.
+   */
+  const bucketedX = namesAPeriod(cfg.xAxisUnit);
+  const drawLabel = (v: string) => {
+    const colFmt = cfg.xAxis ? cfg.columnSettings?.[cfg.xAxis] : undefined;
+    const formatWins = colFmt != null && (bucketedX ? specifiesDateRendering(colFmt) : true);
+    if (formatWins && v != null) {
+      const out = formatValue(v, columns[xi ?? 0]?.type ?? "varchar", colFmt);
+      if (out !== "") return out;
+    }
+    return periodName(cfg.xAxisUnit, v);
+  };
+
   // Whether the step names fit is a question about WIDTH, and until `size` existed this builder
   // could not ask it: the rule here was `longest > 10 && categories.length > 6 ? 30 : 0`, and
   // length and count are only proxies for width. The same rule was deleted from the cartesian
@@ -176,23 +234,50 @@ export function buildWaterfallOption(
   const explicitRotate = cfg.xLabelRotation != null;
   const fit: XLabelFit | undefined = measurable && size && !explicitRotate
     ? fitXLabels({
-        // The RAW step name, where `axisLabel.formatter` below draws the FORMATTED one. Where the
-        // two differ — only when the x column carries a `columnSettings` entry — the formatted
-        // label is the wider of the two ("2026-01-01" measured, "January 2026" drawn), so this
-        // under-measures. Same direction, and same cost, as an over-estimated `plotWidth`: labels
-        // left upright that should have been rotated. Cartesian's axis has the identical seam.
-        labels: categories,
+        // THE STRING THE AXIS ACTUALLY DRAWS, by construction — same closure, same argument.
+        //
+        // This measured `categories`, the RAW step name, and justified the gap as "the formatted
+        // label is the wider of the two, so this under-measures". Naming the periods falsifies both
+        // halves at once, the same way it did on the cartesian axis. The two now differ whenever
+        // `xAxisUnit` is a truncation unit — the common case and this change's whole subject, not
+        // the rare `columnSettings` one that comment named — and the period name is often NARROWER,
+        // not wider: a year measured "2026-01-01" at ten characters and drew "2026" at four. So it
+        // had begun to OVER-measure, which rotates labels that would have sat upright, in the change
+        // whose entire motivation is labels not fitting.
+        labels: categories.map(drawLabel),
         // The gutter is the widest value the y-axis can print, through the y-axis's own formatter
         // (`fmt(v, true)` below), and `yTitle` is what adds 26 to `grid.left` below.
         plotWidth: estimatePlotWidth(size, fmt(widest, true), Boolean(yTitle)),
         // The CONTAINER's height, not an inset one: the 70% guard is a share of the whole card
         // (Metabase's `checkHeight`), so passing a grid-adjusted height silently tightens it.
         outerHeight: size.height,
+        // THE PRECONDITION FOR THINNING, enforced here rather than assumed downstream: only a
+        // BUCKETED temporal axis gets one. `bucketedX` is `namesAPeriod(cfg.xAxisUnit)`, the same
+        // single membership rule `drawLabel` above uses, so an axis that is thinned is by
+        // construction an axis whose labels are period names. On a waterfall of named stages this is
+        // `undefined` and the fitter cannot reach its stride arm at all — there is no such thing as
+        // every second stage. (Both fields are also empty for a non-period unit, so the guard holds
+        // a second time even if this line is ever loosened.)
+        //
+        // `widestPeriodName` is handed `drawLabel` — the SAME closure the axis draws with, for the
+        // same reason `labels:` above is — so the stride is chosen against a string this axis would
+        // really render, including when a stored column format outranks the period name.
+        //
+        // ONE THING A WATERFALL HAS THAT A BAR CHART DOES NOT, and it is a cost rather than a
+        // blocker: the appended "Total" is the LAST category and is not a period, so a stride that
+        // does not land on it leaves it unlabelled. That is the right trade at the only width where
+        // it arises — thinning is reached only once every adjacent pair collides, and the answer
+        // without it is PR 02's rotate-or-hide, under which the Total's label is tilted or gone
+        // anyway. The bars, the tooltip and the aria description all still name it.
+        boundary: bucketedX
+          ? { widestLabel: widestPeriodName(cfg.xAxisUnit, drawLabel), steps: boundarySteps(cfg.xAxisUnit) }
+          : undefined,
       })
     : undefined;
   const rotate = cfg.xLabelRotation ?? (fit?.kind === "rotate" ? fit.rotate : 0);
-  // Either way the axis has now DECIDED, and a decided axis draws every label or none — never the
-  // subset `interval: "auto"` leaves ECharts free to pick.
+  // Either way the axis has now DECIDED, and a decided axis never leaves ECharts the subset
+  // `interval: "auto"` would let it pick. What it draws is every label, none, or — on a bucketed
+  // temporal axis only — every Nth, which the `interval` line below argues is not the same thing.
   const decided = fit != null || explicitRotate;
   // NO ROOM IS RESERVED BELOW THE PLOT FOR A TILTED LABEL, at any rotation, measured or explicit —
   // the 44/18 ladder this builder used to add on the explicit path is gone with it. See
@@ -263,6 +348,11 @@ export function buildWaterfallOption(
         const isTotal = cfg.showTotal !== false && i === categories.length - 1;
         const swatch = bars[i]?.itemStyle.color ?? increase;
         const dot = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${swatch};margin-right:6px"></span>`;
+        // THE RAW BUCKET, not `drawLabel`'s period name — so a month-bucketed waterfall's axis now
+        // reads "January 2026" while its tooltip still reads "2026-01-01". Left as it is
+        // DELIBERATELY: the cartesian tooltip has the identical gap (`axisTooltip`, `../base.ts`),
+        // and closing it on one chart alone would make the two disagree about the same data on the
+        // same dashboard. It is a chart-wide parity item, not this axis's.
         const head = `<div style="font-weight:${TOOLTIP_WEIGHT.header}">${categories[i]}</div>`;
         const line = `<div>${dot}<span style="font-weight:${TOOLTIP_WEIGHT.value}">${fmt(delta)}</span></div>`;
         if (isTotal) return head + line;
@@ -275,16 +365,28 @@ export function buildWaterfallOption(
       nameTextStyle: { color: axisLabelColor },
       axisLabel: {
         fontSize: CHART_THEME.axisFontSize, color: axisLabelColor,
-        interval: decided ? (0 as const) : ("auto" as const), rotate,
-        // The third answer the ladder can give: when even a rotated label would eat 70% of the
+        // `fit.every - 1`, NOT `fit.every`: ECharts' category `interval` counts the labels SKIPPED
+        // between two drawn ones, not the stride. `ordinalScaleCreateTicks`
+        // (`echarts/lib/scale/helper.js:235`) reads it as `step = max((categoryInterval || 0) + 1, 1)`
+        // and walks `tickValue += step` from the extent's start — so `0` is every label, which is what
+        // the `decided` arm has always meant here, and every 6th is `5`. Off by one is invisible in a
+        // screenshot: it draws Jan/Jun/Nov instead of Jan/Jul, which still looks like a date axis.
+        //
+        // AND THIS IS NOT PR 02's RULE BEING UNDONE, which is the reading to head off: "auto" drops
+        // whichever labels happen to collide, an arbitrary subset, while a stride over buckets draws
+        // period boundaries. The full argument — including why restoring a flat `interval: 0` here
+        // would NOT restore PR 02, and the two further ECharts guarantees the stride rests on (it
+        // starts at index 0, and the extra end tick is not drawn beside it) — is on the `thin` arm of
+        // `XLabelFit` in `../axisLabelFit.ts` and at the same line in `options/cartesian.ts`.
+        interval: fit?.kind === "thin" ? fit.every - 1 : decided ? (0 as const) : ("auto" as const),
+        rotate,
+        // The last answer the ladder can give: when even a rotated label would eat 70% of the
         // card's height, Metabase draws no axis rather than a wall of text.
         show: fit?.kind !== "hide",
-        formatter: (v: string) => {
-          const f = cfg.xAxis ? cfg.columnSettings?.[cfg.xAxis] : undefined;
-          if (!f || v == null) return String(v ?? "");
-          const out = formatValue(v, columns[xi ?? 0]?.type ?? "varchar", f);
-          return out === "" ? String(v) : out;
-        },
+        // `drawLabel`, defined above so the FITTER measures this same string. Do not inline it back:
+        // the two drifting apart is what made the cartesian fit rotate labels that would have fitted
+        // upright, and this axis had the identical seam.
+        formatter: drawLabel,
       },
       axisLine: { show: cfg.xAxisTicks !== false, lineStyle: { color: gridLine } },
       axisTick: { show: cfg.xAxisTicks !== false },

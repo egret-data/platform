@@ -1102,6 +1102,78 @@ describe("ChartRenderer", () => {
   });
 
   /**
+   * THE SAME SEAM, one field over: the x column's TEMPORAL UNIT reaching the builder.
+   *
+   * The block above exists because nothing tested that `ChartRenderer` passed the measured size
+   * down, on any of three charts, and only a mutation found it. `xAxisUnit` is the same shape of
+   * fact — a value only this component can look up (`params.spec.temporal_units`), handed to a
+   * builder that cannot derive it — and it went missing on the waterfall branch for exactly as
+   * long as nothing asked: `WaterfallBuildConfig` had no such field, so a month-bucketed waterfall
+   * drew "2026-01-01" for a step covering January, and once the axis became all-or-nothing it drew
+   * nothing at all on a narrow card.
+   *
+   * Read through the AXIS FORMATTER rather than by inspecting the config, because the formatter is
+   * what a viewer sees: this fails both when the branch stops passing the unit and when the builder
+   * stops using it. Not through the size, deliberately — naming a period needs no measurement, and
+   * a test that needed both would be two claims wearing one assertion.
+   *
+   * Cartesian's branch has carried this line since the axis was first named, and is covered here
+   * too — the pair is what says the seam is a rule rather than one branch that happens to be right.
+   */
+  describe("the x column's temporal unit reaches the builder", () => {
+    const BUCKETED: { what: string; vizType: VizType; columns: { name: string; type: string }[]; params: Partial<ChartParams> }[] = [
+      {
+        what: "WaterfallChart",
+        vizType: "waterfall",
+        columns: [{ name: "order_date", type: "date" }, { name: "delta", type: "double" }],
+        params: { waterfall: { xAxis: "order_date", metric: "delta" } },
+      },
+      {
+        what: "CartesianChart",
+        vizType: "bar",
+        columns: [{ name: "order_date", type: "date" }, { name: "rev", type: "double" }],
+        params: { cartesian: { xAxis: "order_date", yMetrics: ["rev"] } },
+      },
+    ];
+
+    /** The x axis of a built option, whichever of the two shapes the builder returns it in. */
+    const xLabelOf = (o: unknown, v: string) => {
+      const built = (o as (s: { width: number; height: number }) => {
+        xAxis: { axisLabel: { formatter?: (v: string) => string } }
+          | { axisLabel: { formatter?: (v: string) => string } }[];
+      })({ width: 640, height: 400 });
+      const axis = Array.isArray(built.xAxis) ? built.xAxis[0] : built.xAxis;
+      return axis.axisLabel.formatter?.(v);
+    };
+
+    BUCKETED.forEach((b) => {
+      it(`${b.what} hands the bucketing unit to its builder`, () => {
+        const spec = (temporal_units?: Record<string, string>): Partial<ChartParams> => ({
+          ...b.params,
+          spec: {
+            metrics: [], dimensions: ["order_date"], columns: [], filters: [], orderby: [],
+            row_limit: 1000, rollup_groups: [], ...(temporal_units ? { temporal_units } : {}),
+          },
+        });
+        render(
+          <ChartRenderer vizType={b.vizType} params={params(spec({ order_date: "month" }))}
+            columns={b.columns} rows={[["2026-01-01", 10]]} />,
+        );
+        expect(xLabelOf(mockLastOption, "2026-01-01")).toBe("January 2026");
+
+        // …and the NEGATIVE from the same seam: with no unit in the spec the same column, the same
+        // viz and the same value stay raw. Without this half, a builder that named a period from
+        // the column's TYPE — inventing a granularity the query never asked for — would pass.
+        render(
+          <ChartRenderer vizType={b.vizType} params={params(spec())}
+            columns={b.columns} rows={[["2026-01-01", 10]]} />,
+        );
+        expect(xLabelOf(mockLastOption, "2026-01-01")).toBe("2026-01-01");
+      });
+    });
+  });
+
+  /**
    * THE SAME SEAM, for the five viz types that hand-listed their fields at this line long after
    * cartesian and pie stopped: gauge, funnel, waterfall, boxplot and sankey.
    *
