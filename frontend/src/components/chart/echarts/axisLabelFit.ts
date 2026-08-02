@@ -70,29 +70,23 @@ export type XLabelFit =
 /**
  * What a BUCKETED temporal axis needs to be thinned, and the only door to `kind: "thin"`.
  *
- * Both fields come from `temporal-period.ts`, keyed on the truncation unit the chart spec carries
- * (`cfg.xAxisUnit`), and neither can be manufactured here — this module holds no temporal knowledge
+ * Its one field comes from `temporal-period.ts`, keyed on the truncation unit the chart spec carries
+ * (`cfg.xAxisUnit`), and it cannot be manufactured here — this module holds no temporal knowledge
  * at all, which is what makes "an ordinal axis of product names is never thinned" a fact about the
  * types rather than a rule someone has to remember. There is no such thing as every second product.
+ *
+ * IT CARRIED A SECOND FIELD UNTIL THIS COMMIT: `widestLabel`, the widest name the UNIT could ever
+ * produce (`widestPeriodName(unit, drawLabel)`), which `strideThatFits` measured once and charged at
+ * every rung. Measuring the labels a rung would ACTUALLY draw replaced it and left nothing for it to
+ * decide, so it is gone rather than kept as an unused bound; `strideThatFits` below carries the
+ * browser measurement that settled it and what the substitution gives up.
  */
 export interface XLabelBoundary {
-  /**
-   * The worst-case label FOR THE UNIT, not the widest in this dataset — `widestPeriodName(unit,
-   * drawLabel)`. Metabase sizes its ticks the same way, against `getRepresentativeDates` rather
-   * than its data (`maxTicksForChartWidth`, `timeseries.ts:280-299`), and the reason is that the
-   * alternative makes a chart's layout depend on which slice of it you are looking at: a month axis
-   * whose visible range happens to be May–July would size itself on "May 2026" and start clipping
-   * the moment the range moved to September.
-   *
-   * It must be a string the axis would actually DRAW — hence `drawLabel`, the caller's own label
-   * closure, threaded through `widestPeriodName`. Measuring one string while another is rendered is
-   * the drift the caller closed one level down; introducing a candidate here that bypasses it would
-   * reopen it one level up.
-   */
-  widestLabel: string;
   /** Candidate strides in BUCKETS, cheapest first — `boundarySteps(unit)`, Metabase's
    *  `TICKS_TIMESERIES_INTERVALS` at and above the data's own unit. Empty for a unit that names no
-   *  period, which is the second thing making a non-temporal stride unreachable. */
+   *  period, which is now the ONLY thing making a non-temporal stride unreachable from inside this
+   *  module — the caller's `namesAPeriod` guard is the other, one level up, and the two are the same
+   *  membership rule asked twice. */
   steps: number[];
 }
 
@@ -141,24 +135,33 @@ const TICKS_TO_MEASURE = 50;
 const pad = (label: string) => ` ${label} `;
 
 /**
- * The tick a value axis draws WIDEST, approximated — the string the gutter below is measured from,
- * and `widestPeriodName`'s opposite number for a value axis rather than a temporal one.
+ * The tick a value axis draws WIDEST, approximated — the string the gutter below is measured from.
+ *
+ * It is the one place this module still SAMPLES rather than measures what is drawn, and it has to
+ * be: `containLabel` leaves the value axis's ticks to ECharts, so unlike the category labels (which
+ * the caller hands over in full, and which `strideThatFits` now slices per rung) there is no list of
+ * them to read.
  *
  * WHAT IT REPLACED, because the replacement only makes sense against it: the caller used to hand
  * over its widest DATUM formatted. A value axis does not draw data, it draws ROUND TICKS, and under
  * compact formatting the round one is routinely the SHORTER string — measured on the ZZ Chart Parity
  * line card, revenue peaking at 24,730 was charged `"24.7K"` at 34.6px while ECharts settled on
- * 0/5K/10K/15K/20K/"25K" and drew 24.2px. Ten pixels of a ~119px plot, reserved and never used, and
- * decisive: with them the x axis missed its last stride by 0.86px and was HIDDEN; without them the
- * same axis clears by 9.5px and draws "January 2026". The waterfall beside it was charged "205K" and
- * drew "250K" — both 32.3px — so it paid nothing, which is how one dataset produced two different
- * answers on one card.
+ * 0/5K/10K/15K/20K/"25K" and drew 24.2px. Ten pixels of a ~119px plot, reserved and never used. The
+ * waterfall beside it was charged "205K" and drew "250K" — both 32.3px — so it paid nothing, which
+ * is how one dataset produced two different gutters on one card.
+ *
+ * (An earlier version of this paragraph closed by saying those ten pixels were what stood between
+ * the line chart and its "January 2026". They were not — they were one of two causes, and the
+ * smaller one. The other was `strideThatFits` measuring "September 2026" for a rung that draws
+ * "January 2026"; see it for the browser numbers. Recovering the gutter is still worth what it is
+ * worth, which is ten pixels of plot, and no longer carries a claim about an outcome it did not
+ * decide on its own.)
  *
  * IT DOES NOT PREDICT `intervalScale`, and must not start. Which ticks ECharts picks is its own
  * `nice()` over an interval drawn from {1,2,5}x10^n, and a builder that reimplemented it would be a
- * second copy to keep in step with an upgrade. What this does instead is exactly what
- * `representativeValues` does for the temporal axis: SAMPLE a handful of values the axis plausibly
- * draws and take the widest, so the answer is a bound rather than a guess. The samples are the
+ * second copy to keep in step with an upgrade. What it does instead is SAMPLE a handful of values
+ * the axis plausibly draws and take the widest, so the answer is a bound rather than a guess — the
+ * same shape as Metabase's `getRepresentativeDates` for a date axis. The samples are the
  * fifths of a one-significant-figure ceiling — ECharts' default `splitNumber` is 5, and the ceiling
  * is at or above whatever `nice()` settles on — computed as `ceiling * n / 5` in integers so no
  * rung arrives as 18000.000000000004.
@@ -169,8 +172,9 @@ const pad = (label: string) => ` ${label} `;
  * produces it. The fifths, by contrast, catch the case a bare ceiling misses, which is the FORMATTER
  * changing magnitude part way up the axis: a ceiling of 2,000,000 formats "2M" at two characters
  * while 0.8 and 0.2 of it give "1.6M" and "400K" at four, and four is what ECharts draws (500K, 1M,
- * 1.5M, 2M). Character count is the same proxy `widestPeriodName` uses and for the same reason — it
- * only chooses BETWEEN candidates, and the caller measures the winner with the real measurer.
+ * 1.5M, 2M). Character count is a PROXY for width and not the same thing ("WWW" outruns "iiiiii"),
+ * which is tolerable here because it only chooses BETWEEN candidates — the caller measures the
+ * winner with the real measurer. It is Metabase's own proxy at the same spot (`timeseries.ts:293`).
  *
  * WHERE IT IS STILL WRONG, both directions named because "closer" is not "right":
  *
@@ -265,7 +269,7 @@ export function estimatePlotWidth(
    *  discouraged. */
   widestValue: number,
   /** The axis's OWN tick formatter, so the candidate is a string this axis would really render —
-   *  the same reason `widestPeriodName` is handed the caller's `drawLabel`. */
+   *  the same rule the category side keeps by measuring the labels the caller passes in. */
   format: (v: number) => string,
   hasAxisTitle: boolean,
 ): number {
@@ -309,11 +313,11 @@ function ticksToMeasure(labels: string[]): string[] {
  * Metabase's `computeTimeseriesTicksInterval` (`timeseries.ts:216-263`) walking its ladder upwards
  * from the data's own unit and stopping at the first rung under the width budget.
  *
- * A label drawn every `every`th bucket owns `every * dimensionWidth` of the axis, and it fits when
- * the worst case for the unit plus one gap of clear ink does. `HORIZONTAL_TICKS_GAP` rather than
- * Metabase's own `TICK_BUFFER_PIXELS` of 10: this module already answers "how much ink-free space
- * between two neighbouring labels" with 6, above, and two constants for one question in one file is
- * how they drift apart. Padding matches upstream, which measures
+ * A label drawn every `every`th bucket owns `every * dimensionWidth` of the axis, and the rung fits
+ * when the widest label THAT RUNG WOULD DRAW, plus one gap of clear ink, does.
+ * `HORIZONTAL_TICKS_GAP` rather than Metabase's own `TICK_BUFFER_PIXELS` of 10: this module already
+ * answers "how much ink-free space between two neighbouring labels" with 6, above, and two constants
+ * for one question in one file is how they drift apart. Padding matches upstream, which measures
  * `getPaddedAxisLabel(formatter(date))` at `timeseries.ts:290-291` — the same pessimism the overlap
  * test uses.
  *
@@ -324,6 +328,52 @@ function ticksToMeasure(labels: string[]): string[] {
  * difference a side-by-side will photograph; if it reads as crowded rather than as generous, this
  * constant is the one to reconcile.
  *
+ * THE DRAWN SET, NOT THE UNIT'S WORST CASE. This is where the port stops following Metabase, and
+ * where it stops following its own first version, so it is argued rather than stated.
+ *
+ * The candidate used to be `boundary.widestLabel` — `widestPeriodName(unit, drawLabel)`, the widest
+ * name the unit could EVER produce — measured once and charged at every rung. At `month` that string
+ * is "September 2026". But a rung of `every` draws indices 0, `every`, `2 * every`, … and nothing
+ * else, so at the rungs that decide a narrow card it was measuring a string the axis does not draw:
+ * twelve monthly buckets at rung 12 draw "January 2026", alone.
+ *
+ * MEASURED IN THE BROWSER, not simulated — the ZZ Chart Parity dashboard, a 166x184 card, Chrome at
+ * `400 13px` in the app's own `--font-sans` stack, read out of this function's own inputs on the
+ * four charts that carry `xAxisUnit: "month"` (line, area, combo, waterfall):
+ *
+ *     plotWidth 93.8 over 12 buckets  ->  dimensionWidth 7.82
+ *     " September 2026 "   109.3px        what the old candidate measured
+ *     " January 2026 "      83.5px        what rung 12 actually draws
+ *
+ * Rung 12 is `alone`, so its budget is the plot exactly: 93.8px. The drawn label CLEARS it by
+ * 10.3px; the hypothetical one loses by 15.5. And every rung past 12 has that same budget — the
+ * `Math.min` below clamps them all to the plot — so once the unit's worst case loses, the whole
+ * remaining ladder loses with it, the axis falls through to the rotate ladder, and at 7.82px per
+ * category that ladder hides it. Line, area and combo drew NO x-axis label at all. The waterfall's
+ * 13 categories reach rung 12 with TWO drawn labels rather than one, and rung 24 alone against the
+ * same plot with the same 109.3px candidate, so it lost its "January 2026" too — in the commit whose
+ * own note recorded it as unchanged.
+ *
+ * WHAT THAT GIVES UP, because it was a real property and not an accident. `widestPeriodName` existed
+ * so a chart's stride would not move as its data's range moved, which is Metabase's rule too: it
+ * sizes ticks against `getRepresentativeDates` rather than against its data (`maxTicksForChartWidth`,
+ * `timeseries.ts:280-299`), on the grounds that a month axis whose visible range happens to be
+ * May–July would size itself on "May 2026" and start clipping the moment the range slid to September.
+ *
+ * THAT REASON DOES NOT TRANSFER, and the difference is structural rather than a preference. Metabase
+ * strides a TIME axis under a data zoom: the visible range moves while the layout that chose the
+ * stride does not re-run, so a stride chosen from the visible slice is stale as soon as the slice
+ * changes. egret strides a CATEGORY axis over the whole result set, with no zoom, and
+ * `EChartsRenderer` re-runs the builder — and therefore this function — on every resize and every
+ * new result. There is no state in which the labels change and the stride does not. The range cannot
+ * slide out from under a stride here, so what the stability bought was a stride sized against a
+ * string the chart never renders, at a cost of four blank axes.
+ *
+ * What is genuinely conceded is that two charts at the same unit and the same width can now land on
+ * DIFFERENT rungs when their months differ in length — a February-to-April axis may thin one rung
+ * less than a July-to-September one. Both draw the labels they measured, which is the property that
+ * decides whether a reader can read the axis; the rung is not.
+ *
  * THREE OF METABASE'S RULES ARE DELIBERATELY NOT PORTED, since each would be wrong here:
  *
  *   - `minTickCount = 2`, which steps BACK a rung when the chosen one would draw fewer than two
@@ -332,9 +382,9 @@ function ticksToMeasure(labels: string[]): string[] {
  *   - the `interval` FALLBACK to the largest rung when nothing fits. Returning `undefined` hands the
  *     axis back to the rotate ladder, which is PR 02's behaviour and the right one — Metabase has no
  *     rotate ladder to hand back to.
- *   - stride 1, skipped outright. "Every label" was already asked and answered above, against the
- *     labels this axis actually has rather than against the unit's worst case; re-asking it here
- *     could only overrule a measurement with an estimate.
+ *   - stride 1, skipped outright. "Every label" was already asked and answered above, by `overlaps`,
+ *     over every adjacent PAIR rather than over one rung's drawn set — a strictly stronger test than
+ *     anything this loop could re-run, so re-asking it here could only overrule it.
  *
  * Rungs at or past the label count all draw the same single label at index 0, so the first of them
  * is the last one worth testing — and it IS worth testing, because "one label or none" is a real
@@ -354,55 +404,62 @@ function ticksToMeasure(labels: string[]): string[] {
  *     neighbouring labels (see the constant, and the overlap test that is its other user). Charging
  *     it here bills a label for clearance from a neighbour that is not drawn.
  *
- * MEASURED, on the ZZ Chart Parity dashboard at a 193x214 card, twelve monthly buckets, both charts
- * `xAxisUnit: "month"` and both titled "revenue" — the case this whole arm exists for. The pixels
- * are Chrome's, at `400 13px` in the app's own `--font-sans` stack; " September 2026 " is 109.3px.
+ * …AND IT IS NOT CHARGED THE PADDING EITHER, which is the same argument as the gap and was left
+ * half-applied. `pad` exists because Metabase measures `getPaddedAxisLabel(formatter(date))` and its
+ * own comment is "we have to be pessimistic" — pessimism about two labels touching. This module
+ * already draws that line once: the overlap test above measures PADDED and the height guard measures
+ * BARE, because the height guard asks "how much room does this one label need" rather than "do these
+ * two collide". The rung that draws one label asks the height guard's question, so it gets the
+ * height guard's answer. Two spaces are 7.2px at `400 13px`, and on the live waterfall they were the
+ * whole margin: " January 2026 " is 90.6px against an 85.7px plot and "January 2026" is 83.5px.
  *
- *   - the LINE chart has 12 categories and a 108.4px plot, so rung 12 is its last and its budget is
- *     the plot exactly. The label plus the phantom gap asked 115.3px and lost by 6.9; no stride
- *     fitted, the rotate ladder found 9px per category, and the axis was HIDDEN — the exact defect
- *     PR 03 exists to fix, surviving in the charts it was written for.
- *   - the WATERFALL appends a "Total", so it has 13 categories, rung 12 is no longer the last, and
- *     rung 24 was tested with a 204px budget against a 110.7px plot. It "fitted", and the axis drew
- *     "January 2026" correctly — by accident, on a budget that could not exist.
+ * BOTH ARMS ARE STILL LOAD-BEARING once the drawn set is measured, and the waterfall is the case
+ * that shows it. Twelve monthly buckets plus a "Total" is 13 categories: rung 12 draws indices 0 and
+ * 12 — "January 2026" and "Total", two labels, so it is NOT `alone` and is rightly charged the gap —
+ * and rung 24 is its first `alone` rung, offering `24 * dimensionWidth`, roughly twice the axis that
+ * exists, if the min did not clamp it. That is how the waterfall once thinned on a live card at a
+ * width where the line chart beside it hid: same unit, same twelve months, opposite answers, decided
+ * by whether a chart appends a Total. The two now measure real drawn labels against the same clamped
+ * budget, so what is left between them is only WHICH rung they land on — and every rung at or past
+ * the count draws index 0 and nothing else, so they draw the same axis.
  *
- * So the visible difference between the two was decided by whether a chart appends a Total, which is
- * a fact about a chart's data shape and has no business deciding whether a date axis is legible. It
- * cut both ways at once: the waterfall accepted a rung it had not really measured, and the line
- * chart was refused one it had. Both arms above are needed to close it — dropping the phantom gap
- * alone leaves the two disagreeing at any width narrow enough for the min to bite, and clamping
- * alone hides the waterfall's label rather than restoring the line chart's.
- *
- * WHAT THAT FIXES AND WHAT IT DOES NOT, on those same two cards, because a fix reported by the
- * defect it names rather than by the pixels it leaves is how the next reader gets misled:
- *
- *   - the waterfall keeps its label and now earns it — 109.3px of single label against a 110.7px
- *     plot, a rung whose budget is the plot rather than twice it.
- *   - the LINE CHART IS STILL HIDDEN, by 0.86px. Its remaining margin is not this function's: it is
- *     charged a gutter for "24.7K" where its value axis draws "25K", 10.4px of plot that exists and
- *     is not counted (see `estimatePlotWidth`, the arm that cuts the other way). Charge the drawn
- *     tick and the same rung clears by 9.5px. So the two builders now AGREE — they measure the same
- *     label against the same rule — and what separates their answers is the 2.25px their two gutter
- *     strings differ by, which is an input, not a divergence.
+ * The gap arm is no longer what decides the live card (at 93.8px of plot, "January 2026" clears with
+ * or without the 6px), but it is still the correct rule and the window where it bites is real, so
+ * `axisLabelFit.test.ts` brackets it from both sides rather than leaving it to the next card that
+ * lands inside it.
  */
 function strideThatFits(
   boundary: XLabelBoundary,
-  count: number,
+  /** The labels the axis would draw at stride 1 — the same array `fitXLabels` measured for overlap,
+   *  in axis order. Every rung slices its own drawn set out of this, which is what makes the budget
+   *  a statement about the labels on the card rather than about the unit. */
+  labels: string[],
   dimensionWidth: number,
-  widthOf: (label: string) => number,
+  /** Measures a string VERBATIM — this applies `pad` itself, because whether a rung is charged the
+   *  pessimistic two spaces depends on whether it draws a neighbour. */
+  widthOf: (text: string) => number,
 ): number | undefined {
-  const { widestLabel, steps } = boundary;
-  // Both are empty for a unit that names no period. Belt and braces against the caller's own
-  // `namesAPeriod` guard: a zero-width candidate would otherwise "fit" every stride and thin an
-  // ordinal axis on the strength of having measured nothing.
-  if (widestLabel === "" || steps.length === 0) return undefined;
-  const width = widthOf(widestLabel);
+  const { steps } = boundary;
+  // Empty for a unit that names no period. Belt and braces against the caller's own `namesAPeriod`
+  // guard: without it an ordinal axis could reach the ladder below and be thinned into "every second
+  // product", which the type is shaped to make unrepresentable.
+  const count = labels.length;
+  if (steps.length === 0 || count === 0) return undefined;
   for (const every of steps) {
     if (every < 2) continue;
+    const drawn: string[] = [];
+    for (let i = 0; i < count; i += every) drawn.push(labels[i]);
     // At or past the count this rung draws index 0 and nothing else — see the two arms above for
-    // what that changes, and why it is also the last rung worth testing.
-    const alone = every >= count;
+    // what that changes, and why it is also the last rung worth testing. Derived from the drawn set
+    // rather than re-deriving `every >= count`, so the two cannot disagree.
+    const alone = drawn.length === 1;
     const budget = Math.min(every, count) * dimensionWidth;
+    // `ticksToMeasure` for the same reason the overlap test above uses it, and reusing it rather
+    // than repeating its rule: a rung of 7 over ten years of daily buckets draws 521 labels, and
+    // measuring every one of them at every rung is the cost `TICKS_TO_MEASURE` exists to bound. It
+    // is exact where it matters — 50 or fewer drawn labels are all measured — and past that it keeps
+    // the longest by character count, which is the one that decides this comparison.
+    const width = Math.max(...ticksToMeasure(drawn).map((l) => widthOf(alone ? l : pad(l))));
     if (width + (alone ? 0 : HORIZONTAL_TICKS_GAP) <= budget) return every;
     if (alone) break;
   }
@@ -485,8 +542,8 @@ export function fitXLabels({
   // BEFORE the rotate ladder, never instead of it: on a bucketed date axis two upright period names
   // beat twelve tilted ones, which is what Metabase draws — but a stride that does not fit falls
   // straight through to the rungs below with nothing changed.
-  const every = boundary && strideThatFits(boundary, labels.length, dimensionWidth,
-    (l) => measure(pad(l), style).width);
+  const every = boundary && strideThatFits(boundary, labels, dimensionWidth,
+    (t) => measure(t, style).width);
   if (every != null) return { kind: "thin", rotate: 0, every };
 
   const maxWidth = Math.max(...measured.map((l) => measure(l, style).width));

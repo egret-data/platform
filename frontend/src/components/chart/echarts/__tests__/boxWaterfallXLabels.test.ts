@@ -92,7 +92,7 @@ afterEach(() => {
 });
 
 interface XAxisShape {
-  axisLabel: { interval: unknown; rotate?: number; show?: boolean; formatter?: (v: unknown) => string };
+  axisLabel: { interval: unknown; rotate?: number; show?: boolean; showMinLabel?: boolean; formatter?: (v: unknown) => string };
 }
 const xAxisOf = (o: unknown) => (o as { xAxis: XAxisShape }).xAxis;
 const gridBottomOf = (o: unknown) => (o as { grid: { bottom: number } }).grid.bottom;
@@ -429,37 +429,18 @@ describe("a bucketed temporal waterfall thins to period boundaries", () => {
     return fitCalls[0].boundary;
   };
 
-  /** The candidate a stride is measured against is the worst case for the UNIT — "September 2026" —
-   *  and the ladder is the one Metabase's `TICKS_TIMESERIES_INTERVALS` gives at and above `month`.
-   *  Both are read from `temporal-period.ts`, so this asserts the wiring rather than restating the
-   *  values, which `temporal-period.test.ts` pins. */
-  it("sizes the stride against the widest label the unit can produce", () => {
-    expect(boundaryOf({ xAxisUnit: "month" })).toEqual({
-      widestLabel: "September 2026",
-      steps: boundarySteps("month"),
-    });
-    expect(boundaryOf({ xAxisUnit: "quarter" })?.widestLabel).toBe("Q1 2026");
-  });
-
-  /** AND THAT CANDIDATE IS A STRING THE AXIS DRAWS, which is the property the hoisted `drawLabel`
-   *  closure exists to keep. Proved by feeding the formatter the value the candidate was derived
-   *  from and demanding the same string back — not by re-deriving the candidate, which would compare
-   *  the implementation to itself. */
-  it("sizes it against a string the axis would really draw", () => {
-    expect(xAxisOf(build({ xAxisUnit: "month" })).axisLabel.formatter?.("2026-09-10T10:00:00"))
-      .toBe("September 2026");
-    expect(boundaryOf({ xAxisUnit: "month" })?.widestLabel).toBe("September 2026");
-  });
-
-  /** A stored column format outranks the period name on the axis (`drawLabel`, arm 1), so it has to
-   *  outrank it in the candidate too — otherwise a chart whose labels read "2026-01-10" picks its
-   *  stride from the width of "September 2026", four characters wider, and thins further than it
-   *  needs to. This is what `widestPeriodName`'s `draw` parameter is for. */
-  it("sizes it against the column's format where that is what wins", () => {
-    const columnSettings = { d: { date_style: "YYYY-MM-DD" } };
-    expect(boundaryOf({ xAxisUnit: "month", columnSettings })?.widestLabel).toBe("2026-01-10");
-    expect(xAxisOf(build({ xAxisUnit: "month", columnSettings })).axisLabel
-      .formatter?.("2026-01-10T10:00:00")).toBe("2026-01-10");
+  /** The boundary is the LADDER AND NOTHING ELSE — Metabase's `TICKS_TIMESERIES_INTERVALS` at and
+   *  above `month`, read from `temporal-period.ts`, so this asserts the wiring rather than restating
+   *  the values, which `temporal-period.test.ts` pins.
+   *
+   *  It carried a `widestLabel: widestPeriodName(cfg.xAxisUnit, drawLabel)` too — the widest name
+   *  the unit could produce, threaded through this builder's label closure. `strideThatFits` slices
+   *  each rung's DRAWN labels out of `labels:` now, and the two `measures ...` cases above pin that
+   *  `labels:` is this builder's own drawn output ("Total" and column format included), so what the
+   *  field was protecting is still true without it. */
+  it("offers the stride ladder for the unit and nothing else", () => {
+    expect(boundaryOf({ xAxisUnit: "month" })).toEqual({ steps: boundarySteps("month") });
+    expect(boundaryOf({ xAxisUnit: "quarter" })).toEqual({ steps: boundarySteps("quarter") });
   });
 
   /**
@@ -499,9 +480,19 @@ describe("a bucketed temporal waterfall thins to period boundaries", () => {
     expect(axis.show).toBe(true);
   });
 
+  /** AND IT DECLARES THE FIRST BUCKET REQUIRED, without which `AxisBuilder.fixMinMaxLabelShow`
+   *  drops index 0 — the label the stride exists to draw — in favour of the off-interval end tick
+   *  ECharts appends after it. The mechanism is at the option line in `options/cartesian.ts`; this
+   *  pins that the waterfall writes the flag too, since the two builders hold their own copy of this
+   *  wiring and that is exactly how the waterfall came to be missing the last one. */
+  it("declares the first bucket a required label on a thinned axis", () => {
+    fitResult.value = { kind: "thin", rotate: 0, every: 6 };
+    expect(xAxisOf(build({ xAxisUnit: "month" })).axisLabel.showMinLabel).toBe(true);
+  });
+
   /** The other three arms are untouched, which is the claim "the all-or-nothing rule was not undone"
    *  has to survive: a decided axis still writes 0 — every label or none — and only `thin` writes
-   *  anything else. */
+   *  anything else, `showMinLabel` included. */
   it("still writes every-label-or-none for every other decision", () => {
     for (const value of [
       { kind: "show", rotate: 0 },
@@ -509,7 +500,9 @@ describe("a bucketed temporal waterfall thins to period boundaries", () => {
       { kind: "hide" },
     ] as XLabelFit[]) {
       fitResult.value = value;
-      expect(xAxisOf(build({ xAxisUnit: "month" })).axisLabel.interval, value.kind).toBe(0);
+      const axis = xAxisOf(build({ xAxisUnit: "month" })).axisLabel;
+      expect(axis.interval, value.kind).toBe(0);
+      expect(axis.showMinLabel, value.kind).toBeUndefined();
     }
   });
 

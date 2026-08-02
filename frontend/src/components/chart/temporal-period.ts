@@ -28,11 +28,12 @@
  * that depends on an extraction value never arriving has to defend itself instead.
  *
  * IT ALSO OWNS THE TICK LADDER (`boundarySteps`), because that is the same knowledge asked a second
- * way. `namesAPeriod` is the single membership rule for "this unit denotes a period", and the two
- * questions a thinned axis asks — how wide can a label at this unit get, and how many buckets apart
- * may two of them be — are both keyed on it. `echarts/axisLabelFit.ts` stays free of any temporal
- * knowledge as a result: it takes the answers as an input it cannot manufacture, which is what
- * makes "an ordinal axis is never thinned" structural rather than a rule someone must remember.
+ * way. `namesAPeriod` is the single membership rule for "this unit denotes a period", and the
+ * question a thinned axis asks — how many buckets apart may two drawn labels be — is keyed on it.
+ * `echarts/axisLabelFit.ts` stays free of any temporal knowledge as a result: it takes the answer as
+ * an input it cannot manufacture, which is what makes "an ordinal axis is never thinned" structural
+ * rather than a rule someone must remember. It used to ask a second question here — how wide can a
+ * label at this unit get — and the note above `boundarySteps` records why it stopped.
  */
 
 import dayjs from "dayjs";
@@ -72,8 +73,8 @@ dayjs.extend(utc);
  *           passes no `type` (`model/axis.ts:713-718`). An axis therefore reads "January 5, 2026"
  *           upstream too. If a caller ever needs the span form — Metabase's trend card does use it,
  *           via `formatDateTimeRangeWithUnit` (`SmartScalar/compute.ts:702`) — that is a second
- *           function, not a change to this one, because `widestPeriodName` below has to stay in
- *           step with what is actually drawn.
+ *           function, not a change to this one, because the axis and the tick chooser both measure
+ *           what THIS one returns and would be sizing one string while drawing another.
  *   hour,   the date style joined to the time style with ", " (`formatDateTimeWithFormats:1273`).
  *   minute  `time_enabled` defaults to "minutes" for the units `hasHour` admits (`:1341`,
  *           `datetime-utils.ts:6`), so seconds are not shown at either unit — a minute bucket has
@@ -189,148 +190,26 @@ export function periodName(unit: string | undefined, value: unknown): string {
  * "March 1, 2026", and dropping that would be a regression), and both of them because a stored
  * column format only has to clear a higher bar when there is a period name for it to outrank.
  *
- * A type predicate rather than a bare `boolean` so `widestPeriodName` can use it as its own
- * membership check instead of restating the same lookup ten lines below it.
+ * A type predicate rather than a bare `boolean` so `boundarySteps` can use it as its own membership
+ * check — and narrow `unit` to `string` for the `dayjs` `diff` inside it — instead of restating the
+ * same lookup.
  */
 export function namesAPeriod(unit: string | undefined): unit is string {
   return unit != null && PERIOD_FORMAT[unit] != null;
 }
 
-/** The reference year every candidate below is built in. Fixed, because a year is four digits
- *  either way and the alternative — `dayjs()` — would make the tick layout of a chart depend on
- *  the day it is looked at. */
-const REFERENCE_YEAR = 2026;
-
-/**
- * The values a unit's widest name is searched over — Metabase's `getRepresentativeDates`
- * (`echarts/cartesian/utils/timeseries.ts:305-349`), whose contract is "the date with the longest
- * string representation for the unit is contained in the array".
- *
- * Its shape is copied, including which axes collapse to a single value at coarse units, because
- * every one of them is an observation about a FORMAT rather than about a date: month names differ
- * in length so all twelve are tried; a two-digit day and a two-digit hour are longer than a
- * one-digit one; and AM/PM can differ in length, so both halves of the day are tried at the units
- * that print a time.
- *
- * THE SEVEN CONSECUTIVE DAYS ARE PARITY BALLAST, and since they are 7/8 of this loop's cost the
- * reason belongs here rather than looking like an accident. Metabase's own comment is "test each
- * possible weekday name" (`timeseries.ts:325`): its `dddd, MMMM D, YYYY` date style prints one, and
- * weekday names differ in length. No format in `PERIOD_FORMAT` prints a weekday today, so all seven
- * collapse to the same answer — they are kept so this array can be diffed against upstream's line
- * for line, and they start earning their cost the day egret honours a weekday-bearing style.
- *
- * ONE DELIBERATE DIVERGENCE, because upstream is wrong here. Metabase builds each candidate as
- * `new Date(2026, month, day, hour).toISOString()` (`:344`) — a LOCAL-zone construction rendered to
- * UTC. On a +07 machine its own "two-digit hour" candidate of 10 comes back as `03`, and the array
- * quietly stops containing the longest representation its contract promises. These are naive
- * strings instead, with no zone for `parseInOwnZone` to preserve, so they are read as the wall
- * clock written here and the answer does not move with the viewer.
+/*
+ * THIS FILE ALSO EXPORTED `widestPeriodName` UNTIL PR 03's LAST COMMIT — the longest name a unit
+ * could produce, built by mapping a copy of Metabase's `getRepresentativeDates` through the caller's
+ * own label closure. Its only consumer was the tick chooser, which measured it once and charged it
+ * at every rung of the stride ladder, and that turned out to be measuring a string the axis does not
+ * draw: twelve monthly buckets at stride 12 draw "January 2026", not "September 2026". The chooser
+ * now slices each rung's drawn labels out of the array it is already handed, so nothing was left for
+ * this to decide and it is deleted rather than kept as an unused bound. `axisLabelFit.ts`'s
+ * `strideThatFits` carries the browser measurement and the argument, including what the unit's
+ * worst case was buying (a stride that did not move with the data's range) and why a category axis
+ * that is rebuilt on every resize and every result does not need it.
  */
-function representativeValues(unit: string): string[] {
-  const months =
-    unit === "year" ? [0] : unit === "quarter" ? [0, 3, 6, 9] : [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-  const coarserThanDay = unit === "year" || unit === "quarter" || unit === "month" || unit === "week";
-  const days = coarserThanDay ? [10] : [10, 11, 12, 13, 14, 15, 16];
-  const hours = coarserThanDay || unit === "day" ? [10] : [10, 20];
-
-  const out: string[] = [];
-  for (const month of months) {
-    for (const day of days) {
-      for (const hour of hours) {
-        const mm = String(month + 1).padStart(2, "0");
-        const dd = String(day).padStart(2, "0");
-        const hh = String(hour).padStart(2, "0");
-        out.push(`${REFERENCE_YEAR}-${mm}-${dd}T${hh}:00:00`);
-      }
-    }
-  }
-  return out;
-}
-
-/**
- * Memoised, but ONLY FOR THE DEFAULT FORM — and since this comment used to claim otherwise, the
- * correction is the point of it. A `draw` mapper is a closure the axis builds fresh per render, so
- * there is no key this Map could hold it under; `widestPeriodName` reads and writes here only when
- * `draw` is absent.
- *
- * Both production callers (`options/cartesian.ts` and `options/waterfall.ts`, the `boundary:` line
- * in each) PASS `draw`. So this cache does not serve the layout path — an earlier version of this
- * comment said it did, naming exactly the caller that bypasses it, which is the shape of a
- * performance claim nobody rechecks. What it serves now is the plain `widestPeriodName(unit)` form
- * and this module's own tests.
- *
- * NOT "the sole caller", which is what this said until the waterfall became the second one — a
- * comment that COUNTS its callers is falsified by the next commit that adds one, and this file was
- * repaired for that exact failure one commit before it happened again. The claim that has to hold
- * is "every caller on the layout path passes `draw`", and it is stated that way above so a third
- * caller either keeps it true or is visibly the exception.
- *
- * WHAT THE LAYOUT PATH THEREFORE PAYS, measured rather than estimated (dayjs 1.11.21, Node 22, per
- * call, warm): 0.01ms at `year`, 0.03ms at `quarter`, 0.06ms at `month` and `week`, 0.36ms at `day`,
- * 0.83ms at `hour` and `minute`. `EChartsRenderer` coalesces to one rebuild per animation frame, so
- * the worst case is ~0.8ms of a 16.7ms frame for the whole of a drag-resize, on the two bucketings
- * that are rarest — and it sits beside a full option rebuild and an ECharts re-render that cost
- * considerably more. Left uncached deliberately: a cache keyed on anything less than the closure's
- * real inputs is a correctness risk, and this is not the frame budget's problem.
- *
- * If it ever becomes one, the key is constructible at the call site rather than here — `drawLabel`'s
- * output depends only on `cfg.xAxisUnit`, `cfg.xAxis`, `cfg.columnSettings?.[cfg.xAxis]` and
- * `cfg.xAxisType`.
- */
-const WIDEST_BY_UNIT = new Map<string, string>();
-
-/**
- * The longest name this unit can produce, BY CHARACTER COUNT — a candidate to measure, not a width.
- *
- * Not the longest name in the data. The tick chooser sizes an axis against this (`axisLabelFit.ts`,
- * the `boundary` arm), the way Metabase measures `getRepresentativeDates` rather than its dataset
- * (`timeseries.ts:280-299`). A month axis whose visible range happens to be May–July would
- * otherwise size itself on "May 2026" and clip "September 2026" the moment the range moved — a
- * chart whose layout depends on which slice of it you are looking at.
- *
- * Character count is a PROXY for width and not the same thing ("WWW" outruns "iiiiii"). It is
- * Metabase's own proxy at the same spot (`timeseries.ts:293-295`), and the caller measures the
- * returned string with the real measurer, so the proxy only chooses BETWEEN candidates — it never
- * decides a width.
- *
- * `draw` IS THE POINT OF THE PARAMETER, not a convenience. The tick chooser's candidate has to be a
- * string the axis would actually DRAW, or the fit is computed against one string while another is
- * rendered — the exact drift `options/cartesian.ts` closed by hoisting its `drawLabel` closure so
- * the fitter measures the axis's own output. A bucketed axis does not always draw the period name:
- * a stored column format outranks it (arm 1 there), and "September 2026" is then neither drawn nor
- * a bound on what is. So the axis passes its own `drawLabel` and this maps the same representative
- * VALUES through it. The default reproduces the plain period name, which is what the name says and
- * what this module's own tests pin.
- *
- * COST — one parse-and-format per representative value, and `representativeValues` collapses hard at
- * the coarse units rather than always producing twelve: **1** at `year` (one month, one day, one
- * hour), **4** at `quarter`, **12** at `month` and `week`, **84** at `day`, **168** at `hour` and
- * `minute`. Bounded by the unit rather than by the data, and a caller pays it only on a bucketed
- * temporal axis that has a measured size — never on an ordinal axis and never on an unmeasured
- * container. The `draw` form is not memoised; `WIDEST_BY_UNIT` above says why, what the
- * layout path actually pays in milliseconds, and where a key would go if it ever mattered.
- *
- * TOTAL, and "" for anything that is not a truncation unit: a caller measuring "" gets a width of
- * zero, which is a visible nonsense rather than a plausible wrong answer. That is also the SECOND
- * of the two things stopping a non-temporal axis being thinned — the caller's own `namesAPeriod`
- * guard is the first — since a zero-width candidate is not what makes an axis fit, an empty
- * `boundarySteps` is.
- */
-export function widestPeriodName(
-  unit: string | undefined,
-  draw?: (value: string) => string,
-): string {
-  if (!namesAPeriod(unit)) return "";
-  const label = draw ?? ((v: string) => periodName(unit, v));
-  const cached = draw == null ? WIDEST_BY_UNIT.get(unit) : undefined;
-  if (cached != null) return cached;
-  const widest = representativeValues(unit).reduce((longest, v) => {
-    const name = label(v);
-    return name.length > longest.length ? name : longest;
-  }, "");
-  if (draw == null) WIDEST_BY_UNIT.set(unit, widest);
-  return widest;
-}
 
 /**
  * Metabase's `TICKS_TIMESERIES_INTERVALS` (`echarts/cartesian/utils/timeseries.ts:45-75`), from

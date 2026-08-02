@@ -68,7 +68,7 @@ const base = {
 } satisfies Partial<CartesianBuildConfig>;
 
 type Axis = {
-  axisLabel?: { formatter?: (v: unknown) => string; interval?: unknown; rotate?: number; show?: boolean };
+  axisLabel?: { formatter?: (v: unknown) => string; interval?: unknown; rotate?: number; show?: boolean; showMinLabel?: boolean };
 };
 const axisOf = (opt: unknown) => {
   const o = opt as { xAxis: Axis | Axis[]; yAxis: Axis | Axis[] };
@@ -245,49 +245,21 @@ describe("a bucketed temporal x-axis thins to period boundaries", () => {
   };
 
   /**
-   * The candidate a stride is measured against is the worst case for the UNIT — "September 2026" —
-   * and the ladder is the one Metabase's `TICKS_TIMESERIES_INTERVALS` gives at and above `month`.
-   * Both are read from `temporal-period.ts`, so this asserts the wiring rather than restating the
-   * values, which `temporal-period.test.ts` pins.
-   */
-  it("sizes the stride against the widest label the unit can produce", () => {
-    expect(boundaryOf({ xAxisUnit: "month" })).toEqual({
-      widestLabel: "September 2026",
-      steps: boundarySteps("month"),
-    });
-    expect(boundaryOf({ xAxisUnit: "quarter" })?.widestLabel).toBe("Q1 2026");
-  });
-
-  /**
-   * AND THAT CANDIDATE IS A STRING THE AXIS DRAWS, which is the property the hoisted `drawLabel`
-   * closure exists to keep. Measuring one string while rendering another is the drift closed one
-   * level down; sizing a stride against a candidate the formatter would never produce reopens it
-   * one level up, and nothing about a 0px jsdom measurement would show it.
+   * The boundary is the LADDER AND NOTHING ELSE — Metabase's `TICKS_TIMESERIES_INTERVALS` at and
+   * above `month`, read from `temporal-period.ts`, so this asserts the wiring rather than restating
+   * the values, which `temporal-period.test.ts` pins.
    *
-   * Proved by feeding the formatter the value the candidate was derived from and demanding the same
-   * string back — not by re-deriving the candidate, which would compare the implementation to
-   * itself.
+   * It carried a second field, `widestLabel: widestPeriodName(cfg.xAxisUnit, drawLabel)` — the
+   * widest name the unit could produce, threaded through this builder's own label closure so that a
+   * stride was sized against a string this axis would really render. `strideThatFits` measures each
+   * rung's DRAWN labels out of `labels:` now, and `labels:` is the same closure's output over this
+   * chart's own buckets — "hands the fitter the drawn labels, not the raw buckets" above pins
+   * exactly that, column format included — so the property survives the field's removal rather than
+   * having depended on it.
    */
-  it("sizes it against a string the axis would really draw", () => {
-    const drawn = (cfg: Partial<CartesianBuildConfig>, v: string) =>
-      axisOf(buildWithSize(cfg)).axisLabel?.formatter?.(v);
-    // 2026-09-10T10:00:00 is one of the unit's representative values; September is the long month.
-    expect(drawn({ xAxisUnit: "month" }, "2026-09-10T10:00:00")).toBe("September 2026");
-    expect(boundaryOf({ xAxisUnit: "month" })?.widestLabel).toBe("September 2026");
-  });
-
-  /**
-   * A stored column format outranks the period name on the axis (`drawLabel`, arm 1), so it has to
-   * outrank it in the candidate too — otherwise a chart whose labels read "2026-01-10" picks its
-   * stride from the width of "September 2026", four characters wider, and thins further than it
-   * needs to. This is what `widestPeriodName`'s `draw` parameter is for.
-   */
-  it("sizes it against the column's format where that is what wins", () => {
-    const fmt = { d: { date_style: "YYYY-MM-DD" } };
-    const b = boundaryOf({ xAxisUnit: "month", columnSettings: fmt });
-    expect(b?.widestLabel).toBe("2026-01-10");
-    expect(axisOf(buildWithSize({ xAxisUnit: "month", columnSettings: fmt }))
-      .axisLabel?.formatter?.("2026-01-10T10:00:00")).toBe("2026-01-10");
+  it("offers the stride ladder for the unit and nothing else", () => {
+    expect(boundaryOf({ xAxisUnit: "month" })).toEqual({ steps: boundarySteps("month") });
+    expect(boundaryOf({ xAxisUnit: "quarter" })).toEqual({ steps: boundarySteps("quarter") });
   });
 
   /**
@@ -328,9 +300,27 @@ describe("a bucketed temporal x-axis thins to period boundaries", () => {
   });
 
   /**
+   * AND IT DECLARES THE FIRST BUCKET REQUIRED, which is the difference between a `thin` decision
+   * and a `thin` decision that renders. `ordinalScaleCreateTicks` appends the extent's last index
+   * with `offInterval: true` on top of the stride, and `AxisBuilder.fixMinMaxLabelShow` resolves the
+   * resulting intersection by dropping the OUTMOST label — index 0, the one the stride exists to
+   * draw — unless `showMinLabel` says otherwise. On the live 166x184 card that cost the line, area
+   * and combo charts their "January 2026" while `fitXLabels` was returning `{ thin, every: 12 }`.
+   *
+   * The full mechanism is at the option line in `options/cartesian.ts`; this pins that the flag is
+   * written, since nothing else in this suite would notice it going missing.
+   */
+  it("declares the first bucket a required label on a thinned axis", () => {
+    fitResult.value = { kind: "thin", rotate: 0, every: 6 };
+    expect(axisOf(buildWithSize({ xAxisUnit: "month" })).axisLabel?.showMinLabel).toBe(true);
+  });
+
+  /**
    * The other three arms are untouched by this change, which is the claim "PR 02 was not undone"
    * has to survive: a decided axis still writes 0 — every label or none — and only `thin` writes
-   * anything else.
+   * anything else. `showMinLabel` goes with it: an axis that draws all its labels or none has no
+   * min/max heuristic to overrule, so leaving the flag set there would be a second decision nobody
+   * asked for.
    */
   it("still writes every-label-or-none for every other decision", () => {
     for (const value of [
@@ -339,7 +329,9 @@ describe("a bucketed temporal x-axis thins to period boundaries", () => {
       { kind: "hide" },
     ] as XLabelFit[]) {
       fitResult.value = value;
-      expect(axisOf(buildWithSize({ xAxisUnit: "month" })).axisLabel?.interval, value.kind).toBe(0);
+      const axis = axisOf(buildWithSize({ xAxisUnit: "month" })).axisLabel;
+      expect(axis?.interval, value.kind).toBe(0);
+      expect(axis?.showMinLabel, value.kind).toBeUndefined();
       fitCalls.length = 0;
     }
   });

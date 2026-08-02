@@ -166,13 +166,25 @@ describe("fitXLabels", () => {
    * "January 2026" and "July 2026". See the `thin` arm of `XLabelFit` for why a regular stride over
    * period boundaries is not the arbitrary subset PR 02 banned.
    *
-   * The arithmetic every case below is stated in, at the stub's 8px per character:
-   *   - the widest name the MONTH unit can produce is "September 2026", 14 chars, padded 16 -> 128px,
-   *     and a stride fits when 128 + 6 (the ink-free gap) <= every x dimensionWidth. So 134px.
-   *   - the widest name in this DATASET is the same string, so the overlap test above fires at any
-   *     dimensionWidth under 128 + 3 = 131px, i.e. any plot narrower than 1572px.
-   * `MONTH_STEPS` is the real ladder rather than a literal, so "every 6th" here is the same rung a
-   * month-bucketed chart gets — `temporal-period.test.ts` pins its contents.
+   * The arithmetic every case below is stated in, at the stub's 8px per character. A rung of `every`
+   * draws indices 0, `every`, `2 * every`, … and the fitter measures THOSE — so the number a case
+   * turns on depends on which rung is being tested, and each one names it:
+   *   - " January 2026 "     14 chars -> 112px   index 0, so drawn at every rung
+   *   - " September 2026 "   16 chars -> 128px   index 8, drawn at rungs 2 and 4 but not 3, 6 or 12
+   *   - " July 2026 "        11 chars ->  88px   index 6
+   *   - " Total "             7 chars ->  56px   the waterfall's extra category
+   * A rung with two or more drawn labels fits when its widest, PADDED, plus 6 (the ink-free gap
+   * between two neighbours) is within `every x dimensionWidth`.
+   *
+   * A rung that draws ONE label is charged neither of those, because both describe a neighbour it
+   * does not have, and is budgeted against the plot rather than against its own stride. So it is the
+   * BARE string that is measured there: "January 2026" is 12 chars -> 96px, and `Math.min` makes its
+   * budget the plot exactly on a twelve-bucket axis.
+   *
+   * The widest label in this dataset is 128px, so the overlap test above fires at any dimensionWidth
+   * under 128 + 3 = 131px, i.e. any plot narrower than 1572px. `MONTH_STEPS` is the real ladder
+   * rather than a literal, so "every 6th" here is the same rung a month-bucketed chart gets —
+   * `temporal-period.test.ts` pins its contents.
    */
   describe("thins a bucketed temporal axis to period boundaries", () => {
     const MONTH_STEPS = boundarySteps("month");
@@ -180,7 +192,10 @@ describe("fitXLabels", () => {
       "January", "February", "March", "April", "May", "June",
       "July", "August", "September", "October", "November", "December",
     ].map((m) => `${m} 2026`);
-    const MONTH_BOUNDARY = { widestLabel: "September 2026", steps: MONTH_STEPS };
+    /** The ladder and nothing else. It carried a `widestLabel` — the widest name the unit could
+     *  produce — until the fitter started measuring each rung's drawn labels instead; see
+     *  `strideThatFits`. */
+    const MONTH_BOUNDARY = { steps: MONTH_STEPS };
     /** `boundary` is REQUIRED here and passed explicitly at every call, including the negative
      *  cases. It had a default of `MONTH_BOUNDARY`, and `thin(..., undefined)` — the case that
      *  proves an unbucketed axis is never thinned — quietly took the default and asserted the
@@ -189,7 +204,7 @@ describe("fitXLabels", () => {
     const thin = (
       labels: string[],
       plotWidth: number,
-      boundary: { widestLabel: string; steps: number[] } | undefined,
+      boundary: { steps: number[] } | undefined,
       outerHeight = 400,
     ) => fitXLabels({ labels, plotWidth, outerHeight, boundary, fontSize: 13, measure: stub(8) });
 
@@ -199,16 +214,17 @@ describe("fitXLabels", () => {
     });
 
     it("takes the CHEAPEST rung that fits rather than the first one that helps", () => {
-      // 900 -> dimensionWidth 75: 2 x 75 = 150 >= 134, so every 2nd, not every 6th.
+      // 900 -> dimensionWidth 75. Rung 2 draws September (128), so it needs 134 and gets 150.
       expect(thin(MONTHS, 900, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 2 });
-      // 600 -> 50: 2 x 50 = 100 is short, 3 x 50 = 150 clears. Every quarter, which is the rung
-      // Metabase's ladder has above `month` x 2 and is why the steps are not just powers of two.
+      // 600 -> 50. Rung 2 offers 100 against September's 134 and loses; rung 3 skips September and
+      // draws January/April/July/October, so it needs 112 + 6 and gets 150. Every quarter, which is
+      // the rung Metabase's ladder has above `month` x 2 and is why the steps are not powers of two.
       expect(thin(MONTHS, 600, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 3 });
     });
 
     /**
      * Brackets the two constants the budget is built from, neither of which any case above can
-     * detect on its own. 780 -> dimensionWidth 65, so a rung of 2 offers 130px against a budget of
+     * detect on its own. 780 -> dimensionWidth 65, so a rung of 2 offers 130px against September's
      * 128 (padded) + 6 (gap) = 134 and loses; drop EITHER the padding Metabase measures with
      * (`getPaddedAxisLabel(formatter(date))`, `timeseries.ts:290-291`) or the ink-free gap and 2 wins.
      */
@@ -217,19 +233,61 @@ describe("fitXLabels", () => {
     });
 
     /**
-     * THE UNIT'S WORST CASE, NOT THIS DATASET'S — Metabase's reason for measuring
-     * `getRepresentativeDates` rather than its data, and the one claim every other case here is
-     * blind to because their widest label happens to be "September 2026" either way.
+     * THE LABELS THE RUNG WOULD DRAW, NOT THE WIDEST THE UNIT COULD PRODUCE — the defect this
+     * whole arm was hiding four live axes behind, and the claim every other case here is blind to
+     * because at those widths the two candidates happen to agree.
      *
-     * Three months of May–July: the widest label PRESENT is "July 2026" at 11 padded chars (88px,
-     * budget 94), while the unit can still produce "September 2026" (128px, budget 134). At
-     * dimensionWidth 60 a rung of 2 offers 120px — enough for the data, short for the unit. Sizing
-     * on the data draws every 2nd and clips the moment the range slides to September; sizing on the
-     * unit draws every 3rd and keeps drawing it.
+     * `strideThatFits` measured `boundary.widestLabel`, `widestPeriodName(unit, drawLabel)`, once
+     * and charged it at every rung. At `month` that is "September 2026" — 128px here — and twelve
+     * monthly buckets at rung 12 draw "January 2026", 112px, and nothing else.
+     *
+     * 120px of plot over twelve buckets is the window between them: rung 12 is the last one, its
+     * budget is the plot exactly (`Math.min(12, 12) x 10`), and it clears "January 2026" at 96
+     * while failing " September 2026 " at 128. Under the old candidate the rung lost, the ladder
+     * ended there — every rung past 12 has the same clamped budget — and at 10px per category the
+     * rotate ladder below cleared neither threshold, so the axis was HIDDEN.
+     *
+     * THIS IS THE LIVE CASE AT THE STUB'S SCALE. Measured in Chrome on the ZZ Chart Parity
+     * dashboard at a 166x184 card, `400 13px` in the app's `--font-sans`: plotWidth 93.8 over 12
+     * buckets, " September 2026 " 109.3px, "January 2026" 83.5px. The drawn label clears by 10.3
+     * and the hypothetical one loses by 15.5 — the line, area and combo cards all drew no x label.
      */
-    it("sizes on what the unit can produce, not on what this dataset happens to contain", () => {
+    it("measures the label the last rung actually draws, not the widest the unit could produce", () => {
+      expect(thin(MONTHS, 120, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 12 });
+    });
+
+    /**
+     * The same claim at an INTERIOR rung, where more than one label is drawn and the answer is the
+     * widest of that subset rather than of the whole axis.
+     *
+     * Three months of May–July: rung 2 draws indices 0 and 2, "May 2026" (80) and "July 2026" (88),
+     * so it needs 94 and gets `min(2, 3) x 60` = 120. The unit's worst case would have asked 134,
+     * lost, and taken rung 3 — a single label where two fit side by side.
+     */
+    it("measures the widest of the subset a rung draws, not of the whole axis", () => {
       const summer = ["May 2026", "June 2026", "July 2026"];
-      expect(thin(summer, 180, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 3 });
+      expect(thin(summer, 180, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 2 });
+    });
+
+    /**
+     * WHAT MEASURING THE DRAWN SET CONCEDES, asserted rather than left in a comment: the stride now
+     * depends on the data, so two axes at the same unit and the same width can land on different
+     * rungs when their months differ in length.
+     *
+     * Both are twelve consecutive months at 780px (dimensionWidth 65, so rung 2 offers 130). One
+     * starts in January, whose rung 2 draws September (128 + 6 = 134) and loses; the other starts in
+     * February, whose rung 2 draws February/April/June/August/October/December — widest 120, so 126,
+     * and it wins. Same ladder, same width, one rung apart.
+     *
+     * That is the property `widestPeriodName` was protecting and it is deliberately given up:
+     * Metabase needs it because its time axis is re-ranged by a data zoom under a layout that does
+     * not re-run, while egret's category axis is rebuilt by `EChartsRenderer` on every resize and
+     * every result, so no stride here can outlive the labels it was measured against.
+     */
+    it("lets the data decide the rung, which sizing on the unit deliberately did not", () => {
+      const fromFebruary = [...MONTHS.slice(1), "January 2027"];
+      expect(thin(MONTHS, 780, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 3 });
+      expect(thin(fromFebruary, 780, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 2 });
     });
 
     /** The parity case, and the one the harness is judged on: a one-third-width card draws
@@ -245,42 +303,49 @@ describe("fitXLabels", () => {
      * them overlapping, and "January 2026" alone is a truthful axis where two smeared names are not.
      */
     it("draws a single period rather than two that would collide", () => {
-      // 150 -> 12.5: 12 x 12.5 = 150 >= 134, and every 12th of twelve is index 0 alone.
+      // 150 -> 12.5: 12 x 12.5 = 150 >= 96, and every 12th of twelve is index 0 alone.
       expect(thin(MONTHS, 150, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 12 });
     });
 
     /**
-     * THE SINGLE LABEL IS NOT CHARGED CLEARANCE FROM A NEIGHBOUR IT DOES NOT HAVE — the gap arm of
-     * the last rung's budget in `strideThatFits`, and the half that decided the live defect.
+     * THE SINGLE LABEL IS CHARGED NEITHER CLEARANCE NOR PADDING, because both describe a neighbour
+     * it does not have — the two arms of the last rung's budget in `strideThatFits`.
      *
-     * Both cases are the same axis at a plot four pixels apart, bracketing the padded label's own
-     * 128px from each side. Reinstating `HORIZONTAL_TICKS_GAP` on this rung turns the first into
-     * `hide`, because 130 sits inside the 128–134 window the phantom gap opens; without the
-     * bracket's second half the rule could be "never budget anything at the last rung", which the
-     * 126px case refuses.
+     * 100px of plot over twelve buckets brackets all three quantities at once. The rung's budget is
+     * the plot exactly, and "January 2026" is 96px BARE, 102px with the gap, 112px padded, 118px
+     * with both. So the case passes only while the rung is charged neither:
      *
-     * The window is not academic. Measured in Chrome at 400 13px in the app's own `--font-sans`
-     * stack, on the ZZ Chart Parity card: " September 2026 " is 109.3px against a 108.4px plot, so
-     * the axis was refused its last rung by 6.9px, of which 6 were clearance from a neighbour that
-     * is not drawn.
+     *   - reinstate `HORIZONTAL_TICKS_GAP` here -> 102 > 100 -> `hide`;
+     *   - reinstate `pad` here                  -> 112 > 100 -> `hide`;
+     *   - budget it against `every x dimensionWidth` unclamped and it would be 1200, which the
+     *     thirteen-category case below refuses separately.
+     *
+     * The 94px half stops the rule from being "never budget anything at the last rung": 96 does not
+     * fit 94, and the axis falls through as it should.
+     *
+     * The padding half is what the live waterfall turned on. On its 166x184 card the plot is 85.7px
+     * and " January 2026 " measures 90.6 against "January 2026"'s 83.5 — two spaces that are never
+     * drawn were the whole margin between a named axis and a blank one.
      */
-    it("does not charge a between-labels gap to the rung that draws one label", () => {
-      expect(thin(MONTHS, 130, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 12 });
-      // 126 -> 10.5: the label itself does not fit the plot, so there is nothing to draw upright.
-      expect(thin(MONTHS, 126, MONTH_BOUNDARY)).toEqual({ kind: "hide" });
+    it("charges the rung that draws one label neither a gap nor the padding", () => {
+      expect(thin(MONTHS, 100, MONTH_BOUNDARY)).toEqual({ kind: "thin", rotate: 0, every: 12 });
+      // 94 -> 7.83: the label itself does not fit the plot, so there is nothing to draw upright.
+      expect(thin(MONTHS, 94, MONTH_BOUNDARY)).toEqual({ kind: "hide" });
     });
 
     /**
      * A LABEL CANNOT OWN MORE AXIS THAN THERE IS — the `Math.min` arm of the same budget.
      *
      * Thirteen categories, because that is what a waterfall of twelve months has: it appends a
-     * "Total". Rung 12 is then no longer the last, and rung 24 was budgeted at `24 x dimensionWidth`
-     * — 184px of an axis 100px wide — so a label needing 128px "fitted" a plot that could not hold
-     * it. Clamped to the plot it does not, and the axis falls through to PR 02's ladder as it should.
+     * "Total". Rung 12 is then no longer the last — it draws indices 0 and 12, "January 2026" and
+     * "Total", so it is charged the padding and the gap like any other pair — and rung 24 was
+     * budgeted at `24 x dimensionWidth`, 166px of an axis 90px wide, so a label needing 96px
+     * "fitted" a plot that could not hold it. Clamped to the plot it does not, and the axis falls
+     * through to PR 02's ladder as it should.
      */
     it("budgets a stride past the bucket count against the plot, not against the stride", () => {
       const withTotal = [...MONTHS, "Total"];
-      expect(thin(withTotal, 100, MONTH_BOUNDARY)).toEqual({ kind: "hide" });
+      expect(thin(withTotal, 90, MONTH_BOUNDARY)).toEqual({ kind: "hide" });
     });
 
     /**
@@ -313,15 +378,16 @@ describe("fitXLabels", () => {
      * exactly as it did before this arm existed.
      */
     it("falls through to rotation when even the widest stride is too tight", () => {
-      // Two labels: the only rung at or above the count is 2, and 2 x 50 = 100 < 134. Then the
-      // ladder below runs untouched — dimensionWidth 50 >= 13 x 2.1, and 112/√2 is under 70% of 400.
-      expect(thin(["January 2026", "September 2026"], 100, MONTH_BOUNDARY)).toEqual({ kind: "rotate", rotate: 45 });
+      // Two labels: the only rung at or above the count is 2, it draws index 0 alone — so the
+      // budget is `min(2, 2) x 45` = 90 against "January 2026"'s bare 96. Then the ladder below runs
+      // untouched — dimensionWidth 45 >= 13 x 2.1, and 112/√2 is under 70% of 400.
+      expect(thin(["January 2026", "September 2026"], 90, MONTH_BOUNDARY)).toEqual({ kind: "rotate", rotate: 45 });
     });
 
     it("falls through to hiding when the plot is narrower than one label", () => {
-      // 100 -> 8.33: the last rung gives 100px for a label needing 134, and 8.33 clears neither
+      // 94 -> 7.83: the last rung gives 94px for a label needing 96, and 7.83 clears neither
       // rotation threshold.
-      expect(thin(MONTHS, 100, MONTH_BOUNDARY)).toEqual({ kind: "hide" });
+      expect(thin(MONTHS, 94, MONTH_BOUNDARY)).toEqual({ kind: "hide" });
     });
 
     /**
@@ -330,19 +396,20 @@ describe("fitXLabels", () => {
      * has. Same labels, same width, same everything — an ordinal axis of twelve product names gets
      * PR 02's answer, because there is no such thing as every second product.
      *
-     * All three shapes are asserted because they are three different guards. `undefined` is what
-     * `options/cartesian.ts` passes when `namesAPeriod(cfg.xAxisUnit)` is false; the empty pair is
-     * what `boundarySteps`/`widestPeriodName` return for a unit that names no period, which holds
-     * even if that call site is ever loosened; and the empty-steps-with-a-label case is the one a
-     * partial loosening would produce.
+     * Both shapes are asserted because they are two different guards. `undefined` is what
+     * `options/cartesian.ts` passes when `namesAPeriod(cfg.xAxisUnit)` is false; the empty ladder is
+     * what `boundarySteps` returns for a unit that names no period, which holds even if that call
+     * site is ever loosened.
+     *
+     * There used to be a third and a fourth, both about a zero-width `widestLabel` "fitting" every
+     * stride on the strength of measuring nothing. That field is gone — the fitter measures the
+     * labels it is handed — so an empty ladder is now the only guard inside this module, and the
+     * `undefined` case above is the only one outside it.
      */
     it("never thins an axis that is not bucketed, at the width that would have thinned it", () => {
       const ordinal = { kind: "rotate", rotate: 90 };
       expect(thin(MONTHS, 300, undefined)).toEqual(ordinal);
-      expect(thin(MONTHS, 300, { widestLabel: "", steps: [] })).toEqual(ordinal);
-      expect(thin(MONTHS, 300, { widestLabel: "September 2026", steps: [] })).toEqual(ordinal);
-      // A zero-width candidate must not "fit" every stride on the strength of measuring nothing.
-      expect(thin(MONTHS, 300, { widestLabel: "", steps: MONTH_STEPS })).toEqual(ordinal);
+      expect(thin(MONTHS, 300, { steps: [] })).toEqual(ordinal);
     });
   });
 });

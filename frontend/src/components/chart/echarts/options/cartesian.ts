@@ -7,7 +7,7 @@ import { formatValue, specifiesDateRendering } from "../../format";
 import { ariaDescription, baseTextStyle, tooltipSurface } from "../base";
 import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
-import { boundarySteps, namesAPeriod, periodName, widestPeriodName } from "@/components/chart/temporal-period";
+import { boundarySteps, namesAPeriod, periodName } from "@/components/chart/temporal-period";
 import { foldTail, OTHER_LABEL } from "../fold";
 import { estimatePlotWidth, fitXLabels, type XLabelFit } from "../axisLabelFit";
 
@@ -1065,12 +1065,15 @@ function baseOption(
         // thing as every second product. (Both fields are also empty for a non-period unit, so the
         // guard holds a second time even if this line is ever loosened.)
         //
-        // `widestPeriodName` is handed `drawLabel` — the SAME closure the axis draws with, for the
-        // same reason `labels:` above is — so the stride is chosen against a string this axis would
-        // really render, including when a stored column format outranks the period name.
-        boundary: bucketedX
-          ? { widestLabel: widestPeriodName(cfg.xAxisUnit, drawLabel), steps: boundarySteps(cfg.xAxisUnit) }
-          : undefined,
+        // ONLY THE LADDER, no sizing candidate. This used to pass `widestLabel:
+        // widestPeriodName(cfg.xAxisUnit, drawLabel)` as well — the widest name the unit could
+        // produce, threaded through this builder's own `drawLabel` so the stride was sized against a
+        // string the axis would really render. It was still the wrong string: a rung draws indices
+        // 0, every, 2*every, … and the fitter now measures exactly those out of `labels:` above,
+        // which is the same closure's output for the buckets this chart actually has. See
+        // `strideThatFits` for the browser measurement and for what dropping the unit's worst case
+        // concedes.
+        boundary: bucketedX ? { steps: boundarySteps(cfg.xAxisUnit) } : undefined,
       })
     : undefined;
   // …but an explicit rotation is honoured WHEREVER the category axis sits, `ordinalX` or not. On a
@@ -1127,6 +1130,27 @@ function baseOption(
       // NOT restore PR 02, is on the `thin` arm of `XLabelFit` in `../axisLabelFit.ts`, which is
       // its one copy.
       interval: fit?.kind === "thin" ? fit.every - 1 : decided ? (0 as const) : ("auto" as const),
+      // THE FIRST BUCKET IS THE ONE LABEL A STRIDE PROMISES, so on a thinned axis it is declared
+      // required rather than left to ECharts' min/max heuristic — which discards it. Read in
+      // `AxisBuilder.fixMinMaxLabelShow` (`:648-726`) against echarts 6.1, because a `thin` decision
+      // that renders nothing is exactly what this looked like on the live dashboard:
+      //
+      //   - `ordinalScaleCreateTicks` (`scale/helper.js:229-253`) walks the stride from index 0 and
+      //     then APPENDS the extent's last index with `offInterval: true`. Twelve monthly buckets at
+      //     stride 12 therefore hand `AxisBuilder` two labels, "January 2026" and "December 2026",
+      //     not one.
+      //   - `fixMinMaxLabelShow` runs `deal(showMinLabel, 0, 1)` FIRST. With the option unset it
+      //     tests the two for intersection and, finding one, ignores the OUTMOST — January — before
+      //     `deal(showMaxLabel, 1, 0)` ever gets to drop December for being `offInterval`. Two
+      //     labels ~84 and ~91px wide on a 94px plot overlap by about a pixel, so the axis lost the
+      //     only label it had chosen to draw, to a label it was about to throw away.
+      //
+      // `true` flips that one branch: the inner label is dropped instead, which is the same December
+      // the next `deal` would have dropped anyway. Set ONLY on the thin arm — index 0 is on-stride
+      // there by construction (`ordinalScaleCreateTicks` starts at 0), and it is the label the whole
+      // `thin` argument in `../axisLabelFit.ts` rests on. On every other arm the axis draws all its
+      // labels or none, and this heuristic has nothing to decide.
+      showMinLabel: fit?.kind === "thin" ? true : undefined,
       rotate,
       // The last answer the ladder can give: when even a rotated label would eat 70% of the
       // card's height, Metabase draws no axis rather than a wall of text.

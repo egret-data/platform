@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import dayjs from "dayjs";
-import { boundarySteps, periodName, widestPeriodName } from "../temporal-period";
+import { boundarySteps, periodName } from "../temporal-period";
 import { TEMPORAL_UNITS } from "../temporal-units";
 
 describe("periodName", () => {
@@ -88,94 +88,27 @@ describe("periodName", () => {
   });
 });
 
-describe("widestPeriodName", () => {
-  /**
-   * The tick chooser needs the worst case for a unit, not the worst case in this dataset — same
-   * reason Metabase measures `getRepresentativeDates` rather than its data. A month axis whose
-   * visible range happens to be May–July would otherwise size itself on "May 2026" and clip
-   * "September 2026" when the range moves.
-   */
-  it("returns the longest name a unit can produce, not one from the data", () => {
-    expect(widestPeriodName("month")).toBe("September 2026");
-    expect(widestPeriodName("quarter").length).toBe("Q1 2026".length);
-    expect(widestPeriodName("year").length).toBe("2026".length);
-  });
-
-  /** Both a one- and a two-digit day: feeding only `-05` leaves `day` and `week` three characters
-   *  of slack, and the assertion would keep passing if the representative days were wrong. */
-  it("is at least as wide as any name that unit actually produces", () => {
-    for (const unit of ["year", "quarter", "month", "day", "week"] as const) {
-      const widest = widestPeriodName(unit).length;
-      for (let m = 0; m < 12; m++) {
-        for (const d of [5, 28]) {
-          const v = `2026-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-          expect(periodName(unit, v).length).toBeLessThanOrEqual(widest);
-        }
-      }
-    }
-  });
-
-  /**
-   * The sub-day units separately, because their worst case is not a month name: a two-digit hour
-   * ("10:00 AM") and a two-digit day are each a character longer than the one-digit case the loop
-   * above happens to use, and that character is what an axis clips.
-   */
-  it("covers the two-digit hour and day a sub-day unit can produce", () => {
-    for (const unit of ["hour", "minute"] as const) {
-      const widest = widestPeriodName(unit).length;
-      for (let m = 0; m < 12; m++) {
-        for (const h of [0, 1, 9, 10, 11, 12, 13, 21, 23]) {
-          const v = `2026-${String(m + 1).padStart(2, "0")}-28T${String(h).padStart(2, "0")}:45:00`;
-          expect(periodName(unit, v).length).toBeLessThanOrEqual(widest);
-        }
-      }
-    }
-  });
-
-  /**
-   * The one assertion here that guards a FUTURE change rather than this one. Nothing ties
-   * `PERIOD_FORMAT`'s keys to `TEMPORAL_UNITS`, so a truncation unit added upstream — the backend's
-   * `TemporalUnit::parse` and this list move together — would silently reinstate the exact defect
-   * this module exists to fix: its buckets fall through to the raw first day on the axis, and Task
-   * 3 sizes its ticks against a zero width. Driven off `TEMPORAL_UNITS` rather than a copied list,
-   * so adding the unit is what turns this red.
-   */
-  it("can name every truncation unit egret supports", () => {
+/**
+ * WHAT SURVIVES OF THE `widestPeriodName` BLOCK THAT USED TO SIT HERE. That function is gone with
+ * the last commit of PR 03 — the tick chooser measures each rung's DRAWN labels now, so nothing was
+ * left for a unit-wide worst case to decide — and with it went every assertion about representative
+ * dates, two-digit hours and the `draw` mapper, all of which described its internals.
+ *
+ * This one did not. It guards a FUTURE change rather than that function: nothing ties
+ * `PERIOD_FORMAT`'s keys to `TEMPORAL_UNITS`, so a truncation unit added upstream — the backend's
+ * `TemporalUnit::parse` and this list move together — would silently reinstate the exact defect this
+ * module exists to fix, its buckets falling through to the raw first day on the axis. Driven off
+ * `TEMPORAL_UNITS` rather than a copied list, so adding the unit is what turns this red.
+ * `boundarySteps` below makes the ladder half of the same claim against the same list.
+ */
+describe("every truncation unit egret supports", () => {
+  it("has a period name, so no bucketing falls through to the raw value", () => {
     const trunc = TEMPORAL_UNITS.filter((u) => u.group === "trunc").map((u) => u.token);
     expect(trunc.length).toBeGreaterThan(0);
     for (const token of trunc) {
-      expect(widestPeriodName(token), `no period name for "${token}"`).not.toBe("");
-      expect(periodName(token, "2026-01-05T13:00:00")).not.toBe("2026-01-05T13:00:00");
+      expect(periodName(token, "2026-01-05T13:00:00"), `no period name for "${token}"`)
+        .not.toBe("2026-01-05T13:00:00");
     }
-  });
-
-  /** Total too, and deliberately zero-width rather than plausibly wrong — see the function. */
-  it("has no width to offer for a unit that names no period", () => {
-    expect(widestPeriodName(undefined)).toBe("");
-    expect(widestPeriodName("day_of_week")).toBe("");
-    expect(widestPeriodName("fortnight")).toBe("");
-  });
-
-  /**
-   * `draw` is why the parameter exists: the tick chooser's candidate has to be a string the axis
-   * would really RENDER, and a bucketed axis does not always render the period name — a stored
-   * column format outranks it (`options/cartesian.ts`'s `drawLabel`, arm 1). Sizing a stride
-   * against "September 2026" while the axis draws "2026-09-10" is the same measure-one-draw-another
-   * drift that made the fitter rotate labels which would have fitted, one level up.
-   *
-   * Asserted on the same representative VALUES rather than on the names, which is the contract:
-   * this maps the candidates through `draw` and picks the longest of the results.
-   */
-  it("picks the widest of what the caller actually draws, not of the period names", () => {
-    // The longest period name is September's; the longest of THESE is the shortest month's.
-    const inverted = (v: string) => "x".repeat(40 - periodName("month", v).length);
-    expect(widestPeriodName("month", inverted)).toBe("x".repeat(40 - "May 2026".length));
-    // …and the default still reproduces the plain period name, memo and all.
-    expect(widestPeriodName("month")).toBe("September 2026");
-  });
-
-  it("offers a drawn candidate no more than the plain one for a unit that names no period", () => {
-    expect(widestPeriodName("day_of_week", () => "a very wide drawn label")).toBe("");
   });
 });
 
@@ -232,8 +165,8 @@ describe("boundarySteps", () => {
    * ladder is not a fallback — `strideThatFits` has nothing to try and hands the axis back to PR
    * 02's rotate/hide. There is no such thing as every second product.
    *
-   * Driven off `TEMPORAL_UNITS` for the positive half, like `widestPeriodName`'s own coverage test
-   * above, so a truncation unit added upstream turns this red rather than silently getting no
+   * Driven off `TEMPORAL_UNITS` for the positive half, like the period-name coverage test above,
+   * so a truncation unit added upstream turns this red rather than silently getting no
    * ladder — that unit's charts would go on drawing no labels at all on a narrow card.
    */
   it("offers no stride for anything that is not a truncation unit", () => {

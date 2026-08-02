@@ -3,7 +3,7 @@ import type { EChartsSize } from "../EChartsRenderer";
 import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue, specifiesDateRendering } from "../../format";
-import { boundarySteps, namesAPeriod, periodName, widestPeriodName } from "../../temporal-period";
+import { boundarySteps, namesAPeriod, periodName } from "../../temporal-period";
 import { estimatePlotWidth, fitXLabels, type XLabelFit } from "../axisLabelFit";
 import { ariaDescription, baseOption, tooltipSurface, TOOLTIP_WEIGHT } from "../base";
 import { CHART_THEME, SERIES_PALETTE, COLOR_FALLBACK, resolveColor } from "../palette";
@@ -261,9 +261,10 @@ export function buildWaterfallOption(
         // every second stage. (Both fields are also empty for a non-period unit, so the guard holds
         // a second time even if this line is ever loosened.)
         //
-        // `widestPeriodName` is handed `drawLabel` — the SAME closure the axis draws with, for the
-        // same reason `labels:` above is — so the stride is chosen against a string this axis would
-        // really render, including when a stored column format outranks the period name.
+        // ONLY THE LADDER, no sizing candidate. This used to pass `widestLabel:
+        // widestPeriodName(cfg.xAxisUnit, drawLabel)` as well — the widest name the unit could
+        // produce. The fitter now slices each rung's drawn labels out of `labels:` above instead;
+        // see `strideThatFits` for the browser measurement and for what that concedes.
         //
         // ONE THING A WATERFALL HAS THAT A BAR CHART DOES NOT: the appended "Total" is a category
         // that is not a period. It costs TWO things, neither a blocker, and both are named here
@@ -274,26 +275,20 @@ export function buildWaterfallOption(
         //     is reached only once every adjacent pair collides, and the answer without it is PR
         //     02's rotate-or-hide, under which the Total's label is tilted or gone anyway. The
         //     bars, the tooltip and the aria description all still name it.
-        //   - IT IS NOT COVERED BY THE SIZING CANDIDATE. `strideThatFits` measures
-        //     `boundary.widestLabel` and never sees `labels`, so the stride is chosen against the
-        //     unit's worst case alone. At `year` that is "2026" (4 characters) while the drawn
-        //     "Total" is 5 — so when the Total IS on-stride it can sit a couple of pixels past the
-        //     budget its stride was chosen under. `year` is the only unit where it happens (every
-        //     other period name is longer than "Total"), and the pessimistic padding plus the 6px
-        //     gap absorb the difference, so this is recorded rather than fixed. Fixing it means
-        //     folding the drawn labels into the candidate, which would make the stride depend on
-        //     the data again — the property `widestPeriodName` exists to remove.
         //   - IT MOVES WHICH RUNG IS THE LAST ONE. `strideThatFits` stops at the first rung at or
         //     past the CATEGORY count, and the Total makes that count one higher — so twelve months
         //     here reach the 24 rung where a bar chart of the same twelve stops at 12. That was a
         //     defect until the budget was clamped: rung 24 was offered `24 x dimensionWidth`, near
         //     twice the plot it had, so this axis thinned on the live dashboard at a width where the
-        //     line chart beside it hid. Both now measure the same single label against the same plot;
-        //     what survives is only that the two land on different RUNGS, and every rung at or past
-        //     the count draws index 0 and nothing else, so they draw the same axis.
-        boundary: bucketedX
-          ? { widestLabel: widestPeriodName(cfg.xAxisUnit, drawLabel), steps: boundarySteps(cfg.xAxisUnit) }
-          : undefined,
+        //     line chart beside it hid. Both now measure real drawn labels against the same clamped
+        //     plot; what survives is only that the two land on different RUNGS, and every rung at or
+        //     past the count draws index 0 and nothing else, so they draw the same axis.
+        //
+        // (A third cost is gone rather than fixed: the Total was not covered by the old sizing
+        // candidate, so at `year` — the one unit whose period name, "2026", is shorter than "Total"
+        // — an on-stride Total could sit a couple of pixels past the budget its stride was chosen
+        // under. It is on the drawn set now, so it is measured like any other category.)
+        boundary: bucketedX ? { steps: boundarySteps(cfg.xAxisUnit) } : undefined,
       })
     : undefined;
   const rotate = cfg.xLabelRotation ?? (fit?.kind === "rotate" ? fit.rotate : 0);
@@ -414,6 +409,12 @@ export function buildWaterfallOption(
         // in `options/cartesian.ts` at this same line, and only there: `axisLabelFit.ts` says
         // outright that the ECharts semantics belong at the builder line rather than in it.
         interval: fit?.kind === "thin" ? fit.every - 1 : decided ? (0 as const) : ("auto" as const),
+        // The first bucket is the one label a stride promises, so on a thinned axis it is declared
+        // required rather than left to `AxisBuilder.fixMinMaxLabelShow`, which drops it in favour of
+        // the off-interval end tick ECharts appends. The mechanism, read out of echarts 6.1, is at
+        // this same line in `options/cartesian.ts` and only there. A waterfall reaches it by the
+        // same route with "Total" as that end tick.
+        showMinLabel: fit?.kind === "thin" ? true : undefined,
         rotate,
         // The last answer the ladder can give: when even a rotated label would eat 70% of the
         // card's height, Metabase draws no axis rather than a wall of text.
