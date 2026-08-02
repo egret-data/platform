@@ -7,7 +7,7 @@ import { CHART_THEME, COLOR_FALLBACK, resolveColor, resolveFontFamily } from "..
 import { colorsForKeys } from "../keyColors";
 import {
   measureText as defaultMeasureText,
-  truncateLabelText,
+  fitSliceLabel,
   type MeasureText,
 } from "../sliceLabel";
 
@@ -184,6 +184,12 @@ export function buildSankeyOption(
   columns: ResultColumn[],
   rows: unknown[][],
   cfg: SankeyBuildConfig,
+  /** Injectable text measurer, defaulting to the real canvas one — the convention `buildPieOption`
+   * set, down to the POSITION: measurer fourth, size fifth. The two files are the only ones that
+   * take a measurer, so a third builder will copy whichever it opens first, and they must not
+   * disagree. (This is what lets the fit below be unit tested without a rasteriser — see
+   * sliceLabel.ts. Production callers pass `undefined` and take the default.) */
+  measureText: MeasureText = defaultMeasureText,
   /** The chart's measured pixel size, when the caller has one — this builder is pure data with no
    * DOM of its own, so EChartsRenderer measures the container and threads it through (see
    * `buildPieOption`, the first to take one).
@@ -208,9 +214,6 @@ export function buildSankeyOption(
    * keeps its percentage and no label is cut against a width nobody supplied — the same safe
    * direction `buildPieOption` takes. */
   size?: EChartsSize,
-  /** Injectable text measurer, defaulting to the real canvas one — the convention `buildPieOption`
-   * set, and the reason the fit above can be unit tested without a rasteriser (see sliceLabel.ts). */
-  measureText: MeasureText = defaultMeasureText,
 ): EChartsCoreOption {
   const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
   const si = cfg.source != null ? idx[cfg.source] : undefined;
@@ -322,13 +325,22 @@ export function buildSankeyOption(
         // canvas edge with no mark at all — and only on those, since the other columns' labels have
         // the diagram to spill into. Metabase's `nodeIndicesWithTruncatedLabels`, keyed on the name
         // rather than the index because egret's nodes carry no `value` to key on.
+        //
+        // `fitSliceLabel` rather than a bare `truncateLabelText`, so the last column inherits the
+        // MIN_TRUNCATED_LABEL_CHARS floor its sibling already enforces: below three surviving
+        // characters a truncation stops identifying anything and starts reading as a real short
+        // value — plenty of genuine categories ARE two-letter codes — so on a card too narrow to
+        // cut honestly the label is dropped instead. A name that FITS is untouched however short it
+        // is; the floor is about cutting, not about length. `?? ""` because ECharts wants a string.
         ...(cutNodes != null && cutTo != null
           ? {
             formatter: (p: { name?: unknown }) => {
               const name = String(p.name ?? "");
-              return cutNodes.has(name)
-                ? truncateLabelText(name, cutTo, measureText, nodeLabelFont)
-                : name;
+              if (!cutNodes.has(name)) return name;
+              return fitSliceLabel({
+                label: name, availableSpace: cutTo, showLabels: true,
+                measureText, fontStyle: nodeLabelFont,
+              }) ?? "";
             },
           }
           : {}),

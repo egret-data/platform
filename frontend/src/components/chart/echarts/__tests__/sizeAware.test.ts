@@ -204,7 +204,8 @@ describe("builders accept a container size", () => {
     const scols = [{ name: "s", type: "varchar" }, { name: "t", type: "varchar" }, { name: "v", type: "double" }];
     const srows: unknown[][] = [["A", "X", 10], ["B", "X", 3]];
     const cfg = { source: "s", target: "t", metric: "v" };
-    const sized = fingerprint(buildSankeyOption(scols, srows, cfg, SMALL)) as Record<string, never>;
+    // `undefined` is the measurer (position 4); the size is position 5, as in `buildPieOption`.
+    const sized = fingerprint(buildSankeyOption(scols, srows, cfg, undefined, SMALL)) as Record<string, never>;
     const unsized = fingerprint(buildSankeyOption(scols, srows, cfg)) as Record<string, never>;
     // tooltip, edge label — pinned exactly, for the reason `expectSizeIsUnread` gives.
     expect(functionsIn(sized)).toBe(2);

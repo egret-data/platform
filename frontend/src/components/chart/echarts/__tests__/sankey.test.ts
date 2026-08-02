@@ -178,6 +178,9 @@ const ROOMY: EChartsSize = { width: 800, height: 400 };
  *  - "Cancelled Order" (15, 105px) is a level-1 SINK. `nodeAlign: "justify"` pushes a node with no
  *    outputs to the right edge, so it joins the reserved set there and not under `"left"` — which
  *    is the one thing distinguishing "last level" from "last drawn column".
+ *  - "US" (2, 14px) is a last-column name that FITS at every size tested here, and it is emitted
+ *    LAST — so "reserve the last one met" disagrees with "reserve the widest" too, and the cutting
+ *    tests below have to show a label surviving uncut next to ones that did not.
  */
 const labelRoomRows: unknown[][] = [
   ["Doohickey Assembly", "Warehouse Hub", 40],
@@ -186,11 +189,13 @@ const labelRoomRows: unknown[][] = [
   ["Warehouse Hub", "Shipped", 30],
   ["Warehouse Hub", "Returned", 10],
   ["Warehouse Hub", "Delivered", 20],
+  ["Warehouse Hub", "US", 15],
 ];
-const LAST_COLUMN = ["Shipped", "Returned", "Delivered"];
+const LAST_COLUMN = ["Shipped", "Returned", "Delivered", "US"];
 
+// Measurer FOURTH, size FIFTH — `buildPieOption`'s order, which `buildSankeyOption` follows.
 const labelRoom = (size?: EChartsSize, over: Partial<SankeyBuildConfig> = {}) =>
-  series(buildSankeyOption(cols, labelRoomRows, { ...cfg, ...over }, size, stubMeasure) as any);
+  series(buildSankeyOption(cols, labelRoomRows, { ...cfg, ...over }, stubMeasure, size) as any);
 
 /**
  * Measured live at 166x184: the right-hand labels started at x=158 — 8px from the edge — and ran to
@@ -217,9 +222,9 @@ describe("sankey node-label room", () => {
     // on top of the 24px floor — a 166px card is under the width where 5% reaches 24.
     expect(s.right).toBe(24 + 41.5);
     // ...and the labels are cut to the room reserved for them. 41.5 less the 7px ellipsis leaves
-    // 34.5, which holds four characters.
+    // 34.5, which holds four characters. "US" is 14px, already inside the cap, so it is untouched.
     const drawn = LAST_COLUMN.map((n) => s.label.formatter({ name: n }));
-    expect(drawn).toEqual(["Ship…", "Retu…", "Deli…"]);
+    expect(drawn).toEqual(["Ship…", "Retu…", "Deli…", "US"]);
 
     // The defect, stated as the reader sees it: the last column's nodes end at `width - right`, and
     // every label drawn from there must finish before the canvas does. It used to finish 30-55px
@@ -234,6 +239,24 @@ describe("sankey node-label room", () => {
     const s = labelRoom(CARD);
     expect(s.label.formatter({ name: "Doohickey Assembly" })).toBe("Doohickey Assembly");
     expect(s.label.formatter({ name: "Warehouse Hub" })).toBe("Warehouse Hub");
+  });
+
+  /**
+   * `sliceLabel.ts` keeps a MIN_TRUNCATED_LABEL_CHARS floor of 3 because a one- or two-character
+   * truncation identifies nothing AND reads as a real short value — plenty of genuine categories
+   * are two-letter codes. A sankey's node names are just as categorical, so the last column
+   * inherits the floor rather than restating the ambiguity: on a card too narrow to cut honestly
+   * the label is dropped, which is what `hideOverlap` has always done to a label with nowhere to go.
+   *
+   * At 100px the cap is 25 and the 7px ellipsis leaves 18 — two characters, under the floor.
+   */
+  it("drops a last-column label rather than cut it to a stub", () => {
+    const s = labelRoom({ width: 100, height: 120 });
+    const drawn = LAST_COLUMN.map((n) => s.label.formatter({ name: n }));
+    // "US" fits the 25px cap whole, so it survives untouched — the floor is about CUTTING, not
+    // about length, and a genuinely short name is never the thing being hidden.
+    expect(drawn).toEqual(["", "", "", "US"]);
+    expect(drawn).not.toContain("…");
   });
 
   /**
