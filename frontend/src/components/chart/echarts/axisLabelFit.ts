@@ -97,6 +97,16 @@ export interface XLabelBoundary {
  *  neighbouring labels; the two factors are the multiples of the font size below which even a
  *  rotated label stops being worth drawing. */
 const HORIZONTAL_TICKS_GAP = 6;
+/** ECharts' own default `axisLabel.margin`: the clear space between an axis line and its labels.
+ *  Not a constant of this module's invention — it is read here because a LEFT axis's name has to be
+ *  placed past labels that sit that far out (`nameGapClearOf`), and because `nameGap` is measured
+ *  from the axis line rather than from the labels. */
+const AXIS_LABEL_MARGIN = 8;
+/** ECharts' own default `splitNumber` on a value axis. It is a HINT — the axis still rounds to a
+ *  human interval — so this is a ceiling to stay under and never a count to assert. Above it there
+ *  is nothing to say, which is why `fitValueTicks` answers `undefined` there rather than repeating
+ *  the default back into the option. */
+const DEFAULT_VALUE_SPLITS = 5;
 /** `X_LABEL_ROTATE_45_THRESHOLD_FACTOR` */
 const ROTATE_45_MIN_FACTOR = 2.1;
 /** `X_LABEL_ROTATE_90_THRESHOLD_FACTOR` */
@@ -208,6 +218,15 @@ export function widestTickLabel(widestValue: number, format: (v: number) => stri
   return widest;
 }
 
+/** The one font every axis label and axis name in this module is measured at — the chart's own,
+ *  RESOLVED rather than the literal token: a CSS-wide keyword like "inherit" is not a legal family
+ *  in the `font` shorthand, so the canvas rejects the whole declaration and measures at its 10px
+ *  sans-serif default, ~30% short, and a fit computed against the wrong family is wrong by however
+ *  much the two differ in advance width. Hoisted so the four measurements below cannot drift apart
+ *  on it. */
+const axisFont = (fontSize: number = CHART_THEME.axisFontSize) =>
+  ({ size: fontSize, family: resolveFontFamily(), weight: CHART_THEME.axisWeight });
+
 /**
  * The width the categories share, estimated — the `plotWidth` every caller of `fitXLabels` below
  * passes, and the one number the whole ladder turns on.
@@ -273,16 +292,170 @@ export function estimatePlotWidth(
   format: (v: number) => string,
   hasAxisTitle: boolean,
 ): number {
+  return plotWidthLessGutter(size, measureText(widestTickLabel(widestValue, format), axisFont()).width, hasAxisTitle);
+}
+
+/**
+ * `estimatePlotWidth`'s arithmetic, with the gutter already measured — the ONE copy, and the reason
+ * it is separated out rather than inlined above.
+ *
+ * A ROW CHART needs the same subtraction against a different gutter. Its left-hand axis is the
+ * CATEGORY axis, so what eats into the plot on that side is the category names, not a column of
+ * value ticks — and `estimatePlotWidth`'s signature deliberately admits no string, because handing
+ * it one is what let three builders charge the gutter for a datum their axis never drew. Rather
+ * than loosen that (or copy the four terms into `options/cartesian.ts`), the row chart measures its
+ * own gutter with `widestLabelWidth` below — the labels ARE the drawn strings there, exactly as
+ * `fitXLabels` takes them — and hands the width here.
+ *
+ * `26` is the room each builder's `grid.left` reserves for an axis title, kept in step with it: all
+ * three add exactly that when the axis on that edge is named.
+ */
+export function plotWidthLessGutter(size: EChartsSize, gutter: number, hasAxisTitle: boolean): number {
   const g = CHART_THEME.grid;
-  // The family the chart is actually DRAWN in, never the literal "inherit": a CSS-wide keyword is
-  // not a legal family in the `font` shorthand, so the canvas would reject the whole declaration
-  // and measure at its 10px sans-serif default. Same rule, and the same reason, as `fitXLabels`.
-  const gutter = measureText(widestTickLabel(widestValue, format), {
-    size: CHART_THEME.axisFontSize, family: resolveFontFamily(), weight: CHART_THEME.axisWeight,
-  }).width;
-  // `26` is the room each builder's `grid.left` reserves for a value-axis title, kept in step with
-  // it — all three add exactly that when their value axis is named.
   return size.width - (g.left as number) - (g.right as number) - gutter - (hasAxisTitle ? 26 : 0);
+}
+
+/** The widest of the labels an axis DRAWS, measured. The category-side counterpart of
+ *  `widestTickLabel`, and unlike it nothing here is INVENTED — a category axis is handed its labels
+ *  in full, so this measures the strings themselves rather than sampling values the axis might
+ *  round to. `ticksToMeasure` bounds the cost the same way the overlap test above does, and with the
+ *  same residual: past 50 labels the widest one can hide in a sampling gap, since character count is
+ *  only a proxy for width. */
+export function widestLabelWidth(
+  labels: string[],
+  measure: TextMeasurer = measureText,
+  fontSize: number = CHART_THEME.axisFontSize,
+): number {
+  let widest = 0;
+  for (const l of ticksToMeasure(labels)) {
+    const w = measure(l, axisFont(fontSize)).width;
+    if (w > widest) widest = w;
+  }
+  return widest;
+}
+
+/** {1,2,5}x10^n at or above `v` — ECharts' own family of tick intervals (`intervalScale`'s
+ *  `nice()` draws from it), so an interval chosen here is one the axis would have been willing to
+ *  choose for itself and its labels stay round. */
+function niceInterval(v: number): number {
+  const magnitude = 10 ** Math.floor(Math.log10(v));
+  for (const m of [1, 2, 5]) if (m * magnitude >= v) return m * magnitude;
+  return 10 * magnitude;
+}
+
+/**
+ * The tick INTERVAL a value axis needs for its labels to clear each other across `plotWidth`, or
+ * `undefined` when ECharts' own default is already loose enough — the value-axis answer to the
+ * question `fitXLabels` answers for categories.
+ *
+ * IT IS A DIFFERENT ANSWER, and that is the whole point rather than an implementation detail. A
+ * category axis that cannot fit its labels rotates them, because the labels are the data and
+ * dropping any of them reads as missing data. A value axis draws ROUND TICKS that it generated
+ * itself, so the same crowding has a remedy the other axis does not have: draw fewer of them. Ten
+ * thousand and twenty thousand say everything nought-to-forty-thousand says. Metabase agrees from
+ * both directions — it greys axis-label rotation out on a value axis, and its own row chart at
+ * 311px answers this crowding by drawing a single tick — so handing a value axis to the rotate
+ * ladder would be a divergence dressed as a fix.
+ *
+ * AN INTERVAL AND NOT A `splitNumber`, and this is the one part of this function that was MEASURED
+ * rather than reasoned. `splitNumber` is a HINT: ECharts divides the extent by it and then rounds
+ * the result to a nice number, and it rounds DOWN as readily as up — so a count that came from a
+ * pixel budget does not survive the round trip. The first version of this fix asked a 250px row
+ * card for 3 splits over a 412,000 extent and got an interval of 100,000 back: five labels, 22px
+ * apart, still overlapping by 8.6px. Rendered across eighteen widths from 166 to 800, that version
+ * left the labels overlapping at 220, 260 and 280 while an interval cleared every one of them.
+ *
+ * WHAT THAT DOES AND DOES NOT SAY, because the distinction is easy to lose and a later reader will
+ * be tempted to "simplify" this back: it is not that `splitNumber` cannot express the answer. A
+ * split count DERIVED from the interval below — `round(span / interval)` — round-trips through
+ * ECharts' rounding to this same interval, and mutating the option that way passes every case in
+ * `rowAxisLabels.test.ts`. The two encodings agree; what failed was deriving the COUNT from the
+ * pitch and hoping the interval ECharts inferred from it would match. Naming the interval removes
+ * the inference, and is the shorter way to say it. (`axisTick` follows the labels for free — it
+ * carries no interval of its own on a value axis.)
+ *
+ * THE BUDGET IS A PITCH, not a packing. Labels are centred on their ticks and evenly spaced, so
+ * neighbours sit `plotWidth / steps` apart whatever the count, and the axis fits when that pitch
+ * clears the widest label plus one gap of ink. `HORIZONTAL_TICKS_GAP` is that gap, the same 6px
+ * `fitXLabels` demands between two neighbouring category labels — one question, one constant.
+ *
+ * ONE LABEL'S WIDTH IS CHARGED BEFORE THE DIVISION, for the two OUTERMOST labels: each overhangs
+ * its end of the plot by half its width, and in echarts 6 the grid shrinks to keep them on the
+ * card, so the pitch is shared over a plot narrower than the estimate. Measured on the live card's
+ * data at 250px: `plotWidthLessGutter` estimates 139 and the drawn plot is 110 — 29px, against a
+ * label of 30.6. Charging it makes the estimate's residual error the small term rather than the
+ * one that decides the answer.
+ *
+ * WHY A CEILING AND NOT A COUNT. Returning `undefined` at or above `DEFAULT_VALUE_SPLITS` leaves a
+ * roomy card's option byte-identical to what it built before this existed — the fit may only ever
+ * take ticks AWAY. A chart wide enough for fifteen labels does not want fifteen, and ECharts'
+ * default already draws six there with 21px between them.
+ *
+ * WHY IT DECLINES ON A ZERO MEASUREMENT rather than treating it as "everything fits". `measureText`
+ * returns 0 under jsdom by design ("Size claims belong in a browser"), and a zero-width label makes
+ * any pitch clear any budget — so an unmeasured environment would silently be told the default is
+ * fine. That happens to be the answer it wants, but by accident; saying so explicitly keeps this
+ * function's contract "decide from a width, or decline", which is the builder's rule for `size`.
+ *
+ * WHAT IT DOES NOT DO IS SET THE AXIS'S MAX, and the residual is real rather than theoretical. An
+ * interval that does not divide the extent ECharts chose leaves a short last step — 200,000 against
+ * a 500,000 max draws 0/200K/400K/500K, and those last two sit half a pitch apart. ECharts drops
+ * that label itself where it would collide (`fixMinMaxLabelShow`), which is why the rendered gap
+ * stays positive at every width measured; at 300px it comes out at 1.4px, which is exactly what the
+ * axis drew there BEFORE this fit existed. Taking the max over as well would even the pitch out, and
+ * would also move every narrow row chart's bar scale — a visible change to charts that do not have
+ * this defect, so it belongs in its own commit if the 1.4px ever reads as a defect of its own.
+ */
+export function intervalThatFits({
+  plotWidth,
+  span,
+  widestValue,
+  format,
+  fontSize = CHART_THEME.axisFontSize,
+  measure = measureText,
+}: {
+  /** The drawable width the ticks share, from `plotWidthLessGutter`. */
+  plotWidth: number;
+  /** The distance the axis covers — what the interval has to divide. NOT the same as
+   *  `widestValue`: an axis running -400 to +400 is 800 across, and sizing its interval against 400
+   *  would ask for twice the ticks that fit. */
+  span: number;
+  /** The largest magnitude the axis carries, and its own tick formatter — the same pair
+   *  `estimatePlotWidth` takes, and for the same reason: the candidate has to be a string this axis
+   *  would really draw. `widestTickLabel` turns them into one. */
+  widestValue: number;
+  format: (v: number) => string;
+  fontSize?: number;
+  measure?: TextMeasurer;
+}): number | undefined {
+  if (plotWidth <= 0 || !Number.isFinite(span) || span <= 0) return undefined;
+  const width = measure(widestTickLabel(widestValue, format), axisFont(fontSize)).width;
+  if (width <= 0) return undefined;
+  const steps = Math.floor((plotWidth - width) / (width + HORIZONTAL_TICKS_GAP));
+  if (steps >= DEFAULT_VALUE_SPLITS) return undefined;
+  // One step is ECharts' floor as well as ours: a value axis draws its two ends. Where even those
+  // two collide the honest remedy is a wider card.
+  return niceInterval(span / Math.max(1, steps));
+}
+
+/**
+ * The `nameGap` a LEFT axis's name needs to clear its own labels, given how wide they measure.
+ *
+ * `nameGap` is measured from the AXIS LINE, and on a left axis the labels are what sits between the
+ * two — so a gap that does not cover them draws the name across them. That is the live defect: the
+ * row chart's `category` title occupied x 64.8-77.8 while `Doohickey` ran 37-97.8. The three terms
+ * are the axis line to the labels (`AXIS_LABEL_MARGIN`), the labels themselves, and the same ink-free
+ * `HORIZONTAL_TICKS_GAP` this module demands between any two neighbouring pieces of axis text.
+ *
+ * IT DOES NOT NEED THE NAME'S OWN THICKNESS, which is the term a reader will look for. A name on a
+ * left axis is rotated onto the y axis, so what it occupies horizontally is its font's HEIGHT — but
+ * ECharts anchors it at `nameGap` and grows it away from the plot, so the term only decides whether
+ * the name still lands on the card. It does: `grid.left` reserves 26px for a titled axis, and
+ * rendered at the live card's size the name's ink came out at x 18-31 against labels starting at 37
+ * — inside the reserved band with 10px to spare, and 6px of clear ink where there was -40.8.
+ */
+export function nameGapClearOf(labelWidth: number): number {
+  return labelWidth + AXIS_LABEL_MARGIN + HORIZONTAL_TICKS_GAP;
 }
 
 /** At most `n` indices spread evenly over `count`, endpoints included — Metabase's
@@ -499,13 +672,9 @@ export function fitXLabels({
   if (labels.length === 0 || plotWidth <= 0) return upright;
 
   // The family the chart is actually DRAWN in (`echarts/base.ts` sets it from the same token), not
-  // the literal "inherit": a CSS-wide keyword is not a legal family in the `font` shorthand, so
-  // `context.font = "400 13px inherit"` is rejected outright and the canvas keeps whatever font it
-  // last had — its 10px sans-serif default on a fresh one. Every width would then come back ~30%
-  // short and the fitter would call collisions "fits", which is exactly the failure it is here to
-  // stop. Same rule BigNumber follows: "a fit computed against the wrong family is wrong by however
-  // much the two differ in advance width."
-  const style = { size: fontSize, family: resolveFontFamily(), weight: CHART_THEME.axisWeight };
+  // the literal "inherit" — `axisFont` above carries the argument, and holding it in one place is
+  // what keeps this ladder measuring at the same font as the gutter it is budgeted against.
+  const style = axisFont(fontSize);
   const measured = ticksToMeasure(labels);
   // PADDED for the overlap test (`areHorizontalXAxisTicksOverlapping` measures
   // `getPaddedAxisLabel(...)`, `:680`/`:684`) and UNPADDED for the height guard
