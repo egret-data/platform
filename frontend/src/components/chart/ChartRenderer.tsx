@@ -9,7 +9,7 @@ import { isCartesianViz } from "@/api/charts";
 import { vizConfig, shellSettings } from "@/components/chart/viz/renderConfig";
 import type { DrillContext, DrillDim } from "@/components/chart/drill";
 import { EChartsRenderer, type EChartsPointClick, type EChartsSize } from "@/components/chart/echarts/EChartsRenderer";
-import { buildCartesianOption, type CartesianBuildConfig } from "@/components/chart/echarts/options/cartesian";
+import { buildCartesianOption, resolveXScale, type CartesianBuildConfig } from "@/components/chart/echarts/options/cartesian";
 import { cartesianMeta, type CartesianMeta } from "@/components/chart/echarts/options/cartesianMeta";
 import {
   buildPieOption, buildPieLegend, buildPieHole, buildPieHoleGraphic, pieLegendPlacement, pieHasSlices,
@@ -583,10 +583,46 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
               // for an answer. Same refusal the pie makes for its own folded slice.
               if (meta.foldedCategory != null && p.name === meta.foldedCategory) return;
               const unit = params.spec.temporal_units?.[cartesian.xAxis as string];
+              // ON A LINEAR X THE CLICKED VALUE IS IN THE DATUM, NOT IN `p.name`. A value axis has
+              // no categories to name a point after, so ECharts reports `name: ""` for one — and a
+              // drill built on that filters `price = ''`, which matches nothing and looks like a
+              // chart with no rows behind it. `applyXScale` re-keys each point to `[x, y]`, so the
+              // x IS `data[0]`, and on a linear scale it is the same number the category string
+              // held. The payload both arms rest on is pinned against real ECharts in
+              // `echarts/__tests__/scatterValueX.echarts.test.ts` — `{name: "", data: [48.93, 7]}`
+              // on the value axis, `{name: "48.93", data: 7}` on the category one — so this comment
+              // is not the only thing holding it up.
+              //
+              // This became reachable without anyone asking for it when a numeric scatter started
+              // resolving to a value axis (`resolveXScale`). Because that function returns a STORED
+              // scale before it computes anything, the same arm also repairs a line, area, bar or
+              // combo chart set to Linear by hand, where the drill has been broken in exactly this
+              // way for as long as the setting has existed.
+              //
+              // `Array.isArray(p.data)` IS DOING GATING, NOT JUST NARROWING, and it has to be read
+              // that way. `resolveXScale` answers "what scale would this config resolve to", not
+              // "what axis is on screen", and it is called here without the two gates the builder
+              // applies around it: the `scatterXY` early return (an `xMetric` scatter over a numeric
+              // dimension computes "linear" while `scatterXY` draws axes named after the METRICS)
+              // and `isHorizontal` (a row chart, or a flipped bar, with a stored `xScale: "linear"`
+              // computes "linear" while `usesXScale` ignores it and draws categories down the left).
+              // In both the axis really on screen is a category one, ECharts reports a name and a
+              // bare number, and `Array.isArray` is what keeps this arm off them. Reproducing the
+              // builder's gates here would mean a second copy of them to drift; testing the datum
+              // shape asks the drawn chart directly, which is the thing the answer depends on.
+              //
+              // TIMESERIES IS DELIBERATELY NOT INCLUDED. Its `data[0]` is `Date.parse`'s epoch
+              // milliseconds, not the bucket value a filter needs, so there is nothing here to
+              // recover — a separate defect, tracked as egretdb/egret#387, and not one this arm
+              // should paper over by filtering on a number the column has never held.
+              const scale = resolveXScale(vizType, cartesian.xScale, cartesianCfg.xAxisType);
+              const xValue = scale === "linear" && Array.isArray(p.data)
+                ? (p.data as unknown[])[0]
+                : p.name;
               const dims: DrillDim[] = [
                 unit
-                  ? { col: cartesian.xAxis as string, value: p.name, unit }
-                  : { col: cartesian.xAxis as string, value: p.name },
+                  ? { col: cartesian.xAxis as string, value: xValue, unit }
+                  : { col: cartesian.xAxis as string, value: xValue },
               ];
               // The series' RAW value, not `p.seriesName` — that is the legend's label, so a
               // renamed series (or one whose column carries a date format) filtered by text no
@@ -692,7 +728,16 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
     // `WaterfallChart` keys its memo on its VALUE rather than its identity. Annotated, so a field
     // that stops matching `WaterfallBuildConfig` is caught here rather than silently widening the
     // prop.
-    const waterfallCfg: WaterfallBuildConfig = { ...waterfall, columnSettings, metricTypes };
+    const waterfallCfg: WaterfallBuildConfig = {
+      ...waterfall, columnSettings, metricTypes,
+      // The same line the cartesian branch above carries, from the same source, and it was missing
+      // here: without it `buildWaterfallOption` cannot tell a month-bucketed step from a raw date,
+      // so it drew "2026-01-01" for a step covering January and — after the axis became
+      // all-or-nothing — drew nothing at all on a narrow card. The drill below already reads this
+      // unit for the same column; the axis now reads it too, which is what keeps what a step is
+      // LABELLED as and what it FILTERS by answers to one question.
+      xAxisUnit: params.spec.temporal_units?.[waterfall.xAxis ?? ""],
+    };
     return (
       <div className="h-full w-full">
         {rows.length === 0

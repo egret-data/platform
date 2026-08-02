@@ -76,6 +76,60 @@ function formatDate(value: unknown, fmt: ColumnFormat): string {
   return `${fmt.prefix ?? ""}${d.format(dateFmt + timeFmt)}${fmt.suffix ?? ""}`;
 }
 
+/**
+ * Which `ColumnFormat` fields `formatDate` above actually consults — the seven it reads, and
+ * `false` for every other field the type carries.
+ *
+ * WHY THIS EXISTS. Two callers decide between a stored format and a computed label by asking "did
+ * the user set a format for this column?", and both asked it as `if (fmt)` — object truthiness.
+ * That is wrong, because the settings panel mints format objects that are SILENT ABOUT DATES:
+ * `FormatSection`'s `patch` spreads into `{ ...fmt, ...p }` (`settings/FormatSection.tsx:67`) and
+ * `styleColumnsFor` offers the x dimension to it for every cartesian viz and falls through to
+ * every column for a smartscalar (`settings/SharedDisplaySections.tsx:27-38`, `:52`). So renaming
+ * a month-bucketed date column to "Month" stores `{ column_title: "Month" }` — truthy — and the
+ * axis silently reverted from "January 2026" to `formatDate`'s default "January 1, 2026" with
+ * nothing in the panel to explain it. Typing a title and deleting it leaves
+ * `{ column_title: undefined }`, which is a truthy object too.
+ *
+ * A `satisfies Record<keyof ColumnFormat, boolean>` ON PURPOSE. This list has to track
+ * `formatDate`'s body, and the drift that would break it is a field ADDED to `ColumnFormat`, at
+ * which point a hand-written array of seven names goes quietly stale. This makes `tsc` demand a
+ * yes/no for the new field instead of defaulting it to "does not matter".
+ */
+const CONSULTED_BY_FORMAT_DATE = {
+  date_style: true,
+  date_separator: true,
+  date_abbreviate: true,
+  time_enabled: true,
+  time_style: true,
+  prefix: true,
+  suffix: true,
+  // Read only by `formatNumber`; a temporal column never reaches it.
+  number_style: false, currency: false, currency_style: false, decimals: false, scale: false,
+  number_separators: false, compact: false, negative_in_parentheses: false,
+  // Read by nothing in this file. `column_title` names the COLUMN, not its values; the rest are
+  // how a table CELL is decorated (`ChartTable`), which no chart label goes through.
+  column_title: false, view_as: false, link_text: false, link_url: false, show_mini_bar: false,
+} satisfies Record<keyof ColumnFormat, boolean>;
+
+/**
+ * Whether this format says anything about how a DATE renders — i.e. whether `formatDate` would
+ * produce anything other than its defaults from it.
+ *
+ * Truthiness per field, which is how `formatDate` itself reads six of the seven: `date_abbreviate:
+ * false` and `time_enabled: null` are the same instruction as saying nothing, and that is exactly
+ * what both mean in the panel — a switch toggled on and back off. The seventh, `date_style`, is
+ * read there with `??`, so a stored empty string would format as "" upstream while reading as
+ * silent here; unreachable from the panel, whose control is a fixed select, and recorded rather
+ * than guarded so this stays one line.
+ */
+export function specifiesDateRendering(fmt: ColumnFormat | undefined): boolean {
+  if (fmt == null) return false;
+  return Object.entries(CONSULTED_BY_FORMAT_DATE).some(
+    ([field, consulted]) => consulted && Boolean(fmt[field as keyof ColumnFormat]),
+  );
+}
+
 export function formatValue(value: unknown, columnType: string, fmt: ColumnFormat = {}): string {
   if (value == null) return "";
   if (isTemporalType(columnType)) return formatDate(value, fmt);

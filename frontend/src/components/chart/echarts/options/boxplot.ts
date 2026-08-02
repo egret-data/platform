@@ -243,7 +243,9 @@ export function buildBoxplotOption(
         // outlier and mean points too, NOT the boxes-only `widest`; see its comment above — through
         // the y-axis's own formatter (`fmt(v, true)` below). `yTitle` is what adds 26 to
         // `grid.left` below.
-        plotWidth: estimatePlotWidth(size, fmt(axisWidest, true), Boolean(yTitle)),
+        // The VALUE and the formatter, not the formatted value: `estimatePlotWidth` rounds to a tick
+        // the axis would actually draw before measuring it, which a pre-formatted string cannot be.
+        plotWidth: estimatePlotWidth(size, axisWidest, (v) => fmt(v, true), Boolean(yTitle)),
         // The CONTAINER's height, not an inset one: the 70% guard is a share of the whole card
         // (Metabase's `checkHeight`), so passing a grid-adjusted height silently tightens it.
         outerHeight: size.height,

@@ -249,6 +249,76 @@ describe("ChartRenderer", () => {
     expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "region", value: "EU" }] }, 3, 4);
   });
 
+  /**
+   * The drill on the axis PR 03 gave a numeric scatter. A value axis has no categories, so ECharts
+   * reports `name: ""` for a clicked point and puts the coordinates in `data` — checked against real
+   * ECharts, not assumed. The drill was reading `p.name`, so the filter came out `price = ''`,
+   * matching nothing and looking like a chart with no rows behind it.
+   *
+   * The payload here is that real one: an empty name beside an [x, y] pair.
+   */
+  it("drills a value-axis point on its coordinate, which is where the value now is", () => {
+    const onValueClick = vi.fn();
+    mockClickPayload = { name: "", seriesName: "rating", value: [15.69, 3], data: [15.69, 3], x: 3, y: 4 };
+    render(
+      <ChartRenderer
+        vizType="scatter"
+        params={params({ cartesian: { xAxis: "price", yMetrics: ["rating"] } })}
+        columns={[{ name: "price", type: "double" }, { name: "rating", type: "double" }]}
+        rows={[[15.69, 3]]}
+        onValueClick={onValueClick}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "price", value: 15.69 }] }, 3, 4);
+  });
+
+  /**
+   * A TIMESERIES X IS DELIBERATELY OUTSIDE THAT ARM, and this RECORDS that rather than endorsing it.
+   * `applyXScale` puts `Date.parse`'s epoch milliseconds in `data[0]` there, which is not a value
+   * the column has ever held, so reading it would swap one filter that matches nothing for another
+   * — and the second one looks like a real answer. The drill on a timeseries x has been broken since
+   * that scale existed and PR 03 neither reaches it (its automatic scale is only ever `linear`) nor
+   * fixes it.
+   *
+   * TRACKED AS egretdb/egret#387, which carries the mechanism and a sketch of the fix. This test is
+   * the one to rewrite when that lands — a characterization test with no issue behind it is how a
+   * defect turns into a documented feature.
+   */
+  it("leaves a timeseries x-axis drill exactly as broken as it was, rather than filtering on an epoch", () => {
+    const onValueClick = vi.fn();
+    mockClickPayload = { name: "", seriesName: "rev", value: [Date.parse("2026-01-01"), 10], data: [Date.parse("2026-01-01"), 10], x: 3, y: 4 };
+    render(
+      <ChartRenderer
+        vizType="line"
+        params={params({ cartesian: { xAxis: "d", yMetrics: ["rev"], xScale: "timeseries" } })}
+        columns={[{ name: "d", type: "date" }, { name: "rev", type: "double" }]}
+        rows={[["2026-01-01", 10]]}
+        onValueClick={onValueClick}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "d", value: "" }] }, 3, 4);
+  });
+
+  /** …and the category axis is untouched by that arm: a varchar-x scatter still names its point,
+   *  and `p.data` is a bare number there, so nothing about the click looks like a coordinate. */
+  it("still drills a category-axis scatter on the clicked category", () => {
+    const onValueClick = vi.fn();
+    mockClickPayload = { name: "Doohickey", seriesName: "rating", value: 3, data: 3, x: 3, y: 4 };
+    render(
+      <ChartRenderer
+        vizType="scatter"
+        params={params({ cartesian: { xAxis: "category", yMetrics: ["rating"] } })}
+        columns={[{ name: "category", type: "varchar" }, { name: "rating", type: "double" }]}
+        rows={[["Doohickey", 3]]}
+        onValueClick={onValueClick}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "category", value: "Doohickey" }] }, 3, 4);
+  });
+
   // A pie click reports the slice's display NAME, which on a nested chart names only the innermost
   // ring. The drill reads the datum's aggregation key instead — the whole root-to-here path in raw
   // values — so an outer slice filters by its ancestors too. `␟` is options/pie.ts' KEY_SEP.
@@ -1097,6 +1167,78 @@ describe("ChartRenderer", () => {
         // …and the same option function, at the same render, draws them when there is room. This is
         // the half that says the decision follows the size rather than being baked in.
         expect(showAt(mockLastOption, WIDE)).toBe(true);
+      });
+    });
+  });
+
+  /**
+   * THE SAME SEAM, one field over: the x column's TEMPORAL UNIT reaching the builder.
+   *
+   * The block above exists because nothing tested that `ChartRenderer` passed the measured size
+   * down, on any of three charts, and only a mutation found it. `xAxisUnit` is the same shape of
+   * fact — a value only this component can look up (`params.spec.temporal_units`), handed to a
+   * builder that cannot derive it — and it went missing on the waterfall branch for exactly as
+   * long as nothing asked: `WaterfallBuildConfig` had no such field, so a month-bucketed waterfall
+   * drew "2026-01-01" for a step covering January, and once the axis became all-or-nothing it drew
+   * nothing at all on a narrow card.
+   *
+   * Read through the AXIS FORMATTER rather than by inspecting the config, because the formatter is
+   * what a viewer sees: this fails both when the branch stops passing the unit and when the builder
+   * stops using it. Not through the size, deliberately — naming a period needs no measurement, and
+   * a test that needed both would be two claims wearing one assertion.
+   *
+   * Cartesian's branch has carried this line since the axis was first named, and is covered here
+   * too — the pair is what says the seam is a rule rather than one branch that happens to be right.
+   */
+  describe("the x column's temporal unit reaches the builder", () => {
+    const BUCKETED: { what: string; vizType: VizType; columns: { name: string; type: string }[]; params: Partial<ChartParams> }[] = [
+      {
+        what: "WaterfallChart",
+        vizType: "waterfall",
+        columns: [{ name: "order_date", type: "date" }, { name: "delta", type: "double" }],
+        params: { waterfall: { xAxis: "order_date", metric: "delta" } },
+      },
+      {
+        what: "CartesianChart",
+        vizType: "bar",
+        columns: [{ name: "order_date", type: "date" }, { name: "rev", type: "double" }],
+        params: { cartesian: { xAxis: "order_date", yMetrics: ["rev"] } },
+      },
+    ];
+
+    /** The x axis of a built option, whichever of the two shapes the builder returns it in. */
+    const xLabelOf = (o: unknown, v: string) => {
+      const built = (o as (s: { width: number; height: number }) => {
+        xAxis: { axisLabel: { formatter?: (v: string) => string } }
+          | { axisLabel: { formatter?: (v: string) => string } }[];
+      })({ width: 640, height: 400 });
+      const axis = Array.isArray(built.xAxis) ? built.xAxis[0] : built.xAxis;
+      return axis.axisLabel.formatter?.(v);
+    };
+
+    BUCKETED.forEach((b) => {
+      it(`${b.what} hands the bucketing unit to its builder`, () => {
+        const spec = (temporal_units?: Record<string, string>): Partial<ChartParams> => ({
+          ...b.params,
+          spec: {
+            metrics: [], dimensions: ["order_date"], columns: [], filters: [], orderby: [],
+            row_limit: 1000, rollup_groups: [], ...(temporal_units ? { temporal_units } : {}),
+          },
+        });
+        render(
+          <ChartRenderer vizType={b.vizType} params={params(spec({ order_date: "month" }))}
+            columns={b.columns} rows={[["2026-01-01", 10]]} />,
+        );
+        expect(xLabelOf(mockLastOption, "2026-01-01")).toBe("January 2026");
+
+        // …and the NEGATIVE from the same seam: with no unit in the spec the same column, the same
+        // viz and the same value stay raw. Without this half, a builder that named a period from
+        // the column's TYPE — inventing a granularity the query never asked for — would pass.
+        render(
+          <ChartRenderer vizType={b.vizType} params={params(spec())}
+            columns={b.columns} rows={[["2026-01-01", 10]]} />,
+        );
+        expect(xLabelOf(mockLastOption, "2026-01-01")).toBe("2026-01-01");
       });
     });
   });

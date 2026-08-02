@@ -167,6 +167,40 @@ so a date column is plotted on a category axis with raw string labels.
 **Fixes:** line, area, combo x-labels; scatter's `15.69 / 48.93 / 84.14` ticks; and the trend card
 printing `December 1, 2026` where it should name the period.
 
+**Amended as built (PR 03).** Item 1 is deliberately **not** done for the temporal case, and this
+records the decision rather than leaving it looking like an oversight. Switching a temporal x to a
+real `time` axis changes bar width, stacking and the breakout path for every temporal chart in the
+product; the visible defect — unreadable and then, after PR 02's all-or-nothing ladder, absent
+labels — is fixed by naming the periods (item 4) and thinning to boundaries (items 2 and 3) on the
+category axis egret already uses. Item 1 *is* done for the numeric scatter, where the same change is
+local.
+
+Items 2 and 3 are therefore adapted rather than ported verbatim: the ladder still starts at the
+data's own bucketing and walks up, but each rung is converted into a count of BUCKETS, because
+ECharts strides a category axis by index (`temporal-period.ts`'s `boundarySteps`). Three
+consequences follow, each argued where it lives and listed here because a live comparison will meet
+all three before it opens either file:
+
+- **The stride aligns on the first bucket, not on the calendar.** Twelve months from January draw
+  January and July, which is the parity case; twelve from March draw March and September, where
+  Metabase still draws January and July. This is the first thing a side-by-side will show on any
+  axis that does not start in January. Fixing it needs an `interval` *callback* rather than a
+  number, which also discards the property the PR-02 compatibility argument rests on — with a
+  number the drawn set is *provably* a regular stride from index 0; with a callback it is a claim
+  about our own predicate.
+- **`minTickCount = 2` is not ported.** One label is a legitimate rung where stepping back would
+  draw two on top of each other.
+- **The two questions are measured against different things, and asymmetrically.** "Do all the
+  labels fit" is decided against *this dataset's* labels (the fitter measures what the axis will
+  draw); every *stride* is decided against the *unit's* worst case. So a May–July month axis that
+  just fits draws all three where Metabase, sizing everything on `getRepresentativeDates`, would
+  already be thinning. Deliberate — the all-or-nothing question is about labels that exist, while a
+  stride has to survive the range moving — but it means egret and Metabase can legitimately differ
+  by one rung on a narrow range, and that is not a defect to chase.
+
+If a later change wants the time axis for its own reasons, `applyXScale` and `scaleAxis` are already
+there.
+
 ### Workstream 4 — colour assignment
 
 The palettes are already identical: egret's `SERIES_PALETTE` is Metabase's eight accents, and

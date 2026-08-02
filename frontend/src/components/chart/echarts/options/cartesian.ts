@@ -3,10 +3,11 @@ import type { CartesianViz, LineSeriesStyle } from "@/api/charts";
 import type { EChartsSize } from "../EChartsRenderer";
 import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
-import { formatValue } from "../../format";
+import { formatValue, specifiesDateRendering } from "../../format";
 import { ariaDescription, baseTextStyle, tooltipSurface } from "../base";
 import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
+import { boundarySteps, namesAPeriod, periodName } from "@/components/chart/temporal-period";
 import { foldTail, OTHER_LABEL } from "../fold";
 import { estimatePlotWidth, fitXLabels, type XLabelFit } from "../axisLabelFit";
 
@@ -47,7 +48,20 @@ export interface CartesianBuildConfig {
   xScale?: "ordinal" | "linear" | "timeseries";  // x-axis scale (default ordinal/category)
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
-  xAxisUnit?: string;            // temporal extraction unit for the x-axis dimension (e.g. "day_of_week")
+  /**
+   * The temporal unit the x-axis dimension was grouped by, from `params.spec.temporal_units`.
+   * EITHER KIND, and the two are read at different places — this said "extraction unit (e.g.
+   * `day_of_week`)" while that was all it drove, and has been stale since a truncation unit started
+   * driving the period naming beneath it:
+   *   - an EXTRACTION unit (`day_of_week`, `month_of_year`) is substituted into the categories
+   *     themselves through `temporalLabel` (`displayCats`), so the axis never sees the raw integer;
+   *   - a TRUNCATION unit (`month`, `quarter`, …) leaves the categories alone and reaches
+   *     `drawLabel`, which names the period the bucket covers, and `boundary`, which is the only
+   *     door to thinning.
+   * `WaterfallBuildConfig.xAxisUnit` is the same field fed from the same line of `ChartRenderer`,
+   * with one difference stated there: that builder does not substitute extraction units.
+   */
+  xAxisUnit?: string;
   xAxisType?: string;            // SQL type of the x-axis dimension, so its labels can be formatted
   /** Metabase's "Show lines and tick marks", per axis. Unset means shown, which is what every
    *  chart drew before the toggles existed. */
@@ -400,6 +414,50 @@ const isHorizontal = (cfg: CartesianBuildConfig) =>
 const usesXScale = (cfg: CartesianBuildConfig) =>
   !isHorizontal(cfg) && (cfg.xScale === "linear" || cfg.xScale === "timeseries");
 
+/**
+ * The x-scale a chart is DRAWN at, which is the stored one whenever there is one and otherwise
+ * `linear` for a scatter whose x column holds numbers.
+ *
+ * Why: a scatter over `price` plotted 196 distinct prices as 196 CATEGORIES, evenly spaced and each
+ * carrying its own label. ECharts kept whichever of those labels did not collide — three arbitrary
+ * prices, `15.69 48.93 84.14` — and once PR 02 made the axis all-or-nothing it drew none at all.
+ * Metabase draws `0 20 40 60 80 100` there, and not because it thins better: its x is a VALUE axis,
+ * so the labels are round ticks ECharts generates from the extent rather than a subset of the data.
+ * egret has had that axis all along (`usesXScale` -> `scaleAxis`); nothing ever selected it.
+ *
+ * SCATTER ONLY, and that is a rule rather than a starting point. A bar chart's categories are
+ * discrete even when they are numbers — bar width, grouping and stacking are all computed off the
+ * axis type — so putting bars on a value axis is a much larger change than this defect asks for.
+ * A scatter has no such geometry: a point sits where its coordinates say.
+ *
+ * RESOLVED AT RENDER TIME, never written into the stored config. That is this programme's standing
+ * rule and it is what makes a scatter saved before this change pick the new axis up. It also means
+ * the answer moves with the data: re-point the chart at a varchar column and the category axis
+ * comes back on its own.
+ *
+ * An explicit `xScale` — including `"ordinal"` — always wins, so a user who has said what they want
+ * is never overridden. The panel offers that choice on a dimension-x scatter for exactly this
+ * reason (`settings/CartesianDisplaySection.tsx`, `AxesOptions`): an automatic answer with no lever
+ * beside it is not a default, it is a rule.
+ *
+ * ONE KNOWN EDGE, PRE-EXISTING BUT NEWLY REACHABLE. `isNumericType` matches `bigint` and `long`,
+ * and a value axis coerces with `Number()` (`applyXScale`), which is a float64 — so a scatter over
+ * an id column with values above 2^53 plots and drills on a rounded id. That has been true of a
+ * hand-set Linear scale since it existed; what is new is that such a column reaches it without
+ * anyone choosing. Narrowing the numeric test to exclude 64-bit integer types would also exclude
+ * the ordinary bigint counts that make perfectly good scatter axes, so it is left alone and named
+ * here rather than silently traded away.
+ */
+export function resolveXScale(
+  kind: CartesianViz,
+  xScale: CartesianBuildConfig["xScale"],
+  xColumnType: string | undefined,
+): CartesianBuildConfig["xScale"] {
+  if (xScale != null) return xScale;
+  if (kind !== "scatter") return undefined;
+  return xColumnType != null && isNumericType(xColumnType) ? "linear" : undefined;
+}
+
 // Re-key category-aligned series onto real x coordinates: each value becomes an
 // [x, y] pair, dropping points whose x can't be parsed. Mutates the series in place.
 function applyXScale(categories: unknown[], series: unknown[], cfg: CartesianBuildConfig) {
@@ -586,20 +644,37 @@ export function buildCartesianOption(
   if (cfg0.kind === "scatter" && cfg0.xMetric && cfg0.yMetrics.length > 0) {
     return scatterXY(columns, rows, cfg0);
   }
+  // Resolve the x-scale ONCE, here, on the same principle as the axis split below it: every
+  // downstream reader — `usesXScale`, `applyXScale`, `foldable`, `ordinalX`, `scaleAxis` — goes on
+  // asking `cfg.xScale` exactly as it always did, and a computed scale is indistinguishable from
+  // one the user chose. Read off the RESULT column rather than `cfg.xAxisType`, which is the same
+  // type by a longer route (`ChartRenderer` looks it up in this very list) but is optional and
+  // absent from every caller that builds a config by hand.
+  //
+  // Below the `scatterXY` early return, because above it would be wasted: a scatter with an
+  // `xMetric` AND at least one y-metric leaves through that return and builds its own pair of value
+  // axes, so the common metric-vs-metric case never reads this. Not "unreachable" — an `xMetric`
+  // scatter with NO y-metric fails that return's second condition and arrives here, where it has no
+  // series to draw anyway and leaves through the empty-option branch a few lines down. What this
+  // line is really FOR is the scatter whose x is a DIMENSION: the one that was drawing 196
+  // categories.
+  const xColumn = cfg0.xAxis != null ? columns.find((c) => c.name === cfg0.xAxis) : undefined;
+  const xScale = resolveXScale(cfg0.kind, cfg0.xScale, xColumn?.type);
+  const cfgX: CartesianBuildConfig = xScale === cfg0.xScale ? cfg0 : { ...cfg0, xScale };
   // Resolve the automatic axis split ONCE, here, and hand the rest of the builder a config that
   // already names the right-axis metrics. Every downstream reader — `isDualAxis`, the per-series
   // `yAxisIndex`, the axis titles — then goes on asking the same question it always did, and a
   // computed split is indistinguishable from one the user assigned by hand.
-  const cfg: CartesianBuildConfig = (cfg0.rightAxisMetrics ?? []).length > 0
-    ? cfg0
+  const cfg: CartesianBuildConfig = (cfgX.rightAxisMetrics ?? []).length > 0
+    ? cfgX
     : (() => {
-        const extents = metricExtents(columns, rows, cfg0.yMetrics);
-        if (!shouldAutoSplitY(cfg0, extents)) return cfg0;
-        const right = computeAxisSplit(cfg0.yMetrics, extents);
+        const extents = metricExtents(columns, rows, cfgX.yMetrics);
+        if (!shouldAutoSplitY(cfgX, extents)) return cfgX;
+        const right = computeAxisSplit(cfgX.yMetrics, extents);
         // A split that puts everything on one side is not a split.
-        return right.length > 0 && right.length < cfg0.yMetrics.length
-          ? { ...cfg0, rightAxisMetrics: right }
-          : cfg0;
+        return right.length > 0 && right.length < cfgX.yMetrics.length
+          ? { ...cfgX, rightAxisMetrics: right }
+          : cfgX;
       })();
   const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
   const xi = cfg.xAxis != null ? idx[cfg.xAxis] : undefined;
@@ -909,8 +984,45 @@ function baseOption(
   // measure; and a linear/timeseries x is a value axis whose labels are ticks ECharts generates,
   // not this array — deciding a fit from `categories` there would reserve room below a rotation
   // that never gets applied, since `scaleAxis` carries no `rotate`. Fitting a value axis means
-  // generating its ticks first, which is PR 03.
+  // generating its ticks first, and NOTHING OWNS THAT: this said "which is PR 03", and PR 03 turned
+  // out to be about which axis a scatter gets (`resolveXScale`), not about laying out the ticks on
+  // it. The deferral stands; the owner named for it never existed.
   const ordinalX = !horizontal && !usesXScale(cfg);
+
+  /**
+   * What a category is DRAWN AS. Hoisted above the fit below rather than written inline on
+   * `axisLabel.formatter`, because the fitter has to measure THIS STRING and nothing else — see
+   * the `labels:` line at the call site for what happened when it measured the other one.
+   *
+   * THREE answers in priority order, and the middle one is what PR 03 added:
+   *   1. the column's own format, when it says something the formatter for this column would
+   *      consult — a stored-then-ignored setting is the defect the pivot, the pie and the breakout
+   *      legend each had in turn. "Says something" rather than "exists": on a BUCKETED axis, where
+   *      arm 2 is in play, a format silent about dates would otherwise beat the period name with
+   *      `formatDate`'s DEFAULTS, and the panel mints exactly such objects — renaming the column to
+   *      "Month" stores `{column_title: "Month"}` and reverted this axis from "January 2026" to
+   *      "January 1, 2026" (see `specifiesDateRendering`). Off a bucketed axis there is nothing for
+   *      the format to outrank, so it still wins on existence there, as it always did.
+   *   2. otherwise the NAME OF THE PERIOD the bucket covers, when the axis is bucketed by a
+   *      truncation unit — "January 2026" for a month, not its first day;
+   *   3. otherwise the raw value, which is every non-temporal axis and every temporal column that
+   *      was not bucketed.
+   * `periodName` is total and falls through to the raw string itself, so it IS answer 3 as well —
+   * `namesAPeriod` is asked only whether arm 2 EXISTS to be outranked, never to guard the call.
+   *
+   * The trend card answers the same question about the same column and has to stay in step:
+   * `SmartScalarChart.tsx`, where arms 1 and 2 are these and ARM 3 IS NOT, and says so.
+   */
+  const bucketedX = namesAPeriod(cfg.xAxisUnit);
+  const drawLabel = (v: string) => {
+    const fmt = cfg.xAxis ? cfg.columnSettings?.[cfg.xAxis] : undefined;
+    const formatWins = fmt != null && (bucketedX ? specifiesDateRendering(fmt) : true);
+    if (formatWins && v != null) {
+      const out = formatValue(v, cfg.xAxisType ?? "varchar", fmt);
+      if (out !== "") return out;
+    }
+    return periodName(cfg.xAxisUnit, v);
+  };
 
   // An explicit rotation SKIPS the measurement rather than merely outranking it. Computing the fit
   // anyway and using it for `show` would honour the user's 45° and hide their axis in the same
@@ -926,17 +1038,42 @@ function baseOption(
   const measurable = size != null && size.width > 0 && size.height > 0;
   const fit: XLabelFit | undefined = measurable && size && ordinalX && !explicitRotate
     ? fitXLabels({
-        // The RAW category, where `axisLabel.formatter` below draws the FORMATTED one. Where the
-        // two differ — only when the x column carries a `columnSettings` entry — the formatted
-        // label is the wider of the two ("2026-01-01" measured, "January 2026" drawn; `1000`
-        // measured, "1,000" drawn), so this under-measures. That is the same direction as an
-        // over-estimated `plotWidth`, and carries the same cost: labels left upright that should
-        // have been rotated.
-        labels: categories.map(String),
-        plotWidth: estimatePlotWidth(size, fmtFor(leftSide)(widestOf(leftSide)), Boolean(yTitle)),
+        // THE STRING THE AXIS ACTUALLY DRAWS, by construction — same closure, same argument.
+        //
+        // This measured `categories.map(String)`, the RAW value, and justified the gap as "the
+        // formatted label is the wider of the two, so this under-measures". PR 03 falsified both
+        // halves at once. The two now differ whenever `xAxisUnit` is a truncation unit — the
+        // common case and this PR's whole subject, not the rare `columnSettings` one that comment
+        // named — and the period name is often NARROWER, not wider: a year measured "2026-01-01"
+        // at ten characters and drew "2026" at four, a quarter ten against "Q3 2026" at seven. So
+        // it had begun to OVER-measure, which rotates labels that would have sat upright, in the
+        // PR whose entire motivation is labels not fitting. Formatting here retires the
+        // `columnSettings` skew too, which that comment conceded and left standing.
+        labels: categories.map((c) => drawLabel(String(c))),
+        // The widest VALUE the left axis carries and the axis's own formatter — not the formatted
+        // datum, which is what this passed until the gutter was found reserving 10px for "24.7K" on
+        // an axis whose top tick is "25K". `estimatePlotWidth` rounds to a tick it would draw.
+        plotWidth: estimatePlotWidth(size, widestOf(leftSide), fmtFor(leftSide), Boolean(yTitle)),
         // The CONTAINER's height, not an inset one: the 70% guard is a share of the whole card
         // (Metabase's `checkHeight`), so passing a grid-adjusted height silently tightens it.
         outerHeight: size.height,
+        // THE PRECONDITION FOR THINNING, enforced here rather than assumed downstream: only a
+        // BUCKETED temporal axis gets one. `bucketedX` is `namesAPeriod(cfg.xAxisUnit)`, the same
+        // single membership rule `drawLabel` above uses, so an axis that is thinned is by
+        // construction an axis whose labels are period names. On an ordinal axis of product names
+        // this is `undefined` and the fitter cannot reach its stride arm at all — there is no such
+        // thing as every second product. (Both fields are also empty for a non-period unit, so the
+        // guard holds a second time even if this line is ever loosened.)
+        //
+        // ONLY THE LADDER, no sizing candidate. This used to pass `widestLabel:
+        // widestPeriodName(cfg.xAxisUnit, drawLabel)` as well — the widest name the unit could
+        // produce, threaded through this builder's own `drawLabel` so the stride was sized against a
+        // string the axis would really render. It was still the wrong string: a rung draws indices
+        // 0, every, 2*every, … and the fitter now measures exactly those out of `labels:` above,
+        // which is the same closure's output for the buckets this chart actually has. See
+        // `strideThatFits` for the browser measurement and for what dropping the unit's worst case
+        // concedes.
+        boundary: bucketedX ? { steps: boundarySteps(cfg.xAxisUnit) } : undefined,
       })
     : undefined;
   // …but an explicit rotation is honoured WHEREVER the category axis sits, `ordinalX` or not. On a
@@ -947,8 +1084,9 @@ function baseOption(
   // would be a silent no-op in the panel — and the panel offers this control on row charts, where
   // it labels the vertical axis as the category one.
   const rotate = cfg.xLabelRotation ?? (fit?.kind === "rotate" ? fit.rotate : 0);
-  // Either way the axis has now DECIDED, and a decided axis draws every label or none — never the
-  // subset `interval: "auto"` leaves ECharts free to pick.
+  // Either way the axis has now DECIDED, and a decided axis never leaves ECharts the subset
+  // `interval: "auto"` would let it pick. What it draws is every label, none, or — on a bucketed
+  // temporal axis only — every Nth, which the `interval` line below argues is not the same thing.
   const decided = fit != null || explicitRotate;
   // NO ROOM IS RESERVED BELOW THE PLOT FOR A TILTED LABEL, at any rotation, measured or explicit.
   // See `XLabelFit`'s doc in `../axisLabelFit.ts` for the measurement that settled it: `containLabel`
@@ -963,22 +1101,63 @@ function baseOption(
     // than the values beneath it, and ECharts' default nameTextStyle colour reads paler.
     nameTextStyle: { color: axisLabelColor },
     // Category labels go through the column's own format. Extraction units are already
-    // substituted above (`displayCats`), but a TRUNCATION unit left the raw bucket on the axis —
+    // substituted above (`displayCats`); a TRUNCATION unit is named by the formatter below —
     // a chart grouped by month read "2026-01-01" where the bucket is really January 2026. The
     // formatter only changes what is drawn; `data` stays the raw value, so a drill still filters
     // on what the engine returned.
     axisLabel: {
       fontSize: CHART_THEME.axisFontSize, color: axisLabelColor,
-      interval: decided ? (0 as const) : ("auto" as const), rotate,
-      // The third answer the ladder can give: when even a rotated label would eat 70% of the
+      // `fit.every - 1`, NOT `fit.every`: ECharts' category `interval` counts the labels SKIPPED
+      // between two drawn ones, not the stride. `ordinalScaleCreateTicks`
+      // (`echarts/lib/scale/helper.js:235`) reads it as `step = max((categoryInterval || 0) + 1, 1)`
+      // and walks `tickValue += step` from the extent's start — so `0` is every label, which is what
+      // the `decided` arm below has always meant, and every 6th is `5`. Off by one here is invisible
+      // in a screenshot: it draws Jan/Jun/Nov instead of Jan/Jul, which looks like a date axis.
+      //
+      // Two more things checked in that source rather than assumed, because both would undo the
+      // "every drawn label is a period boundary" property this rests on. The stride starts at INDEX
+      // ZERO — `startTick` is only re-aligned when the extent starts past 0, i.e. under a data zoom
+      // this axis does not have (`:239-241`) — so the first bucket is always one of the drawn ones.
+      // And the last index is appended `offInterval` (`:251-253`) but then IGNORED by `AxisBuilder`
+      // while `showMinLabel`/`showMaxLabel` are unset, which they are (`AxisBuilder.js:675`); so a
+      // December that is not on the stride is not quietly drawn beside July. The tick MARKS follow
+      // the labels for free: `axisTick` carries no `interval`, which defaults to "auto", and "auto"
+      // on a tick model means "whatever the labels decided" (`axisTickLabelBuilder.js:182-187`).
+      //
+      // AND THIS IS NOT PR 02's RULE BEING UNDONE, which is the reading to head off: "auto" drops
+      // whichever labels happen to collide, an arbitrary subset, while a stride over buckets draws
+      // period boundaries — the full argument, and why restoring a flat `interval: 0` here would
+      // NOT restore PR 02, is on the `thin` arm of `XLabelFit` in `../axisLabelFit.ts`, which is
+      // its one copy.
+      interval: fit?.kind === "thin" ? fit.every - 1 : decided ? (0 as const) : ("auto" as const),
+      // THE FIRST BUCKET IS THE ONE LABEL A STRIDE PROMISES, so on a thinned axis it is declared
+      // required rather than left to ECharts' min/max heuristic — which discards it. Read in
+      // `AxisBuilder.fixMinMaxLabelShow` (`:648-726`) against echarts 6.1, because a `thin` decision
+      // that renders nothing is exactly what this looked like on the live dashboard:
+      //
+      //   - `ordinalScaleCreateTicks` (`scale/helper.js:229-253`) walks the stride from index 0 and
+      //     then APPENDS the extent's last index with `offInterval: true`. Twelve monthly buckets at
+      //     stride 12 therefore hand `AxisBuilder` two labels, "January 2026" and "December 2026",
+      //     not one.
+      //   - `fixMinMaxLabelShow` runs `deal(showMinLabel, 0, 1)` FIRST. With the option unset it
+      //     tests the two for intersection and, finding one, ignores the OUTMOST — January — before
+      //     `deal(showMaxLabel, 1, 0)` ever gets to drop December for being `offInterval`. Two
+      //     labels ~84 and ~91px wide on a 94px plot overlap by about a pixel, so the axis lost the
+      //     only label it had chosen to draw, to a label it was about to throw away.
+      //
+      // `true` flips that one branch: the inner label is dropped instead, which is the same December
+      // the next `deal` would have dropped anyway. Set ONLY on the thin arm — index 0 is on-stride
+      // there by construction (`ordinalScaleCreateTicks` starts at 0), and it is the label the whole
+      // `thin` argument in `../axisLabelFit.ts` rests on. On every other arm the axis draws all its
+      // labels or none, and this heuristic has nothing to decide.
+      showMinLabel: fit?.kind === "thin" ? true : undefined,
+      rotate,
+      // The last answer the ladder can give: when even a rotated label would eat 70% of the
       // card's height, Metabase draws no axis rather than a wall of text.
       show: fit?.kind !== "hide",
-      formatter: (v: string) => {
-        const fmt = cfg.xAxis ? cfg.columnSettings?.[cfg.xAxis] : undefined;
-        if (!fmt || v == null) return String(v ?? "");
-        const out = formatValue(v, cfg.xAxisType ?? "varchar", fmt);
-        return out === "" ? String(v) : out;
-      },
+      // `drawLabel`, defined above so the FITTER measures this same string. Do not inline it back:
+      // the two drifting apart is what made the fit rotate labels that would have fitted upright.
+      formatter: drawLabel,
     },
     // TWO different `show`s sit on this axis and they are not the same switch. `xAxisTicks` is the
     // axis LINE and the tick marks; the LABELS are `axisLabel.show` above, which only the measured
@@ -993,12 +1172,27 @@ function baseOption(
   // Non-ordinal x: a value (linear) or time (timeseries) axis positioning points by
   // their real coordinate. Series carry [x, y] pairs (see applyXScale).
   //
-  // No `rotate` here, deliberately: an explicit `xLabelRotation` is a NO-OP on a value x-axis. Its
-  // labels are ticks ECharts generates rather than the `categories` array, so rotating them is part
-  // of generating them, which is PR 03. A config can still CARRY a rotation here — one saved before
-  // the x-scale was changed to Linear — and the panel keeps showing it rather than pretending it is
-  // gone; what the panel will not do is let it be newly chosen (the two rotate options are disabled
-  // on a value x, `settings/CartesianDisplaySection.tsx`).
+  // No `rotate` here, and PR 03 did NOT change that — this note used to say rotating these labels
+  // "is PR 03", and PR 03 turned out to be about which axis a scatter gets, not about laying out the
+  // ticks on it. An explicit `xLabelRotation` is still a NO-OP on a value x-axis.
+  //
+  // NOT BECAUSE IT COULD NOT BE APPLIED. ECharts would honour it: `AxisBuilder.buildAxisLabel` reads
+  // `axisLabel.rotate` with no branch on the axis kind (`AxisBuilder.js:875`), so adding one key
+  // here would rotate these generated ticks today. The reason not to is PARITY — Metabase greys the
+  // rotation out on a value axis too, so honouring it would be a divergence dressed up as a fix, in
+  // the workstream whose whole point is to stop diverging. A second reason, real but thinner in a
+  // product this young: a chart saved as Linear can still CARRY a rotation from before the switch,
+  // and applying it would silently turn labels nobody has touched in months. Either way the setting
+  // is one the panel must not OFFER where it would land here, which is what `valueX` is for.
+  //
+  // WHAT PR 03 ADDED TO THIS AXIS'S CATCHMENT, and the reason the panel rule had to move with it: a
+  // scatter over a numeric dimension now arrives here WITHOUT anyone having chosen a scale
+  // (`resolveXScale`). Before, `usesXScale` was true only where the user had picked Linear or
+  // Timeseries and the panel could grey the rotations out by reading `config.xScale` alone. It now
+  // has to resolve the scale the same way this builder does, from the x column's type —
+  // `settings/CartesianDisplaySection.tsx`, `valueX`, which calls `resolveXScale` rather than
+  // restating it. A config can still CARRY a rotation here, and the panel still shows it rather
+  // than pretending it is gone; what it will not do is let one be newly chosen.
   const scaleAxis = {
     type: cfg.xScale === "timeseries" ? ("time" as const) : ("value" as const),
     name: xTitle, nameLocation: "middle" as const, nameGap: 28,
