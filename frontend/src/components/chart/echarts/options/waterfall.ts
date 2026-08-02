@@ -263,12 +263,24 @@ export function buildWaterfallOption(
         // same reason `labels:` above is — so the stride is chosen against a string this axis would
         // really render, including when a stored column format outranks the period name.
         //
-        // ONE THING A WATERFALL HAS THAT A BAR CHART DOES NOT, and it is a cost rather than a
-        // blocker: the appended "Total" is the LAST category and is not a period, so a stride that
-        // does not land on it leaves it unlabelled. That is the right trade at the only width where
-        // it arises — thinning is reached only once every adjacent pair collides, and the answer
-        // without it is PR 02's rotate-or-hide, under which the Total's label is tilted or gone
-        // anyway. The bars, the tooltip and the aria description all still name it.
+        // ONE THING A WATERFALL HAS THAT A BAR CHART DOES NOT: the appended "Total" is a category
+        // that is not a period. It costs TWO things, neither a blocker, and both are named here
+        // because a partial account of a known cost reads as a complete one.
+        //
+        //   - IT CAN GO UNLABELLED. It is the LAST category, so a stride that does not land on its
+        //     index skips it. That is the right trade at the only width where it arises — thinning
+        //     is reached only once every adjacent pair collides, and the answer without it is PR
+        //     02's rotate-or-hide, under which the Total's label is tilted or gone anyway. The
+        //     bars, the tooltip and the aria description all still name it.
+        //   - IT IS NOT COVERED BY THE SIZING CANDIDATE. `strideThatFits` measures
+        //     `boundary.widestLabel` and never sees `labels`, so the stride is chosen against the
+        //     unit's worst case alone. At `year` that is "2026" (4 characters) while the drawn
+        //     "Total" is 5 — so when the Total IS on-stride it can sit a couple of pixels past the
+        //     budget its stride was chosen under. `year` is the only unit where it happens (every
+        //     other period name is longer than "Total"), and the pessimistic padding plus the 6px
+        //     gap absorb the difference, so this is recorded rather than fixed. Fixing it means
+        //     folding the drawn labels into the candidate, which would make the stride depend on
+        //     the data again — the property `widestPeriodName` exists to remove.
         boundary: bucketedX
           ? { widestLabel: widestPeriodName(cfg.xAxisUnit, drawLabel), steps: boundarySteps(cfg.xAxisUnit) }
           : undefined,
@@ -349,10 +361,21 @@ export function buildWaterfallOption(
         const swatch = bars[i]?.itemStyle.color ?? increase;
         const dot = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${swatch};margin-right:6px"></span>`;
         // THE RAW BUCKET, not `drawLabel`'s period name — so a month-bucketed waterfall's axis now
-        // reads "January 2026" while its tooltip still reads "2026-01-01". Left as it is
-        // DELIBERATELY: the cartesian tooltip has the identical gap (`axisTooltip`, `../base.ts`),
-        // and closing it on one chart alone would make the two disagree about the same data on the
-        // same dashboard. It is a chart-wide parity item, not this axis's.
+        // reads "January 2026" while its tooltip still reads "2026-01-01".
+        //
+        // Left as it is DELIBERATELY, and this is not the only surface behind the axis. TWO are:
+        // this tooltip, and the `ariaDescription` below, which is handed the raw `categories` too —
+        // a screen reader hears "2026-01-01 10" where the axis reads "January 2026". Both have the
+        // IDENTICAL gap on the cartesian family: its tooltip header is `axisValueLabel`, which
+        // ECharts takes from `axis.scale.getLabel` — on a category scale that returns the raw
+        // `xAxis.data` entry and never consults `axisLabel.formatter` — and `cartesian.ts` feeds
+        // its own `ariaDescription` the raw categories in the same way.
+        //
+        // So this is ONE chart-wide decision, not five per-builder patches, and the decision is not
+        // obvious: a tooltip and a drill sit next to each other, and what a step FILTERS by is the
+        // raw bucket. Naming the period on one surface while the other filters on the value would
+        // trade a cosmetic mismatch for a semantic one. Closing it on this chart alone would also
+        // make the waterfall and a bar chart of the same data disagree on the same dashboard.
         const head = `<div style="font-weight:${TOOLTIP_WEIGHT.header}">${categories[i]}</div>`;
         const line = `<div>${dot}<span style="font-weight:${TOOLTIP_WEIGHT.value}">${fmt(delta)}</span></div>`;
         if (isTotal) return head + line;
@@ -374,10 +397,12 @@ export function buildWaterfallOption(
         //
         // AND THIS IS NOT PR 02's RULE BEING UNDONE, which is the reading to head off: "auto" drops
         // whichever labels happen to collide, an arbitrary subset, while a stride over buckets draws
-        // period boundaries. The full argument — including why restoring a flat `interval: 0` here
-        // would NOT restore PR 02, and the two further ECharts guarantees the stride rests on (it
-        // starts at index 0, and the extra end tick is not drawn beside it) — is on the `thin` arm of
-        // `XLabelFit` in `../axisLabelFit.ts` and at the same line in `options/cartesian.ts`.
+        // period boundaries. The full argument, including why restoring a flat `interval: 0` here
+        // would NOT restore PR 02, is on the `thin` arm of `XLabelFit` in `../axisLabelFit.ts`,
+        // which is its ONE copy. The two further ECharts guarantees the stride rests on — that it
+        // starts at index 0, and that the extra end tick is appended but not drawn beside it — are
+        // in `options/cartesian.ts` at this same line, and only there: `axisLabelFit.ts` says
+        // outright that the ECharts semantics belong at the builder line rather than in it.
         interval: fit?.kind === "thin" ? fit.every - 1 : decided ? (0 as const) : ("auto" as const),
         rotate,
         // The last answer the ladder can give: when even a rotated label would eat 70% of the

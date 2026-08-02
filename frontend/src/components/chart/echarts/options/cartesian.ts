@@ -48,7 +48,20 @@ export interface CartesianBuildConfig {
   xScale?: "ordinal" | "linear" | "timeseries";  // x-axis scale (default ordinal/category)
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
-  xAxisUnit?: string;            // temporal extraction unit for the x-axis dimension (e.g. "day_of_week")
+  /**
+   * The temporal unit the x-axis dimension was grouped by, from `params.spec.temporal_units`.
+   * EITHER KIND, and the two are read at different places — this said "extraction unit (e.g.
+   * `day_of_week`)" while that was all it drove, and has been stale since a truncation unit started
+   * driving the period naming beneath it:
+   *   - an EXTRACTION unit (`day_of_week`, `month_of_year`) is substituted into the categories
+   *     themselves through `temporalLabel` (`displayCats`), so the axis never sees the raw integer;
+   *   - a TRUNCATION unit (`month`, `quarter`, …) leaves the categories alone and reaches
+   *     `drawLabel`, which names the period the bucket covers, and `boundary`, which is the only
+   *     door to thinning.
+   * `WaterfallBuildConfig.xAxisUnit` is the same field fed from the same line of `ChartRenderer`,
+   * with one difference stated there: that builder does not substitute extraction units.
+   */
+  xAxisUnit?: string;
   xAxisType?: string;            // SQL type of the x-axis dimension, so its labels can be formatted
   /** Metabase's "Show lines and tick marks", per axis. Unset means shown, which is what every
    *  chart drew before the toggles existed. */

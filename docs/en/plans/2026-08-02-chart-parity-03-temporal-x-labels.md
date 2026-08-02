@@ -260,6 +260,9 @@ rotate-or-hide on a narrow card. Verified before adding this task.
 - Modify: `frontend/src/components/chart/echarts/options/waterfall.ts`
 - Modify: `frontend/src/components/chart/ChartRenderer.tsx`
 - Test: extend `frontend/src/components/chart/echarts/__tests__/boxWaterfallXLabels.test.ts`
+- Test: extend `frontend/src/components/chart/__tests__/ChartRenderer.test.tsx` — Step 3 mandates the
+  `ChartRenderer` → builder seam, and that file is where the size seam is already covered. It was
+  missing from this list when the task was written.
 
 - [x] **Step 1: Thread the unit in**
 

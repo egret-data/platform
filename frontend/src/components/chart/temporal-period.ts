@@ -18,7 +18,14 @@
  *
  * Extraction units ("day_of_week", "month_of_year", ...) are not periods and are not this module's
  * business — `temporalLabel` in `./temporal-units` has already turned their values into finished
- * words upstream (`options/cartesian.ts`, the `displayCats` line).
+ * words upstream ON THE CARTESIAN AXIS (`options/cartesian.ts`, the `displayCats` line).
+ * `options/waterfall.ts` does NOT substitute them, so `periodName` is called there with an
+ * unsubstituted `"3"` and its extraction guard is REACHED IN PRODUCTION rather than only in
+ * principle — see that guard, which was written when cartesian was the only caller and stated this
+ * substitution as though it held for every one.
+ *
+ * So: the substitution is ONE CALLER'S HABIT, not a premise this module may assume. Anything here
+ * that depends on an extraction value never arriving has to defend itself instead.
  *
  * IT ALSO OWNS THE TICK LADDER (`boundarySteps`), because that is the same knowledge asked a second
  * way. `namesAPeriod` is the single membership rule for "this unit denotes a period", and the two
@@ -145,14 +152,22 @@ export function periodName(unit: string | undefined, value: unknown): string {
   // Same nullish answer as `formatValue` (`format.ts:80`) so an empty cell reads the same wherever
   // it is drawn.
   if (value == null) return "";
-  // An extraction unit's value is a finished word before it ever reaches a formatter, so naming a
-  // period from it would be nonsense. `PERIOD_FORMAT` has no entry for one either, so TODAY this
-  // states the rule rather than being the only thing enforcing it — but what it prevents is
-  // specific and silent: dayjs accepts an extraction value as a date. `dayjs("3").isValid()` is
-  // `true`, and it formats as "March 2001". So the day anyone adds a fallback below this line, a
-  // `day_of_week` of 3 stops reading "Wed" and starts reading a year nobody's data covers. No test
-  // can defend the guard while there is no fallback to reach past it, which is why the reason is
-  // written out here instead.
+  // Naming a period from an extraction unit would be nonsense, so this refuses to.
+  //
+  // THIS BRANCH IS REACHED IN PRODUCTION, which it was not when the comment here began "an
+  // extraction unit's value is a finished word before it ever reaches a formatter". That was true
+  // of the only caller there was: `options/cartesian.ts` substitutes through `temporalLabel`
+  // (`displayCats`) before the axis sees a value. `options/waterfall.ts`, the second caller, does
+  // NOT — so a `day_of_week` waterfall calls this with a raw `"3"` and leaves through this line.
+  // The module header carries the general form: the substitution is one caller's habit and not a
+  // premise anything here may assume.
+  //
+  // What it prevents is specific and silent: dayjs accepts an extraction value as a date.
+  // `dayjs("3").isValid()` is `true`, and it formats as "March 2001". `PERIOD_FORMAT` has no entry
+  // for an extraction token either, so the two guards still overlap and neither is alone — but the
+  // day anyone adds a fallback past that lookup, a `day_of_week` of 3 stops reading "Wed" and
+  // starts reading a year nobody's data covers. No test can tell the two guards apart while they
+  // agree, which is why the reason is written out here instead.
   if (unit == null || isExtractUnit(unit)) return String(value);
   const fmt = PERIOD_FORMAT[unit];
   if (fmt == null) return String(value);
@@ -238,10 +253,17 @@ function representativeValues(unit: string): string[] {
  * there is no key this Map could hold it under; `widestPeriodName` reads and writes here only when
  * `draw` is absent.
  *
- * The sole production caller (`options/cartesian.ts`, the `boundary:` line) PASSES `draw`. So this
- * cache does not serve the layout path — an earlier version of this comment said it did, naming
- * exactly the caller that bypasses it, which is the shape of a performance claim nobody rechecks.
- * What it serves now is the plain `widestPeriodName(unit)` form and this module's own tests.
+ * Both production callers (`options/cartesian.ts` and `options/waterfall.ts`, the `boundary:` line
+ * in each) PASS `draw`. So this cache does not serve the layout path — an earlier version of this
+ * comment said it did, naming exactly the caller that bypasses it, which is the shape of a
+ * performance claim nobody rechecks. What it serves now is the plain `widestPeriodName(unit)` form
+ * and this module's own tests.
+ *
+ * NOT "the sole caller", which is what this said until the waterfall became the second one — a
+ * comment that COUNTS its callers is falsified by the next commit that adds one, and this file was
+ * repaired for that exact failure one commit before it happened again. The claim that has to hold
+ * is "every caller on the layout path passes `draw`", and it is stated that way above so a third
+ * caller either keeps it true or is visibly the exception.
  *
  * WHAT THE LAYOUT PATH THEREFORE PAYS, measured rather than estimated (dayjs 1.11.21, Node 22, per
  * call, warm): 0.01ms at `year`, 0.03ms at `quarter`, 0.06ms at `month` and `week`, 0.36ms at `day`,
@@ -283,9 +305,9 @@ const WIDEST_BY_UNIT = new Map<string, string>();
  * COST — one parse-and-format per representative value, and `representativeValues` collapses hard at
  * the coarse units rather than always producing twelve: **1** at `year` (one month, one day, one
  * hour), **4** at `quarter`, **12** at `month` and `week`, **84** at `day`, **168** at `hour` and
- * `minute`. Bounded by the unit rather than by the data, and the one caller pays it only on a
- * bucketed temporal axis that has a measured size — never on an ordinal axis and never on an
- * unmeasured container. The `draw` form is not memoised; `WIDEST_BY_UNIT` above says why, what the
+ * `minute`. Bounded by the unit rather than by the data, and a caller pays it only on a bucketed
+ * temporal axis that has a measured size — never on an ordinal axis and never on an unmeasured
+ * container. The `draw` form is not memoised; `WIDEST_BY_UNIT` above says why, what the
  * layout path actually pays in milliseconds, and where a key would go if it ever mattered.
  *
  * TOTAL, and "" for anything that is not a truncation unit: a caller measuring "" gets a width of

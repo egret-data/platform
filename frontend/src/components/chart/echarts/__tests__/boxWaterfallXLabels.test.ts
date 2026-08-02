@@ -405,9 +405,9 @@ describe("a bucketed temporal waterfall", () => {
 });
 
 /**
- * The waterfall's half of the thinning contract. `temporalXLabels.test.ts` makes the same four
- * claims about the cartesian axis; they are repeated rather than shared because the two builders
- * hold their own copy of this wiring, which is precisely how the waterfall came to be missing it.
+ * The waterfall's half of the thinning contract. `temporalXLabels.test.ts` makes these same claims
+ * about the cartesian axis; they are repeated rather than shared because the two builders hold
+ * their own copy of this wiring, which is precisely how the waterfall came to be missing it.
  */
 describe("a bucketed temporal waterfall thins to period boundaries", () => {
   const COLS = [{ name: "d", type: "date" }, { name: "m", type: "double" }];
