@@ -1138,7 +1138,7 @@ function baseOption(
    * HIDE, and a row chart's bottom axis is a VALUE axis. Its labels are round ticks ECharts
    * generated, so tilting them is a remedy Metabase does not offer there (it greys the control out
    * on a value axis) and hiding them is not what its row chart does either — at 311px it draws one
-   * tick and keeps drawing it. Fewer ticks is the value axis's answer; see `fitValueTicks`.
+   * tick and keeps drawing it. Fewer ticks is the value axis's answer; see `intervalThatFits`.
    *
    * WHAT THE LEFT SIDE COSTS IS THE CATEGORY NAMES, not a column of value ticks — the row chart is
    * the one cartesian where those two swap edges — so the gutter is measured from the labels
@@ -1153,44 +1153,79 @@ function baseOption(
   const measuredCategories = horizontal && measurable && size ? widestLabelWidth(drawnCategories) : 0;
   // A ZERO IS NOT A ZERO-WIDTH LABEL, it is no measurement at all: `measure-text.ts` reports one
   // deliberately where there is no canvas ("Size claims belong in a browser"), which is every jsdom
-  // test in the repo. Declining there is the same rule `fitValueTicks` keeps for its own candidate
+  // test in the repo. Declining there is the same rule `intervalThatFits` keeps for its own candidate
   // and the same one `measurable` keeps for `size` — a name placed against a width nobody observed
   // is the guess this builder does not make. It also keeps every unmeasured row chart's option
   // exactly as it was before this fit existed.
   const categoryGutter = measuredCategories > 0 ? measuredCategories : undefined;
   /**
-   * How far the value axis runs, which is what an interval has to divide.
+   * How far the value axis runs — the distance an interval has to divide, and the magnitude its
+   * widest tick is formatted from.
    *
    * A BAR AXIS INCLUDES ZERO whether or not the data does — ECharts' `scale` defaults to false and
-   * a bar measured from a floating baseline lies — so the extent is the data's own, widened to the
-   * origin. `yMin`/`yMax` replace their end when the user has set one, and a normalised chart is
-   * 0-100 by construction (the `max: 100` below is the same statement).
+   * a bar measured from a floating baseline lies — so the extent starts at the origin and is
+   * widened by the data. `yMin`/`yMax` replace their end when the user has set one, and a
+   * normalised chart is 0-100 by construction (the `max: 100` below is the same statement).
+   *
+   * A STACK IS SUMMED, PER CATEGORY, and leaving that out was a REGRESSION rather than a gap: three
+   * stacked metrics whose largest datum is 300K reach 870K together, and an interval sized against
+   * 300K asks for nine labels where six fit. Measured at 300px and 320px, a stacked row chart that
+   * drew clean ticks before this fit existed came out overlapping by 13.9 and 11.9px — worse than
+   * the defect the fit is here to remove. `resolveStacked` is the same predicate `decorateSeries`
+   * consults when it writes `stack: "total"`, asked here rather than restated, so the two cannot
+   * disagree about which series pile up.
+   *
+   * GROUPED BARS ARE NOT SUMMED, and that is not an oversight: unstacked series sit side by side,
+   * each measured from the same baseline, so the axis only has to reach the tallest single one.
+   * `resolveStacked` is false for them, which is the whole distinction.
    */
-  const axisSpan = (metrics: string[]) => {
-    if (normalized) return 100;
+  const axisExtent = (metrics: string[]): { lo: number; hi: number } => {
+    if (normalized) return { lo: 0, hi: 100 };
+    const stacked = resolveStacked(cfg);
+    // Per category index, so a stack is summed where it is drawn. Positives and negatives are kept
+    // apart because they grow in opposite directions from the baseline — ECharts stacks them into
+    // two piles, not one net figure, and an axis sized on the net one is too short at both ends.
+    const up: number[] = [], down: number[] = [];
     let lo = 0, hi = 0;
     for (const s of plotted) {
+      // A breakout splits one metric into many series, each still tagged with __metric. An untagged
+      // series predates that and is counted against whichever axis asks — `widestOf`'s rule.
       if (s.__metric != null && !metrics.includes(s.__metric)) continue;
-      for (const d of (s.data ?? []) as unknown[]) {
-        const n = Number(Array.isArray(d) ? d[1] : d);
+      const data = (s.data ?? []) as unknown[];
+      for (let i = 0; i < data.length; i++) {
+        // On a value/time x-axis the datum is an [x, y] pair — the y is what the axis shows.
+        const n = Number(Array.isArray(data[i]) ? (data[i] as unknown[])[1] : data[i]);
         if (!Number.isFinite(n)) continue;
-        if (n < lo) lo = n;
-        if (n > hi) hi = n;
+        if (!stacked) {
+          if (n < lo) lo = n;
+          if (n > hi) hi = n;
+        } else if (n >= 0) up[i] = (up[i] ?? 0) + n;
+        else down[i] = (down[i] ?? 0) + n;
       }
     }
-    return (cfg.yMax ?? hi) - (cfg.yMin ?? lo);
+    // `filter` skips the holes a sparse index leaves, so a category every series is null at cannot
+    // contribute an `undefined` and turn the whole extent into NaN.
+    if (stacked) {
+      hi = Math.max(hi, ...up.filter((v) => Number.isFinite(v)));
+      lo = Math.min(lo, ...down.filter((v) => Number.isFinite(v)));
+    }
+    return { lo: cfg.yMin ?? lo, hi: cfg.yMax ?? hi };
   };
   // A LOG axis is excluded: its ticks are powers, so a linear interval means something else
   // entirely there and the crowding it suffers is not the crowding this measures.
-  const valueInterval = categoryGutter != null && size && !cfg.logScale
+  const rowExtent = categoryGutter != null && size && !cfg.logScale ? axisExtent(leftSide) : undefined;
+  const valueInterval = rowExtent && size
     ? intervalThatFits({
-        plotWidth: plotWidthLessGutter(size, categoryGutter, Boolean(xTitle)),
-        span: axisSpan(leftSide),
-        // The same pair the ladder charges its gutter for, and for the same reason: a value axis
-        // draws round ticks, not data, so the candidate is `widestTickLabel`'s and not a datum's.
+        plotWidth: plotWidthLessGutter(size, categoryGutter!, Boolean(xTitle)),
+        span: rowExtent.hi - rowExtent.lo,
+        // BOTH FROM THE SAME EXTENT, and not `widestOf`: a value axis draws round ticks, not data,
+        // and on a stack the number it reaches is the pile's, not any one datum's. (`widestOf` is
+        // the ladder's, one axis over and one chart kind away — it feeds a vertical chart's gutter,
+        // where the labels are the left axis's own and the stack question does not arise. The two
+        // agree on every unstacked chart, where the extent's ends ARE the extreme data.)
         // On a horizontal chart `leftSide` is the metric side whatever the name says — the split is
         // by series, and `isDualAxis` is false here, so every plotted series is in it.
-        widestValue: widestOf(leftSide),
+        widestValue: Math.max(Math.abs(rowExtent.lo), Math.abs(rowExtent.hi)),
         format: fmtFor(leftSide),
       })
     : undefined;
@@ -1210,10 +1245,15 @@ function baseOption(
     // `nameGap` is measured from the AXIS LINE, so what it has to clear is whatever sits between the
     // line and the name — nothing at the bottom of a vertical chart, where 28 has always been right,
     // but the whole column of category names on a row chart, where the title was drawn straight
-    // across them. `nameGapClearOf` states the three terms. Unmeasured, 28 stands: a gap guessed
-    // from no width is the one thing this builder's `size` doc says never to do, and the row chart
-    // it mis-places is the row chart nobody has measured.
-    nameGap: categoryGutter != null ? nameGapClearOf(categoryGutter) : 28,
+    // across them. `nameGapClearOf` states the three terms.
+    //
+    // 28 STANDS IN TWO CASES, and they are different refusals. Unmeasured, because a gap guessed
+    // from no width is the one thing this builder's `size` doc says never to do. And on a card too
+    // narrow for the labels it has, because there the clearing gap would put the title off the
+    // canvas — 28 draws it across its labels, which is this PR's own defect, but a title one can
+    // read over the top of beats a title that is not there. `nameGapClearOf` owns that judgement
+    // and says `undefined`; this line only has to have somewhere to fall back to.
+    nameGap: (categoryGutter != null && size ? nameGapClearOf(categoryGutter, size) : undefined) ?? 28,
     // The title matches the label colour — an axis name is not a lesser piece of chrome
     // than the values beneath it, and ECharts' default nameTextStyle colour reads paler.
     nameTextStyle: { color: axisLabelColor },

@@ -3,6 +3,7 @@ import * as echarts from "echarts/core";
 import { platformApi } from "zrender/lib/core/platform.js";
 import { registerEChartsModules } from "../register";
 import { buildCartesianOption } from "../options/cartesian";
+import { intervalThatFits } from "../axisLabelFit";
 
 /**
  * A ROW CHART'S TWO AXES, each measured against what ECharts really draws.
@@ -73,11 +74,24 @@ const cols = [{ name: "category", type: "varchar" }, { name: "revenue", type: "d
 const rows: unknown[][] = [
   ["Widget", 412_000], ["Doohickey", 128_000], ["Gizmo", 341_000], ["Gadget", 236_000],
 ];
-/** The same four categories with two of them in the red, so the axis runs -200K to 500K rather than
- *  0 to 500K. Twice the axis for the same widest label, and the case that separates "how far does
- *  this axis run" from "what is the biggest number on it". */
+/**
+ * The same four categories with two of them in the red — the axis runs -290K to 300K, so it is 590K
+ * across while its biggest number is 300K.
+ *
+ * THE NEAR-SYMMETRY IS THE POINT, and the fixture it replaced did not have it. That one ran -188K to
+ * 412K: 600K across against a biggest number of 412K, and on the {1,2,5} lattice of round intervals
+ * a factor of 1.5 disappears — 600/2 and 412/2 both round up to 500K, at every width the case
+ * covered. It asserted a distinction its own numbers could not express, which is why the mutant it
+ * names survived. At a factor of 2 the two land a rung apart (590/2 -> 500K, 300/2 -> 200K), and an
+ * axis given the smaller interval draws five labels where three fit.
+ *
+ * A LEFT-HAND MAGNITUDE THIS FIXTURE DOES NOT PROBE: the minus sign. `widestTickLabel` samples
+ * positives, so `-290K` is charged as `290K`. That under-charge is `estimatePlotWidth`'s own
+ * documented residual, is shared with the vertical ladder, and is not this task's to fix — the
+ * numbers above hold with or without it.
+ */
 const crossesZero: unknown[][] = [
-  ["Widget", 412_000], ["Doohickey", -188_000], ["Gizmo", 341_000], ["Gadget", -96_000],
+  ["Widget", 300_000], ["Doohickey", -290_000], ["Gizmo", 180_000], ["Gadget", -96_000],
 ];
 const CATEGORIES = ["Widget", "Doohickey", "Gizmo", "Gadget"];
 const rowCfg = { kind: "row" as const, xAxis: "category", yMetrics: ["revenue"] };
@@ -85,6 +99,60 @@ const rowCfg = { kind: "row" as const, xAxis: "category", yMetrics: ["revenue"] 
  *  value axis from the metric. Both are drawn, so both have to be excluded from the tick count. */
 const TITLES = ["category", "revenue"];
 const CARD = { width: 166, height: 184 };
+
+/**
+ * THREE METRICS PILED UP, which is the case an extent taken from individual data points gets wrong:
+ * the biggest single number is 300K and the tallest bar is 870K, so ECharts runs the axis to 1M.
+ *
+ * Sized against the datum, the fit asked for `interval: 100000` — nine labels where six fitted — and
+ * a stacked row chart that had drawn CLEAN ticks at 300 and 320px before this fit existed came out
+ * overlapping by 13.9 and 11.9px. A regression, not a shortfall, and the reason the extent is summed
+ * per category rather than scanned per point.
+ *
+ * The three metrics also put a LEGEND on the card, so its entries join the strings a tick count has
+ * to exclude — see `ticksDrawn`.
+ */
+const stackCols = [
+  { name: "category", type: "varchar" }, { name: "north", type: "double" },
+  { name: "south", type: "double" }, { name: "east", type: "double" },
+];
+const stackRows: unknown[][] = [
+  ["Widget", 300_000, 290_000, 280_000], ["Doohickey", 120_000, 130_000, 110_000],
+  ["Gizmo", 250_000, 240_000, 230_000], ["Gadget", 180_000, 170_000, 160_000],
+];
+const stackCfg = {
+  kind: "row" as const, xAxis: "category", yMetrics: ["north", "south", "east"], stacked: true,
+};
+/** A three-metric axis has no single name, so the value axis is untitled here — what has to come out
+ *  of the tick count instead is the category title and the three legend entries. */
+const STACK_TEXT = ["category", "north", "south", "east"];
+
+/**
+ * A stack that grows BOTH WAYS: two metrics up and one down, so the tallest category piles to +590K
+ * above the baseline and -280K below it and the axis runs 870K. Netted into one figure it would read
+ * 310K — a third of the truth, and an interval a third of the size.
+ *
+ * ECharts stacks the two directions separately (positives up, negatives down from the same
+ * baseline), which is why the extent keeps two piles rather than a running total.
+ *
+ * NO LEGEND, and that is not tidying: at some widths a scrollable legend adds its own `1/3` pager to
+ * the markup, and a pager is neither a tick nor a name this file can enumerate. Excluding text by
+ * spelling it out is what keeps `ticksDrawn` honest, so the fixture removes the source instead. The
+ * legend is above the plot; nothing horizontal changes with it gone.
+ */
+const divergingStackCfg = { ...stackCfg, showLegend: false };
+const divergingStackRows: unknown[][] = [
+  ["Widget", 300_000, 290_000, -280_000], ["Doohickey", 120_000, 130_000, -110_000],
+  ["Gizmo", 250_000, 240_000, -230_000], ["Gadget", 180_000, 170_000, -160_000],
+];
+
+/** A category name wide enough that the card cannot hold it, its title and a plot at once. At 166px
+ *  the clearing gap would put the title at x -1; at 250px the same name clears with room to spare,
+ *  which is what makes the pair a bracket around the threshold rather than one anecdote. */
+const LONG_NAME = "Doohickey Trading";
+const longNameRows: unknown[][] = [
+  ["Widget", 412_000], [LONG_NAME, 128_000], ["Gizmo", 341_000], ["Gadget", 236_000],
+];
 
 interface SvgText {
   text: string;
@@ -148,33 +216,38 @@ const rowOption = (size: { width: number; height: number }, data: unknown[][] = 
 /** The value-axis tick labels the chart DREW, left to right, with the page band each occupies. A
  *  row chart with one series draws nothing else: four category names, two axis titles, and the
  *  ticks. Anything new appearing in that markup would show up here as an extra tick and fail loudly
- *  rather than being quietly counted as none. */
-function ticksDrawn(svg: string): { text: string; ink: [number, number] }[] {
+ *  rather than being quietly counted as none — which is exactly what a stacked chart's LEGEND did
+ *  when it was first written, hence the second argument. */
+function ticksDrawn(svg: string, notTicks: string[] = TITLES): { text: string; ink: [number, number] }[] {
   const family = familyOf(svg);
   return parseTexts(svg)
-    .filter((t) => t.text.trim() !== "" && !CATEGORIES.includes(t.text) && !TITLES.includes(t.text))
+    .filter((t) => t.text.trim() !== "" && !CATEGORIES.includes(t.text) && !notTicks.includes(t.text))
     .map((t) => ({ text: t.text, ink: inkX(t, family) }))
     .sort((a, b) => a.ink[0] - b.ink[0]);
 }
 
 /** Clear ink between the two closest neighbouring tick labels — negative when they overlap, which is
  *  the live defect. `Infinity` when the axis drew one label, which cannot overlap anything. */
-function tightestTickGap(svg: string): number {
-  const ticks = ticksDrawn(svg);
+function tightestTickGap(svg: string, notTicks?: string[]): number {
+  const ticks = ticksDrawn(svg, notTicks);
   if (ticks.length === 0) throw new Error("no value ticks were drawn");
   return Math.min(...ticks.slice(1).map((t, i) => t.ink[0] - ticks[i].ink[1]));
 }
 
-/** Clear ink between the rotated `category` title and the nearest category label. */
-function titleGapPx(svg: string): number {
-  const family = familyOf(svg);
-  const texts = parseTexts(svg);
-  const name = texts.find((t) => t.text === "category" && t.c !== 0);
-  const labels = texts.filter((t) => CATEGORIES.includes(t.text));
-  // Not vacuous: a title or labels that failed to parse would otherwise read as a comfortable gap.
+/** The rotated `category` title, or a thrown error if the chart did not draw one — a missing title
+ *  must never read as a comfortable gap. */
+function axisTitle(svg: string): SvgText {
+  const name = parseTexts(svg).find((t) => t.text === "category" && t.c !== 0);
   if (!name) throw new Error("the rotated category title was not drawn");
-  if (labels.length !== CATEGORIES.length) throw new Error(`drew ${labels.length} category labels`);
-  return Math.min(...labels.map((l) => inkX(l, family)[0])) - inkX(name, family)[1];
+  return name;
+}
+
+/** Clear ink between the rotated `category` title and the nearest category label. */
+function titleGapPx(svg: string, categories: string[] = CATEGORIES): number {
+  const family = familyOf(svg);
+  const labels = parseTexts(svg).filter((t) => categories.includes(t.text));
+  if (labels.length !== categories.length) throw new Error(`drew ${labels.length} category labels`);
+  return Math.min(...labels.map((l) => inkX(l, family)[0])) - inkX(axisTitle(svg), family)[1];
 }
 
 describe("a row chart's axes fit what they draw", () => {
@@ -212,10 +285,33 @@ describe("a row chart's axes fit what they draw", () => {
    * sized against the biggest NUMBER rather than against the DISTANCE would come out half what is
    * needed here, and draw twice the ticks that fit.
    */
-  it.each([200, 240, 280, 320])(
+  it.each([200, 220, 240, 250, 260, 280, 320])(
     "draws no two value ticks over each other on an axis that crosses zero at %ipx", (width) => {
       const size = { width, height: 240 };
       expect(tightestTickGap(render(rowOption(size, crossesZero), size))).toBeGreaterThan(0);
+    });
+
+  /**
+   * A STACK IS AS LONG AS ITS TOTAL. Three metrics of 300K, 290K and 280K make a bar of 870K and an
+   * axis that runs to 1M, and an extent read off the individual points would call it 300K — asking
+   * for nine labels on a card that fits six. These four widths are the ones where that regressed:
+   * measured against the commit before this one they overlap by 16.7, 14.7, 13.9 and 11.9px, and the
+   * last two of those cards drew CLEAN ticks before the fit existed at all.
+   */
+  it.each([260, 280, 300, 320])(
+    "draws no two value ticks over each other on a stacked row chart at %ipx", (width) => {
+      const size = { width, height: 240 };
+      const opt = buildCartesianOption(stackCols, stackRows, stackCfg, size);
+      expect(tightestTickGap(render(opt, size), STACK_TEXT)).toBeGreaterThan(0);
+    });
+
+  /** The same rule for a stack that grows in both directions — see `divergingStackRows` for why the
+   *  two piles cannot be netted into one. */
+  it.each([240, 300, 400])(
+    "draws no two value ticks over each other on a stack that grows both ways at %ipx", (width) => {
+      const size = { width, height: 240 };
+      const opt = buildCartesianOption(stackCols, divergingStackRows, divergingStackCfg, size);
+      expect(tightestTickGap(render(opt, size), STACK_TEXT)).toBeGreaterThan(0);
     });
 
   /**
@@ -235,9 +331,41 @@ describe("a row chart's axes fit what they draw", () => {
    */
   it("keeps the title on the canvas while it does so", () => {
     const svg = render(rowOption(CARD), CARD);
-    const name = parseTexts(svg).find((t) => t.text === "category" && t.c !== 0);
-    expect(name).toBeDefined();
-    expect(inkX(name!, familyOf(svg))[0]).toBeGreaterThanOrEqual(0);
+    expect(inkX(axisTitle(svg), familyOf(svg))[0]).toBeGreaterThanOrEqual(0);
+  });
+
+  /**
+   * …AND KEEPS IT THERE WHEN THE LABELS ARE TOO WIDE FOR THE CARD, which the case above cannot show
+   * because its own labels always fit. A gap that clears the labels is measured from where the
+   * labels ARE, and past a certain width ECharts stops honouring `grid.left` and spills them
+   * leftwards — so the gap that clears them walks the title off the canvas with them. Rendered at
+   * 166px, `Doohickey Trading` (108.7px) put the title at x -1, `Doohickey Trading Co` at -6, and a
+   * 223px name at -100.
+   *
+   * The title then falls back to the flat 28 and OVERLAPS its labels, which is this PR's own defect
+   * — and is deliberately the accepted outcome, because before this PR the title was always drawn
+   * that way and a reader could still read it. An invisible title is the worse failure of the two.
+   * Both halves are asserted so that "it fell back" cannot be satisfied by drawing nothing.
+   */
+  it("keeps a title on the canvas when its labels are too wide for the card", () => {
+    const svg = render(buildCartesianOption(cols, longNameRows, rowCfg, CARD), CARD);
+    const title = axisTitle(svg);
+    expect(inkX(title, familyOf(svg))[0]).toBeGreaterThanOrEqual(0);
+    expect((buildCartesianOption(cols, longNameRows, rowCfg, CARD) as { yAxis: { nameGap: number } })
+      .yAxis.nameGap).toBe(28);
+  });
+
+  /**
+   * The other side of that threshold, so the fallback is a decision about the CARD and not a rule
+   * that quietly retired the fix for any long name: the same labels on a 250px card have room, and
+   * there the title clears them as it always should.
+   */
+  it("still clears the same labels once the card is wide enough", () => {
+    const size = { width: 250, height: 184 };
+    const svg = render(buildCartesianOption(cols, longNameRows, rowCfg, size), size);
+    const categories = longNameRows.map((r) => String(r[0]));
+    expect(titleGapPx(svg, categories)).toBeGreaterThan(0);
+    expect(inkX(axisTitle(svg), familyOf(svg))[0]).toBeGreaterThanOrEqual(0);
   });
 
   /**
@@ -273,6 +401,20 @@ describe("a row chart's axes fit what they draw", () => {
    * width costs nothing and this fit has nothing to say — and its category labels are the ones the
    * PR 02 ladder already owns. Neither axis may acquire an interval from this change.
    */
+  /**
+   * The fitter is EXPORTED, and the builder is not its only future caller — the waterfall and the
+   * box plot lay out the same axis from the same grid. A width that is not a number is not a narrow
+   * card, and `<= 0` is false for NaN, so the two guards say `> 0` instead: an unmeasured input has
+   * to come back as "no answer" and not as an interval of NaN quietly reaching an option.
+   */
+  it("answers nothing rather than NaN when it is handed one", () => {
+    const fmt = (v: number) => String(v);
+    expect(intervalThatFits({ plotWidth: NaN, span: 500_000, widestValue: 412_000, format: fmt }))
+      .toBeUndefined();
+    expect(intervalThatFits({ plotWidth: 200, span: NaN, widestValue: 412_000, format: fmt }))
+      .toBeUndefined();
+  });
+
   it("says nothing about a vertical chart's value axis", () => {
     const bar = buildCartesianOption(cols, rows, { ...rowCfg, kind: "bar" }, CARD) as {
       xAxis: { interval?: number; splitNumber?: number };

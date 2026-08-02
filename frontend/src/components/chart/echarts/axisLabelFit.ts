@@ -104,9 +104,27 @@ const HORIZONTAL_TICKS_GAP = 6;
 const AXIS_LABEL_MARGIN = 8;
 /** ECharts' own default `splitNumber` on a value axis. It is a HINT — the axis still rounds to a
  *  human interval — so this is a ceiling to stay under and never a count to assert. Above it there
- *  is nothing to say, which is why `fitValueTicks` answers `undefined` there rather than repeating
- *  the default back into the option. */
+ *  is nothing to say, which is why `intervalThatFits` answers `undefined` there rather than
+ *  repeating the default back into the option. */
 const DEFAULT_VALUE_SPLITS = 5;
+/**
+ * The plot ECharts insists on keeping, near enough — the threshold `nameGapClearOf` decides against.
+ *
+ * MEASURED, not documented anywhere upstream: rendered at 166px with a category label of 108.7px,
+ * the un-clamped left inset (`grid.left` + label + margin) comes to 150.7 against a card whose right
+ * inset starts at 150, and ECharts answers by putting the axis at 134.5 and letting the LABELS spill
+ * left of `grid.left` instead. That spill is the whole problem: every gap this module computes is
+ * relative to where the labels ended up, so once they move left the name follows them off the card.
+ *
+ * IT IS A SAFETY MARGIN AND NOT A CLIFF, which is worth saying because 24 looks like a measured
+ * threshold and is not one. Setting it to 0 — declining only where the un-clamped inset would
+ * overrun the card outright — still keeps the title on the canvas at every size rendered; what it
+ * removes is the room to spare, leaving cards whose title clears its labels by 3px. 24 buys the
+ * decision back before it gets that close. So `rowAxisLabels.test.ts` brackets the DECISION (a
+ * 108.7px label falls back at 166px and clears at 250px) rather than this number, and a change to
+ * it should be justified by rendering a sweep, as this one was.
+ */
+const MIN_PLOT_WIDTH = 24;
 /** `X_LABEL_ROTATE_45_THRESHOLD_FACTOR` */
 const ROTATE_45_MIN_FACTOR = 2.1;
 /** `X_LABEL_ROTATE_90_THRESHOLD_FACTOR` */
@@ -428,9 +446,12 @@ export function intervalThatFits({
   fontSize?: number;
   measure?: TextMeasurer;
 }): number | undefined {
-  if (plotWidth <= 0 || !Number.isFinite(span) || span <= 0) return undefined;
+  // Written as `!(x > 0)` rather than `x <= 0` so a NaN is DECLINED rather than carried: `<=` is
+  // false for NaN, and this function is exported — the waterfall and the box plot are its obvious
+  // next callers, and a NaN plot width returning a NaN interval would reach an option silently.
+  if (!(plotWidth > 0) || !(span > 0) || !Number.isFinite(span)) return undefined;
   const width = measure(widestTickLabel(widestValue, format), axisFont(fontSize)).width;
-  if (width <= 0) return undefined;
+  if (!(width > 0)) return undefined;
   const steps = Math.floor((plotWidth - width) / (width + HORIZONTAL_TICKS_GAP));
   if (steps >= DEFAULT_VALUE_SPLITS) return undefined;
   // One step is ECharts' floor as well as ours: a value axis draws its two ends. Where even those
@@ -447,14 +468,31 @@ export function intervalThatFits({
  * are the axis line to the labels (`AXIS_LABEL_MARGIN`), the labels themselves, and the same ink-free
  * `HORIZONTAL_TICKS_GAP` this module demands between any two neighbouring pieces of axis text.
  *
- * IT DOES NOT NEED THE NAME'S OWN THICKNESS, which is the term a reader will look for. A name on a
- * left axis is rotated onto the y axis, so what it occupies horizontally is its font's HEIGHT — but
- * ECharts anchors it at `nameGap` and grows it away from the plot, so the term only decides whether
- * the name still lands on the card. It does: `grid.left` reserves 26px for a titled axis, and
- * rendered at the live card's size the name's ink came out at x 18-31 against labels starting at 37
- * — inside the reserved band with 10px to spare, and 6px of clear ink where there was -40.8.
+ * IT DOES NOT NEED THE NAME'S OWN THICKNESS AS A TERM, which is what a reader will look for. A name
+ * on a left axis is rotated onto the y axis, so what it occupies horizontally is its font's HEIGHT,
+ * and ECharts anchors it at `nameGap` and grows it away from the plot. Where the labels sit where
+ * this module expects, that thickness lands inside the 26px `grid.left` reserves for a title: at the
+ * live card's size the name's ink came out at x 18-31 against labels starting at 37 — inside the
+ * band with 10px to spare, and 6px of clear ink where there was -40.8.
+ *
+ * …WHICH IS WHY THE ANSWER CAN BE `undefined`, AND THE CALLER MUST HAVE A FALLBACK. Substitute the
+ * identity above and the name's ink is `[labelsLeft - 19, labelsLeft - 6]` — always 19px to the left
+ * of wherever the labels BEGAN. That is fine while they begin at `grid.left`, and it is off the card
+ * the moment they do not: past a certain label width ECharts stops honouring the left inset and
+ * spills the labels leftwards instead (`MIN_PLOT_WIDTH`). Rendered at 166px, a category of 108.7px
+ * put the title at x -1 and one of 129px at x -6, and a 223px one at -100. Before this function
+ * existed the title was drawn at a flat 28 and sat ON its labels — the defect this fixes — but it
+ * was VISIBLE, and a title that has vanished off the canvas is the worse of the two failures. So
+ * where the card cannot afford the clearing gap, this declines and the caller keeps the flat gap.
+ *
+ * The threshold is stated in the card's own terms — the insets, the labels, their margin and the
+ * plot that has to survive — because that is the arithmetic ECharts is doing when it decides to
+ * spill. `26` is the title band `plotWidthLessGutter` also charges, kept in step with it.
  */
-export function nameGapClearOf(labelWidth: number): number {
+export function nameGapClearOf(labelWidth: number, size: EChartsSize): number | undefined {
+  const g = CHART_THEME.grid;
+  const reserved = (g.left as number) + 26 + labelWidth + AXIS_LABEL_MARGIN + MIN_PLOT_WIDTH;
+  if (!(size.width - (g.right as number) >= reserved)) return undefined;
   return labelWidth + AXIS_LABEL_MARGIN + HORIZONTAL_TICKS_GAP;
 }
 
