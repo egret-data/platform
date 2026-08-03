@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { useDatasets, useDataset } from "@/api/datasets";
 import {
   useBuildChartData, useChart, useChartMutations,
-  type QuerySpec, type VizType, type ChartParams, type TableState, type ChartFilter,
+  type QuerySpec, type VizType, type ChartParams, type TableState, type ChartFilter, type ChartOrderBy,
   type AnyChartParams, type VizSettings, isParamsV2,
 } from "@/api/charts";
 import { useSpecData } from "@/api/useSpecData";
@@ -35,6 +35,8 @@ import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
 import { withDefaultTemporalUnits } from "@/components/chart/temporal-units";
 import { useChartRun } from "@/components/chart/useChartRun";
 import { getDescriptor } from "@/components/chart/viz/registry";
+import { authoredOrderby, honoursOrderby, sortableFields } from "@/components/chart/viz/orderby";
+import { SortRows } from "@/components/chart/SortRows";
 import { pivotDescriptor, type PivotConfig } from "@/components/chart/viz/pivot";
 import { tableDescriptor } from "@/components/chart/viz/table";
 import type { VizDescriptor } from "@/components/chart/viz/types";
@@ -84,6 +86,11 @@ export default function ChartExplore() {
   // by a future PR's namespace) survive a round-trip through this builder untouched.
   const [settings, setSettings] = useState<VizSettings>({});
   const [filters, setFilters] = useState<ChartFilter[]>([]);
+  // Shared query state, exactly like `filters` and `rowLimit`: the sort the author asked for, which
+  // every descriptor's `buildSpec` folds into the spec it emits. Empty is "no explicit sort" — the
+  // state a chart saved before this existed comes back in, and the state in which the cartesian
+  // descriptor's own ascending-by-breakout default applies unchanged.
+  const [orderby, setOrderby] = useState<ChartOrderBy[]>([]);
   const [drillMenu, setDrillMenu] = useState<{ ctx: DrillContext; x: number; y: number } | null>(null);
   const [recordsFilters, setRecordsFilters] = useState<ChartFilter[] | null>(null);
 
@@ -116,6 +123,9 @@ export default function ChartExplore() {
     setConditionalFormatting(shell.conditionalFormatting);
     setTableState(shell.tableState);
     setFilters(p.spec?.filters ?? []);
+    // NOT `p.spec?.orderby` — a stored spec's order is the author's sort plus whatever the
+    // descriptor derived, and only the first belongs in editable state. See `authoredOrderby`.
+    setOrderby(authoredOrderby(p, desc));
     setSaveName(c.name);
     setSaveDesc(c.description);
   }, [existing.data]);
@@ -154,7 +164,7 @@ export default function ChartExplore() {
   };
 
   function specForRun(): QuerySpec {
-    if (descriptor) return descriptor.buildSpec(descConfig, { filters, rowLimit, temporalUnits });
+    if (descriptor) return descriptor.buildSpec(descConfig, { filters, rowLimit, temporalUnits, orderby });
     // Unreachable: every viz type is in the registry.
     throw new Error(`no spec builder for viz ${viz}`);
   }
@@ -309,6 +319,12 @@ export default function ChartExplore() {
     resetRun();
     // A different viz means a different config shape; its descriptor's default applies.
     setDescState(null);
+    // And the sort goes with it. Unlike a filter, which names a DATASET column and stays valid
+    // whatever is on screen, a sort names a field of the SPEC — a dimension, a metric or a raw
+    // column the descriptor put there (`orderby_sql`, chartquery.rs). Dropping the config drops
+    // those, so carrying the sort over would ask the engine to order by a field the new query does
+    // not select, which is a 400 rather than a wrong picture.
+    setOrderby([]);
     if (!id) setSearchParams({ type: v });
   }
 
@@ -318,7 +334,7 @@ export default function ChartExplore() {
     // need their own hooks cleared by hand until PR3 retires them.
     setDescState(null); setSettings({});
     setColumnSettings({}); setConditionalFormatting([]); setTableState({}); setFilters([]); resetRun();
-    setTemporalUnits({});
+    setTemporalUnits({}); setOrderby([]);
   }
 
   // Capture the "clean" baseline once the builder is ready: for a new chart that's the
@@ -456,6 +472,13 @@ export default function ChartExplore() {
 
 
 
+
+            {/* Sort sits between the fields and the row limit, the order Metabase's notebook puts
+                its steps in — and the order that reads correctly, since the sort is what decides
+                WHICH rows survive the limit. Not offered where the descriptor would ignore it. */}
+            {descriptor && honoursOrderby(descriptor, descConfig) && (
+              <SortRows fields={sortableFields(specForRun())} value={orderby} onChange={setOrderby} />
+            )}
 
             <div className="space-y-1">
               <Label htmlFor="row-limit" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Row limit</Label>

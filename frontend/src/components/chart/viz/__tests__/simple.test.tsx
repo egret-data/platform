@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { SIMPLE_DESCRIPTORS } from "../simple";
 import { EMPTY_SPEC } from "@/api/charts";
 
-const SHARED = { filters: [], rowLimit: 1000, temporalUnits: { order_date: "month" } };
+const SHARED = { filters: [], rowLimit: 1000, temporalUnits: { order_date: "month" }, orderby: [] };
 const byKey = Object.fromEntries(SIMPLE_DESCRIPTORS.map((d) => [d.key, d]));
 
 describe("the nine simple descriptors", () => {

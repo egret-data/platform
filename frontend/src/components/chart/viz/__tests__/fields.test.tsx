@@ -92,14 +92,14 @@ describe("fieldDescriptor", () => {
   });
 
   it("builds a spec from the declared fields", () => {
-    const spec = d.buildSpec({ dimension: "region", metric: "m" }, { filters: [], rowLimit: 500, temporalUnits: {} });
+    const spec = d.buildSpec({ dimension: "region", metric: "m" }, { filters: [], rowLimit: 500, temporalUnits: {}, orderby: [] });
     expect(spec.dimensions).toEqual(["region"]);
     expect(spec.metrics).toEqual(["m"]);
     expect(spec.row_limit).toBe(500);
   });
 
   it("drops an unset field from the spec instead of emitting an empty string", () => {
-    const spec = d.buildSpec({ dimension: "region" }, { filters: [], rowLimit: 100, temporalUnits: {} });
+    const spec = d.buildSpec({ dimension: "region" }, { filters: [], rowLimit: 100, temporalUnits: {}, orderby: [] });
     expect(spec.metrics).toEqual([]);
   });
 

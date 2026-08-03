@@ -28,7 +28,7 @@ const COLUMNS = [
 ];
 
 /** What ChartExplore's own state starts at for a brand-new chart. */
-const SHARED = { filters: [], rowLimit: 1000, temporalUnits: {} };
+const SHARED = { filters: [], rowLimit: 1000, temporalUnits: {}, orderby: [] };
 
 /**
  * Exactly what `paramsForSave()` does, spelled out here so the test compares against the

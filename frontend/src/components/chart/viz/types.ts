@@ -1,5 +1,5 @@
 import type { FC, ReactNode } from "react";
-import type { AnyChartParams, ChartFilter, QuerySpec, VizSettings, VizType } from "@/api/charts";
+import type { AnyChartParams, ChartFilter, ChartOrderBy, QuerySpec, VizSettings, VizType } from "@/api/charts";
 import type { ChartTypeMeta } from "@/components/chart/chartTypes";
 import type { DatasetColumn, DatasetMetric } from "@/api/datasets";
 
@@ -8,6 +8,19 @@ export interface SharedQueryState {
   filters: ChartFilter[];
   rowLimit: number;
   temporalUnits: Record<string, string>;
+  /**
+   * The sort the CHART'S AUTHOR asked for, in order — sort is a query concern, so it sits beside
+   * `filters` and `rowLimit` rather than in any viz's settings, which is also how Metabase models
+   * it (a notebook step, not a visualization option).
+   *
+   * Empty is the normal case and means "no explicit sort": a descriptor that derives its own
+   * ascending default (cartesian, smartscalar) keeps deriving it, and one that asks the engine for
+   * nothing keeps asking for nothing. See `add-implicit-breakout-order-by`
+   * (metabase/query_processor/middleware/add_implicit_clauses.clj) for the precedence rule the
+   * cartesian descriptor ports: the implicit ascending clause is added for each breakout *unless*
+   * that field is already explicitly referenced here.
+   */
+  orderby: ChartOrderBy[];
 }
 
 /** What a control gets: its config, a patcher, the dataset, and the last result. */

@@ -1,8 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import type { QuerySpec } from "@/api/charts";
 
 // A saved pie chart in the pre-A2 (v1) shape: a viz still on the bridge, i.e. driven by
 // ChartExplore's inline branches rather than a descriptor.
@@ -36,7 +38,58 @@ const TABLE_V2 = {
   },
 };
 
-const CHARTS: Record<string, unknown> = { "c-pie": PIE_V1, "c-bar": BAR_V2, "c-table": TABLE_V2 };
+/**
+ * A bar chart saved WITH a sort its author asked for. Its stored `orderby` is the sum of two
+ * clauses — `total_revenue DESC` the author wrote, and `region ASC` the cartesian descriptor
+ * derives for its breakout — which is exactly what `paramsForSave` writes and what the studio has
+ * to be able to take apart and put back together.
+ */
+const BAR_SORTED = {
+  ...PIE_V1,
+  id: "c-bar-sorted", name: "Bar sorted", viz_type: "bar",
+  params: {
+    version: 2,
+    spec: {
+      metrics: ["total_revenue"], dimensions: ["region"], columns: [], filters: [],
+      orderby: [{ field: "total_revenue", desc: true }, { field: "region", desc: false }],
+      row_limit: 1000, rollup_groups: [],
+    },
+    settings: { "cartesian.xAxis": "region", "cartesian.yMetrics": ["total_revenue"] },
+  },
+};
+
+/** A raw-records viz: its spec carries `columns`, `orderby_sql`'s third arm. */
+const BOXPLOT = {
+  ...PIE_V1,
+  id: "c-boxplot", name: "Box plot", viz_type: "boxplot",
+  params: {
+    version: 2,
+    spec: {
+      metrics: [], dimensions: [], columns: ["region", "amount"], filters: [], orderby: [],
+      row_limit: 1000, rollup_groups: [],
+    },
+    settings: { "boxplot.category": "region", "boxplot.value": "amount" },
+  },
+};
+
+/** The one viz whose descriptor ignores an authored sort, so the control must not appear. */
+const TREND = {
+  ...PIE_V1,
+  id: "c-trend", name: "Trend", viz_type: "smartscalar",
+  params: {
+    version: 2,
+    spec: {
+      metrics: ["total_revenue"], dimensions: ["region"], columns: [], filters: [],
+      orderby: [{ field: "region", desc: false }], row_limit: 1000, rollup_groups: [],
+    },
+    settings: { "smartscalar.dimension": "region", "smartscalar.metric": "total_revenue" },
+  },
+};
+
+const CHARTS: Record<string, unknown> = {
+  "c-pie": PIE_V1, "c-bar": BAR_V2, "c-table": TABLE_V2, "c-bar-sorted": BAR_SORTED,
+  "c-boxplot": BOXPLOT, "c-trend": TREND,
+};
 
 vi.mock("@/api/charts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/api/charts")>()),
@@ -48,12 +101,19 @@ vi.mock("@/api/charts", async (importOriginal) => ({
   useBuildChartData: () => ({ data: undefined, isLoading: false, error: null }),
 }));
 
+/** The spec the studio last asked the backend to run — i.e. `specForRun()`'s output, observed at
+ *  the only seam it crosses. */
+let lastRanSpec: QuerySpec | null = null;
+
 vi.mock("@/api/useSpecData", () => ({
-  useSpecData: () => ({
-    columns: [{ name: "region", type: "varchar" }, { name: "total_revenue", type: "double" }],
-    rows: [["North", 1]],
-    isLoading: false, error: null, hasResult: true,
-  }),
+  useSpecData: (_ws: string, _ds: string | null, spec: QuerySpec | null) => {
+    lastRanSpec = spec;
+    return {
+      columns: [{ name: "region", type: "varchar" }, { name: "total_revenue", type: "double" }],
+      rows: [["North", 1]],
+      isLoading: false, error: null, hasResult: true,
+    };
+  },
 }));
 
 vi.mock("@/api/datasets", () => ({
@@ -64,6 +124,7 @@ vi.mock("@/api/datasets", () => ({
       columns: [
         { column_name: "region", data_type: "varchar", is_temporal: false },
         { column_name: "category", data_type: "varchar", is_temporal: false },
+        { column_name: "amount", data_type: "double", is_temporal: false },
       ],
       metrics: [{ metric_name: "total_revenue", data_type: "double" }],
     },
@@ -142,5 +203,88 @@ describe("ChartExplore mounts", () => {
   it("puts conditional formatting on its own tab", async () => {
     await mountChart("c-table", "rules");
     expect(await screen.findByText("Conditional formatting")).toBeInTheDocument();
+  });
+
+  /**
+   * `orderby` is shared query state, so it has to survive the same round trip `filters` and
+   * `rowLimit` do: stored spec -> studio state -> `specForRun()` -> the query that runs. The
+   * failure this catches is the quiet one — the studio hydrating the sort into state and then not
+   * passing it back to `buildSpec`, which draws a chart in the wrong order while every descriptor
+   * unit test still passes.
+   */
+  it("runs a saved chart's authored sort, and does not double the derived clause", async () => {
+    lastRanSpec = null;
+    await mountChart("c-bar-sorted");
+    await screen.findByDisplayValue("Bar sorted");
+    // Auto-run is debounced (`useAutoRun`, 500ms), so the spec reaches the query a beat after the
+    // editor has hydrated — nothing to assert until it does.
+    await waitFor(() => expect(lastRanSpec?.orderby).toEqual([
+      { field: "total_revenue", desc: true },
+      { field: "region", desc: false },
+    ]), { timeout: 3000 });
+  });
+
+  // A chart with no authored sort still runs PR #394's derived clause, and only that one — the
+  // half a "just always emit shared.orderby" change would silently delete.
+  it("runs the derived ascending clause for a chart with no authored sort", async () => {
+    lastRanSpec = null;
+    await mountChart("c-bar");
+    await screen.findByDisplayValue("Bar v2");
+    await waitFor(
+      () => expect(lastRanSpec?.orderby).toEqual([{ field: "region", desc: false }]),
+      { timeout: 3000 },
+    );
+  });
+});
+
+/**
+ * The control itself, rendered by the only thing that renders it in production. A sort control can
+ * pass a component test and still be invisible or unwired — PR 06 shipped exactly that shape — so
+ * these drive the real route and read the spec that reaches the query.
+ */
+describe("the sort control in the Data tab", () => {
+  it("offers an aggregate viz's breakout and aggregation, and sends what is picked", async () => {
+    lastRanSpec = null;
+    await mountChart("c-bar");
+    await screen.findByDisplayValue("Bar v2");
+    await userEvent.click(screen.getByRole("combobox", { name: /add a sort/i }));
+    // Exactly the spec's fields — `orderby_sql`'s metric and dimension arms — and not `category`,
+    // which is on the dataset but not in this chart's spec.
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["region", "total_revenue"]);
+    await userEvent.click(screen.getByRole("option", { name: "total_revenue" }));
+    // Ascending, Metabase's default for a new clause, composed with the derived breakout order.
+    await waitFor(() => expect(lastRanSpec?.orderby).toEqual([
+      { field: "total_revenue", desc: false },
+      { field: "region", desc: false },
+    ]), { timeout: 3000 });
+
+    await userEvent.click(screen.getByRole("button", { name: /sort 1 direction: ascending/i }));
+    await waitFor(() => expect(lastRanSpec?.orderby).toEqual([
+      { field: "total_revenue", desc: true },
+      { field: "region", desc: false },
+    ]), { timeout: 3000 });
+  });
+
+  it("offers a raw-records viz's columns, and sends what is picked", async () => {
+    lastRanSpec = null;
+    await mountChart("c-boxplot");
+    await screen.findByDisplayValue("Box plot");
+    await userEvent.click(screen.getByRole("combobox", { name: /add a sort/i }));
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["region", "amount"]);
+    await userEvent.click(screen.getByRole("option", { name: "amount" }));
+    await waitFor(
+      () => expect(lastRanSpec?.orderby).toEqual([{ field: "amount", desc: false }]),
+      { timeout: 3000 },
+    );
+  });
+
+  // Not offered on a trend: `SmartScalarChart` reads the last two rows as this period and the
+  // previous one, so its dimension order is a precondition of the arithmetic. An absent control
+  // beats a silently wrong number.
+  it("is not offered on a trend", async () => {
+    await mountChart("c-trend");
+    await screen.findByDisplayValue("Trend");
+    expect(screen.queryByRole("combobox", { name: /add a sort/i })).not.toBeInTheDocument();
+    expect(screen.queryByText("Sort")).not.toBeInTheDocument();
   });
 });

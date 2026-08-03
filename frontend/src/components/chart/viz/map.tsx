@@ -93,7 +93,9 @@ export function mapDescriptor(): VizDescriptor<MapConfig> {
     buildSpec: (cfg, shared: SharedQueryState): QuerySpec => ({
       metrics: cfg.metric ? [cfg.metric] : [],
       dimensions: cfg.region ? [cfg.region] : [],
-      columns: [], filters: shared.filters, orderby: [], row_limit: shared.rowLimit, rollup_groups: [],
+      // A map draws regions, not a sequence, so it derives no order of its own — but it still
+      // carries one an author asked for, which decides which regions survive `row_limit`.
+      columns: [], filters: shared.filters, orderby: shared.orderby, row_limit: shared.rowLimit, rollup_groups: [],
     }),
     controls: [
       { id: "map", section: "data", render: MapControls },

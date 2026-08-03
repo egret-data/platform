@@ -18,7 +18,7 @@
 import { getDescriptor } from "@/components/chart/viz/registry";
 import { mergeVizSettings } from "@/components/chart/viz/renderConfig";
 import { withDefaultTemporalUnits } from "@/components/chart/temporal-units";
-import type { ChartFilter, ChartParamsV2, VizSettings, VizType } from "@/api/charts";
+import type { ChartFilter, ChartOrderBy, ChartParamsV2, VizSettings, VizType } from "@/api/charts";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 
 /**
@@ -38,6 +38,13 @@ export interface HarnessChart {
   /** Defaults below mirror ChartExplore's initial state for a new chart. */
   filters?: ChartFilter[];
   rowLimit?: number;
+  /**
+   * The sort the chart's author asked for, if any. Shared query state, so it lives here beside
+   * `filters` and `rowLimit` rather than in `config` — and, like them, defaults to the studio's
+   * initial state for a new chart, which is none. A descriptor that derives its own order
+   * (cartesian, smartscalar) still does; see `SharedQueryState`.
+   */
+  orderby?: ChartOrderBy[];
   /** Explicit temporal units. A date dimension not named here defaults to "month". */
   temporalUnits?: Record<string, string>;
   /** Settings the chart already carried, e.g. keys no descriptor in this build reads. */
@@ -73,6 +80,7 @@ export function harnessParams(chart: HarnessChart): ChartParamsV2 {
     filters: chart.filters ?? [],
     rowLimit: chart.rowLimit ?? 1000,
     temporalUnits: chart.temporalUnits ?? {},
+    orderby: chart.orderby ?? [],
   };
   // Build once to learn the dimensions, apply the monthly default, build again with it.
   const dims = descriptor.buildSpec(config, shared).dimensions;

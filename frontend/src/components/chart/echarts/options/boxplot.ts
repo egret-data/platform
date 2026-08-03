@@ -42,6 +42,17 @@ export interface BoxplotBuildConfig {
   yMin?: number;
   yMax?: number;
   logScale?: boolean;
+  /**
+   * The rows already arrive in an order that MEANS something, so leave the nominal category axis
+   * alone. Set by `ChartRenderer` for a chart whose stored spec carries a non-empty `orderby` — the
+   * engine has already ordered the rows the way the author asked. Its counterpart on
+   * `CartesianBuildConfig` says the same thing; both are read by the one shared `sortCategories`,
+   * whose comment states the rule and the two callers.
+   *
+   * A spec with `orderby: []` must NOT set it: arrival order is then whatever the engine returned,
+   * which is the defect PR #394 fixed.
+   */
+  preserveCategoryOrder?: boolean;
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
 }
@@ -164,14 +175,19 @@ export function buildBoxplotOption(
    * and all-point scatters, the tooltip's `categories[i]`, the aria labels — is indexed the same
    * way and a box cannot end up under another category's label.
    *
-   * The query is deliberately left alone. The backend WOULD honour an `orderby` here — `push_orderby`
-   * runs in the raw-records branch too (`chartquery.rs`) — but a box plot's spec is raw rows under a
-   * `row_limit`, and `ORDER BY category LIMIT n` returns the alphabetically-first n ROWS: whole
-   * categories would vanish from the chart and the ones left would have truncated distributions.
-   * Sorting here fixes the axis without touching which rows the quartiles are computed from.
+   * The query is deliberately left UNSORTED BY DEFAULT. The backend WOULD honour an `orderby` here
+   * — `push_orderby` runs in the raw-records branch too (`chartquery.rs`) — but a box plot's spec is
+   * raw rows under a `row_limit`, and `ORDER BY category LIMIT n` returns the alphabetically-first n
+   * ROWS: whole categories would vanish from the chart and the ones left would have truncated
+   * distributions. Sorting here fixes the axis without touching which rows the quartiles are
+   * computed from, which is why no descriptor derives an order for a box plot.
+   *
+   * `preserveCategoryOrder` is the case where an author asked for one anyway. The rows then arrive
+   * in the order the engine was told to return them, insertion order means something, and sorting
+   * it away would make the sort look inert. See the field's own comment.
    */
   const catType = ci != null ? columns[ci].type : "varchar";
-  const categories = sortCategories([...groups.keys()], catType) as string[];
+  const categories = sortCategories([...groups.keys()], catType, cfg.preserveCategoryOrder) as string[];
   const stats = categories.map((k) => boxStats(groups.get(k)!, cfg.whiskers ?? "tukey"));
   const data = stats.map((s) => s.box);
 

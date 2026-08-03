@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { cartesianDescriptor } from "../cartesian";
 import { EMPTY_SPEC } from "@/api/charts";
 
-const SHARED = { filters: [], rowLimit: 1000, temporalUnits: { order_date: "month" } };
+const SHARED = { filters: [], rowLimit: 1000, temporalUnits: { order_date: "month" }, orderby: [] };
 
 describe("cartesianDescriptor", () => {
   it("names the missing fields of an empty config", () => {
