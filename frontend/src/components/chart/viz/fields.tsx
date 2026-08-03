@@ -14,6 +14,21 @@ const LABEL_CLASS = "text-xs font-medium uppercase tracking-wide text-muted-fore
 
 type Cfg = Record<string, unknown>;
 
+/**
+ * Drops the keys a spec-derived config could only fill with nothing — an undefined field or an
+ * empty picked-dimensions list. A config recovered from an EMPTY spec then comes back as `{}`,
+ * exactly as a brand-new chart's does, so the recovery below cannot make an untouched chart look
+ * configured.
+ */
+function pruneEmpty(cfg: Cfg): Cfg {
+  const out: Cfg = {};
+  for (const [k, v] of Object.entries(cfg)) {
+    if (v === undefined || (Array.isArray(v) && v.length === 0)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 export interface FieldSpec {
   id: string;
   label: string;
@@ -205,6 +220,12 @@ export function fieldDescriptor(spec: FieldDescriptorSpec): VizDescriptor<Cfg> {
         for (const [k, v] of Object.entries(p.settings)) {
           if (k.startsWith(prefix) && v !== undefined) out[k.slice(prefix.length)] = v;
         }
+        // No slice at all under this prefix: same recovery as v1. The API accepts
+        // `settings: {}` — keys are open by design — so a chart written by anything but this
+        // editor arrives with its fields only in the spec, and returning `{}` opened it on the
+        // "set up your chart" placeholder. Empty spec in, empty config out, so a brand-new
+        // chart is untouched.
+        if (Object.keys(out).length === 0 && legacyFromSpec && p.spec) return pruneEmpty(legacyFromSpec(p.spec));
         return out;
       }
       const nested = legacyKey ? (p as unknown as Record<string, Cfg | undefined>)[legacyKey] : undefined;

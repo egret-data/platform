@@ -75,17 +75,24 @@ export function tableDescriptor(): VizDescriptor<TableConfig> {
     prefix: "table.",
     defaultConfig: { columns: [], metrics: [] },
     fromParams: (p) => {
-      if (isParamsV2(p)) {
-        return {
-          columns: (p.settings["table.columns"] as string[]) ?? [],
-          metrics: (p.settings["table.metrics"] as string[]) ?? [],
-        };
-      }
-      // v1 stored no table config at all: the columns were re-derived from the spec.
-      return {
+      // v1 stored no table config at all: the columns were re-derived from the spec. A v2 row
+      // whose `settings` never got a `table.*` slice needs the same recovery — the API accepts
+      // `settings: {}` (keys are deliberately open), so a chart written by anything but this
+      // editor arrives that way, and reading only `settings` opened it on "add at least one
+      // column or metric" with its columns sitting untouched in the spec.
+      const fromSpec = {
         metrics: p.spec?.metrics ?? [],
         columns: [...(p.spec?.dimensions ?? []), ...(p.spec?.columns ?? [])],
       };
+      if (isParamsV2(p)) {
+        // `??` on the stored key, not on its emptiness: a metrics-only table stores
+        // `table.columns: []` on purpose, and re-deriving would put the columns back.
+        return {
+          columns: (p.settings["table.columns"] as string[]) ?? fromSpec.columns,
+          metrics: (p.settings["table.metrics"] as string[]) ?? fromSpec.metrics,
+        };
+      }
+      return fromSpec;
     },
     toSettings: (cfg) => ({ "table.columns": cfg.columns, "table.metrics": cfg.metrics }),
     // A bare table is valid — with no metric it just lists raw rows — but an EMPTY one is not.
@@ -118,9 +125,10 @@ export function objectDescriptor(): VizDescriptor<ObjectConfig> {
     fromParams: (p) => {
       if (isParamsV2(p)) {
         // Falls back to `table.columns` so switching table→object keeps the selection,
-        // which is what the shared `tableCols` state did before A2.
+        // which is what the shared `tableCols` state did before A2 — and then to the spec,
+        // for the same reason the table descriptor does.
         const own = p.settings["object.columns"] as string[] | undefined;
-        return { columns: own ?? (p.settings["table.columns"] as string[]) ?? [] };
+        return { columns: own ?? (p.settings["table.columns"] as string[]) ?? p.spec?.columns ?? [] };
       }
       return { columns: p.spec?.columns ?? [] };
     },
