@@ -52,9 +52,18 @@ export interface CartesianBuildConfig {
   xScale?: "ordinal" | "linear" | "timeseries";  // x-axis scale (default ordinal/category)
   /**
    * The rows already arrive in an order that MEANS something, so leave a nominal axis alone.
-   * Set by the funnel's bar mode, whose steps run Visited → Added to cart → Checkout → Purchased
-   * from `funnel.stepOrder`: alphabetising a pipeline is worse than any engine order. Everything
-   * that reaches this from a stored `orderby: []` spec must NOT set it — see `sortCategories`.
+   *
+   * TWO CALLERS SET IT, for the same reason by different routes:
+   *
+   *  - `FunnelChart`'s bar mode, whose steps run Visited → Added to cart → Checkout → Purchased
+   *    from `funnel.stepOrder`. Alphabetising a pipeline is worse than any engine order, and the
+   *    component has already ranked the rows itself before it builds this option.
+   *  - `ChartRenderer`, for any chart whose stored spec carries a NON-EMPTY `orderby`. The engine
+   *    was told what order to return the rows in, and it did; re-sorting them here would leave the
+   *    author's sort visibly inert while every unit test still passed.
+   *
+   * A spec carrying `orderby: []` must NOT set it — arrival order is then whatever the engine
+   * happened to return, which is exactly the defect PR #394 fixed. See `sortCategories`.
    */
   preserveCategoryOrder?: boolean;
   columnSettings?: Record<string, ColumnFormat>;
@@ -548,9 +557,13 @@ const distinct = (vals: unknown[]) => {
  * category matches what `buildSpec` now asks the engine for, so the two layers agree rather than
  * fighting, and it is the order Metabase's own query processor defaults to.
  *
- * `preserveCategoryOrder` is the one exemption, and it is narrow: a caller that has ALREADY put the
- * rows in a meaningful order — the funnel's bar mode, whose steps come from `funnel.stepOrder` —
- * keeps it. Arbitrary order is the thing being fixed; a pipeline is not arbitrary.
+ * `preserveCategoryOrder` is the exemption, and it is narrow: a caller whose rows are ALREADY in a
+ * meaningful order keeps it. Arbitrary order is the thing being fixed, and two orders are not
+ * arbitrary — a pipeline (the funnel's bar mode, steps from `funnel.stepOrder`) and one the query
+ * itself asked for. The second is why the sentence above about egret's stored specs is now only
+ * half true: a chart whose author added a sort stores a NON-EMPTY `orderby`, the engine returns its
+ * rows in that order, and `ChartRenderer` sets the flag so this leaves them in it. Sorting them
+ * anyway is how a sort control ends up doing nothing on screen while its own tests pass.
  *
  * Exported because `options/boxplot.ts` has the same nominal axis and had the same defect by a
  * different route, and one shared function is what stops the two drifting apart — the box plot's

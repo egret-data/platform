@@ -492,6 +492,20 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
   const pivot = cfg as unknown as PivotConfig;
   const { columnSettings, conditionalFormatting, tableState } = shellSettings(params);
   const dimensionColumns = params.spec.metrics.length > 0 ? params.spec.dimensions : [];
+  /**
+   * Did this chart's QUERY ask for an order? If it did, the engine has already returned the rows in
+   * it and nothing downstream may sort them again — `sortCategories` would otherwise alphabetise a
+   * nominal axis whatever the query asked for, which is right for the `orderby: []` specs PR #394
+   * had to defend against and wrong the moment an author asks for a sort. That is the whole of
+   * what makes a sort control visible on screen rather than only in the request.
+   *
+   * Read from the STORED SPEC, which is the only thing here that knows what was asked for — the
+   * viz config carries no sort, deliberately, because sort is a query concern.
+   *
+   * Optional-chained: `orderby` is required on `QuerySpec` but a spec is user data from the API, and
+   * the pre-PR-#394 charts in the wild are exactly the ones that must fall through to sorting.
+   */
+  const preserveCategoryOrder = (params.spec.orderby?.length ?? 0) > 0;
 
   if (vizType === "object") {
     return <ObjectDetail columns={columns} rows={rows} columnSettings={columnSettings} />;
@@ -555,6 +569,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       // chart because nobody remembered to extend it.
       ...cartesian,
       kind: vizType,
+      preserveCategoryOrder,
       columnSettings,
       metricTypes,
       xAxisUnit: params.spec.temporal_units?.[cartesian.xAxis ?? ""],
@@ -788,7 +803,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
 
   if (vizType === "boxplot") {
     // Named for the same reason `gaugeCfg` and `waterfallCfg` are, and annotated for the same one.
-    const boxCfg: BoxplotBuildConfig = { ...box, columnSettings, metricTypes };
+    const boxCfg: BoxplotBuildConfig = { ...box, preserveCategoryOrder, columnSettings, metricTypes };
     return (
       <div className="h-full w-full">
         {rows.length === 0

@@ -1626,3 +1626,104 @@ describe("cartesian drill — the folded Other bar", () => {
     expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "region", value: "Other" }] }, 1, 2);
   });
 });
+
+/**
+ * THE OTHER HALF OF HONOURING A SORT. `sortCategories` re-orders a nominal axis client-side
+ * whatever the query asked for — PR #394's second layer, which exists so a chart saved with
+ * `orderby: []` still draws in a stable order. A chart whose stored spec carries a NON-EMPTY
+ * `orderby` is the inverse case: the engine has already put the rows in the order its author asked
+ * for, and re-sorting them here would leave a sort control that appears to do nothing while every
+ * unit test passes.
+ *
+ * `ChartRenderer` is where the two meet, because it is the only place that can see both the stored
+ * spec and the build config.
+ *
+ * THE FIXTURES ARE THE POINT. Both arrival orders are the ones PR #394 measured on
+ * `POST /charts/{id}/data` for `MB · Bar` — seven calls in ten returned one, three the other — and
+ * NEITHER is alphabetical, so a fixture already in the target order could not detect this in either
+ * direction.
+ */
+describe("a sort the query already applied is not applied again before drawing", () => {
+  const COLS = [{ name: "category", type: "varchar" }, { name: "revenue", type: "double" }];
+  const ARRIVAL_A = [["Widget", 40], ["Gadget", 30], ["Doohickey", 10], ["Gizmo", 20]];
+  const ARRIVAL_B = [["Gizmo", 20], ["Widget", 40], ["Gadget", 30], ["Doohickey", 10]];
+  const ALPHABETICAL = ["Doohickey", "Gadget", "Gizmo", "Widget"];
+
+  const specWith = (orderby: { field: string; desc: boolean }[]) => ({
+    metrics: ["revenue"], dimensions: ["category"], columns: [], filters: [],
+    orderby, row_limit: 1000, rollup_groups: [],
+  });
+
+  const barOption = (orderby: { field: string; desc: boolean }[], rows: unknown[][], kind: VizType = "bar") => {
+    render(
+      <ChartRenderer
+        vizType={kind}
+        params={params({ cartesian: { xAxis: "category", yMetrics: ["revenue"] }, spec: specWith(orderby) })}
+        columns={COLS}
+        rows={rows}
+      />,
+    );
+    return (mockLastOption as (s: { width: number; height: number }) => {
+      xAxis: { data?: string[] }; yAxis: { data?: string[] }; series: { data: number[] }[];
+    })({ width: 640, height: 400 });
+  };
+
+  it("draws a bar chart in the order the rows arrived when the spec asked for one", () => {
+    for (const rows of [ARRIVAL_A, ARRIVAL_B]) {
+      const o = barOption([{ field: "revenue", desc: true }, { field: "category", desc: false }], rows);
+      expect(o.xAxis.data).toEqual(rows.map((r) => r[0]));
+      // The BARS follow their categories, so a preserved axis beside re-sorted values — which would
+      // relabel every bar — fails here rather than passing as "the right order".
+      expect(o.series[0].data).toEqual(rows.map((r) => r[1]));
+    }
+  });
+
+  // PR #394's behaviour, which must not regress: an already-saved chart carries `orderby: []`, its
+  // arrival order is the engine's whim, and the axis is sorted.
+  it("still sorts a bar chart whose stored spec asked for nothing", () => {
+    for (const rows of [ARRIVAL_A, ARRIVAL_B]) {
+      const o = barOption([], rows);
+      expect(o.xAxis.data).toEqual(ALPHABETICAL);
+      expect(o.series[0].data).toEqual([10, 30, 20, 40]);
+    }
+  });
+
+  // The row chart draws its categories down the left, so its axis is the Y one — same rule, other
+  // axis, and it is one of the three charts PR #394 measured the defect on.
+  it("applies the same rule to a row chart's category axis", () => {
+    expect(barOption([{ field: "revenue", desc: true }], ARRIVAL_A, "row").yAxis.data)
+      .toEqual(["Widget", "Gadget", "Doohickey", "Gizmo"]);
+    expect(barOption([], ARRIVAL_A, "row").yAxis.data).toEqual(ALPHABETICAL);
+  });
+
+  // The box plot reaches `sortCategories` by its own route (`options/boxplot.ts` groups raw rows),
+  // which is why PR #394 had to fix it separately and why it needs wiring separately too.
+  it("applies the same rule to a box plot", () => {
+    const BOX_COLS = [{ name: "category", type: "varchar" }, { name: "price", type: "double" }];
+    const BOX_ROWS = [
+      ["Widget", 40], ["Widget", 44], ["Gadget", 30], ["Gadget", 34],
+      ["Doohickey", 10], ["Doohickey", 14], ["Gizmo", 20], ["Gizmo", 24],
+    ];
+    const boxOption = (orderby: { field: string; desc: boolean }[]) => {
+      render(
+        <ChartRenderer
+          vizType="boxplot"
+          params={params({
+            boxplot: { category: "category", value: "price" },
+            spec: {
+              metrics: [], dimensions: [], columns: ["category", "price"], filters: [],
+              orderby, row_limit: 1000, rollup_groups: [],
+            },
+          })}
+          columns={BOX_COLS}
+          rows={BOX_ROWS}
+        />,
+      );
+      return (mockLastOption as (s: { width: number; height: number }) => { xAxis: { data: string[] } })(
+        { width: 640, height: 400 },
+      ).xAxis.data;
+    };
+    expect(boxOption([{ field: "price", desc: true }])).toEqual(["Widget", "Gadget", "Doohickey", "Gizmo"]);
+    expect(boxOption([])).toEqual(ALPHABETICAL);
+  });
+});

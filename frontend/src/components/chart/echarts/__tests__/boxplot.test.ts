@@ -251,4 +251,45 @@ describe("a box plot's nominal axis draws in a stable order", () => {
     const opt = buildBoxplotOption(ncols, rows, { category: "bucket", value: "price" }) as any;
     expect(opt.xAxis.data).toEqual(["2", "9", "10"]);
   });
+
+  /**
+   * The other side of the same rule. Sorting exists because a spec carrying `orderby: []` leaves
+   * arrival order to the engine's whim. A spec that carries a NON-EMPTY `orderby` is the opposite
+   * case: the engine has already put the rows in the order its author asked for, and re-sorting
+   * them here would make the sort appear to do nothing.
+   *
+   * The same fixtures, deliberately: both are the measured orderings, NEITHER is alphabetical, and
+   * they differ from each other — so this cannot pass by accident in either direction, and it fails
+   * loudly if `preserve` is wired to the wrong polarity.
+   */
+  it("keeps the arrival order when the caller says the query already sorted", () => {
+    for (const rows of [arrivalA, arrivalB]) {
+      const opt = buildBoxplotOption(bcols, rows, {
+        category: "category", value: "price", preserveCategoryOrder: true,
+      }) as any;
+      expect(opt.xAxis.data).toEqual(rows.filter((_, i) => i % 2 === 0).map((r) => r[0]));
+    }
+  });
+
+  it("keeps each box under its own category when it preserves the order", () => {
+    const opt = buildBoxplotOption(bcols, arrivalA, {
+      category: "category", value: "price", preserveCategoryOrder: true,
+    }) as any;
+    expect(opt.xAxis.data).toEqual(["Widget", "Gadget", "Doohickey", "Gizmo"]);
+    // Medians follow their categories: Widget 42, Gadget 32, Doohickey 12, Gizmo 22.
+    expect(opt.series[0].data.map((d: number[]) => d[2])).toEqual([42, 32, 12, 22]);
+  });
+
+  // A temporal or numeric category axis is NOT a nominal one, and `sortCategories` orders those
+  // branches whatever `preserve` says — chronology and magnitude are not opinions the query can
+  // override. Pinned here because the box plot is the caller most likely to be handed a numeric
+  // bucket column.
+  it("still orders a numeric category column even when asked to preserve", () => {
+    const ncols = [{ name: "bucket", type: "int" }, { name: "price", type: "double" }];
+    const rows = [["10", 5], ["10", 7], ["9", 1], ["9", 3], ["2", 2], ["2", 4]];
+    const opt = buildBoxplotOption(ncols, rows, {
+      category: "bucket", value: "price", preserveCategoryOrder: true,
+    }) as any;
+    expect(opt.xAxis.data).toEqual(["2", "9", "10"]);
+  });
 });
