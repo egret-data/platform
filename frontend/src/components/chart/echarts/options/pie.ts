@@ -34,15 +34,23 @@ const PERCENT_VISIBILITIES: readonly string[] = ["off", "legend", "inside", "bot
 /**
  * Where a pie's percentages go, given what (if anything) is stored.
  *
- * Unset defaults to "legend" ONCE THERE IS MORE THAN ONE RING, and stays "off" for a single
- * ring. On a sunburst the legend is where the reader compares — it lists ring 0 only (the
- * level whose slices are shares of the whole chart, and the only level whose colours are
- * unambiguous), and it has room for a number that the arcs do not: ring-0 labels are already
- * competing for arc space with the rings outside them, and the fit pass truncates or drops
- * them. Percentages on the outer rings would be worse than crowded — they are shares of a
- * PARENT slice, so stacking them next to ring-0's shares-of-the-whole invites comparing two
- * different denominators. A single-ring pie is left alone: its labels have room, nothing
- * about it was reported as unreadable, and every saved one would otherwise change appearance.
+ * Unset defaults to "legend" AT EVERY RING COUNT, which is Metabase's own rule —
+ * `getDefaultPercentVisibility = () => "legend"`, a constant with no ring count and no chart in
+ * it. The legend is where the reader compares: it lists ring 0 only (the level whose slices are
+ * shares of the whole chart, and the only level whose colours are unambiguous), and it has room
+ * for a number that the arcs do not — ring-0 labels are already competing for arc space with the
+ * rings outside them, and the fit pass truncates or drops them. Percentages on the outer rings
+ * would be worse than crowded: they are shares of a PARENT slice, so stacking them next to
+ * ring-0's shares-of-the-whole invites comparing two different denominators.
+ *
+ * A SINGLE RING USED TO BE EXCLUDED, on the grounds that "its labels have room" and that nothing
+ * about it was reported as unreadable. That was an answer to a different question. Arc space is
+ * what "inside" spends; "legend" spends none of it — the legend is React markup in a column
+ * beside the canvas (PieLegend.tsx), and it is a list of names with empty space after each one.
+ * And the reason given above for granting the legend its number holds MORE strongly for one ring
+ * than for three: ring 0 is then the only ring, every entry's share is a share of the whole, and
+ * there is no second denominator anywhere to confuse it with. A pie exists to show proportions,
+ * and reading them off arc angles is exactly what the legend's number saves the reader from.
  *
  * A stored value that isn't one of the four degrades to "off" rather than being trusted:
  * settings arrive from a JSONB column that is never whitelisted server-side, so this can be
@@ -53,8 +61,8 @@ const PERCENT_VISIBILITIES: readonly string[] = ["off", "legend", "inside", "bot
  * it becomes a control that lies (the bug this program has already fixed for the legend, slice
  * labels and, just now, the centre total).
  */
-export function resolvePercentVisibility(stored: string | undefined, ringCount: number): PercentVisibility {
-  if (stored === undefined) return ringCount > 1 ? "legend" : "off";
+export function resolvePercentVisibility(stored: string | undefined): PercentVisibility {
+  if (stored === undefined) return "legend";
   return PERCENT_VISIBILITIES.includes(stored) ? (stored as PercentVisibility) : "off";
 }
 
@@ -75,7 +83,7 @@ export interface PieBuildConfig {
    * one-ring pie with no hole at all. */
   showTotal?: boolean;
   /** Where a slice's percent appears — see `resolvePercentVisibility` for the values and the
-   * default. Unset defaults to "legend" for a multi-ring pie, "off" for a single ring. */
+   * default. Unset defaults to "legend", at any ring count. */
   percentVisibility?: PercentVisibility;
   /** Per-slice colour override, keyed by the slice (dimension) value. */
   sliceColors?: Record<string, string>;
@@ -798,18 +806,26 @@ const TOTAL_LABEL_ID = "pie-total-label";
 function pieHoleModel(rings: Slice[][], cfg: PieBuildConfig, format: (v: unknown) => string): PieHoleModel {
   const ringCount = rings.length;
   const data = rings[0] ?? [];
-  // DEFAULTS ON FOR A MULTI-RING PIE. Measured against a real Metabase (question 7, "Product
-  // breakdown") at 1440x920: it renders `2,852` over `Total` in the hole, egret rendered nothing,
-  // and an empty void in the middle of three rings is what made the chart read as unfinished. A
-  // one-ring donut is left exactly as it was — its hole is small enough to read as deliberate, and
-  // changing it would change what every saved donut looks like. `??`, not `||`, so an explicit
-  // `false` still turns it off; resolved here at render time and never written into stored
-  // settings (this program's standing rule).
+  // DEFAULTS ON WHEREVER THERE IS A HOLE TO WRITE IN. Measured against a real Metabase (question
+  // 7, "Product breakdown") at 1440x920: it renders `2,852` over `Total` in the hole, egret
+  // rendered nothing, and an empty void in the middle of three rings is what made the chart read
+  // as unfinished. Metabase's own rule is `getDefaultShowTotal = () => true`, a constant.
+  //
+  // A ONE-RING DONUT USED TO BE EXCLUDED, on the grounds that "its hole is small enough to read as
+  // deliberate". Measured, that is the wrong way round: egret's one-ring donut hole is 45/70 =
+  // 0.643 of the outer radius (pieGeometry), while the hole Metabase writes its default total into
+  // is `DIMENSIONS.slice.innerRadiusRatio` = 3/5 = 0.600. egret's is the LARGER void of the two,
+  // so the reason given for leaving it empty argues for filling it.
+  //
+  // `??`, not `||`, so an explicit `false` still turns it off; resolved here at render time and
+  // never written into stored settings (this program's standing rule).
   //
   // Gated on there BEING a hole rather than on `cfg.donut`: a multi-ring pie always has one (see
   // pieGeometry), whatever `donut` says, so keying off `donut` would have hidden the total on
-  // exactly the charts this default exists for.
-  const showTotal = cfg.showTotal ?? ringCount > 1;
+  // exactly the charts this default exists for. That gate is also what keeps `true` safe here —
+  // a plain pie has no hole, which is a shape Metabase cannot draw at all (it has no donut
+  // switch), so there is no Metabase behaviour to copy onto it and nowhere to put a total.
+  const showTotal = cfg.showTotal ?? true;
   const shown =
     showTotal && data.length > 0 && pieGeometry(cfg, ringCount).holeRatio > 0;
   // The innermost ring's total is the grand total: it's summed over every outer dimension already.
@@ -1289,7 +1305,7 @@ export function buildPieLegend(
   if (!(cfg.showLegend ?? true)) return [];
   const { rings, groupOfByLevel } = buildPieRings(columns, rows, cfg);
   const ring0 = rings[0] ?? [];
-  const visibility = resolvePercentVisibility(cfg.percentVisibility, rings.length);
+  const visibility = resolvePercentVisibility(cfg.percentVisibility);
   const withPercent = visibility === "legend" || visibility === "both";
   const total = ring0.reduce((t, s) => t + s.value, 0);
   // The legend's OWN precision, over the only shares it lists (ring 0's, each already a share of
@@ -1663,7 +1679,7 @@ export function buildPieOption(
   // "both" means what its name says and what Metabase means by it: the legend AND the slice.
   // Before "legend" existed here, a stored "both" could only ever draw the inside half — the
   // value promised something the renderer had no way to deliver.
-  const percentVisibility = resolvePercentVisibility(cfg.percentVisibility, ringCount);
+  const percentVisibility = resolvePercentVisibility(cfg.percentVisibility);
   const showPercent = percentVisibility === "inside" || percentVisibility === "both";
 
   // Slice label sizing — Metabase's constants.ts: multiRingFontSize (12) once there's more than

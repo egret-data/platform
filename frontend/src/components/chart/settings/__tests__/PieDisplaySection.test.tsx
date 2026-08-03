@@ -198,9 +198,13 @@ describe("PieDisplaySection", () => {
     expect(screen.queryByText("Slices")).not.toBeInTheDocument();
   });
 
-  it("Decimal places is hidden until a percent visibility is chosen", () => {
+  // Was "hidden until a percent visibility is chosen". The default is now "legend" at any ring
+  // count (task 5), so with nothing stored the chart IS drawing percentages and the box that sets
+  // their precision belongs on screen. The cascade survives, on an explicit Off — see
+  // "still hides Decimal places when Percentages is explicitly Off" below.
+  it("Decimal places is offered with nothing stored, because Auto draws percentages", () => {
     render(<PieDisplaySection config={{}} onChange={() => {}} slices={[]} />);
-    expect(screen.queryByLabelText("Decimal places")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Decimal places")).toBeInTheDocument();
   });
 
   // `legend` completes Metabase's own `pie.percent_visibility` domain — it is the value its
@@ -249,8 +253,20 @@ describe("PieDisplaySection", () => {
       expect(screen.getByLabelText("Decimal places")).toBeInTheDocument();
     });
 
-    it("keeps Decimal places hidden under Auto on a single-ring pie, which draws none", () => {
+    // TASK 5. Metabase's `getDefaultPercentVisibility` is `() => "legend"` — no ring count in it —
+    // so Auto now draws percentages on a one-ring pie too, and the box that sets their precision
+    // has to be reachable without first turning a setting on that is already on.
+    it("offers Decimal places under Auto on a single-ring pie, which now draws them in the legend", () => {
       render(<PieDisplaySection config={{ dimensions: ["a"] }} onChange={() => {}} slices={[]} />);
+      expect(screen.getByLabelText("Decimal places")).toBeInTheDocument();
+    });
+
+    // THE CASCADE ITSELF IS KEPT, and it is Metabase's own: `pie.decimal_places.getHidden` reads
+    // `settings["pie.percent_visibility"] == null || === "off"`. Now that the default is never
+    // "off" it can only bite on an EXPLICIT Off, where the box would be setting the precision of a
+    // number nothing draws — a control that lies, which is what this PR exists to remove.
+    it("still hides Decimal places when Percentages is explicitly Off", () => {
+      render(<PieDisplaySection config={{ dimensions: ["a"], percentVisibility: "off" }} onChange={() => {}} slices={[]} />);
       expect(screen.queryByLabelText("Decimal places")).not.toBeInTheDocument();
     });
 

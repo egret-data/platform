@@ -233,9 +233,10 @@ describe("buildPieOption — donut total & percent (Metabase parity 1b)", () => 
   const labelText = (o: any, name: string) =>
     ring(o, 0).find((d: any) => d.name === name).label.formatter();
 
-  it("renders a centre total only for donut + showTotal", () => {
-    expect(opt({ showTotal: true }).graphic).toBeFalsy();           // not a donut
-    expect(opt({ donut: true }).graphic).toBeFalsy();               // showTotal off
+  it("renders a centre total only where there is a hole to write it in", () => {
+    expect(opt({ showTotal: true }).graphic).toBeFalsy();           // not a donut: nowhere to put it
+    expect(opt({ donut: true }).graphic).toBeTruthy();              // a hole, and showTotal defaults on
+    expect(opt({ donut: true, showTotal: false }).graphic).toBeFalsy();
     expect(opt({ donut: true, showTotal: true }).graphic).toBeTruthy();
   });
   it("centre total shows the formatted grand total + a Total caption", () => {
@@ -1613,11 +1614,11 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
       expect(off.graphic).toBeTruthy();
     });
 
-    // The single-ring side is deliberately untouched: a plain pie has no hole to write in,
-    // and a one-ring donut's hole stays empty unless it is asked for.
-    it("a single-ring donut still defaults to an empty hole", () => {
+    // A one-ring donut joined it in task 5 — see the task-5 block at the bottom of this file for
+    // why "its hole is small enough to read as deliberate" did not survive being measured.
+    it("a single-ring donut fills its hole too", () => {
       const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", donut: true }) as any;
-      expect(opt.graphic).toBeFalsy();
+      expect(opt.graphic).toBeTruthy();
     });
 
     it("a single-ring pie with no hole never draws a total, even asked to", () => {
@@ -1698,14 +1699,16 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
         expect(ring(opt, 0).find((d: any) => d.name === "US").label.formatter()).toBe("US");
       });
 
-      it("a single-ring pie is untouched: no percentages anywhere", () => {
+      // A single ring gets the same treatment as of task 5 — see the task-5 block at the bottom
+      // of this file. Its arcs stay clean either way; only the legend gains the number.
+      it("a single-ring pie gets it in the legend as well, and keeps its arcs clean", () => {
         const cfg = { dimensions: ["region"], metric: "rev" };
-        expect(buildPieLegend(cols, rows, cfg).map((e) => e.percent)).toEqual([undefined, undefined]);
+        expect(buildPieLegend(cols, rows, cfg).map((e) => e.percent)).toEqual(["75%", "25%"]);
         const opt = buildPieOption(cols, rows, cfg) as any;
         expect(ring(opt, 0).find((d: any) => d.name === "US").label.formatter()).toBe("US");
       });
 
-      it("an explicit off still wins over the multi-ring default", () => {
+      it("an explicit off still wins over the default", () => {
         expect(legendPercent({
           dimensions: ["region", "category"], metric: "m", percentVisibility: "off",
         }, "US")).toBeUndefined();
@@ -1727,24 +1730,22 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
 });
 
 describe("resolvePercentVisibility", () => {
-  it("passes every known value through, at any ring count", () => {
+  it("passes every known value through", () => {
     for (const v of ["off", "legend", "inside", "both"] as const) {
-      expect(resolvePercentVisibility(v, 1)).toBe(v);
-      expect(resolvePercentVisibility(v, 3)).toBe(v);
+      expect(resolvePercentVisibility(v)).toBe(v);
     }
   });
 
-  it("defaults to the legend once there is more than one ring, and off below that", () => {
-    expect(resolvePercentVisibility(undefined, 0)).toBe("off");
-    expect(resolvePercentVisibility(undefined, 1)).toBe("off");
-    expect(resolvePercentVisibility(undefined, 2)).toBe("legend");
-    expect(resolvePercentVisibility(undefined, 3)).toBe("legend");
+  // Metabase's `getDefaultPercentVisibility` is `() => "legend"` — a constant with no ring count
+  // and no chart in it. The ring count that used to be a parameter here is gone with the branch.
+  it("defaults to the legend", () => {
+    expect(resolvePercentVisibility(undefined)).toBe("legend");
   });
 
   it("degrades an unknown stored value to off, not to the default", () => {
-    expect(resolvePercentVisibility("legend ", 3)).toBe("off");
-    expect(resolvePercentVisibility("", 3)).toBe("off");
-    expect(resolvePercentVisibility("true", 3)).toBe("off");
+    expect(resolvePercentVisibility("legend ")).toBe("off");
+    expect(resolvePercentVisibility("")).toBe("off");
+    expect(resolvePercentVisibility("true")).toBe("off");
   });
 });
 
@@ -3202,5 +3203,55 @@ describe("pieSliceRows — the panel's view of ring 0", () => {
     expect((buildPieOption(dowCols, dowRows, cfg) as any).series[0].data.map((d: any) => d.name))
       .toEqual(["Mon", "Wed"]);
     expect(pieSliceRows(dowCols, dowRows, cfg).map((s) => s.key)).toEqual(["Mon", "Wed"]);
+  });
+});
+
+/**
+ * PR 06 TASK 5 — the one-ring pie gets the defaults Metabase gives its ONLY pie shape.
+ *
+ * Metabase has no ring count and no donut switch: `getDefaultPercentVisibility = () => "legend"`
+ * and `getDefaultShowTotal = () => true` are both unconditional, and `DIMENSIONS.slice
+ * .innerRadiusRatio = 3/5` means every Metabase pie has a hole. egret withheld both from a single
+ * ring on reasons measured below to be about the ARCS (which "legend" never touches) and about a
+ * hole "small enough to read as deliberate" (egret's is 45/70 = 0.643 of the outer radius, LARGER
+ * than the 3/5 = 0.600 hole Metabase writes its total into).
+ *
+ * The holeless pie is the one shape Metabase cannot draw, and it keeps its empty middle: there is
+ * nowhere to write.
+ */
+describe("a single-ring pie's percentage and total defaults (task 5)", () => {
+  // rows totals 40 at ring 0: US 30 (75%), EU 10 (25%).
+  const oneRing = { dimensions: ["region"], metric: "rev" };
+
+  it("puts a lone ring's shares in the legend with nothing stored, as Metabase does", () => {
+    const entries = buildPieLegend(cols, rows, oneRing);
+    expect(entries.map((e) => e.name)).toEqual(["US", "EU"]);
+    expect(entries.map((e) => e.percent)).toEqual(["75%", "25%"]);
+  });
+
+  it("leaves the arcs themselves uncluttered — the legend is where the number goes", () => {
+    const opt = buildPieOption(cols, rows, oneRing) as any;
+    expect(ring(opt, 0).find((d: any) => d.name === "US").label.formatter()).toBe("US");
+  });
+
+  it("an explicit off still empties the legend of percentages", () => {
+    const entries = buildPieLegend(cols, rows, { ...oneRing, percentVisibility: "off" });
+    expect(entries.map((e) => e.percent)).toEqual([undefined, undefined]);
+  });
+
+  it("fills a one-ring DONUT's hole with the total by default", () => {
+    const opt = buildPieOption(cols, rows, { ...oneRing, donut: true }) as any;
+    expect(opt.graphic).toBeTruthy();
+    expect(holeTexts(opt.graphic)).toEqual(["40", "Total"]);
+  });
+
+  it("an explicit false still empties a one-ring donut's hole", () => {
+    const opt = buildPieOption(cols, rows, { ...oneRing, donut: true, showTotal: false }) as any;
+    expect(opt.graphic).toBeFalsy();
+  });
+
+  it("a holeless pie still draws no total — there is nowhere to write it", () => {
+    expect((buildPieOption(cols, rows, oneRing) as any).graphic).toBeFalsy();
+    expect((buildPieOption(cols, rows, { ...oneRing, showTotal: true }) as any).graphic).toBeFalsy();
   });
 });

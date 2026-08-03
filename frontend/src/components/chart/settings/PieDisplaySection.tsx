@@ -91,14 +91,14 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
   // which is now the order the chart draws (value-descending unless `sortRows` says otherwise);
   // it used to be the order the ROWS arrived in, which is why the same rule applied to the same
   // stored order still produced a list in an order the pie never drew.
-  // The number of rings the chart will actually draw, which is what decides the percentage
-  // default — the same `dimensions` list buildPieOption turns into rings.
+  // The number of rings the chart will actually draw — the same `dimensions` list buildPieOption
+  // turns into rings. It decides whether there is a HOLE (a multi-ring pie always has one,
+  // whatever `donut` says); it no longer decides the percentage default, which is now "legend"
+  // at every ring count, matching Metabase's constant `getDefaultPercentVisibility`.
   const ringCount = config.dimensions?.length ?? 0;
   const hasHole = !!config.donut || ringCount > 1;
-  const effectivePercent = resolvePercentVisibility(config.percentVisibility, ringCount);
-  const autoPercentHint = ringCount > 1
-    ? "puts each innermost-ring slice's share beside its name in the legend"
-    : "leaves percentages off a single-ring pie";
+  const effectivePercent = resolvePercentVisibility(config.percentVisibility);
+  const autoPercentHint = "puts each innermost-ring slice's share beside its name in the legend";
 
   const rank = new Map((config.sliceOrder ?? []).map((n, i) => [n, i]));
   const ranked = [...slices].sort(
@@ -185,18 +185,26 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
       />
       <Toggle id="pz-donut" label="Donut" checked={!!config.donut} onChange={(v) => onChange({ donut: v })} />
       {/* Offered whenever the chart HAS a hole to write in — a multi-ring pie always does,
-          whatever `donut` says (buildPieOption's holeStart), so gating this on `donut` alone
-          would leave the multi-ring total, which now defaults on, with no way to turn it off.
-          Auto/On/Off rather than a Switch for that same reason: `undefined` genuinely means
-          "on for a sunburst, off for a one-ring donut", which a Switch would have to lie
-          about in one of the two cases. */}
+          whatever `donut` says (pieGeometry), so gating this on `donut` alone would leave the
+          multi-ring total, which defaults on, with no way to turn it off.
+
+          STILL GATED, and deliberately so, even though Metabase offers `pie.show_total`
+          unconditionally: Metabase has no `pie.donut` setting and applies its 3/5 inner radius to
+          every pie, so a holeless pie is a shape it cannot draw and its unconditional control is
+          not a claim about one. egret's holeless pie has nowhere to put a total — `pieHoleModel`
+          requires `holeRatio > 0` — so an offered switch here would move nothing on screen, which
+          is the exact fault this section exists to remove.
+
+          Auto/On/Off rather than a Switch because `undefined` is a real third state the chart
+          resolves at render time, and a two-state Switch bound to `!!config.showTotal` would read
+          OFF while the hole carried the total. */}
       {hasHole && (
         <AutoToggle
           id="pz-total"
           label="Show total"
           value={config.showTotal}
           onChange={(v) => onChange({ showTotal: v })}
-          autoHint="Auto fills a multi-ring pie's hole with the grand total, and leaves a single-ring donut's hole empty"
+          autoHint="Auto writes the grand total into the hole"
         />
       )}
       <AutoToggle
@@ -206,8 +214,8 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
         onChange={(v) => onChange({ showLabels: v })}
         autoHint="Auto shows slice labels, hiding whichever ones would overlap"
       />
-      {/* Auto is a real option, not decoration: with nothing stored, a multi-ring pie draws
-          its percentages in the legend (see resolvePercentVisibility, which the chart and this
+      {/* Auto is a real option, not decoration: with nothing stored, a pie draws its percentages
+          in the legend at any ring count (see resolvePercentVisibility, which the chart and this
           control share so they cannot drift). A four-value select with no Auto would have to
           show "Off" while the chart drew them. A stored value that isn't one of the four shows
           — and renders as — Off, which is what the chart does with it. */}
