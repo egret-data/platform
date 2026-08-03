@@ -53,3 +53,31 @@ export function pruneUnits(
 ): Record<string, string> {
   return Object.fromEntries(Object.entries(units).filter(([k]) => dims.includes(k)));
 }
+
+/**
+ * A temporal dimension defaults to monthly grouping (Metabase-style) until the user picks
+ * something else. This rule is NOT in any descriptor — `buildSpec` only ever prunes the units
+ * it is handed — so both the studio and any headless caller have to apply it before building
+ * a spec, or every chart on a date axis is silently grouped raw.
+ *
+ * `columns` is structural rather than `DatasetColumn[]` so a caller that only knows which
+ * columns are dates (the parity-harness seed script) can use it without the whole shape.
+ *
+ * Returns `units` itself when nothing changed, so a React state setter can keep identity.
+ */
+export function withDefaultTemporalUnits(
+  units: Record<string, string>,
+  dims: string[],
+  columns: { column_name: string; is_temporal?: boolean }[],
+): Record<string, string> {
+  let changed = false;
+  const next = { ...units };
+  for (const name of dims) {
+    const temporal = columns.find((c) => c.column_name === name)?.is_temporal;
+    if (temporal && !(name in next)) {
+      next[name] = "month";
+      changed = true;
+    }
+  }
+  return changed ? next : units;
+}
