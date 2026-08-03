@@ -16,6 +16,23 @@
  *   --base=<url>         API origin, default http://127.0.0.1:5174
  *   --email= --password= admin credentials, default admin@egret.local / Admin12345!
  *
+ * PREREQUISITES for a workspace this has never run against. A brand-new workspace cannot be
+ * seeded as-is, and neither failure names itself clearly:
+ *
+ *   1. `POST /api/admin/workspaces` creates it with `features: []`, so every `/datasets`,
+ *      `/charts` and `/dashboards` route 404s. Enable them first:
+ *      `PUT /api/admin/workspaces/{id}/features {"features":{"datasets":true,"charts":true,
+ *      "dashboards":true}}` (a merge, not a replace; `dashboards` requires `charts`).
+ *   2. It has no database until an engine is attached, and `resolveDatabase` below refuses to
+ *      guess. Attach with `PUT /api/control-plane/engines/{id}/workspaces` — which takes the
+ *      FULL desired set and diffs against it, so the body MUST list every workspace that engine
+ *      already serves. Sending only the new id silently detaches the others, which is how you
+ *      take `demo`'s database away while setting up a scratch copy of `demo`.
+ *
+ * Tearing a scratch workspace down again: `DELETE /api/admin/workspaces/{id}` is a SOFT delete
+ * (`crates/egret-workspace/src/workspaces.rs` sets `status = 'archived'`). The workspace leaves
+ * `/api/me/workspaces` and all its routes 404, but the row stays and there is no purge endpoint.
+ *
  * SCOPE: egret's side only. Metabase's own 19 cards and its H2 Sample Database live in a separate
  * store that a reset of egret's Postgres does not touch, and rebuilding them needs Metabase's card
  * API and its own dashboard model. What IS in scope from the Metabase side is the DATA: the nine
