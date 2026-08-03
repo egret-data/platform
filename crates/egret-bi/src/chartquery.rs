@@ -359,8 +359,45 @@ fn render_filter(engine: Engine, columns: &[DatasetColumn], f: &Filter) -> Resul
     Ok(pred)
 }
 
-/// Resolve an ORDER BY field to SQL: a metric expression, a grouped dimension (with its temporal
-/// unit), or a bare column. Order matters — a dimension with a unit must match its GROUP BY expr.
+/// Resolve an ORDER BY field to SQL.
+///
+/// **`ORDER BY` names the PROJECTION, by alias — everywhere else in this file names the resolved
+/// expression.** That is a deliberate exception to `build`'s rule, and the reason for it is that
+/// the two clauses resolve a bare identifier in opposite directions.
+///
+/// `GROUP BY` and `SELECT` are evaluated over the FROM relation, so a name in them means an input
+/// column. Writing `GROUP BY "created_at"` against
+/// `SELECT date_trunc('month', "created_at") AS "created_at"` would group by the raw timestamp
+/// while the SELECT list shows a month — silently wrong rows, no error. Hence the rule.
+///
+/// `ORDER BY` is evaluated over the SELECT LIST, so a name in it means an output alias, and an
+/// alias that shadows a base column wins. Restating the expression there therefore re-applies it to
+/// its own result:
+///
+/// ```text
+/// SELECT …, SUM(revenue) AS "revenue" … ORDER BY SUM(revenue) DESC   -- reads as SUM(SUM(revenue))
+/// line 12:14: Invalid reference to output projection attribute from ORDER BY aggregation
+/// ```
+///
+/// That 502 is what sorting a bar chart by its metric returned, on the ordinary dataset shape where
+/// a metric is named after the column it sums. It is shadowing and not a ban on aggregates: the
+/// same `ORDER BY SUM(revenue)` is live-verified 200 when `revenue` is not a projected alias. The
+/// same shadowing makes a dimension's own expression ill-typed once its unit is an EXTRACTION
+/// rather than a truncation — `ORDER BY month("order_month")` is `month` of a `month`, and returned
+/// its own live 502, `Unexpected parameters (bigint) for function month`. A truncation hides it,
+/// `date_trunc` of a `date_trunc` being the same value, which is why only the metric case was
+/// reported. The rollup branch shadows identically (both 502s reproduce there); its derived table
+/// neither causes nor prevents this.
+///
+/// So: if the query projects this field, order by its quoted alias. Every name reachable from the
+/// studio takes this path — `sortableFields` offers exactly the spec's projections. The three arms
+/// below remain for a field the query does NOT project (an unselected metric, a dimension in
+/// raw-records mode, a bare column), which has no alias to name and keeps its expression; the last
+/// of them is what turns a name that means nothing into a 400 rather than an engine error.
+///
+/// Validity is already established by the time this runs: `build` resolves every projected
+/// dimension through `dim_expr` and every metric through `find_metric` before calling
+/// `push_orderby`, so an unknown name or a bad temporal unit is a 400 from there.
 fn orderby_sql(
     engine: Engine,
     columns: &[DatasetColumn],
@@ -368,6 +405,16 @@ fn orderby_sql(
     spec: &QuerySpec,
     field: &str,
 ) -> Result<String, BiError> {
+    let projected = if spec.metrics.is_empty() {
+        // Raw records: the SELECT list is `columns`, and nothing else.
+        spec.columns.iter().any(|c| c == field)
+    } else {
+        // Aggregate: dimensions then metrics. `columns` is not read by this branch of `build`.
+        spec.dimensions.iter().any(|d| d == field) || spec.metrics.iter().any(|m| m == field)
+    };
+    if projected {
+        return Ok(quote_ident(engine, field));
+    }
     if let Some(m) = find_metric(metrics, field) {
         return Ok(m.expression.clone());
     }
@@ -383,7 +430,10 @@ fn orderby_sql(
 }
 
 /// Build the SQL for a chart query. Aggregate mode when `metrics` is non-empty; otherwise
-/// raw-records mode over `columns`. GROUP BY / SELECT use resolved expressions, never aliases.
+/// raw-records mode over `columns`. GROUP BY / SELECT use resolved expressions, never aliases —
+/// they are evaluated over the FROM relation, where an alias that shadows a base column would bind
+/// to the wrong value with no error. ORDER BY is the one exception, and for that same reason
+/// inverted: it is evaluated over the SELECT list, so it names the alias. See `orderby_sql`.
 pub fn build(
     engine: Engine,
     source: &SourceSpec,
@@ -1349,8 +1399,13 @@ mod tests {
         assert!(matches!(err, BiError::BadRequest(_)));
     }
 
+    /// A sort on a bucketed dimension must order by the BUCKET, not by the raw timestamp under it.
+    /// It used to say so by restating the expression; it now says so by naming the projection,
+    /// which is the same group key and the only form that survives an extraction unit or a rollup
+    /// (see `orderby_on_a_dimension_with_an_extraction_unit_names_the_projection`). The invariant
+    /// this test has always been for — ORDER BY agrees with GROUP BY — is unchanged.
     #[test]
-    fn orderby_on_grouped_temporal_dim_wraps_identically() {
+    fn orderby_on_grouped_temporal_dim_matches_the_group_key() {
         let cols = vec![tcol("created_at")];
         let metrics = vec![metric("revenue", "SUM(price)")];
         let mut spec = spec_with_unit("created_at", "month");
@@ -1360,12 +1415,252 @@ mod tests {
         }];
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
         assert!(
-            sql.contains("GROUP BY date_trunc('month', \"created_at\")"),
+            sql.contains("date_trunc('month', \"created_at\") AS \"created_at\""),
             "{sql}"
         );
         assert!(
-            sql.contains("ORDER BY date_trunc('month', \"created_at\") ASC"),
+            sql.contains("GROUP BY date_trunc('month', \"created_at\")"),
             "{sql}"
+        );
+        assert!(sql.contains("ORDER BY \"created_at\" ASC"), "{sql}");
+        // and never the raw column under the bucket
+        assert!(!sql.contains("ORDER BY date_trunc"), "{sql}");
+    }
+
+    /// The dataset the live check ran against: a metric whose alias is also a base column name.
+    /// `MB By Category` is `category:varchar, orders:bigint, revenue:double` with metrics
+    /// `orders = SUM(orders)` and `revenue = SUM(revenue)` — the ordinary shape a dataset takes
+    /// when its metrics are named after the columns they sum, which is most of them.
+    fn shadowing_cols() -> Vec<DatasetColumn> {
+        vec![
+            col("category", "string", None),
+            col("orders", "numeric", None),
+            col("revenue", "numeric", None),
+        ]
+    }
+    fn shadowing_metrics() -> Vec<Metric> {
+        vec![
+            metric("orders", "SUM(orders)"),
+            metric("revenue", "SUM(revenue)"),
+        ]
+    }
+
+    /// Sorting a bar chart by its metric — the acceptance criterion of the sort control — returned
+    /// a 502 from every engine:
+    ///
+    /// ```text
+    /// line 12:14: Invalid reference to output projection attribute from ORDER BY aggregation
+    /// ```
+    ///
+    /// `orderby_sql` resolved a metric to its EXPRESSION, so the query ended
+    /// `SELECT …, SUM(revenue) AS "revenue" … ORDER BY SUM(revenue) DESC`. `ORDER BY` is evaluated
+    /// over the SELECT list, so a bare name inside it resolves against the OUTPUT ALIASES first —
+    /// `revenue` there is the projected `SUM(revenue)`, not the base column, and the clause reads
+    /// as `SUM(SUM(revenue))`. Live-confirmed as alias shadowing rather than a ban on aggregates in
+    /// `ORDER BY`: the identical `ORDER BY SUM(revenue)` returns 200 when `revenue` is NOT among
+    /// the projected aliases.
+    ///
+    /// So `ORDER BY` names the projection. See `orderby_sql`.
+    #[test]
+    fn orderby_on_a_metric_names_the_projection_not_the_expression() {
+        for engine in [Engine::Trino, Engine::StarRocks] {
+            let q = |s: &str| quote_ident(engine, s);
+            let spec = QuerySpec {
+                metrics: vec!["orders".into(), "revenue".into()],
+                dimensions: vec!["category".into()],
+                columns: vec![],
+                filters: vec![],
+                orderby: vec![
+                    OrderBy {
+                        field: "revenue".into(),
+                        desc: true,
+                    },
+                    OrderBy {
+                        field: "category".into(),
+                        desc: false,
+                    },
+                ],
+                row_limit: 100,
+                rollup_groups: vec![],
+                temporal_units: std::collections::HashMap::new(),
+            };
+            let sql = build(
+                engine,
+                &phys(),
+                &shadowing_cols(),
+                &shadowing_metrics(),
+                &spec,
+            )
+            .unwrap();
+            assert!(
+                sql.contains(&format!(
+                    "ORDER BY {} DESC, {} ASC",
+                    q("revenue"),
+                    q("category")
+                )),
+                "{sql}"
+            );
+            // The aggregate must not be re-stated in ORDER BY — that is the shadowed form.
+            assert!(!sql.contains("ORDER BY SUM("), "{sql}");
+            // …while the SELECT list still carries the resolved expression.
+            assert!(
+                sql.contains(&format!("SUM(revenue) AS {}", q("revenue"))),
+                "{sql}"
+            );
+        }
+    }
+
+    /// A metric the query does NOT project has no alias to name, so it keeps its expression — an
+    /// aggregate in `ORDER BY` is legal, and live-verified 200, as long as nothing shadows it.
+    #[test]
+    fn orderby_on_an_unprojected_metric_keeps_its_expression() {
+        let spec = QuerySpec {
+            metrics: vec!["orders".into()],
+            dimensions: vec!["category".into()],
+            columns: vec![],
+            filters: vec![],
+            orderby: vec![OrderBy {
+                field: "revenue".into(),
+                desc: true,
+            }],
+            row_limit: 100,
+            rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
+        };
+        let sql = build(
+            Engine::Trino,
+            &phys(),
+            &shadowing_cols(),
+            &shadowing_metrics(),
+            &spec,
+        )
+        .unwrap();
+        assert!(sql.contains("ORDER BY SUM(revenue) DESC"), "{sql}");
+    }
+
+    /// The same shadowing, one step further along: an EXTRACTION unit is not idempotent, so
+    /// re-stating it over its own alias is not merely redundant but ill-typed —
+    /// `hour(hour("created_at"))` is `hour(bigint)`. A truncation hid this (`date_trunc` of a
+    /// `date_trunc` is the same value), which is why the pinned test that shipped used `month`.
+    #[test]
+    fn orderby_on_a_dimension_with_an_extraction_unit_names_the_projection() {
+        for engine in [Engine::Trino, Engine::StarRocks] {
+            let q = |s: &str| quote_ident(engine, s);
+            let mut spec = spec_with_unit("created_at", "hour_of_day");
+            spec.orderby = vec![OrderBy {
+                field: "created_at".into(),
+                desc: false,
+            }];
+            let sql = build(
+                engine,
+                &phys(),
+                &[tcol("created_at")],
+                &[metric("revenue", "SUM(price)")],
+                &spec,
+            )
+            .unwrap();
+            assert!(
+                sql.contains(&format!("ORDER BY {} ASC", q("created_at"))),
+                "{sql}"
+            );
+            // GROUP BY keeps the resolved expression — only ORDER BY names the alias.
+            assert!(
+                sql.contains(&format!("GROUP BY hour({})", q("created_at"))),
+                "{sql}"
+            );
+        }
+    }
+
+    /// A rollup projects each dimension out of a derived table as `__dim_N AS "name"`, so ORDER BY
+    /// must reach the group key through that alias rather than through either the raw expression or
+    /// the reserved `__dim_N` name.
+    ///
+    /// The rollup branch is exposed to exactly the same shadowing, live-verified on the pivot
+    /// dataset: sorting a rollup by its metric gives the same
+    /// `Invalid reference to output projection attribute from ORDER BY aggregation`, and sorting it
+    /// by a dimension bucketed with an extraction unit gives the same
+    /// `Unexpected parameters (bigint) for function month`. It is not a separate mechanism, and the
+    /// derived table is not what saves or breaks it — the one rule covers all three.
+    #[test]
+    fn orderby_on_a_rollup_dimension_names_the_projection() {
+        let mut spec = pivot_spec(Some("month"));
+        spec.orderby = vec![OrderBy {
+            field: "created".into(),
+            desc: true,
+        }];
+        let sql = build(
+            Engine::Trino,
+            &phys(),
+            &temporal_cols(),
+            &[metric("revenue", "SUM(price)")],
+            &spec,
+        )
+        .unwrap();
+        assert!(sql.contains("ORDER BY \"created\" DESC"), "{sql}");
+        assert!(!sql.contains("ORDER BY date_trunc"), "{sql}");
+    }
+
+    /// The raw-records branch shares `push_orderby`, so it moves too — but only where it was
+    /// already exposed to the same shadowing.
+    ///
+    /// A PHYSICAL column is projected as `"id" AS "id"`, so its alias is its own name and the SQL
+    /// is byte-identical to what shipped. A CALCULATED column is not: `price/100 AS "priced"` used
+    /// to emit `ORDER BY price/100` and now emits `ORDER BY "priced"`. Same value here, and the
+    /// same fix where it is not — a calculated column aliased over its own source
+    /// (`revenue * 2 AS "revenue"`) would have ordered by `revenue * 4`, silently, with no error to
+    /// notice. No metric can reach this branch, so the 502 itself never could.
+    #[test]
+    fn orderby_in_raw_records_names_the_projection() {
+        let cols = vec![
+            col("id", "numeric", None),
+            col("priced", "numeric", Some("price/100")),
+        ];
+        let spec = QuerySpec {
+            metrics: vec![],
+            dimensions: vec![],
+            columns: vec!["id".into(), "priced".into()],
+            filters: vec![],
+            orderby: vec![
+                OrderBy {
+                    field: "id".into(),
+                    desc: true,
+                },
+                OrderBy {
+                    field: "priced".into(),
+                    desc: false,
+                },
+            ],
+            row_limit: 50,
+            rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
+        };
+        let sql = build(Engine::Trino, &phys(), &cols, &[], &spec).unwrap();
+        assert!(
+            sql.contains("ORDER BY \"id\" DESC, \"priced\" ASC"),
+            "{sql}"
+        );
+        assert!(!sql.contains("GROUP BY"), "{sql}");
+    }
+
+    /// An order-by field that names nothing at all is still a 400, not an engine error.
+    #[test]
+    fn orderby_on_an_unknown_field_is_rejected() {
+        let mut spec = spec_with_unit("created_at", "month");
+        spec.orderby = vec![OrderBy {
+            field: "nope".into(),
+            desc: false,
+        }];
+        let err = build(
+            Engine::Trino,
+            &phys(),
+            &[tcol("created_at")],
+            &[metric("revenue", "SUM(price)")],
+            &spec,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("unknown order-by field"),
+            "{err:?}"
         );
     }
 }
