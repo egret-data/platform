@@ -287,7 +287,19 @@ export function cartesianDescriptor(kind: CartesianViz): VizDescriptor<Cartesian
         ? [cfg.xMetric, ...cfg.yMetrics, ...(cfg.bubbleMetric ? [cfg.bubbleMetric] : [])]
         : cfg.yMetrics;
       return {
-        metrics: mets, dimensions: dims, columns: [], filters: shared.filters, orderby: [],
+        metrics: mets, dimensions: dims, columns: [], filters: shared.filters,
+        // The query asks for the order the chart draws in, so the ROWS are deterministic — not
+        // just the axis. Without it the engine returns the groups in whatever order it likes, and
+        // tooltips, drills, exports and whichever rows survive `row_limit` all disagree between
+        // one load and the next.
+        //
+        // Ascending by the dimension, because that is Metabase's own default. A fresh
+        // "summarise by" question carries no `order-by` in its MBQL at all; the query processor
+        // adds one implicitly, `:asc`, on every breakout column before the query runs
+        // (`add-implicit-breakout-order-by`, add_implicit_clauses.clj). Descending by the
+        // aggregation is what a question's AUTHOR asks for, never what the builder emits. It is
+        // also the order egret already chose in `pivot/engine.ts` and in smartscalar (`simple.tsx`).
+        orderby: typeof cfg.xAxis === "string" && cfg.xAxis ? [{ field: cfg.xAxis, desc: false }] : [],
         row_limit: shared.rowLimit, rollup_groups: [],
         temporal_units: pruneUnits(shared.temporalUnits, dims),
       };
