@@ -122,7 +122,15 @@ export interface PieBuildConfig {
 }
 
 const OTHER_NAME = "Other";
-const DEFAULT_THRESHOLD = 2.5; // percent — Metabase SLICE_THRESHOLD (0.025)
+/**
+ * The share below which a ring-0 slice folds into "Other" when nothing is stored — percent,
+ * Metabase's SLICE_THRESHOLD (0.025).
+ *
+ * Exported because the settings panel SHOWS this number in "Group slices below" when the config
+ * carries none of its own, and a second literal 2.5 over there would be a control quietly
+ * disagreeing with the chart the day either moved.
+ */
+export const DEFAULT_SLICE_THRESHOLD = 2.5;
 /**
  * The smallest share of the chart a RING-0 slice is drawn at, however little it is worth —
  * Metabase's `OTHER_SLICE_MIN_PERCENTAGE` (0.005).
@@ -307,7 +315,7 @@ function buildSlices(items: Slice[], cfg: PieBuildConfig): { slices: Slice[]; gr
   const groupOf = new Map<string, string>();
   for (const s of slices) if (s.key) groupOf.set(s.key, s.key);
 
-  const threshold = (cfg.sliceThreshold ?? DEFAULT_THRESHOLD) / 100;
+  const threshold = (cfg.sliceThreshold ?? DEFAULT_SLICE_THRESHOLD) / 100;
   if (threshold > 0 && slices.length > 0) {
     const parentGroups = new Map<string | undefined, Slice[]>();
     for (const s of slices) {
