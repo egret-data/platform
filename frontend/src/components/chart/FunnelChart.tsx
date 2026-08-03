@@ -249,6 +249,10 @@ function StepBars({ steps, columns, dimension, metric, columnSettings, metricTyp
         // read the steps as two different measures. Metabase pins both the same way.
         stacked: true,
         autoSplitY: false,
+        // A pipeline runs Visited → Added to cart → Checkout → Purchased. `steps` is already in
+        // that order (`funnel.stepOrder`), and a nominal axis otherwise draws ascending now — which
+        // would alphabetise the funnel into Added to cart → Checkout → Purchased → Visited.
+        preserveCategoryOrder: true,
         // The axis is still measuring the one metric, whatever the series are called.
         yLabel: metric,
         metricTypes: Object.fromEntries(names.map((n) => [n, metricType])),

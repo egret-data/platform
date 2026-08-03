@@ -145,7 +145,9 @@ const CHARTS: Chart[] = [
       boxCols, rows, { category: "c", value: "v", ...(rotation != null ? { xLabelRotation: rotation } : {}) }, size,
     ),
     rows: [["Widget", 10], ["Gadget", 20], ["Gizmo", 30], ["Doohickey", 40]],
-    labels: ["Widget", "Gadget", "Gizmo", "Doohickey"],
+    // SORTED, not as the rows arrive: a box plot's nominal axis draws ascending now, and what is
+    // MEASURED has to be the labels as DRAWN or the fit is computed for an axis nobody sees.
+    labels: ["Doohickey", "Gadget", "Gizmo", "Widget"],
     crowdedRows: Array.from({ length: CROWDED }, (_, i) => [`Category ${i}`, i + 1]),
   },
   {

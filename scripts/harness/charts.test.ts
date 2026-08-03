@@ -142,6 +142,48 @@ describe("the charts the earlier PRs repaired stay repaired", () => {
   });
 });
 
+/**
+ * WHAT THE SEED EMITS MOVED, ON PURPOSE. Every cartesian chart's spec used to carry `orderby: []`,
+ * which let the engine return the categories in whatever order it liked — measured at 7/10 one
+ * ordering and 3/10 another on `MB · Bar`. `cartesianDescriptor`'s `buildSpec` now derives an
+ * ascending order on the x-axis, so these specs are no longer the ones currently stored in `demo`:
+ * the harness and `demo` diverge until the seed is re-run.
+ *
+ * Ascending by the DIMENSION because that is Metabase's default — a fresh summarise-by carries no
+ * `order-by` at all, and its query processor adds `:asc` on each breakout column
+ * (`add-implicit-breakout-order-by`). Descending by the aggregation is only what an author writes,
+ * as this harness's own `MB By Category` question does with `ORDER BY revenue DESC`.
+ */
+describe("the seed asks for the order each chart draws in", () => {
+  for (const name of ["MB · Bar", "MB · Row"]) {
+    it(`${name} orders by its category, ascending`, () => {
+      expect(chartParams(chartByName(name)).spec.orderby).toEqual([{ field: "category", desc: false }]);
+    });
+  }
+
+  it("every cartesian chart orders by its own x-axis", () => {
+    const expected: Record<string, string> = {
+      "MB · Bar": "category", "MB · Row": "category", "MB · Line": "order_month",
+      "MB · Area": "order_month", "MB · Combo": "order_month", "MB · Scatter": "price",
+    };
+    for (const [name, field] of Object.entries(expected)) {
+      expect(chartParams(chartByName(name)).spec.orderby, name).toEqual([{ field, desc: false }]);
+    }
+  });
+
+  // The non-goal, pinned: the other grouped charts sort themselves client-side and were left alone,
+  // because adding an `orderby` to eleven more `buildSpec`s changes which rows survive `row_limit`
+  // on eleven chart types at once and needs its own comparison.
+  it("leaves the charts that sort themselves untouched", () => {
+    for (const name of ["MB · Pie", "MB · Funnel", "MB · Waterfall", "MB · Sankey", "MB · Map", "MB · Pivot"]) {
+      expect(chartParams(chartByName(name)).spec.orderby, name).toEqual([]);
+    }
+    // The trend already derived its own, and still does.
+    expect(chartParams(chartByName("MB · Trend")).spec.orderby)
+      .toEqual([{ field: "order_month", desc: false }]);
+  });
+});
+
 describe("metricUses feeds the undeclared-metric invariant", () => {
   it("derives the metric list from the same buildSpec that writes the saved spec", () => {
     const uses = metricUses();

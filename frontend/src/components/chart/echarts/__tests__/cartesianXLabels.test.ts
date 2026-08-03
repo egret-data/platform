@@ -250,7 +250,9 @@ describe("cartesian x-axis labels", () => {
     // (the gutter measures 0 here); that it is inset at all is not.
     expect(fitCalls[0].plotWidth).toBeLessThan(640);
     expect(fitCalls[0].plotWidth).toBeGreaterThan(0);
-    expect(fitCalls[0].labels).toEqual(["Widget", "Gadget", "Gizmo", "Doohickey"]);
+    // Sorted, not as they arrive: a nominal axis now draws ascending, and what is MEASURED has to
+    // be the labels as DRAWN or the fit is computed for an axis nobody sees.
+    expect(fitCalls[0].labels).toEqual(["Doohickey", "Gadget", "Gizmo", "Widget"]);
   });
 
   /** A row chart's categories run down the LEFT, where length costs nothing, so there is no

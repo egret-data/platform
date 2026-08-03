@@ -180,3 +180,75 @@ describe("boxStats", () => {
     expect(s.mean).toBe(7);
   });
 });
+
+/**
+ * The box plot's category axis is nominal too, and it had the SAME defect as bar and row — but by
+ * a different route, which is why the sort in `options/cartesian.ts` did not reach it: this file
+ * builds its categories from `[...groups.keys()]`, i.e. Map insertion order, i.e. the order the
+ * engine happened to return the raw rows in.
+ *
+ * THE FIXTURE IS THE POINT, as it was for the cartesian charts. These are the two orderings
+ * measured on `POST /charts/{id}/data` — seven calls in ten returned one, three the other — and
+ * NEITHER is alphabetical, so a fixture already in the target order could not detect this.
+ */
+describe("a box plot's nominal axis draws in a stable order", () => {
+  const bcols = [{ name: "category", type: "varchar" }, { name: "price", type: "double" }];
+  // 3 calls in 10, and 7 calls in 10. Each category carries a distinct distribution so a category
+  // landing in the wrong slot moves a visible box, not just a label.
+  const arrivalA = [
+    ["Widget", 40], ["Widget", 44], ["Gadget", 30], ["Gadget", 34],
+    ["Doohickey", 10], ["Doohickey", 14], ["Gizmo", 20], ["Gizmo", 24],
+  ];
+  const arrivalB = [
+    ["Gizmo", 20], ["Gizmo", 24], ["Widget", 40], ["Widget", 44],
+    ["Gadget", 30], ["Gadget", 34], ["Doohickey", 10], ["Doohickey", 14],
+  ];
+  const sorted = ["Doohickey", "Gadget", "Gizmo", "Widget"];
+
+  it("sorts the categories ascending, whichever order the rows arrived in", () => {
+    for (const rows of [arrivalA, arrivalB]) {
+      const opt = buildBoxplotOption(bcols, rows, { category: "category", value: "price" }) as any;
+      expect(opt.xAxis.data).toEqual(sorted);
+      // The BOXES follow their categories — medians 12, 32, 22, 42 in sorted order. A sorted axis
+      // beside arrival-order boxes would relabel every box wrongly, which is worse than either.
+      expect(opt.series[0].data.map((d: number[]) => d[2])).toEqual([12, 32, 22, 42]);
+    }
+  });
+
+  it("draws the two arrival orders identically", () => {
+    const of = (rows: unknown[][]) => JSON.stringify(
+      buildBoxplotOption(bcols, rows, { category: "category", value: "price" }),
+    );
+    expect(of(arrivalA)).toBe(of(arrivalB));
+  });
+
+  /**
+   * Reordering the CATEGORIES cannot move a VALUE. `boxStats` sorts each group's numbers itself
+   * (`[...values].sort((a, b) => a - b)`) and every group is looked up by its own key, so neither
+   * the order the categories are drawn in nor the order rows arrive WITHIN a category can reach a
+   * quartile. Checked rather than asserted, because if it could this would be a bigger finding
+   * than the ordering.
+   */
+  it("computes identical quartiles however the rows are shuffled, within a category or across", () => {
+    const shuffledWithin = [
+      ["Widget", 44], ["Doohickey", 14], ["Gizmo", 24], ["Gadget", 34],
+      ["Gadget", 30], ["Widget", 40], ["Doohickey", 10], ["Gizmo", 20],
+    ];
+    const boxes = (rows: unknown[][]) =>
+      (buildBoxplotOption(bcols, rows, { category: "category", value: "price" }) as any).series[0].data;
+    expect(boxes(shuffledWithin)).toEqual(boxes(arrivalA));
+    expect(boxes(shuffledWithin)).toEqual(boxes(arrivalB));
+  });
+
+  /**
+   * The category column is not always a string. Sorting is delegated to `sortCategories`, the same
+   * function the bar and row charts use, so the axis TYPE still decides: "10" sorts after "9"
+   * numerically and before it as text, which is what makes this discriminating.
+   */
+  it("sorts a numeric category column numerically, not as text", () => {
+    const ncols = [{ name: "bucket", type: "int" }, { name: "price", type: "double" }];
+    const rows = [["10", 5], ["10", 7], ["9", 1], ["9", 3], ["2", 2], ["2", 4]];
+    const opt = buildBoxplotOption(ncols, rows, { category: "bucket", value: "price" }) as any;
+    expect(opt.xAxis.data).toEqual(["2", "9", "10"]);
+  });
+});

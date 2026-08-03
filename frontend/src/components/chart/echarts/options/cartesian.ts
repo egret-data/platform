@@ -50,6 +50,13 @@ export interface CartesianBuildConfig {
   yMin?: number;                 // manual value-axis minimum (auto when undefined)
   yMax?: number;                 // manual value-axis maximum
   xScale?: "ordinal" | "linear" | "timeseries";  // x-axis scale (default ordinal/category)
+  /**
+   * The rows already arrive in an order that MEANS something, so leave a nominal axis alone.
+   * Set by the funnel's bar mode, whose steps run Visited → Added to cart → Checkout → Purchased
+   * from `funnel.stepOrder`: alphabetising a pipeline is worse than any engine order. Everything
+   * that reaches this from a stored `orderby: []` spec must NOT set it — see `sortCategories`.
+   */
+  preserveCategoryOrder?: boolean;
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
   /**
@@ -521,12 +528,39 @@ const distinct = (vals: unknown[]) => {
   return out;
 };
 
-// Order the x categories by axis type — temporal chronologically, numeric ascending —
-// while leaving a nominal (string) axis in first-seen order. (Metabase model/dataset.ts.)
-function sortCategories(cats: unknown[], type: string): unknown[] {
+/**
+ * Order the x categories by axis type — temporal chronologically, numeric ascending, and a
+ * nominal (string) axis ascending by the category itself.
+ *
+ * THE NOMINAL BRANCH IS A DELIBERATE DIVERGENCE FROM METABASE, and this is why. Metabase's
+ * `sortDataset` (model/dataset.ts) returns an ordinal dataset UNCHANGED — it can, because its
+ * queries carry the order: an MBQL question gets an implicit ascending `order-by` on every
+ * breakout column before it runs (`add-implicit-breakout-order-by`), and a native question has
+ * whatever `ORDER BY` its author wrote. egret's STORED specs carry `orderby: []`, so first-seen
+ * order here is whatever the engine happened to return — measured at 7/10 one ordering and 3/10
+ * another across ten calls to the same chart, with three consecutive page loads all landing on the
+ * 70% case. `cartesianDescriptor`'s `buildSpec` now asks the query for the order, but only charts
+ * saved AFTER that carry it; the dashboard path deserialises the stored spec verbatim, so without
+ * this branch every already-saved chart keeps drawing in engine order until someone re-saves it.
+ *
+ * Non-deterministic output that changes between runs is worse than any particular order — the same
+ * reasoning `pivot/engine.ts`'s `sortTree` states, for the same `orderby: []`. Ascending by the
+ * category matches what `buildSpec` now asks the engine for, so the two layers agree rather than
+ * fighting, and it is the order Metabase's own query processor defaults to.
+ *
+ * `preserveCategoryOrder` is the one exemption, and it is narrow: a caller that has ALREADY put the
+ * rows in a meaningful order — the funnel's bar mode, whose steps come from `funnel.stepOrder` —
+ * keeps it. Arbitrary order is the thing being fixed; a pipeline is not arbitrary.
+ *
+ * Exported because `options/boxplot.ts` has the same nominal axis and had the same defect by a
+ * different route, and one shared function is what stops the two drifting apart — the box plot's
+ * categories must sort exactly as a bar chart's do, including the temporal and numeric branches.
+ */
+export function sortCategories(cats: unknown[], type: string, preserve?: boolean): unknown[] {
   if (isTemporalType(type)) return [...cats].sort((a, b) => Date.parse(String(a)) - Date.parse(String(b)));
   if (isNumericType(type)) return [...cats].sort((a, b) => Number(a) - Number(b));
-  return cats;
+  if (preserve) return cats;
+  return [...cats].sort((a, b) => String(a).localeCompare(String(b)));
 }
 
 // Metric-vs-metric scatter (Metabase's true scatter): each dimension row is a point
@@ -702,7 +736,7 @@ export function buildCartesianOption(
   const xType = columns[xi].type;
   const xrows = rows.filter((r) => r[xi] != null);
   const catKey = (v: unknown) => String(v);
-  let categories = sortCategories(distinct(xrows.map((r) => r[xi])), xType);
+  let categories = sortCategories(distinct(xrows.map((r) => r[xi])), xType, cfg.preserveCategoryOrder);
 
 
   // Breakout: one ECharts series per distinct series value (first y-metric only).

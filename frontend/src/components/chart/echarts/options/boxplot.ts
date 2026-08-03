@@ -4,6 +4,7 @@ import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
 import { estimatePlotWidth, fitXLabels, type XLabelFit } from "../axisLabelFit";
 import { ariaDescription, baseOption, tooltipSurface } from "../base";
+import { sortCategories } from "./cartesian";
 import {
   CHART_THEME, SERIES_PALETTE, COLOR_FALLBACK, resolveColor, fadeColor, scaleLightness,
 } from "../palette";
@@ -149,7 +150,28 @@ export function buildBoxplotOption(
       if (arr) arr.push(v); else groups.set(k, [v]);
     }
   }
-  const categories = [...groups.keys()];
+  /**
+   * Sorted, not `[...groups.keys()]`. Map insertion order is the order the ENGINE returned the raw
+   * rows in, and a box plot's spec carries `orderby: []` like every other stored chart — measured
+   * at `['Widget','Gadget','Doohickey','Gizmo']` on three calls in ten and
+   * `['Gizmo','Widget','Gadget','Doohickey']` on the other seven, for the same chart.
+   *
+   * The SAME `sortCategories` the bar and row charts use, so the three cannot drift and the box
+   * plot gets the temporal and numeric branches for free. See its comment for why sorting a nominal
+   * axis at all is a deliberate divergence from Metabase.
+   *
+   * Sorted BEFORE `stats`, so every derived array below — the boxes, the mean points, the outlier
+   * and all-point scatters, the tooltip's `categories[i]`, the aria labels — is indexed the same
+   * way and a box cannot end up under another category's label.
+   *
+   * The query is deliberately left alone. The backend WOULD honour an `orderby` here — `push_orderby`
+   * runs in the raw-records branch too (`chartquery.rs`) — but a box plot's spec is raw rows under a
+   * `row_limit`, and `ORDER BY category LIMIT n` returns the alphabetically-first n ROWS: whole
+   * categories would vanish from the chart and the ones left would have truncated distributions.
+   * Sorting here fixes the axis without touching which rows the quartiles are computed from.
+   */
+  const catType = ci != null ? columns[ci].type : "varchar";
+  const categories = sortCategories([...groups.keys()], catType) as string[];
   const stats = categories.map((k) => boxStats(groups.get(k)!, cfg.whiskers ?? "tukey"));
   const data = stats.map((s) => s.box);
 
