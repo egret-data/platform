@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import type { ChartParamsV2, VizType } from "@/api/charts";
 import { getDescriptor } from "../registry";
-import { authoredOrderby } from "../orderby";
+import { authoredOrderby, honoursOrderby, sortableFields } from "../orderby";
 import { cartesianDescriptor } from "../cartesian";
 import { pivotDescriptor } from "../pivot";
 import { tableDescriptor, objectDescriptor } from "../table";
@@ -163,5 +163,58 @@ describe("authoredOrderby separates what the author asked for from what the desc
       settings: { "pie.dimensions": ["category"], "pie.metric": "revenue" },
     };
     expect(authoredOrderby(p, getDescriptor("pie"))).toEqual([{ field: "revenue", desc: true }]);
+  });
+});
+
+/**
+ * What the sort control is allowed to offer. `orderby_sql` (crates/egret-bi/src/chartquery.rs)
+ * resolves a field as a METRIC, then as a DIMENSION of the spec, then as a raw COLUMN, and answers
+ * anything else with a 400 — so the options have to come from the spec the descriptor builds, never
+ * from the dataset's column list.
+ */
+describe("sortableFields", () => {
+  it("offers an aggregate spec's breakout and its aggregation", () => {
+    const spec = cartesianDescriptor("bar").buildSpec(
+      { xAxis: "category", yMetrics: ["revenue"] }, NONE,
+    );
+    expect(sortableFields(spec)).toEqual(["category", "revenue"]);
+  });
+
+  it("offers a raw-records spec's columns — the third arm of orderby_sql", () => {
+    const spec = simple("boxplot").buildSpec({ category: "category", value: "score" }, NONE);
+    expect(spec.metrics).toEqual([]);
+    expect(sortableFields(spec)).toEqual(["category", "score"]);
+  });
+
+  it("offers nothing for a query that returns one row", () => {
+    // An aggregate with no breakout is a single row; ordering it is inert. It is also the only
+    // shape where `spec.columns` could be offered and then IGNORED — `build`'s aggregate branch
+    // never reads them, so ORDER BY one would not be in the GROUP BY.
+    expect(sortableFields(simple("scalar").buildSpec({ metric: "revenue" }, NONE))).toEqual([]);
+  });
+
+  it("offers each field once even when the spec names it twice", () => {
+    const spec = simple("boxplot").buildSpec({ category: "category", value: "category" }, NONE);
+    expect(sortableFields(spec)).toEqual(["category"]);
+  });
+});
+
+/**
+ * Whether a descriptor honours an authored sort AT ALL, asked of the descriptor rather than of a
+ * hardcoded list — a viz that drops `shared.orderby` must lose the control automatically.
+ */
+describe("honoursOrderby", () => {
+  it("is true for the descriptors that pass an authored sort through", () => {
+    expect(honoursOrderby(getDescriptor("bar")!, { xAxis: "category", yMetrics: ["revenue"] } as never)).toBe(true);
+    expect(honoursOrderby(getDescriptor("boxplot")!, { category: "category", value: "score" } as never)).toBe(true);
+    expect(honoursOrderby(getDescriptor("table")!, { columns: ["category"], metrics: [] } as never)).toBe(true);
+  });
+
+  it("is false for the trend, whose dimension order is a precondition of its arithmetic", () => {
+    // `SmartScalarChart` reads valid[n-1] and valid[n-2] as this period and the one before, so an
+    // authored sort would draw a number and a caption computed from two rows that are neither.
+    expect(honoursOrderby(getDescriptor("smartscalar")!, { dimension: "day", metric: "revenue" } as never)).toBe(false);
+    // Also with nothing configured yet — the control must not flicker into existence.
+    expect(honoursOrderby(getDescriptor("smartscalar")!, {} as never)).toBe(false);
   });
 });

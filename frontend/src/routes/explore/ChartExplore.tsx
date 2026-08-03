@@ -35,7 +35,8 @@ import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
 import { withDefaultTemporalUnits } from "@/components/chart/temporal-units";
 import { useChartRun } from "@/components/chart/useChartRun";
 import { getDescriptor } from "@/components/chart/viz/registry";
-import { authoredOrderby } from "@/components/chart/viz/orderby";
+import { authoredOrderby, honoursOrderby, sortableFields } from "@/components/chart/viz/orderby";
+import { SortRows } from "@/components/chart/SortRows";
 import { pivotDescriptor, type PivotConfig } from "@/components/chart/viz/pivot";
 import { tableDescriptor } from "@/components/chart/viz/table";
 import type { VizDescriptor } from "@/components/chart/viz/types";
@@ -471,6 +472,13 @@ export default function ChartExplore() {
 
 
 
+
+            {/* Sort sits between the fields and the row limit, the order Metabase's notebook puts
+                its steps in — and the order that reads correctly, since the sort is what decides
+                WHICH rows survive the limit. Not offered where the descriptor would ignore it. */}
+            {descriptor && honoursOrderby(descriptor, descConfig) && (
+              <SortRows fields={sortableFields(specForRun())} value={orderby} onChange={setOrderby} />
+            )}
 
             <div className="space-y-1">
               <Label htmlFor="row-limit" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Row limit</Label>
