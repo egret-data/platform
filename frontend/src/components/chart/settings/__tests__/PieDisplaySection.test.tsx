@@ -1,8 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
+import type { PieConfig } from "@/api/charts";
 import { PieDisplaySection } from "../PieDisplaySection";
-import { buildPieOption } from "@/components/chart/echarts/options/pie";
+import { buildPieOption, DEFAULT_SLICE_THRESHOLD } from "@/components/chart/echarts/options/pie";
 
 describe("PieDisplaySection", () => {
   // Legend and Show labels both default from buildPieOption at render time (a pie's colours
@@ -196,9 +198,13 @@ describe("PieDisplaySection", () => {
     expect(screen.queryByText("Slices")).not.toBeInTheDocument();
   });
 
-  it("Decimal places is hidden until a percent visibility is chosen", () => {
+  // Was "hidden until a percent visibility is chosen". The default is now "legend" at any ring
+  // count (task 5), so with nothing stored the chart IS drawing percentages and the box that sets
+  // their precision belongs on screen. The cascade survives, on an explicit Off — see
+  // "still hides Decimal places when Percentages is explicitly Off" below.
+  it("Decimal places is offered with nothing stored, because Auto draws percentages", () => {
     render(<PieDisplaySection config={{}} onChange={() => {}} slices={[]} />);
-    expect(screen.queryByLabelText("Decimal places")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Decimal places")).toBeInTheDocument();
   });
 
   // `legend` completes Metabase's own `pie.percent_visibility` domain — it is the value its
@@ -247,8 +253,20 @@ describe("PieDisplaySection", () => {
       expect(screen.getByLabelText("Decimal places")).toBeInTheDocument();
     });
 
-    it("keeps Decimal places hidden under Auto on a single-ring pie, which draws none", () => {
+    // TASK 5. Metabase's `getDefaultPercentVisibility` is `() => "legend"` — no ring count in it —
+    // so Auto now draws percentages on a one-ring pie too, and the box that sets their precision
+    // has to be reachable without first turning a setting on that is already on.
+    it("offers Decimal places under Auto on a single-ring pie, which now draws them in the legend", () => {
       render(<PieDisplaySection config={{ dimensions: ["a"] }} onChange={() => {}} slices={[]} />);
+      expect(screen.getByLabelText("Decimal places")).toBeInTheDocument();
+    });
+
+    // THE CASCADE ITSELF IS KEPT, and it is Metabase's own: `pie.decimal_places.getHidden` reads
+    // `settings["pie.percent_visibility"] == null || === "off"`. Now that the default is never
+    // "off" it can only bite on an EXPLICIT Off, where the box would be setting the precision of a
+    // number nothing draws — a control that lies, which is what this PR exists to remove.
+    it("still hides Decimal places when Percentages is explicitly Off", () => {
+      render(<PieDisplaySection config={{ dimensions: ["a"], percentVisibility: "off" }} onChange={() => {}} slices={[]} />);
       expect(screen.queryByLabelText("Decimal places")).not.toBeInTheDocument();
     });
 
@@ -287,6 +305,196 @@ describe("PieDisplaySection", () => {
     expect((screen.getByLabelText("Decimal places") as HTMLInputElement).value).toBe("3");
     fireEvent.change(screen.getByLabelText("Decimal places"), { target: { value: "" } });
     expect(onChange).toHaveBeenCalledWith({ decimals: undefined });
+  });
+});
+
+/**
+ * "GROUP SLICES BELOW" KEEPS THE NUMBER BEING TYPED INTO IT.
+ *
+ * These drive the box with real key presses through a STATEFUL parent, because the defect lives
+ * entirely in the round trip: the handler stores a number, the parent feeds it back as the
+ * controlled `value`, and the re-render overwrites what is in the box. A `fireEvent.change` with
+ * the final value, or a spy parent that never feeds anything back, closes that loop and passes
+ * against the broken control.
+ *
+ * WHAT THE BROKEN CONTROL DID, measured in Chrome (playwright, `type=number` + the old handler,
+ * driven by keyboard.press and reading `input.value` after each key):
+ *
+ *   typing 4 . 5 over a selected "2.5"  →  [4 → box "4", stored 4]
+ *                                          [. → box "0", stored 0]   ← collapsed
+ *                                          [5 → box "5", stored 5]   ← meant 4.5, got 5
+ *   clearing with Backspace             →  box "0", stored 0
+ *
+ * The cause of both is one line: a `type=number` input whose contents are not a valid number
+ * reports `value === ""` (`validity.badInput === true`) — the browser does this both for an empty
+ * box and for the instant "4." exists — and `Number("")` is 0. 0 is not "unset" here; it is the
+ * setting that turns the "Other" fold OFF entirely (charts.ts: "0 = off"), so the control silently
+ * stored a different setting and, showing "0", offered no way back to the 2.5 default.
+ *
+ * JSDOM CANNOT SEE THE COLLAPSE THE SAME WAY and these tests do not pretend it can. user-event
+ * buffers the "." itself rather than letting the number input go bad, so no empty-string change
+ * event is ever delivered mid-decimal. What jsdom shows instead is the same defect's other face:
+ * the "." never reaches the box at all, which is why the display assertion below (`"4."`) is the
+ * one that fails on the old control, not the stored value. The empty-string change event that
+ * Chrome delivers mid-decimal is exercised directly by the clear tests.
+ */
+describe("PieDisplaySection — Group slices below", () => {
+  /** A parent that actually applies the patch, so the control is fed its own output back. */
+  function Harness({ initial = {} }: { initial?: PieConfig }) {
+    const [config, setConfig] = useState<PieConfig>(initial);
+    return (
+      <PieDisplaySection
+        config={config}
+        onChange={(patch) => setConfig((c) => ({ ...c, ...patch }))}
+        slices={[]}
+      />
+    );
+  }
+  const box = () => screen.getByLabelText("Group slices below") as HTMLInputElement;
+  /** What the panel is currently storing, read back off the control that displays it. */
+  const stored = () => box().value;
+
+  it("shows the default the chart actually folds at", () => {
+    render(<Harness />);
+    expect(box().value).toBe(String(DEFAULT_SLICE_THRESHOLD));
+  });
+
+  // The typed characters must survive in the box while a decimal is half-written. On the old
+  // control the "." is simply not there afterwards (jsdom), and in Chrome it took the whole
+  // field to "0" — the two faces of the same missing draft state.
+  it("keeps a half-typed decimal in the box instead of swallowing it", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    await user.clear(box());
+    await user.type(box(), "4");
+    expect(box().value).toBe("4");
+    await user.type(box(), ".");
+    expect(box().value).toBe("4.");
+    await user.type(box(), "5");
+    expect(box().value).toBe("4.5");
+  });
+
+  // …and the number behind it never passes through 0 on the way. 0 turns the fold off, so a
+  // single frame of it is a real, if brief, different chart.
+  it("never stores 0 while a decimal is being typed", async () => {
+    const user = userEvent.setup();
+    const seen: (number | undefined)[] = [];
+    function Spy() {
+      const [config, setConfig] = useState<PieConfig>({});
+      return (
+        <PieDisplaySection
+          config={config}
+          onChange={(patch) => {
+            if ("sliceThreshold" in patch) seen.push(patch.sliceThreshold);
+            setConfig((c) => ({ ...c, ...patch }));
+          }}
+          slices={[]}
+        />
+      );
+    }
+    render(<Spy />);
+    await user.clear(box());
+    seen.length = 0; // the clear itself is asserted below; this is about the digits after it
+    await user.type(box(), "4.5");
+    expect(seen).not.toContain(0);
+    expect(seen.at(-1)).toBe(4.5);
+  });
+
+  // Clearing is "no threshold of my own", i.e. back to the default — NOT 0, which is the
+  // distinct "never fold anything" setting. This is also the exact change event Chrome delivers
+  // mid-decimal, so it pins that path too.
+  it("clearing the box means unset, not the fold-nothing 0", async () => {
+    const user = userEvent.setup();
+    const seen: (number | undefined)[] = [];
+    function Spy() {
+      const [config, setConfig] = useState<PieConfig>({ sliceThreshold: 10 });
+      return (
+        <PieDisplaySection
+          config={config}
+          onChange={(patch) => {
+            if ("sliceThreshold" in patch) seen.push(patch.sliceThreshold);
+            setConfig((c) => ({ ...c, ...patch }));
+          }}
+          slices={[]}
+        />
+      );
+    }
+    render(<Spy />);
+    expect(box().value).toBe("10");
+    await user.clear(box());
+    expect(seen).toEqual([undefined]);
+    expect(box().value).not.toBe("0");
+  });
+
+  // The default has to be REACHABLE again — clearing was the only route back to it, and it led
+  // to 0 instead, permanently.
+  it("clearing gets the default back rather than stranding the panel on 0", async () => {
+    const user = userEvent.setup();
+    render(<Harness initial={{ sliceThreshold: 10 }} />);
+    await user.clear(box());
+    await user.tab(); // leaving the field settles it on what the chart will use
+    expect(box().value).toBe(String(DEFAULT_SLICE_THRESHOLD));
+  });
+
+  // 0 is still typeable, and still means what it means: fold nothing. It has to travel through
+  // a stateful parent like the rest — against a spy that never applies the patch the box keeps
+  // redisplaying the old 10, so the "0" lands on the end of it and the test measures the stub.
+  it("still lets 0 be chosen deliberately", async () => {
+    const user = userEvent.setup();
+    const seen: (number | undefined)[] = [];
+    function Spy() {
+      const [config, setConfig] = useState<PieConfig>({ sliceThreshold: 10 });
+      return (
+        <PieDisplaySection
+          config={config}
+          onChange={(patch) => {
+            if ("sliceThreshold" in patch) seen.push(patch.sliceThreshold);
+            setConfig((c) => ({ ...c, ...patch }));
+          }}
+          slices={[]}
+        />
+      );
+    }
+    render(<Spy />);
+    await user.clear(box());
+    await user.type(box(), "0");
+    expect(seen.at(-1)).toBe(0);
+    expect(box().value).toBe("0");
+  });
+
+  // Text that is not a number must not be committed as one. `Number("4.5.6")` is NaN, and a NaN
+  // threshold makes every `share < threshold` comparison false — the fold would quietly stop
+  // happening rather than the keystroke being ignored.
+  it("does not commit text that is not a number", async () => {
+    const user = userEvent.setup();
+    const seen: (number | undefined)[] = [];
+    function Spy() {
+      const [config, setConfig] = useState<PieConfig>({ sliceThreshold: 10 });
+      return (
+        <PieDisplaySection
+          config={config}
+          onChange={(patch) => {
+            if ("sliceThreshold" in patch) seen.push(patch.sliceThreshold);
+            setConfig((c) => ({ ...c, ...patch }));
+          }}
+          slices={[]}
+        />
+      );
+    }
+    render(<Spy />);
+    await user.type(box(), "x");
+    expect(seen).toEqual([]);
+    expect(box().value).toBe("10x"); // the keystroke is still visible, just not stored
+    await user.tab();
+    expect(box().value).toBe("10"); // …and leaving the field puts back what the chart is using
+  });
+
+  it("stores a whole number typed over the default", async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    await user.clear(box());
+    await user.type(box(), "12");
+    expect(stored()).toBe("12");
   });
 });
 

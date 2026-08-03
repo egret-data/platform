@@ -41,6 +41,13 @@ export function cartesianFromSettings(settings: VizSettings): CartesianConfig {
  * carry their metrics in the spec.
  */
 export function cartesianFromParams(params: AnyChartParams): CartesianConfig {
-  if (isParamsV2(params)) return cartesianFromSettings(params.settings);
-  return params.cartesian ?? { yMetrics: params.spec?.metrics ?? [] };
+  const fromSpec = { yMetrics: params.spec?.metrics ?? [] };
+  if (isParamsV2(params)) {
+    // No `cartesian.*` key at all gets the same spec recovery as v1: the API accepts
+    // `settings: {}`, so a chart written by anything but this editor arrives with its metrics
+    // only in the spec, and reading settings alone opened it with no metric picked.
+    const hasSlice = Object.keys(params.settings).some((k) => k.startsWith(CARTESIAN_PREFIX));
+    return hasSlice ? cartesianFromSettings(params.settings) : fromSpec;
+  }
+  return params.cartesian ?? fromSpec;
 }

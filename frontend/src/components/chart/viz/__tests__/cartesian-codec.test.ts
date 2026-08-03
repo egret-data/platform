@@ -40,6 +40,26 @@ describe("cartesianFromParams", () => {
     expect(cfg).toEqual({ yMetrics: [] });
   });
 
+  // Same failure mode as the table's: a v2 row that never got a `cartesian.*` key used to open
+  // with no metric at all, though the spec it was saved with names one.
+  it("falls back to the spec metrics when a v2 chart has no cartesian key", () => {
+    const cfg = cartesianFromParams({
+      version: 2,
+      spec: { ...EMPTY_SPEC, metrics: ["total_revenue"] },
+      settings: { "pie.metric": "someone else's key" },
+    });
+    expect(cfg).toEqual({ yMetrics: ["total_revenue"] });
+  });
+
+  it("prefers the stored metrics over the spec", () => {
+    const cfg = cartesianFromParams({
+      version: 2,
+      spec: { ...EMPTY_SPEC, metrics: ["from_spec"] },
+      settings: { "cartesian.yMetrics": ["stored"] },
+    });
+    expect(cfg).toEqual({ yMetrics: ["stored"] });
+  });
+
   it("round-trips config → settings → config", () => {
     expect(cartesianFromParams({ version: 2, spec: EMPTY_SPEC, settings: cartesianToSettings(CFG) })).toEqual(CFG);
   });

@@ -39,6 +39,49 @@ describe("tableDescriptor", () => {
     const cfg = { columns: ["region"], metrics: ["m"] };
     expect(d.fromParams({ version: 2, spec: EMPTY_SPEC, settings: d.toSettings(cfg) })).toEqual(cfg);
   });
+
+  // A v2 row whose `settings` never got the `table.*` slice — written by a seeding harness, not
+  // by the editor — opened on "Add: at least one column or metric" with its ten columns sitting
+  // right there in the spec. v1 recovered them; v2 must too.
+  it("recovers the columns from the spec when the v2 settings have no table slice", () => {
+    const cfg = d.fromParams({
+      version: 2,
+      spec: { ...EMPTY_SPEC, columns: ["reviewer", "rating", "product"] },
+      settings: {},
+    });
+    expect(cfg).toEqual({ columns: ["reviewer", "rating", "product"], metrics: [] });
+  });
+
+  it("recovers an aggregated table's dimensions and metrics from the spec", () => {
+    const cfg = d.fromParams({
+      version: 2,
+      spec: { ...EMPTY_SPEC, dimensions: ["region"], columns: ["category"], metrics: ["total_revenue"] },
+      settings: {},
+    });
+    expect(cfg).toEqual({ columns: ["region", "category"], metrics: ["total_revenue"] });
+  });
+
+  // The fixture above would pass on the broken code if the spec and the settings agreed, so the
+  // stored slice must WIN over a spec that says something different.
+  it("prefers the stored table slice over the spec when both are present", () => {
+    const cfg = d.fromParams({
+      version: 2,
+      spec: { ...EMPTY_SPEC, dimensions: ["from_spec_dim"], columns: ["from_spec_col"], metrics: ["from_spec_m"] },
+      settings: { "table.columns": ["stored_col"], "table.metrics": ["stored_m"] },
+    });
+    expect(cfg).toEqual({ columns: ["stored_col"], metrics: ["stored_m"] });
+  });
+
+  // Deliberately emptied is not the same as never written: a metrics-only table stores
+  // `table.columns: []`, and re-deriving columns from the spec would put them back.
+  it("keeps a stored-but-empty column list empty", () => {
+    const cfg = d.fromParams({
+      version: 2,
+      spec: { ...EMPTY_SPEC, columns: ["from_spec_col"], metrics: ["total_revenue"] },
+      settings: { "table.columns": [], "table.metrics": ["total_revenue"] },
+    });
+    expect(cfg).toEqual({ columns: [], metrics: ["total_revenue"] });
+  });
 });
 
 describe("objectDescriptor", () => {
@@ -70,5 +113,30 @@ describe("objectDescriptor", () => {
       settings: { "object.columns": ["a"], "table.columns": ["b"] },
     });
     expect(cfg).toEqual({ columns: ["a"] });
+  });
+
+  it("recovers the columns from the spec when the v2 settings have neither slice", () => {
+    const cfg = d.fromParams({
+      version: 2,
+      spec: { ...EMPTY_SPEC, columns: ["id", "plan", "seats"] },
+      settings: {},
+    });
+    expect(cfg).toEqual({ columns: ["id", "plan", "seats"] });
+  });
+
+  it("prefers a stored slice over the spec", () => {
+    const own = d.fromParams({
+      version: 2,
+      spec: { ...EMPTY_SPEC, columns: ["from_spec"] },
+      settings: { "object.columns": ["stored"] },
+    });
+    expect(own).toEqual({ columns: ["stored"] });
+
+    const inherited = d.fromParams({
+      version: 2,
+      spec: { ...EMPTY_SPEC, columns: ["from_spec"] },
+      settings: { "table.columns": ["from_table"] },
+    });
+    expect(inherited).toEqual({ columns: ["from_table"] });
   });
 });

@@ -1,5 +1,7 @@
+import { useState } from "react";
 import type { PieConfig } from "@/api/charts";
 import { colorsForKeys } from "@/components/chart/echarts/keyColors";
+import { OTHER_SLICE_COLOR } from "@/components/chart/echarts/palette";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
@@ -7,11 +9,58 @@ import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
 import { AutoToggle } from "./AutoToggle";
-import { resolvePercentVisibility } from "@/components/chart/echarts/options/pie";
+import { resolvePercentVisibility, DEFAULT_SLICE_THRESHOLD } from "@/components/chart/echarts/options/pie";
 
 // A Radix Select item cannot carry an empty value, so "leave it unset" needs a sentinel that
 // no real percentVisibility can collide with.
 const AUTO = "auto";
+
+/**
+ * The "Group slices below" percentage, which keeps the number BEING TYPED into it.
+ *
+ * `type="number"` cannot hold a half-written decimal. The moment "4." exists the contents stop
+ * being a valid number, so the browser reports `value === ""` (`validity.badInput`) — and the old
+ * handler ran that through `Number("")`, which is 0, and stored it. Measured in Chrome, typing
+ * 4 . 5 over the default went: "4" → **"0"** → "5". The dot wiped the field and the user who meant
+ * 4.5 got 5. Clearing the box did the same thing and stayed there.
+ *
+ * 0 IS NOT "UNSET" HERE. It is the setting that switches the "Other" fold off entirely
+ * (charts.ts: "0 = off"), so that was not a cosmetic slip — the control silently chose a
+ * different chart, then displayed "0" with no route back to the default.
+ *
+ * So: a TEXT input, with the in-progress characters held here and a number committed only once
+ * they parse. Empty means UNSET — `undefined`, which the pie resolves to DEFAULT_SLICE_THRESHOLD —
+ * which is also what makes the default reachable again. The draft is dropped on blur so the box
+ * settles on whatever the chart is actually using ("4." normalises to 4, empty back to 2.5).
+ *
+ * This is the shape Metabase's own `ChartSettingInputNumeric` uses for this very setting
+ * (`pie.slice_threshold`): a `TextInput`, an `inputValue` state, and `""` → `onChange(undefined)`.
+ */
+function SliceThresholdInput({ value, onChange }: { value: number | undefined; onChange: (v: number | undefined) => void }) {
+  // null = "not being edited"; show what is stored. Any string, including "", is a live draft.
+  const [draft, setDraft] = useState<string | null>(null);
+  return (
+    <Input
+      id="pz-threshold" aria-label="Group slices below"
+      // inputMode gets the numeric keypad on touch without handing the field back to the
+      // number-input value sanitiser that caused this.
+      type="text" inputMode="decimal"
+      className="h-7 w-16 text-sm"
+      placeholder={String(DEFAULT_SLICE_THRESHOLD)}
+      value={draft ?? String(value ?? DEFAULT_SLICE_THRESHOLD)}
+      onChange={(e) => {
+        const raw = e.target.value;
+        setDraft(raw);
+        if (raw.trim() === "") return onChange(undefined);
+        const n = Number(raw);
+        // Anything unparseable ("4.5.6", "abc") is left in the box and NOT committed — the last
+        // good number stays in the config, and blur puts it back on screen.
+        if (Number.isFinite(n)) onChange(n);
+      }}
+      onBlur={() => setDraft(null)}
+    />
+  );
+}
 
 function Toggle({ id, label, checked, onChange }: { id: string; label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -22,27 +71,52 @@ function Toggle({ id, label, checked, onChange }: { id: string; label: string; c
   );
 }
 
-// `slices` here is the distinct slice VALUES present in the current result (for the rows
-// below) — not to be confused with `PieConfig.sliceNames`, which is a value -> label rename
-// map. Same-sounding names, different shapes; keep them apart.
-export function PieDisplaySection({ config, onChange, slices = [] }: { config: PieConfig; onChange: (patch: Partial<PieConfig>) => void; slices?: string[] }) {
+// `slices` here is ring 0's slice VALUES in the order the chart draws them (for the rows below) —
+// not to be confused with `PieConfig.sliceNames`, which is a value -> label rename map.
+// Same-sounding names, different shapes; keep them apart.
+//
+// `foldedSlices` is the subset of them the chart merged into its "Other" bucket. Both come from
+// `pieSliceRows` (echarts/options/pie.ts), the builder's own pass — this section cannot work either
+// one out, because it is handed slice NAMES and the fold and the sort are both decided by their
+// VALUES.
+export function PieDisplaySection({ config, onChange, slices = [], foldedSlices = [] }: {
+  config: PieConfig;
+  onChange: (patch: Partial<PieConfig>) => void;
+  slices?: string[];
+  foldedSlices?: string[];
+}) {
   // Ranked exactly like SeriesOrderSection ranks cartesian series: by the stored sliceOrder
-  // position, with anything unranked keeping its natural (incoming) place after the ranked
-  // ones — buildPieOption applies this identical rule to ring 0, so the row order here always
-  // matches what the chart itself draws.
-  // The number of rings the chart will actually draw, which is what decides the percentage
-  // default — the same `dimensions` list buildPieOption turns into rings.
+  // position, with anything unranked keeping its natural place after the ranked ones —
+  // buildPieRings applies this identical rule to ring 0. "Natural" is what `slices` arrives in,
+  // which is now the order the chart draws (value-descending unless `sortRows` says otherwise);
+  // it used to be the order the ROWS arrived in, which is why the same rule applied to the same
+  // stored order still produced a list in an order the pie never drew.
+  // The number of rings the chart will actually draw — the same `dimensions` list buildPieOption
+  // turns into rings. It decides whether there is a HOLE (a multi-ring pie always has one,
+  // whatever `donut` says); it no longer decides the percentage default, which is now "legend"
+  // at every ring count, matching Metabase's constant `getDefaultPercentVisibility`.
   const ringCount = config.dimensions?.length ?? 0;
   const hasHole = !!config.donut || ringCount > 1;
-  const effectivePercent = resolvePercentVisibility(config.percentVisibility, ringCount);
-  const autoPercentHint = ringCount > 1
-    ? "puts each innermost-ring slice's share beside its name in the legend"
-    : "leaves percentages off a single-ring pie";
+  const effectivePercent = resolvePercentVisibility(config.percentVisibility);
+  const autoPercentHint = "puts each innermost-ring slice's share beside its name in the legend";
 
   const rank = new Map((config.sliceOrder ?? []).map((n, i) => [n, i]));
   const ranked = [...slices].sort(
     (a, b) => (rank.get(a) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b) ?? Number.MAX_SAFE_INTEGER),
   );
+  /**
+   * A FOLDED SLICE GETS NO ROW. The threshold merged it into "Other", so the chart draws no slice
+   * of its own for it and a row would be offering a colour, a rename and a hide toggle that all
+   * land on nothing — Metabase renders nothing for a row it marked `isOther` either. The bucket
+   * itself is reported below instead, as a line rather than a row: it takes no curation on either
+   * side (the builder identifies it by a sentinel no stored key can carry).
+   *
+   * Hidden slices are NOT in here — the fold is judged after they are dropped, so a hidden slice is
+   * never folded — which is what keeps its own switch, the only route back to showing it, on screen.
+   */
+  const folded = new Set(foldedSlices);
+  const listed = ranked.filter((n) => !folded.has(n));
+  const foldedInOrder = ranked.filter((n) => folded.has(n));
   /**
    * The swatch a slice shows before any override — buildPieRings' own answer, asked the same way.
    *
@@ -56,46 +130,44 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
    * added to that set. `sliceColors` goes in as `existing` for the same reason it does there: an
    * override consumes its slot, so the slice that would have hashed onto it moves along.
    *
-   * TWO DIVERGENCES REMAIN, both from the panel not having the data the builder does. Measured
-   * against the pre-PR-04 code rather than assumed, because the two are not the same story:
-   *  - THE FOLD. Slices below the threshold are merged into "Other" by `buildSlices` and drop out of
-   *    the key set. This panel is handed slice NAMES only, not their values, so it cannot run that
-   *    fold. Not new: the old positional rule diverged here too, and more widely — it indexed the
-   *    panel's ROW order against the chart's value-desc ring, so with rows arriving in ascending
-   *    order every swatch on the pie was wrong. Net, this is narrower than what it replaces.
-   *    (The synthetic bucket itself is not a problem: it is created inside the builder and never
-   *    reaches `slices`, so the panel excludes it by construction — and a real dimension value that
-   *    happens to be the string "Other" is a genuine key on both sides, which is why the builder
-   *    identifies the bucket by its OTHER_KEY sentinel rather than by name.)
-   *  - COLUMN FORMATS. `buildPieRings` aggregates on the FORMATTED label, so ring 0's keys are
-   *    formatted strings while this panel is handed raw values. The name mismatch itself is older
-   *    and wider than colour — it already decides which slice a rename, a hide or a pinned colour
-   *    lands on, and those already miss. But the SWATCH is newly exposed to it: the positional rule
-   *    this replaces did not key on names at all, so a formatted label could not move it. Measured:
-   *    with `columnSettings: { category: { prefix: "» " } }` all four swatches now disagree with the
-   *    chart where before they matched. Closing it means giving the panel the same `labelOf` the
-   *    builder applies — which is the pre-existing raw/formatted seam, not this rule, and is where
-   *    the fix belongs.
+   * COLUMN FORMATS USED TO DIVERGE HERE and no longer do. `buildPieRings` keyed ring 0's colours
+   * (and its hide, rename and order) on the slice's formatted LABEL while this panel is handed raw
+   * values, so `columnSettings: { category: { prefix: "» " } }` made all four swatches disagree
+   * with the chart. It now keys every one of them on the raw dimension value, which is the string
+   * this panel writes — so hashing the raw values here asks the builder's own question. (Metabase
+   * likewise hashes `getKeyFromDimensionValue(value)`, never the formatted name.)
+   *
+   * THE FOLD USED TO DIVERGE HERE and no longer does. Slices below the threshold are merged into
+   * "Other" by `buildSlices` and drop out of the ring-0 key set, and this panel — handed slice
+   * names with no values — could not run that fold, so it kept them as keys. That was not only a
+   * missing row: a `sliceColors` pin on a FOLDED slice reaches `colorsForKeys` here and CONSUMES
+   * its colour, while in the chart the folded slice is not a key at all and the colour stays free
+   * for whoever hashes onto it. Measured: with `Gizmo` folded and pinned to `#f2a86f`, the panel
+   * showed `Widget` as `#98d9d9` and the pie drew it `#F2A86F`. `foldedSlices` is what closes it —
+   * the key set below is now the ring's own. (The synthetic bucket itself was never a problem: it
+   * is created inside the builder and never reaches `slices`, and a real dimension value that
+   * happens to be the string "Other" is a genuine key on both sides, which is why the builder
+   * identifies the bucket by its OTHER_KEY sentinel rather than by name.)
    *
    * On a NESTED pie the swatch is the family's BASE colour, which ring 0 is then drawn as the dark
-   * variant of (`ring0Variant`). That is deliberate rather than a third divergence: whatever this
-   * control shows is what a nudge of the picker stores, and the builder reads a stored colour as the
-   * base. Showing the darkened one would make the pie darken it again on every edit.
+   * variant of (`ring0Variant`). That is deliberate rather than a divergence: whatever this control
+   * shows is what a nudge of the picker stores, and the builder reads a stored colour as the base.
+   * Showing the darkened one would make the pie darken it again on every edit.
    */
-  const drawn = ranked.filter((n) => !config.hiddenSlices?.includes(n));
+  const drawn = listed.filter((n) => !config.hiddenSlices?.includes(n));
   const drawnColors = colorsForKeys(drawn, config.sliceColors);
   const defaultSliceColor = (name: string) =>
-    drawnColors[name] ?? colorsForKeys(ranked.filter((n) => n === name || !config.hiddenSlices?.includes(n)), config.sliceColors)[name];
+    drawnColors[name] ?? colorsForKeys(listed.filter((n) => n === name || !config.hiddenSlices?.includes(n)), config.sliceColors)[name];
 
   const move = (i: number, delta: number) => {
     const j = i + delta;
-    if (j < 0 || j >= ranked.length) return;
-    const a = ranked[i];
-    const b = ranked[j];
+    if (j < 0 || j >= listed.length) return;
+    const a = listed[i];
+    const b = listed[j];
     // Merge into the STORED order, not the visible list: a slice hidden or not present in
     // this run's data still has a remembered position, and swapping two others must not
     // throw it away (same reasoning as SeriesOrderSection.move).
-    const base = config.sliceOrder?.length ? [...config.sliceOrder] : [...ranked];
+    const base = config.sliceOrder?.length ? [...config.sliceOrder] : [...listed];
     for (const n of [a, b]) if (!base.includes(n)) base.push(n);
     const ia = base.indexOf(a);
     const ib = base.indexOf(b);
@@ -113,18 +185,26 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
       />
       <Toggle id="pz-donut" label="Donut" checked={!!config.donut} onChange={(v) => onChange({ donut: v })} />
       {/* Offered whenever the chart HAS a hole to write in — a multi-ring pie always does,
-          whatever `donut` says (buildPieOption's holeStart), so gating this on `donut` alone
-          would leave the multi-ring total, which now defaults on, with no way to turn it off.
-          Auto/On/Off rather than a Switch for that same reason: `undefined` genuinely means
-          "on for a sunburst, off for a one-ring donut", which a Switch would have to lie
-          about in one of the two cases. */}
+          whatever `donut` says (pieGeometry), so gating this on `donut` alone would leave the
+          multi-ring total, which defaults on, with no way to turn it off.
+
+          STILL GATED, and deliberately so, even though Metabase offers `pie.show_total`
+          unconditionally: Metabase has no `pie.donut` setting and applies its 3/5 inner radius to
+          every pie, so a holeless pie is a shape it cannot draw and its unconditional control is
+          not a claim about one. egret's holeless pie has nowhere to put a total — `pieHoleModel`
+          requires `holeRatio > 0` — so an offered switch here would move nothing on screen, which
+          is the exact fault this section exists to remove.
+
+          Auto/On/Off rather than a Switch because `undefined` is a real third state the chart
+          resolves at render time, and a two-state Switch bound to `!!config.showTotal` would read
+          OFF while the hole carried the total. */}
       {hasHole && (
         <AutoToggle
           id="pz-total"
           label="Show total"
           value={config.showTotal}
           onChange={(v) => onChange({ showTotal: v })}
-          autoHint="Auto fills a multi-ring pie's hole with the grand total, and leaves a single-ring donut's hole empty"
+          autoHint="Auto writes the grand total into the hole"
         />
       )}
       <AutoToggle
@@ -134,8 +214,8 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
         onChange={(v) => onChange({ showLabels: v })}
         autoHint="Auto shows slice labels, hiding whichever ones would overlap"
       />
-      {/* Auto is a real option, not decoration: with nothing stored, a multi-ring pie draws
-          its percentages in the legend (see resolvePercentVisibility, which the chart and this
+      {/* Auto is a real option, not decoration: with nothing stored, a pie draws its percentages
+          in the legend at any ring count (see resolvePercentVisibility, which the chart and this
           control share so they cannot drift). A four-value select with no Auto would have to
           show "Off" while the chart drew them. A stored value that isn't one of the four shows
           — and renders as — Off, which is what the chart does with it. */}
@@ -181,10 +261,10 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
       <div className="flex items-center justify-between gap-2">
         <Label htmlFor="pz-threshold" className="text-sm font-normal">Group slices below</Label>
         <div className="flex items-center gap-1">
-          <Input id="pz-threshold" aria-label="Group slices below" type="number" min={0} max={100} step={0.5}
-            className="h-7 w-16 text-sm"
-            value={config.sliceThreshold ?? 2.5}
-            onChange={(e) => { const n = Number(e.target.value); onChange({ sliceThreshold: Number.isNaN(n) ? 0 : n }); }} />
+          <SliceThresholdInput
+            value={config.sliceThreshold}
+            onChange={(sliceThreshold) => onChange({ sliceThreshold })}
+          />
           <span className="text-sm text-muted-foreground">%</span>
         </div>
       </div>
@@ -199,13 +279,13 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
           <div className="text-xs text-muted-foreground">
             Applies to the innermost ring only — outer rings (additional nested dimensions) aren't affected.
           </div>
-          {ranked.map((name, i) => {
+          {listed.map((name, i) => {
             const hidden = !!config.hiddenSlices?.includes(name);
             return (
               <div key={name} className="flex items-center gap-1.5">
                 <button type="button" aria-label={`Move ${name} up`} disabled={i === 0}
                   className="text-xs text-muted-foreground disabled:opacity-40" onClick={() => move(i, -1)}>↑</button>
-                <button type="button" aria-label={`Move ${name} down`} disabled={i === ranked.length - 1}
+                <button type="button" aria-label={`Move ${name} down`} disabled={i === listed.length - 1}
                   className="text-xs text-muted-foreground disabled:opacity-40" onClick={() => move(i, 1)}>↓</button>
                 <input
                   type="color"
@@ -236,6 +316,19 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
               </div>
             );
           })}
+          {/* The fold, reported so the reader can see where the missing categories went — pinned
+              last, which is where the chart draws the bucket (`buildPieRings` ranks it after every
+              named slice, however `sliceOrder` is written). Deliberately NOT a row: there is
+              nothing here to curate, and the controls a row carries would all land on nothing.
+              Metabase shows even less — its list widget simply renders nothing for a folded slice —
+              but a silently shorter list is the thing that sent a reader looking for the row that
+              renames the slice they can see in the legend. */}
+          {foldedInOrder.length > 0 && (
+            <div className="flex items-start gap-1.5 pt-0.5 text-xs text-muted-foreground">
+              <span className="mt-0.5 h-3 w-3 shrink-0 rounded-sm" style={{ background: OTHER_SLICE_COLOR }} />
+              <span>Other — {foldedInOrder.join(", ")}, grouped by the threshold above</span>
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildPieOption, buildPieLegend, buildPieHole, buildPieHoleGraphic, pieLegendPlacement, resolvePercentVisibility,
   PIE_LEGEND_COLUMN_WIDTH_PX, computeMaxPercentDecimals, pieHasSlices, buildPieBreakdown,
-  pieSliceDrillPath,
+  pieSliceDrillPath, pieSliceRows,
 } from "../options/pie";
 import { SERIES_PALETTE, chartShade, COLOR_FALLBACK } from "../palette";
 import { colorsForKeys } from "../keyColors";
@@ -233,9 +233,10 @@ describe("buildPieOption — donut total & percent (Metabase parity 1b)", () => 
   const labelText = (o: any, name: string) =>
     ring(o, 0).find((d: any) => d.name === name).label.formatter();
 
-  it("renders a centre total only for donut + showTotal", () => {
-    expect(opt({ showTotal: true }).graphic).toBeFalsy();           // not a donut
-    expect(opt({ donut: true }).graphic).toBeFalsy();               // showTotal off
+  it("renders a centre total only where there is a hole to write it in", () => {
+    expect(opt({ showTotal: true }).graphic).toBeFalsy();           // not a donut: nowhere to put it
+    expect(opt({ donut: true }).graphic).toBeTruthy();              // a hole, and showTotal defaults on
+    expect(opt({ donut: true, showTotal: false }).graphic).toBeFalsy();
     expect(opt({ donut: true, showTotal: true }).graphic).toBeTruthy();
   });
   it("centre total shows the formatted grand total + a Total caption", () => {
@@ -1613,11 +1614,11 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
       expect(off.graphic).toBeTruthy();
     });
 
-    // The single-ring side is deliberately untouched: a plain pie has no hole to write in,
-    // and a one-ring donut's hole stays empty unless it is asked for.
-    it("a single-ring donut still defaults to an empty hole", () => {
+    // A one-ring donut joined it in task 5 — see the task-5 block at the bottom of this file for
+    // why "its hole is small enough to read as deliberate" did not survive being measured.
+    it("a single-ring donut fills its hole too", () => {
       const opt = buildPieOption(cols, rows, { dimensions: ["region"], metric: "rev", donut: true }) as any;
-      expect(opt.graphic).toBeFalsy();
+      expect(opt.graphic).toBeTruthy();
     });
 
     it("a single-ring pie with no hole never draws a total, even asked to", () => {
@@ -1698,14 +1699,16 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
         expect(ring(opt, 0).find((d: any) => d.name === "US").label.formatter()).toBe("US");
       });
 
-      it("a single-ring pie is untouched: no percentages anywhere", () => {
+      // A single ring gets the same treatment as of task 5 — see the task-5 block at the bottom
+      // of this file. Its arcs stay clean either way; only the legend gains the number.
+      it("a single-ring pie gets it in the legend as well, and keeps its arcs clean", () => {
         const cfg = { dimensions: ["region"], metric: "rev" };
-        expect(buildPieLegend(cols, rows, cfg).map((e) => e.percent)).toEqual([undefined, undefined]);
+        expect(buildPieLegend(cols, rows, cfg).map((e) => e.percent)).toEqual(["75%", "25%"]);
         const opt = buildPieOption(cols, rows, cfg) as any;
         expect(ring(opt, 0).find((d: any) => d.name === "US").label.formatter()).toBe("US");
       });
 
-      it("an explicit off still wins over the multi-ring default", () => {
+      it("an explicit off still wins over the default", () => {
         expect(legendPercent({
           dimensions: ["region", "category"], metric: "m", percentVisibility: "off",
         }, "US")).toBeUndefined();
@@ -1727,24 +1730,22 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
 });
 
 describe("resolvePercentVisibility", () => {
-  it("passes every known value through, at any ring count", () => {
+  it("passes every known value through", () => {
     for (const v of ["off", "legend", "inside", "both"] as const) {
-      expect(resolvePercentVisibility(v, 1)).toBe(v);
-      expect(resolvePercentVisibility(v, 3)).toBe(v);
+      expect(resolvePercentVisibility(v)).toBe(v);
     }
   });
 
-  it("defaults to the legend once there is more than one ring, and off below that", () => {
-    expect(resolvePercentVisibility(undefined, 0)).toBe("off");
-    expect(resolvePercentVisibility(undefined, 1)).toBe("off");
-    expect(resolvePercentVisibility(undefined, 2)).toBe("legend");
-    expect(resolvePercentVisibility(undefined, 3)).toBe("legend");
+  // Metabase's `getDefaultPercentVisibility` is `() => "legend"` — a constant with no ring count
+  // and no chart in it. The ring count that used to be a parameter here is gone with the branch.
+  it("defaults to the legend", () => {
+    expect(resolvePercentVisibility(undefined)).toBe("legend");
   });
 
   it("degrades an unknown stored value to off, not to the default", () => {
-    expect(resolvePercentVisibility("legend ", 3)).toBe("off");
-    expect(resolvePercentVisibility("", 3)).toBe("off");
-    expect(resolvePercentVisibility("true", 3)).toBe("off");
+    expect(resolvePercentVisibility("legend ")).toBe("off");
+    expect(resolvePercentVisibility("")).toBe("off");
+    expect(resolvePercentVisibility("true")).toBe("off");
   });
 });
 
@@ -2980,5 +2981,277 @@ describe("slice labels honour the dimension's column format", () => {
       dimensions: ["order_date"], metric: "rev", dimensionUnits: { order_date: "month" },
     }) as any;
     expect(opt.series[0].data.map((d: any) => d.name)).toEqual(["2026-01-01", "2026-02-01"]);
+  });
+});
+
+/**
+ * THE RAW/FORMATTED SEAM — the settings panel and the chart must name the same slice.
+ *
+ * `PieDisplayControl` (viz/simple.tsx) hands the panel `String(row[dimIdx])`, i.e. the RAW
+ * dimension values, and every control writes those raw strings into `hiddenSlices`,
+ * `sliceOrder`, `sliceNames` and `sliceColors`. A column format then makes the chart DRAW
+ * something else, so a curation keyed on the drawn label finds nothing at all: reproduced in
+ * the UI on a pie over `order_month` with Date style `January 2024`, where the panel listed
+ * `2026-12-01` and the chart drew `December 2026`, and toggling "Show 2026-12-01" off changed
+ * nothing. Metabase keys the same four on the raw value too — `getPieRows`/`getPieColors` build
+ * every row around `getKeyFromDimensionValue(dimensionValue)` and carry `name: formatter(value)`
+ * alongside it, and its own hidden check is `!hiddenSlices.includes(row.key)`.
+ *
+ * THE FIXTURE IS ONLY ABLE TO SEE THIS BECAUSE ITS TWO VOCABULARIES DIFFER. A format whose
+ * output happens to equal its input (Date style `2024-01-31` on an ISO date, say) makes every
+ * assertion below pass against the broken code as well — which is exactly the control that
+ * identified the bug in the UI. `the fixture speaks two vocabularies` states that premise so it
+ * cannot rot away silently.
+ */
+describe("a curated pie finds the slice the panel named, not the label it drew", () => {
+  const COLS = [{ name: "order_month", type: "date" }, { name: "rev", type: "double" }];
+  /** What the panel is handed — `String(row[dimIdx])` for `dimensions[0]`. */
+  const RAW = ["2026-12-01", "2026-11-01", "2026-10-01"];
+  const LABELS = ["December 2026", "November 2026", "October 2026"];
+  const ROWS: unknown[][] = [[RAW[0], 60], [RAW[1], 30], [RAW[2], 10]];
+  const cfg = {
+    dimensions: ["order_month"], metric: "rev",
+    dimensionUnits: { order_month: "month" },
+    columnSettings: { order_month: { date_style: "MMMM YYYY" } },
+  };
+  const build = (extra: Record<string, unknown> = {}) =>
+    buildPieOption(COLS, ROWS, { ...cfg, ...extra }) as any;
+
+  it("the fixture speaks two vocabularies — no raw value is its own label", () => {
+    const data = ring(build(), 0);
+    expect(data.map((d: any) => d.key)).toEqual(RAW);
+    expect(data.map((d: any) => d.name)).toEqual(LABELS);
+    for (const d of data) expect(d.name).not.toBe(d.key);
+    // No slice is under the 2.5% fold threshold, so nothing here is an "Other" bucket in
+    // disguise: 10/100 is the smallest, and after the hide below 10/40 is smaller still.
+    expect(data.map((d: any) => d.value)).toEqual([60, 30, 10]);
+  });
+
+  it("hiddenSlices, named by the panel's raw value, hides that slice", () => {
+    const data = ring(build({ hiddenSlices: [RAW[0]] }), 0);
+    expect(data.map((d: any) => d.name)).toEqual(["November 2026", "October 2026"]);
+    // ...and the remaining shares re-base as if December had never been queried.
+    expect(data.reduce((t: number, d: any) => t + d.value, 0)).toBe(40);
+  });
+
+  it("sliceNames, named by the panel's raw value, renames that slice", () => {
+    const data = ring(build({ sliceNames: { [RAW[1]]: "Black Friday" } }), 0);
+    expect(data.map((d: any) => d.name)).toEqual(["December 2026", "Black Friday", "October 2026"]);
+    // The rename is display-only: the key the drill and the curations address is untouched.
+    expect(data.map((d: any) => d.key)).toEqual(RAW);
+  });
+
+  it("sliceOrder, named by the panel's raw value, reorders the ring", () => {
+    // Natural order is value-desc (Dec 60, Nov 30, Oct 10), so putting October first is a
+    // change only an order override can make.
+    const data = ring(build({ sliceOrder: [RAW[2]] }), 0);
+    expect(data.map((d: any) => d.name)).toEqual(["October 2026", "December 2026", "November 2026"]);
+  });
+
+  it("sliceColors, named by the panel's raw value, paints that slice", () => {
+    const data = ring(build({ sliceColors: { [RAW[2]]: "#123456" } }), 0);
+    expect(data.find((d: any) => d.name === "October 2026").itemStyle.color).toBe("#123456");
+  });
+
+  /**
+   * And the slices it did NOT pin take the palette as if keyed on the raw value — which is the
+   * same question `PieDisplaySection`'s swatch asks (`colorsForKeys(rawSlices, sliceColors)`),
+   * so the swatch beside "2026-12-01" is now the ink the chart puts in December's wedge. Both
+   * assertions are needed: the override alone can be satisfied while the rest of the ring is
+   * still hashed on its drawn label, and then every OTHER swatch in the panel is wrong.
+   */
+  it("an un-pinned slice takes the palette slot its raw value hashes to", () => {
+    const plain = ring(build(), 0);
+    expect(plain.map((d: any) => d.itemStyle.color)).toEqual(RAW.map((r) => colorsForKeys(RAW)[r]));
+    const pinned = { [RAW[2]]: "#123456" };
+    const withPin = ring(build({ sliceColors: pinned }), 0);
+    expect(withPin.map((d: any) => d.itemStyle.color))
+      .toEqual(RAW.map((r) => colorsForKeys(RAW, pinned)[r]));
+  });
+
+  /**
+   * AGGREGATION IS UNCHANGED BY ANY OF THE ABOVE, and this is the assertion that says so.
+   *
+   * `aggregateRing` has always grouped on `parts.join(KEY_SEP)` — the STRINGIFIED RAW values —
+   * and only ever passed `labelOf` over the display `name`. So two raw values that format to
+   * one label were already two slices, and moving the curations onto the key cannot merge or
+   * split anything. Stated here because the opposite (a builder that aggregates on the label)
+   * would have made this a rendering change in a settings change's clothes, and the difference
+   * is not visible from the curation code alone.
+   */
+  it("two raw values that format to the same label are still two slices", () => {
+    // Both days are in the same month, so `MMMM YYYY` collapses them to one label.
+    const data = ring(buildPieOption(COLS, [["2026-10-01", 30], ["2026-10-15", 10]], cfg), 0);
+    expect(data.map((d: any) => d.name)).toEqual(["October 2026", "October 2026"]);
+    expect(data.map((d: any) => d.key)).toEqual(["2026-10-01", "2026-10-15"]);
+    expect(data.map((d: any) => d.value)).toEqual([30, 10]);
+  });
+
+  it("an outer ring's own dimension value is raw there too", () => {
+    // `sliceColors` has always matched on every ring, not just ring 0 — so the same VALUE
+    // appearing as an outer-ring dimension value takes the override there as well. That match
+    // has to speak the same vocabulary the panel wrote, which is the raw value, not the label
+    // the outer ring happens to be drawn with.
+    const cols2 = [
+      { name: "region", type: "varchar" }, { name: "order_month", type: "date" },
+      { name: "rev", type: "double" },
+    ];
+    const opt = buildPieOption(cols2, [["EU", RAW[0], 60], ["US", RAW[1], 40]], {
+      dimensions: ["region", "order_month"], metric: "rev",
+      dimensionUnits: { order_month: "month" },
+      columnSettings: { order_month: { date_style: "MMMM YYYY" } },
+      sliceColors: { [RAW[0]]: "#654321" },
+    }) as any;
+    const outer = ring(opt, 1);
+    expect(outer.map((d: any) => d.name)).toEqual(["December 2026", "November 2026"]);
+    expect(outer.find((d: any) => d.name === "December 2026").itemStyle.color).toBe("#654321");
+  });
+});
+
+/**
+ * RING 0 AS THE SETTINGS PANEL HAS TO SEE IT.
+ *
+ * `pieSliceRows` is the one derivation `PieDisplayControl` is allowed to have: the panel needs the
+ * slices in the order the chart draws them and it needs to know which ones the fold swallowed, and
+ * it can work out neither from the slice NAMES it used to be handed. Everything here is asserted
+ * against `buildPieOption`'s own output where the two overlap, because a helper that restates the
+ * rule instead of sharing it is exactly how the panel and the chart drifted apart in the first
+ * place.
+ */
+describe("pieSliceRows — the panel's view of ring 0", () => {
+  const c = [{ name: "category", type: "varchar" }, { name: "m", type: "double" }];
+  /** NOT pre-sorted: the rows arrive Gizmo, Widget, Gadget, Doohickey and the pie draws
+   *  Widget, Gadget, Gizmo, Doohickey. A fixture arriving value-descending could not tell a list
+   *  that sorts from one that echoes its input. */
+  const r: unknown[][] = [["Gizmo", 20], ["Widget", 40], ["Gadget", 30], ["Doohickey", 10]];
+  const base = { dimensions: ["category"], metric: "m" };
+  const keys = (cfg: Record<string, unknown> = {}) => pieSliceRows(c, r, { ...base, ...cfg }).map((s) => s.key);
+  const foldedKeys = (cfg: Record<string, unknown> = {}) =>
+    pieSliceRows(c, r, { ...base, ...cfg }).filter((s) => s.folded).map((s) => s.key);
+  const drawnNames = (cfg: Record<string, unknown> = {}) =>
+    (buildPieOption(c, r, { ...base, ...cfg }) as any).series[0].data.map((d: any) => d.name);
+
+  it("reads value-descending, which is the order the chart draws", () => {
+    expect(keys()).toEqual(drawnNames());
+    expect(keys()).not.toEqual(r.map((row) => row[0])); // …and that is not the row order
+  });
+
+  it("follows the chart back to row order when sorting is off", () => {
+    // The literal is stated as well as the comparison: both sides of the comparison go through the
+    // same sort, so a builder that ignored `sortRows: false` would keep them agreeing with each
+    // other while both disagreed with the pie the user asked for.
+    expect(keys({ sortRows: false })).toEqual(["Gizmo", "Widget", "Gadget", "Doohickey"]);
+    expect(keys({ sortRows: false })).toEqual(drawnNames({ sortRows: false }));
+  });
+
+  it("marks the slices the fold swallowed, and puts them where the bucket is drawn", () => {
+    const cfg = { sliceThreshold: 26 }; // Gizmo 20% and Doohickey 10% are both under it
+    expect(drawnNames(cfg)).toEqual(["Widget", "Gadget", "Other"]);
+    expect(keys(cfg)).toEqual(["Widget", "Gadget", "Gizmo", "Doohickey"]);
+    expect(foldedKeys(cfg)).toEqual(["Gizmo", "Doohickey"]);
+  });
+
+  it("folds nothing when only one slice is under the threshold, as buildSlices does not", () => {
+    const cfg = { sliceThreshold: 15 }; // Doohickey alone
+    expect(drawnNames(cfg)).toEqual(["Widget", "Gadget", "Gizmo", "Doohickey"]);
+    expect(foldedKeys(cfg)).toEqual([]);
+  });
+
+  // A hidden slice is dropped before the ring's total is computed, so it cannot be folded — and it
+  // stays listed, because its own switch is the only route back to showing it.
+  it("keeps a hidden slice listed, unfolded, after the ones the chart draws", () => {
+    const cfg = { hiddenSlices: ["Widget"] };
+    expect(drawnNames(cfg)).toEqual(["Gadget", "Gizmo", "Doohickey"]);
+    expect(keys(cfg)).toEqual(["Gadget", "Gizmo", "Doohickey", "Widget"]);
+    expect(foldedKeys(cfg)).toEqual([]);
+  });
+
+  // Hiding re-bases the remaining shares, which changes what falls under the threshold. A list that
+  // judged the fold before the hide would fold nothing here.
+  it("judges the fold on the shares that remain after a hide, as the ring does", () => {
+    // At 25%, of 100: Gizmo 20% and Doohickey 10% are both under it, so they fold. Hide Widget and
+    // the remaining 60 re-bases them to 33% and 17% — only one is under it now, and one does not
+    // make a bucket. A list that folded before the hide would drop Gizmo's row for a chart that
+    // draws Gizmo.
+    expect(foldedKeys({ sliceThreshold: 25 })).toEqual(["Gizmo", "Doohickey"]);
+    const cfg = { hiddenSlices: ["Widget"], sliceThreshold: 25 };
+    expect(drawnNames(cfg)).toEqual(["Gadget", "Gizmo", "Doohickey"]);
+    expect(foldedKeys(cfg)).toEqual([]);
+    expect(keys(cfg)).toEqual(["Gadget", "Gizmo", "Doohickey", "Widget"]);
+  });
+
+  it("lists nothing when the chart has no dimension or no metric to draw with", () => {
+    expect(pieSliceRows(c, r, { metric: "m" })).toEqual([]);
+    expect(pieSliceRows(c, r, { dimensions: ["category"] })).toEqual([]);
+    expect(pieSliceRows(c, r, { dimensions: ["nope"], metric: "m" })).toEqual([]);
+  });
+
+  /**
+   * A TEMPORAL EXTRACTION UNIT KEYS ON THE EXTRACTED WORD, not on the number in the column: the
+   * aggregation groups on `temporalLabel(unit, raw)`, so "Wed" IS the slice's raw value as far as
+   * every stored curation is concerned. A panel that stringified the column would write
+   * `sliceColors["3"]`, which no slice carries.
+   *
+   * NOTE (PR 06 task 4): this closes the derivation, not the app path. `VizControlProps` carries no
+   * temporal units, so `PieDisplayControl` still passes none — threading them is a change to the
+   * studio shell's control contract, not to the pie.
+   */
+  it("keys on the extracted word for a temporal extraction unit, as the ring does", () => {
+    const dowCols = [{ name: "dow", type: "bigint" }, { name: "m", type: "double" }];
+    const dowRows: unknown[][] = [[3, 20], [1, 40]];
+    const cfg = { dimensions: ["dow"], metric: "m", dimensionUnits: { dow: "day_of_week" } };
+    expect((buildPieOption(dowCols, dowRows, cfg) as any).series[0].data.map((d: any) => d.name))
+      .toEqual(["Mon", "Wed"]);
+    expect(pieSliceRows(dowCols, dowRows, cfg).map((s) => s.key)).toEqual(["Mon", "Wed"]);
+  });
+});
+
+/**
+ * PR 06 TASK 5 — the one-ring pie gets the defaults Metabase gives its ONLY pie shape.
+ *
+ * Metabase has no ring count and no donut switch: `getDefaultPercentVisibility = () => "legend"`
+ * and `getDefaultShowTotal = () => true` are both unconditional, and `DIMENSIONS.slice
+ * .innerRadiusRatio = 3/5` means every Metabase pie has a hole. egret withheld both from a single
+ * ring on reasons measured below to be about the ARCS (which "legend" never touches) and about a
+ * hole "small enough to read as deliberate" (egret's is 45/70 = 0.643 of the outer radius, LARGER
+ * than the 3/5 = 0.600 hole Metabase writes its total into).
+ *
+ * The holeless pie is the one shape Metabase cannot draw, and it keeps its empty middle: there is
+ * nowhere to write.
+ */
+describe("a single-ring pie's percentage and total defaults (task 5)", () => {
+  // rows totals 40 at ring 0: US 30 (75%), EU 10 (25%).
+  const oneRing = { dimensions: ["region"], metric: "rev" };
+
+  it("puts a lone ring's shares in the legend with nothing stored, as Metabase does", () => {
+    const entries = buildPieLegend(cols, rows, oneRing);
+    expect(entries.map((e) => e.name)).toEqual(["US", "EU"]);
+    expect(entries.map((e) => e.percent)).toEqual(["75%", "25%"]);
+  });
+
+  it("leaves the arcs themselves uncluttered — the legend is where the number goes", () => {
+    const opt = buildPieOption(cols, rows, oneRing) as any;
+    expect(ring(opt, 0).find((d: any) => d.name === "US").label.formatter()).toBe("US");
+  });
+
+  it("an explicit off still empties the legend of percentages", () => {
+    const entries = buildPieLegend(cols, rows, { ...oneRing, percentVisibility: "off" });
+    expect(entries.map((e) => e.percent)).toEqual([undefined, undefined]);
+  });
+
+  it("fills a one-ring DONUT's hole with the total by default", () => {
+    const opt = buildPieOption(cols, rows, { ...oneRing, donut: true }) as any;
+    expect(opt.graphic).toBeTruthy();
+    expect(holeTexts(opt.graphic)).toEqual(["40", "Total"]);
+  });
+
+  it("an explicit false still empties a one-ring donut's hole", () => {
+    const opt = buildPieOption(cols, rows, { ...oneRing, donut: true, showTotal: false }) as any;
+    expect(opt.graphic).toBeFalsy();
+  });
+
+  it("a holeless pie still draws no total — there is nowhere to write it", () => {
+    expect((buildPieOption(cols, rows, oneRing) as any).graphic).toBeFalsy();
+    expect((buildPieOption(cols, rows, { ...oneRing, showTotal: true }) as any).graphic).toBeFalsy();
   });
 });

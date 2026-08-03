@@ -40,6 +40,57 @@ describe("fieldDescriptor", () => {
     expect(cfg).toEqual({ dimension: "region", metric: "m" });
   });
 
+  // Same failure mode as the table's: a v2 row that never got this viz's settings slice used to
+  // open on the "set up your chart" placeholder with the fields sitting in the spec.
+  it("falls back to the spec when the v2 settings have no slice for this prefix", () => {
+    const cfg = d.fromParams({
+      version: 2,
+      spec: { ...EMPTY_SPEC, dimensions: ["stage"], metrics: ["users"] },
+      settings: { "cartesian.xAxis": "someone else's key" },
+    });
+    expect(cfg).toEqual({ dimension: "stage", metric: "users" });
+  });
+
+  it("prefers the stored slice over the spec", () => {
+    const cfg = d.fromParams({
+      version: 2,
+      spec: { ...EMPTY_SPEC, dimensions: ["from_spec_dim"], metrics: ["from_spec_m"] },
+      settings: { "funnel.dimension": "stored_dim", "funnel.metric": "stored_m" },
+    });
+    expect(cfg).toEqual({ dimension: "stored_dim", metric: "stored_m" });
+  });
+
+  // A brand-new chart has an empty slice AND an empty spec; it must stay `{}` rather than gain
+  // keys holding nothing, which is what the panel and the run guard read.
+  //
+  // `toStrictEqual`, not `toEqual`: `{ dimension: undefined }` deep-equals `{}` under `toEqual`,
+  // so a recovery that handed back undefined-valued keys passed the first version of this test.
+  it("stays empty for a v2 chart with nothing picked yet", () => {
+    expect(d.fromParams({ version: 2, spec: EMPTY_SPEC, settings: {} })).toStrictEqual({});
+  });
+
+  // The other half of the same guard: a field holding a LIST recovers `[]` from an empty spec,
+  // and an empty array is neither undefined nor pruned by `toStrictEqual`.
+  it("stays empty for a v2 chart whose fields are lists", () => {
+    const withList = fieldDescriptor({
+      key: "pie",
+      prefix: "pie.",
+      fields: [
+        { id: "dimensions", label: "Dimension", kind: "dimensions", required: "a dimension", max: 2 },
+        { id: "metric", label: "Metric", kind: "metric", required: "a metric" },
+      ],
+      buildSpec: (cfg, shared, helpers) =>
+        helpers.dimsAndMetrics((cfg.dimensions as string[]) ?? [], [cfg.metric], shared),
+      legacyKey: "pie",
+      legacyFromSpec: (spec) => ({ dimensions: spec.dimensions, metric: spec.metrics?.[0] }),
+    });
+    expect(withList.fromParams({ version: 2, spec: EMPTY_SPEC, settings: {} })).toStrictEqual({});
+    // …but a spec that names something still comes back.
+    expect(withList.fromParams({
+      version: 2, spec: { ...EMPTY_SPEC, dimensions: ["category"], metrics: ["orders"] }, settings: {},
+    })).toStrictEqual({ dimensions: ["category"], metric: "orders" });
+  });
+
   it("builds a spec from the declared fields", () => {
     const spec = d.buildSpec({ dimension: "region", metric: "m" }, { filters: [], rowLimit: 500, temporalUnits: {} });
     expect(spec.dimensions).toEqual(["region"]);

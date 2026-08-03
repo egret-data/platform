@@ -34,15 +34,23 @@ const PERCENT_VISIBILITIES: readonly string[] = ["off", "legend", "inside", "bot
 /**
  * Where a pie's percentages go, given what (if anything) is stored.
  *
- * Unset defaults to "legend" ONCE THERE IS MORE THAN ONE RING, and stays "off" for a single
- * ring. On a sunburst the legend is where the reader compares — it lists ring 0 only (the
- * level whose slices are shares of the whole chart, and the only level whose colours are
- * unambiguous), and it has room for a number that the arcs do not: ring-0 labels are already
- * competing for arc space with the rings outside them, and the fit pass truncates or drops
- * them. Percentages on the outer rings would be worse than crowded — they are shares of a
- * PARENT slice, so stacking them next to ring-0's shares-of-the-whole invites comparing two
- * different denominators. A single-ring pie is left alone: its labels have room, nothing
- * about it was reported as unreadable, and every saved one would otherwise change appearance.
+ * Unset defaults to "legend" AT EVERY RING COUNT, which is Metabase's own rule —
+ * `getDefaultPercentVisibility = () => "legend"`, a constant with no ring count and no chart in
+ * it. The legend is where the reader compares: it lists ring 0 only (the level whose slices are
+ * shares of the whole chart, and the only level whose colours are unambiguous), and it has room
+ * for a number that the arcs do not — ring-0 labels are already competing for arc space with the
+ * rings outside them, and the fit pass truncates or drops them. Percentages on the outer rings
+ * would be worse than crowded: they are shares of a PARENT slice, so stacking them next to
+ * ring-0's shares-of-the-whole invites comparing two different denominators.
+ *
+ * A SINGLE RING USED TO BE EXCLUDED, on the grounds that "its labels have room" and that nothing
+ * about it was reported as unreadable. That was an answer to a different question. Arc space is
+ * what "inside" spends; "legend" spends none of it — the legend is React markup in a column
+ * beside the canvas (PieLegend.tsx), and it is a list of names with empty space after each one.
+ * And the reason given above for granting the legend its number holds MORE strongly for one ring
+ * than for three: ring 0 is then the only ring, every entry's share is a share of the whole, and
+ * there is no second denominator anywhere to confuse it with. A pie exists to show proportions,
+ * and reading them off arc angles is exactly what the legend's number saves the reader from.
  *
  * A stored value that isn't one of the four degrades to "off" rather than being trusted:
  * settings arrive from a JSONB column that is never whitelisted server-side, so this can be
@@ -53,8 +61,8 @@ const PERCENT_VISIBILITIES: readonly string[] = ["off", "legend", "inside", "bot
  * it becomes a control that lies (the bug this program has already fixed for the legend, slice
  * labels and, just now, the centre total).
  */
-export function resolvePercentVisibility(stored: string | undefined, ringCount: number): PercentVisibility {
-  if (stored === undefined) return ringCount > 1 ? "legend" : "off";
+export function resolvePercentVisibility(stored: string | undefined): PercentVisibility {
+  if (stored === undefined) return "legend";
   return PERCENT_VISIBILITIES.includes(stored) ? (stored as PercentVisibility) : "off";
 }
 
@@ -75,7 +83,7 @@ export interface PieBuildConfig {
    * one-ring pie with no hole at all. */
   showTotal?: boolean;
   /** Where a slice's percent appears — see `resolvePercentVisibility` for the values and the
-   * default. Unset defaults to "legend" for a multi-ring pie, "off" for a single ring. */
+   * default. Unset defaults to "legend", at any ring count. */
   percentVisibility?: PercentVisibility;
   /** Per-slice colour override, keyed by the slice (dimension) value. */
   sliceColors?: Record<string, string>;
@@ -83,8 +91,13 @@ export interface PieBuildConfig {
    * Extending this to inner rings would need a compound key and isn't worth it for rings that
    * exist to be scanned, not curated.
    *
-   * All three key on the slice's RAW dimension value, never its renamed display text — so a
-   * rename never breaks a colour override, a hide, or a manual position.
+   * All three — and `sliceColors` with them — key on the slice's RAW dimension value, which is
+   * `Slice.raw` and is what `PieDisplayControl` hands the settings panel. Never the DISPLAY text:
+   * that is the raw value after a `columnSettings` format AND after a `sliceNames` rename, so
+   * keying on it would mean a date format silently disabled every one of these controls, and a
+   * rename broke a colour override, a hide or a manual position. Metabase keys the same four the
+   * same way (`getPieRows` builds each row around `getKeyFromDimensionValue(value)` and carries
+   * `name: formatter(value)` beside it; the hidden check is `!hiddenSlices.includes(row.key)`).
    *
    * `hiddenSlices` rows are dropped before the ring's total/threshold is computed at all, so
    * the remaining slices' shares re-base as if the hidden category never existed; an outer
@@ -117,7 +130,15 @@ export interface PieBuildConfig {
 }
 
 const OTHER_NAME = "Other";
-const DEFAULT_THRESHOLD = 2.5; // percent — Metabase SLICE_THRESHOLD (0.025)
+/**
+ * The share below which a ring-0 slice folds into "Other" when nothing is stored — percent,
+ * Metabase's SLICE_THRESHOLD (0.025).
+ *
+ * Exported because the settings panel SHOWS this number in "Group slices below" when the config
+ * carries none of its own, and a second literal 2.5 over there would be a control quietly
+ * disagreeing with the chart the day either moved.
+ */
+export const DEFAULT_SLICE_THRESHOLD = 2.5;
 /**
  * The smallest share of the chart a RING-0 slice is drawn at, however little it is worth —
  * Metabase's `OTHER_SLICE_MIN_PERCENTAGE` (0.005).
@@ -168,8 +189,17 @@ export function pieSliceDrillPath(key: string | undefined): string[] | null {
 /** One (aggregated) slice going into a ring, still carrying the identity fields ring-nesting needs:
  * `key` — this ring's own aggregation key (the dimension-value path up to and including this ring);
  * `parentKey` — the same path one ring in, i.e. the key this slice's row(s) aggregate to in the
- * next ring inward. Absent on the synthetic "Other" slice, which has no single origin. */
-interface Slice { name: string; value: number; key?: string; parentKey?: string; itemStyle?: { color: string } }
+ * next ring inward;
+ * `raw` — this ring's OWN dimension value, unformatted: the last segment of `key`, and the string
+ * the settings panel is handed (`PieDisplayControl` passes `String(row[dimIdx])`). Every stored
+ * curation — `sliceColors`, `sliceNames`, `hiddenSlices`, `sliceOrder` — is matched against THIS
+ * and never against `name`, which a column format can make read completely differently.
+ * `key`, `parentKey` and `raw` are all absent on the synthetic "Other" slice, which has no single
+ * origin — and so takes no curation, at any ring depth. */
+interface Slice {
+  name: string; value: number; key?: string; parentKey?: string; raw?: string;
+  itemStyle?: { color: string };
+}
 
 /** One node of the `sunburst` series' data tree — a drawn slice, plus the slices nested inside it.
  * Named so `toNode` can be recursive without TypeScript having to infer its own return type. */
@@ -209,9 +239,13 @@ interface PieSliceNode {
 }
 
 /** A ring's raw (pre-robustness-rules) aggregate: rows grouped by the dimension-value tuple up to
- * and including this ring's own dimension, values summed. Pre-existing behaviour, unchanged by
- * nesting: grouping is by DISPLAYED value, so `null`, `undefined` and `""` all render as the same
- * `""`-named slice and merge together. */
+ * and including this ring's own dimension, values summed.
+ *
+ * Grouping is by the STRINGIFIED RAW value, never by the formatted label — so `null`, `undefined`
+ * and `""` all collapse into one `""` slice (pre-existing, unchanged by nesting), while two
+ * distinct values that a column format happens to render identically stay two slices. `labelOf`
+ * reaches `name` and nothing else, which is why moving the curations off `name` and onto `raw`
+ * cannot merge or split anything. */
 function aggregateRing(
   rows: unknown[][], dimIdxs: (number | undefined)[], units: (string | undefined)[], mi: number,
   // How this ring's own dimension value should READ. Applied to the display name only, never to
@@ -234,6 +268,7 @@ function aggregateRing(
     else groups.set(key, {
       key,
       parentKey: parts.length > 1 ? parts.slice(0, -1).join(KEY_SEP) : undefined,
+      raw: parts[parts.length - 1],
       name: labelOf(parts[parts.length - 1]),
       value,
     });
@@ -288,7 +323,7 @@ function buildSlices(items: Slice[], cfg: PieBuildConfig): { slices: Slice[]; gr
   const groupOf = new Map<string, string>();
   for (const s of slices) if (s.key) groupOf.set(s.key, s.key);
 
-  const threshold = (cfg.sliceThreshold ?? DEFAULT_THRESHOLD) / 100;
+  const threshold = (cfg.sliceThreshold ?? DEFAULT_SLICE_THRESHOLD) / 100;
   if (threshold > 0 && slices.length > 0) {
     const parentGroups = new Map<string | undefined, Slice[]>();
     for (const s of slices) {
@@ -322,6 +357,85 @@ function buildSlices(items: Slice[], cfg: PieBuildConfig): { slices: Slice[]; gr
   }
 
   return { slices, groupOf };
+}
+
+/** One row of the settings panel's slice list. */
+export interface PieSliceRow {
+  /** The slice's RAW dimension value — `Slice.raw`, which is the key every stored curation is
+   * written against (`sliceColors`, `sliceNames`, `hiddenSlices`, `sliceOrder`). */
+  key: string;
+  /** Merged into ring 0's synthetic "Other" bucket by the threshold, so the chart draws no slice
+   * of its own for it: its colour, its name and its visibility all belong to the bucket now. */
+  folded: boolean;
+}
+
+/**
+ * RING 0's SLICES AS THE PANEL HAS TO SEE THEM: in the order the chart draws them, and saying
+ * which ones the "Other" fold swallowed.
+ *
+ * `PieDisplayControl` used to build this list itself, out of the distinct raw values of the first
+ * dimension in ROW order and with no measure at all. That is not a list the chart ever draws: the
+ * pie sorts value-descending (`buildSlices`), so on a twelve-slice monthly pie the panel's rows and
+ * the chart's wedges shared no position at all, and matching a legend swatch to the row that
+ * renames it meant hunting. Without the measure the panel could not run the fold either, so it went
+ * on offering colour, rename and hide controls for slices that had been merged into "Other" and no
+ * longer existed — and, worse, kept them as ring-0 colour KEYS, where a pin on a folded slice
+ * consumed a palette slot the chart had left free and moved a surviving slice's swatch off the
+ * colour it is actually drawn in.
+ *
+ * So the derivation lives HERE, next to the one the chart uses, and goes through the same
+ * `aggregateRing` + `buildSlices` pass — including the merge-2+ rule (a lone sub-threshold slice is
+ * NOT folded), the sign/zero rules, and the all-negative absolute-value flip, none of which a
+ * second implementation would be likely to reproduce and all of which would show up as a panel
+ * disagreeing with its own chart.
+ *
+ * Metabase's `getPieRows` is the same idea: aggregate, sort by value, then mark `isOther` on
+ * everything under the threshold (and only when 2+ qualify) — and its list widget renders nothing
+ * at all for a row marked that way.
+ *
+ * WHAT IS NOT APPLIED HERE: `sliceOrder`. The panel owns the manual order (it is what its arrows
+ * write), and it ranks this list itself exactly as `buildPieRings` ranks the ring — one owner, one
+ * rule. Everything ranked is therefore value-descending underneath.
+ *
+ * Rows the chart does NOT draw — hidden slices, and anything the sign/zero rule dropped — are
+ * listed last: they must stay listed (a hidden slice's own switch is the only way back), but they
+ * have no position in a draw order they are not part of.
+ */
+export function pieSliceRows(columns: ResultColumn[], rows: unknown[][], cfg: PieBuildConfig): PieSliceRow[] {
+  const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
+  const dim = cfg.dimensions?.[0];
+  const di = dim != null ? idx[dim] : undefined;
+  const mi = cfg.metric != null ? idx[cfg.metric] : undefined;
+  // The same lookup `buildPieRings` makes, so a pie whose columns the chart cannot resolve lists
+  // nothing rather than listing rows for a chart that draws nothing.
+  if (dim == null || di == null || mi == null) return [];
+
+  // Keyed the way the RING is keyed, which for a temporal extraction unit is `temporalLabel`'s
+  // finished word ("Wed") rather than the raw `3` — the aggregation key itself differs there, so a
+  // panel that stringified the column would write every curation under a key no slice carries.
+  const items = aggregateRing(rows, [di], [cfg.dimensionUnits?.[dim]], mi);
+  const hidden = new Set(cfg.hiddenSlices ?? []);
+  // Hidden rows are dropped BEFORE the fold, exactly as `buildPieRings` drops them — the rest of
+  // the ring re-bases as if the hidden category never existed, which changes what falls under the
+  // threshold.
+  const { slices, groupOf } = buildSlices(items.filter((it) => !hidden.has(it.raw!)), cfg);
+
+  // `groupOf` is seeded with every surviving slice in the ring's own post-sort order and only then
+  // re-pointed for the folded ones; a Map keeps a re-written key where it was, so this reads out in
+  // that same order.
+  const foldedKeys = [...groupOf].filter(([key, group]) => key !== group).map(([key]) => key);
+  const out: PieSliceRow[] = [];
+  for (const s of slices) {
+    // The synthetic bucket, identified by its sentinel rather than by the word "Other" (a real
+    // dimension value can be that string). It stands in for its constituents, so it expands.
+    if (s.key?.startsWith(OTHER_KEY)) out.push(...foldedKeys.map((key) => ({ key, folded: true })));
+    else if (s.raw != null) out.push({ key: s.raw, folded: false });
+  }
+  const listed = new Set(out.map((r) => r.key));
+  for (const it of items) {
+    if (it.raw != null && !listed.has(it.raw)) out.push({ key: it.raw, folded: false });
+  }
+  return out;
 }
 
 /** Groups a ring's slices under the key of the PARENT-ring slice each one belongs to — the
@@ -692,18 +806,26 @@ const TOTAL_LABEL_ID = "pie-total-label";
 function pieHoleModel(rings: Slice[][], cfg: PieBuildConfig, format: (v: unknown) => string): PieHoleModel {
   const ringCount = rings.length;
   const data = rings[0] ?? [];
-  // DEFAULTS ON FOR A MULTI-RING PIE. Measured against a real Metabase (question 7, "Product
-  // breakdown") at 1440x920: it renders `2,852` over `Total` in the hole, egret rendered nothing,
-  // and an empty void in the middle of three rings is what made the chart read as unfinished. A
-  // one-ring donut is left exactly as it was — its hole is small enough to read as deliberate, and
-  // changing it would change what every saved donut looks like. `??`, not `||`, so an explicit
-  // `false` still turns it off; resolved here at render time and never written into stored
-  // settings (this program's standing rule).
+  // DEFAULTS ON WHEREVER THERE IS A HOLE TO WRITE IN. Measured against a real Metabase (question
+  // 7, "Product breakdown") at 1440x920: it renders `2,852` over `Total` in the hole, egret
+  // rendered nothing, and an empty void in the middle of three rings is what made the chart read
+  // as unfinished. Metabase's own rule is `getDefaultShowTotal = () => true`, a constant.
+  //
+  // A ONE-RING DONUT USED TO BE EXCLUDED, on the grounds that "its hole is small enough to read as
+  // deliberate". Measured, that is the wrong way round: egret's one-ring donut hole is 45/70 =
+  // 0.643 of the outer radius (pieGeometry), while the hole Metabase writes its default total into
+  // is `DIMENSIONS.slice.innerRadiusRatio` = 3/5 = 0.600. egret's is the LARGER void of the two,
+  // so the reason given for leaving it empty argues for filling it.
+  //
+  // `??`, not `||`, so an explicit `false` still turns it off; resolved here at render time and
+  // never written into stored settings (this program's standing rule).
   //
   // Gated on there BEING a hole rather than on `cfg.donut`: a multi-ring pie always has one (see
   // pieGeometry), whatever `donut` says, so keying off `donut` would have hidden the total on
-  // exactly the charts this default exists for.
-  const showTotal = cfg.showTotal ?? ringCount > 1;
+  // exactly the charts this default exists for. That gate is also what keeps `true` safe here —
+  // a plain pie has no hole, which is a shape Metabase cannot draw at all (it has no donut
+  // switch), so there is no Metabase behaviour to copy onto it and nowhere to put a total.
+  const showTotal = cfg.showTotal ?? true;
   const shown =
     showTotal && data.length > 0 && pieGeometry(cfg, ringCount).holeRatio > 0;
   // The innermost ring's total is the grand total: it's summed over every outer dimension already.
@@ -897,8 +1019,15 @@ function buildPieRings(
       // below never gets an entry for it, so the orphan-drop above removes its children in the
       // next ring out for free, the same way it already handles a parent lost to the sign/zero
       // rule.
+      //
+      // Matched on `raw`, the panel's own vocabulary — see `Slice.raw`. It used to match `name`,
+      // which a column format rewrites: a pie over `order_month` at Date style `January 2024`
+      // listed `2026-12-01` in the panel and drew `December 2026`, and the hide toggle silently
+      // did nothing at all because no drawn name was ever in the saved list.
       if (level === 0 && cfg.hiddenSlices?.length) {
-        items = items.filter((it) => !cfg.hiddenSlices!.includes(it.name));
+        // `raw!` because these come straight from `aggregateRing`, which sets it on every item;
+        // only the synthetic "Other" bucket lacks one, and that is built later, in `buildSlices`.
+        items = items.filter((it) => !cfg.hiddenSlices!.includes(it.raw!));
       }
       const { slices, groupOf } = buildSlices(items, cfg);
       // A ring below 0 keeps buildSlices' own order (value-desc, each parent's "Other" last within
@@ -909,11 +1038,15 @@ function buildPieRings(
       // Ring 0 only: sliceOrder is a display-order override keyed on the same raw value as
       // hiddenSlices — applied AFTER buildSlices, so it can't influence the Other threshold.
       // Ring 0's order IS the sunburst's top-level draw order, so every outer ring follows it.
+      //
+      // `raw` is `undefined` on the synthetic "Other" bucket, which therefore ranks last however
+      // the list is written — Metabase's own rule (its Other row is pinned to the end of
+      // `pie.rows`), and the panel never offers the bucket as a row to move in the first place.
       if (level === 0 && cfg.sliceOrder?.length) {
         const rank = new Map(cfg.sliceOrder.map((n, i) => [n, i]));
-        ordered = [...ordered].sort(
-          (a, b) => (rank.get(a.name) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.name) ?? Number.MAX_SAFE_INTEGER),
-        );
+        const rankOf = (s: Slice) =>
+          (s.raw != null ? rank.get(s.raw) : undefined) ?? Number.MAX_SAFE_INTEGER;
+        ordered = [...ordered].sort((a, b) => rankOf(a) - rankOf(b));
       }
       rings.push(ordered);
       groupOfByLevel.push(groupOf);
@@ -923,10 +1056,18 @@ function buildPieRings(
   const effectiveRings = rings.length > 0 ? rings : [[]];
 
   // Per-slice colour overrides win over the palette slot (the "Other" slice keeps its muted tint).
-  // Matched by NAME on every ring, not just ring 0 — so a value that happens to appear as a
-  // dimension value in more than one ring (e.g. the same string used for both a region and a
-  // category) takes the override in both places it appears. Pre-existing behaviour, unchanged
-  // here; flagged because it's easy to assume "override" means "ring-0 only".
+  // Matched on that ring's OWN RAW dimension value (`Slice.raw`) at every ring, not just ring 0 —
+  // so a value that happens to appear as a dimension value in more than one ring (e.g. the same
+  // string used for both a region and a category) takes the override in both places it appears.
+  // Flagged because it's easy to assume "override" means "ring-0 only".
+  //
+  // It used to match on `name` instead, which is the same string only until the ring's dimension
+  // is given a column format: the panel writes `sliceColors["2026-12-01"]` and the chart drew
+  // `December 2026`, so the override landed on nothing. The synthetic "Other" bucket has no `raw`
+  // (it has no single origin), which is now what excludes it — replacing a check on the literal
+  // name `"Other"`, so a real dimension value that IS the string "Other" can finally be given a
+  // colour, the same way the rest of this file already tells the two apart by the key sentinel
+  // rather than by the word.
   //
   // The override goes through `resolveColor` like every other colour in this file: it arrives
   // from the chart's settings JSONB, which is never whitelisted server-side, so it can be
@@ -935,9 +1076,9 @@ function buildPieRings(
   // fallback, and an empty-string fallback (not a colour, so unambiguous) turns that into "no
   // override": the slice keeps its palette slot instead of being painted with a value ECharts
   // would ignore and `getTextColorForBackground` would then silently mis-contrast against.
-  const sliceOverride = (name: string): string | undefined => {
-    const c = cfg.sliceColors?.[name];
-    if (!c || name === OTHER_NAME) return undefined;
+  const sliceOverride = (raw: string | undefined): string | undefined => {
+    const c = raw != null ? cfg.sliceColors?.[raw] : undefined;
+    if (!c) return undefined;
     return resolveColor(c, "") || undefined;
   };
   // Applied HERE for rings below 0 only. Ring 0's overrides are handed to `colorsForKeys` instead
@@ -953,7 +1094,7 @@ function buildPieRings(
   // starting a new family. So it stays a straight assignment.
   for (const ring of effectiveRings.slice(1)) {
     for (const s of ring) {
-      const resolved = sliceOverride(s.name);
+      const resolved = sliceOverride(s.raw);
       if (resolved) s.itemStyle = { color: resolved };
     }
   }
@@ -1037,22 +1178,33 @@ function buildPieRings(
   // `buildPieBreakdown` already do. A dimension value can genuinely BE the string "Other" (the file
   // accepts that collision knowingly, see OTHER_KEY), and such a slice is a real category that must
   // keep hashing to a colour like any other — only the synthetic bucket carries the sentinel.
+  //
+  // HASHED ON THE RAW VALUE, not on the drawn label — Metabase's own input (`getPieColors` hashes
+  // `dimensionValues.map(getKeyFromDimensionValue)` and merges `pie.rows`' colours in by `row.key`,
+  // never by `row.name`). Two things follow, and both are the point: `sliceColors` can go in as
+  // `existing` under the same key the panel wrote it under, and `PieDisplaySection`'s own swatch —
+  // which has only ever had the raw values to hash — now shows the ink the chart actually uses. A
+  // slice also keeps its colour when its column's date/number format is edited, which is a setting
+  // about how a value READS, not about which value it is.
   const ring0Slices = effectiveRings[0] ?? [];
   const ring0Named = ring0Slices.filter((s) => !(s.key != null && s.key.startsWith(OTHER_KEY)));
   // One decision about the whole ring, not one per slice: a hash collision moves a name along, and
   // an override takes its colour out of circulation, so neither can be worked out a slice at a time.
   // `sliceColors` goes in as `existing` — the single place ring 0's overrides are applied.
   const ring0Colors = colorsForKeys(
-    ring0Named.map((s) => s.name),
+    ring0Named.map((s) => s.raw!),
     Object.fromEntries(
       ring0Named.flatMap((s) => {
-        const c = sliceOverride(s.name);
-        return c ? [[s.name, c] as [string, string]] : [];
+        const c = sliceOverride(s.raw);
+        return c ? [[s.raw!, c] as [string, string]] : [];
       }),
     ),
   );
   ring0Slices.forEach((s) => {
-    s.itemStyle ??= { color: ring0Colors[s.name] };
+    // Every slice left without a `raw` is the synthetic bucket, whose muted tint `buildSlices`
+    // already fixed — so there is nothing here for the `??=` to fall back to, and no key it could
+    // have looked up.
+    if (s.raw != null) s.itemStyle ??= { color: ring0Colors[s.raw] };
   });
   let anchors = new Map<string, ColorAnchor>();
   (effectiveRings[0] ?? []).forEach((s) => {
@@ -1094,12 +1246,17 @@ function buildPieRings(
   }
 
   // Ring 0 only, and deliberately LAST: a display rename must not disturb anything computed
-  // above by raw value — the sliceColors match (by name, above) and the colour-inheritance
-  // anchors (by key, just above) have already run against the raw value, so renaming now only
-  // changes what's shown, never what's found by hiddenSlices/sliceOrder/sliceColors.
+  // above by raw value — the sliceColors match and the colour-inheritance anchors have both
+  // already run, so renaming now only changes what's SHOWN, never what's found by
+  // hiddenSlices/sliceOrder/sliceColors.
+  //
+  // Keyed on `raw` like the other three, for the same reason: the panel writes the dimension
+  // value, and `s.name` is whatever the column's format made of it. Chaining is impossible by
+  // construction — a rename is looked up against a field a rename never touches — so a stored
+  // `{ "A": "B", "B": "C" }` renames A to B and B to C, and never A to C.
   if (cfg.sliceNames) {
     for (const s of effectiveRings[0] ?? []) {
-      const renamed = cfg.sliceNames[s.name];
+      const renamed = s.raw != null ? cfg.sliceNames[s.raw] : undefined;
       if (renamed) s.name = renamed;
     }
   }
@@ -1148,7 +1305,7 @@ export function buildPieLegend(
   if (!(cfg.showLegend ?? true)) return [];
   const { rings, groupOfByLevel } = buildPieRings(columns, rows, cfg);
   const ring0 = rings[0] ?? [];
-  const visibility = resolvePercentVisibility(cfg.percentVisibility, rings.length);
+  const visibility = resolvePercentVisibility(cfg.percentVisibility);
   const withPercent = visibility === "legend" || visibility === "both";
   const total = ring0.reduce((t, s) => t + s.value, 0);
   // The legend's OWN precision, over the only shares it lists (ring 0's, each already a share of
@@ -1522,7 +1679,7 @@ export function buildPieOption(
   // "both" means what its name says and what Metabase means by it: the legend AND the slice.
   // Before "legend" existed here, a stored "both" could only ever draw the inside half — the
   // value promised something the renderer had no way to deliver.
-  const percentVisibility = resolvePercentVisibility(cfg.percentVisibility, ringCount);
+  const percentVisibility = resolvePercentVisibility(cfg.percentVisibility);
   const showPercent = percentVisibility === "inside" || percentVisibility === "both";
 
   // Slice label sizing — Metabase's constants.ts: multiRingFontSize (12) once there's more than
