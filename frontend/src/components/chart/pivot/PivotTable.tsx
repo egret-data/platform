@@ -1,4 +1,4 @@
-import { buildPivot, type PivotInput } from "./engine";
+import { buildPivot, pivotProblem, type PivotInput } from "./engine";
 import { formatValue } from "../format";
 import { buildConditional } from "../conditional";
 import type { ColumnFormat, Rule } from "../format-types";
@@ -79,6 +79,25 @@ export function PivotTable({
    * dimension's labels render as the raw `2026-01-01` even when the user has set a date format. */
   columnTypes?: Record<string, string>;
 }) {
+  // Checked BEFORE building, the way `sankeyProblem` is — a result the engine cannot place must
+  // not reach `buildPivot`, which would silently assemble a one-cell table out of it.
+  //
+  // Rendered HERE rather than at the two call sites, which is where the sankey message lives. That
+  // check sits outside `SankeyChart` because it decides whether an error boundary renders at all
+  // and hooks cannot follow an early return in `ChartRenderer`; neither applies to this component,
+  // which uses no hooks and has no boundary of its own. What does apply is that `PivotTable` is
+  // rendered from both `ChartRenderer` (dashboard cards) and `PreviewPane` (the editor) — putting
+  // the branch at the call sites would duplicate it, and a pivot that fails on a dashboard but not
+  // in the editor is exactly the asymmetry this guard exists to expose.
+  const problem = pivotProblem(input);
+  if (problem) {
+    return (
+      <div className="flex h-full min-h-[8rem] items-center justify-center p-6 text-center text-sm text-muted-foreground">
+        {problem}
+      </div>
+    );
+  }
+
   // The engine needs to know whether any metric was renamed, so it can give the sub-header a row
   // to show the name in — see `renamedMetric` there.
   const metricTitles: Record<string, string> = {};

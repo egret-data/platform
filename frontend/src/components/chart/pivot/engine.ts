@@ -24,6 +24,28 @@ export type CellValue = number | string | null;
 const pathKey = (rowPath: (string | null)[], colPath: (string | null)[]) =>
   JSON.stringify([rowPath, colPath]);
 
+/**
+ * Why this result cannot be laid out as a pivot, in words a reader can act on — the counterpart to
+ * `sankeyProblem`, and pure for the same reason: it is decidable from the input alone.
+ *
+ * A pivot is laid out from the `__grp_i` marker columns the backend emits as `GROUPING(x)`, one per
+ * dimension, and it emits them only when the query spec carries `rollup_groups`. A chart persisted
+ * with `rollup_groups: []` therefore comes back with its dimensions and its metric but no markers —
+ * and `indexResult` could not tell that apart from markers that are all zero. `idx("__grp_0")`
+ * returned -1, `r[-1]` was `undefined`, `Number(undefined)` was `NaN`, `NaN === 0` was false, so
+ * every row classified into the `([], [])` cell and overwrote the one before it. The result was a
+ * header with a single blank leaf and one "Grand totals" row carrying the LAST row's value: a
+ * plausible-looking table assembled from one row of many, with nothing on screen to say so.
+ *
+ * Nothing here is checked when there are no dimensions to place — a metric-only result needs no
+ * markers and lays out correctly without them.
+ */
+export function pivotProblem(input: PivotInput): string | undefined {
+  if (input.rowDims.length === 0 && input.colDims.length === 0) return undefined;
+  if (input.columns.includes("__grp_0")) return undefined;
+  return "These results are missing the grouping columns this pivot is laid out from, so its rows cannot be placed. Open the chart in the editor and save it again to rebuild its query.";
+}
+
 export interface Indexed {
   rowLeafPaths: (string | null)[][];   // distinct full row paths, first-appearance order
   colLeafPaths: (string | null)[][];   // distinct full col paths, first-appearance order

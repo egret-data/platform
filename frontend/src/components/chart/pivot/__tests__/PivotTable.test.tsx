@@ -150,3 +150,39 @@ describe("PivotTable — dimension labels are formatted", () => {
     expect(screen.getByText("Grand totals")).toBeInTheDocument();
   });
 });
+
+describe("PivotTable — a result with no rollup markers says so", () => {
+  // The shape a chart persisted with `rollup_groups: []` returns. Rendering it silently produced
+  // a header with one blank leaf and a single "Grand totals" row holding the LAST row's value —
+  // a plausible-looking table that is simply wrong.
+  const unmarked: PivotInput = {
+    columns: ["order_month", "category", "revenue"],
+    rows: [
+      ["2026-01-01", "Doohickey", 1939.99],
+      ["2026-01-01", "Widget", 2997.83],
+      ["2026-02-01", "Doohickey", 1200.5],
+    ],
+    rowDims: ["order_month"], colDims: ["category"], metrics: ["revenue"],
+    showRowTotals: true, showColTotals: true, condense: true, collapsed: new Set(),
+  };
+
+  it("renders the message instead of a table", () => {
+    const { container } = render(<PivotTable input={unmarked} />);
+    expect(screen.getByText(/grouping columns/i)).toBeInTheDocument();
+    expect(container.querySelector("table")).toBeNull();
+  });
+
+  it("does not invent a grand total out of the last row", () => {
+    render(<PivotTable input={unmarked} />);
+    expect(screen.queryByText("Grand totals")).not.toBeInTheDocument();
+    expect(screen.queryByText("1200.5")).not.toBeInTheDocument();
+  });
+
+  it("leaves a well-formed result rendering exactly as before", () => {
+    const { container } = render(<PivotTable input={input} />);
+    expect(screen.queryByText(/grouping columns/i)).not.toBeInTheDocument();
+    expect(container.querySelector("table")).not.toBeNull();
+    expect(screen.getByText("Grand totals")).toBeInTheDocument();
+    expect(screen.getByText("35")).toBeInTheDocument();
+  });
+});

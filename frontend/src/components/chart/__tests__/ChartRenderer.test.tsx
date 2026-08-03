@@ -226,12 +226,22 @@ describe("ChartRenderer", () => {
           showRowTotals: false,
           showColTotals: false,
         })}
-        columns={[{ name: "region", type: "varchar" }, { name: "revenue", type: "double" }]}
-        rows={[["EU", 1000], ["US", 2000]]}
+        // A ROLLUP result, carrying the `__grp_0` marker the backend emits per dimension. This
+        // fixture used to omit it, and the test still passed: without markers the pivot renders
+        // its header and NO body at all, and the assertion only looked at the header. It asserts
+        // a placed value now, so the fixture has to be a result the engine can actually lay out.
+        columns={[
+          { name: "region", type: "varchar" },
+          { name: "revenue", type: "double" },
+          { name: "__grp_0", type: "bigint" },
+        ]}
+        rows={[["EU", 1000, 0], ["US", 2000, 0]]}
       />,
     );
     // PivotTable renders rowDim names as column headers
     expect(screen.getByText("region")).toBeInTheDocument();
+    expect(screen.getByText("EU")).toBeInTheDocument();
+    expect(screen.getByText("2,000")).toBeInTheDocument();
   });
 
   it("calls onValueClick with the xAxis dim when a cartesian point is clicked", () => {
