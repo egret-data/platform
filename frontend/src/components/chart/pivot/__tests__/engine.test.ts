@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { indexResult, buildPivot, type PivotInput } from "../engine";
+import { indexResult, buildPivot, pivotProblem, type PivotInput } from "../engine";
 
 // 1 row dim (region) × 1 col dim (seg) × 1 metric (revenue), ROLLUP×ROLLUP result.
 // columns order: region, seg, revenue, __grp_0 (region marker), __grp_1 (seg marker)
@@ -342,5 +342,54 @@ describe("metric sub-header", () => {
 
   it("an empty title is not a rename", () => {
     expect(buildPivot({ ...oneMetric, metricTitles: { revenue: "" } }).topHeader).toHaveLength(1);
+  });
+});
+
+describe("pivotProblem — a result with no rollup markers", () => {
+  // Exactly the shape a chart saved with `rollup_groups: []` produces: the dimensions and the
+  // metric come back, the `__grp_i` marker columns do not.
+  const unmarked: PivotInput = {
+    columns: ["order_month", "category", "revenue"],
+    rows: [
+      ["2026-01-01", "Doohickey", 1939.99],
+      ["2026-01-01", "Widget", 2997.83],
+      ["2026-02-01", "Doohickey", 1200.5],
+    ],
+    rowDims: ["order_month"], colDims: ["category"], metrics: ["revenue"],
+    showRowTotals: true, showColTotals: true, condense: true, collapsed: new Set(),
+  };
+
+  it("is reported, naming the missing grouping columns", () => {
+    const problem = pivotProblem(unmarked);
+    expect(problem).toBeDefined();
+    expect(problem).toMatch(/grouping columns/i);
+  });
+
+  it("is what stands between the user and a table built from the last row alone", () => {
+    // Documents the silent failure the guard exists to stop. Without markers `idx("__grp_0")` is
+    // -1, `Number(undefined)` is NaN, every row classifies into the ([], []) cell, and the last
+    // row overwrites all the others: three rows become one cell holding 1200.5.
+    const p = buildPivot(unmarked);
+    expect(p.bodyRows).toHaveLength(1);
+    expect(p.bodyRows[0].kind).toBe("grand");
+    expect(p.bodyRows[0].values).toContain(1200.5);
+    expect(p.bodyRows[0].values).not.toContain(1939.99);
+  });
+
+  it("is not reported when the markers are there", () => {
+    expect(pivotProblem(input)).toBeUndefined();
+  });
+
+  it("is not reported for a marker-free result with no dimensions to place", () => {
+    // Nothing to roll up, so nothing to mark — a metric-only result is laid out correctly.
+    expect(pivotProblem({
+      columns: ["revenue"], rows: [[35]],
+      rowDims: [], colDims: [], metrics: ["revenue"],
+      showRowTotals: false, showColTotals: false, condense: false, collapsed: new Set(),
+    })).toBeUndefined();
+  });
+
+  it("is reported from the column dimension alone", () => {
+    expect(pivotProblem({ ...unmarked, rowDims: [] })).toBeDefined();
   });
 });
