@@ -213,11 +213,15 @@ describe("buildCartesianOption — data shaping (Metabase parity 1c)", () => {
     expect(opt.xAxis.data).toEqual(["2024-01-01", "2024-02-01", "2024-03-01"]);
     expect(opt.series[0].data).toEqual([1, 2, 3]);
   });
-  it("preserves first-seen order for a categorical (string) x-axis", () => {
+  // This used to assert first-seen order, `["Med", "High", "Low"]`, citing Metabase's `sortDataset`
+  // for it. First-seen order is the DEFECT: egret's stored specs carry `orderby: []`, so it is the
+  // engine's order and it changes between calls. See the dedicated suite at the end of this file.
+  it("sorts a categorical (string) x-axis ascending, not by arrival", () => {
     const cols = [{ name: "p", type: "varchar" }, { name: "rev", type: "double" }];
     const rows = [["Med", 2], ["High", 3], ["Low", 1]];
     const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "p", yMetrics: ["rev"] }) as any;
-    expect(opt.xAxis.data).toEqual(["Med", "High", "Low"]);
+    expect(opt.xAxis.data).toEqual(["High", "Low", "Med"]);
+    expect(opt.series[0].data).toEqual([3, 1, 2]);
   });
   it("drops rows whose x value is null", () => {
     const cols = [{ name: "yr", type: "int" }, { name: "rev", type: "double" }];
@@ -858,5 +862,97 @@ describe("scatter — bubbles, breakout and focus", () => {
       expect(s.emphasis.focus).toBe("series");
       expect(s.blur.itemStyle.opacity).toBe(0.3);
     }
+  });
+});
+
+/**
+ * A nominal axis draws in a stable order, whatever the query returned.
+ *
+ * THE FIXTURE IS THE POINT. These are the two orderings actually measured on
+ * `POST /charts/{id}/data` across ten calls to the same chart — seven returned one, three the
+ * other — and NEITHER is alphabetical. A fixture whose categories already arrive in the target
+ * order cannot detect this defect at all, so both real arrival orders are asserted here, and the
+ * expected output matches neither of them.
+ */
+describe("a nominal axis draws in a stable order", () => {
+  const cols = [{ name: "category", type: "varchar" }, { name: "revenue", type: "double" }];
+  // 3 calls in 10.
+  const arrivalA = [["Widget", 4], ["Gadget", 3], ["Doohickey", 1], ["Gizmo", 2]];
+  // 7 calls in 10 — the one that made three consecutive page loads look deterministic.
+  const arrivalB = [["Gizmo", 2], ["Widget", 4], ["Gadget", 3], ["Doohickey", 1]];
+  const sorted = ["Doohickey", "Gadget", "Gizmo", "Widget"];
+
+  it("sorts a bar's categories ascending, whichever order the rows arrived in", () => {
+    for (const rows of [arrivalA, arrivalB]) {
+      const opt = buildCartesianOption(cols, rows, {
+        kind: "bar", xAxis: "category", yMetrics: ["revenue"],
+      }) as any;
+      expect(opt.xAxis.data).toEqual(sorted);
+      // The bars must follow their categories, not keep the arrival order beside a sorted axis.
+      expect(opt.series[0].data).toEqual([1, 3, 2, 4]);
+    }
+  });
+
+  it("draws the two arrival orders identically — that is the whole defect", () => {
+    const of = (rows: unknown[][]) => JSON.stringify(
+      buildCartesianOption(cols, rows, { kind: "bar", xAxis: "category", yMetrics: ["revenue"] }),
+    );
+    expect(of(arrivalA)).toBe(of(arrivalB));
+  });
+
+  it("sorts a row chart's category axis the same way", () => {
+    const opt = buildCartesianOption(cols, arrivalB, {
+      kind: "row", xAxis: "category", yMetrics: ["revenue"],
+    }) as any;
+    expect(opt.yAxis.type).toBe("category");
+    expect(opt.yAxis.data).toEqual(sorted);
+    expect(opt.series[0].data).toEqual([1, 3, 2, 4]);
+  });
+
+  it("sorts a breakout chart's categories too, and keeps each cell with its own category", () => {
+    const bcols = [
+      { name: "category", type: "varchar" }, { name: "state", type: "varchar" },
+      { name: "revenue", type: "double" },
+    ];
+    const rows = [["Widget", "CA", 4], ["Doohickey", "CA", 1], ["Gizmo", "TX", 2]];
+    const opt = buildCartesianOption(bcols, rows, {
+      kind: "bar", xAxis: "category", yMetrics: ["revenue"], series: "state",
+    }) as any;
+    expect(opt.xAxis.data).toEqual(["Doohickey", "Gizmo", "Widget"]);
+    expect(opt.series.find((s: any) => s.name === "CA").data).toEqual([1, null, 4]);
+    expect(opt.series.find((s: any) => s.name === "TX").data).toEqual([null, 2, null]);
+  });
+
+  /**
+   * The one exemption. Arbitrary order is what is being fixed; a PIPELINE is not arbitrary, and
+   * the funnel's bar mode hands its steps over already ranked by `funnel.stepOrder`. The second
+   * half is what makes this test worth having — it shows the sort really would have scrambled it.
+   */
+  it("leaves a caller's meaningful order alone when it asks", () => {
+    const scols = [{ name: "step", type: "varchar" }, { name: "users", type: "bigint" }];
+    const rows = [["Visited", 4], ["Added to cart", 3], ["Checkout", 2], ["Purchased", 1]];
+    const base = { kind: "bar" as const, xAxis: "step", yMetrics: ["users"] };
+    const kept = buildCartesianOption(scols, rows, { ...base, preserveCategoryOrder: true }) as any;
+    expect(kept.xAxis.data).toEqual(["Visited", "Added to cart", "Checkout", "Purchased"]);
+    const scrambled = buildCartesianOption(scols, rows, base) as any;
+    expect(scrambled.xAxis.data).toEqual(["Added to cart", "Checkout", "Purchased", "Visited"]);
+  });
+
+  // The two branches this does NOT change. They are Metabase's own (`sortDataset`) and were never
+  // the defect: a temporal axis already drew chronologically and a numeric one already ascending.
+  it("still draws a temporal axis chronologically", () => {
+    const tcols = [{ name: "m", type: "timestamp" }, { name: "revenue", type: "double" }];
+    const rows = [["2026-03-01", 3], ["2026-01-01", 1], ["2026-02-01", 2]];
+    const opt = buildCartesianOption(tcols, rows, { kind: "line", xAxis: "m", yMetrics: ["revenue"] }) as any;
+    expect(opt.series[0].data).toEqual([1, 2, 3]);
+  });
+
+  it("still draws a numeric axis ascending, not as text", () => {
+    const ncols = [{ name: "n", type: "bigint" }, { name: "revenue", type: "double" }];
+    // 2 < 10 numerically but "10" < "2" as text, so this discriminates the numeric branch from a
+    // string sort landing on it by mistake.
+    const rows = [["10", 10], ["2", 2], ["1", 1]];
+    const opt = buildCartesianOption(ncols, rows, { kind: "bar", xAxis: "n", yMetrics: ["revenue"] }) as any;
+    expect(opt.series[0].data).toEqual([1, 2, 10]);
   });
 });
