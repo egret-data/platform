@@ -83,8 +83,13 @@ export interface PieBuildConfig {
    * Extending this to inner rings would need a compound key and isn't worth it for rings that
    * exist to be scanned, not curated.
    *
-   * All three key on the slice's RAW dimension value, never its renamed display text — so a
-   * rename never breaks a colour override, a hide, or a manual position.
+   * All three — and `sliceColors` with them — key on the slice's RAW dimension value, which is
+   * `Slice.raw` and is what `PieDisplayControl` hands the settings panel. Never the DISPLAY text:
+   * that is the raw value after a `columnSettings` format AND after a `sliceNames` rename, so
+   * keying on it would mean a date format silently disabled every one of these controls, and a
+   * rename broke a colour override, a hide or a manual position. Metabase keys the same four the
+   * same way (`getPieRows` builds each row around `getKeyFromDimensionValue(value)` and carries
+   * `name: formatter(value)` beside it; the hidden check is `!hiddenSlices.includes(row.key)`).
    *
    * `hiddenSlices` rows are dropped before the ring's total/threshold is computed at all, so
    * the remaining slices' shares re-base as if the hidden category never existed; an outer
@@ -168,8 +173,17 @@ export function pieSliceDrillPath(key: string | undefined): string[] | null {
 /** One (aggregated) slice going into a ring, still carrying the identity fields ring-nesting needs:
  * `key` — this ring's own aggregation key (the dimension-value path up to and including this ring);
  * `parentKey` — the same path one ring in, i.e. the key this slice's row(s) aggregate to in the
- * next ring inward. Absent on the synthetic "Other" slice, which has no single origin. */
-interface Slice { name: string; value: number; key?: string; parentKey?: string; itemStyle?: { color: string } }
+ * next ring inward;
+ * `raw` — this ring's OWN dimension value, unformatted: the last segment of `key`, and the string
+ * the settings panel is handed (`PieDisplayControl` passes `String(row[dimIdx])`). Every stored
+ * curation — `sliceColors`, `sliceNames`, `hiddenSlices`, `sliceOrder` — is matched against THIS
+ * and never against `name`, which a column format can make read completely differently.
+ * `key`, `parentKey` and `raw` are all absent on the synthetic "Other" slice, which has no single
+ * origin — and so takes no curation, at any ring depth. */
+interface Slice {
+  name: string; value: number; key?: string; parentKey?: string; raw?: string;
+  itemStyle?: { color: string };
+}
 
 /** One node of the `sunburst` series' data tree — a drawn slice, plus the slices nested inside it.
  * Named so `toNode` can be recursive without TypeScript having to infer its own return type. */
@@ -209,9 +223,13 @@ interface PieSliceNode {
 }
 
 /** A ring's raw (pre-robustness-rules) aggregate: rows grouped by the dimension-value tuple up to
- * and including this ring's own dimension, values summed. Pre-existing behaviour, unchanged by
- * nesting: grouping is by DISPLAYED value, so `null`, `undefined` and `""` all render as the same
- * `""`-named slice and merge together. */
+ * and including this ring's own dimension, values summed.
+ *
+ * Grouping is by the STRINGIFIED RAW value, never by the formatted label — so `null`, `undefined`
+ * and `""` all collapse into one `""` slice (pre-existing, unchanged by nesting), while two
+ * distinct values that a column format happens to render identically stay two slices. `labelOf`
+ * reaches `name` and nothing else, which is why moving the curations off `name` and onto `raw`
+ * cannot merge or split anything. */
 function aggregateRing(
   rows: unknown[][], dimIdxs: (number | undefined)[], units: (string | undefined)[], mi: number,
   // How this ring's own dimension value should READ. Applied to the display name only, never to
@@ -234,6 +252,7 @@ function aggregateRing(
     else groups.set(key, {
       key,
       parentKey: parts.length > 1 ? parts.slice(0, -1).join(KEY_SEP) : undefined,
+      raw: parts[parts.length - 1],
       name: labelOf(parts[parts.length - 1]),
       value,
     });
@@ -897,8 +916,15 @@ function buildPieRings(
       // below never gets an entry for it, so the orphan-drop above removes its children in the
       // next ring out for free, the same way it already handles a parent lost to the sign/zero
       // rule.
+      //
+      // Matched on `raw`, the panel's own vocabulary — see `Slice.raw`. It used to match `name`,
+      // which a column format rewrites: a pie over `order_month` at Date style `January 2024`
+      // listed `2026-12-01` in the panel and drew `December 2026`, and the hide toggle silently
+      // did nothing at all because no drawn name was ever in the saved list.
       if (level === 0 && cfg.hiddenSlices?.length) {
-        items = items.filter((it) => !cfg.hiddenSlices!.includes(it.name));
+        // `raw!` because these come straight from `aggregateRing`, which sets it on every item;
+        // only the synthetic "Other" bucket lacks one, and that is built later, in `buildSlices`.
+        items = items.filter((it) => !cfg.hiddenSlices!.includes(it.raw!));
       }
       const { slices, groupOf } = buildSlices(items, cfg);
       // A ring below 0 keeps buildSlices' own order (value-desc, each parent's "Other" last within
@@ -909,11 +935,15 @@ function buildPieRings(
       // Ring 0 only: sliceOrder is a display-order override keyed on the same raw value as
       // hiddenSlices — applied AFTER buildSlices, so it can't influence the Other threshold.
       // Ring 0's order IS the sunburst's top-level draw order, so every outer ring follows it.
+      //
+      // `raw` is `undefined` on the synthetic "Other" bucket, which therefore ranks last however
+      // the list is written — Metabase's own rule (its Other row is pinned to the end of
+      // `pie.rows`), and the panel never offers the bucket as a row to move in the first place.
       if (level === 0 && cfg.sliceOrder?.length) {
         const rank = new Map(cfg.sliceOrder.map((n, i) => [n, i]));
-        ordered = [...ordered].sort(
-          (a, b) => (rank.get(a.name) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.name) ?? Number.MAX_SAFE_INTEGER),
-        );
+        const rankOf = (s: Slice) =>
+          (s.raw != null ? rank.get(s.raw) : undefined) ?? Number.MAX_SAFE_INTEGER;
+        ordered = [...ordered].sort((a, b) => rankOf(a) - rankOf(b));
       }
       rings.push(ordered);
       groupOfByLevel.push(groupOf);
@@ -923,10 +953,18 @@ function buildPieRings(
   const effectiveRings = rings.length > 0 ? rings : [[]];
 
   // Per-slice colour overrides win over the palette slot (the "Other" slice keeps its muted tint).
-  // Matched by NAME on every ring, not just ring 0 — so a value that happens to appear as a
-  // dimension value in more than one ring (e.g. the same string used for both a region and a
-  // category) takes the override in both places it appears. Pre-existing behaviour, unchanged
-  // here; flagged because it's easy to assume "override" means "ring-0 only".
+  // Matched on that ring's OWN RAW dimension value (`Slice.raw`) at every ring, not just ring 0 —
+  // so a value that happens to appear as a dimension value in more than one ring (e.g. the same
+  // string used for both a region and a category) takes the override in both places it appears.
+  // Flagged because it's easy to assume "override" means "ring-0 only".
+  //
+  // It used to match on `name` instead, which is the same string only until the ring's dimension
+  // is given a column format: the panel writes `sliceColors["2026-12-01"]` and the chart drew
+  // `December 2026`, so the override landed on nothing. The synthetic "Other" bucket has no `raw`
+  // (it has no single origin), which is now what excludes it — replacing a check on the literal
+  // name `"Other"`, so a real dimension value that IS the string "Other" can finally be given a
+  // colour, the same way the rest of this file already tells the two apart by the key sentinel
+  // rather than by the word.
   //
   // The override goes through `resolveColor` like every other colour in this file: it arrives
   // from the chart's settings JSONB, which is never whitelisted server-side, so it can be
@@ -935,9 +973,9 @@ function buildPieRings(
   // fallback, and an empty-string fallback (not a colour, so unambiguous) turns that into "no
   // override": the slice keeps its palette slot instead of being painted with a value ECharts
   // would ignore and `getTextColorForBackground` would then silently mis-contrast against.
-  const sliceOverride = (name: string): string | undefined => {
-    const c = cfg.sliceColors?.[name];
-    if (!c || name === OTHER_NAME) return undefined;
+  const sliceOverride = (raw: string | undefined): string | undefined => {
+    const c = raw != null ? cfg.sliceColors?.[raw] : undefined;
+    if (!c) return undefined;
     return resolveColor(c, "") || undefined;
   };
   // Applied HERE for rings below 0 only. Ring 0's overrides are handed to `colorsForKeys` instead
@@ -953,7 +991,7 @@ function buildPieRings(
   // starting a new family. So it stays a straight assignment.
   for (const ring of effectiveRings.slice(1)) {
     for (const s of ring) {
-      const resolved = sliceOverride(s.name);
+      const resolved = sliceOverride(s.raw);
       if (resolved) s.itemStyle = { color: resolved };
     }
   }
@@ -1037,22 +1075,33 @@ function buildPieRings(
   // `buildPieBreakdown` already do. A dimension value can genuinely BE the string "Other" (the file
   // accepts that collision knowingly, see OTHER_KEY), and such a slice is a real category that must
   // keep hashing to a colour like any other — only the synthetic bucket carries the sentinel.
+  //
+  // HASHED ON THE RAW VALUE, not on the drawn label — Metabase's own input (`getPieColors` hashes
+  // `dimensionValues.map(getKeyFromDimensionValue)` and merges `pie.rows`' colours in by `row.key`,
+  // never by `row.name`). Two things follow, and both are the point: `sliceColors` can go in as
+  // `existing` under the same key the panel wrote it under, and `PieDisplaySection`'s own swatch —
+  // which has only ever had the raw values to hash — now shows the ink the chart actually uses. A
+  // slice also keeps its colour when its column's date/number format is edited, which is a setting
+  // about how a value READS, not about which value it is.
   const ring0Slices = effectiveRings[0] ?? [];
   const ring0Named = ring0Slices.filter((s) => !(s.key != null && s.key.startsWith(OTHER_KEY)));
   // One decision about the whole ring, not one per slice: a hash collision moves a name along, and
   // an override takes its colour out of circulation, so neither can be worked out a slice at a time.
   // `sliceColors` goes in as `existing` — the single place ring 0's overrides are applied.
   const ring0Colors = colorsForKeys(
-    ring0Named.map((s) => s.name),
+    ring0Named.map((s) => s.raw!),
     Object.fromEntries(
       ring0Named.flatMap((s) => {
-        const c = sliceOverride(s.name);
-        return c ? [[s.name, c] as [string, string]] : [];
+        const c = sliceOverride(s.raw);
+        return c ? [[s.raw!, c] as [string, string]] : [];
       }),
     ),
   );
   ring0Slices.forEach((s) => {
-    s.itemStyle ??= { color: ring0Colors[s.name] };
+    // Every slice left without a `raw` is the synthetic bucket, whose muted tint `buildSlices`
+    // already fixed — so there is nothing here for the `??=` to fall back to, and no key it could
+    // have looked up.
+    if (s.raw != null) s.itemStyle ??= { color: ring0Colors[s.raw] };
   });
   let anchors = new Map<string, ColorAnchor>();
   (effectiveRings[0] ?? []).forEach((s) => {
@@ -1094,12 +1143,17 @@ function buildPieRings(
   }
 
   // Ring 0 only, and deliberately LAST: a display rename must not disturb anything computed
-  // above by raw value — the sliceColors match (by name, above) and the colour-inheritance
-  // anchors (by key, just above) have already run against the raw value, so renaming now only
-  // changes what's shown, never what's found by hiddenSlices/sliceOrder/sliceColors.
+  // above by raw value — the sliceColors match and the colour-inheritance anchors have both
+  // already run, so renaming now only changes what's SHOWN, never what's found by
+  // hiddenSlices/sliceOrder/sliceColors.
+  //
+  // Keyed on `raw` like the other three, for the same reason: the panel writes the dimension
+  // value, and `s.name` is whatever the column's format made of it. Chaining is impossible by
+  // construction — a rename is looked up against a field a rename never touches — so a stored
+  // `{ "A": "B", "B": "C" }` renames A to B and B to C, and never A to C.
   if (cfg.sliceNames) {
     for (const s of effectiveRings[0] ?? []) {
-      const renamed = cfg.sliceNames[s.name];
+      const renamed = s.raw != null ? cfg.sliceNames[s.raw] : undefined;
       if (renamed) s.name = renamed;
     }
   }

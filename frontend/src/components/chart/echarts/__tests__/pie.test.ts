@@ -2982,3 +2982,127 @@ describe("slice labels honour the dimension's column format", () => {
     expect(opt.series[0].data.map((d: any) => d.name)).toEqual(["2026-01-01", "2026-02-01"]);
   });
 });
+
+/**
+ * THE RAW/FORMATTED SEAM — the settings panel and the chart must name the same slice.
+ *
+ * `PieDisplayControl` (viz/simple.tsx) hands the panel `String(row[dimIdx])`, i.e. the RAW
+ * dimension values, and every control writes those raw strings into `hiddenSlices`,
+ * `sliceOrder`, `sliceNames` and `sliceColors`. A column format then makes the chart DRAW
+ * something else, so a curation keyed on the drawn label finds nothing at all: reproduced in
+ * the UI on a pie over `order_month` with Date style `January 2024`, where the panel listed
+ * `2026-12-01` and the chart drew `December 2026`, and toggling "Show 2026-12-01" off changed
+ * nothing. Metabase keys the same four on the raw value too — `getPieRows`/`getPieColors` build
+ * every row around `getKeyFromDimensionValue(dimensionValue)` and carry `name: formatter(value)`
+ * alongside it, and its own hidden check is `!hiddenSlices.includes(row.key)`.
+ *
+ * THE FIXTURE IS ONLY ABLE TO SEE THIS BECAUSE ITS TWO VOCABULARIES DIFFER. A format whose
+ * output happens to equal its input (Date style `2024-01-31` on an ISO date, say) makes every
+ * assertion below pass against the broken code as well — which is exactly the control that
+ * identified the bug in the UI. `the fixture speaks two vocabularies` states that premise so it
+ * cannot rot away silently.
+ */
+describe("a curated pie finds the slice the panel named, not the label it drew", () => {
+  const COLS = [{ name: "order_month", type: "date" }, { name: "rev", type: "double" }];
+  /** What the panel is handed — `String(row[dimIdx])` for `dimensions[0]`. */
+  const RAW = ["2026-12-01", "2026-11-01", "2026-10-01"];
+  const LABELS = ["December 2026", "November 2026", "October 2026"];
+  const ROWS: unknown[][] = [[RAW[0], 60], [RAW[1], 30], [RAW[2], 10]];
+  const cfg = {
+    dimensions: ["order_month"], metric: "rev",
+    dimensionUnits: { order_month: "month" },
+    columnSettings: { order_month: { date_style: "MMMM YYYY" } },
+  };
+  const build = (extra: Record<string, unknown> = {}) =>
+    buildPieOption(COLS, ROWS, { ...cfg, ...extra }) as any;
+
+  it("the fixture speaks two vocabularies — no raw value is its own label", () => {
+    const data = ring(build(), 0);
+    expect(data.map((d: any) => d.key)).toEqual(RAW);
+    expect(data.map((d: any) => d.name)).toEqual(LABELS);
+    for (const d of data) expect(d.name).not.toBe(d.key);
+    // No slice is under the 2.5% fold threshold, so nothing here is an "Other" bucket in
+    // disguise: 10/100 is the smallest, and after the hide below 10/40 is smaller still.
+    expect(data.map((d: any) => d.value)).toEqual([60, 30, 10]);
+  });
+
+  it("hiddenSlices, named by the panel's raw value, hides that slice", () => {
+    const data = ring(build({ hiddenSlices: [RAW[0]] }), 0);
+    expect(data.map((d: any) => d.name)).toEqual(["November 2026", "October 2026"]);
+    // ...and the remaining shares re-base as if December had never been queried.
+    expect(data.reduce((t: number, d: any) => t + d.value, 0)).toBe(40);
+  });
+
+  it("sliceNames, named by the panel's raw value, renames that slice", () => {
+    const data = ring(build({ sliceNames: { [RAW[1]]: "Black Friday" } }), 0);
+    expect(data.map((d: any) => d.name)).toEqual(["December 2026", "Black Friday", "October 2026"]);
+    // The rename is display-only: the key the drill and the curations address is untouched.
+    expect(data.map((d: any) => d.key)).toEqual(RAW);
+  });
+
+  it("sliceOrder, named by the panel's raw value, reorders the ring", () => {
+    // Natural order is value-desc (Dec 60, Nov 30, Oct 10), so putting October first is a
+    // change only an order override can make.
+    const data = ring(build({ sliceOrder: [RAW[2]] }), 0);
+    expect(data.map((d: any) => d.name)).toEqual(["October 2026", "December 2026", "November 2026"]);
+  });
+
+  it("sliceColors, named by the panel's raw value, paints that slice", () => {
+    const data = ring(build({ sliceColors: { [RAW[2]]: "#123456" } }), 0);
+    expect(data.find((d: any) => d.name === "October 2026").itemStyle.color).toBe("#123456");
+  });
+
+  /**
+   * And the slices it did NOT pin take the palette as if keyed on the raw value — which is the
+   * same question `PieDisplaySection`'s swatch asks (`colorsForKeys(rawSlices, sliceColors)`),
+   * so the swatch beside "2026-12-01" is now the ink the chart puts in December's wedge. Both
+   * assertions are needed: the override alone can be satisfied while the rest of the ring is
+   * still hashed on its drawn label, and then every OTHER swatch in the panel is wrong.
+   */
+  it("an un-pinned slice takes the palette slot its raw value hashes to", () => {
+    const plain = ring(build(), 0);
+    expect(plain.map((d: any) => d.itemStyle.color)).toEqual(RAW.map((r) => colorsForKeys(RAW)[r]));
+    const pinned = { [RAW[2]]: "#123456" };
+    const withPin = ring(build({ sliceColors: pinned }), 0);
+    expect(withPin.map((d: any) => d.itemStyle.color))
+      .toEqual(RAW.map((r) => colorsForKeys(RAW, pinned)[r]));
+  });
+
+  /**
+   * AGGREGATION IS UNCHANGED BY ANY OF THE ABOVE, and this is the assertion that says so.
+   *
+   * `aggregateRing` has always grouped on `parts.join(KEY_SEP)` — the STRINGIFIED RAW values —
+   * and only ever passed `labelOf` over the display `name`. So two raw values that format to
+   * one label were already two slices, and moving the curations onto the key cannot merge or
+   * split anything. Stated here because the opposite (a builder that aggregates on the label)
+   * would have made this a rendering change in a settings change's clothes, and the difference
+   * is not visible from the curation code alone.
+   */
+  it("two raw values that format to the same label are still two slices", () => {
+    // Both days are in the same month, so `MMMM YYYY` collapses them to one label.
+    const data = ring(buildPieOption(COLS, [["2026-10-01", 30], ["2026-10-15", 10]], cfg), 0);
+    expect(data.map((d: any) => d.name)).toEqual(["October 2026", "October 2026"]);
+    expect(data.map((d: any) => d.key)).toEqual(["2026-10-01", "2026-10-15"]);
+    expect(data.map((d: any) => d.value)).toEqual([30, 10]);
+  });
+
+  it("an outer ring's own dimension value is raw there too", () => {
+    // `sliceColors` has always matched on every ring, not just ring 0 — so the same VALUE
+    // appearing as an outer-ring dimension value takes the override there as well. That match
+    // has to speak the same vocabulary the panel wrote, which is the raw value, not the label
+    // the outer ring happens to be drawn with.
+    const cols2 = [
+      { name: "region", type: "varchar" }, { name: "order_month", type: "date" },
+      { name: "rev", type: "double" },
+    ];
+    const opt = buildPieOption(cols2, [["EU", RAW[0], 60], ["US", RAW[1], 40]], {
+      dimensions: ["region", "order_month"], metric: "rev",
+      dimensionUnits: { order_month: "month" },
+      columnSettings: { order_month: { date_style: "MMMM YYYY" } },
+      sliceColors: { [RAW[0]]: "#654321" },
+    }) as any;
+    const outer = ring(opt, 1);
+    expect(outer.map((d: any) => d.name)).toEqual(["December 2026", "November 2026"]);
+    expect(outer.find((d: any) => d.name === "December 2026").itemStyle.color).toBe("#654321");
+  });
+});

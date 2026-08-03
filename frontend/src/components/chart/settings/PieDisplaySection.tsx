@@ -56,8 +56,14 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
    * added to that set. `sliceColors` goes in as `existing` for the same reason it does there: an
    * override consumes its slot, so the slice that would have hashed onto it moves along.
    *
-   * TWO DIVERGENCES REMAIN, both from the panel not having the data the builder does. Measured
-   * against the pre-PR-04 code rather than assumed, because the two are not the same story:
+   * COLUMN FORMATS USED TO DIVERGE HERE and no longer do. `buildPieRings` keyed ring 0's colours
+   * (and its hide, rename and order) on the slice's formatted LABEL while this panel is handed raw
+   * values, so `columnSettings: { category: { prefix: "» " } }` made all four swatches disagree
+   * with the chart. It now keys every one of them on the raw dimension value, which is the string
+   * this panel writes — so hashing the raw values here asks the builder's own question. (Metabase
+   * likewise hashes `getKeyFromDimensionValue(value)`, never the formatted name.)
+   *
+   * ONE DIVERGENCE REMAINS, from the panel not having the data the builder does:
    *  - THE FOLD. Slices below the threshold are merged into "Other" by `buildSlices` and drop out of
    *    the key set. This panel is handed slice NAMES only, not their values, so it cannot run that
    *    fold. Not new: the old positional rule diverged here too, and more widely — it indexed the
@@ -67,15 +73,6 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
    *    reaches `slices`, so the panel excludes it by construction — and a real dimension value that
    *    happens to be the string "Other" is a genuine key on both sides, which is why the builder
    *    identifies the bucket by its OTHER_KEY sentinel rather than by name.)
-   *  - COLUMN FORMATS. `buildPieRings` aggregates on the FORMATTED label, so ring 0's keys are
-   *    formatted strings while this panel is handed raw values. The name mismatch itself is older
-   *    and wider than colour — it already decides which slice a rename, a hide or a pinned colour
-   *    lands on, and those already miss. But the SWATCH is newly exposed to it: the positional rule
-   *    this replaces did not key on names at all, so a formatted label could not move it. Measured:
-   *    with `columnSettings: { category: { prefix: "» " } }` all four swatches now disagree with the
-   *    chart where before they matched. Closing it means giving the panel the same `labelOf` the
-   *    builder applies — which is the pre-existing raw/formatted seam, not this rule, and is where
-   *    the fix belongs.
    *
    * On a NESTED pie the swatch is the family's BASE colour, which ring 0 is then drawn as the dark
    * variant of (`ring0Variant`). That is deliberate rather than a third divergence: whatever this
