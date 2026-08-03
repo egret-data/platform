@@ -43,8 +43,16 @@ describe("resolveXScale — which axis a scatter gets", () => {
   it("puts a scatter over a NUMERIC dimension on a value axis, with its points at real coordinates", () => {
     const opt = build(priceCols, priceRows, { kind: "scatter", xAxis: "price", yMetrics: ["rating"] });
     expect(opt.xAxis.type).toBe("value");
-    // `applyXScale` re-keys each point to [x, y]; sorted ascending by the numeric x.
-    expect(opt.series[0].data).toEqual([[0.2, 4], [15.69, 3], [48.93, 7], [84.14, 2], [99.5, 1]]);
+    // `applyXScale` re-keys each point to an item object at [x, y]; sorted ascending by the numeric
+    // x. The `name` is the raw category — see the click-payload block below for why it is there and
+    // what it fixed; before #387 these were bare `[x, y]` arrays and the points had no name at all.
+    expect(opt.series[0].data).toEqual([
+      { value: [0.2, 4], name: "0.2" },
+      { value: [15.69, 3], name: "15.69" },
+      { value: [48.93, 7], name: "48.93" },
+      { value: [84.14, 2], name: "84.14" },
+      { value: [99.5, 1], name: "99.5" },
+    ]);
   });
 
   it("leaves a scatter over a VARCHAR dimension on the category axis it always had", () => {
@@ -153,14 +161,23 @@ describe("what ECharts draws on the axis it was given", () => {
    * THE CLICK PAYLOAD THE DRILL IS BUILT ON, pinned against real ECharts instead of only asserted
    * about in a comment.
    *
-   * `ChartRenderer`'s cartesian drill reads `data[0]` on a linear x and `name` otherwise, because a
-   * value axis has no category to name a point after: `getDataParams` fills `name` from
+   * WHAT THIS USED TO RECORD, and why it changed. `applyXScale` emitted bare `[x, y]` arrays, and a
+   * value axis has no category to name a point after: `getDataParams` filled `name` from
    * `SeriesData.getName`, which returns `''` when the series has no name list and no `itemName`
-   * dimension — which is every series `applyXScale` produces. The drill's own test hand-writes that
-   * payload into a mocked renderer, so on its own it proves the drill handles the shape, not that
-   * the shape is real. If an ECharts upgrade started reporting a name here, that fixture would
-   * quietly stop describing anything and the arm would go wrong with a green suite. This is the
-   * assertion that fails instead.
+   * dimension. So this file pinned `{name: "", data: [48.93, 7]}`, and `ChartRenderer`'s drill had
+   * to read `data[0]` on a linear x — which worked there only because a linear coordinate IS the
+   * category value, and left a timeseries x with nothing recoverable at all (egretdb/egret#387).
+   *
+   * `applyXScale` now emits ECharts ITEM OBJECTS — `{value: [x, y], name: String(category)}` — so
+   * the raw category survives the re-keying and `getName` has a name list to read. That is the
+   * whole fix: `p.name` is the bucket value again on every scale, and the drill has no special case
+   * left. This is the assertion that the item object really does reach `getName`, rather than being
+   * carried in `data` where only egret can see it.
+   *
+   * The drill's own test hand-writes this payload into a mocked renderer, so on its own it proves
+   * the drill handles the shape, not that the shape is real. If an ECharts upgrade stopped reporting
+   * a name here, that fixture would quietly stop describing anything and the drill would go back to
+   * filtering on `''` with a green suite. This is the assertion that fails instead.
    */
   function clickParams(cfg: CartesianBuildConfig): { name: string; data: unknown } {
     registerEChartsModules();
@@ -175,13 +192,54 @@ describe("what ECharts draws on the axis it was given", () => {
     return { name: p.name, data: p.data };
   }
 
-  it("reports no name and an [x, y] datum for a value-axis point, which is why the drill reads data[0]", () => {
+  it("names a value-axis point after its raw category, which is what the drill filters on", () => {
     expect(clickParams({ kind: "scatter", xAxis: "price", yMetrics: ["rating"] }))
-      .toEqual({ name: "", data: [48.93, 7] });
+      .toEqual({ name: "48.93", data: { value: [48.93, 7], name: "48.93" } });
   });
 
   it("still reports the category name and a bare value on the category axis", () => {
     expect(clickParams({ kind: "scatter", xAxis: "price", yMetrics: ["rating"], xScale: "ordinal" }))
       .toEqual({ name: "48.93", data: 7 });
+  });
+
+  /**
+   * THE TIMESERIES CASE, which is the defect #387 named and the one no `linear` fix could reach.
+   *
+   * On a time axis `applyXScale` coordinates each point by `Date.parse`'s epoch milliseconds — a
+   * number the column has never held — so `data[0]` was never a filterable value however it was
+   * read. The item object's `name` is the string the ROW held, so the coordinate and the filter
+   * value are now two different things that no longer have to be reconciled.
+   *
+   * FIVE DAYS, CLICKED IN THE MIDDLE, and the dates are deliberately nothing like their epochs:
+   * `1735862400000` shares no leading digits with `2025-01-03`, so an assertion that passed by
+   * reading the coordinate could not be mistaken for one reading the name. A single-point series
+   * would hide an off-by-one in the datum shape entirely, which is why there are five.
+   */
+  const dayCols = [{ name: "d", type: "date" }, { name: "rev", type: "double" }];
+  const dayRows = [
+    ["2025-01-01", 10], ["2025-01-02", 20], ["2025-01-03", 30], ["2025-01-04", 40], ["2025-01-05", 50],
+  ];
+
+  function dayClickParams(cfg: CartesianBuildConfig, i: number): { name: string; data: unknown } {
+    registerEChartsModules();
+    const chart = echarts.init(null, null, { renderer: "svg", ssr: true, width: 400, height: 300 });
+    chart.setOption({ animation: false, ...buildCartesianOption(dayCols, dayRows, cfg) });
+    const p = (chart as unknown as {
+      getModel(): { getSeriesByIndex(i: number): { getDataParams(i: number): { name: string; data: unknown } } };
+    }).getModel().getSeriesByIndex(0).getDataParams(i);
+    chart.dispose();
+    return { name: p.name, data: p.data };
+  }
+
+  it("names a TIME-axis point after the date the row held, not after its epoch", () => {
+    expect(dayClickParams({ kind: "line", xAxis: "d", yMetrics: ["rev"], xScale: "timeseries" }, 2))
+      .toEqual({ name: "2025-01-03", data: { value: [Date.parse("2025-01-03"), 30], name: "2025-01-03" } });
+  });
+
+  /** …and the point next to it, so a fixture that reported one fixed name for every point — or an
+   *  index that silently landed on the same datum twice — could not pass. */
+  it("names each time-axis point after its OWN date", () => {
+    expect(dayClickParams({ kind: "line", xAxis: "d", yMetrics: ["rev"], xScale: "timeseries" }, 3).name)
+      .toBe("2025-01-04");
   });
 });

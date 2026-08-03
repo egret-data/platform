@@ -16,6 +16,36 @@ describe("value-axis labels", () => {
     expect(opt(base, small).yAxis.axisLabel.formatter(25468)).toBe("25,468");
   });
 
+  /**
+   * THE SAME DECISION ON A TIME AXIS, where the datum is not a bare number.
+   *
+   * `applyXScale` re-keys each point onto the x-scale, and #387 made what it emits a
+   * `{value: [x, y], name}` ITEM OBJECT so a clicked point still knows its category. `widestOf` —
+   * which decides this compact default — reads the plotted y off that datum, and it is the reason
+   * the item-object change could not be made on its own: it read `d[1]`, which an object answers
+   * `undefined` to, so every value-axis chart would have measured `NaN` and quietly stopped
+   * shortening its labels. Nothing else in the suite went near it.
+   *
+   * A TIME axis rather than a linear one, on purpose: its x coordinate is `Date.parse`'s epoch, a
+   * number in the 1.7e12 range. So the two cases below fail in OPPOSITE directions and pin the
+   * unwrapping exactly — reading the x instead of the y shortens the small-value axis that must not
+   * be shortened, and failing to unwrap the object at all stops shortening the large-value one
+   * that must be.
+   */
+  const tcols = [{ name: "d", type: "date" }, { name: "rev", type: "double" }];
+  const tcfg = { kind: "bar", xAxis: "d", yMetrics: ["rev"], xScale: "timeseries" };
+  const tOpt = (rows: unknown[][]) => buildCartesianOption(tcols, rows, tcfg as any) as any;
+
+  it("shortens wide numbers on a time axis, where the datum is an item object", () => {
+    const rows = [["2024-01-01", 25_468], ["2024-01-02", 98_120]];
+    expect(tOpt(rows).yAxis.axisLabel.formatter(25468)).toBe("25.5K");
+  });
+
+  it("does not shorten a small time-axis chart, whose x coordinate is a 13-digit epoch", () => {
+    const rows = [["2024-01-01", 12], ["2024-01-02", 34]];
+    expect(tOpt(rows).yAxis.axisLabel.formatter(25468)).toBe("25,468");
+  });
+
   it("obeys an explicit choice in both directions", () => {
     expect(opt({ ...base, compactValues: false }).yAxis.axisLabel.formatter(25468)).toBe("25,468");
     expect(opt({ ...base, compactValues: true }, small).yAxis.axisLabel.formatter(25468)).toBe("25.5K");

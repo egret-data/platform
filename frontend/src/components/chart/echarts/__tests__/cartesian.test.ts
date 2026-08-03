@@ -503,17 +503,28 @@ describe("buildCartesianOption — x-axis scale (Metabase parity)", () => {
     expect(opt.xAxis.type).toBe("category");
     expect(opt.series[0].data).toEqual([10, 20, 30]); // sorted numeric categories
   });
+  /** The pairs are wrapped in ECharts item objects since #387, so a clicked point still knows which
+   *  category it came from — `applyXScale` says why, and `scatterValueX.echarts.test.ts` pins what
+   *  ECharts then reports for one. The COORDINATE is unchanged, which is what these two assert. */
   it("linear scale uses a value axis with [x,y] pairs", () => {
     const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"], xScale: "linear" }) as any;
     expect(opt.xAxis.type).toBe("value");
-    expect(opt.series[0].data).toEqual([[1, 10], [2, 20], [3, 30]]);
+    expect(opt.series[0].data).toEqual([
+      { value: [1, 10], name: "1" }, { value: [2, 20], name: "2" }, { value: [3, 30], name: "3" },
+    ]);
   });
+  /** On a TIME axis the coordinate and the name are different things — the epoch positions the
+   *  point, the date string is what a drill can filter on — so this is the case where reading one
+   *  for the other cannot go unnoticed. */
   it("timeseries scale uses a time axis with parsed-timestamp pairs", () => {
     const tcols = [{ name: "d", type: "date" }, { name: "rev", type: "double" }];
     const trows = [["2024-01-01", 10], ["2024-01-03", 30]];
     const opt = buildCartesianOption(tcols, trows, { kind: "line", xAxis: "d", yMetrics: ["rev"], xScale: "timeseries" }) as any;
     expect(opt.xAxis.type).toBe("time");
-    expect(opt.series[0].data).toEqual([[Date.parse("2024-01-01"), 10], [Date.parse("2024-01-03"), 30]]);
+    expect(opt.series[0].data).toEqual([
+      { value: [Date.parse("2024-01-01"), 10], name: "2024-01-01" },
+      { value: [Date.parse("2024-01-03"), 30], name: "2024-01-03" },
+    ]);
   });
   it("tooltip reads y from [x,y] pairs on a scaled axis", () => {
     const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"], xScale: "linear", metricTypes: { rev: "double" }, columnSettings: { rev: { prefix: "$" } } }) as any;

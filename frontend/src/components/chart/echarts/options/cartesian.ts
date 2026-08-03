@@ -478,16 +478,56 @@ export function resolveXScale(
   return xColumnType != null && isNumericType(xColumnType) ? "linear" : undefined;
 }
 
-// Re-key category-aligned series onto real x coordinates: each value becomes an
-// [x, y] pair, dropping points whose x can't be parsed. Mutates the series in place.
+/**
+ * A point on a value/time x-axis: its coordinate pair, and the category it came from.
+ *
+ * THE `name` IS THE WHOLE REASON THIS IS AN OBJECT rather than the bare `[x, y]` array it used to
+ * be. A value axis has no categories, so ECharts' `getDataParams` fills a clicked point's `name`
+ * from `SeriesData.getName` — which returns `''` for a series that has neither a name list nor an
+ * `itemName` dimension, which is every series this function used to produce. The drill read that
+ * empty string and filtered `<column> = ''`, matching nothing (egretdb/egret#387).
+ *
+ * An item object gives ECharts the name list it was missing, so `p.name` is the RAW CATEGORY again
+ * on every scale and the drill needs no special case for any of them. That matters most on a
+ * `timeseries` axis, where the coordinate is `Date.parse`'s epoch milliseconds — a number the
+ * column has never held, and one no amount of reading `data[0]` could have turned back into a
+ * filter value.
+ *
+ * `String(c)`, because an ECharts `name` is a string. It is the same spelling the ordinal path
+ * already sends — a category axis reports its category as a string too — so the two paths hand the
+ * drill the same thing, and the backend validates a filter value against the column's type either
+ * way (`chartquery.rs`, `sql_literal`, which parses a numeric out of a string).
+ */
+interface ScaledPoint { value: [number, number | null]; name: string }
+
+// Re-key category-aligned series onto real x coordinates: each value becomes an ECharts item
+// object at [x, y], dropping points whose x can't be parsed. Mutates the series in place.
 function applyXScale(categories: unknown[], series: unknown[], cfg: CartesianBuildConfig) {
   const coord = (c: unknown) => (cfg.xScale === "timeseries" ? Date.parse(String(c)) : Number(c));
   const xs = categories.map(coord);
   for (const s of series as { data: (number | null)[] }[]) {
     s.data = s.data
-      .map((y, i) => [xs[i], y] as unknown as number | null)
-      .filter((p) => Number.isFinite((p as unknown as [number, unknown])[0]));
+      .map((y, i) => ({ value: [xs[i], y], name: String(categories[i]) } as ScaledPoint) as unknown as number | null)
+      .filter((p) => Number.isFinite((p as unknown as ScaledPoint).value[0]));
   }
+}
+
+/**
+ * The plotted y of a datum — the number the VALUE axis shows — through every shape a datum takes:
+ * a bare number on a category axis, and since #387 a `{value: [x, y], name}` item object on a
+ * value/time one. The bare `[x, y]` pair that item object replaced is unwrapped too, because
+ * ECharts still accepts one and nothing here should depend on which of the two it is handed.
+ *
+ * `widestOf` is why this exists, and it is the reason `applyXScale` could not emit item objects on
+ * its own: it read `d[1]` off the datum, which an object answers `undefined` to, so the
+ * compact-label threshold it feeds would have measured `NaN` and silently become "never compact"
+ * on every value-axis chart. `cartesian.labels.test.ts` pins both directions of that.
+ */
+function datumY(d: unknown): unknown {
+  const v = d != null && typeof d === "object" && !Array.isArray(d) && "value" in d
+    ? (d as { value: unknown }).value
+    : d;
+  return Array.isArray(v) ? v[1] : v;
 }
 
 // ECharts series type for a metric under the active kind.
@@ -1039,8 +1079,9 @@ function baseOption(
       // An untagged series predates that and is counted against whichever axis asks.
       if (s.__metric != null && !metrics.includes(s.__metric)) continue;
       for (const d of (s.data ?? []) as unknown[]) {
-        // On a value/time x-axis the datum is an [x, y] pair — the y is what the axis shows.
-        const n = Math.abs(Number(Array.isArray(d) ? d[1] : d));
+        // On a value/time x-axis the datum is a `{value: [x, y], name}` item — the y is what the
+        // axis shows. `datumY` unwraps both that and the bare `[x, y]` pair it replaced.
+        const n = Math.abs(Number(datumY(d)));
         if (Number.isFinite(n) && n > widest) widest = n;
       }
     }
