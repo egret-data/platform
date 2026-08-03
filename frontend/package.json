@@ -9,6 +9,7 @@
     "test": "vitest run",
     "gen:api": "orval && node scripts/encode-path-params.mjs",
     "lint": "eslint .",
+    "lint:harness": "cd .. && frontend/node_modules/.bin/eslint --config frontend/eslint.config.js scripts/harness",
     "test:e2e": "playwright test"
   },
   "dependencies": {
