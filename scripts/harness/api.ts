@@ -39,6 +39,8 @@ export interface ApiChart {
   id: string;
   name: string;
   viz_type: string;
+  /** Present on the LIST response too, not just the detail — the upsert relies on that. */
+  dataset_id: string;
 }
 
 export interface ApiDashboard {
@@ -184,7 +186,17 @@ export class Api {
     return this.req("POST", this.wsPath("/charts"), input);
   }
 
-  async updateChart(id: string, input: { name: string; viz_type: string; params: unknown }): Promise<void> {
+  /**
+   * `dataset_id` is REQUIRED on the update, not just the create — a PUT that omits it is a 422,
+   * which is easy to miss because the field is not being changed.
+   */
+  async updateChart(id: string, input: {
+    dataset_id: string;
+    name: string;
+    description?: string;
+    viz_type: string;
+    params: unknown;
+  }): Promise<void> {
     await this.req("PUT", this.wsPath(`/charts/${id}`), input);
   }
 
