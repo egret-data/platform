@@ -13,6 +13,17 @@ import {
 // AND the decal patterns — is silently ignored, which is exactly what happened here until
 // the accessibility audit went looking for the label and found none.
 import "echarts/lib/component/aria";
+// LabelLayout is listed here for the same reason `aria` is imported above, one rung further down:
+// echarts DOES install it itself, as a top-level `use(installLabelLayout)` in `lib/export/core.js`
+// — but that file is not in the package's `sideEffects` allowlist (`index*.js`, `lib/echarts.js`,
+// `lib/chart/*`, `lib/component/*`, `extension/**`, `theme/*`, `i18n/*`), so Rollup deletes the
+// call from a production build and LabelManager never reaches the bundle. Vitest and `vite dev`
+// do not tree-shake, so both run it happily and the loss is invisible until you grep `dist`.
+//
+// DO NOT REMOVE THIS AS REDUNDANT. Without it every `labelLayout` option in `options/` — the
+// `fit` density the cartesian, waterfall and box-plot panels offer by name, and the pie's and
+// sankey's overlap backstops — is silently ignored in the shipped app only.
+import { LabelLayout } from "echarts/features";
 
 let registered = false;
 
@@ -23,6 +34,7 @@ export function registerEChartsModules() {
     SVGRenderer,
     BarChart, LineChart, ScatterChart, SunburstChart, GaugeChart, FunnelChart, BoxplotChart, SankeyChart, MapChart,
     GridComponent, TooltipComponent, LegendComponent, DatasetComponent, GraphicComponent, MarkLineComponent, VisualMapComponent,
+    LabelLayout,
   ]);
   registered = true;
 }

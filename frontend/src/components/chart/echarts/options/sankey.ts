@@ -351,6 +351,16 @@ export function buildSankeyOption(
         textBorderWidth: LABEL_HALO, textBorderColor: halo,
         formatter: (p: { value?: unknown }) => fmt(p.value, labelCompact),
       },
+      // The vertical backstop, and the only one of the two mechanisms that is not this builder's.
+      // The gutter above governs HORIZONTAL fit; this governs nodes stacked so close that their
+      // names run through each other, which no gutter can help with.
+      //
+      // It was tree-shaken out of production builds until `register.ts` listed `LabelLayout`.
+      // Measured on restoring it: BELOW 260px WIDE it drops three or four of seven node labels
+      // (five to seven of eleven on a busier diagram), and at 260px and above nothing changes. Each
+      // drop is a real rectangle intersection between two names, hand-checked — it is not undoing
+      // the gutter's decision, which is about the right edge and says so above. A card that narrow
+      // was previously drawing those names on top of one another.
       labelLayout: { hideOverlap: true },
       // `right` is the only side that has to hold text — the first column's labels are drawn INTO
       // the diagram, so its gutter costs nothing.

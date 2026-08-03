@@ -1699,14 +1699,17 @@ export function buildPieOption(
   // a post-layout pass that hides whichever labels collide, the same graceful degradation Metabase
   // reaches for (`labelLayout: { hideOverlap: true }` in its own option.ts).
   //
-  // KEPT, BUT NOT RELIED ON, and the distinction is not academic. This option is honoured under
-  // Vitest and under Vite's dev server, and is DEAD IN A PRODUCTION BUILD: echarts installs the
-  // label-layout feature as a top-level `use(installLabelLayout)` inside `lib/export/core.js`, a
-  // file its package's `sideEffects` allowlist does not name, so Rollup drops the call and no
-  // LabelManager reaches the bundle — the shipped `assets/index-*.js` contains none of it. So a
-  // label this builder decides to draw WILL be drawn, on top of whatever is already there. Every
-  // decision about what fits is made above, where it can be measured; this line is what the app
-  // gets back for free if that install is ever restored, and costs nothing meanwhile.
+  // KEPT, BUT NOT RELIED ON, and the distinction is not academic. Every decision about what fits
+  // is made above, where it can be MEASURED against the slice that has to hold the label; this
+  // line is the backstop for whatever survives that and still collides.
+  //
+  // It was dead in a production build until `register.ts` listed `LabelLayout` — echarts installs
+  // the feature as a top-level `use(installLabelLayout)` inside `lib/export/core.js`, a file its
+  // package's `sideEffects` allowlist does not name, so Rollup dropped the call and no
+  // LabelManager reached the bundle. Turning it on changed NOTHING here, measured across five
+  // sizes and both ring counts: not one slice label disappears, because the fit above has already
+  // removed everything that would have collided. That is the result the ordering was chosen for,
+  // and it is what makes this line free rather than a second opinion overriding a measured one.
   const labelLayout = { hideOverlap: true };
 
   // Geometry and the hole are both computed by the shared helpers above (pieGeometry /
