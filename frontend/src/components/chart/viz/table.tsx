@@ -105,7 +105,11 @@ export function tableDescriptor(): VizDescriptor<TableConfig> {
       const dims = agg ? cfg.columns : [];
       return {
         metrics: cfg.metrics, dimensions: dims, columns: agg ? [] : cfg.columns,
-        filters: shared.filters, orderby: [], row_limit: shared.rowLimit, rollup_groups: [],
+        // The table's own header click sorts the rows ON SCREEN, within the page it already has.
+        // `shared.orderby` is the other thing: it sorts in the QUERY, so it decides which rows come
+        // back at all under `row_limit`. Both branches carry it — `orderby_sql` resolves a raw
+        // column as readily as a dimension or a metric.
+        filters: shared.filters, orderby: shared.orderby, row_limit: shared.rowLimit, rollup_groups: [],
         temporal_units: pruneUnits(shared.temporalUnits, dims),
       };
     },
@@ -136,7 +140,7 @@ export function objectDescriptor(): VizDescriptor<ObjectConfig> {
     requiredFields: (cfg) => (cfg.columns.length ? [] : ["at least one column"]),
     buildSpec: (cfg, shared: SharedQueryState): QuerySpec => ({
       metrics: [], dimensions: [], columns: cfg.columns,
-      filters: shared.filters, orderby: [], row_limit: shared.rowLimit, rollup_groups: [],
+      filters: shared.filters, orderby: shared.orderby, row_limit: shared.rowLimit, rollup_groups: [],
     }),
     controls: [{ id: "fields", section: "data", render: ObjectFieldsControl }],
   };

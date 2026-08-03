@@ -11,7 +11,7 @@ import { cartesianSeriesNames, stackModeOf } from "@/components/chart/echarts/op
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
-import type { CartesianConfig, CartesianViz, QuerySpec } from "@/api/charts";
+import type { CartesianConfig, CartesianViz, ChartOrderBy, QuerySpec } from "@/api/charts";
 import { cartesianFromParams, cartesianToSettings, CARTESIAN_PREFIX } from "./cartesian-codec";
 import type { SharedQueryState, VizControl, VizControlProps, VizDescriptor } from "./types";
 
@@ -253,6 +253,35 @@ function displayControls(kind: CartesianViz): VizControl<CartesianConfig>[] {
   ];
 }
 
+/**
+ * Metabase's `add-implicit-breakout-order-by`, ported rather than invented
+ * (`query_processor/middleware/add_implicit_clauses.clj`): "Fields specified in `breakout` should
+ * add an implicit ascending `order-by` subclause *unless* that Field is already *explicitly*
+ * referenced in `order-by`."
+ *
+ * Two details taken from the implementation, not from the docstring, because they are what make
+ * the two clauses compose instead of fight:
+ *
+ *  - It APPENDS. `add-implicit-breakout-order-by` reduces `lib/order-by` over the breakouts on top
+ *    of whatever the author already wrote, so `ORDER BY revenue DESC` on a chart broken out by
+ *    category becomes `revenue DESC, category ASC`. The author's clause decides the drawn order;
+ *    the breakout's decides ties, which is what keeps the result deterministic between two calls —
+ *    the whole point of PR #394.
+ *  - It skips a field already referenced IN ANY DIRECTION. `lib/order-by` compares on
+ *    `order-by-distinct-key`, which is the expression alone (order_by.cljc:104: "Ignore duplicate
+ *    order bys with different directions… the second sort won't change anything"). So sorting
+ *    descending BY the breakout replaces the implicit ascending clause rather than being defeated
+ *    by it.
+ *
+ * With no authored sort this returns exactly what PR #394 emitted — ascending by the x-axis, or
+ * nothing at all when there is no x-axis.
+ */
+function withImplicitBreakoutOrder(authored: ChartOrderBy[], breakout: string | undefined): ChartOrderBy[] {
+  if (!breakout) return authored;
+  if (authored.some((o) => o.field === breakout)) return authored;
+  return [...authored, { field: breakout, desc: false }];
+}
+
 export function cartesianDescriptor(kind: CartesianViz): VizDescriptor<CartesianConfig> {
   const controls: VizControl<CartesianConfig>[] = [
     { id: "x", section: "data", render: XAxisControl },
@@ -299,7 +328,15 @@ export function cartesianDescriptor(kind: CartesianViz): VizDescriptor<Cartesian
         // (`add-implicit-breakout-order-by`, add_implicit_clauses.clj). Descending by the
         // aggregation is what a question's AUTHOR asks for, never what the builder emits. It is
         // also the order egret already chose in `pivot/engine.ts` and in smartscalar (`simple.tsx`).
-        orderby: typeof cfg.xAxis === "string" && cfg.xAxis ? [{ field: cfg.xAxis, desc: false }] : [],
+        //
+        // An author CAN now ask for one, through `shared.orderby`, and `withImplicitBreakoutOrder`
+        // is where the two meet — the same precedence Metabase's own middleware applies. What the
+        // renderer then does with a non-empty `orderby` is the other half of honouring it; see
+        // `preserveCategoryOrder` in `echarts/options/cartesian.ts`.
+        orderby: withImplicitBreakoutOrder(
+          shared.orderby,
+          typeof cfg.xAxis === "string" && cfg.xAxis ? cfg.xAxis : undefined,
+        ),
         row_limit: shared.rowLimit, rollup_groups: [],
         temporal_units: pruneUnits(shared.temporalUnits, dims),
       };

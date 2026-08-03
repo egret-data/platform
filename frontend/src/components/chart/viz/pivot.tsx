@@ -183,7 +183,10 @@ export function pivotDescriptor(): VizDescriptor<PivotConfig> {
     buildSpec: (cfg, shared: SharedQueryState): QuerySpec => {
       const dims = [...cfg.rows, ...cfg.cols];
       return {
-        metrics: cfg.metrics, dimensions: dims, columns: [], filters: shared.filters, orderby: [],
+        // `shared.orderby` verbatim, and no implicit default of its own: `pivot/engine.ts`'s
+        // `sortTree` already orders every level client-side, so deriving one here would only
+        // change which rows survive `row_limit` under a tree that re-sorts them anyway.
+        metrics: cfg.metrics, dimensions: dims, columns: [], filters: shared.filters, orderby: shared.orderby,
         row_limit: shared.rowLimit,
         rollup_groups: [cfg.rows, cfg.cols].filter((g) => g.length > 0),
         temporal_units: pruneUnits(shared.temporalUnits, dims),

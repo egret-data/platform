@@ -65,23 +65,32 @@ export interface FieldDescriptorSpec {
 const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
 const strs = (xs: unknown[]) => xs.map(str).filter((x): x is string => !!x);
 
+/**
+ * `shared.orderby` goes through all three untouched, and none of them derives one of its own —
+ * these vizzes order themselves client-side (the pie's ring, the funnel's steps, the box plot's
+ * categories) and asking the engine for an order would change which rows survive `row_limit`.
+ * Empty in, empty out, which is what every already-saved chart carries.
+ *
+ * The one descriptor built on these that DOES derive its own is smartscalar, which overrides the
+ * result of `dimsAndMetrics` for a reason stated at its declaration in `simple.tsx`.
+ */
 const helpers: Helpers = {
   dimsAndMetrics: (dims, metrics, shared) => {
     const d = strs(dims);
     return {
       metrics: strs(metrics), dimensions: d, columns: [],
-      filters: shared.filters, orderby: [], row_limit: shared.rowLimit, rollup_groups: [],
+      filters: shared.filters, orderby: shared.orderby, row_limit: shared.rowLimit, rollup_groups: [],
       temporal_units: pruneUnits(shared.temporalUnits, d),
     };
   },
   rawColumns: (cols, shared) => ({
     metrics: [], dimensions: [], columns: strs(cols),
-    filters: shared.filters, orderby: [], row_limit: shared.rowLimit, rollup_groups: [],
+    filters: shared.filters, orderby: shared.orderby, row_limit: shared.rowLimit, rollup_groups: [],
   }),
   // The scalar family reduces to a single aggregate row.
   oneRow: (metric, shared) => ({
     metrics: strs([metric]), dimensions: [], columns: [],
-    filters: shared.filters, orderby: [], row_limit: 1, rollup_groups: [],
+    filters: shared.filters, orderby: shared.orderby, row_limit: 1, rollup_groups: [],
   }),
 };
 

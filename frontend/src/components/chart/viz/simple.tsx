@@ -329,7 +329,20 @@ export const SIMPLE_DESCRIPTORS: VizDescriptor<Cfg>[] = [
       { id: "dimension", label: "Time / order dimension", kind: "dimension", required: "a time dimension", temporal: true },
       { id: "metric", label: "Metric", kind: "metric", required: "a metric" },
     ],
-    // Trend compares the last two periods, so the rows must come back in dimension order.
+    /**
+     * Trend compares the last two periods, so the rows must come back in dimension order.
+     *
+     * THE ONE DESCRIPTOR THAT IGNORES `shared.orderby`, deliberately. Metabase's precedence rule
+     * lets an author override the query processor's implicit ascending breakout clause — a default
+     * nobody asked for. This is not that: `SmartScalarChart` reads `valid[n - 1]` and `valid[n - 2]`
+     * as "this period" and "the one before", and captions the delta with the period the last row
+     * covers. The order is a precondition of the arithmetic, not a default. Under an authored
+     * `revenue DESC` the card would still draw a number and a "vs. previous month" caption, both
+     * computed from two rows that are neither, with nothing on screen to say so.
+     *
+     * The honest consequence for the sort control: it must not be offered on a trend, or it would
+     * be an inert control. Silently accepting it and drawing a wrong number is the worse of the two.
+     */
     buildSpec: (c, s, h) => ({
       ...h.dimsAndMetrics([c.dimension], [c.metric], s),
       orderby: typeof c.dimension === "string" && c.dimension ? [{ field: c.dimension, desc: false }] : [],

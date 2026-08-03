@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import type { QuerySpec } from "@/api/charts";
 
 // A saved pie chart in the pre-A2 (v1) shape: a viz still on the bridge, i.e. driven by
 // ChartExplore's inline branches rather than a descriptor.
@@ -36,7 +37,29 @@ const TABLE_V2 = {
   },
 };
 
-const CHARTS: Record<string, unknown> = { "c-pie": PIE_V1, "c-bar": BAR_V2, "c-table": TABLE_V2 };
+/**
+ * A bar chart saved WITH a sort its author asked for. Its stored `orderby` is the sum of two
+ * clauses — `total_revenue DESC` the author wrote, and `region ASC` the cartesian descriptor
+ * derives for its breakout — which is exactly what `paramsForSave` writes and what the studio has
+ * to be able to take apart and put back together.
+ */
+const BAR_SORTED = {
+  ...PIE_V1,
+  id: "c-bar-sorted", name: "Bar sorted", viz_type: "bar",
+  params: {
+    version: 2,
+    spec: {
+      metrics: ["total_revenue"], dimensions: ["region"], columns: [], filters: [],
+      orderby: [{ field: "total_revenue", desc: true }, { field: "region", desc: false }],
+      row_limit: 1000, rollup_groups: [],
+    },
+    settings: { "cartesian.xAxis": "region", "cartesian.yMetrics": ["total_revenue"] },
+  },
+};
+
+const CHARTS: Record<string, unknown> = {
+  "c-pie": PIE_V1, "c-bar": BAR_V2, "c-table": TABLE_V2, "c-bar-sorted": BAR_SORTED,
+};
 
 vi.mock("@/api/charts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/api/charts")>()),
@@ -48,12 +71,19 @@ vi.mock("@/api/charts", async (importOriginal) => ({
   useBuildChartData: () => ({ data: undefined, isLoading: false, error: null }),
 }));
 
+/** The spec the studio last asked the backend to run — i.e. `specForRun()`'s output, observed at
+ *  the only seam it crosses. */
+let lastRanSpec: QuerySpec | null = null;
+
 vi.mock("@/api/useSpecData", () => ({
-  useSpecData: () => ({
-    columns: [{ name: "region", type: "varchar" }, { name: "total_revenue", type: "double" }],
-    rows: [["North", 1]],
-    isLoading: false, error: null, hasResult: true,
-  }),
+  useSpecData: (_ws: string, _ds: string | null, spec: QuerySpec | null) => {
+    lastRanSpec = spec;
+    return {
+      columns: [{ name: "region", type: "varchar" }, { name: "total_revenue", type: "double" }],
+      rows: [["North", 1]],
+      isLoading: false, error: null, hasResult: true,
+    };
+  },
 }));
 
 vi.mock("@/api/datasets", () => ({
@@ -142,5 +172,36 @@ describe("ChartExplore mounts", () => {
   it("puts conditional formatting on its own tab", async () => {
     await mountChart("c-table", "rules");
     expect(await screen.findByText("Conditional formatting")).toBeInTheDocument();
+  });
+
+  /**
+   * `orderby` is shared query state, so it has to survive the same round trip `filters` and
+   * `rowLimit` do: stored spec -> studio state -> `specForRun()` -> the query that runs. The
+   * failure this catches is the quiet one — the studio hydrating the sort into state and then not
+   * passing it back to `buildSpec`, which draws a chart in the wrong order while every descriptor
+   * unit test still passes.
+   */
+  it("runs a saved chart's authored sort, and does not double the derived clause", async () => {
+    lastRanSpec = null;
+    await mountChart("c-bar-sorted");
+    await screen.findByDisplayValue("Bar sorted");
+    // Auto-run is debounced (`useAutoRun`, 500ms), so the spec reaches the query a beat after the
+    // editor has hydrated — nothing to assert until it does.
+    await waitFor(() => expect(lastRanSpec?.orderby).toEqual([
+      { field: "total_revenue", desc: true },
+      { field: "region", desc: false },
+    ]), { timeout: 3000 });
+  });
+
+  // A chart with no authored sort still runs PR #394's derived clause, and only that one — the
+  // half a "just always emit shared.orderby" change would silently delete.
+  it("runs the derived ascending clause for a chart with no authored sort", async () => {
+    lastRanSpec = null;
+    await mountChart("c-bar");
+    await screen.findByDisplayValue("Bar v2");
+    await waitFor(
+      () => expect(lastRanSpec?.orderby).toEqual([{ field: "region", desc: false }]),
+      { timeout: 3000 },
+    );
   });
 });

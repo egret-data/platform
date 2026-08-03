@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { tableDescriptor, objectDescriptor } from "../table";
 import { EMPTY_SPEC } from "@/api/charts";
 
-const SHARED = { filters: [], rowLimit: 1000, temporalUnits: { order_date: "month" } };
+const SHARED = { filters: [], rowLimit: 1000, temporalUnits: { order_date: "month" }, orderby: [] };
 
 describe("tableDescriptor", () => {
   const d = tableDescriptor();

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mapDescriptor } from "../map";
 import { EMPTY_SPEC } from "@/api/charts";
 
-const SHARED = { filters: [], rowLimit: 1000, temporalUnits: {} };
+const SHARED = { filters: [], rowLimit: 1000, temporalUnits: {}, orderby: [] };
 const d = mapDescriptor();
 
 describe("mapDescriptor", () => {
