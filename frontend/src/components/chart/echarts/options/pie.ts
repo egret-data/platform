@@ -351,6 +351,85 @@ function buildSlices(items: Slice[], cfg: PieBuildConfig): { slices: Slice[]; gr
   return { slices, groupOf };
 }
 
+/** One row of the settings panel's slice list. */
+export interface PieSliceRow {
+  /** The slice's RAW dimension value — `Slice.raw`, which is the key every stored curation is
+   * written against (`sliceColors`, `sliceNames`, `hiddenSlices`, `sliceOrder`). */
+  key: string;
+  /** Merged into ring 0's synthetic "Other" bucket by the threshold, so the chart draws no slice
+   * of its own for it: its colour, its name and its visibility all belong to the bucket now. */
+  folded: boolean;
+}
+
+/**
+ * RING 0's SLICES AS THE PANEL HAS TO SEE THEM: in the order the chart draws them, and saying
+ * which ones the "Other" fold swallowed.
+ *
+ * `PieDisplayControl` used to build this list itself, out of the distinct raw values of the first
+ * dimension in ROW order and with no measure at all. That is not a list the chart ever draws: the
+ * pie sorts value-descending (`buildSlices`), so on a twelve-slice monthly pie the panel's rows and
+ * the chart's wedges shared no position at all, and matching a legend swatch to the row that
+ * renames it meant hunting. Without the measure the panel could not run the fold either, so it went
+ * on offering colour, rename and hide controls for slices that had been merged into "Other" and no
+ * longer existed — and, worse, kept them as ring-0 colour KEYS, where a pin on a folded slice
+ * consumed a palette slot the chart had left free and moved a surviving slice's swatch off the
+ * colour it is actually drawn in.
+ *
+ * So the derivation lives HERE, next to the one the chart uses, and goes through the same
+ * `aggregateRing` + `buildSlices` pass — including the merge-2+ rule (a lone sub-threshold slice is
+ * NOT folded), the sign/zero rules, and the all-negative absolute-value flip, none of which a
+ * second implementation would be likely to reproduce and all of which would show up as a panel
+ * disagreeing with its own chart.
+ *
+ * Metabase's `getPieRows` is the same idea: aggregate, sort by value, then mark `isOther` on
+ * everything under the threshold (and only when 2+ qualify) — and its list widget renders nothing
+ * at all for a row marked that way.
+ *
+ * WHAT IS NOT APPLIED HERE: `sliceOrder`. The panel owns the manual order (it is what its arrows
+ * write), and it ranks this list itself exactly as `buildPieRings` ranks the ring — one owner, one
+ * rule. Everything ranked is therefore value-descending underneath.
+ *
+ * Rows the chart does NOT draw — hidden slices, and anything the sign/zero rule dropped — are
+ * listed last: they must stay listed (a hidden slice's own switch is the only way back), but they
+ * have no position in a draw order they are not part of.
+ */
+export function pieSliceRows(columns: ResultColumn[], rows: unknown[][], cfg: PieBuildConfig): PieSliceRow[] {
+  const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
+  const dim = cfg.dimensions?.[0];
+  const di = dim != null ? idx[dim] : undefined;
+  const mi = cfg.metric != null ? idx[cfg.metric] : undefined;
+  // The same lookup `buildPieRings` makes, so a pie whose columns the chart cannot resolve lists
+  // nothing rather than listing rows for a chart that draws nothing.
+  if (dim == null || di == null || mi == null) return [];
+
+  // Keyed the way the RING is keyed, which for a temporal extraction unit is `temporalLabel`'s
+  // finished word ("Wed") rather than the raw `3` — the aggregation key itself differs there, so a
+  // panel that stringified the column would write every curation under a key no slice carries.
+  const items = aggregateRing(rows, [di], [cfg.dimensionUnits?.[dim]], mi);
+  const hidden = new Set(cfg.hiddenSlices ?? []);
+  // Hidden rows are dropped BEFORE the fold, exactly as `buildPieRings` drops them — the rest of
+  // the ring re-bases as if the hidden category never existed, which changes what falls under the
+  // threshold.
+  const { slices, groupOf } = buildSlices(items.filter((it) => !hidden.has(it.raw!)), cfg);
+
+  // `groupOf` is seeded with every surviving slice in the ring's own post-sort order and only then
+  // re-pointed for the folded ones; a Map keeps a re-written key where it was, so this reads out in
+  // that same order.
+  const foldedKeys = [...groupOf].filter(([key, group]) => key !== group).map(([key]) => key);
+  const out: PieSliceRow[] = [];
+  for (const s of slices) {
+    // The synthetic bucket, identified by its sentinel rather than by the word "Other" (a real
+    // dimension value can be that string). It stands in for its constituents, so it expands.
+    if (s.key?.startsWith(OTHER_KEY)) out.push(...foldedKeys.map((key) => ({ key, folded: true })));
+    else if (s.raw != null) out.push({ key: s.raw, folded: false });
+  }
+  const listed = new Set(out.map((r) => r.key));
+  for (const it of items) {
+    if (it.raw != null && !listed.has(it.raw)) out.push({ key: it.raw, folded: false });
+  }
+  return out;
+}
+
 /** Groups a ring's slices under the key of the PARENT-ring slice each one belongs to — the
  * structure the sunburst's `children` needs.
  *

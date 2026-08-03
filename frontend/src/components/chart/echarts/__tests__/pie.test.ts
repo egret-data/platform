@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildPieOption, buildPieLegend, buildPieHole, buildPieHoleGraphic, pieLegendPlacement, resolvePercentVisibility,
   PIE_LEGEND_COLUMN_WIDTH_PX, computeMaxPercentDecimals, pieHasSlices, buildPieBreakdown,
-  pieSliceDrillPath,
+  pieSliceDrillPath, pieSliceRows,
 } from "../options/pie";
 import { SERIES_PALETTE, chartShade, COLOR_FALLBACK } from "../palette";
 import { colorsForKeys } from "../keyColors";
@@ -3104,5 +3104,103 @@ describe("a curated pie finds the slice the panel named, not the label it drew",
     const outer = ring(opt, 1);
     expect(outer.map((d: any) => d.name)).toEqual(["December 2026", "November 2026"]);
     expect(outer.find((d: any) => d.name === "December 2026").itemStyle.color).toBe("#654321");
+  });
+});
+
+/**
+ * RING 0 AS THE SETTINGS PANEL HAS TO SEE IT.
+ *
+ * `pieSliceRows` is the one derivation `PieDisplayControl` is allowed to have: the panel needs the
+ * slices in the order the chart draws them and it needs to know which ones the fold swallowed, and
+ * it can work out neither from the slice NAMES it used to be handed. Everything here is asserted
+ * against `buildPieOption`'s own output where the two overlap, because a helper that restates the
+ * rule instead of sharing it is exactly how the panel and the chart drifted apart in the first
+ * place.
+ */
+describe("pieSliceRows — the panel's view of ring 0", () => {
+  const c = [{ name: "category", type: "varchar" }, { name: "m", type: "double" }];
+  /** NOT pre-sorted: the rows arrive Gizmo, Widget, Gadget, Doohickey and the pie draws
+   *  Widget, Gadget, Gizmo, Doohickey. A fixture arriving value-descending could not tell a list
+   *  that sorts from one that echoes its input. */
+  const r: unknown[][] = [["Gizmo", 20], ["Widget", 40], ["Gadget", 30], ["Doohickey", 10]];
+  const base = { dimensions: ["category"], metric: "m" };
+  const keys = (cfg: Record<string, unknown> = {}) => pieSliceRows(c, r, { ...base, ...cfg }).map((s) => s.key);
+  const foldedKeys = (cfg: Record<string, unknown> = {}) =>
+    pieSliceRows(c, r, { ...base, ...cfg }).filter((s) => s.folded).map((s) => s.key);
+  const drawnNames = (cfg: Record<string, unknown> = {}) =>
+    (buildPieOption(c, r, { ...base, ...cfg }) as any).series[0].data.map((d: any) => d.name);
+
+  it("reads value-descending, which is the order the chart draws", () => {
+    expect(keys()).toEqual(drawnNames());
+    expect(keys()).not.toEqual(r.map((row) => row[0])); // …and that is not the row order
+  });
+
+  it("follows the chart back to row order when sorting is off", () => {
+    // The literal is stated as well as the comparison: both sides of the comparison go through the
+    // same sort, so a builder that ignored `sortRows: false` would keep them agreeing with each
+    // other while both disagreed with the pie the user asked for.
+    expect(keys({ sortRows: false })).toEqual(["Gizmo", "Widget", "Gadget", "Doohickey"]);
+    expect(keys({ sortRows: false })).toEqual(drawnNames({ sortRows: false }));
+  });
+
+  it("marks the slices the fold swallowed, and puts them where the bucket is drawn", () => {
+    const cfg = { sliceThreshold: 26 }; // Gizmo 20% and Doohickey 10% are both under it
+    expect(drawnNames(cfg)).toEqual(["Widget", "Gadget", "Other"]);
+    expect(keys(cfg)).toEqual(["Widget", "Gadget", "Gizmo", "Doohickey"]);
+    expect(foldedKeys(cfg)).toEqual(["Gizmo", "Doohickey"]);
+  });
+
+  it("folds nothing when only one slice is under the threshold, as buildSlices does not", () => {
+    const cfg = { sliceThreshold: 15 }; // Doohickey alone
+    expect(drawnNames(cfg)).toEqual(["Widget", "Gadget", "Gizmo", "Doohickey"]);
+    expect(foldedKeys(cfg)).toEqual([]);
+  });
+
+  // A hidden slice is dropped before the ring's total is computed, so it cannot be folded — and it
+  // stays listed, because its own switch is the only route back to showing it.
+  it("keeps a hidden slice listed, unfolded, after the ones the chart draws", () => {
+    const cfg = { hiddenSlices: ["Widget"] };
+    expect(drawnNames(cfg)).toEqual(["Gadget", "Gizmo", "Doohickey"]);
+    expect(keys(cfg)).toEqual(["Gadget", "Gizmo", "Doohickey", "Widget"]);
+    expect(foldedKeys(cfg)).toEqual([]);
+  });
+
+  // Hiding re-bases the remaining shares, which changes what falls under the threshold. A list that
+  // judged the fold before the hide would fold nothing here.
+  it("judges the fold on the shares that remain after a hide, as the ring does", () => {
+    // At 25%, of 100: Gizmo 20% and Doohickey 10% are both under it, so they fold. Hide Widget and
+    // the remaining 60 re-bases them to 33% and 17% — only one is under it now, and one does not
+    // make a bucket. A list that folded before the hide would drop Gizmo's row for a chart that
+    // draws Gizmo.
+    expect(foldedKeys({ sliceThreshold: 25 })).toEqual(["Gizmo", "Doohickey"]);
+    const cfg = { hiddenSlices: ["Widget"], sliceThreshold: 25 };
+    expect(drawnNames(cfg)).toEqual(["Gadget", "Gizmo", "Doohickey"]);
+    expect(foldedKeys(cfg)).toEqual([]);
+    expect(keys(cfg)).toEqual(["Gadget", "Gizmo", "Doohickey", "Widget"]);
+  });
+
+  it("lists nothing when the chart has no dimension or no metric to draw with", () => {
+    expect(pieSliceRows(c, r, { metric: "m" })).toEqual([]);
+    expect(pieSliceRows(c, r, { dimensions: ["category"] })).toEqual([]);
+    expect(pieSliceRows(c, r, { dimensions: ["nope"], metric: "m" })).toEqual([]);
+  });
+
+  /**
+   * A TEMPORAL EXTRACTION UNIT KEYS ON THE EXTRACTED WORD, not on the number in the column: the
+   * aggregation groups on `temporalLabel(unit, raw)`, so "Wed" IS the slice's raw value as far as
+   * every stored curation is concerned. A panel that stringified the column would write
+   * `sliceColors["3"]`, which no slice carries.
+   *
+   * NOTE (PR 06 task 4): this closes the derivation, not the app path. `VizControlProps` carries no
+   * temporal units, so `PieDisplayControl` still passes none — threading them is a change to the
+   * studio shell's control contract, not to the pie.
+   */
+  it("keys on the extracted word for a temporal extraction unit, as the ring does", () => {
+    const dowCols = [{ name: "dow", type: "bigint" }, { name: "m", type: "double" }];
+    const dowRows: unknown[][] = [[3, 20], [1, 40]];
+    const cfg = { dimensions: ["dow"], metric: "m", dimensionUnits: { dow: "day_of_week" } };
+    expect((buildPieOption(dowCols, dowRows, cfg) as any).series[0].data.map((d: any) => d.name))
+      .toEqual(["Mon", "Wed"]);
+    expect(pieSliceRows(dowCols, dowRows, cfg).map((s) => s.key)).toEqual(["Mon", "Wed"]);
   });
 });

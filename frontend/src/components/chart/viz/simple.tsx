@@ -10,6 +10,7 @@ import type { BoxplotConfig, GaugeSegment, PieConfig, SankeyConfig, ScalarConfig
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SERIES_PALETTE } from "@/components/chart/echarts/palette";
+import { pieSliceRows } from "@/components/chart/echarts/options/pie";
 
 /** Metabase’s `color("accent1")`, the progress bar’s default. */
 const PROGRESS_DEFAULT_COLOR = SERIES_PALETTE[1];
@@ -20,19 +21,30 @@ import type { VizControl, VizControlProps, VizDescriptor } from "./types";
 
 type Cfg = Record<string, unknown>;
 
-/** Distinct slice values of the current result, for the pie's per-slice colour controls.
- * Reads the FIRST picked dimension (`dimensions?.[0]`) — with nested rings (task 4), the
- * innermost ring is what `sliceColors`/`sliceNames` key against, matching the single-ring
- * pie's colouring today. */
+/** Ring 0's slices of the current result, for the pie's per-slice controls.
+ *
+ * Derived by `pieSliceRows`, the pie builder's OWN pass, so the list reads in the order the chart
+ * draws and knows which slices the "Other" fold swallowed. It used to be the distinct raw values of
+ * the first dimension in row order, with no measure — a list the chart never draws (see
+ * `pieSliceRows` for what that cost).
+ *
+ * Reads the FIRST picked dimension only: the innermost ring is what `sliceColors`/`sliceNames` key
+ * against, matching Metabase's `pie.rows`.
+ *
+ * `dimensions` is stored settings rather than typed input, so a pre-migration row can hand back a
+ * bare string — the same guard the descriptor's `buildSpec` makes, for the same reason. */
 function PieDisplayControl({ config, onChange, resultColumns, rows }: VizControlProps<Cfg>) {
-  const dims = Array.isArray(config.dimensions) ? (config.dimensions as string[]) : [];
-  const dim = dims[0];
-  const dimIdx = resultColumns.findIndex((c) => c.name === dim);
-  const slices = dim && dimIdx !== -1
-    ? Array.from(new Set(rows.map((r) => String((r as unknown[])[dimIdx] ?? "")).filter((v) => v !== "")))
-    : [];
+  const dimensions = Array.isArray(config.dimensions) ? (config.dimensions as string[]) : [];
+  const sliceRows = pieSliceRows(resultColumns, rows, { ...(config as PieConfig), dimensions });
   return (
-    <PieDisplaySection config={config as PieConfig} slices={slices}
+    <PieDisplaySection
+      config={config as PieConfig}
+      // The empty slice (`aggregateRing` collapses null, undefined and "" into one) is left out, as
+      // it always has been: it has no name to label a row with. It still takes part in the pass
+      // above, so it counts towards the total the fold is judged against, exactly as it does in the
+      // chart.
+      slices={sliceRows.map((s) => s.key).filter((k) => k !== "")}
+      foldedSlices={sliceRows.filter((s) => s.folded).map((s) => s.key).filter((k) => k !== "")}
       onChange={(patch) => onChange(patch as Partial<Cfg>)} />
   );
 }

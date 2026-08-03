@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { PieConfig } from "@/api/charts";
 import { colorsForKeys } from "@/components/chart/echarts/keyColors";
+import { OTHER_SLICE_COLOR } from "@/components/chart/echarts/palette";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
@@ -70,14 +71,26 @@ function Toggle({ id, label, checked, onChange }: { id: string; label: string; c
   );
 }
 
-// `slices` here is the distinct slice VALUES present in the current result (for the rows
-// below) — not to be confused with `PieConfig.sliceNames`, which is a value -> label rename
-// map. Same-sounding names, different shapes; keep them apart.
-export function PieDisplaySection({ config, onChange, slices = [] }: { config: PieConfig; onChange: (patch: Partial<PieConfig>) => void; slices?: string[] }) {
+// `slices` here is ring 0's slice VALUES in the order the chart draws them (for the rows below) —
+// not to be confused with `PieConfig.sliceNames`, which is a value -> label rename map.
+// Same-sounding names, different shapes; keep them apart.
+//
+// `foldedSlices` is the subset of them the chart merged into its "Other" bucket. Both come from
+// `pieSliceRows` (echarts/options/pie.ts), the builder's own pass — this section cannot work either
+// one out, because it is handed slice NAMES and the fold and the sort are both decided by their
+// VALUES.
+export function PieDisplaySection({ config, onChange, slices = [], foldedSlices = [] }: {
+  config: PieConfig;
+  onChange: (patch: Partial<PieConfig>) => void;
+  slices?: string[];
+  foldedSlices?: string[];
+}) {
   // Ranked exactly like SeriesOrderSection ranks cartesian series: by the stored sliceOrder
-  // position, with anything unranked keeping its natural (incoming) place after the ranked
-  // ones — buildPieOption applies this identical rule to ring 0, so the row order here always
-  // matches what the chart itself draws.
+  // position, with anything unranked keeping its natural place after the ranked ones —
+  // buildPieRings applies this identical rule to ring 0. "Natural" is what `slices` arrives in,
+  // which is now the order the chart draws (value-descending unless `sortRows` says otherwise);
+  // it used to be the order the ROWS arrived in, which is why the same rule applied to the same
+  // stored order still produced a list in an order the pie never drew.
   // The number of rings the chart will actually draw, which is what decides the percentage
   // default — the same `dimensions` list buildPieOption turns into rings.
   const ringCount = config.dimensions?.length ?? 0;
@@ -91,6 +104,19 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
   const ranked = [...slices].sort(
     (a, b) => (rank.get(a) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b) ?? Number.MAX_SAFE_INTEGER),
   );
+  /**
+   * A FOLDED SLICE GETS NO ROW. The threshold merged it into "Other", so the chart draws no slice
+   * of its own for it and a row would be offering a colour, a rename and a hide toggle that all
+   * land on nothing — Metabase renders nothing for a row it marked `isOther` either. The bucket
+   * itself is reported below instead, as a line rather than a row: it takes no curation on either
+   * side (the builder identifies it by a sentinel no stored key can carry).
+   *
+   * Hidden slices are NOT in here — the fold is judged after they are dropped, so a hidden slice is
+   * never folded — which is what keeps its own switch, the only route back to showing it, on screen.
+   */
+  const folded = new Set(foldedSlices);
+  const listed = ranked.filter((n) => !folded.has(n));
+  const foldedInOrder = ranked.filter((n) => folded.has(n));
   /**
    * The swatch a slice shows before any override — buildPieRings' own answer, asked the same way.
    *
@@ -111,36 +137,37 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
    * this panel writes — so hashing the raw values here asks the builder's own question. (Metabase
    * likewise hashes `getKeyFromDimensionValue(value)`, never the formatted name.)
    *
-   * ONE DIVERGENCE REMAINS, from the panel not having the data the builder does:
-   *  - THE FOLD. Slices below the threshold are merged into "Other" by `buildSlices` and drop out of
-   *    the key set. This panel is handed slice NAMES only, not their values, so it cannot run that
-   *    fold. Not new: the old positional rule diverged here too, and more widely — it indexed the
-   *    panel's ROW order against the chart's value-desc ring, so with rows arriving in ascending
-   *    order every swatch on the pie was wrong. Net, this is narrower than what it replaces.
-   *    (The synthetic bucket itself is not a problem: it is created inside the builder and never
-   *    reaches `slices`, so the panel excludes it by construction — and a real dimension value that
-   *    happens to be the string "Other" is a genuine key on both sides, which is why the builder
-   *    identifies the bucket by its OTHER_KEY sentinel rather than by name.)
+   * THE FOLD USED TO DIVERGE HERE and no longer does. Slices below the threshold are merged into
+   * "Other" by `buildSlices` and drop out of the ring-0 key set, and this panel — handed slice
+   * names with no values — could not run that fold, so it kept them as keys. That was not only a
+   * missing row: a `sliceColors` pin on a FOLDED slice reaches `colorsForKeys` here and CONSUMES
+   * its colour, while in the chart the folded slice is not a key at all and the colour stays free
+   * for whoever hashes onto it. Measured: with `Gizmo` folded and pinned to `#f2a86f`, the panel
+   * showed `Widget` as `#98d9d9` and the pie drew it `#F2A86F`. `foldedSlices` is what closes it —
+   * the key set below is now the ring's own. (The synthetic bucket itself was never a problem: it
+   * is created inside the builder and never reaches `slices`, and a real dimension value that
+   * happens to be the string "Other" is a genuine key on both sides, which is why the builder
+   * identifies the bucket by its OTHER_KEY sentinel rather than by name.)
    *
    * On a NESTED pie the swatch is the family's BASE colour, which ring 0 is then drawn as the dark
-   * variant of (`ring0Variant`). That is deliberate rather than a third divergence: whatever this
-   * control shows is what a nudge of the picker stores, and the builder reads a stored colour as the
-   * base. Showing the darkened one would make the pie darken it again on every edit.
+   * variant of (`ring0Variant`). That is deliberate rather than a divergence: whatever this control
+   * shows is what a nudge of the picker stores, and the builder reads a stored colour as the base.
+   * Showing the darkened one would make the pie darken it again on every edit.
    */
-  const drawn = ranked.filter((n) => !config.hiddenSlices?.includes(n));
+  const drawn = listed.filter((n) => !config.hiddenSlices?.includes(n));
   const drawnColors = colorsForKeys(drawn, config.sliceColors);
   const defaultSliceColor = (name: string) =>
-    drawnColors[name] ?? colorsForKeys(ranked.filter((n) => n === name || !config.hiddenSlices?.includes(n)), config.sliceColors)[name];
+    drawnColors[name] ?? colorsForKeys(listed.filter((n) => n === name || !config.hiddenSlices?.includes(n)), config.sliceColors)[name];
 
   const move = (i: number, delta: number) => {
     const j = i + delta;
-    if (j < 0 || j >= ranked.length) return;
-    const a = ranked[i];
-    const b = ranked[j];
+    if (j < 0 || j >= listed.length) return;
+    const a = listed[i];
+    const b = listed[j];
     // Merge into the STORED order, not the visible list: a slice hidden or not present in
     // this run's data still has a remembered position, and swapping two others must not
     // throw it away (same reasoning as SeriesOrderSection.move).
-    const base = config.sliceOrder?.length ? [...config.sliceOrder] : [...ranked];
+    const base = config.sliceOrder?.length ? [...config.sliceOrder] : [...listed];
     for (const n of [a, b]) if (!base.includes(n)) base.push(n);
     const ia = base.indexOf(a);
     const ib = base.indexOf(b);
@@ -244,13 +271,13 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
           <div className="text-xs text-muted-foreground">
             Applies to the innermost ring only — outer rings (additional nested dimensions) aren't affected.
           </div>
-          {ranked.map((name, i) => {
+          {listed.map((name, i) => {
             const hidden = !!config.hiddenSlices?.includes(name);
             return (
               <div key={name} className="flex items-center gap-1.5">
                 <button type="button" aria-label={`Move ${name} up`} disabled={i === 0}
                   className="text-xs text-muted-foreground disabled:opacity-40" onClick={() => move(i, -1)}>↑</button>
-                <button type="button" aria-label={`Move ${name} down`} disabled={i === ranked.length - 1}
+                <button type="button" aria-label={`Move ${name} down`} disabled={i === listed.length - 1}
                   className="text-xs text-muted-foreground disabled:opacity-40" onClick={() => move(i, 1)}>↓</button>
                 <input
                   type="color"
@@ -281,6 +308,19 @@ export function PieDisplaySection({ config, onChange, slices = [] }: { config: P
               </div>
             );
           })}
+          {/* The fold, reported so the reader can see where the missing categories went — pinned
+              last, which is where the chart draws the bucket (`buildPieRings` ranks it after every
+              named slice, however `sliceOrder` is written). Deliberately NOT a row: there is
+              nothing here to curate, and the controls a row carries would all land on nothing.
+              Metabase shows even less — its list widget simply renders nothing for a folded slice —
+              but a silently shorter list is the thing that sent a reader looking for the row that
+              renames the slice they can see in the legend. */}
+          {foldedInOrder.length > 0 && (
+            <div className="flex items-start gap-1.5 pt-0.5 text-xs text-muted-foreground">
+              <span className="mt-0.5 h-3 w-3 shrink-0 rounded-sm" style={{ background: OTHER_SLICE_COLOR }} />
+              <span>Other — {foldedInOrder.join(", ")}, grouped by the threshold above</span>
+            </div>
+          )}
         </div>
       )}
     </div>
