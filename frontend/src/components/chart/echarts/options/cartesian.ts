@@ -551,8 +551,12 @@ const distinct = (vals: unknown[]) => {
  * `preserveCategoryOrder` is the one exemption, and it is narrow: a caller that has ALREADY put the
  * rows in a meaningful order — the funnel's bar mode, whose steps come from `funnel.stepOrder` —
  * keeps it. Arbitrary order is the thing being fixed; a pipeline is not arbitrary.
+ *
+ * Exported because `options/boxplot.ts` has the same nominal axis and had the same defect by a
+ * different route, and one shared function is what stops the two drifting apart — the box plot's
+ * categories must sort exactly as a bar chart's do, including the temporal and numeric branches.
  */
-function sortCategories(cats: unknown[], type: string, preserve?: boolean): unknown[] {
+export function sortCategories(cats: unknown[], type: string, preserve?: boolean): unknown[] {
   if (isTemporalType(type)) return [...cats].sort((a, b) => Date.parse(String(a)) - Date.parse(String(b)));
   if (isNumericType(type)) return [...cats].sort((a, b) => Number(a) - Number(b));
   if (preserve) return cats;

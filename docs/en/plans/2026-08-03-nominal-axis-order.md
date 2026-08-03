@@ -41,6 +41,11 @@ client-side sort they apply themselves:
 | **none** | **bar, row** |
 | order varies, no visual consequence | map |
 
+**The box plot is missing from that table, and that is how this plan came to state a false fact
+about it.** The table enumerates the twelve *grouped* charts; a box plot's spec is raw `columns`
+with `dimensions: []`, so it was never counted — yet its category axis is nominal, it is built from
+`[...groups.keys()]`, and it had exactly the same defect. Protection: **none**. See Task 2 step 4b.
+
 `cartesian.ts:526` is deliberate and its comment is accurate:
 
 > Order the x categories by axis type — temporal chronologically, numeric ascending — while leaving a
@@ -171,8 +176,31 @@ git commit -m "fix(charts): a cartesian query asks for the order it draws in"
   what egret now does, that Metabase does not, and why the difference is deliberate (Metabase's queries
   carry the order; egret's stored ones do not).
 
-- [ ] **Step 4:** run the full suite. **Bar, row and box plot all go through this file**, and the box
-  plot's category axis is nominal too — check whether it is affected and say so either way.
+- [ ] **Step 4:** run the full suite. **Bar and row go through this file. THE BOX PLOT DOES NOT** —
+  this plan claimed all three did, and that was wrong. `options/boxplot.ts` is a separate builder
+  that imports nothing from `options/cartesian.ts` and takes its categories from
+  `[...groups.keys()]`, i.e. Map insertion order, i.e. the engine's order. Probed directly, it
+  returned `['Widget','Gadget','Doohickey','Gizmo']` and `['Gizmo','Widget','Gadget','Doohickey']`
+  for the two measured arrival orders — the same defect by a different route. It has its own step
+  below. The funnel's **bar mode** also reaches `sortCategories` (`kind: "bar"`) and must be exempted
+  rather than sorted: its steps arrive ranked by `funnel.stepOrder`, and alphabetising a pipeline is
+  worse than any engine order.
+
+- [ ] **Step 4b: fix the box plot too**, in `options/boxplot.ts`, by sorting its categories with the
+  same exported `sortCategories` — one function, so the three cannot drift and the box plot gets the
+  temporal and numeric branches for free. Sort BEFORE the stats are computed, so the boxes, mean
+  points, scatters, tooltips and aria labels stay on the same index.
+
+  **Not via the query.** The backend would honour it — `push_orderby` runs in the raw-records branch
+  too (`crates/egret-bi/src/chartquery.rs`, and `build_raw_records_selects_columns_no_group_by`
+  asserts `ORDER BY "id" DESC` on a `columns:`-only spec) — but a box plot's spec is raw rows under a
+  `row_limit`, so `ORDER BY category LIMIT n` returns the alphabetically-first n ROWS: whole
+  categories would vanish and the survivors would have truncated distributions. The client-side sort
+  changes no data.
+
+  Confirm the quartiles cannot move: `boxStats` sorts each group's values itself and every group is
+  fetched by its own key, so neither the drawn category order nor the row order within a category can
+  reach a quartile. Assert it, do not assume it.
 
 - [ ] **Step 5: Commit**
 

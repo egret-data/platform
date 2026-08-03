@@ -28,6 +28,11 @@ Spec của mọi chart có nhóm đều mang `orderby: []`. Chín trong mười 
 client của riêng chúng; **bar và row thì không**, vì `cartesian.ts:526` cố ý để trục danh nghĩa theo
 thứ tự gặp đầu tiên.
 
+**Box plot vắng mặt trong danh sách đó, và đó chính là cách kế hoạch này nêu một điều SAI về nó.**
+Danh sách chỉ đếm mười hai chart **có nhóm**; spec của box plot là `columns` thô với `dimensions: []`
+nên không bao giờ được đếm — nhưng trục danh mục của nó vẫn là danh nghĩa, nó dựng từ
+`[...groups.keys()]`, và nó mắc đúng lỗi ấy. Mức bảo vệ: **không có**. Xem Task 2 bước 4b.
+
 ## Metabase thật sự để nguyên — nên chỉ sắp xếp phía client là chưa đủ
 
 `model/dataset.ts:849` của Metabase:
@@ -95,8 +100,27 @@ trước khi chọn — đó là bằng chứng quyết định mà cả kế ho
 | # | nội dung |
 |---|---|
 | 1 | Truy vấn mang sẵn thứ tự — `buildSpec` của cartesian |
-| 2 | Chart đã lưu cũng được sửa — `sortCategories` |
+| 2 | Chart đã lưu cũng được sửa — `sortCategories` (+ bước 4b: box plot) |
 | 3 | Đối chiếu live + mở PR (KHÔNG merge) |
+
+**Bar và row đi qua `options/cartesian.ts`. BOX PLOT THÌ KHÔNG** — kế hoạch này từng nói cả ba đều đi
+qua đó, và điều đó sai. `options/boxplot.ts` là bộ dựng riêng, không import gì từ `options/cartesian.ts`,
+và lấy danh mục từ `[...groups.keys()]` — tức thứ tự Map chèn vào, tức thứ tự engine trả về. Đo trực
+tiếp cho ra `['Widget','Gadget','Doohickey','Gizmo']` và `['Gizmo','Widget','Gadget','Doohickey']` với
+hai thứ tự đến đã đo được: cùng một lỗi, theo một đường khác.
+
+**Bước 4b — sửa cả box plot** trong `options/boxplot.ts`, dùng chính `sortCategories` đã export: một hàm
+duy nhất nên ba chart không thể trôi lệch nhau, và box plot được hưởng sẵn nhánh thời gian lẫn nhánh số.
+Sắp xếp **trước** khi tính `stats`, để hộp, điểm trung bình, scatter, tooltip và nhãn aria cùng một chỉ số.
+
+**Không sửa qua truy vấn.** Backend có honour `orderby` thật — `push_orderby` chạy cả ở nhánh raw-records
+(`crates/egret-bi/src/chartquery.rs`) — nhưng spec của box plot là dòng thô dưới `row_limit`, nên
+`ORDER BY category LIMIT n` sẽ trả về n DÒNG đầu theo bảng chữ cái: nguyên vài danh mục biến mất và số
+còn lại có phân phối bị cắt cụt. Sắp xếp phía client không đụng tới dữ liệu.
+
+**Bar mode của funnel** cũng chạm `sortCategories` (`kind: "bar"`) và phải được **miễn trừ** chứ không
+sắp xếp: các bước của nó đến theo `funnel.stepOrder`, và xếp một pipeline theo bảng chữ cái còn tệ hơn
+bất kỳ thứ tự nào của engine.
 
 Lưu ý hợp đồng với harness: `scripts/harness/params.ts` sinh params qua **chính** `buildSpec` này, và
 `charts.test.ts` khẳng định 19 config round-trip. Thay đổi của bạn sẽ làm seed sinh ra khác đi — **đó là
