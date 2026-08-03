@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { buildSankeyOption, sankeyProblem, hasCyclicFlow, MAX_SANKEY_NODES } from "../options/sankey";
+import type { EChartsSize } from "../EChartsRenderer";
+import {
+  buildSankeyOption, sankeyProblem, hasCyclicFlow, MAX_SANKEY_NODES,
+  type SankeyBuildConfig,
+} from "../options/sankey";
 import { SERIES_PALETTE } from "../palette";
 import { colorsForKeys } from "../keyColors";
 
@@ -146,6 +150,133 @@ describe("buildSankeyOption", () => {
     expect(on.edgeLabel.formatter({ value: 1234 })).toBe("1,234");
     const compact = series(buildSankeyOption(cols, rows, { ...cfg, showEdgeLabels: true, labelFormatting: "compact" }) as any);
     expect(compact.edgeLabel.formatter({ value: 1234 })).toBe("1.2K");
+  });
+});
+
+/**
+ * A deterministic stub measurer, the same convention `sliceLabel.test.ts` uses: 7px per character
+ * whatever font is asked for. Every expected number below is arithmetic on it, so the assertions
+ * say what the builder computed rather than what some rasteriser happened to return.
+ */
+const stubMeasure = (s: string) => s.length * 7;
+
+/** The card the defect was measured on: labels drawn at x=158 on a 166px svg, reaching 197-221. */
+const CARD: EChartsSize = { width: 166, height: 184 };
+/** Wide enough that the 25% cap never binds, so the reservation is the raw label width. */
+const ROOMY: EChartsSize = { width: 800, height: 400 };
+
+/**
+ * THREE levels, and every width in it is load-bearing — this fixture exists to make wrong
+ * implementations disagree with the right one rather than accidentally match it:
+ *
+ *  - "Doohickey Assembly" (18 chars, 126px) is a LEVEL-0 node and the WIDEST name in the fixture.
+ *    An implementation that reserves room for the widest label ANYWHERE reserves 126; the right
+ *    one reserves 63. First-column labels are drawn INTO the diagram and need no gutter at all.
+ *  - "Warehouse Hub" (13, 91px) sits in the MIDDLE level, so "widest non-root" disagrees too.
+ *  - The last column is Shipped (7) / Returned (8) / Delivered (9): three DIFFERENT widths, with
+ *    the widest one LAST — so "reserve the widest" and "reserve the first" disagree.
+ *  - "Cancelled Order" (15, 105px) is a level-1 SINK. `nodeAlign: "justify"` pushes a node with no
+ *    outputs to the right edge, so it joins the reserved set there and not under `"left"` — which
+ *    is the one thing distinguishing "last level" from "last drawn column".
+ *  - "US" (2, 14px) is a last-column name that FITS at every size tested here, and it is emitted
+ *    LAST — so "reserve the last one met" disagrees with "reserve the widest" too, and the cutting
+ *    tests below have to show a label surviving uncut next to ones that did not.
+ */
+const labelRoomRows: unknown[][] = [
+  ["Doohickey Assembly", "Warehouse Hub", 40],
+  ["Widget", "Warehouse Hub", 10],
+  ["Widget", "Cancelled Order", 5],
+  ["Warehouse Hub", "Shipped", 30],
+  ["Warehouse Hub", "Returned", 10],
+  ["Warehouse Hub", "Delivered", 20],
+  ["Warehouse Hub", "US", 15],
+];
+const LAST_COLUMN = ["Shipped", "Returned", "Delivered", "US"];
+
+// Measurer FOURTH, size FIFTH — `buildPieOption`'s order, which `buildSankeyOption` follows.
+const labelRoom = (size?: EChartsSize, over: Partial<SankeyBuildConfig> = {}) =>
+  series(buildSankeyOption(cols, labelRoomRows, { ...cfg, ...over }, stubMeasure, size) as any);
+
+/**
+ * Measured live at 166x184: the right-hand labels started at x=158 — 8px from the edge — and ran to
+ * 197-221, i.e. 30-55px PAST it, because `right` was the string `"8%"` (13px here) and no label
+ * width or overflow was set anywhere. Metabase reserves the room instead: its layout adds the
+ * widest last-column label to the right padding, capped at 25% of the width, and truncates those
+ * labels to the cap when it binds (`getSankeyLayout`, `MAX_RIGHT_LABEL_LENGTH_PERCENT`).
+ */
+describe("sankey node-label room", () => {
+  it("reserves the LAST column's widest label in the right gutter", () => {
+    const s = labelRoom(ROOMY);
+    // 5% of 800 = 40, Metabase's own horizontal padding (floored at 24), plus "Delivered" at 63.
+    expect(s.right).toBe(40 + stubMeasure("Delivered"));
+    // NOT the widest label on the chart: "Doohickey Assembly" is 126px and sits in the FIRST
+    // column, whose labels are drawn into the diagram and cost the gutter nothing.
+    expect(s.right).toBeLessThan(40 + stubMeasure("Doohickey Assembly"));
+    // Nothing had to be cut at this size, so there is no formatter to cut it.
+    expect(s.label.formatter).toBeUndefined();
+  });
+
+  it("keeps the last column's labels inside the canvas on the 166px card", () => {
+    const s = labelRoom(CARD);
+    // The widest last-column label (63) is over the 25% cap (41.5), so the cap is what is reserved,
+    // on top of the 24px floor — a 166px card is under the width where 5% reaches 24.
+    expect(s.right).toBe(24 + 41.5);
+    // ...and the labels are cut to the room reserved for them. 41.5 less the 7px ellipsis leaves
+    // 34.5, which holds four characters. "US" is 14px, already inside the cap, so it is untouched.
+    const drawn = LAST_COLUMN.map((n) => s.label.formatter({ name: n }));
+    expect(drawn).toEqual(["Ship…", "Retu…", "Deli…", "US"]);
+
+    // The defect, stated as the reader sees it: the last column's nodes end at `width - right`, and
+    // every label drawn from there must finish before the canvas does. It used to finish 30-55px
+    // outside.
+    const nodeRightEdge = CARD.width - (s.right as number);
+    for (const text of drawn) {
+      expect(nodeRightEdge + stubMeasure(text)).toBeLessThanOrEqual(CARD.width);
+    }
+  });
+
+  it("cuts only the column that has to live in the gutter", () => {
+    const s = labelRoom(CARD);
+    expect(s.label.formatter({ name: "Doohickey Assembly" })).toBe("Doohickey Assembly");
+    expect(s.label.formatter({ name: "Warehouse Hub" })).toBe("Warehouse Hub");
+  });
+
+  /**
+   * `sliceLabel.ts` keeps a MIN_TRUNCATED_LABEL_CHARS floor of 3 because a one- or two-character
+   * truncation identifies nothing AND reads as a real short value — plenty of genuine categories
+   * are two-letter codes. A sankey's node names are just as categorical, so the last column
+   * inherits the floor rather than restating the ambiguity: on a card too narrow to cut honestly
+   * the label is dropped, which is what `hideOverlap` has always done to a label with nowhere to go.
+   *
+   * At 100px the cap is 25 and the 7px ellipsis leaves 18 — two characters, under the floor.
+   */
+  it("drops a last-column label rather than cut it to a stub", () => {
+    const s = labelRoom({ width: 100, height: 120 });
+    const drawn = LAST_COLUMN.map((n) => s.label.formatter({ name: n }));
+    // "US" fits the 25px cap whole, so it survives untouched — the floor is about CUTTING, not
+    // about length, and a genuinely short name is never the thing being hidden.
+    expect(drawn).toEqual(["", "", "", "US"]);
+    expect(drawn).not.toContain("…");
+  });
+
+  /**
+   * A node with no outgoing flow is only on the right EDGE when the alignment puts it there —
+   * Metabase's `getMostRightNodes`, whose `shouldIncludeAllNodesWithoutOutputs` is exactly
+   * `node_align !== "left"`. Under "left" the sink stays at its own depth with the whole diagram
+   * still to its right, and reserving for it would waste a fifth of the canvas.
+   */
+  it("counts a sink as last-column only when the alignment pushes it there", () => {
+    expect(labelRoom(ROOMY).right).toBe(40 + stubMeasure("Delivered"));
+    expect(labelRoom(ROOMY, { nodeAlign: "justify" }).right).toBe(40 + stubMeasure("Cancelled Order"));
+    expect(labelRoom(ROOMY, { nodeAlign: "right" }).right).toBe(40 + stubMeasure("Cancelled Order"));
+  });
+
+  // No measurement means no fitting: the same rule every other size-aware builder follows. Nothing
+  // is truncated against a width nobody supplied.
+  it("leaves the gutter alone when the caller has no measurement", () => {
+    const s = labelRoom(undefined);
+    expect(s.right).toBe("8%");
+    expect(s.label.formatter).toBeUndefined();
   });
 });
 

@@ -3,8 +3,13 @@ import type { EChartsSize } from "../EChartsRenderer";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
 import { ariaDescription, baseOption, tooltipSurface } from "../base";
-import { CHART_THEME, COLOR_FALLBACK, resolveColor } from "../palette";
+import { CHART_THEME, COLOR_FALLBACK, resolveColor, resolveFontFamily } from "../palette";
 import { colorsForKeys } from "../keyColors";
+import {
+  measureText as defaultMeasureText,
+  fitSliceLabel,
+  type MeasureText,
+} from "../sliceLabel";
 
 export interface ResultColumn { name: string; type: string }
 
@@ -36,6 +41,15 @@ const NODE_WIDTH = 20;          // SANKEY_CHART_STYLE.nodeWidth
 const LABEL_HALO = 3;           // nodeLabels.textBorderWidth
 const EDGE_OPACITY = 0.2;
 const CURVENESS = 0.5;
+/** `SANKEY_CHART_STYLE.padding` — the gutter Metabase leaves before it starts reserving label room.
+ * Only the RIGHT side uses it here: it is the one side that has to hold text (see `rightGutter`),
+ * and a percentage alone collapses to nothing on the narrow card this was measured on — 8% of 166px
+ * is 13px, which is why the labels ran off the edge. The floor is what stops that. */
+const GUTTER_PERCENT = 0.05;
+const GUTTER_MIN = 24;
+/** `MAX_RIGHT_LABEL_LENGTH_PERCENT`. A quarter of the card is the most Metabase will surrender to
+ * the last column's names; past that the labels are cut to fit rather than the diagram squeezed. */
+const MAX_RIGHT_LABEL_PERCENT = 0.25;
 
 /**
  * Why the flow cannot be drawn, in words a reader can act on — Metabase's `checkRenderable`.
@@ -117,34 +131,89 @@ export function hasCyclicFlow(rows: unknown[][], sourceIndex: number, targetInde
   return false;
 }
 
+/**
+ * The nodes ECharts will draw in the RIGHTMOST column — the only ones whose labels need room
+ * reserved for them, since every label is drawn to the right of its node and the others have the
+ * rest of the diagram to spill into. Metabase's `getMostRightNodes`.
+ *
+ * Two ways to be in that column. Being at the deepest level is the obvious one. The other is
+ * Metabase's `shouldIncludeAllNodesWithoutOutputs`: with `nodeAlign` anything but "left", a node
+ * with no outgoing flow is pushed to the right EDGE regardless of how deep it actually is, so a
+ * one-hop dead end sits beside a five-hop one. Under "left" that same node stays at its own depth
+ * with the whole rest of the diagram still to its right, and reserving a gutter for it would give
+ * away a quarter of the canvas for a label that was never near the edge.
+ *
+ * Depth is the LONGEST path from a root, which is what ECharts' own layout uses, computed by a
+ * topological sweep. A node still holding an in-degree when the sweep runs dry is on a cycle —
+ * `sankeyProblem` refuses those before they reach here, so this only has to not hang.
+ */
+function rightmostNodeNames(
+  names: string[],
+  links: { source: string; target: string }[],
+  nodeAlign: NodeAlign,
+): Set<string> {
+  const level = new Map(names.map((n) => [n, 0]));
+  const outgoing = new Map<string, string[]>();
+  const inDegree = new Map(names.map((n) => [n, 0]));
+  for (const l of links) {
+    const outs = outgoing.get(l.source);
+    if (outs) outs.push(l.target); else outgoing.set(l.source, [l.target]);
+    inDegree.set(l.target, (inDegree.get(l.target) ?? 0) + 1);
+  }
+
+  const queue = names.filter((n) => inDegree.get(n) === 0);
+  for (let i = 0; i < queue.length; i++) {
+    const node = queue[i];
+    for (const next of outgoing.get(node) ?? []) {
+      level.set(next, Math.max(level.get(next) ?? 0, (level.get(node) ?? 0) + 1));
+      const remaining = (inDegree.get(next) ?? 0) - 1;
+      inDegree.set(next, remaining);
+      if (remaining === 0) queue.push(next);
+    }
+  }
+
+  const maxLevel = Math.max(...level.values());
+  const sinksCount = nodeAlign !== "left";
+  return new Set(
+    names.filter((n) => level.get(n) === maxLevel || (sinksCount && !outgoing.has(n))),
+  );
+}
+
 // Metabase-style Sankey: weighted flows from source category to target category.
 export function buildSankeyOption(
   columns: ResultColumn[],
   rows: unknown[][],
   cfg: SankeyBuildConfig,
+  /** Injectable text measurer, defaulting to the real canvas one — the convention `buildPieOption`
+   * set, down to the POSITION: measurer fourth, size fifth. The two files are the only ones that
+   * take a measurer, so a third builder will copy whichever it opens first, and they must not
+   * disagree. (This is what lets the fit below be unit tested without a rasteriser — see
+   * sliceLabel.ts. Production callers pass `undefined` and take the default.) */
+  measureText: MeasureText = defaultMeasureText,
   /** The chart's measured pixel size, when the caller has one — this builder is pure data with no
    * DOM of its own, so EChartsRenderer measures the container and threads it through (see
    * `buildPieOption`, the first to take one).
    *
-   * Unread today. It is the seam node-label truncation attaches to: how much room a node's label
-   * has before it runs into the next column is a question about WIDTH divided between the depths,
-   * and this builder has never been able to see it. Today it asks for full labels and loses them
-   * two ways instead. `labelLayout.hideOverlap` below drops outright any label that would collide
-   * with another — so a lost label is GONE, not overlapping. And ECharts' `label.position` defaults
-   * to "right", which this file does not override, so every label is drawn to the right of its
-   * node, including the last column's; those have only the `right: "8%"` gutter set below to live
-   * in — ECharts' own default is 20% — and no `label.width` or `label.overflow` is set anywhere, so
-   * ECharts does no ellipsis of its own and the container edge simply cuts the text. That is why a
-   * narrow card shows one- and two-character node names on the target side
-   * (docs/en/specs/2026-08-01-chart-parity-design.md).
+   * READ, for the one decision it was threaded in for: how much of the width the LAST column's
+   * labels get. ECharts' `label.position` defaults to "right" and this file does not override it,
+   * so every label is drawn to the right of its node — including the last column's, which have only
+   * the right gutter to live in. That gutter used to be a flat `"8%"`: 13px on the 166px card this
+   * was measured on, against a 63px name. The labels started 8px from the edge and ran 30-55px PAST
+   * it, and since no `label.width` or `label.overflow` was set anywhere ECharts did no ellipsis of
+   * its own — the container edge simply cut the text, leaving the one- and two-character stubs the
+   * design spec called truncation (docs/en/specs/2026-08-01-chart-parity-design.md).
    *
-   * Undefined means the caller has no measurement (every unit test, and any caller passing a plain
-   * option object rather than a size function), and labels keep exactly that behaviour rather than
-   * being fitted against a guessed width.
+   * What happens now is Metabase's `getSankeyLayout`: measure the widest label in the rightmost
+   * column, add it to the right gutter, and cap that at a quarter of the width — past which the
+   * labels are cut to the cap with a real ellipsis rather than the diagram squeezed any further.
+   * `labelLayout.hideOverlap` below stays as the backstop it always was, for labels that collide
+   * with each other VERTICALLY; it never had anything to say about running off the right edge.
    *
-   * `__tests__/sizeAware.test.ts` pins that passing a size changes nothing yet — if you are about
-   * to delete this parameter as unused, that test is the thing to read first. */
-  _size?: EChartsSize,
+   * Undefined means the caller has no measurement (unit tests that aren't about fit, and any caller
+   * passing a plain option object rather than a size function). Then nothing is fitted: the gutter
+   * keeps its percentage and no label is cut against a width nobody supplied — the same safe
+   * direction `buildPieOption` takes. */
+  size?: EChartsSize,
 ): EChartsCoreOption {
   const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
   const si = cfg.source != null ? idx[cfg.source] : undefined;
@@ -200,6 +269,26 @@ export function buildSankeyOption(
   // flow went; "target" traces where it came from.
   const edgeColor = cfg.edgeColor === "gray" ? GRAY_EDGE : (cfg.edgeColor ?? "source");
 
+  // Room for the labels this chart is about to draw — see the `size` parameter's comment.
+  const nodeLabelFont = {
+    size: CHART_THEME.axisFontSize, weight: CHART_THEME.axisWeight, family: resolveFontFamily(),
+  };
+  let rightGutter: number | string = "8%";
+  let cutTo: number | undefined;
+  let cutNodes: Set<string> | undefined;
+  if (size != null && size.width > 0 && names.size > 0) {
+    const rightmost = rightmostNodeNames([...names], links, cfg.nodeAlign ?? "left");
+    const widest = Math.max(0, ...[...rightmost].map((n) => measureText(n, nodeLabelFont)));
+    const cap = size.width * MAX_RIGHT_LABEL_PERCENT;
+    rightGutter = Math.max(size.width * GUTTER_PERCENT, GUTTER_MIN) + Math.min(cap, widest);
+    // Only when the cap actually binds. Below it every label fits the room reserved for it, so
+    // there is nothing to cut and no formatter worth carrying.
+    if (widest > cap) {
+      cutTo = cap;
+      cutNodes = rightmost;
+    }
+  }
+
   return {
     ...baseOption(),
     // Flows, not categories: read the biggest ones rather than every node.
@@ -232,6 +321,29 @@ export function buildSankeyOption(
         // A node label lands on top of the edges leaving it. The halo is what keeps it readable
         // there — without it the text competes with whatever flows behind it.
         textBorderWidth: LABEL_HALO, textBorderColor: halo,
+        // An ellipsis the reader can SEE, on the labels that would otherwise have been cut by the
+        // canvas edge with no mark at all — and only on those, since the other columns' labels have
+        // the diagram to spill into. Metabase's `nodeIndicesWithTruncatedLabels`, keyed on the name
+        // rather than the index because egret's nodes carry no `value` to key on.
+        //
+        // `fitSliceLabel` rather than a bare `truncateLabelText`, so the last column inherits the
+        // MIN_TRUNCATED_LABEL_CHARS floor its sibling already enforces: below three surviving
+        // characters a truncation stops identifying anything and starts reading as a real short
+        // value — plenty of genuine categories ARE two-letter codes — so on a card too narrow to
+        // cut honestly the label is dropped instead. A name that FITS is untouched however short it
+        // is; the floor is about cutting, not about length. `?? ""` because ECharts wants a string.
+        ...(cutNodes != null && cutTo != null
+          ? {
+            formatter: (p: { name?: unknown }) => {
+              const name = String(p.name ?? "");
+              if (!cutNodes.has(name)) return name;
+              return fitSliceLabel({
+                label: name, availableSpace: cutTo, showLabels: true,
+                measureText, fontStyle: nodeLabelFont,
+              }) ?? "";
+            },
+          }
+          : {}),
       },
       edgeLabel: {
         show: !!cfg.showEdgeLabels,
@@ -240,7 +352,9 @@ export function buildSankeyOption(
         formatter: (p: { value?: unknown }) => fmt(p.value, labelCompact),
       },
       labelLayout: { hideOverlap: true },
-      left: "3%", right: "8%", top: "4%", bottom: "4%",
+      // `right` is the only side that has to hold text — the first column's labels are drawn INTO
+      // the diagram, so its gutter costs nothing.
+      left: "3%", right: rightGutter, top: "4%", bottom: "4%",
     }],
   };
 }

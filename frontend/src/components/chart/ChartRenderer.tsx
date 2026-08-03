@@ -372,7 +372,10 @@ function SankeyChart({ columns, rows, cfg, onPointClick }: {
   // `ChartRenderer` builds this config fresh on every render, so `[cfg]` would memoise nothing.
   const cfgKey = JSON.stringify(cfg);
   const option = useMemo(
-    () => (size: EChartsSize) => buildSankeyOption(columns, rows, cfg, size),
+    // `undefined` is buildSankeyOption's measureText (position 4), whose default real-canvas
+    // measurer is what production wants; `size` fills position 5 — the same order buildPieOption
+    // above uses, deliberately.
+    () => (size: EChartsSize) => buildSankeyOption(columns, rows, cfg, undefined, size),
     [columns, rows, cfgKey],
   );
   return <EChartsRenderer option={option} onPointClick={onPointClick} />;

@@ -10,12 +10,23 @@ import { buildWaterfallOption } from "../options/waterfall";
 /**
  * These five builders grew a fourth, optional size parameter so the size-dependent label work —
  * x-label rotation, gauge graduations, sankey node labels; see each builder's own comment — has a
- * seam to attach to. Two of the five still do not read it, and keep the `_size` name to say so;
- * cartesian, the box plot and the waterfall each call it `size` and read it. Gauge and sankey are
- * what this file was written for: build each chart twice, once with a size and once without, and
- * the two options must be indistinguishable. The three live seams have their cases inverted below
- * rather than deleted — the point is unchanged, that a size changes exactly what it is supposed to
- * and nothing else.
+ * seam to attach to. All five now read it. The point is unchanged: a size changes exactly what it
+ * is supposed to and nothing else, so each builder is built twice, once with a size and once
+ * without, and the two options must differ only where that builder's fit is entitled to differ.
+ *
+ * THE GAUGE'S CASE IS THE ODD ONE, and the reason is worth reading before trusting it. Its fit is
+ * the only one that DECLINES when nothing can be measured — `measure-text.ts` returns `{width: 0}`
+ * under jsdom by design ("Size claims belong in a browser"), and a zero-width label clears any
+ * budget, so a gauge that decided from those numbers would be told that eleven labels fit at every
+ * size. `gaugeSplitNumber` refuses to answer instead. Which means that in THIS file, whose whole
+ * environment is jsdom and which mocks nothing, a sized gauge and an unsized one really are
+ * identical — and asserting that would be asserting the environment, not the builder. It is still
+ * worth pinning, because "decide from a width, or decline" is the contract every builder here
+ * keeps and a fit that started guessing a radius would break it. So the case below says that and
+ * only that; the claim it used to make — that the gauge does not read the size at all — is now
+ * false, and the leak it was guarding against is asserted in
+ * `gaugeGraduations.echarts.test.ts` ("reads the size, and reads it ONLY for the graduations"),
+ * which mocks in zrender's own estimator and can therefore see the fit answer.
  *
  * Naively that is `expect(build(cols, rows, cfg, SMALL)).toEqual(build(cols, rows, cfg))`, and that
  * does not work. Every one of these options carries FUNCTIONS — axis-label formatters, tooltip
@@ -184,16 +195,38 @@ describe("builders accept a container size", () => {
     expect(sized).toStrictEqual(unsized);
   });
 
-  it("gauge builds identically with and without a size", () => {
+  it("gauge declines to decide where nothing can be measured, so it builds identically", () => {
     // tooltip, arc axis label, centre detail.
     expectSizeIsUnread((size) => buildGaugeOption(cols, rows, { metric: "v" }, size), 3);
   });
 
-  it("sankey builds identically with and without a size", () => {
+  /**
+   * The sankey reads it too now (PR 05), for one decision and one option key: how much of the width
+   * the LAST column's labels get, which is `series[0].right`. Inverted the same way the four above
+   * are — the two builds must differ, and differ ONLY there.
+   *
+   * The `right` gutter is the whole seam by design: on this fixture the single last-column node is
+   * `"X"`, whose label is far inside the quarter-width cap, so nothing is truncated and no label
+   * formatter appears. That is what makes the exact-function-count assertion below still worth
+   * having: it stays at two, and a fit that started emitting a truncating formatter on a chart with
+   * nothing to truncate would fail here rather than pass quietly.
+   */
+  it("sankey reads the size, and reads it ONLY for the node-label gutter", () => {
     const scols = [{ name: "s", type: "varchar" }, { name: "t", type: "varchar" }, { name: "v", type: "double" }];
     const srows: unknown[][] = [["A", "X", 10], ["B", "X", 3]];
     const cfg = { source: "s", target: "t", metric: "v" };
-    // tooltip, edge label.
-    expectSizeIsUnread((size) => buildSankeyOption(scols, srows, cfg, size), 2);
+    // `undefined` is the measurer (position 4); the size is position 5, as in `buildPieOption`.
+    const sized = fingerprint(buildSankeyOption(scols, srows, cfg, undefined, SMALL)) as Record<string, never>;
+    const unsized = fingerprint(buildSankeyOption(scols, srows, cfg)) as Record<string, never>;
+    // tooltip, edge label — pinned exactly, for the reason `expectSizeIsUnread` gives.
+    expect(functionsIn(sized)).toBe(2);
+
+    const seriesOf = (fp: Record<string, never>) =>
+      (fp as unknown as { series: Record<string, unknown>[] }).series[0];
+    expect(seriesOf(sized).right).not.toStrictEqual(seriesOf(unsized).right);
+
+    delete seriesOf(sized).right;
+    delete seriesOf(unsized).right;
+    expect(sized).toStrictEqual(unsized);
   });
 });

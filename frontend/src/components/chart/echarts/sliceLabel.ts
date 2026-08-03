@@ -211,6 +211,67 @@ export function calcAvailableDonutSliceLabelLength(
   return Math.min(maxRectLength, sliceConstraint);
 }
 
+/**
+ * Available pixel length for a HOLE-LESS pie's slice label — the case Metabase's own formula
+ * above cannot express, because Metabase's pie always keeps a hole (`innerRadiusRatio: 3/5` even
+ * at one ring) and egret's `donut: false` does not.
+ *
+ * Handed a zero inner radius, `calcAvailableDonutSliceLabelLength` returns 0 for every slice: its
+ * inner chord is the chord of a circle of radius 0, so `innerChordLength > fontSize` is false and
+ * the horizontal branch's `sliceConstraint` collapses to a point. Reading that as "no room" would
+ * drop every label on a plain pie; reading it as "unmeasurable, show everything" (which is what
+ * this file's caller used to do) is what let a 166x129 card draw `Doohickey` and `Widget` through
+ * each other. Neither is true — a full pie's wedge has real, measurable room — so it gets its own
+ * geometry rather than a guess in either direction.
+ *
+ * WHERE THE LABEL IS. ECharts anchors an `inside` label at the middle of the [inner, outer] band,
+ * which on a full pie is `outerRadius / 2`, and this module already treats a label as occupying a
+ * band `fontSize` either side of its anchor (the rectangle the donut formula measures). So the
+ * label's box reaches `outerRadius / 2 - fontSize` towards the centre, and the wedge is NARROWEST
+ * there — which is the same quantity Metabase's donut rule takes: the chord at the innermost
+ * radius the label may occupy. A label that does not fit that chord cannot be written across its
+ * own wedge without leaving it.
+ *
+ * Deliberately WITHOUT the donut rule's near-x-axis exemption (`isNearXAxis`), which grants a
+ * slice at 3 or 9 o'clock the ring's THICKNESS instead of its chord — there is no ring here to
+ * measure the thickness of, and the exemption's replacement would be geometry no Metabase source
+ * states. The consequence is that a full pie is charged conservatively at those two angles; the
+ * safe direction, since the error it makes is truncating a label that would have fitted rather
+ * than drawing one that does not.
+ */
+export function calcAvailableFullPieSliceLabelLength(
+  outerRadius: number,
+  startAngle: number,
+  endAngle: number,
+  fontSize: number,
+): number {
+  const labelRadius = outerRadius / 2;
+  const labelInnerEdge = labelRadius - fontSize;
+  // Nothing can be written inside a pie whose label anchor is less than a line from its centre.
+  // DEFENSIVE, not load-bearing, and deliberately so: the rectangle below reaches the same 0 on
+  // its own for any pie this small, but by way of a horizontal line that misses the circle
+  // altogether — a thrown-and-caught exception and a console warning (see `warnOnce`) for a chart
+  // whose only sin is being small. Removing this line changes no label anywhere; it changes what
+  // a tiny one writes to the console.
+  if (labelInnerEdge <= 0) {
+    return 0;
+  }
+
+  const arcAngle = Math.min(endAngle - startAngle, Math.PI);
+  const sliceConstraint = calcChordLength(labelInnerEdge, arcAngle);
+
+  const midAngle = (startAngle + endAngle) / 2;
+  const [, labelCenterY] = getCoordOnCircle(labelRadius, midAngle);
+  const maxRectLength = calcMaxRectLengthWithinDonut(
+    labelCenterY - fontSize,
+    labelCenterY + fontSize,
+    0,
+    outerRadius,
+  );
+
+  return Math.min(maxRectLength, sliceConstraint);
+}
+
 /** Splits an overall [innerRadius, outerRadius] band evenly across `numRings`, returning the
  * band for the given 1-based `ring`. */
 export function calcInnerOuterRadiusesForRing(
