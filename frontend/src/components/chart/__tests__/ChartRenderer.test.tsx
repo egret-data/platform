@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import { useState } from "react";
 import { ChartRenderer } from "../ChartRenderer";
+import { drillFilters } from "../drill";
 import type { ChartParams, PieConfig, VizType } from "@/api/charts";
 
 // Captures the `option` prop each render passes to EChartsRenderer, so tests can assert on
@@ -260,16 +261,23 @@ describe("ChartRenderer", () => {
   });
 
   /**
-   * The drill on the axis PR 03 gave a numeric scatter. A value axis has no categories, so ECharts
-   * reports `name: ""` for a clicked point and puts the coordinates in `data` — checked against real
-   * ECharts, not assumed. The drill was reading `p.name`, so the filter came out `price = ''`,
-   * matching nothing and looking like a chart with no rows behind it.
+   * The drill on the axis PR 03 gave a numeric scatter. A value axis has no categories of its own,
+   * so ECharts named a clicked point `""` and the drill filtered `price = ''` — matching nothing and
+   * looking like a chart with no rows behind it. PR 03 patched that by reading `data[0]`, which is
+   * the coordinate; #387 replaced the patch by making `applyXScale` emit ECharts item objects that
+   * CARRY the raw category as their `name`, so there is a name to read again on every scale.
    *
-   * The payload here is that real one: an empty name beside an [x, y] pair.
+   * The payload here is the real one, pinned in `echarts/__tests__/scatterValueX.echarts.test.ts`:
+   * the category string beside a `{value, name}` item.
+   *
+   * `"15.69"` rather than `15.69` — a STRING — because that is what an ECharts `name` is, and it is
+   * exactly what the ordinal path a few tests below already sends for the same column. The backend
+   * validates a filter value against the column's generic type and parses a numeric one out of a
+   * string (`chartquery.rs`, `sql_literal`), so both spellings emit the same unquoted SQL literal.
    */
-  it("drills a value-axis point on its coordinate, which is where the value now is", () => {
+  it("drills a value-axis point on the category its item object still carries", () => {
     const onValueClick = vi.fn();
-    mockClickPayload = { name: "", seriesName: "rating", value: [15.69, 3], data: [15.69, 3], x: 3, y: 4 };
+    mockClickPayload = { name: "15.69", seriesName: "rating", value: [15.69, 3], data: { value: [15.69, 3], name: "15.69" }, x: 3, y: 4 };
     render(
       <ChartRenderer
         vizType="scatter"
@@ -280,35 +288,64 @@ describe("ChartRenderer", () => {
       />,
     );
     fireEvent.click(screen.getByTestId("echarts"));
-    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "price", value: 15.69 }] }, 3, 4);
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "price", value: "15.69" }] }, 3, 4);
   });
 
   /**
-   * A TIMESERIES X IS DELIBERATELY OUTSIDE THAT ARM, and this RECORDS that rather than endorsing it.
-   * `applyXScale` puts `Date.parse`'s epoch milliseconds in `data[0]` there, which is not a value
-   * the column has ever held, so reading it would swap one filter that matches nothing for another
-   * — and the second one looks like a real answer. The drill on a timeseries x has been broken since
-   * that scale existed and PR 03 neither reaches it (its automatic scale is only ever `linear`) nor
-   * fixes it.
+   * A TIMESERIES X, which is the defect #387 named.
    *
-   * TRACKED AS egretdb/egret#387, which carries the mechanism and a sketch of the fix. This test is
-   * the one to rewrite when that lands — a characterization test with no issue behind it is how a
-   * defect turns into a documented feature.
+   * WHAT THIS TEST USED TO RECORD: `"leaves a timeseries x-axis drill exactly as broken as it was,
+   * rather than filtering on an epoch"` — it asserted `{col: "d", value: ""}`, the empty filter, and
+   * said so in its name. `applyXScale` coordinated each point by `Date.parse`'s epoch milliseconds,
+   * a number the column has never held, so `data[0]` was not a value any filter could use; reading
+   * it would have swapped one filter that matches nothing for another that matches nothing AND
+   * looks like a real answer. There was nothing in the datum to recover the bucket value from.
+   *
+   * WHAT IT ASSERTS NOW: the datum carries the raw date, because `applyXScale` emits
+   * `{value: [epochMs, y], name: "2026-03-01"}`. The coordinate stays the epoch — that is what the
+   * time axis positions by — and the FILTER value is the string the row held.
+   *
+   * AND IT DRILLS TO A RANGE, NOT AN INSTANT. The x column is bucketed by month here, so the dim
+   * carries its `unit` exactly as the ordinal path's does, and `drillFilters` turns that one dim
+   * into the half-open pair `>= 2026-03-01` / `< 2026-04-01`. Filtering `= 2026-03-01` would answer
+   * for one day of the month the point covers — the silent under-count `drillFilters` exists to
+   * prevent. The pair is asserted below, through the same function the app calls.
    */
-  it("leaves a timeseries x-axis drill exactly as broken as it was, rather than filtering on an epoch", () => {
+  it("drills a timeseries x-axis on the date the row held, carrying its bucket unit", () => {
     const onValueClick = vi.fn();
-    mockClickPayload = { name: "", seriesName: "rev", value: [Date.parse("2026-01-01"), 10], data: [Date.parse("2026-01-01"), 10], x: 3, y: 4 };
+    mockClickPayload = {
+      name: "2026-03-01", seriesName: "rev",
+      value: [Date.parse("2026-03-01"), 30],
+      data: { value: [Date.parse("2026-03-01"), 30], name: "2026-03-01" },
+      x: 3, y: 4,
+    };
     render(
       <ChartRenderer
         vizType="line"
-        params={params({ cartesian: { xAxis: "d", yMetrics: ["rev"], xScale: "timeseries" } })}
+        params={params({
+          spec: {
+            metrics: [], dimensions: [], columns: [], filters: [], orderby: [], row_limit: 1000,
+            rollup_groups: [], temporal_units: { d: "month" },
+          },
+          cartesian: { xAxis: "d", yMetrics: ["rev"], xScale: "timeseries" },
+        })}
         columns={[{ name: "d", type: "date" }, { name: "rev", type: "double" }]}
-        rows={[["2026-01-01", 10]]}
+        // Three buckets, and the click lands on the middle one: a single-row fixture would pass
+        // for any datum shape at all, since there would be only one value to find.
+        rows={[["2026-02-01", 10], ["2026-03-01", 30], ["2026-04-01", 20]]}
         onValueClick={onValueClick}
       />,
     );
     fireEvent.click(screen.getByTestId("echarts"));
-    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "d", value: "" }] }, 3, 4);
+    expect(onValueClick).toHaveBeenCalledWith(
+      { dims: [{ col: "d", value: "2026-03-01", unit: "month" }] }, 3, 4,
+    );
+    // The half-open range the ordinal path already produces from the same dim shape — asserted
+    // here, and not only in `drill.test.ts`, because the point of the fix is the whole path.
+    expect(drillFilters(onValueClick.mock.calls[0][0])).toEqual([
+      { col: "d", op: "ge", value: "2026-03-01" },
+      { col: "d", op: "lt", value: "2026-04-01" },
+    ]);
   });
 
   /** …and the category axis is untouched by that arm: a varchar-x scatter still names its point,
