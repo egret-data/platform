@@ -7,5 +7,6 @@
     "baseUrl": ".", "paths": { "@/*": ["src/*"] },
     "types": ["vitest/globals", "@testing-library/jest-dom"]
   },
-  "include": ["src"]
+  "//": "../scripts/harness is the chart-parity seed script. It lives at the repo root because it is tooling, but it imports the app's viz descriptors through `@/`, so it is type-checked here — an unchecked script rots.",
+  "include": ["src", "../scripts/harness"]
 }

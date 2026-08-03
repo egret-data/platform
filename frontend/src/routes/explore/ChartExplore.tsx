@@ -32,6 +32,7 @@ import {
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
+import { withDefaultTemporalUnits } from "@/components/chart/temporal-units";
 import { useChartRun } from "@/components/chart/useChartRun";
 import { getDescriptor } from "@/components/chart/viz/registry";
 import { pivotDescriptor, type PivotConfig } from "@/components/chart/viz/pivot";
@@ -159,20 +160,12 @@ export default function ChartExplore() {
   }
 
   // A temporal dimension defaults to monthly grouping (Metabase-style) until the user changes it.
+  // The rule itself lives beside `pruneUnits` so headless callers — the parity-harness seed
+  // script — apply the same one instead of a copy that can drift; it returns `prev` untouched
+  // when nothing changed, so this stays a no-op re-render.
   const activeDims = specForRun().dimensions;
   useEffect(() => {
-    setTemporalUnits((prev) => {
-      let changed = false;
-      const next = { ...prev };
-      for (const name of activeDims) {
-        const temporal = columns.find((c) => c.column_name === name)?.is_temporal;
-        if (temporal && !(name in next)) {
-          next[name] = "month";
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
+    setTemporalUnits((prev) => withDefaultTemporalUnits(prev, activeDims, columns));
   }, [activeDims.join("|"), columns]);
 
   const [autoRun, setAutoRun] = useState(true);

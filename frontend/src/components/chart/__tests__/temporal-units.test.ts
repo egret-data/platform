@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { TEMPORAL_UNITS, isExtractUnit, temporalLabel, pruneUnits } from "../temporal-units";
+import {
+  TEMPORAL_UNITS, isExtractUnit, temporalLabel, pruneUnits, withDefaultTemporalUnits,
+} from "../temporal-units";
 import { buildPieOption } from "../echarts/options/pie";
 
 describe("temporal-units", () => {
@@ -33,6 +35,38 @@ describe("temporal-units", () => {
       created_at: "month",
     });
     expect(pruneUnits({ created_at: "month" }, [])).toEqual({});
+  });
+
+  // The studio's monthly default, extracted here so the parity-harness seed script applies the
+  // same rule instead of a copy. It used to live inline in ChartExplore's useEffect and had no
+  // test of its own, which is how a harness that wrote `temporal_units: {}` went unnoticed.
+  describe("withDefaultTemporalUnits", () => {
+    const COLUMNS = [
+      { column_name: "created_at", is_temporal: true },
+      { column_name: "region", is_temporal: false },
+    ];
+
+    it("defaults a date dimension to monthly grouping", () => {
+      expect(withDefaultTemporalUnits({}, ["created_at"], COLUMNS)).toEqual({ created_at: "month" });
+    });
+
+    it("leaves a non-temporal dimension alone", () => {
+      expect(withDefaultTemporalUnits({}, ["region"], COLUMNS)).toEqual({});
+    });
+
+    it("never overwrites a unit the user already chose", () => {
+      const chosen = { created_at: "day_of_week" };
+      expect(withDefaultTemporalUnits(chosen, ["created_at"], COLUMNS)).toEqual(chosen);
+    });
+
+    it("returns the same object when nothing changed, so a state setter is a no-op", () => {
+      const prev = { created_at: "month" };
+      expect(withDefaultTemporalUnits(prev, ["created_at", "region"], COLUMNS)).toBe(prev);
+    });
+
+    it("ignores a dimension the dataset does not describe", () => {
+      expect(withDefaultTemporalUnits({}, ["unknown"], COLUMNS)).toEqual({});
+    });
   });
 
   it("pie slice names use the extraction label", () => {
