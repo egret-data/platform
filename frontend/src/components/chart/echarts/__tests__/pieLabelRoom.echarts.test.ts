@@ -28,19 +28,34 @@ import { buildPieOption } from "../options/pie";
  *      is a shape Metabase does not have (its own single-ring pie still keeps a 3/5 hole), so
  *      there was nothing to port and the case was waived instead.
  *
- *   2. `labelLayout: { hideOverlap: true }`, the documented backstop, IS NOT RUNNING IN THE
- *      SHIPPED APP. echarts installs that feature as a top-level `use(installLabelLayout)` in
- *      `lib/export/core.js`; the package's `sideEffects` allowlist does not name that file, so
- *      Rollup drops the call from a production build. The live bundle contains no LabelManager at
- *      all — no `labelGuideIgnore`, no `shiftX` — while a dev server and Vitest, neither of which
- *      tree-shakes, run it happily.
+ *   2. `labelLayout: { hideOverlap: true }`, the documented backstop, WAS NOT RUNNING IN THE
+ *      SHIPPED APP when this file was written. echarts installs that feature as a top-level
+ *      `use(installLabelLayout)` in `lib/export/core.js`; the package's `sideEffects` allowlist
+ *      does not name that file, so Rollup dropped the call from a production build and the live
+ *      bundle contained no LabelManager at all, while a dev server and Vitest — neither of which
+ *      tree-shakes — ran it happily.
  *
- * WHICH IS WHY THIS FILE STRIPS `labelLayout` BEFORE RENDERING (see `asShipped`). Rendered as
- * built, under Vitest, ECharts quietly hides the colliding pair and the defect is INVISIBLE: the
- * unfixed builder passes an overlap assertion here while the live card overlaps. Stripping the key
- * is what makes this test render what a reader's browser renders. It also states the standard the
- * pie is being held to — that it place its own labels, rather than draw them and hope something
- * downstream tidies up.
+ *      THAT IS NO LONGER TRUE: `register.ts` now lists `LabelLayout` explicitly, and
+ *      `scripts/assert-label-layout-bundled.mjs` fails CI if it ever stops reaching the bundle.
+ *      The backstop runs in the shipped app.
+ *
+ * WHICH IS WHY THIS FILE STRIPS `labelLayout` BEFORE RENDERING (see `asShipped`) — AND WHY IT
+ * STILL SHOULD, for a reason that has outlived the bug above.
+ *
+ * What is measured here is the pie's OWN geometric fit, in isolation: that `sliceLabel.ts` decides
+ * each label against its own slice's chord, so that nothing has to be tidied up afterwards. Left
+ * in, `hideOverlap` would satisfy every overlap assertion below on its own, and the case that
+ * pins the defect (`drew four labels at 166x129, two of them through each other`) could not be
+ * written at all — a builder that had thrown the geometric fit away entirely would pass this file
+ * end to end. Stripping the key is what keeps these cases falsifiable, and it states the standard
+ * the pie is held to: place your own labels, rather than draw them and hope something downstream
+ * tidies up.
+ *
+ * It is also why enabling the backstop changed nothing on a pie. Measured across five sizes, in
+ * every configuration including two rings: not one slice label disappears, because the geometry
+ * has already removed everything that would have collided. The control that proves the mechanism
+ * really does reach these labels — build with `size: undefined`, so the geometric fit is skipped,
+ * and `hideOverlap` drops two to five of them.
  *
  * NO PIXEL IS ASSERTED, and no placement is recomputed here: where each label lands is ECharts'
  * own sunburst layout, read out of the markup. The one fabricated input is the font metric,
@@ -108,9 +123,13 @@ function build(rows: [string, number][], size: { width: number; height: number }
 }
 
 /**
- * The option as the PRODUCTION BUNDLE renders it — `labelLayout` removed, because the feature
- * that reads it is tree-shaken out of the build (see this file's header). Vitest would otherwise
- * apply a post-layout pass no reader ever gets.
+ * The option with the post-layout backstop removed, so what is rendered below is the pie's own
+ * geometric fit and nothing else.
+ *
+ * This used to be a claim about the build — the feature was tree-shaken out and stripping the key
+ * was how this file rendered what a reader's browser rendered. It no longer is: `register.ts`
+ * lists `LabelLayout` and the backstop ships. The strip stays because of what this file measures,
+ * not because of what the bundle contains; see the header.
  */
 function asShipped(option: Record<string, unknown>): Record<string, unknown> {
   const series = (option.series as Record<string, unknown>[]).map(({ labelLayout: _dropped, ...rest }) => rest);

@@ -78,3 +78,8 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      # Asserts the shipped bundle still carries ECharts' LabelManager. It cannot live in `npm test`
+      # — vitest does not tree-shake and does not produce `dist/`, so the only place this can fail
+      # for the right reason is right here, against the artefact the step above just built. The
+      # script's header explains which symbols survive minification and why.
+      - run: npm run test:bundle

@@ -424,7 +424,17 @@ export function buildBoxplotOption(
           // which is how Metabase splits it too.
           formatter: (p: { data: number[] }) => fmt(p.data[1], true, cfg.compactValues ?? true),
         },
-        labelLayout: { hideOverlap: true },
+        // THE SAME BARGAIN THE CARTESIAN AND WATERFALL BUILDERS STRIKE, made against the control
+        // this panel actually offers. There is no `labelDensity` here; "Values to display" is the
+        // box plot's density control, because "All" is what stacks five numbers down one box's
+        // height and is the only setting that can crowd. So "All" means the user has asked for
+        // every statistic and accepted the crowding — hiding a third of them would be the panel
+        // lying about what it draws. "Median only" is one label per box and keeps the backstop,
+        // which is what stops a wide category axis printing medians through each other.
+        //
+        // Unconditional until the LabelManager reached the bundle, when it cost 12 of 45 texts at
+        // 640x400 and 26 at a dashboard card, with no way for the user to ask for the rest.
+        labelLayout: { hideOverlap: labelMode !== "all" },
       }] : []),
     ],
   };
