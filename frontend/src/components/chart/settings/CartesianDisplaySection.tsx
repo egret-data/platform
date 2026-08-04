@@ -4,7 +4,7 @@ import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { DecimalInput } from "./DecimalInput";
 import {
-  resolveXScale, seriesDisplayFor, stackModeOf, stackModePatch, type StackMode,
+  resolveXScale, seriesDisplayFor, stackModeOf, stackModePatch, xScaleFitsColumn, type StackMode,
 } from "@/components/chart/echarts/options/cartesian";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
@@ -242,9 +242,26 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope }: Sect
           <Select value={resolveXScale(kind, config.xScale, xColumnType) ?? "ordinal"} onValueChange={(v) => onChange({ xScale: v as CartesianConfig["xScale"] })}>
             <SelectTrigger aria-label="X axis scale" className="h-7 w-28"><SelectValue /></SelectTrigger>
             <SelectContent>
+              {/* Greyed out where the column cannot carry the scale — Metabase offers only Ordinal
+                  on a text x, and picking Timeseries here drew an ENTIRELY EMPTY plot: the builder
+                  coerces every category through `Date.parse` and drops what comes back NaN, which
+                  on a column of names is all of it.
+
+                  Disabled rather than hidden, and asked through `xScaleFitsColumn` rather than
+                  restated, for the two reasons the rotation items below already give: options that
+                  appear and disappear as the data changes read as a glitch rather than as a rule,
+                  and a second copy of the builder's rule in a panel is how a control comes to offer
+                  what the chart will not draw. This is the same mechanism as those items, on
+                  purpose — there is one way to say "offered but not here" in this file.
+
+                  THE PANEL IS THE SECOND HALF OF THE FIX, NOT THE FIX. `resolveXScale` refuses the
+                  same combination, so a chart that stored Timeseries before this existed draws its
+                  bars again instead of nothing (#407's lesson: fixing the control never reaches a
+                  chart that already has the bad value stored). Nothing here is disabled that the
+                  builder would still honour. */}
               <SelectItem value="ordinal">Ordinal</SelectItem>
-              <SelectItem value="linear">Linear</SelectItem>
-              <SelectItem value="timeseries">Timeseries</SelectItem>
+              <SelectItem value="linear" disabled={!xScaleFitsColumn("linear", xColumnType)}>Linear</SelectItem>
+              <SelectItem value="timeseries" disabled={!xScaleFitsColumn("timeseries", xColumnType)}>Timeseries</SelectItem>
             </SelectContent>
           </Select>
         </div>

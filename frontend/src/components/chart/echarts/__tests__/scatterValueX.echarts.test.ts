@@ -66,10 +66,31 @@ describe("resolveXScale — which axis a scatter gets", () => {
    * A stored scale is a statement, and the automatic one is only for charts that have not made it.
    * `"ordinal"` is the case that matters: it is the value the panel writes when a user picks the
    * category axis BACK, and treating it as "nothing chosen" would make that choice unclickable.
+   *
+   * `"timeseries"` USED TO BE IN THIS LIST and was moved out below, because on this fixture it was
+   * pinning a blank chart rather than a stored statement — see the test that replaced it.
    */
-  it.each(["ordinal", "linear", "timeseries"] as const)("lets an explicit %s scale win", (xScale) => {
+  it.each(["ordinal", "linear"] as const)("lets an explicit %s scale win", (xScale) => {
     const opt = build(priceCols, priceRows, { kind: "scatter", xAxis: "price", yMetrics: ["rating"], xScale });
-    expect(opt.xAxis.type).toBe(xScale === "ordinal" ? "category" : xScale === "linear" ? "value" : "time");
+    expect(opt.xAxis.type).toBe(xScale === "ordinal" ? "category" : "value");
+  });
+
+  /**
+   * …BUT ONLY WHERE THE COLUMN CAN CARRY IT. `price` is a `double`, and `applyXScale` reaches a
+   * timeseries coordinate through `Date.parse(String(c))` — which is NaN for "15.69", so every one
+   * of these five points was dropped and the chart came out empty on a `time` axis with no extent.
+   * The assertion above asserted `type === "time"` and never looked at the data, so it passed on
+   * exactly that.
+   *
+   * `resolveXScale` now refuses the pair (`xScaleFitsColumn`), and a refused scale falls through to
+   * the automatic answer rather than to `ordinal` outright — so this scatter keeps the value axis
+   * this whole file exists to give it. Both halves are asserted, because the axis type alone is
+   * what let the blank chart through the first time.
+   */
+  it("refuses a timeseries scale on a numeric column instead of dropping every point", () => {
+    const opt = build(priceCols, priceRows, { kind: "scatter", xAxis: "price", yMetrics: ["rating"], xScale: "timeseries" });
+    expect(opt.series[0].data).toHaveLength(priceRows.length);
+    expect(opt.xAxis.type).toBe("value");
   });
 
   /**

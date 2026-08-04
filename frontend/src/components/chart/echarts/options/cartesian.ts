@@ -506,12 +506,65 @@ const usesXScale = (cfg: CartesianBuildConfig) =>
  * the ordinary bigint counts that make perfectly good scatter axes, so it is left alone and named
  * here rather than silently traded away.
  */
+/**
+ * Can this column be DRAWN on this scale at all?
+ *
+ * `applyXScale` re-keys every point onto a real coordinate — `Date.parse` for a timeseries,
+ * `Number` for a linear one — and drops the ones that come out non-finite. Over a column whose
+ * values coerce to nothing that is not a degraded chart, it is an EMPTY one: measured live on the
+ * parity harness's `MB · Bar`, whose x is a text column, picking Timeseries drew no bars, no y-axis
+ * values and no x tick labels. Two clicks, and saving keeps it.
+ *
+ * The answer is taken from the column's TYPE rather than from its values, for two reasons. The
+ * panel has to grey out the same items and has only the type (it holds no rows); and it is
+ * Metabase's own rule — `getDefaultXAxisScale`/the `graph.x_axis.scale` options there are computed
+ * from the column's semantic type, offering Timeseries only on a temporal column and Linear (with
+ * Power/Log/Histogram) only on a numeric one, with Ordinal always available because every column
+ * can be drawn as a sequence of categories.
+ *
+ * THE COST, NAMED RATHER THAN HIDDEN: a `varchar` column holding ISO date strings coerces perfectly
+ * well through `Date.parse`, and this refuses it, so such a chart saved with Timeseries falls back
+ * to the ordinal axis. That is a downgrade — every point still draws, in order, since ISO strings
+ * sort chronologically — where the alternative rule (judge the coerced VALUES) would have to live
+ * in the builder and could not be shared with the panel, leaving the select greying items out by
+ * one rule while the chart honoured another. A second rule for the same question is how this
+ * programme's colour picker came to offer a swatch the chart did not draw. Cast the column, or pick
+ * Ordinal, and nothing is lost.
+ *
+ * An unknown type permits everything: before a query has run there is no result column to judge
+ * against, and refusing on a guess would silently rewrite a setting the user made.
+ */
+export function xScaleFitsColumn(
+  scale: NonNullable<CartesianBuildConfig["xScale"]>,
+  xColumnType: string | undefined,
+): boolean {
+  if (scale === "ordinal") return true;
+  if (xColumnType == null) return true;
+  return scale === "timeseries" ? isTemporalType(xColumnType) : isNumericType(xColumnType);
+}
+
 export function resolveXScale(
   kind: CartesianViz,
   xScale: CartesianBuildConfig["xScale"],
   xColumnType: string | undefined,
 ): CartesianBuildConfig["xScale"] {
-  if (xScale != null) return xScale;
+  // A stored scale still wins — but only where the column can carry it. A refused one falls
+  // THROUGH to the automatic answer rather than to `ordinal` outright, so a scatter over a numeric
+  // column that had `timeseries` stored still gets the value axis it would have got with nothing
+  // stored at all, instead of the 196-category axis that predates it.
+  //
+  // WHAT THE PANEL THEN SHOWS is "Ordinal", not the stored word greyed out, and that follows from
+  // the select already reading the RESOLVED scale (`AxesOptions`, and the argument on that row):
+  // printing "Timeseries" over a chart visibly drawing categories is the same
+  // stored-says-one-thing-screen-says-another defect that row was written to avoid. The stored
+  // value is not rewritten — nothing here writes to the config — so re-pointing the chart at a date
+  // column brings the timeseries axis straight back, which is the same render-time-resolution rule
+  // that lets a saved scatter pick up a better default.
+  //
+  // That is the OPPOSITE choice from the rotation items a few lines away in that panel, which stay
+  // showing what they stored while greyed. The difference is which value the control is bound to:
+  // `xTicksChoiceOf` reads the config, this select reads the resolution.
+  if (xScale != null && xScaleFitsColumn(xScale, xColumnType)) return xScale;
   if (kind !== "scatter") return undefined;
   return xColumnType != null && isNumericType(xColumnType) ? "linear" : undefined;
 }

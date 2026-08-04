@@ -376,6 +376,64 @@ describe("CartesianDisplaySection — the x-axis scale select", () => {
     render(<CartesianDisplaySection kind={kind} config={{ yMetrics: ["rev"], xAxis: "price", ...extra }} onChange={() => {}} xColumnType="double" />);
     expect(screen.queryByLabelText("X axis scale")).toBeNull();
   });
+
+  /**
+   * A SCALE THE COLUMN CANNOT CARRY IS OFFERED GREYED, NOT LIVE.
+   *
+   * Measured live on `MB · Bar`, whose x is a text column: all three items were enabled and picking
+   * Timeseries drew an entirely empty plot area. Metabase, driven side by side on the same card,
+   * disables the select down to Ordinal alone there.
+   *
+   * The panel is the second half of the fix — `resolveXScale` refuses the same combination, which
+   * is what reaches a card that already has the bad value stored (`xScaleFitsColumn.test.ts`). This
+   * half is about not offering it in the first place.
+   *
+   * Asserted on `aria-disabled`, which is what a Radix `SelectItem` sets and the only signal a
+   * screen reader gets — `disabled` as an attribute is not there to find.
+   */
+  const scaleItems = async (user: ReturnType<typeof userEvent.setup>) => {
+    await user.click(screen.getByLabelText("X axis scale"));
+    const state = async (name: string) =>
+      (await screen.findByRole("option", { name })).getAttribute("aria-disabled");
+    return { linear: await state("Linear"), timeseries: await state("Timeseries"), ordinal: await state("Ordinal") };
+  };
+
+  it("greys Linear and Timeseries out on a text x column, leaving Ordinal", async () => {
+    const user = userEvent.setup();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xAxis: "category" }} onChange={() => {}} xColumnType="varchar" />);
+    expect(await scaleItems(user)).toEqual({ linear: "true", timeseries: "true", ordinal: null });
+  });
+
+  /** A number is not a date: `Date.parse("15.69")` is NaN, so Timeseries empties a numeric chart
+   *  just as it empties a text one. Metabase offers Linear / Power / Log / Ordinal there and no
+   *  Timeseries. */
+  it("greys only Timeseries out on a numeric x column", async () => {
+    const user = userEvent.setup();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xAxis: "price" }} onChange={() => {}} xColumnType="double" />);
+    expect(await scaleItems(user)).toEqual({ linear: null, timeseries: "true", ordinal: null });
+  });
+
+  it("greys only Linear out on a temporal x column", async () => {
+    const user = userEvent.setup();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xAxis: "d" }} onChange={() => {}} xColumnType="timestamp" />);
+    expect(await scaleItems(user)).toEqual({ linear: "true", timeseries: null, ordinal: null });
+  });
+
+  /** Before a query has run there is no result column to judge against, and greying an item out on
+   *  a guess would refuse a setting that may be exactly right. Nothing is disabled. */
+  it("greys nothing out while the column type is unknown", async () => {
+    const user = userEvent.setup();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xAxis: "category" }} onChange={() => {}} />);
+    expect(await scaleItems(user)).toEqual({ linear: null, timeseries: null, ordinal: null });
+  });
+
+  /** A card saved with the bad value shows what it is DRAWN as, not what it stored — the trigger
+   *  reads the resolved scale, and the resolution now refuses this pair. The stored key is
+   *  untouched, so re-pointing the chart at a date column brings Timeseries straight back. */
+  it("reads Ordinal on a text column that stored Timeseries, which is what it now draws", () => {
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xAxis: "category", xScale: "timeseries" }} onChange={() => {}} xColumnType="varchar" />);
+    expect(screen.getByLabelText("X axis scale")).toHaveTextContent("Ordinal");
+  });
 });
 
 describe("CartesianDisplaySection — a combo can stack", () => {
