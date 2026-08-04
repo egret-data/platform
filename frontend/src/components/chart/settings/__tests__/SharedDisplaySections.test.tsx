@@ -129,3 +129,50 @@ describe("styleColumnsFor — pie", () => {
     expect(styleColumnsFor("pie", {} as never, cols)).toEqual([]);
   });
 });
+
+/**
+ * PR B: for a TABLE there is one column list, not two.
+ *
+ * The table's `styleColumns` ARE its `resultColumns` (`styleColumnsFor` returns them unfiltered),
+ * so the Formatting accordion under the column list was a second row per column carrying the same
+ * names in a different order — and the rename two lists away from the visibility toggle. It is now
+ * the row's own drill-in. Every other viz keeps the section, because for them `styleColumns` is a
+ * genuine subset of the result and so is a different list rather than a duplicate one.
+ */
+describe("SharedDisplaySections — the table has ONE column list", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "revenue", type: "bigint" }];
+  const common = {
+    resultColumns: cols,
+    styleColumns: cols,
+    tableState: {},
+    columnSettings: {},
+    conditionalFormatting: [],
+    onTableState: vi.fn(),
+    onColumnSettings: vi.fn(),
+    onConditionalFormatting: vi.fn(),
+  };
+
+  it("renders no separate Formatting section for a table", () => {
+    render(<SharedDisplaySections vizType="table" {...common} only="format" />);
+    expect(screen.getByText("Columns")).toBeInTheDocument();
+    expect(screen.queryByText("Formatting")).not.toBeInTheDocument();
+  });
+
+  it("prints each column's name exactly once", () => {
+    render(<SharedDisplaySections vizType="table" {...common} only="format" />);
+    expect(screen.getAllByText("revenue")).toHaveLength(1);
+  });
+
+  it("puts the formatting behind the row's drill-in instead", () => {
+    render(<SharedDisplaySections vizType="table" {...common} only="format" />);
+    expect(screen.getByLabelText("settings revenue")).toBeInTheDocument();
+  });
+
+  // A pivot's formattable columns are a SUBSET of its result, so its Formatting list is a
+  // different list and stays. Pinned so "drop the section" cannot be over-applied.
+  it("keeps the Formatting section for a pivot", () => {
+    render(<SharedDisplaySections vizType="pivot_table" {...common}
+      styleColumns={[{ name: "revenue", type: "bigint" }]} only="format" />);
+    expect(screen.getByText("Formatting")).toBeInTheDocument();
+  });
+});
