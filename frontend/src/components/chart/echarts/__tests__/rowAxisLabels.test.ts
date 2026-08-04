@@ -396,12 +396,6 @@ describe("a row chart's axes fit what they draw", () => {
   });
 
   /**
-   * A row chart is a cartesian, so the fit runs in the file every other cartesian kind builds
-   * through. A vertical bar's value axis is the LEFT one — its ticks stack downwards, where their
-   * width costs nothing and this fit has nothing to say — and its category labels are the ones the
-   * PR 02 ladder already owns. Neither axis may acquire an interval from this change.
-   */
-  /**
    * The fitter is EXPORTED, and the builder is not its only future caller — the waterfall and the
    * box plot lay out the same axis from the same grid. A width that is not a number is not a narrow
    * card, and `<= 0` is false for NaN, so the two guards say `> 0` instead: an unmeasured input has
@@ -415,15 +409,37 @@ describe("a row chart's axes fit what they draw", () => {
       .toBeUndefined();
   });
 
+  /**
+   * A row chart is a cartesian, so this fit runs in the file every other cartesian kind builds
+   * through — and a vertical chart's value axis is a DIFFERENT axis with a different budget. Its
+   * ticks stack downwards, where a label's width costs nothing, so a width fit has nothing to say
+   * about it and must not reach it.
+   *
+   * WHAT CHANGED UNDER THIS CASE, and why it is not the guard weakening. This used to assert that
+   * NOTHING reached a vertical chart's value axis, which was true while nothing had been written
+   * for it. `verticalAxisLabels.echarts.test.ts` is the fix for the same crowding on that axis, and
+   * it budgets in HEIGHT: the bar chart's own labels overlapped on the live card too, at a 10.7px
+   * pitch, because four 90° category names leave it a 56px plot. So the claim here narrows from
+   * "no interval" to "not THIS interval", which is the one this file can actually speak for —
+   * an interval sized against the height differs from one sized against the width, and the two
+   * being equal by coincidence is what the horizontal card below rules out.
+   */
   it("says nothing about a vertical chart's value axis", () => {
     const bar = buildCartesianOption(cols, rows, { ...rowCfg, kind: "bar" }, CARD) as {
       xAxis: { interval?: number; splitNumber?: number };
       yAxis: { interval?: number; splitNumber?: number; nameGap?: number };
     };
-    expect(bar.yAxis.interval).toBeUndefined();
+    const row = buildCartesianOption(cols, rows, rowCfg, CARD) as { xAxis: { interval?: number } };
     expect(bar.yAxis.splitNumber).toBeUndefined();
-    // The category axis is the bottom one here, where a title needs no room made for labels beside
-    // it — so it keeps the constant it always had rather than the row chart's measured gap.
-    expect((bar.xAxis as { nameGap?: number }).nameGap).toBe(28);
+    // The row chart's own bottom axis is what this file's fit decides, and the bar chart's left one
+    // is not it: on this card they land on different intervals, so a wire crossed between them
+    // would show up here rather than passing as a coincidence.
+    expect(row.xAxis.interval).toBeDefined();
+    expect(bar.yAxis.interval).not.toBe(row.xAxis.interval);
+    // …and the row chart's CATEGORY axis is the left one, so the measured `nameGap` this file
+    // asserts above belongs to a left axis. A vertical chart's category axis is the bottom one and
+    // is measured by the height fit instead — a different function with a different clamp — so what
+    // this case can say is only that it is not the flat constant either edge used to keep.
+    expect((bar.xAxis as { nameGap?: number }).nameGap).toBeGreaterThan(28);
   });
 });

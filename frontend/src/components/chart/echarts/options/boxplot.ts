@@ -2,7 +2,10 @@ import type { EChartsCoreOption } from "echarts/core";
 import type { EChartsSize } from "../EChartsRenderer";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
-import { estimatePlotWidth, fitXLabels, type XLabelFit } from "../axisLabelFit";
+import {
+  bottomNameGapClearOf, categoryLabelBand, estimatePlotWidth, fitXLabels, plotHeightLessLabels,
+  verticalValueAxisFit, widestLabelWidth, type XLabelFit,
+} from "../axisLabelFit";
 import { ariaDescription, baseOption, tooltipSurface } from "../base";
 import { sortCategories } from "./cartesian";
 import {
@@ -293,6 +296,60 @@ export function buildBoxplotOption(
   // Either way the axis has now DECIDED, and a decided axis draws every label or none — never the
   // subset `interval: "auto"` leaves ECharts free to pick.
   const decided = fit != null || explicitRotate;
+
+  /**
+   * THE OTHER AXIS HAS THE SAME DEFECT ON THE OTHER DIMENSION, and this chart is one of the two the
+   * live 166x184 dashboard showed it on: the value axis drew `20 40 60 80` on a 10.7px pitch against
+   * 15px label boxes, every neighbouring pair overlapping, while `category` was drawn straight down
+   * its own four rotated names.
+   *
+   * The cause is the ladder above rather than the numbers: four product names turned 90° reserve
+   * 72px of a 184px card, leaving a 56px plot for six ticks. `echarts/axisLabelFit.ts` carries the
+   * whole argument and all three measurements — `categoryLabelBand` for the band those names take,
+   * `plotHeightLessLabels` for what is left, `verticalValueAxisFit` for the pitch — because
+   * the cartesian builder and this one lay the same grid out and two copies of that arithmetic is
+   * two places for it to drift.
+   *
+   * MEASURED OR DECLINED, the same rule the x-label fit above keeps: `widestLabelWidth` reports 0
+   * where there is no canvas, and a band computed from that is a guess about a card nobody measured.
+   */
+  const measuredCategories = measurable ? widestLabelWidth(categories) : 0;
+  const categoryGutter = measuredCategories > 0 ? measuredCategories : undefined;
+  const categoryBand = categoryGutter != null && fit?.kind !== "hide"
+    ? categoryLabelBand({ rotate, widestLabel: categoryGutter })
+    : 0;
+  // The insets this builder is about to emit, hoisted so the fit subtracts the grid it really uses.
+  const grid = {
+    ...CHART_THEME.grid,
+    bottom: (CHART_THEME.grid.bottom as number) + (xTitle ? 22 : 0),
+    left: (CHART_THEME.grid.left as number) + (yTitle ? 26 : 0),
+  };
+  /**
+   * How far the value axis runs. Every value the axis has to hold — the five box numbers, the
+   * outliers, the non-outlier points and the means — and ZERO, because ECharts' `scale` defaults to
+   * false and this axis reaches the origin whether or not a price does. It is the same set
+   * `axisWidest` above takes its magnitude from, kept as two ends rather than one because an
+   * interval divides a DISTANCE: a distribution running -40 to +60 is 100 across while its biggest
+   * number is 60. `yMin`/`yMax` replace their end when the user has set one.
+   */
+  // REDUCED rather than spread into `Math.min`: "All points" draws every raw row, and a spread of
+  // one argument per point is a call frame that overflows on a big enough result set.
+  let axisLo = 0, axisHi = 0;
+  for (const v of [
+    ...stats.flatMap((s) => s.box),
+    ...outlierPoints.map((p) => p[1]), ...allPoints.map((p) => p[1]), ...meanPoints.map((p) => p[1]),
+  ]) {
+    if (!Number.isFinite(v)) continue;
+    if (v < axisLo) axisLo = v;
+    if (v > axisHi) axisHi = v;
+  }
+  const down = categoryGutter != null && size && !cfg.logScale && cfg.yTickCount == null
+    ? verticalValueAxisFit({
+        plotHeight: plotHeightLessLabels({ size, band: categoryBand, grid }),
+        lo: cfg.yMin ?? axisLo,
+        hi: cfg.yMax ?? axisHi,
+      })
+    : undefined;
   // NO ROOM IS RESERVED BELOW THE PLOT FOR A TILTED LABEL, at any rotation, measured or explicit —
   // the 44/18 ladder this builder used to add on the explicit path is gone with it. See
   // `XLabelFit`'s doc in `../axisLabelFit.ts`: `containLabel` already expands the grid around the
@@ -331,11 +388,7 @@ export function buildBoxplotOption(
       kind: "Box plot", metric: cfg.value, dimension: cfg.category, format: (v) => fmt(v),
       points: categories.map((c, i) => ({ name: String(c), value: stats[i]?.box?.[2] })),
     }),
-    grid: {
-      ...CHART_THEME.grid,
-      bottom: (CHART_THEME.grid.bottom as number) + (xTitle ? 22 : 0),
-      left: (CHART_THEME.grid.left as number) + (yTitle ? 26 : 0),
-    },
+    grid,
     // The series-level `tooltip: { trigger: "item" }` entries below only make the point series
     // hoverable at all; the box the tooltip is DRAWN in is this one, so the shared surface belongs
     // here and covers all of them.
@@ -361,7 +414,16 @@ export function buildBoxplotOption(
     },
     xAxis: {
       type: "category", data: categories,
-      name: xTitle, nameLocation: "middle", nameGap: 28,
+      name: xTitle, nameLocation: "middle",
+      // `nameGap` is measured from the AXIS LINE, and what sits between the line and the name is the
+      // column of category labels — which, once the ladder above turns them 90°, run down into
+      // exactly the band 28 places the title in. Live at 166x184: `category` occupied y 106.2-119.2
+      // against names running 86.2-147.0, drawn across all four. `bottomNameGapClearOf` states the
+      // three terms and owns the one card it declines on; `Math.max` keeps 28 as the floor, which is
+      // the gap an axis whose labels are hidden should keep.
+      nameGap: Math.max(28, (categoryGutter != null && size
+        ? bottomNameGapClearOf({ band: categoryBand, size, gridTop: grid.top as number })
+        : undefined) ?? 28),
       nameTextStyle: { color: axisLabelColor },
       axisLabel: {
         fontSize: CHART_THEME.axisFontSize, color: axisLabelColor,
@@ -377,9 +439,17 @@ export function buildBoxplotOption(
       type: cfg.logScale ? "log" : "value",
       name: yTitle, nameLocation: "middle", nameGap: 44,
       nameTextStyle: { color: axisLabelColor },
+      // The ends the fit's interval divides, written FIRST so a range the user set outranks them —
+      // see `verticalValueAxisFit` for why ECharts will not round them itself once an `interval` is
+      // named, and for the short last step it leaves behind.
+      ...(down != null ? { min: down.min, max: down.max } : {}),
       ...(cfg.yMin != null ? { min: cfg.yMin } : {}),
       ...(cfg.yMax != null ? { max: cfg.yMax } : {}),
-      ...(cfg.yTickCount != null ? { splitNumber: cfg.yTickCount } : {}),
+      // The user's own tick count wins outright; the measured fit is the fallback behind it, and it
+      // arrives ALONE — an `interval` beside a `splitNumber` would win over it in ECharts, which is
+      // why the fit above declines outright once one is set rather than being masked here.
+      ...(cfg.yTickCount != null ? { splitNumber: cfg.yTickCount }
+        : down != null ? { interval: down.interval } : {}),
       axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmt(v, true) },
       axisLine: { show: cfg.yAxisTicks !== false, lineStyle: { color: gridLine } },
       axisTick: { show: cfg.yAxisTicks !== false },
