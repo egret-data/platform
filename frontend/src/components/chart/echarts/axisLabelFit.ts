@@ -468,6 +468,209 @@ export function intervalThatFits({
 }
 
 /**
+ * The vertical band a value label OCCUPIES, as a multiple of the font size — the height counterpart
+ * of the width `intervalThatFits` measures per label, and the one term that could not be carried
+ * across from it.
+ *
+ * IT IS NOT MEASURED PER LABEL, AND THAT IS THE POINT. `intervalThatFits` has to ask `measureText`
+ * how wide `"400K"` comes out, because the answer depends on the digits; stacked labels are all
+ * exactly as tall as each other whatever they say, so the vertical fit needs no measurer for its
+ * pitch at all and cannot be defeated by a jsdom that reports zero. (It still declines under jsdom,
+ * for a different reason — the PLOT HEIGHT below is measured. See `plotHeightLessLabels`.)
+ *
+ * 15/13 IS A MEASUREMENT AND NOT A GUESS AT A LINE HEIGHT, and the distinction matters because
+ * ECharts' own answer is a different number. Read off the live 166x184 dashboard card, Chrome, the
+ * app's `--font-sans` at `400 13px`: every axis label's box came out 15px tall — `100K` and `20`
+ * alike, digits having neither descenders nor accents to vary it. zrender lays the same axis out
+ * against `getLineHeight(font)`, which is the width of `国` and comes to exactly the font size
+ * (13px, confirmed in SSR). So ECharts thinks its labels are 13 tall while the browser draws 15,
+ * and a fit charged 13 would leave two boxes touching by 2px while satisfying its own arithmetic.
+ * What is drawn is what a reader sees, so what is drawn is what is charged.
+ *
+ * NO `HORIZONTAL_TICKS_GAP` IS ADDED ON TOP OF IT, which is the one place this fit declines to
+ * follow the horizontal one, and it is not an oversight. That constant is the ink-free space two
+ * labels running SIDE BY SIDE need, where the box being measured is the glyphs' own advance width
+ * and there is no slack in it — `getPaddedAxisLabel` even adds a space at each end to be
+ * pessimistic. A LINE BOX already contains its leading: 15px of box around digits whose ink is
+ * ~9.4px tall leaves 5.6px of clear space between two boxes that merely touch. Charging 6 more
+ * would be billing the same clearance twice, and it is the difference between leaving the harness's
+ * combo card alone (its ticks sit 18.3px apart) and thinning an axis nobody reported. The criterion
+ * the live audit applied was that no two label BOXES intersect, and that is the criterion here.
+ */
+const VALUE_LABEL_BOX_RATIO = 15 / 13;
+
+/**
+ * The vertical band the CATEGORY labels take out of the card below the plot, given the rotation the
+ * ladder above settled on — the term that makes a vertical chart's plot SHORT, and the reason its
+ * value axis crowds at a size where a row chart's does not.
+ *
+ * WHY THE BUILDER CANNOT JUST SUBTRACT ITS GRID INSETS, which is what `plotWidthLessGutter` does on
+ * the other axis: `grid.bottom` is 12, and the plot on the live bar card ends 105.8px above the
+ * bottom of a 184px SVG. The missing 72px is this — four 90°-rotated product names, each as tall as
+ * its own width, reserved by ECharts' `outerBounds` from a grid inset that says nothing about them.
+ * A vertical fit computed against `size.height` less the insets would be told it had 138px to spend
+ * where it had 56.
+ *
+ * EACH ARM MEASURED, against real ECharts 6.1 in SSR, at two font sizes so a term that is really a
+ * constant cannot masquerade as a multiple of one. The quantity read out is the room ECharts left
+ * below the plot in excess of `grid.bottom`, less `AXIS_LABEL_MARGIN`; the widest of the four
+ * category names measures 60.84px at 13px and 93.60px at 20px:
+ *
+ *              measured 13px   this returns   measured 20px   this returns
+ *     0°        13.00           13.00          20.00           20.00
+ *     45°       49.74           52.21          75.38           80.33
+ *     90°       63.84           67.34          96.60           103.60
+ *
+ * SO TWO OF THE THREE ARE BOUNDS RATHER THAN EQUALITIES, deliberately, and they lean the safe way:
+ * over-stating the band under-states the plot, which spends fewer ticks than strictly necessary —
+ * the failure is a sparse axis, not an overlapping one. The 0° arm is exact because there is
+ * nothing to project: an upright label's band is its line, and its line is the font size.
+ *
+ * 90° IS THE WIDTH PLUS HALF A LINE, and the half line is slack rather than geometry. A label
+ * turned onto the vertical runs exactly its own width down the card, so the width is the whole of
+ * the projection — but ECharts reserved 3.00px more than that at BOTH font sizes, out of the single
+ * estimate pass `layOutGridByOuterBounds` makes (its own comment concedes the rect "might be
+ * slightly smaller than the ideally expected result"). Charging a measured 3 would pin an
+ * implementation detail of one ECharts version; charging half a line covers it at any font size and
+ * says why it is there.
+ *
+ * 45° IS THE ROTATED BOX'S PROJECTION, `(w·sin45 + h·cos45)` with the label's height taken as the
+ * font size — the same √2 the height guard in `fitXLabels` projects with, applied to both sides of
+ * the box rather than to the width alone. `maxWidth / √2` alone is NOT a bound here: it comes to
+ * 43.02 against a measured 49.74.
+ */
+export function categoryLabelBand({
+  rotate,
+  /** The widest label the axis DRAWS, measured — `widestLabelWidth`. Unused at 0°, where the band
+   *  is the font's own line and no string can change it. */
+  widestLabel,
+  fontSize = CHART_THEME.axisFontSize,
+}: { rotate: 0 | 45 | 90; widestLabel: number; fontSize?: number }): number {
+  if (rotate === 90) return widestLabel + fontSize / 2;
+  if (rotate === 45) return (widestLabel + fontSize) / Math.SQRT2;
+  return fontSize;
+}
+
+/**
+ * The height the value ticks share — `plotWidthLessGutter`'s counterpart, and NOT its transposition.
+ *
+ * Three of the four terms have no analogue on the other axis:
+ *
+ *   - `categoryLabelBand`, above, which is the whole reason this cannot be four insets.
+ *   - `AXIS_LABEL_MARGIN`, because ECharts holds the category labels that far clear of the axis
+ *     line and the band is measured from where they START.
+ *   - HALF A LINE AT THE TOP. The topmost value label is centred on its tick and would overhang the
+ *     top of the card, so ECharts pushes the plot down by half its height — measured at exactly
+ *     `fontSize / 2` (6.50 at 13px, 10.00 at 20px, constant across every card height rendered).
+ *     This is the vertical trace of the same effect `intervalThatFits` charges a whole label width
+ *     for, and it is HALF of one rather than one because only the top end moves: the bottom label
+ *     sits on the axis line and overhangs into the band the category names already own.
+ *
+ * WHICH WAY IT ERRS, and it is the same direction the width estimate takes for the same reason:
+ * UNDER. Rendered at 166x184 with four 90° category names it answers 52.2 against a drawn plot of
+ * 55.7, the 3.5px being `categoryLabelBand`'s deliberate over-charge. Erring small spends fewer
+ * ticks than the card could carry; erring large leaves two of them touching, which is the defect.
+ *
+ * THE GRID INSETS ARE PASSED IN RATHER THAN READ FROM `CHART_THEME`, unlike `plotWidthLessGutter`'s
+ * hard-coded 26. Each builder adds its own room on these two edges — 24 at the top for a legend, 22
+ * at the bottom for a title — and both are conditional, so a copy of that arithmetic here would be
+ * a second place for it to drift from the `grid` the builder actually emits. Callers pass the very
+ * object they are about to hand ECharts.
+ */
+export function plotHeightLessLabels({
+  size,
+  band,
+  grid,
+  fontSize = CHART_THEME.axisFontSize,
+}: {
+  size: EChartsSize;
+  /** `categoryLabelBand` for the rotation this chart settled on, or 0 where the ladder hid the
+   *  axis and nothing is drawn below it. */
+  band: number;
+  /** The builder's OWN resolved grid insets, not `CHART_THEME.grid`'s. */
+  grid: { top: number; bottom: number };
+  fontSize?: number;
+}): number {
+  return size.height - grid.top - grid.bottom - AXIS_LABEL_MARGIN - band - fontSize / 2;
+}
+
+/**
+ * The whole scale a VERTICAL value axis needs for its labels to clear each other down `plotHeight`
+ * — the interval AND the two ends it divides. `intervalThatFits` asked about the other axis, and
+ * the answer is a different quantity rather than the same one rotated.
+ *
+ * WHAT DOES CARRY OVER, unchanged and deliberately shared: the remedy (fewer ticks, never a
+ * rotation — see `intervalThatFits` for why a value axis is not handed the category ladder), the
+ * `{1,2,5}×10ⁿ` lattice, and the ceiling at `DEFAULT_VALUE_SPLITS` that leaves a roomy card's
+ * option byte-identical.
+ *
+ * WHAT DOES NOT, and each was checked rather than assumed:
+ *
+ *   1. NO LABEL IS MEASURED. `intervalThatFits` divides by `width + gap` and has to know which
+ *      string the axis draws; a stacked label's height is its font's, so `VALUE_LABEL_BOX_RATIO`
+ *      answers it outright. There is no `widestValue`, no `format`, and no zero-measurement arm —
+ *      the caller's plot height is the only measured input, and it declines on that. (Nor any
+ *      `HORIZONTAL_TICKS_GAP`; the constant's own note says why a line box does not want one.)
+ *   2. NO WHOLE LABEL IS CHARGED BEFORE THE DIVISION. The horizontal fit subtracts one full label
+ *      width for the two outermost overhangs, because echarts 6 shrinks the grid sideways to keep
+ *      them on the card — measured at 250px as 29px of a 139px estimate. Vertically it does not:
+ *      the plot rect came out at a CONSTANT y of 22.5 and a height of `cardHeight − 128.34` across
+ *      184/220/260/300/400px cards, three chart families and every interval tried, and the drawn
+ *      pitch was `plotHeight / steps` to the third decimal in all of them. The top overhang is a
+ *      fixed half line and belongs to `plotHeightLessLabels`; the bottom one spills into the
+ *      category names' own band. Charging a label here would have thinned every card by one rung
+ *      for a shrink that does not happen.
+ *   3. IT NAMES THE ENDS AS WELL AS THE INTERVAL, which is the only thing this returns that the
+ *      horizontal fit does not, and it is a defect of the horizontal one rather than a luxury of
+ *      this one. `intervalThatFits`'s own note records the residual: an interval that does not
+ *      divide the extent ECharts chose leaves a SHORT last step — 200K against a nice 500K max
+ *      draws 0/200K/400K/500K, and the last two sit half a pitch apart. It relies on ECharts
+ *      dropping that label itself, and ECharts does — but by ITS 13px reckoning of a label's
+ *      height, not the 15px one a browser draws. Measured on a 166x200 bar card, the last two came
+ *      out 14.33px apart: comfortable to ECharts, and a 0.67px overlap on screen. Rounding the two
+ *      ends OUT to multiples of the interval removes the short step by construction rather than by
+ *      relying on someone else's tie-break, and it cannot clip data — `floor` on the low end and
+ *      `ceil` on the high one only ever widen. `axisHelper.niceScaleExtent` is why ECharts will not
+ *      do it for us: it rounds the extent for the interval it DERIVED, then overwrites the interval
+ *      with the option's, leaving the extent behind.
+ *
+ * THE PITCH IS THE WHOLE TEST, then: labels are centred on their ticks and evenly spaced, so
+ * neighbours sit `plotHeight / steps` apart, and the axis fits when that clears one label box —
+ * 15px at the 13px this family draws at. The live card's crowded axes were at 10.7 (bar and box
+ * plot, four labels each overlapping the next); the four that read cleanly were at 21 and 18.3.
+ */
+export function verticalValueAxisFit({
+  plotHeight,
+  lo,
+  hi,
+  fontSize = CHART_THEME.axisFontSize,
+}: {
+  /** The drawable height the ticks share, from `plotHeightLessLabels`. */
+  plotHeight: number;
+  /** The two ends the axis has to hold — the DISTANCE between them is what an interval divides, so
+   *  an axis running -400 to +400 is 800 across and not 400. Both are widened to the round numbers
+   *  returned, so a caller hands over the extent its data really needs and gets back one the ticks
+   *  land on. */
+  lo: number;
+  hi: number;
+  fontSize?: number;
+}): { interval: number; min: number; max: number } | undefined {
+  const span = hi - lo;
+  // `!(x > 0)` rather than `x <= 0` so a NaN is DECLINED rather than carried into an option — the
+  // same guard `intervalThatFits` states, and for the same reason: three builders call this.
+  if (!(plotHeight > 0) || !(span > 0) || !Number.isFinite(span)) return undefined;
+  const steps = Math.floor(plotHeight / (fontSize * VALUE_LABEL_BOX_RATIO));
+  if (steps >= DEFAULT_VALUE_SPLITS) return undefined;
+  // One step is ECharts' floor as well as ours: a value axis draws its two ends.
+  const interval = niceInterval(span / Math.max(1, steps));
+  return {
+    interval,
+    min: Math.floor(lo / interval) * interval,
+    max: Math.ceil(hi / interval) * interval,
+  };
+}
+
+/**
  * The `nameGap` a LEFT axis's name needs to clear its own labels, given how wide they measure.
  *
  * `nameGap` is measured from the AXIS LINE, and on a left axis the labels are what sits between the
@@ -502,6 +705,66 @@ export function nameGapClearOf(labelWidth: number, size: EChartsSize): number | 
   const reserved = (g.left as number) + 26 + labelWidth + AXIS_LABEL_MARGIN + MIN_PLOT_WIDTH;
   if (!(size.width - (g.right as number) >= reserved)) return undefined;
   return labelWidth + AXIS_LABEL_MARGIN + HORIZONTAL_TICKS_GAP;
+}
+
+/**
+ * The `nameGap` a BOTTOM axis's name needs to clear its own labels — the same defect
+ * `nameGapClearOf` fixes one axis over, and the same three terms, because `nameGap` is measured
+ * from the axis line on every edge and the labels are what sits between the two wherever they are.
+ *
+ * IT IS A SECOND FUNCTION AND NOT AN ARGUMENT TO THE FIRST, and the reason is entirely in the
+ * CLAMP. What the two compute is identical (`AXIS_LABEL_MARGIN + labels + HORIZONTAL_TICKS_GAP`);
+ * what they decline for is not, and folding them together would put one of the two clamps on an
+ * axis it is wrong for.
+ *
+ * The live defect, at 166x184: `category` occupied y 106.2-119.2 while its four 90°-rotated names
+ * ran 86.2-147.0 — the title drawn straight down the middle of the labels it names, intersecting
+ * all four. `nameGap` was a flat 28 from an axis line at 78.2, and the names need 68.8.
+ *
+ * WHY THE LEFT AXIS'S CLAMP WOULD NOT TRANSFER. `nameGapClearOf` declines on a narrow card because
+ * ECharts stops honouring `grid.left` past a certain label width and SPILLS the labels leftwards,
+ * so a gap measured from where they were expected walks the title off the canvas — measured there
+ * at x -1, -6 and -100. Downwards there is no spill: the plot simply shrinks, the axis line rises
+ * with the labels, and the title rises with the axis line. Rendered at 166x184 with a category name
+ * of 108.7px the plot came out 7.8px tall and the title still landed at y 153-166 on a 184px card —
+ * the same place a 60.8px name put it, because both are measured from an axis line that had already
+ * moved. So the unclamped gap is SAFE over the whole range where the left axis's is not.
+ *
+ * …UNTIL THE PLOT RUNS OUT, which is the case this does decline for. ECharts stops shrinking at a
+ * zero-height plot (measured: exactly 0.00 on a 120px card with those same four names), and from
+ * there the axis line cannot rise any further while the labels below it keep growing. The condition
+ * below is that case stated in full — the top inset, the half line the topmost value label
+ * overhangs by, the gap itself and the title's own line — and it is the only arrangement in which
+ * the title leaves the card. Where it does, the caller keeps the flat 28 and the title is drawn
+ * across its labels, which is this fix's own defect and deliberately the accepted outcome:
+ * `nameGapClearOf` argues it at length, and a title one can read over the top of beats one that is
+ * not there.
+ *
+ * A HIDDEN AXIS IS THE CALLER'S BUSINESS, not this function's. When the ladder answers `hide` no
+ * label is drawn, there is nothing to clear, and a gap computed from labels that are not on the
+ * card is how the title ends up at y 325 on a 184px SVG — measured, on the first version of this.
+ * The caller passes a band of 0 there and gets `AXIS_LABEL_MARGIN + HORIZONTAL_TICKS_GAP` back,
+ * which is under the flat 28 it would otherwise use; `??` picks the larger of the two by the
+ * caller's own arithmetic rather than by a special case in here.
+ */
+export function bottomNameGapClearOf({
+  band,
+  size,
+  gridTop,
+  fontSize = CHART_THEME.axisFontSize,
+}: {
+  /** The vertical band the labels occupy — `categoryLabelBand`, the same number
+   *  `plotHeightLessLabels` is given, so the gap and the plot cannot disagree about where the
+   *  labels end. */
+  band: number;
+  size: EChartsSize;
+  /** The builder's own top inset, which is where a squeezed plot bottoms out. */
+  gridTop: number;
+  fontSize?: number;
+}): number | undefined {
+  const gap = AXIS_LABEL_MARGIN + band + HORIZONTAL_TICKS_GAP;
+  if (!(size.height >= gridTop + fontSize / 2 + gap + fontSize)) return undefined;
+  return gap;
 }
 
 /** At most `n` indices spread evenly over `count`, endpoints included — Metabase's

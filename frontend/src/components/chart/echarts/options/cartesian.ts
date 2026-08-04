@@ -11,7 +11,8 @@ import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units"
 import { boundarySteps, namesAPeriod, periodName } from "@/components/chart/temporal-period";
 import { foldTail, OTHER_LABEL } from "../fold";
 import {
-  estimatePlotWidth, fitXLabels, intervalThatFits, nameGapClearOf, plotWidthLessGutter, widestLabelWidth,
+  bottomNameGapClearOf, categoryLabelBand, estimatePlotWidth, fitXLabels, intervalThatFits,
+  nameGapClearOf, plotHeightLessLabels, plotWidthLessGutter, verticalValueAxisFit, widestLabelWidth,
   type XLabelFit,
 } from "../axisLabelFit";
 
@@ -1257,8 +1258,15 @@ function baseOption(
    * Live, at the 166x184 card this was found on: `Doohickey` measures 60.8 of the 166, leaving ~55
    * for ticks that measure 30.6 apiece — one label's worth, where four were being drawn on an 8px
    * pitch, each overlapping its neighbour by 23px.
+   *
+   * A VERTICAL CHART MEASURES THE SAME STRINGS, which is why the `horizontal &&` guard this line
+   * carried is gone rather than mirrored. There the names are on the BOTTOM axis, and what their
+   * width buys is a height: turned 90° each one runs its own width down the card, and
+   * `categoryLabelBand` is the projection. The two uses are the same measurement asked for opposite
+   * dimensions, so taking it once is what keeps a bar chart and a row chart of the same data
+   * agreeing about how long `Doohickey` is.
    */
-  const measuredCategories = horizontal && measurable && size ? widestLabelWidth(drawnCategories) : 0;
+  const measuredCategories = measurable && size ? widestLabelWidth(drawnCategories) : 0;
   // A ZERO IS NOT A ZERO-WIDTH LABEL, it is no measurement at all: `measure-text.ts` reports one
   // deliberately where there is no canvas ("Size claims belong in a browser"), which is every jsdom
   // test in the repo. Declining there is the same rule `intervalThatFits` keeps for its own candidate
@@ -1321,7 +1329,13 @@ function baseOption(
   };
   // A LOG axis is excluded: its ticks are powers, so a linear interval means something else
   // entirely there and the crowding it suffers is not the crowding this measures.
-  const rowExtent = categoryGutter != null && size && !cfg.logScale ? axisExtent(leftSide) : undefined;
+  //
+  // `horizontal` is back on this line and not on `measuredCategories` above, which is the swap this
+  // change makes: the MEASUREMENT is shared with the vertical fit below, the WIDTH fit it feeds is
+  // still the row chart's alone. Without it every vertical chart would be handed the horizontal
+  // budget for its left-hand ticks — the axis where a label's width costs nothing.
+  const rowExtent = horizontal && categoryGutter != null && size && !cfg.logScale
+    ? axisExtent(leftSide) : undefined;
   const valueInterval = rowExtent && size
     ? intervalThatFits({
         plotWidth: plotWidthLessGutter(size, categoryGutter!, Boolean(xTitle)),
@@ -1337,6 +1351,65 @@ function baseOption(
         format: fmtFor(leftSide),
       })
     : undefined;
+  // Metabase puts the legend along the top; reserve room there for it. The category axis
+  // sits at the bottom normally and on the left when horizontal — the value axis is the
+  // other one — so reserve room on whichever edge each title actually renders on.
+  //
+  // HOISTED ABOVE THE AXES rather than left beside the option it goes into: the vertical fit below
+  // subtracts these two insets from the card to find its plot, and taking them from the object the
+  // builder really emits is what stops that arithmetic drifting from the grid it describes.
+  const bottomTitle = horizontal ? yTitle : xTitle;
+  const leftTitle = horizontal ? xTitle : yTitle;
+  const grid = {
+    ...CHART_THEME.grid,
+    top: (CHART_THEME.grid.top as number) + (showLegend ? 24 : 0),
+    bottom: (CHART_THEME.grid.bottom as number) + (bottomTitle ? 22 : 0),
+    left: (CHART_THEME.grid.left as number) + (leftTitle ? 26 : 0),
+  };
+
+  /**
+   * …AND A VERTICAL CHART'S LEFT-HAND VALUE AXIS HAS THE SAME DEFECT ON THE OTHER DIMENSION, which
+   * the fit above cannot see because it is budgeted in pixels of WIDTH.
+   *
+   * Live, at the same 166x184 card: the bar chart drew `100K 200K 300K 400K` on a 10.7px pitch
+   * against 15px label boxes — every neighbouring pair overlapping — and the box plot beside it drew
+   * `20 40 60 80` on the same pitch. The line, waterfall, combo and scatter cards on that dashboard
+   * were clean at 21px, and the difference is not the numbers on the axis: it is that a bar's four
+   * product names turn 90° and eat 72px off the bottom of the card, leaving a 56px plot where the
+   * line chart's thinned period names leave 122. Six ticks fit in 122px and do not fit in 56.
+   *
+   * SO THE INPUT IS A PLOT HEIGHT AND NOT A CARD HEIGHT, and it is the one thing this fit needs
+   * measuring for — a label's height is its font's, so nothing about the pitch is a `measureText`
+   * call. `categoryLabelBand` turns the widest name and the rotation the ladder chose into the band
+   * ECharts reserves below the plot; the two together are what the builder knows and ECharts does
+   * not tell it.
+   *
+   * `categoryGutter != null` GATES IT, so an unmeasured card is left exactly as it was — the same
+   * rule the row chart's fit keeps, reached from the other side. The band at 90° IS the measurement,
+   * and the rotation that selects the arm came from `fitXLabels`, which measured too; deciding a
+   * tick count from a jsdom's zero would be the guess this builder does not make.
+   */
+  const categoryBand = categoryGutter != null && fit?.kind !== "hide"
+    ? categoryLabelBand({ rotate, widestLabel: categoryGutter })
+    : 0;
+  // A HIDDEN axis draws nothing below the plot, so it reserves nothing — and a value/time x-axis is
+  // excluded outright: its bottom labels are ECharts' own round ticks rather than these strings, so
+  // the band would be measured off labels the axis does not draw. Declining is the safe direction,
+  // and it leaves every scale-x chart's option untouched.
+  // (`ordinalX` is `!horizontal && !usesXScale(cfg)`, so a row chart is already out — writing
+  // `!horizontal` again here would read as a second condition and mutate to nothing.)
+  const verticalPlot = ordinalX && categoryGutter != null && size && !cfg.logScale
+    ? plotHeightLessLabels({ size, band: categoryBand, grid })
+    : undefined;
+  /** The scale a VERTICAL value axis needs, per axis — `mkValueAxis` is called twice on a dual
+   *  chart and the two carry different metrics, so the extent is asked for the metrics that axis
+   *  actually shows rather than for the chart. A NORMALISED axis is 0-100 by construction and
+   *  already divides cleanly, so it takes the interval and keeps its own ends. */
+  const verticalFit = (metrics: string[]) => {
+    if (verticalPlot == null) return undefined;
+    const e = axisExtent(metrics);
+    return verticalValueAxisFit({ plotHeight: verticalPlot, lo: e.lo, hi: e.hi });
+  };
   // Either way the axis has now DECIDED, and a decided axis never leaves ECharts the subset
   // `interval: "auto"` would let it pick. What it draws is every label, none, or — on a bucketed
   // temporal axis only — every Nth, which the `interval` line below argues is not the same thing.
@@ -1361,7 +1434,18 @@ function baseOption(
     // canvas — 28 draws it across its labels, which is this PR's own defect, but a title one can
     // read over the top of beats a title that is not there. `nameGapClearOf` owns that judgement
     // and says `undefined`; this line only has to have somewhere to fall back to.
-    nameGap: (categoryGutter != null && size ? nameGapClearOf(categoryGutter, size) : undefined) ?? 28,
+    //
+    // 28 NO LONGER STANDS AT THE BOTTOM OF A VERTICAL CHART, which is what the comment above used to
+    // claim and what the live card falsified: the labels there are ROTATED, so they run down into
+    // exactly the band the title is placed in, and `category` was drawn across all four of them.
+    // Same three terms, a different clamp — `bottomNameGapClearOf` states why the left axis's does
+    // not transfer. `Math.max` because a hidden axis reserves no band and its clearing gap comes out
+    // under the flat 28, which is the gap an axis with nothing below it should keep.
+    nameGap: horizontal
+      ? (categoryGutter != null && size ? nameGapClearOf(categoryGutter, size) : undefined) ?? 28
+      : Math.max(28, (categoryGutter != null && size
+          ? bottomNameGapClearOf({ band: categoryBand, size, gridTop: grid.top })
+          : undefined) ?? 28),
     // The title matches the label colour — an axis name is not a lesser piece of chrome
     // than the values beneath it, and ECharts' default nameTextStyle colour reads paler.
     nameTextStyle: { color: axisLabelColor },
@@ -1468,36 +1552,54 @@ function baseOption(
     splitLine: { show: false as const },
   };
   const xCategory = usesXScale(cfg) ? scaleAxis : categoryAxis;
-  const mkValueAxis = (metrics: string[], position?: "left" | "right") => ({
-    type: cfg.logScale ? ("log" as const) : ("value" as const),
-    name: position === "right" ? undefined : yTitle,
-    nameLocation: "middle" as const,
-    nameTextStyle: { color: axisLabelColor },
-    // Clear of the tick labels: a vertical axis's numbers are far wider than a horizontal
-    // axis's are tall.
-    nameGap: horizontal ? 28 : 44,
-    position,
-    ...(normalized ? { max: 100 } : {}),
-    // Manual axis range (Metabase y-axis min/max) overrides the auto extent.
-    ...(cfg.yMin != null ? { min: cfg.yMin } : {}),
-    ...(cfg.yMax != null ? { max: cfg.yMax } : {}),
-    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: fmtFor(metrics) },
-    axisLine: { show: cfg.yAxisTicks !== false, lineStyle: { color: gridLine } },
-    axisTick: { show: cfg.yAxisTicks !== false },
-    // `splitNumber` is a HINT — ECharts still rounds to human intervals, so asking for 5 can
-    // yield 4 or 6. Metabase's own control behaves the same way, being the same underlying knob.
-    //
-    // The user's own tick count wins outright, and takes the hint's looseness with it. `interval` is
-    // the measured fallback behind it, and it is `undefined` on every axis this fit has nothing to
-    // say about — a vertical chart's value axis, whose ticks stack downwards where their width costs
-    // nothing, and any row chart wide enough for ECharts' own default. So these two lines change
-    // exactly one option: a narrow row chart's bottom axis. `intervalThatFits` argues why it is an
-    // interval rather than a `splitNumber` of our own, and has the measurements.
-    ...(cfg.yTickCount != null ? { splitNumber: cfg.yTickCount }
-      : valueInterval != null ? { interval: valueInterval } : {}),
-    // A second (right) axis omits gridlines to avoid doubling them up.
-    splitLine: position === "right" ? { show: false } : { lineStyle: { color: gridLine } },
-  });
+  const mkValueAxis = (metrics: string[], position?: "left" | "right") => {
+    // Whichever of the two fits this axis's orientation makes reachable — exactly one of them can be
+    // non-`undefined` on any chart, and both are `undefined` on a card with room to spare. The row
+    // chart's answers an interval alone; the vertical one answers the two ends it divides as well,
+    // and `verticalValueAxisFit` argues why the horizontal one ought to and does not yet.
+    const down = verticalFit(metrics);
+    const measuredInterval = valueInterval ?? down?.interval;
+    return {
+      type: cfg.logScale ? ("log" as const) : ("value" as const),
+      name: position === "right" ? undefined : yTitle,
+      nameLocation: "middle" as const,
+      nameTextStyle: { color: axisLabelColor },
+      // Clear of the tick labels: a vertical axis's numbers are far wider than a horizontal
+      // axis's are tall.
+      nameGap: horizontal ? 28 : 44,
+      position,
+      ...(normalized ? { max: 100 } : {}),
+      // The ends the vertical fit's interval divides — see `verticalValueAxisFit`, which explains why
+      // ECharts will not round them itself once an `interval` is named, and what the short last step
+      // it leaves behind measured on a live card. NOT on a normalised axis, which is 0-100 by
+      // construction and divides cleanly already; and outranked below by a range the user set, which
+      // is why these are written first.
+      ...(down != null && !normalized ? { min: down.min, max: down.max } : {}),
+      // Manual axis range (Metabase y-axis min/max) overrides the auto extent.
+      ...(cfg.yMin != null ? { min: cfg.yMin } : {}),
+      ...(cfg.yMax != null ? { max: cfg.yMax } : {}),
+      axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: fmtFor(metrics) },
+      axisLine: { show: cfg.yAxisTicks !== false, lineStyle: { color: gridLine } },
+      axisTick: { show: cfg.yAxisTicks !== false },
+      // `splitNumber` is a HINT — ECharts still rounds to human intervals, so asking for 5 can
+      // yield 4 or 6. Metabase's own control behaves the same way, being the same underlying knob.
+      //
+      // The user's own tick count wins outright, and takes the hint's looseness with it. `interval` is
+      // the measured fallback behind it, and it is `undefined` on every axis either fit has nothing to
+      // say about — any card roomy enough for ECharts' own default on the edge that matters, and every
+      // unmeasured one. `intervalThatFits` argues why it is an interval rather than a `splitNumber` of
+      // our own, and has the measurements; `verticalValueAxisFit` states what the vertical answer does
+      // NOT inherit from it.
+      //
+      // WHICH OF THE TWO IS CONSULTED IS DECIDED BY THE CHART'S ORIENTATION and never by both at once:
+      // `valueInterval` is `undefined` off a row chart and `verticalFit` is `undefined` on one, so the
+      // `??` picks whichever axis this actually is rather than preferring one.
+      ...(cfg.yTickCount != null ? { splitNumber: cfg.yTickCount }
+        : measuredInterval != null ? { interval: measuredInterval } : {}),
+      // A second (right) axis omits gridlines to avoid doubling them up.
+      splitLine: position === "right" ? { show: false } : { lineStyle: { color: gridLine } },
+    };
+  };
 
   let xAxis: unknown;
   let yAxis: unknown;
@@ -1522,18 +1624,6 @@ function baseOption(
       lineStyle: { color: axisLabelColor, type: "dashed" },
     };
   }
-
-  // Metabase puts the legend along the top; reserve room there for it. The category axis
-  // sits at the bottom normally and on the left when horizontal — the value axis is the
-  // other one — so reserve room on whichever edge each title actually renders on.
-  const bottomTitle = horizontal ? yTitle : xTitle;
-  const leftTitle = horizontal ? xTitle : yTitle;
-  const grid = {
-    ...CHART_THEME.grid,
-    top: (CHART_THEME.grid.top as number) + (showLegend ? 24 : 0),
-    bottom: (CHART_THEME.grid.bottom as number) + (bottomTitle ? 22 : 0),
-    left: (CHART_THEME.grid.left as number) + (leftTitle ? 26 : 0),
-  };
 
   // Trend series stay out of the legend.
   const legendNames = series.filter((s) => !(s as SeriesLike).__trend && !(s as SeriesLike).__total).map((s) => (s as SeriesLike).name);

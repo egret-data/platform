@@ -4,7 +4,10 @@ import type { ColumnFormat } from "../../format-types";
 import { sortCategories } from "./cartesian";
 import { formatValue, specifiesDateRendering } from "../../format";
 import { boundarySteps, namesAPeriod, periodName } from "../../temporal-period";
-import { estimatePlotWidth, fitXLabels, type XLabelFit } from "../axisLabelFit";
+import {
+  bottomNameGapClearOf, categoryLabelBand, estimatePlotWidth, fitXLabels, plotHeightLessLabels,
+  verticalValueAxisFit, widestLabelWidth, type XLabelFit,
+} from "../axisLabelFit";
 import { ariaDescription, baseOption, tooltipSurface, TOOLTIP_WEIGHT } from "../base";
 import { CHART_THEME, SERIES_PALETTE, COLOR_FALLBACK, resolveColor } from "../palette";
 
@@ -340,6 +343,47 @@ export function buildWaterfallOption(
   // `interval: "auto"` would let it pick. What it draws is every label, none, or — on a bucketed
   // temporal axis only — every Nth, which the `interval` line below argues is not the same thing.
   const decided = fit != null || explicitRotate;
+
+  /**
+   * THE OTHER AXIS, ON THE OTHER DIMENSION — the same fit the cartesian and box-plot builders make,
+   * from the same module, because all three lay out the same grid and a third copy of the arithmetic
+   * would be a third place for it to drift.
+   *
+   * NOT THE CARD THE DEFECT WAS FOUND ON, and that is worth saying rather than leaving to be
+   * inferred: on the live 166x184 dashboard the crowding was the BAR and the BOX PLOT, at a 10.7px
+   * pitch, while this chart's twelve monthly steps thin to upright period names and leave a plot
+   * tall enough for six ticks at 21px. `verticalValueAxisFit` is a ceiling, so that card's
+   * option comes out byte-identical. What brings this builder in is the case where the same steps
+   * are NOT period names — a waterfall over product categories turns its labels 90° exactly as a bar
+   * chart does, reserves the same 72px, and then draws its ticks into each other. Same axis, same
+   * grid, same remedy.
+   */
+  const measuredCategories = measurable ? widestLabelWidth(categories.map(drawLabel)) : 0;
+  const categoryGutter = measuredCategories > 0 ? measuredCategories : undefined;
+  const categoryBand = categoryGutter != null && fit?.kind !== "hide"
+    ? categoryLabelBand({ rotate, widestLabel: categoryGutter })
+    : 0;
+  // The insets this builder is about to emit, hoisted so the fit subtracts the grid it really uses.
+  const grid = {
+    ...CHART_THEME.grid,
+    bottom: (CHART_THEME.grid.bottom as number) + (xTitle ? 22 : 0),
+    left: (CHART_THEME.grid.left as number) + (yTitle ? 26 : 0),
+  };
+  /**
+   * How far the value axis runs. A waterfall's bars float: each spans `base[i]` to
+   * `base[i] + bars[i].value`, so the axis has to hold both ends of every step and the origin the
+   * running total starts from. `widest` above is the same set collapsed to a magnitude; this keeps
+   * the two ends, because an interval divides a DISTANCE — a series that dips to -40 and peaks at
+   * +60 is 100 across while its biggest number is 60.
+   */
+  const tops = base.map((b, i) => b + bars[i].value);
+  const down = categoryGutter != null && size && !cfg.logScale && cfg.yTickCount == null
+    ? verticalValueAxisFit({
+        plotHeight: plotHeightLessLabels({ size, band: categoryBand, grid }),
+        lo: cfg.yMin ?? Math.min(0, ...base),
+        hi: cfg.yMax ?? Math.max(0, ...tops),
+      })
+    : undefined;
   // NO ROOM IS RESERVED BELOW THE PLOT FOR A TILTED LABEL, at any rotation, measured or explicit —
   // the 44/18 ladder this builder used to add on the explicit path is gone with it. See
   // `XLabelFit`'s doc in `../axisLabelFit.ts`: `containLabel` already expands the grid around the
@@ -389,11 +433,7 @@ export function buildWaterfallOption(
     // An axis title needs room reserved on the edge it renders on, or ECharts draws it into the
     // tick labels and the plot clips it — the same adjustment the cartesian builder makes, and the
     // reason a shared `CHART_THEME.grid` alone is not enough once titles exist.
-    grid: {
-      ...CHART_THEME.grid,
-      bottom: (CHART_THEME.grid.bottom as number) + (xTitle ? 22 : 0),
-      left: (CHART_THEME.grid.left as number) + (yTitle ? 26 : 0),
-    },
+    grid,
     // The shared `axisTooltip()` reports the series' own value, and the bar's value is a MAGNITUDE
     // — it read "Q2  60" where Q2 is a fall of 60. Metabase's tooltip reads the ORIGINAL signed
     // datum and tints its swatch by direction; this does the same, and adds the running total the
@@ -446,7 +486,15 @@ export function buildWaterfallOption(
     },
     xAxis: {
       type: "category", data: categories,
-      name: xTitle, nameLocation: "middle", nameGap: 28,
+      name: xTitle, nameLocation: "middle",
+      // `nameGap` is measured from the AXIS LINE, and what sits between the line and the name is the
+      // column of category labels — which, once the ladder above turns them 90°, run down into
+      // exactly the band 28 places the title in. `bottomNameGapClearOf` states the three terms and
+      // owns the one card it declines on; `Math.max` keeps 28 as the floor, which is the gap an axis
+      // whose labels are hidden should keep.
+      nameGap: Math.max(28, (categoryGutter != null && size
+        ? bottomNameGapClearOf({ band: categoryBand, size, gridTop: grid.top as number })
+        : undefined) ?? 28),
       nameTextStyle: { color: axisLabelColor },
       axisLabel: {
         fontSize: CHART_THEME.axisFontSize, color: axisLabelColor,
@@ -488,9 +536,17 @@ export function buildWaterfallOption(
       type: cfg.logScale ? "log" : "value",
       name: yTitle, nameLocation: "middle", nameGap: 44,
       nameTextStyle: { color: axisLabelColor },
+      // The ends the fit's interval divides, written FIRST so a range the user set outranks them —
+      // see `verticalValueAxisFit` for why ECharts will not round them itself once an `interval` is
+      // named, and for the short last step it leaves behind.
+      ...(down != null ? { min: down.min, max: down.max } : {}),
       ...(cfg.yMin != null ? { min: cfg.yMin } : {}),
       ...(cfg.yMax != null ? { max: cfg.yMax } : {}),
-      ...(cfg.yTickCount != null ? { splitNumber: cfg.yTickCount } : {}),
+      // The user's own tick count wins outright; the measured fit is the fallback behind it, and it
+      // arrives ALONE — an `interval` beside a `splitNumber` would win over it in ECharts, which is
+      // why the fit above declines outright once one is set rather than being masked here.
+      ...(cfg.yTickCount != null ? { splitNumber: cfg.yTickCount }
+        : down != null ? { interval: down.interval } : {}),
       axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmt(v, true) },
       axisLine: { show: cfg.yAxisTicks !== false, lineStyle: { color: gridLine } },
       axisTick: { show: cfg.yAxisTicks !== false },
