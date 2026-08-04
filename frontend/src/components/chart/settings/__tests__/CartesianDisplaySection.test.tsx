@@ -159,16 +159,109 @@ describe("CartesianDisplaySection", () => {
     expect(onChange).toHaveBeenCalledWith({ yMax: undefined });
   });
 
-  // Task 7: line shape, missing-value and marker controls, gated on isLineish (line/area).
-  // Per-series style/size live in their own control (SeriesLineStyleSection, tested
-  // separately) so they can hide behind "More options"; shape and markers stay
-  // chart-wide-only everywhere (see task doc for the deliberate gap).
-  describe("line shape / missing values / markers (isLineish only)", () => {
+  // Line shape, missing-value and marker controls. The gate was `isLineish` (line/area by KIND)
+  // until the audit measured a combo honouring all three while offering none of them; it is now
+  // "does any series resolve to a line", the same rule #408 uses to decide which series rows get
+  // the per-series drill-in. Shape and markers also have that per-series door; `missing` has only
+  // this one, which is why the gate being wrong made it unreachable rather than merely awkward.
+  describe("line shape / missing values / markers (any series drawn as a line)", () => {
     it("all three render for line", () => {
       render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
       expect(screen.getByLabelText("Line shape")).toBeInTheDocument();
       expect(screen.getByLabelText("Missing values")).toBeInTheDocument();
       expect(screen.getByLabelText("Markers")).toBeInTheDocument();
+    });
+
+    /**
+     * A COMBO REACHES THEM TOO, because `decorateSeries` applies all three to any series whose
+     * ECharts type is "line" — and a fresh combo draws its first metric as one.
+     *
+     * Measured on `kind: "combo"` with `missing: "zero"`, `lineShape: "smooth"`, `markers: "off"`:
+     * the line band came back `data: [1, 0, 3]` (the null rewritten to 0), `smooth: true`,
+     * `showSymbol: false`. All three took effect and the panel offered none of them.
+     *
+     * `missing` is the one that matters most: `LineSeriesStyle` deliberately omits it (the argument
+     * is on `decorateSeries`), so the per-series popover #408 added cannot reach it either — the
+     * chart-wide control was its ONLY door and that door was shut for a combo. And it does not
+     * merely restyle: `missing: "zero"` rewrites the data, so it silently moves stack totals,
+     * normalisation and any trend fit.
+     */
+    it("all three render for a combo, whose first metric is drawn as a line", () => {
+      render(<CartesianDisplaySection kind="combo" config={{ yMetrics: ["rev", "cnt"] }} onChange={() => {}} />);
+      expect(screen.getByLabelText("Line shape")).toBeInTheDocument();
+      expect(screen.getByLabelText("Missing values")).toBeInTheDocument();
+      expect(screen.getByLabelText("Markers")).toBeInTheDocument();
+    });
+
+    /**
+     * …AND STOP RENDERING ONCE NO SERIES IS A LINE. "Combo is line-ish" would have been the cheap
+     * gate and it is wrong here: with every metric flipped to Bar the chart draws no line, so
+     * `decorateSeries` applies none of these and the controls would be three settings that change
+     * nothing. The honest question is "does any series resolve to a line", which is the same rule
+     * #408 used to decide which series rows get the drill-in button.
+     *
+     * THREE SERIES with the flipped one in the MIDDLE, and the first one flipped too: the gate is a
+     * `.some()` over the resolved displays, so a fixture that left the positional default in place
+     * anywhere would still find a line and pass whatever the gate said.
+     */
+    it("none of the three render for a combo whose every series is a bar", () => {
+      render(<CartesianDisplaySection kind="combo"
+        config={{ yMetrics: ["rev", "cnt", "qty"], seriesTypes: { rev: "bar", cnt: "bar", qty: "bar" } }}
+        onChange={() => {}} />);
+      expect(screen.queryByLabelText("Line shape")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Missing values")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Markers")).not.toBeInTheDocument();
+    });
+
+    /** One line among bars is still a line, and the middle one is chosen so the answer cannot come
+     *  from the positional default at either end. */
+    it("renders them for a combo with a single line band among bars", () => {
+      render(<CartesianDisplaySection kind="combo"
+        config={{ yMetrics: ["rev", "cnt", "qty"], seriesTypes: { rev: "bar", cnt: "line", qty: "bar" } }}
+        onChange={() => {}} />);
+      expect(screen.getByLabelText("Line shape")).toBeInTheDocument();
+    });
+
+    /**
+     * WITH A BREAKOUT the bands are named by the DATA, so the gate reads the names the caller hands
+     * in rather than the metrics — the same list the Stacking control above already counts.
+     *
+     * The first arm is what pins that: the single metric is `rev`, which no `seriesTypes` entry
+     * names, so a gate reading the METRICS would resolve it through the positional default to
+     * `line` at index 0 and show the controls. It reads the two bar bands instead and hides them.
+     * The second arm brings a line band in, in the MIDDLE, where neither end of the positional
+     * default can account for the answer.
+     */
+    it("reads the breakout's band names, not the metrics, when the caller supplies them", () => {
+      const config = {
+        yMetrics: ["rev"], series: "product",
+        seriesTypes: { Widget: "bar", Gadget: "bar", Gizmo: "line" },
+      } as CartesianConfig;
+      const { rerender } = render(
+        <CartesianDisplaySection kind="combo" config={config} onChange={() => {}} seriesNames={["Widget", "Gadget"]} />,
+      );
+      expect(screen.queryByLabelText("Line shape")).not.toBeInTheDocument();
+      rerender(
+        <CartesianDisplaySection kind="combo" config={config} onChange={() => {}} seriesNames={["Widget", "Gizmo", "Gadget"]} />,
+      );
+      expect(screen.getByLabelText("Line shape")).toBeInTheDocument();
+    });
+
+    /**
+     * BEFORE A QUERY HAS RUN there may be no series to ask about — `cartesianSeriesNames` returns
+     * `[]` for a breakout whose result has not arrived. Hiding the controls then would make them
+     * flicker in as the query lands; the fallback asks the builder what series 0 would be, which is
+     * a line for a combo and for a line/area chart and a bar for the rest.
+     */
+    it("falls back to the kind's own first-series answer when no series are known yet", () => {
+      const { rerender } = render(
+        <CartesianDisplaySection kind="combo" config={{ yMetrics: [], series: "product" }} onChange={() => {}} seriesNames={[]} />,
+      );
+      expect(screen.getByLabelText("Line shape")).toBeInTheDocument();
+      rerender(
+        <CartesianDisplaySection kind="bar" config={{ yMetrics: [], series: "product" }} onChange={() => {}} seriesNames={[]} />,
+      );
+      expect(screen.queryByLabelText("Line shape")).not.toBeInTheDocument();
     });
 
     it("none of the three render for bar", () => {

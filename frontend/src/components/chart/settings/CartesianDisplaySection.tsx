@@ -4,7 +4,8 @@ import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { DecimalInput } from "./DecimalInput";
 import {
-  resolveXScale, seriesDisplayFor, stackModeOf, stackModePatch, xScaleFitsColumn, type StackMode,
+  echartsTypeOf, resolveXScale, seriesDisplayFor, stackModeOf, stackModePatch, xScaleFitsColumn,
+  type StackMode,
 } from "@/components/chart/echarts/options/cartesian";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
@@ -39,9 +40,9 @@ interface SectionProps {
 }
 
 /**
- * Stacking, the chart-wide line-shape/missing-value/marker choices (line and area only),
- * per-series colour/label, and the combo per-metric series type. Per-series style and size
- * live in their own control (SeriesLineStyleSection) so they can hide behind "More options".
+ * Stacking, the chart-wide line-shape/missing-value/marker choices (wherever the chart draws a
+ * line, which includes a combo), per-series colour/label, and the combo per-metric series type.
+ * Per-series style and size live on the series row's own drill-in (SeriesSettingsPopover).
  */
 /*
  * `defaultSeriesColor` used to live here. It took `(hasBreakout, count, index)` and re-derived a
@@ -74,7 +75,6 @@ export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionPr
   // egret excluded combo, so the guard that hides the display select was unreachable and a combo
   // could not stack at all.
   const canStack = kind === "bar" || kind === "row" || kind === "area" || kind === "combo";
-  const isLineish = kind === "line" || kind === "area";
   /**
    * Metabase's `getHidden` on `stackable.stack_type` (lib/settings/graph.ts): count the series whose
    * display is stackable and hide the control at `<= 1`. A lone bar has nothing to stack against, so
@@ -97,6 +97,39 @@ export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionPr
     (n, i) => STACKABLE_DISPLAYS.has(seriesDisplayFor(kind, n, i, config.seriesTypes)),
   ).length;
   const showStacking = canStack && (kind === "row" || stackableCount > 1);
+  /**
+   * WHETHER THE CHART-WIDE LINE CONTROLS ARE ON OFFER — line shape, missing values, markers.
+   *
+   * This used to be `kind === "line" || kind === "area"`, which EXCLUDED COMBO while
+   * `decorateSeries` applied all three to any series whose ECharts type is "line". Measured on
+   * `kind: "combo"` with `missing: "zero"`, `lineShape: "smooth"`, `markers: "off"`: the line band
+   * came back `data: [1, 0, 3]`, `smooth: true`, `showSymbol: false`. All three took effect and the
+   * panel offered none of them.
+   *
+   * `missing` is why that mattered rather than merely looked untidy. `LineSeriesStyle` deliberately
+   * omits it (the argument is on `decorateSeries`), so #408's per-series popover cannot reach it —
+   * this control was its only door, and for a combo the door was shut. It also rewrites the DATA
+   * rather than the drawing, so an unreachable "Zero" silently moves stack totals, normalisation
+   * and any trend fit.
+   *
+   * "COMBO IS LINE-ISH" IS THE CHEAP GATE AND IT IS WRONG the other way: a combo with every metric
+   * flipped to Bar draws no line, and these three would then be settings that change nothing —
+   * which is the same defect one file over. The honest question is "does any series RESOLVE to a
+   * line", asked through the builder's own two functions rather than restated, exactly as #408
+   * asked it to decide which series rows get the drill-in button. A second spelling of that rule
+   * here is how a panel comes to offer what the chart will not draw.
+   *
+   * THE SOFT SPOT THE PLAN FLAGGED — "this panel may not have the series names" — turned out not to
+   * hold: `seriesNames` is already a prop, threaded in for the Stacking count above, and `names`
+   * already falls back to the metrics. The one case where it is genuinely empty is a BREAKOUT whose
+   * query has not returned, since `cartesianSeriesNames` can only name the bands from the rows. For
+   * that, ask the builder what series 0 would be — a line for combo/line/area, a bar for the rest —
+   * rather than hiding controls that will flicker back in a moment later.
+   */
+  const displays = names.length > 0
+    ? names.map((n, i) => seriesDisplayFor(kind, n, i, config.seriesTypes))
+    : [seriesDisplayFor(kind, "", 0, config.seriesTypes)];
+  const anyLine = displays.some((d) => echartsTypeOf(d) === "line");
   return (
     <div className="space-y-2.5">
       {/* Three mutually exclusive states, offered as one choice — Metabase's own Stacking control.
@@ -123,7 +156,7 @@ export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionPr
       {showStacking && stackModeOf({ kind, stacked: config.stacked, normalized: config.normalized }) === "stacked" && (
         <Toggle id="cz-stacktotal" label="Stack totals" checked={!!config.showStackTotal} onChange={(v) => onChange({ showStackTotal: v })} />
       )}
-      {isLineish && (
+      {anyLine && (
         <div className="flex items-center justify-between gap-2">
           <Label className="text-sm font-normal">Line shape</Label>
           <Select value={config.lineShape ?? "linear"} onValueChange={(v) => onChange({ lineShape: v as CartesianConfig["lineShape"] })}>
@@ -136,7 +169,7 @@ export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionPr
           </Select>
         </div>
       )}
-      {isLineish && (
+      {anyLine && (
         <div className="flex items-center justify-between gap-2">
           <Label className="text-sm font-normal">Missing values</Label>
           <Select value={config.missing ?? "interpolate"} onValueChange={(v) => onChange({ missing: v as CartesianConfig["missing"] })}>
@@ -149,7 +182,7 @@ export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionPr
           </Select>
         </div>
       )}
-      {isLineish && (
+      {anyLine && (
         <div className="flex items-center justify-between gap-2">
           <Label htmlFor="cz-markers" className="text-sm font-normal">Markers</Label>
           {/* A plain three-option Select bound directly to the string, like Line shape and
