@@ -99,8 +99,12 @@ same reason; decide whether the waterfall needs the same escape hatch and say wh
 **Corrected.** The carried-forward claim was "the tooltip and the aria description both read the raw
 bucket". Checked at `options/cartesian.ts:1495-1520`:
 
-- **Tooltip**: `visible[0].axisValueLabel ?? visible[0].name` — `axisValueLabel` is ECharts' *formatted*
-  axis label, so the tooltip header already says `January 2026`. **No defect.**
+- **Tooltip**: `visible[0].axisValueLabel ?? visible[0].name`. **This entry was wrong — corrected
+  by #400.** `axisValueLabel` is built from `axisPointer.label.formatter`, *not* `axisLabel.formatter`,
+  over `OrdinalScale.getLabel`, which returns the raw `xAxis.data` entry — so the tooltip says
+  `2026-01-01` while the axis says `January 2026`. Established by tracing ECharts **and** by rendering a
+  real chart and capturing `showTip`. **#400 left it raw deliberately**: a tooltip sits beside a drill
+  and the click filters on the raw bucket. An open product question, not a settled non-defect.
 - **Aria**: `points: categories.map((c) => ({ name: String(c) }))` — the **raw** value. So a screen
   reader hears `2026-01-01` where the axis says `January 2026`.
 

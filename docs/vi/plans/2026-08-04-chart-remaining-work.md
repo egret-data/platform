@@ -79,8 +79,12 @@ tương tự; phải quyết định waterfall có cần cửa thoát đó khôn
 **Đính chính.** Ghi chép cũ nói "tooltip và aria đều đọc bucket thô". Kiểm tại
 `options/cartesian.ts:1495-1520`:
 
-- **Tooltip**: `visible[0].axisValueLabel ?? visible[0].name` — `axisValueLabel` là nhãn trục **đã định
-  dạng**, nên tooltip vốn đã hiện `January 2026`. **Không có lỗi.**
+- **Tooltip**: `visible[0].axisValueLabel ?? visible[0].name`. **Mục này SAI — đã đính chính bởi #400.**
+  `axisValueLabel` dựng từ `axisPointer.label.formatter`, **không phải** `axisLabel.formatter`, trên
+  `OrdinalScale.getLabel` vốn trả về giá trị thô — nên tooltip hiện `2026-01-01` trong khi trục hiện
+  `January 2026`. Xác lập bằng truy mã ECharts **và** render chart thật rồi bắt `showTip`. **#400 cố ý
+  để nguyên**: tooltip nằm cạnh thao tác drill, mà cú bấm lọc theo bucket thô. Câu hỏi sản phẩm còn mở,
+  không phải một "không có lỗi" đã chốt.
 - **Aria**: `points: categories.map((c) => ({ name: String(c) }))` — giá trị **thô**. Nên trình đọc màn
   hình đọc `2026-01-01` trong khi trục ghi `January 2026`.
 
