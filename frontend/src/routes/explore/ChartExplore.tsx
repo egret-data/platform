@@ -248,6 +248,17 @@ export default function ChartExplore() {
     return { ...base, settings: { ...(isParamsV2(base) ? base.settings : {}), column_settings: effCS } };
   };
 
+  /**
+   * The temporal units the RESULT ON SCREEN was bucketed by, for the settings panel.
+   *
+   * From `previewParams`, i.e. the FROZEN spec, and not from the live `temporalUnits` state — the
+   * same rule (and the same reason) as the table drill's below: `data.rows` came back from a query
+   * that ran with the units in force at the time, so a control that lists those rows' dimension
+   * values back to the author has to read them under the same units. It is also the exact map the
+   * preview's own `ChartRenderer` builds from, so the panel and the chart cannot key differently.
+   */
+  const shownUnits = (): Record<string, string> => previewParams().spec.temporal_units ?? {};
+
   // Same rule for the previews that take a config instead of a ChartParams: frozen at what
   // last ran while the query is stale, because the field names inside a config address the
   // columns of the result on screen.
@@ -461,7 +472,7 @@ export default function ChartExplore() {
             {descriptor && (
               <StudioPanel descriptor={descriptor} config={descConfig} onConfigChange={patchDescConfig}
                 columns={columns} metrics={metrics} resultColumns={resultColumns} rows={data.rows}
-                unitRow={unitRow} tab="data" />
+                temporalUnits={shownUnits()} unitRow={unitRow} tab="data" />
             )}
 
 
@@ -495,7 +506,7 @@ export default function ChartExplore() {
               <>
                 <StudioPanel descriptor={descriptor} config={descConfig} onConfigChange={patchDescConfig}
                   columns={columns} metrics={metrics} resultColumns={resultColumns} rows={data.rows}
-                  unitRow={unitRow} tab="display" hasMoreBelow />
+                  temporalUnits={shownUnits()} unitRow={unitRow} tab="display" hasMoreBelow />
                 {/* Formatting, table columns and conditional formatting edit settings the
                     shell owns, not any one viz — so they sit beside the descriptor's own
                     controls rather than inside it. */}
@@ -534,7 +545,7 @@ export default function ChartExplore() {
               {descriptor && (
                 <StudioPanel descriptor={descriptor} config={descConfig} onConfigChange={patchDescConfig}
                   columns={columns} metrics={metrics} resultColumns={resultColumns} rows={data.rows}
-                  unitRow={unitRow} tab="axes" />
+                  temporalUnits={shownUnits()} unitRow={unitRow} tab="axes" />
               )}
             </TabsContent>
           )}

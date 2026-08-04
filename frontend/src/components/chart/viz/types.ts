@@ -37,6 +37,24 @@ export interface VizControlProps<Cfg> {
    */
   resultColumns: { name: string; type: string }[];
   rows: unknown[][];
+  /**
+   * The temporal unit each dimension of THAT result was grouped by, keyed by column name — the
+   * `spec.temporal_units` the query on screen actually ran with, which is the same map
+   * `ChartRenderer` hands the builders.
+   *
+   * A control needs it for the same reason a builder does: under an EXTRACTION unit
+   * (`day_of_week`, `hour_of_day`, …) the value in the column is not the value the chart keys on.
+   * The pie aggregates its ring on `temporalLabel(unit, raw)` — "Wed", not the `3` in the row — so
+   * a slice list built by stringifying the column offered rows whose renames, hides and pinned
+   * colours were all written under a key no slice carries. Empty is the normal case and means
+   * "no bucketing", which is what every non-temporal chart passes.
+   *
+   * FROZEN WITH THE RESULT, not the live editor state: `rows` above came back from a query that
+   * ran with a particular set of units, and pairing them with units the user has since changed
+   * describes a chart nobody is looking at. Both call sites read them off the same params the
+   * preview renders from.
+   */
+  temporalUnits: Record<string, string>;
   /** Renders the shared "Date grouping" row for a temporal dimension, or null. */
   unitRow: (col?: string) => ReactNode;
 }

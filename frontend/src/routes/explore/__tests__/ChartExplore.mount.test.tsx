@@ -86,9 +86,28 @@ const TREND = {
   },
 };
 
+/**
+ * A pie broken out by a TEMPORAL EXTRACTION unit. Its ring aggregates on `temporalLabel(unit, raw)`
+ * — "Mon"/"Wed", never the 1/3 in the column — so it is the shape that tells a settings panel keyed
+ * on the chart apart from one keyed on the raw result. A truncation unit (`month`) would not: there
+ * the raw value IS the key on both sides.
+ */
+const PIE_DOW = {
+  ...PIE_V1,
+  id: "c-pie-dow", name: "Pie by weekday", viz_type: "pie",
+  params: {
+    version: 2,
+    spec: {
+      metrics: ["total_revenue"], dimensions: ["dow"], columns: [], filters: [], orderby: [],
+      row_limit: 1000, rollup_groups: [], temporal_units: { dow: "day_of_week" },
+    },
+    settings: { "pie.dimensions": ["dow"], "pie.metric": "total_revenue" },
+  },
+};
+
 const CHARTS: Record<string, unknown> = {
   "c-pie": PIE_V1, "c-bar": BAR_V2, "c-table": TABLE_V2, "c-bar-sorted": BAR_SORTED,
-  "c-boxplot": BOXPLOT, "c-trend": TREND,
+  "c-boxplot": BOXPLOT, "c-trend": TREND, "c-pie-dow": PIE_DOW,
 };
 
 vi.mock("@/api/charts", async (importOriginal) => ({
@@ -108,6 +127,15 @@ let lastRanSpec: QuerySpec | null = null;
 vi.mock("@/api/useSpecData", () => ({
   useSpecData: (_ws: string, _ds: string | null, spec: QuerySpec | null) => {
     lastRanSpec = spec;
+    // The bucketed chart's result is what the engine returns for a `day_of_week` grouping: the
+    // integer, not the word. Deliberately not pre-sorted — the pie draws Mon (40) before Wed (20).
+    if (spec?.dimensions?.includes("dow")) {
+      return {
+        columns: [{ name: "dow", type: "bigint" }, { name: "total_revenue", type: "double" }],
+        rows: [[3, 20], [1, 40]],
+        isLoading: false, error: null, hasResult: true,
+      };
+    }
     return {
       columns: [{ name: "region", type: "varchar" }, { name: "total_revenue", type: "double" }],
       rows: [["North", 1]],
@@ -125,6 +153,9 @@ vi.mock("@/api/datasets", () => ({
         { column_name: "region", data_type: "varchar", is_temporal: false },
         { column_name: "category", data_type: "varchar", is_temporal: false },
         { column_name: "amount", data_type: "double", is_temporal: false },
+        // Temporal, so the studio offers it a unit at all — the saved chart already picks one, so
+        // `withDefaultTemporalUnits` leaves its `day_of_week` alone.
+        { column_name: "dow", data_type: "timestamp", is_temporal: true },
       ],
       metrics: [{ metric_name: "total_revenue", data_type: "double" }],
     },
@@ -203,6 +234,56 @@ describe("ChartExplore mounts", () => {
   it("puts conditional formatting on its own tab", async () => {
     await mountChart("c-table", "rules");
     expect(await screen.findByText("Conditional formatting")).toBeInTheDocument();
+  });
+
+  /**
+   * THE STUDIO'S OWN SEAM, driven through the route that owns it. The temporal unit is QUERY state
+   * — `spec.temporal_units` — and lives nowhere in any viz's settings, so the only way a control
+   * can key its rows the way the chart keys its slices is for the shell to hand the units over.
+   * Until it did, the pie's slice list read "3", "1" against a chart drawing "Mon" and "Wed", and
+   * every hide, rename and pinned colour authored there was written under a key no slice carries.
+   *
+   * Asserted on the route rather than on the control: a control test passes just as happily when
+   * nothing hands the prop over (PR 02 and PR 06 both found that shape).
+   */
+  it("keys the pie's slice list on the extracted word the bucketed chart drew", async () => {
+    await mountChart("c-pie-dow", "display");
+    await screen.findByDisplayValue("Pie by weekday");
+    // Auto-run is debounced, so the result — and with it the slice list — arrives a beat later.
+    expect(await screen.findByLabelText("Show Mon", {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(screen.getByLabelText("Show Wed")).toBeInTheDocument();
+    // The raw column values are not keys of anything the chart drew.
+    expect(screen.queryByLabelText("Show 1")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Show 3")).not.toBeInTheDocument();
+  });
+
+  /**
+   * …AND ON THE UNITS THAT RAN, NOT THE ONES BEING TYPED. With Auto-run off, changing the grouping
+   * edits the NEXT query; the rows on screen are still the old ones, and re-reading them under a
+   * unit they were never fetched with describes a chart nobody is looking at. Switching `dow` to
+   * `month` here would re-key the very same integers as "3" and "1" — the raw list, arrived at from
+   * the other direction — while the chart beside the panel still draws Mon and Wed.
+   *
+   * The same rule (and the same `previewParams` source) the table's drill already follows.
+   */
+  it("keys the list on the units the result ran with, not on an unrun edit", async () => {
+    await mountChart("c-pie-dow", "display");
+    await screen.findByLabelText("Show Mon", {}, { timeout: 3000 });
+
+    // Auto off, so the edit below cannot become the result while the assertion runs.
+    await userEvent.click(screen.getByLabelText("Auto-run"));
+    await userEvent.click(screen.getByRole("tab", { name: "Data" }));
+    // The unit picker has no label of its own (it is captioned by the "Unit \u00b7 dow" row beside
+    // it), and a `combobox` takes no accessible name from its contents — so it is found by the
+    // grouping it currently shows.
+    const unitPicker = screen.getAllByRole("combobox").find((c) => c.textContent === "Day of week");
+    await userEvent.click(unitPicker!);
+    await userEvent.click(await screen.findByRole("option", { name: "Month" }));
+    await userEvent.click(screen.getByRole("tab", { name: "Display" }));
+
+    expect(await screen.findByLabelText("Show Mon")).toBeInTheDocument();
+    expect(screen.getByLabelText("Show Wed")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Show 3")).not.toBeInTheDocument();
   });
 
   /**
