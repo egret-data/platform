@@ -127,6 +127,15 @@ Now:
   plain 13px to 14px at weight 700.
 - **Legend and slice labels default to on.** Both are Auto unless set, and Auto means shown — a
   pie's colours say nothing without a key. An explicitly saved `false` still turns either off.
+
+  > **The slice-labels half of this was later reversed** (`resolveShowLabels`, options/pie.ts).
+  > The reason given here — "a pie's colours say nothing without a key" — argues for the LEGEND,
+  > which is the key and which still defaults on; it says nothing about repeating the key on the
+  > arcs. Metabase's `getDefaultShowLabels` returns `false` at one dimension, and since the
+  > percentage default moved to "legend" at every ring count, a one-ring pie's legend already reads
+  > `US  75%` — so arc names were the same string twice. **Two rings and up keep the default**,
+  > because there the argument does hold: the legend lists ring 0 only, so the outer rings have no
+  > key anywhere else.
 - **The radii are the one thing that did not move.** `Donut` off is still a full circle; `Donut` on
   still opens the same hole. Metabase's own one-ring ratio was deliberately not adopted, because a
   plain pie's proportions were never the thing that read badly.
