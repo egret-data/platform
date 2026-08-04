@@ -114,6 +114,19 @@ Goal line bị chôn sau "More options"; hai danh sách cột của table; mặc
 đơn vị trích xuất thời gian** — cái cuối cần `dimensionUnits` luồn qua `VizControlProps`, `StudioPanel`,
 `CardVizPanel`, `ChartExplore`, tức **đổi contract của Chart Studio**, và đó là lý do PR 06 dừng.
 
+**Cập nhật — hai mục đã đóng (xem bản tiếng Anh để biết lập luận đầy đủ):**
+
+- **Thang trục giá trị.** Cartesian giờ có select Scale như tab `#403` đã cho waterfall/box plot.
+  **Power KHÔNG được cung cấp, và đây là kết luận chứ không phải hoãn**: ECharts chỉ có
+  `value | category | time | log`; Metabase cũng không dùng trục `log` của ECharts — cả `pow` lẫn
+  `log` của nó đều là **biến đổi trên DỮ LIỆU** trên một trục `type: "value"` phẳng
+  (`echarts/cartesian/model/transforms.ts`), rồi áp nghịch đảo lại trong mọi formatter. Làm cho
+  đúng là đổi builder ở ba họ chart cộng một khoá lưu mới (`logScale` là **boolean**, không mang nổi
+  giá trị thứ ba) — một PR riêng.
+- **Mặc định `showLabels`.** Đã xong: `resolveShowLabels` — tắt ở một vòng, bật từ hai vòng trở lên,
+  giá trị lưu tường minh luôn thắng, đúng `getDefaultShowLabels` của Metabase. Pie một vòng không hề
+  trống: legend vẫn nêu tên và tỉ lệ từng lát.
+
 **Quá lớn cho một PR.** Tách: đường nối và `getHidden` là hành vi; nhóm tab, số dòng và tuỳ chọn thang
 là trình bày; cấu hình line theo series là một tính năng riêng.
 

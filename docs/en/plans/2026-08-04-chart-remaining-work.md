@@ -150,14 +150,36 @@ measured live against Metabase:
   unconditionally.
 - **Per-series line settings.** egret's Line shape, Missing values and Markers are global; Metabase's
   are per series, plus Line style, Line size, Y-axis position, trend line and values per series.
-- **Y scale.** egret offers a binary "Log scale" switch; Metabase offers Linear / Power / Log.
+- **Y scale.** ~~egret offers a binary "Log scale" switch; Metabase offers Linear / Power / Log.~~
+  **Half-closed, and the other half is closed as NOT REACHABLE here.** The control is now a Scale
+  select on the cartesian panel too, matching the one `#403` gave the waterfall/box plot. **Power is
+  not offered, and this is settled rather than deferred**: `pow` is not an ECharts axis type —
+  ECharts has `value | category | time | log` and nothing else — and Metabase does not use the `log`
+  axis either. Both of its non-linear scales are a TRANSFORM ON THE DATA over a plain `type: "value"`
+  axis (`echarts/cartesian/model/transforms.ts`: signed square root for `pow`, symmetric log for
+  `log`), with the inverse re-applied in every axis-label, tooltip and data-label formatter.
+  Offering Power without that transform would draw a linear axis under a word promising otherwise.
+  Doing it honestly is a builder change across cartesian, waterfall and box plot, plus a new stored
+  key — `logScale` is a **boolean** and cannot carry a third value, so it would need a migration,
+  a codec entry and backend params validation. That is a PR of its own, not a control change.
+  Worth knowing if anyone takes it: egret's Log is ECharts' native log axis, which cannot plot zero
+  or negatives at all, where Metabase's symlog handles both. Adopting Metabase's `pow` would drag
+  that divergence into scope with it.
 - **Goal line** is buried behind "More options (2)"; Metabase has it top-level.
 - **Two table column lists** — Data "Columns" (what to query) and Display "Visible columns" (what to
   show) — where Metabase has one tab. egret's Show all / Hide all, numeric Freeze first columns and
   Paginate are improvements; Metabase's "Freeze rows" is missing.
-- **`showLabels` default.** Metabase's `getDefaultShowLabels` returns **false** for a single dimension,
-  so its one-ring pie draws nothing on the arcs and everything in the legend; egret's `?? true` now
-  draws names on the arcs *and* percentages in the legend.
+- **`showLabels` default.** ~~Metabase's `getDefaultShowLabels` returns **false** for a single
+  dimension, so its one-ring pie draws nothing on the arcs and everything in the legend; egret's
+  `?? true` now draws names on the arcs *and* percentages in the legend.~~ **Done.** Re-checked at
+  `shared/settings/pie.ts:51-56` (`getPieDimensions(settings).length <= 1 → false`), wired at
+  `PieChart/chart-definition.ts:218`. egret's default is now `resolveShowLabels` — off at one ring,
+  on above it, an explicit value always winning. The reasoning it overrides is in the pie spec
+  ("Legend and slice labels default to on… a pie's colours say nothing without a key"), which argues
+  for the LEGEND — the key, and on by default regardless — and says nothing about repeating the key
+  on the arcs. The multi-ring half of the argument does hold, and is kept: the legend lists ring 0
+  only. A default one-ring pie is not left blank — the legend names every slice and states its
+  share, and the tooltip still answers a hover.
 - **The temporal-extraction seam.** For `day_of_week` and friends the aggregation key is
   `temporalLabel(...)` → `"Wed"` while `PieDisplayControl` hands the panel raw `3`. Reproduced in
   PR 06. Closing it needs `dimensionUnits` threaded through `VizControlProps`, `StudioPanel`,

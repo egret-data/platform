@@ -345,7 +345,37 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
     || (kind === "scatter" && config.xMetric != null);
   return (
     <div className="space-y-2.5">
-      {scoped(scope, "value") && kind !== "scatter" && <Toggle id="cz-log" label="Log scale" checked={!!config.logScale} onChange={(v) => onChange({ logScale: v })} />}
+      {/* Metabase's `graph.y_axis.scale`, as the SELECT it is there rather than the "Log scale"
+          switch this row used to be — the waterfall/box-plot tab already renders one
+          (`ChartAxesSection`), and the same stored key offered through two different controls is
+          how it comes to read differently depending on which chart the reader opened.
+
+          **POWER IS NOT OFFERED**, and it is not an oversight. Metabase's third choice, `pow`, is
+          not an ECharts axis type: ECharts has `value | category | time | log` and nothing else,
+          and Metabase does not use its `log` axis either. Both of Metabase's non-linear scales are
+          a TRANSFORM ON THE DATA over a plain `type: "value"` axis — signed square root for `pow`,
+          symmetric log for `log` (`echarts/cartesian/model/transforms.ts`) — with the inverse
+          applied again in every axis-label, tooltip and data-label formatter. Offering a Power
+          option here without that transform would draw a linear axis under a word promising
+          otherwise, which is the exact fault this panel exists to remove. Adding it honestly is a
+          builder change across three families plus a new stored key (`logScale` is a BOOLEAN and
+          cannot carry a third value), not a control change.
+
+          The stored key is therefore untouched: `logScale: true` for Log, cleared for Linear, so
+          every already-saved chart round-trips exactly as before. */}
+      {scoped(scope, "value") && kind !== "scatter" && (
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="cz-scale" className="text-sm font-normal">{valAx} scale</Label>
+          <Select value={config.logScale ? "log" : "linear"}
+            onValueChange={(v) => onChange({ logScale: v === "log" || undefined })}>
+            <SelectTrigger id="cz-scale" aria-label={`${valAx} scale`} className="h-7 w-28"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="linear">Linear</SelectItem>
+              <SelectItem value="log">Log</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
       {/* Metabase's `graph.x_axis.axis_enabled`, a FIVE-choice key of which this select offers four
           — Hide / Show / Rotate 45° / Rotate 90° — projected onto `xAxisTicks` + `xLabelRotation`
           through the SHARED mapping the waterfall/box-plot tab uses (`xTicksChoiceOf`/
@@ -489,12 +519,13 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
  * panel renders a heading per group. egret's tab was one flat run — "X axis scale, X label, Y label,
  * Log scale, X axis lines and ticks, Y axis lines and ticks, Y tick marks, Y min, Y max" — in which
  * the two axes' settings alternated and answering "what can I change about the X axis" meant reading
- * the whole list.
+ * the whole list. (That flat run named the value-axis scale row "Log scale"; it is "Y scale" now,
+ * a select, for the reasons on the control itself.)
  *
  * PRESENTATION ONLY. Not one setting is added, dropped or moved between controls: `AxesOptions`
- * still owns the scale, the titles and the left/right split, `AxisRangeOptions` still owns the
- * bounds, the log scale and both lines-and-ticks selects. Each is asked TWICE, once per axis, and
- * renders only the rows belonging to that one — which is why the fix is here and not a `group` in
+ * still owns the x-axis scale, the titles and the left/right split, `AxisRangeOptions` still owns
+ * the bounds, the value-axis scale and both lines-and-ticks selects. Each is asked TWICE, once per
+ * axis, and renders only the rows belonging to that one — which is why the fix is here, not a `group` in
  * the descriptor. The shell deliberately flattens the Axes TAB (`StudioPanel`, `tab === "axes"`),
  * since a group heading inside it would just repeat the tab's own name; the split that is wanted is
  * a level below that, between the two axes.

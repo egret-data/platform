@@ -116,7 +116,9 @@ describe("a slice label whose fill no ink can serve", () => {
     // nested chart the same override would be taken at ring 0's dark variant instead.
     const single = [{ name: "d", type: "varchar" }, { name: "n", type: "double" }];
     const { labels, fills } = draw(
-      { dimensions: ["d"], metric: "n", sliceColors: { AAA: "#7172AD" } },
+      // `showLabels: true` because a one-ring pie's arcs are bare by default
+      // (`resolveShowLabels`), and there has to BE a slice label before its outline can be read.
+      { dimensions: ["d"], metric: "n", showLabels: true, sliceColors: { AAA: "#7172AD" } },
       single,
       [["AAA", 5000], ["BBB", 4000], ["CCC", 3000]],
     );
