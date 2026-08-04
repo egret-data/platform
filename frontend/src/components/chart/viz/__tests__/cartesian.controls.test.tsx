@@ -39,16 +39,77 @@ describe("cartesian controls are grouped and per-kind", () => {
     expect(ctrls("row").map((c) => c.id)).not.toContain("orientation");
   });
 
-  it("offers per-series line style to line and area only, grouped under Series and hidden behind advanced", () => {
-    for (const k of ["line", "area"] as const) {
-      const control = ctrls(k).find((c) => c.id === "seriesLineStyle");
-      expect(control, `${k} is missing seriesLineStyle`).toBeTruthy();
-      expect(control!.group).toBe("Series");
-      expect(control!.advanced).toBe(true);
+  /**
+   * `seriesLineStyle` USED TO BE DECLARED HERE — for line and area, `advanced: true`, rendering an
+   * N-row grid of Selects behind the Series group's "More options". It is gone, and this test moved
+   * with it: the same settings are now reached from a per-series drill-in on the series row itself,
+   * so a second declaration would be a second place to change one thing from.
+   *
+   * The assertion is not "the id is absent" alone — an id vanishing proves the control was deleted,
+   * not that anything replaced it. The next test drives what replaced it, through the descriptor.
+   */
+  it("no longer declares a chart-wide per-series line style control on any kind", () => {
+    for (const k of ["bar", "row", "line", "area", "scatter", "combo"] as const) {
+      expect(ctrls(k).map((c) => c.id), `${k} should not declare seriesLineStyle`).not.toContain("seriesLineStyle");
     }
-    for (const k of ["bar", "row", "scatter", "combo"] as const) {
-      expect(ctrls(k).map((c) => c.id), `${k} should not offer seriesLineStyle`).not.toContain("seriesLineStyle");
-    }
+  });
+
+  /**
+   * THE DESCRIPTOR -> PANEL SEAM for the drill-in. `SeriesListControl` decides which rows offer it,
+   * by asking the BUILDER's own `echartsTypeOf(seriesDisplayFor(...))` — so this has to be driven
+   * through the descriptor's `render`, not by rendering `SeriesListSection` with a stub predicate.
+   * A section test with a stub passes just as happily when nothing threads the real rule in, which
+   * is the mistake this file already records against the colour swatch.
+   *
+   * The combo case is the one that matters most: the old control was never declared for combo at
+   * all, so a combo's line band could carry a stored `seriesLine` entry that the builder drew and
+   * no panel could edit.
+   */
+  const lineProps: VizControlProps<CartesianConfig> = {
+    config: { xAxis: "month", yMetrics: ["revenue", "orders"] },
+    onChange: () => {},
+    columns: [], metrics: [],
+    resultColumns: [
+      { name: "month", type: "varchar" },
+      { name: "revenue", type: "double" },
+      { name: "orders", type: "bigint" },
+    ],
+    rows: [["2026-01", 1, 2], ["2026-02", 3, 4]],
+    temporalUnits: {},
+    unitRow: () => null,
+  };
+
+  it("puts the per-series drill-in on every row of a line chart", () => {
+    render(createElement(ctrls("line").find((c) => c.id === "seriesList")!.render, lineProps));
+    expect(screen.getByLabelText("settings revenue")).toBeInTheDocument();
+    expect(screen.getByLabelText("settings orders")).toBeInTheDocument();
+  });
+
+  // Everything the popover holds is line appearance, so a chart that draws no lines gets no button
+  // — a popover with nothing in it is a button that opens nothing.
+  it("offers no drill-in on a bar chart, whose series have no line appearance", () => {
+    render(createElement(ctrls("bar").find((c) => c.id === "seriesList")!.render, lineProps));
+    expect(screen.queryByLabelText("settings revenue")).toBeNull();
+    expect(screen.queryByLabelText("settings orders")).toBeNull();
+  });
+
+  // Metabase's popover self-prunes the same way: the line rows carry `hidden` on a `bar` series.
+  // Here the default combo display is first-is-a-line, so exactly one of these two has lines.
+  it("prunes it per series on a combo — the line band has it, the bar band does not", () => {
+    render(createElement(ctrls("combo").find((c) => c.id === "seriesList")!.render, lineProps));
+    expect(screen.getByLabelText("settings revenue")).toBeInTheDocument();
+    expect(screen.queryByLabelText("settings orders")).toBeNull();
+  });
+
+  // The prune follows the row's own display Select, not the default — flipping a band to Bar has
+  // to take its line settings away, or the panel offers a setting the builder will ignore.
+  it("follows the row's chosen display, not just the default", () => {
+    render(createElement(ctrls("combo").find((c) => c.id === "seriesList")!.render, {
+      ...lineProps,
+      config: { ...lineProps.config, seriesTypes: { revenue: "bar", orders: "area" } },
+    }));
+    expect(screen.queryByLabelText("settings revenue")).toBeNull();
+    expect(screen.getByLabelText("settings orders")).toBeInTheDocument();
   });
 
   /**

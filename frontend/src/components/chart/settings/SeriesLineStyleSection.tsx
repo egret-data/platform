@@ -4,86 +4,72 @@ import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
 
+/** The four rows, in Metabase's own order: shape, style, size, dots. */
+const ROWS = [
+  {
+    field: "shape" as const, label: "Line shape",
+    // linear|smooth|step is exactly what decorateSeries resolves, and `step` is egret's existing
+    // middle-step mode, NOT Metabase's step-after — see the comment at cartesian.ts. A control
+    // that offered step-after here would store a value the builder silently rounds to `middle`.
+    options: [["linear", "Linear"], ["smooth", "Smooth"], ["step", "Step"]],
+  },
+  { field: "style" as const, label: "Line style", options: [["solid", "Solid"], ["dashed", "Dashed"], ["dotted", "Dotted"]] },
+  { field: "size" as const, label: "Line size", options: [["S", "S"], ["M", "M"], ["L", "L"]] },
+  // Named after egret's CHART-WIDE control ("Markers"), not after Metabase's "Show dots on
+  // lines": this select's Auto falls back to that control, and two names for one setting is how
+  // a user stops believing the fallback exists.
+  {
+    field: "markers" as const, label: "Markers", options: [["on", "On"], ["off", "Off"]],
+    autoTitle: "Auto shows markers only when there are few enough points to read",
+  },
+];
+
 /**
- * Per-series line appearance, one row per series name — all four of `LineSeriesStyle`.
+ * ONE series' line appearance — all four of `LineSeriesStyle`, as the body of that series'
+ * drill-in popover (SeriesSettingsPopover).
  *
- * `shape` and `markers` used to be missing here, and the omission was ARGUED rather than
- * accidental: a third and fourth Select per row would make an already-unbounded list (one row
- * per series) worse, so the control was declared `advanced: true` and hidden behind "More
- * options". The trouble is that `decorateSeries` (echarts/options/cartesian.ts) has always
- * honoured all four, so a chart could draw a per-series step line that nobody could ask for —
- * the same shape of defect FormatSection.tsx names for `scale` and `number_separators`.
- * The drill-in (SeriesSettingsPopover) removes the premise instead of overriding the
- * conclusion: this section now renders ONE series at a time inside a popover, so four Selects
- * are four rows in a panel that opens on demand rather than 4N Selects always on screen.
+ * This used to be an N-row grid, one row per series with a Select per field, declared
+ * `advanced: true` in viz/cartesian.tsx so it hid behind the Series group's "More options".
+ * `shape` and `markers` were left out of it on purpose — a third and fourth Select per row would
+ * have made an already-unbounded list worse — even though `decorateSeries`
+ * (echarts/options/cartesian.ts) has honoured all four since the per-series map landed. A chart
+ * could therefore draw a per-series step line that nobody could ask for: the same shape of defect
+ * FormatSection.tsx names for `scale` and `number_separators`.
+ *
+ * The drill-in removes that premise rather than overriding the conclusion. Per series, the cost of
+ * a field is now a row in a panel that opens on demand instead of a column across every row on
+ * screen, so the list stays readable at ten series and the two unreachable fields become
+ * reachable. It is also Metabase's shape: `ChartNestedSettingSeriesSingle` inside
+ * `ChartSettingsWidgetPopover`, off the series row's ellipsis.
  */
-export function SeriesLineStyleSection({ names, seriesLine, onChange }: {
-  names: string[];
+export function SeriesLineStyleSection({ name, seriesLine, onChange }: {
+  /** The ONE series this renders. Was `names: string[]` when this was the whole list. */
+  name: string;
   seriesLine?: Record<string, LineSeriesStyle>;
   onChange: (patch: { seriesLine?: Record<string, LineSeriesStyle> }) => void;
 }) {
   // Merge a single field into one series' entry without disturbing the others — seriesLine
   // is a map keyed by series name, so both spreads matter: the outer one keeps every other
   // series' entry, the inner one keeps this series' other fields.
-  const patch = (name: string, field: keyof LineSeriesStyle, value: string | undefined) =>
+  const patch = (field: keyof LineSeriesStyle, value: string | undefined) =>
     onChange({ seriesLine: { ...seriesLine, [name]: { ...seriesLine?.[name], [field]: value } } });
   return (
     <div className="space-y-1.5">
-      {names.map((name) => (
-        <div key={name} className="flex items-center gap-2">
-          <Label className="min-w-0 flex-1 truncate text-sm font-normal" title={name}>{name}</Label>
+      {ROWS.map(({ field, label, options, autoTitle }) => (
+        <div key={field} className="flex items-center justify-between gap-2">
+          <Label className="text-sm font-normal">{label}</Label>
           {/* "Auto" writes `undefined`, not the literal — the builder reads any stored value as an
-              override, so a literal "auto" would cut this series off from `cfg.lineShape` for good.
-              The values match what decorateSeries resolves: linear|smooth|step, and `step` is
-              egret's existing middle-step mode, NOT Metabase's step-after. */}
+              override, so a literal "auto" would cut this series off from the chart-wide default
+              for good. The fallback chain is one link longer than the chart-wide control's:
+              series → chart-wide → the builder's own default. */}
           <Select
-            value={seriesLine?.[name]?.shape ?? "auto"}
-            onValueChange={(v) => patch(name, "shape", v === "auto" ? undefined : v)}
+            value={seriesLine?.[name]?.[field] ?? "auto"}
+            onValueChange={(v) => patch(field, v === "auto" ? undefined : v)}
           >
-            <SelectTrigger aria-label={`shape ${name}`} className="h-7 w-24"><SelectValue /></SelectTrigger>
+            <SelectTrigger aria-label={`${field} ${name}`} className="h-7 w-28"><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="auto">Auto</SelectItem>
-              <SelectItem value="linear">Linear</SelectItem>
-              <SelectItem value="smooth">Smooth</SelectItem>
-              <SelectItem value="step">Step</SelectItem>
-            </SelectContent>
-          </Select>
-          <Select
-            value={seriesLine?.[name]?.style ?? "auto"}
-            onValueChange={(v) => patch(name, "style", v === "auto" ? undefined : v)}
-          >
-            <SelectTrigger aria-label={`style ${name}`} className="h-7 w-24"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="auto">Auto</SelectItem>
-              <SelectItem value="solid">Solid</SelectItem>
-              <SelectItem value="dashed">Dashed</SelectItem>
-              <SelectItem value="dotted">Dotted</SelectItem>
-            </SelectContent>
-          </Select>
-          <Select
-            value={seriesLine?.[name]?.size ?? "auto"}
-            onValueChange={(v) => patch(name, "size", v === "auto" ? undefined : v)}
-          >
-            <SelectTrigger aria-label={`size ${name}`} className="h-7 w-20"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="auto">Auto</SelectItem>
-              <SelectItem value="S">S</SelectItem>
-              <SelectItem value="M">M</SelectItem>
-              <SelectItem value="L">L</SelectItem>
-            </SelectContent>
-          </Select>
-          <Select
-            value={seriesLine?.[name]?.markers ?? "auto"}
-            onValueChange={(v) => patch(name, "markers", v === "auto" ? undefined : v)}
-          >
-            <SelectTrigger aria-label={`markers ${name}`} className="h-7 w-20"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              {/* Same three options as the chart-wide Markers select, and the same meaning of
-                  "auto" — show markers only when there are few enough points to read. Here the
-                  fallback chain is one link longer: series → chart-wide → auto. */}
-              <SelectItem value="auto" title="Auto shows markers only when there are few enough points to read">Auto</SelectItem>
-              <SelectItem value="on">On</SelectItem>
-              <SelectItem value="off">Off</SelectItem>
+              <SelectItem value="auto" title={autoTitle}>Auto</SelectItem>
+              {options.map(([value, text]) => <SelectItem key={value} value={value}>{text}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>

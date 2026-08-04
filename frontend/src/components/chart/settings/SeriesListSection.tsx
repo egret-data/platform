@@ -1,7 +1,15 @@
+import { useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { SeriesDisplay } from "@/components/chart/echarts/options/cartesian";
+import type { LineSeriesStyle } from "@/api/charts";
+import { SeriesSettingsPopover } from "./SeriesSettingsPopover";
+
+/** Metabase's own cap, verbatim: `lib/settings/graph.ts` sets `truncateAfter: 10` on the series
+ *  order widget. Ten rows is roughly the height of the panel's viewport, so the eleventh is the
+ *  first one that costs the reader the group heading above it. */
+const TRUNCATE_AFTER = 10;
 
 export interface SeriesListPatch {
   seriesOrder?: string[];
@@ -9,6 +17,7 @@ export interface SeriesListPatch {
   seriesColors?: Record<string, string>;
   seriesLabels?: Record<string, string>;
   seriesTypes?: Record<string, SeriesDisplay>;
+  seriesLine?: Record<string, LineSeriesStyle>;
 }
 
 /**
@@ -31,9 +40,14 @@ export interface SeriesListPatch {
  *
  * `defaultDisplay` IS still asked by natural index, and that is not an oversight: Metabase's
  * first-is-a-line combo rule is genuinely about position, not about what a series is called.
+ *
+ * The row also carries the DRILL-IN button (`SeriesSettingsPopover`) for everything about a series
+ * that is too big to sit on the row itself. Metabase's row is the same shape: identity here, the
+ * rest behind an ellipsis.
  */
 export function SeriesListSection({
-  names, order, hidden, colors, labels, types, defaultDisplay, defaultColor, renameable = true, onChange,
+  names, order, hidden, colors, labels, types, seriesLine, defaultDisplay, defaultColor,
+  hasLineSettings, renameable = true, onChange,
 }: {
   names: string[];
   order?: string[];
@@ -42,12 +56,23 @@ export function SeriesListSection({
   labels?: Record<string, string>;
   /** Combo only: how each series is drawn. Absent for every other kind, whose display is fixed. */
   types?: Record<string, SeriesDisplay>;
+  /** Per-series line appearance, edited inside the drill-in. Meaningless without
+   *  `hasLineSettings`, which is what decides whether the drill-in exists on a row at all. */
+  seriesLine?: Record<string, LineSeriesStyle>;
   /** The display a series falls back to, by its NATURAL index — Metabase's first-is-a-line rule.
    *  Undefined means this chart kind offers no per-series display at all. */
   defaultDisplay?: (naturalIndex: number) => SeriesDisplay;
   /** Omitted by a chart drawn in ONE colour — the funnel, whose bands differ only in opacity. A
    *  swatch there would be a control that cannot change anything. */
   defaultColor?: (name: string) => string;
+  /** Whether this series has line appearance to drill into, by its NATURAL index. Asked of the
+   *  caller rather than decided here: the answer is what `seriesDisplayFor` resolves for the chart
+   *  kind and its `seriesTypes`, and only the caller holds those. Copying the rule in here is how
+   *  the colour rule diverged from the renderer once already (viz/cartesian.tsx records it).
+   *
+   *  Absent means no row gets a button — bar, row and scatter have no per-series line appearance,
+   *  and neither do the funnel's steps. A popover holding nothing is a button that opens nothing. */
+  hasLineSettings?: (name: string, naturalIndex: number) => boolean;
   /** False where the renderer has no label override to read — the funnel labels its steps from the
    *  dimension value itself. An editable name there accepts typing and then discards it. */
   renameable?: boolean;
@@ -78,9 +103,24 @@ export function SeriesListSection({
     onChange({ seriesOrder: base });
   };
 
+  // A breakout decides how many series there are, so this list has no natural bound: a 40-value
+  // breakout puts 40 rows in a ~300px panel and pushes every group below it off the tab. Metabase
+  // caps its own at ten (`lib/settings/graph.ts`, `truncateAfter: 10`) behind a "more" affordance.
+  //
+  // The cut is taken AFTER ranking, not over `names`: truncating the natural order would hide
+  // whichever series the user had just moved to the top, which is the one they are working on.
+  //
+  // `move`'s bounds deliberately still read `ranked.length`, not the visible count — the last
+  // visible row of a truncated list can still be sent down, swapping it with the first hidden one.
+  // The alternative is a series that can never be moved past the cut without expanding first, and
+  // a disabled arrow that gives no reason.
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? ranked : ranked.slice(0, TRUNCATE_AFTER);
+  const overflow = ranked.length - visible.length;
+
   return (
     <div className="space-y-1">
-      {ranked.map((name, i) => (
+      {visible.map((name, i) => (
         <div key={name} className="flex items-center gap-1">
           <div className="flex shrink-0 flex-col leading-none">
             <button type="button" aria-label={`Move ${name} up`} disabled={i === 0}
@@ -131,12 +171,34 @@ export function SeriesListSection({
               <span className="truncate">{name}</span>
             </div>
           )}
+          {hasLineSettings?.(name, naturalIndex.get(name) ?? i) && (
+            <SeriesSettingsPopover
+              name={name}
+              label={labels?.[name]}
+              // The swatch the row is showing, override included — the popover's header must not
+              // disagree with the input two elements to its left.
+              color={defaultColor && (colors?.[name] ?? defaultColor(name))}
+              seriesLine={seriesLine}
+              onChange={onChange}
+            />
+          )}
           <Switch aria-label={`Show ${name}`} checked={!hidden?.includes(name)}
             onCheckedChange={(v) => onChange({
               hiddenSeries: v ? (hidden ?? []).filter((n) => n !== name) : [...(hidden ?? []), name],
             })} />
         </div>
       ))}
+      {ranked.length > TRUNCATE_AFTER && (
+        // Named, not a bare chevron: "Show 3 more series" says what is behind it, where a chevron
+        // on a list that is already ten rows long reads as one more row.
+        <button
+          type="button"
+          className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? "Show fewer series" : `Show ${overflow} more series`}
+        </button>
+      )}
     </div>
   );
 }

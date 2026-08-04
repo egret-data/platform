@@ -63,13 +63,17 @@ describe("StudioPanel renders bar's grouped Display controls", () => {
 });
 
 /**
- * The per-series style/size control (seriesLineStyle) was extracted out of the always-open
- * "Series" section and marked advanced so an unbounded per-series list of Selects doesn't
- * swamp the panel. Extracting a control behind a disclosure is only safe if it stays
- * reachable — this proves it does, mounted through the real descriptor + StudioPanel for
- * "line", the kind it's declared for.
+ * The per-series line settings USED TO BE a separate `seriesLineStyle` control, extracted out of
+ * the always-open "Series" section and marked `advanced` so an unbounded per-series grid of
+ * Selects didn't swamp the panel — and this suite proved the disclosure still made it reachable.
+ *
+ * It moved. They now live in a drill-in popover hung off each series' own row, which is bounded by
+ * construction (one button per row) and needs no disclosure at all — so the assertion moved with
+ * it: NOT behind "More options", but one click from the row. The two halves of the old test still
+ * matter and both survive here: nothing is on screen until asked for, and what is asked for is
+ * genuinely reachable through the real descriptor + StudioPanel rather than through a stub.
  */
-describe("StudioPanel: per-series line style is reachable behind Series' More options", () => {
+describe("StudioPanel: per-series line settings are one click from the series' own row", () => {
   const props = {
     descriptor: cartesianDescriptor("line"),
     config: { xAxis: "region", yMetrics: ["revenue", "cost"] },
@@ -90,15 +94,25 @@ describe("StudioPanel: per-series line style is reachable behind Series' More op
     tab: "display" as const,
   };
 
-  it("hides style/size until Series' More options opens, then shows one row per series", async () => {
+  it("keeps the four line settings off screen until a row's drill-in is opened", async () => {
     render(<StudioPanel {...props} />);
-    expect(screen.queryByLabelText("style revenue")).not.toBeInTheDocument();
+    // Not merely hidden behind a disclosure now — not rendered at all, for either series.
+    for (const f of ["shape", "style", "size", "markers"]) {
+      expect(screen.queryByLabelText(`${f} revenue`)).not.toBeInTheDocument();
+      expect(screen.queryByLabelText(`${f} cost`)).not.toBeInTheDocument();
+    }
+    // And opening every disclosure on the tab does not bring them back — the old route is gone,
+    // which is the half of this that a "the new route works" assertion would not have caught.
     for (const trigger of screen.getAllByRole("button", { name: /more options/i })) {
       await userEvent.click(trigger);
     }
-    expect(screen.getByLabelText("style revenue")).toBeInTheDocument();
-    expect(screen.getByLabelText("size revenue")).toBeInTheDocument();
-    expect(screen.getByLabelText("style cost")).toBeInTheDocument();
-    expect(screen.getByLabelText("size cost")).toBeInTheDocument();
+    expect(screen.queryByLabelText("style revenue")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByLabelText("settings revenue"));
+    for (const f of ["shape", "style", "size", "markers"]) {
+      expect(await screen.findByLabelText(`${f} revenue`)).toBeInTheDocument();
+    }
+    // One series at a time: the other row's settings stay where they were.
+    expect(screen.queryByLabelText("style cost")).not.toBeInTheDocument();
   });
 });

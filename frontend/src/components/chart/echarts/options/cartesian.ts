@@ -623,8 +623,13 @@ export function seriesDisplayFor(
   return kind; // "bar" | "line"
 }
 
-/** The ECharts series type behind a display. An area is a line that happens to be filled. */
-function echartsTypeOf(display: SeriesDisplay | "scatter"): "bar" | "line" | "scatter" {
+/** The ECharts series type behind a display. An area is a line that happens to be filled.
+ *
+ *  Exported because the settings panel has to ask the same question the builder does: `decorateSeries`
+ *  applies `cfg.seriesLine` only where this returns "line", so the panel's drill-in button must appear
+ *  exactly there. Restating "line or area" in the panel would be a second rule that drifts — which is
+ *  how the colour rule drifted from the renderer once already. */
+export function echartsTypeOf(display: SeriesDisplay | "scatter"): "bar" | "line" | "scatter" {
   return display === "area" ? "line" : display;
 }
 
