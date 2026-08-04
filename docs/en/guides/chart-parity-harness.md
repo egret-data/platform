@@ -91,24 +91,33 @@ No descriptor knows about these, so they are enforced in the script itself:
   `grid_col` / `grid_row` / `size_x` / `size_y`.
 - egret login is rate-limited **5 per 5 minutes**. The script logs in once.
 
-## Known, and not fixed here
+## Resolved since this guide was written
 
-**Bar and row charts render their categories in whatever order the engine returned.** Every grouped
-chart's spec carries `orderby: []`, and no descriptor can express one — `SharedQueryState` is
-`{filters, rowLimit, temporalUnits}`, and every `buildSpec` hardcodes `orderby: []`. Nine of the twelve
-grouped charts are protected by a client-side sort they apply themselves (temporal axes, pie, sankey,
-funnel, pivot); **bar and row are not**, because `cartesian.ts` deliberately leaves a nominal axis in
-first-seen order.
+**Category order — fixed, and fixed differently from what this guide proposed.** It used to say bar and
+row render in engine order (measured: seven of ten calls one way, three the other), that no descriptor
+could express an `orderby`, and that the fix belonged in `sortCategories` as a **descending-series-value**
+sort.
 
-Measured on the endpoint the dashboard uses, ten calls: seven returned
-`Gizmo, Widget, Gadget, Doohickey` and three returned `Widget, Gadget, Doohickey, Gizmo`. Three
-consecutive page loads all showed the 70% ordering, which is why a two-load comparison called it
-deterministic and it survived PRs 02–06.
+All three are now out of date:
 
-The fix belongs in `sortCategories`, not in this script — sorting a nominal axis by descending series
-value, which is what `pie.ts` and `sankey.ts` already do and what Metabase's own `MB By Category`
-question does. Fixing it in the seed would make two charts on one dashboard deterministic and leave
-every user's bar chart flipping.
+- `#394` sorts a nominal axis **ascending by the dimension**, and derives an `orderby` in `buildSpec`
+  so the *data* is ordered too — the order Metabase's query processor adds implicitly for every
+  breakout column (`add_implicit_clauses.clj:71`), not descending by value.
+- `#395` added a sort control to the studio, so `SharedQueryState` **does** carry an `orderby` now.
+- `#399` closed the waterfall, the fourth family.
+
+Probed after the last re-seed, ten calls each: **10/10 `Doohickey, Gadget, Gizmo, Widget`** on both bar
+and row. Do not go looking for this.
+
+**The scalar family — fixed by running this script.** `MB · Scalar`, `Gauge` and `Progress` used to
+store `dimensions: ["category"], row_limit: 1000` and read `rows[0]` of an unordered `GROUP BY`. The
+live symptom was two cards on one page load disagreeing: Scalar showing Widget's 423.7K while Gauge
+showed Gizmo's 383,061.95. They now read the whole-dataset aggregate **1,510,621.69** against a
+2,000,000 bound, 15 of 15 identical calls.
+
+**If you are re-deriving a baseline table, note the viewport.** The `166×184` svg figure quoted in the
+parity PRs was taken at a viewport nobody recorded; at 1600×1000 the same cards measure `193×214`.
+Fix your viewport, measure before and after in the same one, and say which you used.
 
 ## Environment notes
 

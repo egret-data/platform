@@ -87,22 +87,32 @@ Các bẫy phía Metabase, ghi lại vì đã tốn thời gian:
   `grid_col` / `grid_row` / `size_x` / `size_y`.
 - Đăng nhập egret giới hạn **5 lần / 5 phút**. Script đăng nhập một lần.
 
-## Đã biết, và không sửa ở đây
+## Đã được giải quyết kể từ khi viết tài liệu này
 
-**Bar và row vẽ danh mục theo thứ tự engine trả về.** Spec của mọi chart có nhóm đều mang
-`orderby: []`, và **không descriptor nào diễn đạt được** một `orderby` — `SharedQueryState` là
-`{filters, rowLimit, temporalUnits}`, và mọi `buildSpec` đều hard-code `orderby: []`. Chín trong mười
-hai chart có nhóm được bảo vệ bởi phép sắp xếp phía client của riêng chúng (trục thời gian, pie,
-sankey, funnel, pivot); **bar và row thì không**, vì `cartesian.ts` cố ý để trục danh nghĩa theo thứ tự
-gặp đầu tiên.
+**Thứ tự danh mục — đã sửa, và sửa KHÁC cách tài liệu này đề xuất.** Trước đây mục này nói bar và row
+vẽ theo thứ tự engine (đo được: bảy trong mười lần một kiểu, ba lần kiểu kia), rằng không descriptor
+nào diễn đạt được `orderby`, và rằng bản sửa thuộc về `sortCategories` dưới dạng sắp **giảm dần theo
+giá trị series**.
 
-Đo trên đúng endpoint dashboard dùng, mười lần gọi: bảy lần trả `Gizmo, Widget, Gadget, Doohickey` và
-ba lần trả `Widget, Gadget, Doohickey, Gizmo`. Ba lần tải trang liên tiếp đều ra thứ tự 70%, nên phép
-so hai lần tải đã kết luận là xác định — và đó là lý do nó sống sót qua PR 02–06.
+Cả ba đều đã lạc hậu:
 
-Bản sửa thuộc về `sortCategories`, không thuộc script này — sắp xếp trục danh nghĩa theo giá trị giảm
-dần, đúng điều `pie.ts` và `sankey.ts` đã làm và đúng điều câu hỏi `MB By Category` của Metabase làm.
-Sửa trong seed chỉ làm hai chart trên một dashboard xác định, còn bar chart của mọi người dùng vẫn lật.
+- `#394` sắp trục danh nghĩa **tăng dần theo dimension**, và suy một `orderby` trong `buildSpec` để
+  **dữ liệu** cũng có thứ tự — đúng thứ tự mà query processor của Metabase tự thêm cho mọi cột breakout
+  (`add_implicit_clauses.clj:71`), không phải giảm dần theo giá trị.
+- `#395` thêm control sắp xếp vào studio, nên `SharedQueryState` **giờ có** `orderby`.
+- `#399` đóng nốt waterfall, họ thứ tư.
+
+Đo lại sau lần seed gần nhất, mười lần gọi mỗi chart: **10/10 `Doohickey, Gadget, Gizmo, Widget`** trên
+cả bar lẫn row. Đừng đi tìm lỗi này nữa.
+
+**Nhóm chart số đơn — đã sửa bằng chính việc chạy script này.** `MB · Scalar`, `Gauge`, `Progress`
+từng lưu `dimensions: ["category"], row_limit: 1000` rồi đọc `rows[0]` của một `GROUP BY` không thứ tự.
+Triệu chứng sống: trên **một** lần tải trang, Scalar hiện 423,7K của Widget còn Gauge hiện 383.061,95
+của Gizmo. Giờ cả ba đọc tổng toàn tập **1.510.621,69** với ngưỡng 2.000.000, 15/15 lần gọi giống nhau.
+
+**Nếu bạn dựng lại một bảng mốc, nhớ ghi viewport.** Con số svg `166×184` trong các PR parity được đo ở
+một viewport không ai ghi lại; ở 1600×1000 cùng những card đó đo ra `193×214`. Cố định viewport, đo
+trước và sau trong cùng một viewport, và nói rõ bạn dùng cái nào.
 
 ## Ghi chú môi trường
 
