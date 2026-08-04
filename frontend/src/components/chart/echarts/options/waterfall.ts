@@ -336,7 +336,11 @@ export function buildWaterfallOption(
     ...baseOption(),
     aria: ariaDescription({
       kind: "Waterfall chart", metric: cfg.metric, dimension: cfg.xAxis, format: (v) => fmt(v),
-      points: categories.map((c, i) => ({ name: c, value: deltas[i] })),
+      // `drawLabel`, not the raw `categories` — the same closure the axis formats its steps with, so
+      // a screen reader hears the step it can see. This enumerated the raw bucket, which on a
+      // month-bucketed waterfall read "2026-01-01 100" against an axis saying "January 2026".
+      // The tooltip below stays on the raw bucket and says why.
+      points: categories.map((c, i) => ({ name: drawLabel(c), value: deltas[i] })),
     }),
     // An axis title needs room reserved on the edge it renders on, or ECharts draws it into the
     // tick labels and the plot clips it — the same adjustment the cartesian builder makes, and the
@@ -365,22 +369,31 @@ export function buildWaterfallOption(
         const isTotal = cfg.showTotal !== false && i === categories.length - 1;
         const swatch = bars[i]?.itemStyle.color ?? increase;
         const dot = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${swatch};margin-right:6px"></span>`;
-        // THE RAW BUCKET, not `drawLabel`'s period name — so a month-bucketed waterfall's axis now
-        // reads "January 2026" while its tooltip still reads "2026-01-01".
+        // THE RAW BUCKET, not `drawLabel`'s period name — so a month-bucketed waterfall's axis
+        // reads "January 2026" while this tooltip still reads "2026-01-01".
         //
-        // Left as it is DELIBERATELY, and this is not the only surface behind the axis. TWO are:
-        // this tooltip, and the `ariaDescription` below, which is handed the raw `categories` too —
-        // a screen reader hears "2026-01-01 10" where the axis reads "January 2026". Both have the
-        // IDENTICAL gap on the cartesian family: its tooltip header is `axisValueLabel`, which
-        // ECharts takes from `axis.scale.getLabel` — on a category scale that returns the raw
-        // `xAxis.data` entry and never consults `axisLabel.formatter` — and `cartesian.ts` feeds
-        // its own `ariaDescription` the raw categories in the same way.
+        // Left as it is DELIBERATELY. This used to be one of TWO surfaces behind the axis, the other
+        // being the `ariaDescription` above, and the note here treated the pair as one chart-wide
+        // decision. The pair has since been SPLIT, because the two are not alike: the aria
+        // description now goes through `drawLabel`, on this chart and on the cartesian family, and
+        // only the tooltip stays raw.
         //
-        // So this is ONE chart-wide decision, not five per-builder patches, and the decision is not
-        // obvious: a tooltip and a drill sit next to each other, and what a step FILTERS by is the
-        // raw bucket. Naming the period on one surface while the other filters on the value would
-        // trade a cosmetic mismatch for a semantic one. Closing it on this chart alone would also
-        // make the waterfall and a bar chart of the same data disagree on the same dashboard.
+        // What separates them is the drill. A tooltip and a drill sit next to each other, and what a
+        // step FILTERS by is the raw bucket — naming the period in the tooltip while the click
+        // filters on the value trades a cosmetic mismatch for a semantic one. A screen-reader
+        // description has no click behind it and exists precisely to say what a sighted user sees
+        // (`ariaDescription`'s own header), so leaving it raw was a defect with nothing on the other
+        // side of the scale.
+        //
+        // MEASURED, so the cartesian half is not assumed: its tooltip header is
+        // `params.axisValueLabel`, which ECharts builds in `getValueLabel`
+        // (`component/axisPointer/viewHelper.js`) from `axis.scale.getLabel` — `OrdinalScale`'s
+        // returns the `xAxis.data` entry verbatim (`scale/Ordinal.js`) and never consults
+        // `axisLabel.formatter`, and the only override is `axisPointer.label.formatter`, which no
+        // builder here sets. Rendered against echarts 6 in jsdom, a month-bucketed bar chart hands
+        // its formatter `axisValueLabel: "2026-01-01"` while the axis draws "January 2026". So the
+        // two families' tooltips still agree with each other on a dashboard, which is the property
+        // this note was protecting.
         const head = `<div style="font-weight:${TOOLTIP_WEIGHT.header}">${categories[i]}</div>`;
         const line = `<div>${dot}<span style="font-weight:${TOOLTIP_WEIGHT.value}">${fmt(delta)}</span></div>`;
         if (isTotal) return head + line;
