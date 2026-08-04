@@ -33,6 +33,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
 import { withDefaultTemporalUnits } from "@/components/chart/temporal-units";
+import { reconcileTableState } from "@/components/chart/table-state";
 import { useChartRun } from "@/components/chart/useChartRun";
 import { getDescriptor } from "@/components/chart/viz/registry";
 import { authoredOrderby, honoursOrderby, sortableFields } from "@/components/chart/viz/orderby";
@@ -198,6 +199,40 @@ export default function ChartExplore() {
   const finished = !data.isLoading && !data.error && !!ranSpec;
   const resultColumns = data.columns.filter((c) => !c.name.startsWith("__grp_"));
   const metricTypes = Object.fromEntries((detail.data?.metrics ?? []).map((m) => [m.metric_name, m.data_type ?? "double"]));
+
+  /**
+   * THE ONE PLACE A TABLE'S COLUMN STATE CAN GO STALE, so the one place it is reconciled.
+   *
+   * `hiddenColumns` / `columnOrder` / `columnWidths` all key on column NAME, and the only thing
+   * that can take a name out of the result is an edit to the query — which is only reachable here,
+   * from this route's Data tab. A dashboard card's `CardVizPanel` composes the very same display
+   * sections but has no Data tab at all (`ChartTable.tsx` records why), and the drill dialog and
+   * the dataset preview render `ChartTable` with no `tableState` to go stale. So there is a single
+   * place, not a sprinkling.
+   *
+   * WHAT GUARDS IT, since this writes settings back rather than deriving them:
+   *  - `data.hasResult` — a run has completed for this key at least once. Not `!isLoading`, which
+   *    is also true while the query is merely disabled (see `useSpecData`'s own note). Without it
+   *    the reconcile fires on the empty pre-run result and prunes a saved chart's state to nothing
+   *    before its first query has even gone out.
+   *  - a non-empty column list, belt-and-braces against a result that came back with no columns.
+   *  - `viz === "table"`. Nothing else reads `TableState` (`ChartRenderer` hands it to the table
+   *    branch only), so reconciling while a bar chart is on screen would prune a table's hidden
+   *    columns against the bar's two result columns and silently lose them on the way back.
+   *  - the keying is on the NAMES, not the array, which is rebuilt every render.
+   *
+   * `reconcileTableState` returns its argument by identity when there is nothing to prune, so the
+   * common case is a React bail-out and not a re-render — the same shape, and the same reason, as
+   * `withDefaultTemporalUnits` above.
+   */
+  const resultColumnNames = resultColumns.map((c) => c.name);
+  // NUL as the separator, not a comma or a pipe: a quoted column name can legally contain either,
+  // and two different results colliding on one key would skip a reconcile that was due.
+  const resultColumnKey = resultColumnNames.join("\u0000");
+  useEffect(() => {
+    if (viz !== "table" || !data.hasResult || resultColumnNames.length === 0) return;
+    setTableState((prev) => reconcileTableState(prev, resultColumnNames));
+  }, [viz, data.hasResult, resultColumnKey]);
 
   // Dataset-level formats (column & metric) become chart DEFAULTS: they render
   // unless the chart has its own per-column override. Applied at render time

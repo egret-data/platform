@@ -153,6 +153,63 @@ describe("ChartTable interactions", () => {
     expect(aHeader.className).toContain("z-30");
   });
 
+  /**
+   * "FREEZE FIRST COLUMNS" COUNTS IN DISPLAY ORDER, WHICH IS THE ONLY ORDER THE USER CAN SEE.
+   *
+   * `columnPinning.left` used to be built as `col_0 … col_{n-1}` — ids assigned by RESULT index —
+   * while `columnOrder` reorders those same ids for display. With both set they disagreed, and
+   * because tanstack draws pinned columns first, freezing after a drag silently UNDID the drag:
+   * dragging `b` to the front and freezing one column put `a` back on the left, frozen.
+   *
+   * Both halves are asserted. That the right column is frozen is not enough on its own — a build
+   * that froze nothing would satisfy "`a` is not sticky" — so the draw order is pinned too.
+   */
+  it("freezes the first column in DISPLAY order, not the first the result happened to return", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(2)} tableState={{ columnOrder: ["b", "a"], pinnedLeft: 1 }} />);
+    // `z-30`, not `sticky`: EVERY header is `sticky top-0` — that is the header ROW staying put
+    // under a vertical scroll, nothing to do with pinning. The z-index is what actually differs
+    // (`z-30` pinned, `z-10` not), which is why the existing pinnedLeft test asserts on it too.
+    expect(screen.getByText("b").closest("th")!.className).toContain("z-30");
+    expect(screen.getByText("a").closest("th")!.className).toContain("z-10");
+    // …and the reorder survives the freeze rather than being undone by it.
+    const headers = within(document.querySelector("thead")!).getAllByRole("columnheader");
+    expect(headers.map((h) => h.textContent)).toEqual(["b", "a"]);
+  });
+
+  /**
+   * A `columnOrder` naming only some of the result's columns is the normal state — `ChartTable`
+   * appends whatever it does not mention. The freeze has to count down the SAME appended list, or
+   * a partial order re-points it to a column the user never froze.
+   */
+  it("counts the freeze down the appended tail of a partial columnOrder", () => {
+    const three = [...COLS, { name: "c", type: "varchar" }];
+    render(
+      <ChartTable
+        columns={three}
+        rows={[["a0", 0, "c0"]]}
+        tableState={{ columnOrder: ["c"], pinnedLeft: 2 }}
+      />,
+    );
+    const headers = within(document.querySelector("thead")!).getAllByRole("columnheader");
+    expect(headers.map((h) => h.textContent)).toEqual(["c", "a", "b"]);
+    expect(headers[0].className).toContain("z-30");
+    expect(headers[1].className).toContain("z-30");
+    expect(headers[2].className).toContain("z-10");
+  });
+
+  /**
+   * …and it skips a hidden column rather than spending the count on it. A pinned id that
+   * `columnVisibility` has switched off is inert in tanstack — it never reaches
+   * `getVisibleLeafColumns` — so counting it meant "freeze 1" froze nothing at all whenever the
+   * leading column was hidden.
+   */
+  it("spends the freeze on visible columns, not on a hidden one it cannot draw", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(2)} tableState={{ hiddenColumns: ["a"], pinnedLeft: 1 }} />);
+    const headers = within(document.querySelector("thead")!).getAllByRole("columnheader");
+    expect(headers.map((h) => h.textContent)).toEqual(["b"]);
+    expect(headers[0].className).toContain("z-30");
+  });
+
   it("paginates to pageSize rows with a working Next button", () => {
     render(<ChartTable columns={COLS} rows={mkRows(30)} tableState={{ pagination: { enabled: true, pageSize: 25 } }} />);
     expect(screen.getByText("1–25 of 30")).toBeInTheDocument();
@@ -198,6 +255,37 @@ describe("ChartTable interactions", () => {
     const headers = within(document.querySelector("thead")!).getAllByRole("columnheader");
     expect(headers[0]).toHaveTextContent("b");
     expect(headers[1]).toHaveTextContent("a");
+  });
+
+  /**
+   * `columnOrder` HOLDS RAW COLUMN NAMES, and `column_settings[name].column_title` renames the
+   * HEADER without renaming the column — so the order has to be resolved through `c.name` and
+   * never through the text on screen. Resolving through the title drops every renamed column out
+   * of the stored order silently: it falls through to the appended tail and lands at the end,
+   * which reads as "my drag didn't save".
+   *
+   * Written because the two-column case cannot see this — with `[b, a]` reversed, losing `a` from
+   * the order and re-appending it produces the identical layout, so the mutation survived. Three
+   * columns with the renamed one in the MIDDLE of the order is the smallest case that can tell the
+   * two apart. This is the seventh instance in this programme of a bug from keying on a display
+   * string rather than a raw value, and the second found only by mutating.
+   */
+  it("resolves columnOrder by raw column name, not by a renamed header", () => {
+    const three = [...COLS, { name: "c", type: "varchar" }];
+    render(
+      <ChartTable
+        columns={three}
+        rows={[["a0", 0, "c0"]]}
+        columnSettings={{ a: { column_title: "Alpha" } }}
+        tableState={{ columnOrder: ["c", "a", "b"], pinnedLeft: 2 }}
+      />,
+    );
+    const headers = within(document.querySelector("thead")!).getAllByRole("columnheader");
+    expect(headers.map((h) => h.textContent)).toEqual(["c", "Alpha", "b"]);
+    // The freeze counts down that same list, so it must not drift with the rename either.
+    expect(headers[0].className).toContain("z-30");
+    expect(headers[1].className).toContain("z-30");
+    expect(headers[2].className).toContain("z-10");
   });
 
   it("reorders a column from the keyboard: focus, Space, ArrowRight, Space", async () => {
