@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Input } from "@/components/ui/input";
 import { DecimalInput } from "./DecimalInput";
 import { Label } from "@/components/ui/label";
@@ -74,12 +75,35 @@ export function Toggle({ id, label, checked, onChange }: {
   );
 }
 
-/** A section heading naming which axis the settings under it belong to — Metabase's own "X-axis" /
- *  "Y-axis" pills. Grouping by axis is the point: the previous layout put both titles together and
- *  then a lump of toggles, so answering "what can I change about the Y axis" meant hopping. */
-function AxisHeading({ children }: { children: string }) {
+/**
+ * A block of settings under a heading naming which axis they belong to — Metabase's own "X-axis" /
+ * "Y-axis" groups (every `graph.x_axis.*` / `graph.y_axis.*` setting carries a `group` of one or the
+ * other, and its panel renders one block per group). Grouping by axis is the point: a flat run put
+ * both titles together and then a lump of toggles, so answering "what can I change about the Y
+ * axis" meant hopping.
+ *
+ * `role="group"` with the heading as its accessible name, rather than a styled div: it is what makes
+ * the grouping REAL rather than a visual hint — a screen reader announces which axis it has entered,
+ * and a test can assert that a control is inside the right block instead of merely that a heading
+ * with the right words appears somewhere on the page.
+ *
+ * Exported because cartesian's Axes tab needs the same two blocks and the same headings. It is the
+ * heading that is shared, NOT the settings: cartesian keeps its own controls (`AxesOptions` /
+ * `AxisRangeOptions`), which offer an x-axis scale and a left/right split that neither the waterfall
+ * nor the box plot honours.
+ *
+ * `axis` is the axis LETTER the reader sees, not the config key — on a horizontal chart the category
+ * axis is the vertical one, and cartesian passes "Y" for it.
+ */
+export function AxisGroup({ axis, className, children }: {
+  axis: string; className?: string; children: ReactNode;
+}) {
+  const name = `${axis}-axis`;
   return (
-    <div className="inline-block rounded bg-muted px-1.5 py-0.5 text-xs font-medium text-muted-foreground">
+    <div role="group" aria-label={name} className={className ? `space-y-2 ${className}` : "space-y-2"}>
+      <div className="inline-block rounded bg-muted px-1.5 py-0.5 text-xs font-medium text-muted-foreground">
+        {name}
+      </div>
       {children}
     </div>
   );
@@ -127,8 +151,7 @@ export function ChartAxesSection<C extends AxesConfig>({ config, onChange, idPre
 
   return (
     <div className="space-y-3">
-      <div className="space-y-2">
-        <AxisHeading>X-axis</AxisHeading>
+      <AxisGroup axis="X">
         <AxisTitleRow id={`${idPrefix}-xlabel`} axis="X" label={config.xLabel} shown={config.showXLabel !== false}
           onLabel={(v) => onChange({ xLabel: v } as Partial<C>)} onShown={(v) => onChange({ showXLabel: v ? undefined : false } as Partial<C>)} />
         <div className="space-y-1">
@@ -146,10 +169,9 @@ export function ChartAxesSection<C extends AxesConfig>({ config, onChange, idPre
             </SelectContent>
           </Select>
         </div>
-      </div>
+      </AxisGroup>
 
-      <div className="space-y-2 border-t pt-3">
-        <AxisHeading>Y-axis</AxisHeading>
+      <AxisGroup axis="Y" className="border-t pt-3">
         <AxisTitleRow id={`${idPrefix}-ylabel`} axis="Y" label={config.yLabel} shown={config.showYLabel !== false}
           onLabel={(v) => onChange({ yLabel: v } as Partial<C>)} onShown={(v) => onChange({ showYLabel: v ? undefined : false } as Partial<C>)} />
         <Toggle id={`${idPrefix}-autorange`} label="Auto y-axis range" checked={autoRange}
@@ -199,20 +221,25 @@ export function ChartAxesSection<C extends AxesConfig>({ config, onChange, idPre
             </SelectContent>
           </Select>
         </div>
-        {/* Label above a full-width input, like every other field on this tab and like Metabase's.
+        {/* Metabase's `getHidden` on `graph.y_axis.split_number`: hidden while
+            `graph.y_axis.axis_enabled === false`. With the axis' lines and ticks turned off there
+            are no tick marks to count, so the box would take a number that changes nothing.
+            Label above a full-width input, like every other field on this tab and like Metabase's.
             Inline-right would make it the only row that reads differently. */}
-        <div className="space-y-1">
-          <Label htmlFor={`${idPrefix}-ytickcount`} className="text-sm font-normal">Number of tick marks</Label>
-          <Input
-            id={`${idPrefix}-ytickcount`} aria-label="Number of tick marks" type="number" min={2} max={20}
-            className="h-8" placeholder="auto" value={config.yTickCount ?? ""}
-            onChange={(e) => {
-              const n = Number(e.target.value);
-              onChange({ yTickCount: e.target.value === "" || Number.isNaN(n) ? undefined : n } as Partial<C>);
-            }}
-          />
-        </div>
-      </div>
+        {config.yAxisTicks !== false && (
+          <div className="space-y-1">
+            <Label htmlFor={`${idPrefix}-ytickcount`} className="text-sm font-normal">Number of tick marks</Label>
+            <Input
+              id={`${idPrefix}-ytickcount`} aria-label="Number of tick marks" type="number" min={2} max={20}
+              className="h-8" placeholder="auto" value={config.yTickCount ?? ""}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                onChange({ yTickCount: e.target.value === "" || Number.isNaN(n) ? undefined : n } as Partial<C>);
+              }}
+            />
+          </div>
+        )}
+      </AxisGroup>
     </div>
   );
 }

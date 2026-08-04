@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ChartAxesSection, xTicksChoiceOf, xTicksPatch, type AxesConfig } from "../ChartAxesSection";
 
@@ -49,6 +49,41 @@ describe("ChartAxesSection — the x lines/ticks/rotation select", () => {
     render(<ChartAxesSection config={cfg()} onChange={() => {}} />);
     await user.click(screen.getByLabelText("X show lines and tick marks"));
     expect(await screen.findByRole("option", { name: "Rotate 45°" })).not.toHaveAttribute("aria-disabled", "true");
+  });
+});
+
+/**
+ * Metabase's `getHidden` on `graph.y_axis.split_number` — "Number of tick marks" —
+ * (lib/settings/graph.ts): `settings["graph.y_axis.axis_enabled"] === false`. With the value axis'
+ * lines and ticks turned off there are no tick marks to count, so the box asks for a number that
+ * changes nothing. Same setting, same condition, so it is ported rather than reasoned about.
+ *
+ * Both directions: a fixture with the axis on cannot show the box hides, and one with it off cannot
+ * show it is still offered.
+ */
+describe("ChartAxesSection — the tick count follows the axis it counts", () => {
+  it("hides Number of tick marks once the value axis' lines and ticks are off", () => {
+    render(<ChartAxesSection config={cfg({ yAxisTicks: false })} onChange={() => {}} />);
+    expect(screen.queryByLabelText("Number of tick marks")).toBeNull();
+  });
+
+  it("offers it while they are drawn", () => {
+    render(<ChartAxesSection config={cfg()} onChange={() => {}} />);
+    expect(screen.getByLabelText("Number of tick marks")).toBeInTheDocument();
+  });
+});
+
+/** The X and Y settings are each announced under the axis they belong to, so a screen reader (and
+ *  `within`) can tell the two halves of this tab apart rather than meeting one flat run of rows. */
+describe("ChartAxesSection — each half is a labelled group", () => {
+  it("files the X rows under X-axis and the Y rows under Y-axis", () => {
+    render(<ChartAxesSection config={cfg()} onChange={() => {}} />);
+    const x = screen.getByRole("group", { name: "X-axis" });
+    const y = screen.getByRole("group", { name: "Y-axis" });
+    expect(within(x).getByLabelText("X show lines and tick marks")).toBeInTheDocument();
+    expect(within(x).queryByLabelText("Y scale")).toBeNull();
+    expect(within(y).getByLabelText("Y scale")).toBeInTheDocument();
+    expect(within(y).queryByLabelText("X label")).toBeNull();
   });
 });
 

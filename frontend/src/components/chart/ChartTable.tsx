@@ -409,18 +409,35 @@ export function ChartTable({
           </tbody>
         </table>
       </div>
-      {paginationEnabled && (
-        <div className="flex items-center justify-between border-t border-border/50 px-3 py-2 text-xs text-muted-foreground">
-          <span>
-            {totalRows === 0 ? "No rows" : `Showing ${start + 1}–${Math.min(start + pageSize, totalRows)} of ${totalRows}`}
-          </span>
+      {/*
+        THE ROW COUNT IS NOT A PAGINATION DETAIL, and it used to be nested inside one — the whole
+        footer hung off `paginationEnabled`, which is off unless a card turns it on, so egret's
+        ordinary 60-row table said nothing at all about how many rows it was showing.
+
+        Metabase prints a count under every table and its wording is `Showing ${n} row(s)` —
+        `getRowCountMessage` (common/utils/get-row-count-message.ts) and `QuestionRowCount` both
+        build it from `formatRowCount`, which is an `ngettext` over "row"/"rows", so one row reads
+        "Showing 1 row". The page RANGE is a separate control there (`PaginationControls`, which
+        renders `1 - 10 of 100`) and appears only when there is a page to move between — which is
+        why the two are separate spans here rather than one sentence that changes shape.
+
+        NOT PORTED: Metabase's "Showing first N rows", which it says when the result was truncated
+        at the hard row limit. egret's table is handed the rows it has and is told nothing about
+        whether the engine cut them short, so claiming "first" would be a guess. Row limits live on
+        the query side (`shared.rowLimit`); wiring the truncation flag through to here is its own
+        change.
+      */}
+      <div className="flex items-center justify-between border-t border-border/50 px-3 py-2 text-xs text-muted-foreground">
+        <span>Showing {totalRows} {totalRows === 1 ? "row" : "rows"}</span>
+        {paginationEnabled && (
           <div className="flex items-center gap-2">
+            <span>{start + 1}–{Math.min(start + pageSize, totalRows)} of {totalRows}</span>
             <Button size="sm" variant="outline" className="h-7" disabled={!table.getCanPreviousPage()} onClick={() => table.previousPage()}>Prev</Button>
             <span>Page {pageIndex + 1} / {Math.max(1, table.getPageCount())}</span>
             <Button size="sm" variant="outline" className="h-7" disabled={!table.getCanNextPage()} onClick={() => table.nextPage()}>Next</Button>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
     </DndContext>
   );

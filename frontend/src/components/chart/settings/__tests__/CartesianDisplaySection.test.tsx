@@ -101,6 +101,25 @@ describe("CartesianDisplaySection", () => {
     fireEvent.change(screen.getByLabelText("Y tick marks"), { target: { value: "" } });
     expect(onChange).toHaveBeenLastCalledWith({ yTickCount: undefined });
   });
+  /**
+   * Metabase's `getHidden` on `graph.y_axis.split_number` — "Number of tick marks" — is
+   * `settings["graph.y_axis.axis_enabled"] === false`. The lines-and-ticks toggle is egret's half of
+   * that key, so with it off there are no tick marks left for this number to divide. The
+   * waterfall/box-plot tab ships the same setting and gets the same rule (ChartAxesSection.test.tsx);
+   * fixing one of two copies is how the last defect here came to live in both files.
+   *
+   * Both directions, because a fixture with the axis on cannot show the box hides.
+   */
+  it("hides the value-axis tick count once that axis' lines and ticks are off", () => {
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], yAxisTicks: false }} onChange={() => {}} />);
+    expect(screen.queryByLabelText("Y tick marks")).toBeNull();
+  });
+
+  it("…and offers it while they are drawn", () => {
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    expect(screen.getByLabelText("Y tick marks")).toBeInTheDocument();
+  });
+
   it("Data label density is hidden when data labels are off", () => {
     render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
     expect(screen.queryByLabelText("Data label density")).not.toBeInTheDocument();
@@ -218,28 +237,32 @@ describe("CartesianDisplaySection", () => {
   });
 });
 
+// TWO metrics throughout, because Metabase hides the whole control once one stackable series is
+// left (`stackable.stack_type`'s getHidden) and these are about what it READS, not about when it
+// appears. The appearing is covered in viz/__tests__/cartesian.controls.test.tsx, through the
+// descriptor that feeds it the series the chart actually draws.
 describe("CartesianDisplaySection — Stacking", () => {
   // Metabase offers one control with three options. Two switches made the reader discover the
   // third state by turning the first one on, and could store `normalized` while `stacked` was off.
   it("shows one control, and a fresh area reads Stack", () => {
-    render(<CartesianDisplaySection kind="area" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    render(<CartesianDisplaySection kind="area" config={{ yMetrics: ["rev", "cnt"] }} onChange={() => {}} />);
     expect(screen.getByLabelText("Stacking")).toHaveTextContent("Stack");
     expect(screen.queryByLabelText("100% stacked")).toBeNull();
   });
 
   it("a fresh bar reads Don't stack", () => {
-    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev", "cnt"] }} onChange={() => {}} />);
     expect(screen.getByLabelText("Stacking")).toHaveTextContent(/Don.t stack/);
   });
 
   // Stack totals only means something on a plain stack — a 100% stack's total is always 100.
   it("offers Stack totals on a stack but not on a 100% stack", () => {
     const { rerender } = render(
-      <CartesianDisplaySection kind="area" config={{ yMetrics: ["rev"] }} onChange={() => {}} />,
+      <CartesianDisplaySection kind="area" config={{ yMetrics: ["rev", "cnt"] }} onChange={() => {}} />,
     );
     expect(screen.getByLabelText("Stack totals")).toBeInTheDocument();
     rerender(
-      <CartesianDisplaySection kind="area" config={{ yMetrics: ["rev"], stacked: true, normalized: true }} onChange={() => {}} />,
+      <CartesianDisplaySection kind="area" config={{ yMetrics: ["rev", "cnt"], stacked: true, normalized: true }} onChange={() => {}} />,
     );
     expect(screen.queryByLabelText("Stack totals")).toBeNull();
   });
@@ -357,8 +380,17 @@ describe("CartesianDisplaySection — a combo can stack", () => {
   // Metabase hides the per-series display on `stackable.stack_type`, which only means anything
   // because a combo can reach that state there. egret excluded combo from `canStack`, so a combo
   // could not stack at all and the guard that hides the display select was unreachable.
+  // Both series named as bars, because a FRESH combo draws its first metric as a line and Metabase
+  // hides Stacking wherever one stackable series is left — see the getHidden suite in
+  // viz/__tests__/cartesian.controls.test.tsx, which owns that rule.
   it("offers Stacking on a combo", () => {
-    render(<CartesianDisplaySection kind="combo" config={{ yMetrics: ["rev", "cnt"] }} onChange={() => {}} />);
+    render(
+      <CartesianDisplaySection
+        kind="combo"
+        config={{ yMetrics: ["rev", "cnt"], seriesTypes: { rev: "bar", cnt: "bar" } }}
+        onChange={() => {}}
+      />,
+    );
     expect(screen.getByLabelText("Stacking")).toHaveTextContent(/Don.t stack/);
   });
 
