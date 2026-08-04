@@ -6,8 +6,9 @@ import {
 } from "@/components/chart/settings/CartesianDisplaySection";
 import { colorsForKeys } from "@/components/chart/echarts/keyColors";
 import { SeriesListSection } from "@/components/chart/settings/SeriesListSection";
-import { SeriesLineStyleSection } from "@/components/chart/settings/SeriesLineStyleSection";
-import { cartesianSeriesNames, stackModeOf } from "@/components/chart/echarts/options/cartesian";
+import {
+  cartesianSeriesNames, stackModeOf, seriesDisplayFor, echartsTypeOf,
+} from "@/components/chart/echarts/options/cartesian";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
@@ -161,18 +162,23 @@ function SeriesListControl({ kind, config, onChange, resultColumns, rows }: VizC
         ? (i) => (i === 0 ? "line" : "bar")
         : undefined}
       defaultColor={(name) => swatchColors[name]}
+      seriesLine={config.seriesLine}
+      /**
+       * Which rows offer the per-series drill-in. Line appearance is all the popover holds, and
+       * `decorateSeries` applies `cfg.seriesLine` only to a series whose ECharts type is "line" —
+       * so the button belongs exactly where that is true, asked through the builder's OWN two
+       * functions rather than restated as "line or area". A combo series flipped to Bar on the row
+       * beside it loses its button on the next render, which is Metabase's measured behaviour (its
+       * popover hides the line rows on a `bar` series) arrived at from the same rule.
+       *
+       * This also widens the reach of the setting: the old `seriesLineStyle` control was declared
+       * for the line and area KINDS only, so a combo's line bands could carry per-series style and
+       * had no control for it — the same unreachable-setting defect one level up.
+       */
+      hasLineSettings={(name, i) => echartsTypeOf(seriesDisplayFor(kind, name, i, config.seriesTypes)) === "line"}
       onChange={onChange}
     />
   );
-}
-
-// Per-series dash style and width — declared for line/area only (see displayControls) and
-// marked advanced there, so an unbounded per-series list of Selects hides behind "More
-// options" instead of always taking panel space.
-function SeriesLineStyleControl({ config, onChange, resultColumns, rows }: VizControlProps<CartesianConfig>) {
-  const names = cartesianSeriesNames(resultColumns, rows, config);
-  if (names.length === 0) return null;
-  return <SeriesLineStyleSection names={names} seriesLine={config.seriesLine} onChange={onChange} />;
 }
 
 /**
@@ -184,7 +190,6 @@ function displayControls(kind: CartesianViz): VizControl<CartesianConfig>[] {
   // OrientationOption's internal isBar gate (which just renders nothing for row), the control
   // itself is not declared for row at all.
   const showOrientation = kind === "bar";
-  const isLineish = kind === "line" || kind === "area";
   return [
     {
       id: "seriesOptions", section: "display", group: "Series",
@@ -203,10 +208,10 @@ function displayControls(kind: CartesianViz): VizControl<CartesianConfig>[] {
       id: "seriesList", section: "display", group: "Series",
       render: (p: VizControlProps<CartesianConfig>) => <SeriesListControl kind={kind} {...p} />,
     },
-    ...(isLineish ? [{
-      id: "seriesLineStyle", section: "display" as const, group: "Series", advanced: true,
-      render: SeriesLineStyleControl,
-    }] : []),
+    // `seriesLineStyle` used to be declared here for line/area, `advanced: true`, rendering an
+    // N-row grid of Selects behind the Series group's "More options". It is gone: the same
+    // settings now live in the per-series drill-in on the row itself (SeriesSettingsPopover), so
+    // there is no second place to reach them from and no disclosure to find first.
     ...(showOrientation ? [{
       id: "orientation", section: "display" as const, group: "Axes",
       render: ({ config, onChange }: VizControlProps<CartesianConfig>) => (
