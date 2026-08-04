@@ -2,7 +2,9 @@ import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
 import { SIMPLE_DESCRIPTORS } from "../simple";
+import { StudioPanel } from "@/components/chart/StudioPanel";
 import { buildPieOption } from "@/components/chart/echarts/options/pie";
+import { temporalLabel } from "@/components/chart/temporal-units";
 import type { VizControlProps } from "../types";
 
 /**
@@ -43,6 +45,7 @@ describe("the pie's slice list, through the descriptor's own control", () => {
       columns: [], metrics: [],
       resultColumns: cols,
       rows,
+      temporalUnits: {},
       unitRow: () => null,
     } as VizControlProps<Record<string, unknown>>));
 
@@ -145,7 +148,8 @@ describe("the pie's slice list, through the descriptor's own control", () => {
     const onChange = vi.fn();
     render(createElement(control.render, {
       config: { ...base, sliceThreshold: 26 },
-      onChange, columns: [], metrics: [], resultColumns: cols, rows, unitRow: () => null,
+      onChange, columns: [], metrics: [], resultColumns: cols, rows,
+      temporalUnits: {}, unitRow: () => null,
     } as VizControlProps<Record<string, unknown>>));
     expect(screen.getByLabelText("Move Widget up")).toBeDisabled();
     expect(screen.getByLabelText("Move Gadget down")).toBeDisabled();
@@ -159,5 +163,153 @@ describe("the pie's slice list, through the descriptor's own control", () => {
     expect(panelRows()).toContain("Widget");
     expect((screen.getByLabelText("Show Widget") as HTMLInputElement).getAttribute("data-state"))
       .toBe("unchecked");
+  });
+});
+
+/**
+ * A TEMPORAL EXTRACTION UNIT — THE PANEL'S KEYS ARE THE CHART'S KEYS, OR THE PANEL EDITS NOTHING.
+ *
+ * Under `day_of_week` the pie AGGREGATES on `temporalLabel(unit, raw)`: "Wed" is the slice's key,
+ * not the `3` sitting in the column (see `aggregateRing`). Every stored curation — `sliceColors`,
+ * `sliceNames`, `hiddenSlices`, `sliceOrder` — is matched against that key, so a panel that keyed on
+ * the raw column value wrote `hiddenSlices: ["3"]` against a chart that only ever asks about "Wed".
+ * Nothing errored; the switch simply did nothing.
+ *
+ * The derivation was already right — `pieSliceRows` has been unit-aware since #392 — and the seam
+ * that was NOT: the unit lives in `params.spec.temporal_units`, and `VizControlProps` carried no
+ * temporal units at all, so `PieDisplayControl` had none to pass. These tests render the REAL
+ * control out of the descriptor (and, below, through the real `StudioPanel`) so that a contract
+ * that stops carrying the units fails here rather than passing on a hand-built config.
+ */
+describe("the pie's slice list under a temporal extraction unit", () => {
+  const pieDescriptor = SIMPLE_DESCRIPTORS.find((d) => d.key === "pie")!;
+  const control = pieDescriptor.controls.find((c) => c.section === "display")!;
+  const cols = [{ name: "dow", type: "bigint" }, { name: "m", type: "double" }];
+
+  /**
+   * THE FIXTURE HAS TO BE ABLE TO TELL RAW FROM EXTRACTED, and that rules out most of the obvious
+   * ones. `day_of_week` 3 -> "Wed" and 1 -> "Mon": neither raw value is a prefix, suffix or
+   * stringification of its own label, so a panel keyed on the column and a panel keyed on the ring
+   * cannot produce the same list. A TRUNCATION unit (`month`, `day`) could not detect this at all —
+   * `temporalLabel` returns those values unchanged, so the two keyings agree by construction. The
+   * last test in this block pins that, so nobody "simplifies" the fixture into a blind one.
+   *
+   * Not pre-sorted either, for the reason the block above states: Mon (40) draws before Wed (20)
+   * while the rows arrive Wed first.
+   */
+  const rows: unknown[][] = [[3, 20], [1, 40]];
+  const RAW_KEYS = rows.map((r) => String(r[0]));
+  const temporalUnits = { dow: "day_of_week" };
+  const base = { dimensions: ["dow"], metric: "m" };
+
+  /** What the CHART is built from — the units arrive as `dimensionUnits`, which is what
+   *  `ChartRenderer` forwards `params.spec.temporal_units` as. */
+  const chartCfg = (cfg: Record<string, unknown> = {}) =>
+    ({ ...base, dimensionUnits: temporalUnits, ...cfg });
+
+  const drawnOrder = (cfg: Record<string, unknown> = {}) =>
+    (buildPieOption(cols, rows, chartCfg(cfg)) as unknown as {
+      series: { data: { name: string }[] }[];
+    }).series[0].data.map((d) => d.name);
+
+  const panelRows = () =>
+    screen.getAllByLabelText(/^Move .+ up$/).map((el) => el.getAttribute("aria-label")!.slice(5, -3));
+
+  const renderPanel = (
+    cfg: Record<string, unknown> = {},
+    onChange: (patch: Record<string, unknown>) => void = () => {},
+    units: Record<string, string> = temporalUnits,
+  ) =>
+    render(createElement(control.render, {
+      config: { ...base, ...cfg },
+      onChange,
+      columns: [], metrics: [],
+      resultColumns: cols,
+      rows,
+      temporalUnits: units,
+      unitRow: () => null,
+    } as VizControlProps<Record<string, unknown>>));
+
+  it("draws a chart whose slice keys are nothing like the raw column values", () => {
+    // The premise, asserted rather than assumed: this fixture CAN tell the two keyings apart.
+    expect(drawnOrder()).toEqual(["Mon", "Wed"]);
+    for (const raw of RAW_KEYS) expect(drawnOrder()).not.toContain(raw);
+    expect(temporalLabel("day_of_week", 3)).toBe("Wed");
+  });
+
+  it("lists the slices by the word the chart keys on, not by the raw column value", () => {
+    renderPanel();
+    expect(panelRows()).toEqual(drawnOrder());
+    // The failure being closed: the list used to read ["3", "1"] — row order, raw values.
+    expect(panelRows()).not.toEqual(RAW_KEYS);
+  });
+
+  /**
+   * THE ROUND TRIP, which is the only thing that proves the list is more than cosmetic: a hide
+   * authored HERE has to reach the slice the chart DREW. Written by feeding the panel's own patch
+   * back into `buildPieOption` rather than by asserting the patch's text, so a key that merely looks
+   * plausible ("Wed" spelled some other way) still fails.
+   */
+  it("hands a hide authored in the panel to the slice the chart actually drew", () => {
+    const onChange = vi.fn();
+    renderPanel({}, onChange);
+    fireEvent.click(screen.getByLabelText("Show Wed"));
+
+    const patch = onChange.mock.calls.at(-1)![0] as { hiddenSlices: string[] };
+    expect(patch.hiddenSlices).toEqual(["Wed"]);
+    expect(drawnOrder(patch)).toEqual(["Mon"]); // the slice is gone from the chart
+    // …and the switch is the way back, so the hidden slice stays listed under the same key.
+    renderPanel(patch);
+    expect(panelRows()).toContain("Wed");
+  });
+
+  /** The colour seam, for the same reason: a pin written under the panel's key has to be the colour
+   *  the chart paints that slice. Keyed on the raw `1` it would have been spent on nothing. */
+  it("pins a colour under a key the chart resolves", () => {
+    const cfg = { sliceColors: { Mon: "#f2a86f" } };
+    const drawn = (buildPieOption(cols, rows, chartCfg(cfg)) as unknown as {
+      series: { data: { name: string; itemStyle: { color: string } }[] }[];
+    }).series[0].data;
+    expect(drawn.find((d) => d.name === "Mon")!.itemStyle.color.toLowerCase()).toBe("#f2a86f");
+    renderPanel(cfg);
+    expect((screen.getByLabelText("color Mon") as HTMLInputElement).value.toLowerCase()).toBe("#f2a86f");
+  });
+
+  /** The shell seam. The control gets its units from `VizControlProps`, which `StudioPanel` fills
+   *  from its own prop — so this fails if the panel accepts the units and drops them on the floor,
+   *  which rendering the control directly cannot catch. */
+  it("carries the units through the real StudioPanel to the descriptor's control", () => {
+    render(
+      <StudioPanel
+        descriptor={pieDescriptor}
+        config={base}
+        onConfigChange={() => {}}
+        columns={[]} metrics={[]}
+        resultColumns={cols}
+        rows={rows}
+        temporalUnits={temporalUnits}
+        unitRow={() => null}
+        tab="display"
+      />,
+    );
+    expect(panelRows()).toEqual(["Mon", "Wed"]);
+  });
+
+  /**
+   * WHY THE FIXTURE ABOVE IS THE ONE THAT WORKS. A truncation unit's value is its own key on both
+   * sides — `temporalLabel` returns it untouched — so a `month` fixture agrees whether or not the
+   * units are threaded at all, and would have passed against the broken control. Pinned so the
+   * discriminating fixture is not quietly traded for a blind one.
+   */
+  it("cannot be tested with a truncation unit, whose panel and chart already agree", () => {
+    const monthCols = [{ name: "d", type: "date" }, { name: "m", type: "double" }];
+    const monthRows: unknown[][] = [["2026-02-01", 20], ["2026-01-01", 40]];
+    const monthCfg = { dimensions: ["d"], metric: "m" };
+    const withUnit = buildPieOption(monthCols, monthRows, { ...monthCfg, dimensionUnits: { d: "month" } });
+    const keysOf = (o: unknown) =>
+      (o as { series: { data: { name: string }[] }[] }).series[0].data.map((d) => d.name);
+    // The raw strings ARE the keys, so nothing distinguishes a unit-aware panel from a blind one.
+    expect(keysOf(withUnit)).toEqual(["2026-01-01", "2026-02-01"]);
+    expect(keysOf(buildPieOption(monthCols, monthRows, monthCfg))).toEqual(keysOf(withUnit));
   });
 });

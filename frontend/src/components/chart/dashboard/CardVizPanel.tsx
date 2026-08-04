@@ -61,6 +61,11 @@ export function CardVizPanel({ chart, override, columns, rows = [], onChange }: 
           metrics={[]}
           resultColumns={columns}
           rows={rows}
+          // The units `rows` were fetched with, straight off the effective params — the same field
+          // `ChartRenderer` builds the card's chart from, so the panel keys on what was drawn. A
+          // dashboard has no unit picker (see `unitRow` below), which is exactly why this cannot be
+          // derived here: the answer lives in the saved spec.
+          temporalUnits={eff.params.spec.temporal_units ?? {}}
           unitRow={() => null}
           tab="display"
           hasMoreBelow

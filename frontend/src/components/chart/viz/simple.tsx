@@ -32,10 +32,19 @@ type Cfg = Record<string, unknown>;
  * against, matching Metabase's `pie.rows`.
  *
  * `dimensions` is stored settings rather than typed input, so a pre-migration row can hand back a
- * bare string — the same guard the descriptor's `buildSpec` makes, for the same reason. */
-function PieDisplayControl({ config, onChange, resultColumns, rows }: VizControlProps<Cfg>) {
+ * bare string — the same guard the descriptor's `buildSpec` makes, for the same reason.
+ *
+ * `temporalUnits` travels for the same reason `ChartRenderer` forwards it to the builder: under an
+ * EXTRACTION unit the ring aggregates on `temporalLabel(unit, raw)`, so "Wed" — not the `3` in the
+ * column — is the key every stored curation is written against. Without it this control listed the
+ * raw values, and a hide, a rename or a pinned colour authored here landed on a slice that does not
+ * exist. It is a prop rather than something read off `config` because the unit is QUERY state
+ * (`spec.temporal_units`), not a viz setting: no descriptor owns it. */
+function PieDisplayControl({ config, onChange, resultColumns, rows, temporalUnits }: VizControlProps<Cfg>) {
   const dimensions = Array.isArray(config.dimensions) ? (config.dimensions as string[]) : [];
-  const sliceRows = pieSliceRows(resultColumns, rows, { ...(config as PieConfig), dimensions });
+  const sliceRows = pieSliceRows(resultColumns, rows, {
+    ...(config as PieConfig), dimensions, dimensionUnits: temporalUnits,
+  });
   return (
     <PieDisplaySection
       config={config as PieConfig}

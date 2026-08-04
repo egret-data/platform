@@ -25,6 +25,7 @@ describe("StudioPanel renders bar's grouped Display controls", () => {
       ["west", 1],
       ["east", 2],
     ],
+    temporalUnits: {},
     unitRow: () => null,
     tab: "display" as const,
   };
@@ -84,6 +85,7 @@ describe("StudioPanel: per-series line style is reachable behind Series' More op
       ["west", 1, 1],
       ["east", 2, 2],
     ],
+    temporalUnits: {},
     unitRow: () => null,
     tab: "display" as const,
   };

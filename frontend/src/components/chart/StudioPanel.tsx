@@ -20,6 +20,8 @@ interface Props<Cfg> {
   metrics: DatasetMetric[];
   resultColumns: { name: string; type: string }[];
   rows: unknown[][];
+  /** The units `rows` were bucketed by — see `VizControlProps.temporalUnits`, which this fills. */
+  temporalUnits: Record<string, string>;
   unitRow: (col?: string) => ReactNode;
   /**
    * Which panel tab to render. "axes" is not a `section` any control declares — it is the
@@ -42,7 +44,8 @@ interface Props<Cfg> {
  * any specific viz — which is the whole point of the registry.
  */
 export function StudioPanel<Cfg>({
-  descriptor, config, onConfigChange, columns, metrics, resultColumns, rows, unitRow, tab, hasMoreBelow,
+  descriptor, config, onConfigChange, columns, metrics, resultColumns, rows, temporalUnits, unitRow,
+  tab, hasMoreBelow,
 }: Props<Cfg>) {
   const shown = descriptor.controls.filter((c) => {
     if (tab === "axes") return c.section === "display" && c.group === AXES_GROUP;
@@ -53,7 +56,9 @@ export function StudioPanel<Cfg>({
     if (hasMoreBelow) return null;
     return <p className="text-xs text-muted-foreground">No {tab} options for this chart type.</p>;
   }
-  const controlProps = { config, onChange: onConfigChange, columns, metrics, resultColumns, rows, unitRow };
+  const controlProps = {
+    config, onChange: onConfigChange, columns, metrics, resultColumns, rows, temporalUnits, unitRow,
+  };
   // Inside the Axes TAB the group heading would just repeat the tab's own name, so everything
   // there renders flat — including the advanced ones, which no longer have a group to hide in.
   if (tab === "axes") {

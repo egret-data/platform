@@ -65,6 +65,7 @@ describe("cartesian controls are grouped and per-kind", () => {
     columns: [], metrics: [],
     resultColumns: [{ name: "price", type: "double" }, { name: "rating", type: "double" }],
     rows: [],
+    temporalUnits: {},
     unitRow: () => null,
   };
 
@@ -121,7 +122,7 @@ describe("cartesian controls are grouped and per-kind", () => {
       const control = ctrls(kind).find((c) => c.id === "seriesList");
       render(createElement(control!.render, {
         config, onChange: () => {}, columns: [], metrics: [],
-        resultColumns: cols, rows, unitRow: () => null,
+        resultColumns: cols, rows, temporalUnits: {}, unitRow: () => null,
       } as VizControlProps<CartesianConfig>));
     };
     /** A native `<input type="color">` normalises its value to lower-case (HTML spec), which is also
@@ -236,7 +237,7 @@ describe("cartesian controls are grouped and per-kind", () => {
       const control = ctrls(kind).find((c) => c.id === "seriesOptions");
       render(createElement(control!.render, {
         config, onChange: () => {}, columns: [], metrics: [],
-        resultColumns: cols, rows, unitRow: () => null,
+        resultColumns: cols, rows, temporalUnits: {}, unitRow: () => null,
       } as VizControlProps<CartesianConfig>));
     };
 
@@ -325,7 +326,7 @@ describe("cartesian controls are grouped and per-kind", () => {
       render(createElement(control!.render, {
         config, onChange: () => {}, columns: [], metrics: [],
         resultColumns: [{ name: "month", type: "varchar" }, { name: "revenue", type: "double" }],
-        rows: [], unitRow: () => null,
+        rows: [], temporalUnits: {}, unitRow: () => null,
       } as VizControlProps<CartesianConfig>));
     };
 

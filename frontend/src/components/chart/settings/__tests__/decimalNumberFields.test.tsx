@@ -358,6 +358,7 @@ describe("a numeric field descriptor — viz/fields", () => {
         metrics={[]}
         resultColumns={[]}
         rows={[]}
+        temporalUnits={{}}
         unitRow={() => null}
       />
     );
