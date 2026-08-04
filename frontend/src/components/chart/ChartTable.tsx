@@ -197,13 +197,11 @@ export function ChartTable({
     return out;
   }, [columns, tableState.hiddenColumns]);
 
-  const pinnedCount = Math.max(0, Math.min(tableState.pinnedLeft ?? 0, columns.length));
-  const columnPinning = useMemo(
-    () => ({ left: Array.from({ length: pinnedCount }, (_, i) => `col_${i}`) }),
-    [pinnedCount],
-  );
-
-  const columnOrder = useMemo<string[]>(() => {
+  // `col_<i>` ids in the order they are DRAWN: the stored order first, then everything it does
+  // not mention appended in result order. Keyed on the raw `c.name` and never on the header text
+  // — `columnSettings[name].column_title` renames the header without renaming the column, so
+  // resolving these through the title would lose every renamed column out of the order.
+  const displayOrder = useMemo<string[]>(() => {
     const byName = new Map(columns.map((c, i) => [c.name, `col_${i}`]));
     const ordered = (tableState.columnOrder ?? [])
       .map((name) => byName.get(name))
@@ -211,6 +209,27 @@ export function ChartTable({
     columns.forEach((_, i) => { if (!ordered.includes(`col_${i}`)) ordered.push(`col_${i}`); });
     return ordered;
   }, [columns, tableState.columnOrder]);
+
+  /**
+   * "Freeze first columns" counts down the list ABOVE — what is on screen, left to right.
+   *
+   * It used to be `col_0 … col_{n-1}`, i.e. the first N columns of the RESULT, which is an order
+   * the user has no way to see once `columnOrder` has moved anything. The two then disagreed, and
+   * since tanstack draws pinned columns first, turning the freeze on after a drag silently PUT THE
+   * DRAG BACK: with `state` dragged to the front, freeze = 1 pinned `id` and `id` reappeared on the
+   * left. Measured on the deployment before this changed.
+   *
+   * Hidden columns are skipped rather than counted. This half goes beyond the reordering bug: a
+   * pinned id that `columnVisibility` has switched off is simply inert in tanstack — it is not in
+   * `getVisibleLeafColumns` — so counting it meant "freeze the first 1 column" froze NOTHING
+   * whenever the leading column was hidden. Both halves are the same rule: the count is over what
+   * the user can see, because that is the only list the control's label can be describing.
+   */
+  const pinnedCount = Math.max(0, Math.min(tableState.pinnedLeft ?? 0, columns.length));
+  const columnPinning = useMemo(
+    () => ({ left: displayOrder.filter((id) => columnVisibility[id] !== false).slice(0, pinnedCount) }),
+    [displayOrder, columnVisibility, pinnedCount],
+  );
 
   const showRowIndex = !!tableState.rowIndex;
   const paginationEnabled = !!tableState.pagination?.enabled;
@@ -226,7 +245,7 @@ export function ChartTable({
       columnSizing: localSizing,
       columnVisibility,
       columnPinning,
-      columnOrder,
+      columnOrder: displayOrder,
       ...(paginationEnabled ? { pagination: { pageIndex, pageSize } } : {}),
     },
     // tanstack defaults numeric columns to descending-first; Metabase sorts ascending on the first
