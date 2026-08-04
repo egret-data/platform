@@ -11,7 +11,10 @@ import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
 import { AutoToggle } from "./AutoToggle";
-import { AxisGroup, xTicksChoiceOf, xTicksPatch, type XTicksChoice } from "./ChartAxesSection";
+import {
+  AxisGroup, CategoryTicksSelect, TickCountRow, ValueRangeRows, ValueTicksSelect,
+  xTicksChoiceOf, xTicksPatch,
+} from "./ChartAxesSection";
 
 /**
  * Which half of the Axes tab a row belongs to. The CATEGORY axis is the dimension's and the VALUE
@@ -452,53 +455,48 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
           reading just "X-axis" would not be.
 
           Stored as `false` only when turned off, so a chart saved before these existed keeps
-          drawing both. */}
+          drawing both.
+
+          THE MARKUP IS NO LONGER HERE. This row and the waterfall/box-plot tab's are one component
+          now (`CategoryTicksSelect`) — the two had already drifted to different labels for the same
+          key, and two implementations of one control is how this programme got four per-series
+          settings spread over three parallel lists. Everything cartesian-specific is passed IN: the
+          axis letter (a horizontal chart's categories run down the left), whether the rotations are
+          reachable, and the id of the caption that says why they are not.
+
+          WHAT THE ROTATIONS ARE DISABLED FOR, kept here because it is a fact about THIS family: a
+          linear/timeseries x and a metric-vs-metric scatter both draw a VALUE axis, whose labels are
+          ticks ECharts generates rather than the category array, and `scaleAxis` in
+          echarts/options/cartesian.ts carries no `rotate`.
+
+          IT COULD, and this used to claim otherwise — "rotating generated ticks means generating
+          them first, which is PR 03" is wrong twice over. ECharts applies `axisLabel.rotate` to any
+          axis kind (`AxisBuilder.js:875` reads it with no branch on the axis), so nothing has to be
+          generated first; and PR 03 does not own tick generation, it only decides which axis a
+          scatter gets. The reason `scaleAxis` carries no `rotate` is PARITY: Metabase greys the
+          rotation out on a value axis too, so honouring it would be a divergence dressed up as a
+          fix. A secondary reason, real but thinner in a product this young, is that charts saved as
+          Linear can still carry a rotation from before the switch, and applying it would silently
+          turn their labels.
+
+          Disabled rather than hidden, for two reasons: a chart that stored 45° and later moved to
+          Linear must still SHOW what it stored instead of an empty trigger, and options that appear
+          and disappear as a neighbouring select changes read as a glitch rather than as a rule. */}
       {scoped(scope, "category") && (
       <div className="space-y-1">
-        <div className="flex items-center justify-between gap-2">
-          <Label htmlFor="cz-xticks" className="text-sm font-normal">{catAx} axis lines and ticks</Label>
-          <Select value={xTicksChoiceOf(config)} onValueChange={(v) => onChange(xTicksPatch(v as XTicksChoice))}>
-            {/* The reason the rotations are greyed out hangs off the TRIGGER, which is focusable and
-                keeps its pointer events, and is read out by `aria-describedby`. It cannot hang off
-                the disabled items themselves: `data-[disabled]:pointer-events-none` (ui/select.tsx)
-                means a mouse never hovers them so a native `title` never fires, Radix skips disabled
-                items in its roving focus so a keyboard never lands on one, and a screen reader is
-                told only `aria-disabled`. A `title` there would have looked like an explanation and
-                been reachable by nobody. */}
-            <SelectTrigger
-              id="cz-xticks" aria-label={`${catAx} axis lines and ticks`} className="h-7 w-28"
-              aria-describedby={valueX ? "cz-xticks-rotation" : undefined}
-            ><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="hide">Hide</SelectItem>
-              <SelectItem value="show">Show</SelectItem>
-              {/* Offered but DISABLED where the rotation would be stored and then never applied: a
-                  linear/timeseries x and a metric-vs-metric scatter both draw a VALUE axis, whose
-                  labels are ticks ECharts generates rather than the category array, and `scaleAxis`
-                  in echarts/options/cartesian.ts carries no `rotate`.
-
-                  IT COULD, and this used to claim otherwise — "rotating generated ticks means
-                  generating them first, which is PR 03" is wrong twice over. ECharts applies
-                  `axisLabel.rotate` to any axis kind (`AxisBuilder.js:875` reads it with no branch
-                  on the axis), so nothing has to be generated first; and PR 03 does not own tick
-                  generation, it only decides which axis a scatter gets. The reason `scaleAxis`
-                  carries no `rotate` is PARITY: Metabase greys the rotation out on a value axis too,
-                  so honouring it would be a divergence dressed up as a fix. A secondary reason, real
-                  but thinner in a product this young, is that charts saved as Linear can still carry
-                  a rotation from before the switch, and applying it would silently turn their labels.
-
-                  Disabled rather than hidden, for two reasons: a chart that stored 45° and later
-                  moved to Linear must still SHOW what it stored instead of an empty trigger, and
-                  options that appear and disappear as a neighbouring select changes read as a glitch
-                  rather than as a rule. */}
-              {(["rotate45", "rotate90"] as const).map((v) => (
-                <SelectItem key={v} value={v} disabled={valueX}>
-                  {v === "rotate45" ? "Rotate 45°" : "Rotate 90°"}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+        <CategoryTicksSelect
+          axis={catAx} id="cz-xticks" value={xTicksChoiceOf(config)}
+          onChange={(v) => onChange(xTicksPatch(v))}
+          rotationsDisabled={valueX}
+          // The reason the rotations are greyed out hangs off the TRIGGER, which is focusable and
+          // keeps its pointer events, and is read out by `aria-describedby`. It cannot hang off the
+          // disabled items themselves: `data-[disabled]:pointer-events-none` (ui/select.tsx) means a
+          // mouse never hovers them so a native `title` never fires, Radix skips disabled items in
+          // its roving focus so a keyboard never lands on one, and a screen reader is told only
+          // `aria-disabled`. A `title` there would have looked like an explanation and been
+          // reachable by nobody.
+          describedBy={valueX ? "cz-xticks-rotation" : undefined}
+        />
         {/* Visible, not a tooltip: the two greyed-out rows are invisible until the select is opened,
             so an explanation gated on hovering or focusing something inside it is reachable only
             after the reader has already hit the wall. A caption states the rule before it is met,
@@ -517,46 +515,38 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
         <Toggle id="cz-autosplit" label="Split y-axis when necessary" checked={config.autoSplitY !== false}
           onChange={(v) => onChange({ autoSplitY: v ? undefined : false })} />
       )}
+      {/* A SELECT, not the switch this used to be. Measured live across six charts: the waterfall
+          and the box plot offered Metabase's `graph.y_axis.axis_enabled` as a Hide/Show select while
+          every cartesian kind offered the same stored key as a toggle — one setting, two controls,
+          picked by which chart the reader happened to open. Same component as theirs now. */}
       {scoped(scope, "value") && (
-        <Toggle id="cz-yticks" label={`${valAx} axis lines and ticks`} checked={config.yAxisTicks !== false}
-          onChange={(v) => onChange({ yAxisTicks: v ? undefined : false })} />
+        <ValueTicksSelect axis={valAx} id="cz-yticks" shown={config.yAxisTicks !== false}
+          onChange={(shown) => onChange({ yAxisTicks: shown ? undefined : false })} />
       )}
       {/* Metabase's `getHidden` on `graph.y_axis.split_number`: hidden while
           `graph.y_axis.axis_enabled === false`. The row above is egret's half of that key, so with
           it off there are no tick marks left for this number to divide — the same rule, on the same
-          setting, as the waterfall/box-plot tab's own "Number of tick marks". */}
+          setting, as the waterfall/box-plot tab's own. The gate stays at each call site rather than
+          inside `TickCountRow`, because it is a statement about the row ABOVE it in this panel. */}
       {scoped(scope, "value") && config.yAxisTicks !== false && (
-        <div className="flex items-center justify-between gap-2">
-          <Label htmlFor="cz-ytickcount" className="text-sm font-normal">{valAx} tick marks</Label>
-          <Input
-            id="cz-ytickcount" aria-label={`${valAx} tick marks`} type="number" min={2} max={20} step={1}
-            className="h-7 w-20" placeholder="Auto"
-            value={config.yTickCount ?? ""}
-            onChange={(e) => {
-              const n = Number(e.target.value);
-              onChange({ yTickCount: e.target.value === "" || Number.isNaN(n) ? undefined : n });
-            }}
-          />
-        </div>
+        <TickCountRow id="cz-ytickcount" value={config.yTickCount}
+          onChange={(yTickCount) => onChange({ yTickCount })} />
       )}
-      {/* The same pair ChartAxesSection offers the waterfall/box-plot/sankey side, and the same
-          reason for DecimalInput over `type="number"`: a bound is a data value, and a number input
-          goes EMPTY the instant a decimal point is the last character typed. Both copies are fixed
-          together — fixing one is how the defect came to live in two files. */}
+      {/* GATED BEHIND "Auto y-axis range" now, which is the other half of the same divergence: the
+          waterfall/box-plot tab has had Metabase's switch since it was written, and cartesian showed
+          a bare pair of boxes that usually said "auto". `CartesianDisplaySection` acknowledged the
+          duplicated pair in a comment for three PRs; the gate was simply never copied across, which
+          is the argument for sharing the component instead of copying the markup a fourth time.
+
+          IT COSTS NO STORED KEY. `ValueRangeRows` derives the switch from `yMin == null && yMax ==
+          null`, so nothing new is persisted and no state exists in which the switch and the boxes
+          disagree — and every already-saved chart carrying a bound arrives with the switch off and
+          the boxes open, which is exactly what it was drawing before.
+
+          STILL NOT ON A SCATTER, unchanged: that kind's continuous axes are not bounded from here. */}
       {scoped(scope, "value") && kind !== "scatter" && (
-        <div className="grid grid-cols-2 gap-2 border-t pt-2">
-          <label className="space-y-1">
-            <span className="text-xs text-muted-foreground">{valAx} min</span>
-            <DecimalInput className="h-8" placeholder="auto"
-              value={config.yMin}
-              onChange={(yMin) => onChange({ yMin })} />
-          </label>
-          <label className="space-y-1">
-            <span className="text-xs text-muted-foreground">{valAx} max</span>
-            <DecimalInput className="h-8" placeholder="auto"
-              value={config.yMax}
-              onChange={(yMax) => onChange({ yMax })} />
-          </label>
+        <div className="space-y-2 border-t pt-2">
+          <ValueRangeRows axis={valAx} idPrefix="cz" min={config.yMin} max={config.yMax} onChange={onChange} />
         </div>
       )}
     </div>

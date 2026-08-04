@@ -109,6 +109,143 @@ export function AxisGroup({ axis, className, children }: {
   );
 }
 
+/**
+ * THE ROWS BOTH AXES TABS SHARE, one implementation each.
+ *
+ * `ChartAxesSection` (waterfall, box plot) and cartesian's `AxisRangeOptions` (bar, line, area,
+ * combo, row, scatter) store the SAME KEYS — `yMin`/`yMax`, `yAxisTicks`, `yTickCount`,
+ * `xAxisTicks`/`xLabelRotation` — and until these were pulled out they presented them two different
+ * ways: the waterfall's tab gated the bounds behind an "Auto y-axis range" switch and offered
+ * lines-and-ticks as a select, cartesian's showed a bare always-visible min/max pair and a switch.
+ * Which panel a reader saw depended only on which chart they had opened.
+ *
+ * That is the same failure as the four per-series settings spread over three parallel lists earlier
+ * in this programme, and it has the same fix: not "copy the better markup across" — which is how it
+ * arose — but ONE component with the differences passed in. The differences are real and few: the
+ * axis LETTER (a horizontal cartesian chart's measure runs across, so its value axis is X), the id
+ * prefix, and whether the rotations are reachable on this chart's category axis.
+ *
+ * Each takes a value and a patch callback rather than the config, so the mapping from control to
+ * stored keys (`xTicksChoiceOf`/`xTicksPatch`) stays in one place and visible at the call site.
+ */
+
+/** Metabase's `graph.x_axis.axis_enabled` on the CATEGORY axis: Hide / Show / Rotate 45° / 90°. */
+export function CategoryTicksSelect({ axis, id, value, onChange, rotationsDisabled, describedBy }: {
+  /** The axis letter the READER sees — "Y" for the category axis of a horizontal chart. */
+  axis: string;
+  id: string;
+  value: XTicksChoice;
+  onChange: (v: XTicksChoice) => void;
+  /** Greys the two rotations out where the chart draws a VALUE axis across, whose tick labels
+   *  ECharts generates and `scaleAxis` gives no `rotate`. Never set by the waterfall/box-plot tab,
+   *  whose x is always the ordinal sequence of categories. Disabled rather than hidden: a chart
+   *  that stored 45° and later changed scale must still show what it stored. */
+  rotationsDisabled?: boolean;
+  /** Id of the caption explaining that greying, hung off the TRIGGER — the disabled items
+   *  themselves are unreachable by mouse, keyboard and screen reader alike. */
+  describedBy?: string;
+}) {
+  return (
+    <div className="space-y-1">
+      <Label htmlFor={id} className="text-sm font-normal">Show lines and tick marks</Label>
+      <Select value={value} onValueChange={(v) => onChange(v as XTicksChoice)}>
+        <SelectTrigger id={id} aria-label={`${axis} show lines and tick marks`} className="h-8 w-full"
+          aria-describedby={describedBy}><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="hide">Hide</SelectItem>
+          <SelectItem value="show">Show</SelectItem>
+          {(["rotate45", "rotate90"] as const).map((v) => (
+            <SelectItem key={v} value={v} disabled={rotationsDisabled}>
+              {v === "rotate45" ? "Rotate 45°" : "Rotate 90°"}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+/** Metabase's `graph.y_axis.axis_enabled` on the VALUE axis — the same control with no rotation,
+ *  since a value axis' labels are ticks ECharts generates rather than the category array. */
+export function ValueTicksSelect({ axis, id, shown, onChange }: {
+  axis: string; id: string; shown: boolean; onChange: (shown: boolean) => void;
+}) {
+  return (
+    <div className="space-y-1">
+      <Label htmlFor={id} className="text-sm font-normal">Show lines and tick marks</Label>
+      <Select value={shown ? "show" : "hide"} onValueChange={(v) => onChange(v !== "hide")}>
+        <SelectTrigger id={id} aria-label={`${axis} show lines and tick marks`} className="h-8 w-full"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="hide">Hide</SelectItem>
+          <SelectItem value="show">Show</SelectItem>
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+/**
+ * Metabase's automatic value-axis range and the two bounds it gates.
+ *
+ * DERIVED, NOT STORED. The switch is `yMin == null && yMax == null`, so there is no fourth key and
+ * no state in which it and the boxes can disagree — turning it off has to SEED a bound or the
+ * switch would flip straight back on its own next render, which is why "off" emits `{ yMin: 0 }`.
+ *
+ * DecimalInput, not `type="number"`: an axis bound is a data value, so "4." is a state a user
+ * passes through on the way to 4.5 — and a number input reports itself EMPTY for exactly as long as
+ * the point is the last character, which cleared the bound mid-word and dropped the keystroke. See
+ * DecimalInput for the measurement.
+ */
+export function ValueRangeRows({ axis, idPrefix, min, max, onChange }: {
+  axis: string; idPrefix: string;
+  min: number | undefined; max: number | undefined;
+  onChange: (patch: { yMin?: number; yMax?: number }) => void;
+}) {
+  const autoRange = min == null && max == null;
+  return (
+    <>
+      <Toggle id={`${idPrefix}-autorange`} label={`Auto ${axis.toLowerCase()}-axis range`} checked={autoRange}
+        onChange={(v) => onChange(v ? { yMin: undefined, yMax: undefined } : { yMin: 0 })} />
+      {!autoRange && (
+        <div className="grid grid-cols-2 gap-2">
+          <label className="space-y-1">
+            <span className="text-xs text-muted-foreground">{axis} min</span>
+            <DecimalInput className="h-8" placeholder="auto" aria-label={`${axis} min`}
+              value={min} onChange={(yMin) => onChange({ yMin })} />
+          </label>
+          <label className="space-y-1">
+            <span className="text-xs text-muted-foreground">{axis} max</span>
+            <DecimalInput className="h-8" placeholder="auto" aria-label={`${axis} max`}
+              value={max} onChange={(yMax) => onChange({ yMax })} />
+          </label>
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Metabase's `graph.y_axis.split_number`. Its `getHidden` is
+ *  `settings["graph.y_axis.axis_enabled"] === false` — with the axis' lines and ticks off there are
+ *  no tick marks to count — and BOTH callers apply that gate, which is why it is not applied here:
+ *  the row that owns the gate is the one above it in each panel. */
+export function TickCountRow({ id, value, onChange }: {
+  id: string; value: number | undefined; onChange: (n: number | undefined) => void;
+}) {
+  return (
+    <div className="space-y-1">
+      <Label htmlFor={id} className="text-sm font-normal">Number of tick marks</Label>
+      <Input
+        id={id} aria-label="Number of tick marks" type="number" min={2} max={20}
+        className="h-8" placeholder="auto" value={value ?? ""}
+        onChange={(e) => {
+          const n = Number(e.target.value);
+          onChange(e.target.value === "" || Number.isNaN(n) ? undefined : n);
+        }}
+      />
+    </div>
+  );
+}
+
 /** Title + its Show switch, the pair Metabase puts at the top of each axis. */
 function AxisTitleRow({ id, axis, label, shown, onLabel, onShown }: {
   id: string; axis: string; label: string | undefined; shown: boolean;
@@ -143,59 +280,23 @@ export function ChartAxesSection<C extends AxesConfig>({ config, onChange, idPre
   /** Distinct per chart so two panels on one page cannot share a label's `htmlFor`. */
   idPrefix?: string;
 }) {
-  // Metabase gates the min/max pair behind "Auto y-axis range" rather than showing two boxes that
-  // usually say "auto". Derived from the two values instead of a fourth stored key, so there is no
-  // state where the switch and the inputs can disagree.
-  const autoRange = config.yMin == null && config.yMax == null;
-  const xTicks = xTicksChoiceOf(config);
-
   return (
     <div className="space-y-3">
       <AxisGroup axis="X">
         <AxisTitleRow id={`${idPrefix}-xlabel`} axis="X" label={config.xLabel} shown={config.showXLabel !== false}
           onLabel={(v) => onChange({ xLabel: v } as Partial<C>)} onShown={(v) => onChange({ showXLabel: v ? undefined : false } as Partial<C>)} />
-        <div className="space-y-1">
-          <Label htmlFor={`${idPrefix}-xticks`} className="text-sm font-normal">Show lines and tick marks</Label>
-          <Select
-            value={xTicks}
-            onValueChange={(v) => onChange(xTicksPatch(v as XTicksChoice) as Partial<C>)}
-          >
-            <SelectTrigger id={`${idPrefix}-xticks`} aria-label="X show lines and tick marks" className="h-8 w-full"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="hide">Hide</SelectItem>
-              <SelectItem value="show">Show</SelectItem>
-              <SelectItem value="rotate45">Rotate 45°</SelectItem>
-              <SelectItem value="rotate90">Rotate 90°</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+        {/* No `rotationsDisabled`: these two charts' x is always the ordinal sequence of categories,
+            so the rotation always applies. Cartesian's tab passes it, because a linear/timeseries x
+            draws a value axis whose labels `scaleAxis` gives no `rotate`. */}
+        <CategoryTicksSelect axis="X" id={`${idPrefix}-xticks`} value={xTicksChoiceOf(config)}
+          onChange={(v) => onChange(xTicksPatch(v) as Partial<C>)} />
       </AxisGroup>
 
       <AxisGroup axis="Y" className="border-t pt-3">
         <AxisTitleRow id={`${idPrefix}-ylabel`} axis="Y" label={config.yLabel} shown={config.showYLabel !== false}
           onLabel={(v) => onChange({ yLabel: v } as Partial<C>)} onShown={(v) => onChange({ showYLabel: v ? undefined : false } as Partial<C>)} />
-        <Toggle id={`${idPrefix}-autorange`} label="Auto y-axis range" checked={autoRange}
-          onChange={(v) => onChange((v ? { yMin: undefined, yMax: undefined } : { yMin: 0 }) as Partial<C>)} />
-        {!autoRange && (
-          <div className="grid grid-cols-2 gap-2">
-            {/* DecimalInput, not `type="number"`: an axis bound is a data value, so "4." is a
-                state a user passes through on the way to 4.5 — and a number input reports itself
-                EMPTY for exactly as long as the point is the last character, which cleared the
-                bound mid-word and dropped the keystroke. See DecimalInput for the measurement. */}
-            <label className="space-y-1">
-              <span className="text-xs text-muted-foreground">Y min</span>
-              <DecimalInput className="h-8" placeholder="auto" aria-label="Y min"
-                value={config.yMin}
-                onChange={(yMin) => onChange({ yMin } as Partial<C>)} />
-            </label>
-            <label className="space-y-1">
-              <span className="text-xs text-muted-foreground">Y max</span>
-              <DecimalInput className="h-8" placeholder="auto" aria-label="Y max"
-                value={config.yMax}
-                onChange={(yMax) => onChange({ yMax } as Partial<C>)} />
-            </label>
-          </div>
-        )}
+        <ValueRangeRows axis="Y" idPrefix={idPrefix} min={config.yMin} max={config.yMax}
+          onChange={(patch) => onChange(patch as Partial<C>)} />
         {/* Metabase's Scale select offers Linear / Power / Log. **Power is not offered**: ECharts'
             value axis has no power scale, Metabase implements its own, and a third option that
             silently drew a linear axis would be worse than its absence. */}
@@ -210,34 +311,11 @@ export function ChartAxesSection<C extends AxesConfig>({ config, onChange, idPre
             </SelectContent>
           </Select>
         </div>
-        <div className="space-y-1">
-          <Label htmlFor={`${idPrefix}-yticks`} className="text-sm font-normal">Show lines and tick marks</Label>
-          <Select value={config.yAxisTicks === false ? "hide" : "show"}
-            onValueChange={(v) => onChange({ yAxisTicks: v === "hide" ? false : undefined } as Partial<C>)}>
-            <SelectTrigger id={`${idPrefix}-yticks`} aria-label="Y show lines and tick marks" className="h-8 w-full"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="hide">Hide</SelectItem>
-              <SelectItem value="show">Show</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        {/* Metabase's `getHidden` on `graph.y_axis.split_number`: hidden while
-            `graph.y_axis.axis_enabled === false`. With the axis' lines and ticks turned off there
-            are no tick marks to count, so the box would take a number that changes nothing.
-            Label above a full-width input, like every other field on this tab and like Metabase's.
-            Inline-right would make it the only row that reads differently. */}
+        <ValueTicksSelect axis="Y" id={`${idPrefix}-yticks`} shown={config.yAxisTicks !== false}
+          onChange={(shown) => onChange({ yAxisTicks: shown ? undefined : false } as Partial<C>)} />
         {config.yAxisTicks !== false && (
-          <div className="space-y-1">
-            <Label htmlFor={`${idPrefix}-ytickcount`} className="text-sm font-normal">Number of tick marks</Label>
-            <Input
-              id={`${idPrefix}-ytickcount`} aria-label="Number of tick marks" type="number" min={2} max={20}
-              className="h-8" placeholder="auto" value={config.yTickCount ?? ""}
-              onChange={(e) => {
-                const n = Number(e.target.value);
-                onChange({ yTickCount: e.target.value === "" || Number.isNaN(n) ? undefined : n } as Partial<C>);
-              }}
-            />
-          </div>
+          <TickCountRow id={`${idPrefix}-ytickcount`} value={config.yTickCount}
+            onChange={(yTickCount) => onChange({ yTickCount } as Partial<C>)} />
         )}
       </AxisGroup>
     </div>

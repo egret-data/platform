@@ -90,8 +90,10 @@ const box = (label: string) => () => screen.getByLabelText(label) as HTMLInputEl
 
 // ---------------------------------------------------------------------------------------------
 // Axis bounds — ChartAxesSection (waterfall / box plot / sankey) and CartesianDisplaySection.
-// Two separate implementations of the same pair of fields; both are asserted, because fixing one
-// and leaving the other is precisely how this bug came to exist in two places.
+// ONE implementation of the pair now (`ValueRangeRows`), rendered by both panels — but both are
+// still asserted, because they reach it through different props (the cartesian one names the axis
+// after the chart's orientation) and because a shared component is only shared for as long as
+// nobody copies it back out. This bug lived in two places once already.
 // ---------------------------------------------------------------------------------------------
 
 describe("Y min / Y max — ChartAxesSection", () => {
@@ -143,8 +145,10 @@ describe("Y min / Y max — ChartAxesSection", () => {
 });
 
 describe("value-axis min / max — CartesianDisplaySection", () => {
+  /** A stored bound to start from: the pair is gated behind "Auto y-axis range" here too now, so an
+   *  unbounded config renders no boxes at all to type into. */
   function Harness() {
-    const [config, setConfig] = useState<CartesianConfig>({ yMetrics: ["revenue"] });
+    const [config, setConfig] = useState<CartesianConfig>({ yMetrics: ["revenue"], yMin: 0, yMax: 100 });
     return (
       <AxisRangeOptions
         kind="bar"

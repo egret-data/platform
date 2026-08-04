@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { render, screen, fireEvent, within, cleanup } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AxisRangeOptions, CartesianDisplaySection } from "../CartesianDisplaySection";
+import { ChartAxesSection } from "../ChartAxesSection";
 import { buildCartesianOption } from "@/components/chart/echarts/options/cartesian";
 import type { CartesianConfig } from "@/api/charts";
 
@@ -84,23 +85,23 @@ describe("CartesianDisplaySection", () => {
   // The per-series colour and rename moved to SeriesListSection, which now carries all four
   // per-series settings on one row — see that file's own tests.
 
-  it("offers Metabase's axis line/tick toggles and the value-axis tick count", () => {
+  it("offers Metabase's axis line/tick selects and the value-axis tick count", () => {
     const onChange = vi.fn();
     render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={onChange} />);
-    // Unset means shown, so a chart saved before these existed keeps drawing both. The category
-    // axis is a four-way select (it carries the rotation too); the value axis is still a switch.
-    expect(screen.getByLabelText("X axis lines and ticks")).toHaveTextContent("Show");
-    expect(screen.getByLabelText("Y axis lines and ticks")).toBeChecked();
-    fireEvent.click(screen.getByLabelText("Y axis lines and ticks"));
-    expect(onChange).toHaveBeenCalledWith({ yAxisTicks: false });
-    fireEvent.change(screen.getByLabelText("Y tick marks"), { target: { value: "5" } });
+    // Unset means shown, so a chart saved before these existed keeps drawing both. BOTH axes are a
+    // select now — the category axis carries the rotation too, so it has four choices to the value
+    // axis' two. The value axis WAS a switch, which is the divergence from the waterfall/box-plot
+    // tab the audit measured; driving it is the block at the bottom of this file.
+    expect(screen.getByLabelText("X show lines and tick marks")).toHaveTextContent("Show");
+    expect(screen.getByLabelText("Y show lines and tick marks")).toHaveTextContent("Show");
+    fireEvent.change(screen.getByLabelText("Number of tick marks"), { target: { value: "5" } });
     expect(onChange).toHaveBeenLastCalledWith({ yTickCount: 5 });
   });
 
   it("clearing the tick count returns the axis to auto", () => {
     const onChange = vi.fn();
     render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], yTickCount: 5 }} onChange={onChange} />);
-    fireEvent.change(screen.getByLabelText("Y tick marks"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("Number of tick marks"), { target: { value: "" } });
     expect(onChange).toHaveBeenLastCalledWith({ yTickCount: undefined });
   });
   /**
@@ -114,12 +115,12 @@ describe("CartesianDisplaySection", () => {
    */
   it("hides the value-axis tick count once that axis' lines and ticks are off", () => {
     render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], yAxisTicks: false }} onChange={() => {}} />);
-    expect(screen.queryByLabelText("Y tick marks")).toBeNull();
+    expect(screen.queryByLabelText("Number of tick marks")).toBeNull();
   });
 
   it("…and offers it while they are drawn", () => {
     render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
-    expect(screen.getByLabelText("Y tick marks")).toBeInTheDocument();
+    expect(screen.getByLabelText("Number of tick marks")).toBeInTheDocument();
   });
 
   it("Data label density is hidden when data labels are off", () => {
@@ -150,6 +151,8 @@ describe("CartesianDisplaySection", () => {
     expect(within(screen.getByLabelText("Data label density")).getByText("Fit")).toBeInTheDocument();
   });
 
+  /** A stored bound in the fixture, which is also what opens the pair now that it sits behind the
+   *  automatic range — see the vocabulary block at the bottom of this file for that gate. */
   it("Y min/max inputs patch yMin/yMax (undefined when cleared)", () => {
     const onChange = vi.fn();
     render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], yMax: 50 }} onChange={onChange} />);
@@ -561,7 +564,7 @@ describe("CartesianDisplaySection — a combo can stack", () => {
  * that CLEARS the other key from one that silently leaves it alone.
  */
 describe("CartesianDisplaySection — the category-axis lines/ticks/rotation select", () => {
-  const open = async (user: ReturnType<typeof userEvent.setup>, label = "X axis lines and ticks") =>
+  const open = async (user: ReturnType<typeof userEvent.setup>, label = "X show lines and tick marks") =>
     user.click(screen.getByLabelText(label));
 
   it("choosing Rotate 45° stores the rotation and clears the hide", async () => {
@@ -604,9 +607,9 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
 
   it("displays what is stored: a rotation, and Hide winning over one", () => {
     const { rerender } = render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xLabelRotation: 90 }} onChange={() => {}} />);
-    expect(screen.getByLabelText("X axis lines and ticks")).toHaveTextContent("Rotate 90°");
+    expect(screen.getByLabelText("X show lines and tick marks")).toHaveTextContent("Rotate 90°");
     rerender(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xLabelRotation: 90, xAxisTicks: false }} onChange={() => {}} />);
-    expect(screen.getByLabelText("X axis lines and ticks")).toHaveTextContent("Hide");
+    expect(screen.getByLabelText("X show lines and tick marks")).toHaveTextContent("Hide");
   });
 
   // A row chart's categories run down the LEFT, so this control names the vertical axis — and the
@@ -615,7 +618,7 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
     const user = userEvent.setup();
     const onChange = vi.fn();
     render(<CartesianDisplaySection kind="row" config={{ yMetrics: ["rev"] }} onChange={onChange} />);
-    await open(user, "Y axis lines and ticks");
+    await open(user, "Y show lines and tick marks");
     const opt = await screen.findByRole("option", { name: "Rotate 45°" });
     expect(opt).not.toHaveAttribute("aria-disabled", "true");
     await user.click(opt);
@@ -649,7 +652,7 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
   it("keeps them enabled on a horizontal chart carrying a leftover linear scale", async () => {
     const user = userEvent.setup();
     render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], horizontal: true, xScale: "linear" }} onChange={() => {}} />);
-    await open(user, "Y axis lines and ticks");
+    await open(user, "Y show lines and tick marks");
     expect(await screen.findByRole("option", { name: "Rotate 90°" })).not.toHaveAttribute("aria-disabled", "true");
   });
 
@@ -732,7 +735,7 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
     const user = userEvent.setup();
     render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"], xScale: "timeseries" }} onChange={() => {}} />);
     const hint = screen.getByText(/Rotation applies to a category axis/);
-    expect(screen.getByLabelText("X axis lines and ticks")).toHaveAttribute("aria-describedby", hint.id);
+    expect(screen.getByLabelText("X show lines and tick marks")).toHaveAttribute("aria-describedby", hint.id);
     // …and NOT on the items, where it would look like an explanation and reach nobody.
     await open(user);
     expect(await screen.findByRole("option", { name: "Rotate 45°" })).not.toHaveAttribute("title");
@@ -741,12 +744,12 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
   it("says nothing where every choice is live", () => {
     render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
     expect(screen.queryByText(/Rotation applies to a category axis/)).toBeNull();
-    expect(screen.getByLabelText("X axis lines and ticks")).not.toHaveAttribute("aria-describedby");
+    expect(screen.getByLabelText("X show lines and tick marks")).not.toHaveAttribute("aria-describedby");
   });
 
   it("still shows a rotation stored before the scale changed", () => {
     render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"], xScale: "linear", xLabelRotation: 45 }} onChange={() => {}} />);
-    expect(screen.getByLabelText("X axis lines and ticks")).toHaveTextContent("Rotate 45°");
+    expect(screen.getByLabelText("X show lines and tick marks")).toHaveTextContent("Rotate 45°");
   });
 });
 
@@ -755,27 +758,33 @@ describe("CartesianDisplaySection — axis names follow the chart's orientation"
   // chart the category axis is the vertical one, so naming these after the config keys printed them
   // backwards from the screen: "Y min" governed the horizontal extent. Metabase relabels the same
   // settings by the axis they appear on.
+  // A stored bound throughout, because the pair is gated behind the automatic range now — and the
+  // SWITCH is named for the axis too, which is the row that would silently keep saying "y" if the
+  // shared control had hard-coded its label.
   it("names the value-axis controls X on a row chart", () => {
-    render(<CartesianDisplaySection kind="row" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    render(<CartesianDisplaySection kind="row" config={{ yMetrics: ["rev"], yMin: 0 }} onChange={() => {}} />);
+    expect(screen.getByLabelText("Auto x-axis range")).toBeInTheDocument();
     expect(screen.getByLabelText("X min")).toBeInTheDocument();
     expect(screen.getByLabelText("X max")).toBeInTheDocument();
-    expect(screen.getByLabelText("X tick marks")).toBeInTheDocument();
-    expect(screen.getByLabelText("X axis lines and ticks")).toBeInTheDocument();
+    expect(screen.getByLabelText("Number of tick marks")).toBeInTheDocument();
+    expect(screen.getByLabelText("X show lines and tick marks")).toBeInTheDocument();
     // …and the category axis, which is vertical here, reads Y.
-    expect(screen.getByLabelText("Y axis lines and ticks")).toBeInTheDocument();
+    expect(screen.getByLabelText("Y show lines and tick marks")).toBeInTheDocument();
     expect(screen.getByLabelText("Show Y label")).toBeInTheDocument();
   });
 
   it("does the same for a bar turned horizontal", () => {
-    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], horizontal: true }} onChange={() => {}} />);
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], horizontal: true, yMin: 0 }} onChange={() => {}} />);
+    expect(screen.getByLabelText("Auto x-axis range")).toBeInTheDocument();
     expect(screen.getByLabelText("X min")).toBeInTheDocument();
-    expect(screen.getByLabelText("Y axis lines and ticks")).toBeInTheDocument();
+    expect(screen.getByLabelText("Y show lines and tick marks")).toBeInTheDocument();
   });
 
   it("leaves an upright chart alone", () => {
-    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], yMin: 0 }} onChange={() => {}} />);
+    expect(screen.getByLabelText("Auto y-axis range")).toBeInTheDocument();
     expect(screen.getByLabelText("Y min")).toBeInTheDocument();
-    expect(screen.getByLabelText("X axis lines and ticks")).toBeInTheDocument();
+    expect(screen.getByLabelText("X show lines and tick marks")).toBeInTheDocument();
     expect(screen.getByLabelText("Show X label")).toBeInTheDocument();
   });
 });
@@ -842,3 +851,121 @@ describe("AxisRangeOptions — the value axis' Scale select", () => {
  * control the descriptor declares and read the swatch out of the DOM, which is coverage of the
  * decision rather than of a copy of it.
  */
+
+/**
+ * ONE AXES VOCABULARY, NOT TWO.
+ *
+ * MEASURED live across six charts. The waterfall and the box plot render their Axes tab through
+ * `ChartAxesSection` and match Metabase: an "Auto y-axis range" switch that gates Y min / Y max, and
+ * "Show lines and tick marks" as a SELECT. Bar, line, area, combo, row and scatter render through
+ * `CartesianDisplaySection` and got a different panel over THE SAME STORED KEYS — no auto-range
+ * switch at all (a bare Y min / Y max pair, always visible), and lines/ticks as a switch.
+ *
+ * Which panel a reader saw depended only on which chart they had opened.
+ *
+ * The gate costs no stored key: `autoRange` is derived, `config.yMin == null && config.yMax == null`,
+ * so there is no state in which the switch and the boxes can disagree and nothing new is persisted.
+ */
+describe("the cartesian Axes tab speaks the same vocabulary as the waterfall's", () => {
+  const bar = (config: CartesianConfig) =>
+    render(<CartesianDisplaySection kind="bar" config={config} onChange={() => {}} />);
+
+  it("hides the bounds behind Auto y-axis range, as the waterfall's tab does", () => {
+    bar({ yMetrics: ["rev"] });
+    expect(screen.getByLabelText("Auto y-axis range")).toBeChecked();
+    expect(screen.queryByLabelText("Y min")).toBeNull();
+    expect(screen.queryByLabelText("Y max")).toBeNull();
+  });
+
+  /** Turning it off has to REVEAL the pair, and seed a bound — an "off" that showed two empty boxes
+   *  would put the switch and the values it is derived from into immediate disagreement. */
+  it("reveals the bounds when the automatic range is turned off", () => {
+    const onChange = vi.fn();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={onChange} />);
+    fireEvent.click(screen.getByLabelText("Auto y-axis range"));
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ yMin: 0 });
+  });
+
+  /** …and a chart that already stores a bound arrives with the switch off and the boxes open, since
+   *  the switch is derived from the bounds rather than stored beside them. */
+  it("shows a stored bound with the switch already off", () => {
+    bar({ yMetrics: ["rev"], yMax: 50 });
+    expect(screen.getByLabelText("Auto y-axis range")).not.toBeChecked();
+    expect(screen.getByLabelText("Y min")).toBeInTheDocument();
+    expect(screen.getByLabelText("Y max")).toBeInTheDocument();
+  });
+
+  /** Turning it back ON has to clear BOTH bounds, or the switch reads "auto" over a chart still
+   *  pinned to a stored maximum. */
+  it("clears both bounds when the automatic range is turned back on", () => {
+    const onChange = vi.fn();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], yMax: 50 }} onChange={onChange} />);
+    // `toStrictEqual` on the emitted patch, not `toHaveBeenCalledWith`: the latter runs the same
+    // loose equality `toEqual` does, which IGNORES `undefined` properties — so a patch clearing only
+    // `yMin` and leaving a stored `yMax` behind satisfied it, and a mutation doing exactly that
+    // survived the whole suite. The switch would then have read "auto" over a chart still pinned to
+    // its maximum. This file already makes the same argument on the x-ticks patches.
+    fireEvent.click(screen.getByLabelText("Auto y-axis range"));
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ yMin: undefined, yMax: undefined });
+  });
+
+  /**
+   * The value axis' lines and ticks as a SELECT, which is what the other tab offers and what
+   * Metabase's `graph.y_axis.axis_enabled` is. Asserted as a combobox carrying both choices rather
+   * than merely "not a switch": a select that rendered one option would satisfy the negative.
+   */
+  it("offers the value axis' lines and ticks as a select, not a switch", async () => {
+    const user = userEvent.setup();
+    bar({ yMetrics: ["rev"] });
+    const trigger = screen.getByLabelText("Y show lines and tick marks");
+    expect(trigger).toHaveAttribute("role", "combobox");
+    await user.click(trigger);
+    expect(await screen.findByRole("option", { name: "Hide" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "Show" })).toBeInTheDocument();
+  });
+
+  it("stores the hide and clears it again through that select", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={onChange} />);
+    await user.click(screen.getByLabelText("Y show lines and tick marks"));
+    await user.click(await screen.findByRole("option", { name: "Hide" }));
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ yAxisTicks: false });
+
+    cleanup();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], yAxisTicks: false }} onChange={onChange} />);
+    await user.click(screen.getByLabelText("Y show lines and tick marks"));
+    await user.click(await screen.findByRole("option", { name: "Show" }));
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ yAxisTicks: undefined });
+  });
+
+  /**
+   * THE WORDING ITSELF, pinned by rendering both panels and comparing what a reader can address.
+   * This is the assertion that would have caught the divergence in the first place: every other
+   * test in either file passes happily while the two tabs name the same setting differently.
+   *
+   * `ChartAxesSection` is rendered with its own default id prefix, so nothing here depends on the
+   * cartesian ids.
+   */
+  it("names the shared rows exactly as the waterfall/box-plot tab names them", () => {
+    const shared = ["Auto y-axis range", "Y min", "Y max", "Y show lines and tick marks", "Number of tick marks"];
+    render(<ChartAxesSection config={{ yMin: 0 }} onChange={() => {}} />);
+    for (const label of shared) expect(screen.getByLabelText(label), `${label} on the waterfall tab`).toBeInTheDocument();
+    cleanup();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], yMin: 0 }} onChange={() => {}} />);
+    for (const label of shared) expect(screen.getByLabelText(label), `${label} on the cartesian tab`).toBeInTheDocument();
+  });
+
+  /**
+   * …AND THE HORIZONTAL RELABELLING SURVIVES IT. A row chart's measure runs ACROSS, so the value
+   * axis is the X one and every row in this block is named for it — the relabelling the cartesian
+   * panel has done all along and which `ChartAxesSection`, whose two charts are always vertical,
+   * has no need of. Sharing the controls must not flatten it back to a hard-coded "Y".
+   */
+  it("still names the value axis after the axis the reader sees on a row chart", () => {
+    render(<CartesianDisplaySection kind="row" config={{ yMetrics: ["rev"], yMin: 0 }} onChange={() => {}} />);
+    expect(screen.getByLabelText("Auto x-axis range")).toBeInTheDocument();
+    expect(screen.getByLabelText("X min")).toBeInTheDocument();
+    expect(screen.getByLabelText("X show lines and tick marks")).toBeInTheDocument();
+  });
+});
