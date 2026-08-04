@@ -234,6 +234,49 @@ export default function ChartExplore() {
     setTableState((prev) => reconcileTableState(prev, resultColumnNames));
   }, [viz, data.hasResult, resultColumnKey]);
 
+  /**
+   * The query's field lists, handed to the Display tab's column list so it can fold them behind
+   * `Add or remove columns` — Metabase's shape, where the one column list owns both "which columns
+   * exist" and "which of them are drawn".
+   *
+   * BOTH lists, not just the columns one. A table with a metric on it kept `revenue` in a FOURTH
+   * parallel field list one tab over, so the display list showed a column that no field list the
+   * reader could see from there mentioned at all. That was measured disagreement #1.
+   *
+   * Only for the table. `object` has a field list too but renders no `TableState`, and every other
+   * viz configures its fields through role-shaped controls (x-axis, metrics, breakout) that a flat
+   * checkbox panel would misrepresent.
+   *
+   * It does NOT replace the Data tab's own controls, which stay: they carry the per-column temporal
+   * unit pickers (`unitRow`), which are query grain and not display, and Metabase keeps its own
+   * notebook field picker for the same reason. Two entry points to one setting is Metabase's
+   * arrangement exactly; what this PR removes is two entry points that disagreed.
+   */
+  const tableQueryFields = useMemo(() => {
+    if (viz !== "table") return undefined;
+    const cfg = descConfig as { columns?: string[]; metrics?: string[] };
+    return [
+      {
+        // The DATASET's name, the way Metabase heads this panel's field group with the source
+        // table's. It also stops the group repeating the section's own "Columns" heading directly
+        // above it, which is what a plain "Columns" here read as.
+        label: detail.data?.name ?? "Columns",
+        options: columns.map((c) => c.column_name),
+        selected: cfg.columns ?? [],
+        onChange: (next: string[]) => patchDescConfig({ columns: next } as never),
+      },
+      ...(metrics.length
+        ? [{
+            label: "Metrics",
+            options: metrics.map((m) => m.metric_name),
+            selected: cfg.metrics ?? [],
+            onChange: (next: string[]) => patchDescConfig({ metrics: next } as never),
+          }]
+        : []),
+    ];
+    // `descConfig` is rebuilt on every render, so key on what is actually read out of it.
+  }, [viz, columns, metrics, (descConfig as { columns?: string[] }).columns, (descConfig as { metrics?: string[] }).metrics]);
+
   // Dataset-level formats (column & metric) become chart DEFAULTS: they render
   // unless the chart has its own per-column override. Applied at render time
   // only (never baked into saved params) so editing the dataset stays live.
@@ -568,6 +611,7 @@ export default function ChartExplore() {
                   onTableState={setTableState}
                   onColumnSettings={setColumnSettings}
                   onConditionalFormatting={setConditionalFormatting}
+                  queryFields={tableQueryFields}
                   only="format"
                 />
               </>

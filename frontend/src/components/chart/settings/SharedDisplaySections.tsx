@@ -1,7 +1,7 @@
 import { type VizType, type ChartParams, isCartesianViz } from "@/api/charts";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 import type { TableState } from "@/api/charts";
-import { TableColumnsSection } from "./TableColumnsSection";
+import { TableColumnsSection, type QueryFieldGroup } from "./TableColumnsSection";
 import { FormatSection } from "./FormatSection";
 import { ConditionalFormattingSection } from "./ConditionalFormattingSection";
 import { SectionLabel } from "./SectionLabel";
@@ -82,7 +82,7 @@ export function ruleColumnsFor(
  */
 export function SharedDisplaySections({
   vizType, resultColumns, styleColumns, tableState, columnSettings, conditionalFormatting,
-  onTableState, onColumnSettings, onConditionalFormatting, only, ruleColumns,
+  onTableState, onColumnSettings, onConditionalFormatting, only, ruleColumns, queryFields,
 }: {
   vizType: VizType;
   resultColumns: ResultColumn[];
@@ -101,6 +101,11 @@ export function SharedDisplaySections({
   /** Columns a rule may target; defaults to `styleColumns`. A pivot narrows it to its measures —
    * see `ruleColumnsFor`. */
   ruleColumns?: ResultColumn[];
+  /** The query's own field lists, folded behind the table column list's `Add or remove columns`.
+   * Passed only by the builder route: a dashboard card can override how a column is DRAWN but
+   * cannot change what its query selects, so `CardVizPanel` leaves this out and the affordance is
+   * simply absent there. */
+  queryFields?: QueryFieldGroup[];
 }) {
   const showFormat = only !== "conditional";
   const showConditional = only !== "format";
@@ -121,14 +126,25 @@ export function SharedDisplaySections({
       {showFormat && vizType === "table" && (
         <div className="space-y-1.5">
           <SectionLabel>Columns</SectionLabel>
-          <TableColumnsSection columns={resultColumns} value={tableState} onChange={onTableState} columnSettings={columnSettings} />
+          <TableColumnsSection columns={resultColumns} value={tableState} onChange={onTableState}
+            columnSettings={columnSettings} onColumnSettings={onColumnSettings} queryFields={queryFields} />
         </div>
       )}
-      {showFormat && styleColumns.length > 0 && (
+      {/* NOT for the table. Its formattable columns ARE its result columns, so a second accordion
+          under this one printed every column's name a third time and put its rename two lists away
+          from its visibility — the whole defect PR B closes. The table's formatting moved into the
+          row's drill-in above. Every other viz keeps this section, because for them `styleColumns`
+          is a genuine SUBSET of the result (a pivot's measures, a cartesian's plotted metrics and
+          axis) and so is a different list, not a duplicate one. */}
+      {showFormat && vizType !== "table" && styleColumns.length > 0 && (
         <div className="space-y-1.5">
           <SectionLabel>Formatting</SectionLabel>
+          {/* `false`, flatly. This branch is now every viz EXCEPT the table, and the table was the
+              only one that drew a mini bar — the old `vizType === "table"` here would read as a
+              live condition that is in fact never true. The table's own mini-bar switch is in the
+              drill-in above, where `ColumnSettingsPopover` defaults it on. */}
           <FormatSection columns={styleColumns} value={columnSettings} onChange={onColumnSettings}
-            allowMiniBar={vizType === "table"} />
+            allowMiniBar={false} />
         </div>
       )}
       {showConditional && (vizType === "table" || vizType === "pivot_table") && (

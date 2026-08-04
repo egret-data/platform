@@ -66,7 +66,7 @@ vi.mock("@/api/charts", async (importOriginal) => ({
   useBuildChartData: () => ({ data: undefined, isLoading: false, error: null }),
 }));
 
-const TYPES: Record<string, string> = { id: "bigint", state: "varchar", vendor: "varchar" };
+const TYPES: Record<string, string> = { id: "bigint", state: "varchar", vendor: "varchar", revenue: "double" };
 
 /**
  * The engine's contract, not a fixture: the result carries exactly the columns the spec projected.
@@ -75,7 +75,9 @@ const TYPES: Record<string, string> = { id: "bigint", state: "varchar", vendor: 
  */
 vi.mock("@/api/useSpecData", () => ({
   useSpecData: (_ws: string, _ds: string | null, spec: QuerySpec | null) => {
-    const names = spec ? [...(spec.dimensions ?? []), ...(spec.columns ?? [])] : [];
+    // Metrics included: an aggregated table's result is its dimensions THEN its measures, and
+    // leaving them out made an aggregation look like a query that returned nothing new.
+    const names = spec ? [...(spec.dimensions ?? []), ...(spec.columns ?? []), ...(spec.metrics ?? [])] : [];
     return {
       columns: names.map((n) => ({ name: n, type: TYPES[n] ?? "varchar" })),
       rows: names.length ? [names.map((n) => (n === "id" ? 1 : `${n}-value`))] : [],
@@ -94,7 +96,10 @@ vi.mock("@/api/datasets", () => ({
         { column_name: "state", data_type: "varchar", is_temporal: false },
         { column_name: "vendor", data_type: "varchar", is_temporal: false },
       ],
-      metrics: [],
+      // One metric the chart does NOT use. It is what makes the fourth parallel field list real:
+      // an aggregated table shows `revenue` in the display list while it lives in a Metrics list
+      // one tab over. The `Add or remove columns` panel is what brings both into one place.
+      metrics: [{ metric_name: "revenue", data_type: "double" }],
     },
     isLoading: false,
   }),
@@ -121,6 +126,21 @@ const drawnHeaders = () =>
 
 const tab = (name: string) => userEvent.click(screen.getByRole("tab", { name }));
 
+/**
+ * The Display tab's row for one column, by the RAW name it is keyed on.
+ *
+ * MOVED IN PR B. This used to be `getByLabelText(<title>)` — the checkbox in the old
+ * `Visible columns` list, whose <Label> was the column's DISPLAY title. The three lists have since
+ * merged into one row per column, and its eye toggle is labelled by the raw column name (see
+ * `TableColumnsSection`), which is also the only name every stored list keys on. `toBeChecked()`
+ * becomes `aria-pressed`, since the control is a toggle button and no longer a checkbox.
+ *
+ * The Data tab's checkboxes are untouched and are still driven by `getByLabelText(name)` below —
+ * they were always labelled by the raw name, because that tab edits the query.
+ */
+const eye = (name: string) => screen.getByRole("button", { name: `Show ${name}` });
+const noEye = (name: string) => screen.queryByRole("button", { name: `Show ${name}` });
+
 describe("a column put back into the query is drawn again", () => {
   it("does not keep a stale hidden flag across a column leaving and re-entering the result", async () => {
     await mountTable();
@@ -128,7 +148,7 @@ describe("a column put back into the query is drawn again", () => {
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
 
     // ── step 1: hide `vendor` in Display ▸ Visible columns
-    await userEvent.click(screen.getByLabelText("vendor"));
+    await userEvent.click(eye("vendor"));
     expect(drawnHeaders()).toEqual(["id", "state"]);
 
     // ── step 2: drop `vendor` from the query in the Data tab
@@ -140,7 +160,7 @@ describe("a column put back into the query is drawn again", () => {
     // step 1, so the assertion passes before the debounced re-run has even gone out and step 3
     // then measures a column that never left. The Visible-columns list is built from the RESULT,
     // so `vendor` dropping out of it is the signal that the new query came back without it.
-    await waitFor(() => expect(screen.queryByLabelText("vendor")).not.toBeInTheDocument(), { timeout: 3000 });
+    await waitFor(() => expect(noEye("vendor")).not.toBeInTheDocument(), { timeout: 3000 });
     expect(drawnHeaders()).toEqual(["id", "state"]);
 
     // ── step 3: put `vendor` back into the query
@@ -151,7 +171,7 @@ describe("a column put back into the query is drawn again", () => {
 
     // …and the Display tab agrees, rather than showing it as still hidden.
     await tab("Display");
-    expect(screen.getByLabelText("vendor")).toBeChecked();
+    expect(eye("vendor")).toHaveAttribute("aria-pressed", "true");
     // Each step waits on a debounced auto-run, so the whole sequence outlasts the 5s default.
   }, 30000);
 
@@ -178,8 +198,12 @@ describe("a column put back into the query is drawn again", () => {
     // The header, like the panel row, shows the rename; the column is still `vendor` underneath.
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "Supplier"]), { timeout: 3000 });
 
-    await userEvent.click(screen.getByLabelText("Supplier"));
+    await userEvent.click(eye("vendor"));
     expect(drawnHeaders()).toEqual(["id", "state"]);
+    // The rename is live in the PANEL too, not only in the header the click just removed: the row
+    // shows "Supplier" while its toggle is still addressed as `vendor`. That pairing is the whole
+    // point of this fixture, and it is what the old `getByLabelText("Supplier")` used to carry.
+    expect(screen.getByText("Supplier")).toBeInTheDocument();
 
     // An edit that re-runs the query without touching `vendor`: drop `state` instead.
     await tab("Data");
@@ -187,7 +211,89 @@ describe("a column put back into the query is drawn again", () => {
     await waitFor(() => expect(drawnHeaders()).toEqual(["id"]), { timeout: 3000 });
 
     await tab("Display");
-    expect(screen.getByLabelText("Supplier")).not.toBeChecked();
+    expect(eye("vendor")).toHaveAttribute("aria-pressed", "false");
     expect(within(document.body).queryByRole("columnheader", { name: /Supplier/ })).not.toBeInTheDocument();
+  }, 30000);
+});
+
+/**
+ * B2: the query's field lists are reachable from the DISPLAY tab, folded behind Metabase's own
+ * `Add or remove columns` affordance.
+ *
+ * Driven through the route on purpose. `TableColumnsSection`'s own tests prove the panel emits
+ * what it is handed; only this file can prove `ChartExplore` hands it anything — a `queryFields`
+ * prop that is never passed is a green unit test over dead wiring, which this programme has
+ * shipped twice.
+ */
+describe("Add or remove columns, from the Display tab", () => {
+  it("removes a column from the QUERY and the table stops drawing it", async () => {
+    await mountTable();
+    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
+
+    // The list is replaced, not joined by a second one: that is the defect being closed.
+    await userEvent.click(screen.getByRole("button", { name: /add or remove columns/i }));
+    expect(noEye("vendor")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByLabelText("vendor"));
+    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state"]), { timeout: 3000 });
+
+    // …and the Data tab agrees, because there is one stored key, not two.
+    await tab("Data");
+    expect(screen.getByLabelText("vendor")).not.toBeChecked();
+  }, 30000);
+
+  /**
+   * DISAGREEMENT #1, closed. A metric was in a fourth field list that the Display tab could not
+   * reach at all, so an aggregated table drew a column no list on that tab mentioned.
+   */
+  it("reaches the metrics list from the same panel", async () => {
+    await mountTable();
+    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
+
+    expect(screen.queryByLabelText("revenue")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /add or remove columns/i }));
+    await userEvent.click(screen.getByLabelText("revenue"));
+
+    // Aggregating turns the raw columns into dimensions and adds the metric to the result.
+    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor", "revenue"]), { timeout: 3000 });
+  }, 30000);
+});
+
+/**
+ * DISAGREEMENT #2, closed: the panel's list is the order the table draws in, and moving a row
+ * moves the column.
+ *
+ * Reorder used to exist ONLY as a drag on the rendered header. `TableColumnsSection` never read
+ * `columnOrder` at all, so the panel drew its list in result order and the table drew itself in
+ * stored order — two lists on one screen claiming to be the same thing while disagreeing.
+ */
+describe("reordering from the panel moves the drawn column", () => {
+  it("moves a column up and the table follows", async () => {
+    await mountTable();
+    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
+
+    await userEvent.click(screen.getByLabelText("Move vendor up"));
+    expect(drawnHeaders()).toEqual(["id", "vendor", "state"]);
+    // The panel's own list moved too — it is the same list now, not a second one.
+    expect(Array.from(document.querySelectorAll("[data-column]")).map((e) => e.getAttribute("data-column")))
+      .toEqual(["id", "vendor", "state"]);
+  }, 30000);
+
+  /**
+   * THE RAW-NAME MUTATION GUARD, end to end. `ChartTable` resolves `columnOrder` through the raw
+   * column name; `column_title` renames the header without renaming the column. If the panel wrote
+   * the DISPLAYED string, `ChartTable` would resolve nothing for it, drop it out of the order and
+   * re-append it at the end — so the header would land at position 3 instead of position 2, and the
+   * user's drag would be silently ignored.
+   *
+   * Three columns with the renamed one MOVING INTO THE MIDDLE is the smallest fixture that can see
+   * that: with two, losing a name from the order and re-appending it gives the identical layout.
+   */
+  it("moves a RENAMED column under its raw name, not its title", async () => {
+    await mountTable("c-renamed");
+    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "Supplier"]), { timeout: 3000 });
+
+    await userEvent.click(screen.getByLabelText("Move vendor up"));
+    expect(drawnHeaders()).toEqual(["id", "Supplier", "state"]);
   }, 30000);
 });

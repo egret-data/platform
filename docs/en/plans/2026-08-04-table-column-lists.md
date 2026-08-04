@@ -127,37 +127,84 @@ Only after A is merged. Branch off main.
 **Files:** `TableColumnsSection.tsx` (rewrite as an ordered list), `SharedDisplaySections.tsx`,
 `FormatSection.tsx`, `viz/table.tsx`, `ChartExplore.tsx`, `CardVizPanel.tsx`, `ChartTable.tsx`.
 
-- [ ] **Step 1: Merge B into C.** C's rows already have the right anatomy — type icon, name, drill-in,
+- [x] **Step 1: Merge B into C.** C's rows already have the right anatomy — type icon, name, drill-in,
   and `column_title` already shown beside the raw name (`FormatSection.tsx:83-91`). Add an eye toggle
   and a drag handle. **The template is already in this repo**: `SeriesListSection.tsx` +
   `SeriesSettingsPopover.tsx`, shipped in #408. Reuse it rather than writing a second one.
 
-- [ ] **Step 2: Keep it in the Display tab.** Do NOT move it to Data — `CardVizPanel` has no Data tab,
+  **CORRECTED while executing PR B: the template has no drag handle, and should not grow one.**
+  `SeriesListSection` reorders with a pair of ▲▼ BUTTONS, not a grabber. The merged column list
+  copies that, because a button carries its keyboard path with it — PR #356 in this programme
+  shipped a column reorder that was mouse-only because a `dnd-kit` list was handed no
+  `KeyboardSensor`, and a visual grabber in the panel would be that same bet taken again for a
+  cosmetic gain. The rendered header's drag stays and is unchanged; it already has its
+  `KeyboardSensor`.
+
+  Also corrected: the "eye toggle" is genuinely an EYE here and not the template's `Switch`.
+  Metabase's column row uses an eye, and forty switches down a 300px panel is a different weight of
+  control than the series list's ten. `aria-pressed` carries the state so it is not colour-only.
+
+  One thing the plan does not mention and that the merge requires: `FormatSection` still serves
+  every OTHER viz, whose formattable columns are a genuine subset of the result. The accordion is
+  dropped **for the table only**, and its per-column editor is extracted (`ColumnFormatFields`) so
+  both it and the new drill-in stay one editor over one `column_settings` key.
+
+- [x] **Step 2: Keep it in the Display tab.** Do NOT move it to Data — `CardVizPanel` has no Data tab,
   and `ChartTable.tsx:290-292` already records that constraint.
 
-- [ ] **Step 3: Give reorder a home in the list.** Today it exists only as a drag on the rendered
+- [x] **Step 3: Give reorder a home in the list.** Today it exists only as a drag on the rendered
   header and is invisible to the panel. Dragging in the list writes the same `columnOrder`.
 
-- [ ] **Step 4: Hidden columns stay in the list**, marked, as Metabase's do — not moved to the end and
+- [x] **Step 4: Hidden columns stay in the list**, marked, as Metabase's do — not moved to the end and
   not moved to a separate group. Measured behaviour, and it is what makes "turn it back on" findable.
 
-- [ ] **Step 5: Gates.** Existing tests WILL move. Every one that does must be understood and
+- [x] **Step 5: Gates.** Existing tests WILL move. Every one that does must be understood and
   explained in the PR body — this programme has shipped a passing suite over a dead code path twice.
+
+  **Ten moved, in exactly two files**, and both moves are the same fact: the per-column control
+  changed from a checkbox whose `<Label>` was the DISPLAY TITLE to an eye toggle labelled by the RAW
+  name. Eight in `TableColumnsSection.test.tsx`, two in PR A's
+  `ChartExplore.tableColumns.test.tsx`. One of the eight is inverted rather than translated — the
+  old list showed the title INSTEAD of the raw name and the merged row shows both. No other test
+  moved.
 
 ## Task B2: fold query projection behind a toggle
 
-- [ ] **Step 1:** Put A behind an `Add or remove columns` affordance in the same section, Metabase's
+- [x] **Step 1:** Put A behind an `Add or remove columns` affordance in the same section, Metabase's
   exact shape, so query projection stops being a permanently-visible second checkbox list.
 
-- [ ] **Step 2:** If that turns out too large or it fights `viz/table.tsx`'s control registration, the
-  minimum viable alternative is to **relabel** — "Columns in this query" vs "Columns shown" — and stop
-  there. Task A1's reconcile is what actually closes the bug; the labels only stop it being confusing.
-  **Say which you did and why.**
+  **DONE — the full affordance, not the escape hatch.** It does not fight `viz/table.tsx` at all,
+  because it does not go through the descriptor: `SharedDisplaySections` takes an opaque
+  `queryFields: {label, options, selected, onChange}[]` and `ChartExplore` fills it from `descConfig`
+  and the dataset. `CardVizPanel` omits it and the affordance is simply absent there, which is
+  correct — a dashboard card overrides how a column is DRAWN and cannot change what its query
+  selects.
+
+  It carries a group per field list, so the METRICS list is in it too. That is what closes
+  disagreement #1, which relabelling could not have: an aggregated table showed `revenue` in the
+  display list while it lived in a fourth field list one tab over.
+
+  **The Data tab's own controls STAY, which is a correction to this step's premise.** The plan reads
+  as though query projection should stop existing outside the fold. Two things say otherwise. First,
+  `TableColumnsControl` anchors the per-column temporal-unit pickers (`unitRow`), which are query
+  GRAIN and not display, and which have no home in a display list. Second, Metabase keeps both too —
+  its notebook Data step has a field picker AND its viz settings have `Add or remove columns`, over
+  the same stored field list. Two entry points to one setting is Metabase's arrangement; what this
+  PR removes is two entry points that DISAGREED.
 
 ## Task B3: live check and PR
 
-- [ ] Drive it: reproduce all four measured disagreements and show each is gone or explain why one
+- [x] Drive it: reproduce all four measured disagreements and show each is gone or explain why one
   remains. Then the 19 "ZZ Chart Parity" charts. Screenshots to the session scratchpad, ABSOLUTE paths.
+
+  All four driven on the kind deployment. #1 and #2 NEWLY CLOSED by PR B; #3 and #4 were PR A's and
+  were RE-VERIFIED here, #3 specifically against the panel reorder that did not exist when A shipped.
+  All 19 parity cards render unchanged.
+
+  The live check found three defects that no test and no review had: a dashboard card's rows all
+  badged TEXT (its columns carry no types), the picker's group heading repeating the section's own,
+  and a UA-hairline focus ring on the 10px reorder arrows. Fixed in the second commit.
+
 - [ ] Open PR B. **Do NOT merge.**
 
 ---

@@ -98,6 +98,50 @@ Rồi gấp A lại sau nút `Add or remove columns`. Nếu quá lớn, phương
 "Columns in this query" so với "Columns shown" — và dừng ở đó; A1 mới là thứ đóng lỗi, nhãn chỉ khiến
 nó bớt khó hiểu. **Nói rõ đã chọn cách nào và vì sao.**
 
+**ĐÃ SỬA khi thực thi PR B: khuôn KHÔNG có tay kéo, và không nên mọc thêm.** `SeriesListSection` sắp
+xếp bằng một cặp NÚT ▲▼ chứ không phải grabber. Danh sách cột gộp chép đúng cách đó, vì một cái nút
+mang sẵn đường bàn phím của nó — PR #356 trong chính chương trình này đã ship một tính năng sắp xếp
+cột chỉ dùng được bằng chuột vì danh sách `dnd-kit` không được cấp `KeyboardSensor`. Thao tác kéo trên
+header của bảng đã render vẫn giữ nguyên; nó vốn đã có `KeyboardSensor`.
+
+Cũng đã sửa: "nút mắt" ở đây đúng là một CON MẮT chứ không phải `Switch` của khuôn. Hàng cột của
+Metabase dùng con mắt, và bốn mươi cái switch trong một panel rộng 300px là một sức nặng khác hẳn mười
+cái của danh sách series. `aria-pressed` mang trạng thái nên nó không chỉ dựa vào màu.
+
+Một điểm kế hoạch không nhắc và việc gộp bắt buộc phải xử lý: `FormatSection` vẫn phục vụ MỌI viz
+khác, nơi tập cột định dạng được thực sự là tập con của kết quả. Accordion chỉ bị bỏ **cho riêng
+table**, và trình soạn theo cột của nó được tách ra (`ColumnFormatFields`) để cả hai bên vẫn là MỘT
+trình soạn trên MỘT key `column_settings`.
+
+**ĐÃ LÀM PHƯƠNG ÁN ĐẦY ĐỦ, không dùng lối thoát.** Nó không hề xung đột với `viz/table.tsx`, vì nó
+không đi qua descriptor: `SharedDisplaySections` nhận một `queryFields` đục
+(`{label, options, selected, onChange}[]`) và `ChartExplore` đổ đầy từ `descConfig` cùng dataset.
+`CardVizPanel` bỏ trống nên nút đó vắng mặt ở đó — đúng, vì một card trên dashboard ghi đè cách VẼ một
+cột chứ không đổi được truy vấn chọn gì.
+
+Nó mang một nhóm cho mỗi danh sách trường, nên danh sách METRICS cũng nằm trong đó. Đó là thứ đóng
+bất đồng số 1 — điều mà chỉ đổi nhãn không làm được.
+
+**Các control ở tab Data VẪN GIỮ, và đây là một điểm phải sửa lại của kế hoạch.** Thứ nhất,
+`TableColumnsControl` là chỗ neo của các bộ chọn đơn vị thời gian theo cột (`unitRow`) — đó là ĐỘ MỊN
+của truy vấn, không phải hiển thị. Thứ hai, Metabase cũng giữ cả hai: bước Data trong notebook có bộ
+chọn trường VÀ viz settings có `Add or remove columns`, trên cùng một danh sách trường đã lưu. Hai lối
+vào cho một setting chính là cách Metabase bố trí; thứ PR này bỏ đi là hai lối vào KHÔNG ĐỒNG Ý với
+nhau.
+
+**Test đã dời: mười cái, trong đúng hai tệp**, và cả hai lần dời đều cùng một lý do — control theo cột
+đổi từ checkbox có `<Label>` là TIÊU ĐỀ HIỂN THỊ sang nút mắt gắn nhãn theo TÊN THÔ. Tám cái trong
+`TableColumnsSection.test.tsx`, hai cái trong `ChartExplore.tableColumns.test.tsx` của PR A. Một trong
+tám cái bị ĐẢO chứ không phải dịch: danh sách cũ hiện tiêu đề THAY CHO tên thô, hàng gộp hiện cả hai.
+Không test nào khác dời.
+
+**Kiểm tra trực tiếp trên deployment kind:** cả bốn bất đồng đều đã lái tay. Số 1 và số 2 do PR B ĐÓNG
+MỚI; số 3 và số 4 là của PR A và được KIỂM LẠI ở đây, riêng số 3 kiểm với thao tác sắp xếp trong panel
+— thứ chưa tồn tại lúc A ship. Cả 19 card parity render nguyên vẹn. Lần lái tay này tìm ra ba lỗi mà
+không test nào và không lần review nào thấy: hàng của card trên dashboard đều bị gắn nhãn TEXT (cột của
+card không mang kiểu), nhãn nhóm trong bảng chọn lặp lại nhãn của chính section, và vòng focus trên các
+mũi tên 10px chỉ là nét mảnh mặc định của trình duyệt.
+
 ---
 
 ## Cố ý nằm ngoài phạm vi
