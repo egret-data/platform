@@ -1,4 +1,5 @@
 import { Input } from "@/components/ui/input";
+import { DecimalInput } from "./DecimalInput";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -114,12 +115,12 @@ export function BoxplotDisplaySection({ config, onChange }: Props) {
       <div className="grid grid-cols-2 gap-2 border-t pt-2">
         <label className="space-y-1">
           <span className="text-xs text-muted-foreground">Goal value</span>
-          <Input className="h-8" type="number" placeholder="none" aria-label="Goal value"
-            value={config.goalValue ?? ""}
-            onChange={(e) => {
-              const n = Number(e.target.value);
-              onChange({ goalValue: e.target.value === "" || Number.isNaN(n) ? undefined : n });
-            }} />
+          {/* DecimalInput: a goal is a data value, and `type="number"` reports itself EMPTY for
+              as long as a decimal point is the last character, which fed `undefined` into the
+              config mid-word and lost the keystroke. See DecimalInput. */}
+          <DecimalInput className="h-8" placeholder="none" aria-label="Goal value"
+            value={config.goalValue}
+            onChange={(goalValue) => onChange({ goalValue })} />
         </label>
         <label className="space-y-1">
           <span className="text-xs text-muted-foreground">Goal label</span>

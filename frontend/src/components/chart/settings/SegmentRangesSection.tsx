@@ -1,6 +1,7 @@
 import { Plus, Trash2 } from "lucide-react";
 import { SERIES_PALETTE } from "@/components/chart/echarts/palette";
 import { Input } from "@/components/ui/input";
+import { DecimalInput } from "./DecimalInput";
 import { Button } from "@/components/ui/button";
 
 /** The widest shape both charts' segments fit into. The gauge's bounds are always numbers; the
@@ -67,14 +68,17 @@ export function SegmentRangesSection({
 
   /** An emptied bound is `null` (unbounded) where that is allowed, and rejected where it is not.
    * Never `0`: `Number("")` is `0`, so coercing would turn "clear this bound" into "from zero" —
-   * a different, silently wrong band. */
-  function patchBound(i: number, field: "min" | "max", text: string) {
-    if (text.trim() === "") {
+   * a different, silently wrong band.
+   *
+   * `DecimalInput` has already done the parsing and hands over `undefined` for an emptied box, so
+   * this no longer sees the half-written "4." that a `type="number"` field used to deliver as `""`
+   * — the reason it takes a number rather than the raw text now. */
+  function patchBound(i: number, field: "min" | "max", n: number | undefined) {
+    if (n === undefined) {
       if (nullableBounds) patch(i, field, null);
       return;
     }
-    const n = Number(text);
-    if (!Number.isNaN(n)) patch(i, field, n);
+    patch(i, field, n);
   }
 
   function addRange() {
@@ -118,22 +122,24 @@ export function SegmentRangesSection({
             value={s.color}
             onChange={(e) => patch(i, "color", e.target.value)}
           />
-          <Input
+          {/* DecimalInput, not `type="number"`: a band edge is a data value ("≥ 1701.5 is High"),
+              and a number input reports itself EMPTY for as long as a decimal point is the last
+              character typed — which arrived here as "the user cleared this bound". See
+              DecimalInput. */}
+          <DecimalInput
             aria-label={`range ${i + 1} min`}
-            type="number"
             className="h-7 w-16 shrink-0 text-sm"
             placeholder={nullableBounds ? "−∞" : undefined}
-            value={s.min ?? ""}
-            onChange={(e) => patchBound(i, "min", e.target.value)}
+            value={s.min ?? undefined}
+            onChange={(v) => patchBound(i, "min", v)}
           />
           <span className="shrink-0 text-xs text-muted-foreground">–</span>
-          <Input
+          <DecimalInput
             aria-label={`range ${i + 1} max`}
-            type="number"
             className="h-7 w-16 shrink-0 text-sm"
             placeholder={nullableBounds ? "∞" : undefined}
-            value={s.max ?? ""}
-            onChange={(e) => patchBound(i, "max", e.target.value)}
+            value={s.max ?? undefined}
+            onChange={(v) => patchBound(i, "max", v)}
           />
           <Input
             aria-label={`range ${i + 1} name`}

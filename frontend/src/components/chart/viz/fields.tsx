@@ -3,7 +3,7 @@ import { Trash2 } from "lucide-react";
 import { pruneUnits } from "@/components/chart/temporal-units";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { Label } from "@/components/ui/label";
-import { Input } from "@/components/ui/input";
+import { DecimalInput } from "@/components/chart/settings/DecimalInput";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 import { isParamsV2 } from "@/api/charts";
@@ -110,12 +110,15 @@ function FieldControl({ field, config, onChange, columns, metrics, unitRow }: {
     return (
       <div className="space-y-1">
         <Label htmlFor={`f-${field.id}`} className={LABEL_CLASS}>{field.label}</Label>
-        <Input id={`f-${field.id}`} type="number" className="h-8 text-sm" placeholder={field.placeholder}
-          value={(config[field.id] as number | undefined) ?? ""}
-          onChange={(e) => {
-            const n = Number(e.target.value);
-            set(e.target.value === "" || Number.isNaN(n) ? undefined : n);
-          }} />
+        {/* DecimalInput rather than `type="number"`. This descriptor's only user today is the
+            progress chart's Goal, and a target of 0.85 or 1250.5 is ordinary — but the rule is
+            about the KIND: a numeric field with no integer constraint has to be able to hold "4."
+            while it is being typed, which a number input cannot (it reports itself empty for
+            exactly that long). See DecimalInput. If a future field here is genuinely integer-only,
+            it needs its own descriptor kind, not this one. */}
+        <DecimalInput id={`f-${field.id}`} className="h-8 text-sm" placeholder={field.placeholder}
+          value={config[field.id] as number | undefined}
+          onChange={set} />
       </div>
     );
   }
