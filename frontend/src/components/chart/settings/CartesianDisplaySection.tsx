@@ -2,6 +2,7 @@ import type { CartesianConfig, CartesianViz } from "@/api/charts";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
+import { DecimalInput } from "./DecimalInput";
 import { resolveXScale, stackModeOf, stackModePatch, type StackMode } from "@/components/chart/echarts/options/cartesian";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
@@ -388,19 +389,23 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType }: Sectio
           }}
         />
       </div>
+      {/* The same pair ChartAxesSection offers the waterfall/box-plot/sankey side, and the same
+          reason for DecimalInput over `type="number"`: a bound is a data value, and a number input
+          goes EMPTY the instant a decimal point is the last character typed. Both copies are fixed
+          together — fixing one is how the defect came to live in two files. */}
       {kind !== "scatter" && (
         <div className="grid grid-cols-2 gap-2 border-t pt-2">
           <label className="space-y-1">
             <span className="text-xs text-muted-foreground">{valAx} min</span>
-            <Input className="h-8" type="number" placeholder="auto"
-              value={config.yMin ?? ""}
-              onChange={(e) => { const n = Number(e.target.value); onChange({ yMin: e.target.value === "" || Number.isNaN(n) ? undefined : n }); }} />
+            <DecimalInput className="h-8" placeholder="auto"
+              value={config.yMin}
+              onChange={(yMin) => onChange({ yMin })} />
           </label>
           <label className="space-y-1">
             <span className="text-xs text-muted-foreground">{valAx} max</span>
-            <Input className="h-8" type="number" placeholder="auto"
-              value={config.yMax ?? ""}
-              onChange={(e) => { const n = Number(e.target.value); onChange({ yMax: e.target.value === "" || Number.isNaN(n) ? undefined : n }); }} />
+            <DecimalInput className="h-8" placeholder="auto"
+              value={config.yMax}
+              onChange={(yMax) => onChange({ yMax })} />
           </label>
         </div>
       )}
@@ -451,11 +456,13 @@ export function FormatOptions({ config, onChange }: SectionProps) {
 export function GoalOptions({ config, onChange }: SectionProps) {
   return (
     <div className="grid grid-cols-2 gap-2 pt-2">
+      {/* A goal is a data value — a 4.5% conversion target, a 1250.75 revenue line — so it takes
+          DecimalInput for the same reason the axis bounds do. */}
       <label className="space-y-1">
         <span className="text-xs text-muted-foreground">Goal value</span>
-        <Input className="h-8" type="number" placeholder="none"
-          value={config.goalValue ?? ""}
-          onChange={(e) => { const n = Number(e.target.value); onChange({ goalValue: e.target.value === "" || Number.isNaN(n) ? undefined : n }); }} />
+        <DecimalInput className="h-8" placeholder="none"
+          value={config.goalValue}
+          onChange={(goalValue) => onChange({ goalValue })} />
       </label>
       <label className="space-y-1">
         <span className="text-xs text-muted-foreground">Goal label</span>

@@ -1,4 +1,3 @@
-import { useState } from "react";
 import type { PieConfig } from "@/api/charts";
 import { colorsForKeys } from "@/components/chart/echarts/keyColors";
 import { OTHER_SLICE_COLOR } from "@/components/chart/echarts/palette";
@@ -9,58 +8,12 @@ import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
 import { AutoToggle } from "./AutoToggle";
+import { DecimalInput } from "./DecimalInput";
 import { resolvePercentVisibility, DEFAULT_SLICE_THRESHOLD } from "@/components/chart/echarts/options/pie";
 
 // A Radix Select item cannot carry an empty value, so "leave it unset" needs a sentinel that
 // no real percentVisibility can collide with.
 const AUTO = "auto";
-
-/**
- * The "Group slices below" percentage, which keeps the number BEING TYPED into it.
- *
- * `type="number"` cannot hold a half-written decimal. The moment "4." exists the contents stop
- * being a valid number, so the browser reports `value === ""` (`validity.badInput`) — and the old
- * handler ran that through `Number("")`, which is 0, and stored it. Measured in Chrome, typing
- * 4 . 5 over the default went: "4" → **"0"** → "5". The dot wiped the field and the user who meant
- * 4.5 got 5. Clearing the box did the same thing and stayed there.
- *
- * 0 IS NOT "UNSET" HERE. It is the setting that switches the "Other" fold off entirely
- * (charts.ts: "0 = off"), so that was not a cosmetic slip — the control silently chose a
- * different chart, then displayed "0" with no route back to the default.
- *
- * So: a TEXT input, with the in-progress characters held here and a number committed only once
- * they parse. Empty means UNSET — `undefined`, which the pie resolves to DEFAULT_SLICE_THRESHOLD —
- * which is also what makes the default reachable again. The draft is dropped on blur so the box
- * settles on whatever the chart is actually using ("4." normalises to 4, empty back to 2.5).
- *
- * This is the shape Metabase's own `ChartSettingInputNumeric` uses for this very setting
- * (`pie.slice_threshold`): a `TextInput`, an `inputValue` state, and `""` → `onChange(undefined)`.
- */
-function SliceThresholdInput({ value, onChange }: { value: number | undefined; onChange: (v: number | undefined) => void }) {
-  // null = "not being edited"; show what is stored. Any string, including "", is a live draft.
-  const [draft, setDraft] = useState<string | null>(null);
-  return (
-    <Input
-      id="pz-threshold" aria-label="Group slices below"
-      // inputMode gets the numeric keypad on touch without handing the field back to the
-      // number-input value sanitiser that caused this.
-      type="text" inputMode="decimal"
-      className="h-7 w-16 text-sm"
-      placeholder={String(DEFAULT_SLICE_THRESHOLD)}
-      value={draft ?? String(value ?? DEFAULT_SLICE_THRESHOLD)}
-      onChange={(e) => {
-        const raw = e.target.value;
-        setDraft(raw);
-        if (raw.trim() === "") return onChange(undefined);
-        const n = Number(raw);
-        // Anything unparseable ("4.5.6", "abc") is left in the box and NOT committed — the last
-        // good number stays in the config, and blur puts it back on screen.
-        if (Number.isFinite(n)) onChange(n);
-      }}
-      onBlur={() => setDraft(null)}
-    />
-  );
-}
 
 function Toggle({ id, label, checked, onChange }: { id: string; label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -261,7 +214,21 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
       <div className="flex items-center justify-between gap-2">
         <Label htmlFor="pz-threshold" className="text-sm font-normal">Group slices below</Label>
         <div className="flex items-center gap-1">
-          <SliceThresholdInput
+          {/* The control this whole family now shares (DecimalInput). This box is where the
+              defect was first measured: 0 is not "unset" here, it is the setting that switches the
+              "Other" fold OFF entirely (charts.ts: "0 = off"), so `Number("")` reaching the config
+              mid-decimal did not blank a field, it silently chose a different chart and then
+              showed "0" with no route back to the default.
+
+              `unsetText` rather than a placeholder alone: this control displays the percentage the
+              pie is ACTUALLY folding at, so an empty box would be claiming there is no threshold
+              when there is one. Clearing it is still the only way back to that default, and now
+              lands there instead of on 0. */}
+          <DecimalInput
+            id="pz-threshold" aria-label="Group slices below"
+            className="h-7 w-16 text-sm"
+            placeholder={String(DEFAULT_SLICE_THRESHOLD)}
+            unsetText={String(DEFAULT_SLICE_THRESHOLD)}
             value={config.sliceThreshold}
             onChange={(sliceThreshold) => onChange({ sliceThreshold })}
           />

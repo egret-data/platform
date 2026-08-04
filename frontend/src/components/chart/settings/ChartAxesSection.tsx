@@ -1,4 +1,5 @@
 import { Input } from "@/components/ui/input";
+import { DecimalInput } from "./DecimalInput";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -155,23 +156,21 @@ export function ChartAxesSection<C extends AxesConfig>({ config, onChange, idPre
           onChange={(v) => onChange((v ? { yMin: undefined, yMax: undefined } : { yMin: 0 }) as Partial<C>)} />
         {!autoRange && (
           <div className="grid grid-cols-2 gap-2">
+            {/* DecimalInput, not `type="number"`: an axis bound is a data value, so "4." is a
+                state a user passes through on the way to 4.5 — and a number input reports itself
+                EMPTY for exactly as long as the point is the last character, which cleared the
+                bound mid-word and dropped the keystroke. See DecimalInput for the measurement. */}
             <label className="space-y-1">
               <span className="text-xs text-muted-foreground">Y min</span>
-              <Input className="h-8" type="number" placeholder="auto" aria-label="Y min"
-                value={config.yMin ?? ""}
-                onChange={(e) => {
-                  const n = Number(e.target.value);
-                  onChange({ yMin: e.target.value === "" || Number.isNaN(n) ? undefined : n } as Partial<C>);
-                }} />
+              <DecimalInput className="h-8" placeholder="auto" aria-label="Y min"
+                value={config.yMin}
+                onChange={(yMin) => onChange({ yMin } as Partial<C>)} />
             </label>
             <label className="space-y-1">
               <span className="text-xs text-muted-foreground">Y max</span>
-              <Input className="h-8" type="number" placeholder="auto" aria-label="Y max"
-                value={config.yMax ?? ""}
-                onChange={(e) => {
-                  const n = Number(e.target.value);
-                  onChange({ yMax: e.target.value === "" || Number.isNaN(n) ? undefined : n } as Partial<C>);
-                }} />
+              <DecimalInput className="h-8" placeholder="auto" aria-label="Y max"
+                value={config.yMax}
+                onChange={(yMax) => onChange({ yMax } as Partial<C>)} />
             </label>
           </div>
         )}

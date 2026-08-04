@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Hash, Calendar, Type, ChevronDown, type LucideIcon } from "lucide-react";
 import { isNumericType, isTemporalType, type ColumnFormat } from "../format-types";
 import { Input } from "@/components/ui/input";
+import { DecimalInput } from "./DecimalInput";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import {
@@ -163,10 +164,14 @@ export function FormatSection({
                       </Select>
                     </Field>
 
+                    {/* DecimalInput. A scale below 1 is the everyday use of this field — 0.001 to
+                        show thousands as units — and its leading "0." is exactly the state a
+                        `type="number"` box cannot hold: the browser reports it EMPTY, which arrived
+                        here as `undefined` and dropped the point. See DecimalInput. */}
                     <Field label="Multiply by a number">
-                      <Input type="number" className="h-8" placeholder="1"
-                        value={fmt.scale ?? ""}
-                        onChange={(e) => patch({ scale: e.target.value === "" ? undefined : Number(e.target.value) })} />
+                      <DecimalInput className="h-8" placeholder="1"
+                        value={fmt.scale}
+                        onChange={(scale) => patch({ scale })} />
                     </Field>
 
                     <div className="flex gap-2">

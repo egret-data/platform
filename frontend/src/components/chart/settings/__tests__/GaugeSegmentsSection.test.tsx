@@ -18,9 +18,14 @@ describe("GaugeSegmentsSection", () => {
     const expected = defaultGaugeSegments(60);
     render(<GaugeSegmentsSection segments={undefined} value={60} onChange={() => {}} />);
     expect(screen.getAllByLabelText(/^range \d+ min$/)).toHaveLength(3);
+    // Strings, not numbers: the bounds moved to `DecimalInput`, which is a TEXT input on purpose
+    // (a `type="number"` box reports itself empty for as long as a decimal point is the last
+    // character typed, so it cannot hold a half-written bound). `toHaveValue` returns the raw
+    // string for a text input and a coerced number for a number input, so this is the same
+    // assertion said in the new field's own terms — it is still the displayed bound.
     expected.forEach((seg, i) => {
-      expect(screen.getByLabelText(`range ${i + 1} min`)).toHaveValue(seg.min);
-      expect(screen.getByLabelText(`range ${i + 1} max`)).toHaveValue(seg.max);
+      expect(screen.getByLabelText(`range ${i + 1} min`)).toHaveValue(String(seg.min));
+      expect(screen.getByLabelText(`range ${i + 1} max`)).toHaveValue(String(seg.max));
     });
   });
 
