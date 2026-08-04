@@ -739,7 +739,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
     // that stops matching `WaterfallBuildConfig` is caught here rather than silently widening the
     // prop.
     const waterfallCfg: WaterfallBuildConfig = {
-      ...waterfall, columnSettings, metricTypes,
+      ...waterfall, preserveCategoryOrder, columnSettings, metricTypes,
       // The same line the cartesian branch above carries, from the same source, and it was missing
       // here: without it `buildWaterfallOption` cannot tell a month-bucketed step from a raw date,
       // so it drew "2026-01-01" for a step covering January and — after the axis became

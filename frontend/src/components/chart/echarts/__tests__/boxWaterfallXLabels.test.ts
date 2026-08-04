@@ -159,7 +159,9 @@ const CHARTS: Chart[] = [
     // appends a "Total" category of its own. It is drawn like any other, so it is measured like any
     // other — the counts below are the categories on the axis, not the rows in the result.
     rows: [["Widget", 10], ["Gadget", 20], ["Gizmo", 30]],
-    labels: ["Widget", "Gadget", "Gizmo", "Total"],
+    // SORTED, for the same reason the box plot's above is — a nominal step axis draws ascending now
+    // — with the appended "Total" left where the builder puts it: last, and not a step.
+    labels: ["Gadget", "Gizmo", "Widget", "Total"],
     crowdedRows: Array.from({ length: CROWDED - 1 }, (_, i) => [`Category ${i}`, i + 1]),
   },
 ];
