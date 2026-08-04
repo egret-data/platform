@@ -531,14 +531,34 @@ function datumY(d: unknown): unknown {
 }
 
 // ECharts series type for a metric under the active kind.
-/** A breakout series' value as it should READ — its column's format, if the column has one and the
- *  value is a real column value rather than an extraction unit's finished word ("Wed"). */
+/**
+ * A breakout series' value as it should READ — the same question `drawLabel` answers for the x-axis,
+ * about the other dimension, and now with the same three arms in the same order:
+ *   1. the column's own format, when it says something a date formatter would consult — and on a
+ *      BUCKETED series that bar is `specifiesDateRendering`, not mere existence, for the reason
+ *      `drawLabel` sets out: the panel mints `{column_title: "Month"}` objects, and a format silent
+ *      about dates would otherwise beat the period name with `formatDate`'s DEFAULTS;
+ *   2. otherwise the NAME OF THE PERIOD the bucket covers — "January 2026" for a month, not its
+ *      first day. This arm was MISSING, so a breakout by month drew `2026-01-01` in the legend,
+ *      in the tooltip's series names, and in the aria description that reads the first band's name;
+ *   3. otherwise the raw value. `periodName` is total and falls through to the raw string, so it IS
+ *      answer 3 as well.
+ * The early `isExtractUnit` return stays even though `periodName` refuses one too: an extraction
+ * unit's value is a finished word ("Wed") that a stored date format must not be allowed to re-read,
+ * and that is arm 1's guard, not arm 2's.
+ *
+ * The RAW value is untouched — `decorateSeries` keeps it on `__raw` because that is what a drill
+ * filters by, and it is keyed by raw name for colours too.
+ */
 function seriesDisplayName(cfg: CartesianBuildConfig, raw: string): string {
   const col = cfg.series;
   if (col == null || isExtractUnit(cfg.seriesUnit)) return raw;
   const fmt = cfg.columnSettings?.[col];
-  if (!fmt) return raw;
-  return formatValue(raw, cfg.seriesType ?? "varchar", fmt) || raw;
+  if (fmt != null && (namesAPeriod(cfg.seriesUnit) ? specifiesDateRendering(fmt) : true)) {
+    const out = formatValue(raw, cfg.seriesType ?? "varchar", fmt);
+    if (out !== "") return out;
+  }
+  return periodName(cfg.seriesUnit, raw);
 }
 
 /** What a series is DRAWN AS. "area" is not an ECharts series type — it is a line with a fill — so
@@ -1553,11 +1573,32 @@ function baseOption(
       kind: `${cfg.kind === "line" ? "Line" : cfg.kind === "area" ? "Area" : cfg.kind === "scatter" ? "Scatter" : cfg.kind === "combo" ? "Combo" : "Bar"} chart`,
       // No fallback to cfg.yMetrics[0]: with every series hidden there is no metric being
       // described, and naming one would tell a screen reader about a chart nobody can see.
+      //
+      // The series' DISPLAY name, which is what the legend shows — so this arm needs nothing of its
+      // own, and a breakout band named for its period (`seriesDisplayName`) is heard as one here too.
       metric: first?.name,
-      dimension: cfg.xAxis,
+      // The dimension AS THE AXIS TITLE NAMES IT, not the raw column name. `titleOf` is the same
+      // rename ladder `xTitle` is built from — but read past `showXLabel`, because hiding the title
+      // takes a label off the card and should not take the dimension out of the description with it:
+      // the bars are still there and still grouped by that column.
+      dimension: cfg.xLabel ?? titleOf(cfg.xAxis),
       seriesCount: described.length,
       format: (v) => fmtFor(cfg.yMetrics)(Number(v)),
-      points: first ? categories.map((c, i) => ({ name: String(c), value: first.data?.[i] })) : [],
+      // `drawnCategories`, NOT `categories.map(String)` — the raw bucket is what this enumerated
+      // until now, so a month-bucketed axis drew "January 2026" while a screen reader heard
+      // "2026-01-01". `ariaDescription`'s own header says it exists to state "what a sighted user
+      // sees", and `drawLabel` is the single closure that decides what that is (the fitter and the
+      // axis formatter already read it, for the same reason).
+      //
+      // THE TOOLTIP DOES NOT MOVE WITH IT, and that is deliberate rather than an oversight: its
+      // header is `params.axisValueLabel`, which ECharts builds from `axis.scale.getLabel`
+      // (`component/axisPointer/viewHelper.js`) — on an OrdinalScale that returns the `xAxis.data`
+      // entry verbatim and never consults `axisLabel.formatter` — so the tooltip does still read the
+      // raw bucket. `options/waterfall.ts`'s tooltip formatter carries the argument for leaving it
+      // there: a tooltip sits next to a drill and what a click FILTERS by is the raw bucket, so
+      // naming the period on one while the other filters on the value trades a cosmetic mismatch for
+      // a semantic one. A description has no click behind it, which is why it moves and that does not.
+      points: first ? drawnCategories.map((name, i) => ({ name, value: first.data?.[i] })) : [],
     }),
     color: undefined,
     // The product's own typeface, at the option root — this is the one builder that composes its
