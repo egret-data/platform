@@ -1044,9 +1044,21 @@ function decorateSeries(
     // rewrite the data afterwards, and "auto" is a question about the points that actually get
     // drawn.
     out.__markers = ln.markers ?? cfg.markers ?? "auto";
-    // Chart-wide only: `LineSeriesStyle` has no `missing`, because how a gap is read is a
-    // statement about the data, and two series disagreeing would make the chart say two
-    // things at once.
+    // CHART-WIDE ONLY, AND DELIBERATELY. `LineSeriesStyle` carries shape, style, size and markers
+    // but no `missing`, and this is a divergence from Metabase rather than a gap in the port:
+    // Metabase makes "Replace missing values with" a per-series setting, and setting one band of a
+    // four-band chart to Zero while the others interpolate is stored and drawn there with no
+    // warning, no badge, and nothing in the legend or tooltip to say so. (Measured on the live
+    // instance; an earlier version of this comment implied Metabase forbade it, which is false.)
+    //
+    // egret keeps it chart-wide because of what the setting DOES here rather than what Metabase
+    // does with it. The other four are appearance — a dashed line and a solid line are the same
+    // number drawn differently. `missing: "zero"` is not: it rewrites the data (see below), and
+    // that zero then counts in stack totals, in normalisation and in a trend fit. Per series, one
+    // band asserting "the absent value was 0" while the next asserts "there was no value" makes
+    // the stack total and the trend describe two different datasets, with nothing on the chart
+    // that could tell a reader which. That is a bad trade for the case it buys, so it stays one
+    // answer for the whole chart until something turns up that actually needs two.
     // A log axis has no zero, so filling with one cannot mean what it says — ECharts would drop
     // the point and break the line at exactly the place the user asked to have filled. Leaving
     // the gap is the honest version of "this value cannot be shown here".
