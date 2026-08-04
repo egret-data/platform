@@ -1763,4 +1763,38 @@ describe("a sort the query already applied is not applied again before drawing",
     expect(boxOption([{ field: "price", desc: true }])).toEqual(["Widget", "Gadget", "Doohickey", "Gizmo"]);
     expect(boxOption([])).toEqual(ALPHABETICAL);
   });
+
+  /**
+   * The waterfall reaches `sortCategories` by its own route too (`options/waterfall.ts` orders raw
+   * rows, because its running total builds in that order), so it needs wiring separately — and it
+   * IS offered the sort control: its descriptor passes `shared.orderby` through untouched, so
+   * `honoursOrderby` answers yes for it.
+   *
+   * The Total is the chart's own appended bar, not a step, so it is trimmed off before comparing.
+   */
+  it("applies the same rule to a waterfall, whose running total builds in that order", () => {
+    const wfOption = (orderby: { field: string; desc: boolean }[], rows: unknown[][]) => {
+      render(
+        <ChartRenderer
+          vizType="waterfall"
+          params={params({ waterfall: { xAxis: "category", metric: "revenue" }, spec: specWith(orderby) })}
+          columns={COLS}
+          rows={rows}
+        />,
+      );
+      return (mockLastOption as (s: { width: number; height: number }) => {
+        xAxis: { data: string[] }; series: { data: { value: number }[] }[];
+      })({ width: 640, height: 400 });
+    };
+    for (const rows of [ARRIVAL_A, ARRIVAL_B]) {
+      const authored = wfOption([{ field: "revenue", desc: true }], rows);
+      expect(authored.xAxis.data.slice(0, -1)).toEqual(rows.map((r) => r[0]));
+      expect(authored.series[1].data.slice(0, -1).map((d) => d.value)).toEqual(rows.map((r) => r[1]));
+
+      const unsorted = wfOption([], rows);
+      expect(unsorted.xAxis.data.slice(0, -1)).toEqual(ALPHABETICAL);
+      // The deltas follow their categories, so the cumulative sum is the sorted one.
+      expect(unsorted.series[1].data.slice(0, -1).map((d) => d.value)).toEqual([10, 30, 20, 40]);
+    }
+  });
 });

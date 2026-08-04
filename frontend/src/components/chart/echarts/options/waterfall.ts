@@ -1,7 +1,7 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { EChartsSize } from "../EChartsRenderer";
 import type { ColumnFormat } from "../../format-types";
-import { isNumericType, isTemporalType } from "../../format-types";
+import { sortCategories } from "./cartesian";
 import { formatValue, specifiesDateRendering } from "../../format";
 import { boundarySteps, namesAPeriod, periodName } from "../../temporal-period";
 import { estimatePlotWidth, fitXLabels, type XLabelFit } from "../axisLabelFit";
@@ -35,6 +35,17 @@ export interface WaterfallBuildConfig {
   logScale?: boolean;
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
+  /**
+   * The rows already arrive in an order the QUERY asked for, so leave a nominal step axis alone —
+   * the same field `CartesianBuildConfig` and `BoxplotBuildConfig` carry, read by the same
+   * `sortCategories`, and set by `ChartRenderer` for any chart whose stored spec has a non-empty
+   * `orderby`. A spec carrying `orderby: []` must NOT set it: arrival order is then the engine's
+   * whim, and on a waterfall that whim is arithmetic, not just arrangement.
+   *
+   * Unlike the funnel's bar mode there is no second setter here, because a waterfall has no
+   * `funnel.stepOrder` to be ranked by.
+   */
+  preserveCategoryOrder?: boolean;
   /**
    * The truncation unit the x column was BUCKETED by, from `params.spec.temporal_units` —
    * `CartesianBuildConfig.xAxisUnit` is the same field fed from the same place, and `ChartRenderer`
@@ -109,14 +120,47 @@ export function buildWaterfallOption(
   const runningTotals: number[] = [];
 
   if (xi != null && mi != null) {
-    // Order steps by the x column (temporal chronological, numeric ascending, nominal
-    // kept as-is) so the running total builds in a sensible sequence — Metabase parity.
+    /**
+     * Order the steps by the x column, through the SAME `sortCategories` the bar, row and box
+     * charts use — a nominal axis included, which is what this line used to leave in arrival order.
+     *
+     * A stored spec carries `orderby: []`, so arrival order is whatever the engine happened to
+     * return: measured across ten calls to one chart's data endpoint as
+     * `['Widget','Gadget','Doohickey','Gizmo']` on seven and
+     * `['Gizmo','Widget','Gadget','Doohickey']` on the other three (PR #394). Three consecutive
+     * page loads landed on the same one, which is how it survived being called deterministic.
+     *
+     * A WATERFALL HAS MORE AT STAKE THAN A BAR CHART, not less, and that is why it does not get the
+     * funnel's `preserveCategoryOrder` exemption: the running total below builds in this order, so
+     * an arbitrary one does not merely shuffle the bars, it changes which step is first and
+     * therefore every cumulative value drawn. The funnel is exempt because its steps arrive ranked
+     * by `funnel.stepOrder` and alphabetising a pipeline is worse than any engine order; nothing in
+     * `WaterfallConfig` states a step order that way — Metabase's waterfall has no such setting
+     * either, only its cartesian `graph.*` ones.
+     *
+     * METABASE DRAWS THE SORTED ORDER TOO, by the other layer: `getWaterfallChartModel` calls the
+     * shared `sortDataset`, which returns an ORDINAL dataset unchanged — but the dataset reaching it
+     * is already ascending by the breakout, because the query processor adds an implicit ascending
+     * `order-by` for every breakout column before the query runs
+     * (`add_implicit_clauses.clj`, `add-implicit-breakout-order-by`). So sorting here is parity with
+     * what Metabase renders, arrived at where egret can: its stored specs carry no such clause.
+     *
+     * `preserveCategoryOrder` is the case where an author asked for an order anyway. The waterfall
+     * descriptor passes `shared.orderby` through untouched, so PR #395's sort control IS offered on
+     * one; the engine then returns the rows in that order and `ChartRenderer` sets the flag. Sorting
+     * them again here is how a sort control ends up inert on screen while its own tests pass.
+     */
     const xType = columns[xi].type;
-    const ordered = isTemporalType(xType)
-      ? [...rows].sort((a, b) => Date.parse(String(a[xi])) - Date.parse(String(b[xi])))
-      : isNumericType(xType)
-        ? [...rows].sort((a, b) => Number(a[xi]) - Number(b[xi]))
-        : rows;
+    // One entry per distinct step, in arrival order, so `sortCategories` is handed the same list a
+    // bar chart's `distinct(xrows.map(...))` hands it — and rows sharing a step stay together
+    // whichever way it answers.
+    const byStep = new Map<unknown, unknown[][]>();
+    for (const r of rows) {
+      const at = byStep.get(r[xi]);
+      if (at) at.push(r); else byStep.set(r[xi], [r]);
+    }
+    const ordered = sortCategories([...byStep.keys()], xType, cfg.preserveCategoryOrder)
+      .flatMap((k) => byStep.get(k) ?? []);
     let running = 0;
     for (const r of ordered) {
       const delta = Number(r[mi]);
