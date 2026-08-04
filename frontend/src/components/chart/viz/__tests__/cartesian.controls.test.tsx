@@ -338,7 +338,7 @@ describe("cartesian controls are grouped and per-kind", () => {
         expect(within(x).getByLabelText(label), `${label} belongs under X-axis`).toBeInTheDocument();
         expect(within(y).queryByLabelText(label), `${label} must not be under Y-axis`).toBeNull();
       }
-      for (const label of ["Show Y label", "Y label", "Log scale", "Y axis lines and ticks", "Y tick marks", "Y min", "Y max"]) {
+      for (const label of ["Show Y label", "Y label", "Y scale", "Y axis lines and ticks", "Y tick marks", "Y min", "Y max"]) {
         expect(within(y).getByLabelText(label), `${label} belongs under Y-axis`).toBeInTheDocument();
         expect(within(x).queryByLabelText(label), `${label} must not be under X-axis`).toBeNull();
       }

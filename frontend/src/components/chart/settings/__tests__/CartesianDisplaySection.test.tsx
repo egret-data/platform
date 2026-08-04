@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { CartesianDisplaySection } from "../CartesianDisplaySection";
+import { AxisRangeOptions, CartesianDisplaySection } from "../CartesianDisplaySection";
+import { buildCartesianOption } from "@/components/chart/echarts/options/cartesian";
+import type { CartesianConfig } from "@/api/charts";
 
 describe("CartesianDisplaySection", () => {
   // Legend and "Shorten large numbers" both default from the data at render time (see
@@ -624,6 +626,58 @@ describe("CartesianDisplaySection — axis names follow the chart's orientation"
     expect(screen.getByLabelText("Y min")).toBeInTheDocument();
     expect(screen.getByLabelText("X axis lines and ticks")).toBeInTheDocument();
     expect(screen.getByLabelText("Show X label")).toBeInTheDocument();
+  });
+});
+
+/**
+ * The value axis' Scale row — Metabase's `graph.y_axis.scale`, as a select rather than the
+ * "Log scale" switch cartesian used to carry. The waterfall/box-plot tab already renders one
+ * (`ChartAxesSection`); two panels offering the same stored setting through two different
+ * controls is how the same key comes to read differently depending on which chart you opened.
+ *
+ * Asserted through to the BUILT OPTION, not stopped at the emitted patch: a select that emits
+ * `{ logScale: true }` into a builder that ignored it would still be a Scale row that changes
+ * nothing on screen, and the patch-only assertion could not tell the difference.
+ */
+describe("AxisRangeOptions — the value axis' Scale select", () => {
+  const cols = [{ name: "x", type: "varchar" }, { name: "rev", type: "double" }];
+  const rows = [["a", 1], ["b", 10]];
+
+  const axisTypeAfterChoosing = async (from: CartesianConfig, option: string) => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<AxisRangeOptions kind="bar" config={from} onChange={onChange} />);
+    await user.click(screen.getByLabelText("Y scale"));
+    await user.click(await screen.findByRole("option", { name: option }));
+    const patch = onChange.mock.calls.at(-1)![0] as Partial<CartesianConfig>;
+    const built = buildCartesianOption(cols, rows, {
+      kind: "bar", xAxis: "x", ...from, ...patch,
+    }) as { yAxis: { type: string } };
+    return built.yAxis.type;
+  };
+
+  it("Log builds a log value axis", async () => {
+    expect(await axisTypeAfterChoosing({ yMetrics: ["rev"] }, "Log")).toBe("log");
+  });
+
+  it("Linear builds a plain value axis", async () => {
+    expect(await axisTypeAfterChoosing({ yMetrics: ["rev"], logScale: true }, "Linear")).toBe("value");
+  });
+
+  /* Metabase's third option, Power, is deliberately absent — see the comment on the control. */
+  it("offers exactly Linear and Log", async () => {
+    const user = userEvent.setup();
+    render(<AxisRangeOptions kind="bar" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    await user.click(screen.getByLabelText("Y scale"));
+    expect((await screen.findAllByRole("option")).map((o) => o.textContent)).toEqual(["Linear", "Log"]);
+  });
+
+  /** A horizontal chart's measure runs across, and every other row on this control already
+   *  renames itself accordingly. */
+  it("names itself after the axis the reader sees on a row chart", () => {
+    render(<AxisRangeOptions kind="row" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    expect(screen.getByLabelText("X scale")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Y scale")).toBeNull();
   });
 });
 
