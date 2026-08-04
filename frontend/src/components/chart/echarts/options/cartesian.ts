@@ -144,7 +144,11 @@ const MARKER_AUTO_MAX = 30;
  * data line that weighs the same as the chrome around it undercuts the point of drawing it. */
 const LINE_WIDTHS = { S: 1.5, M: CHART_THEME.lineWidth, L: 4 } as const;
 
-interface SeriesLike { name?: string; data: (number | null)[]; yAxisIndex?: number; itemStyle?: { color?: string }; __trend?: boolean; __total?: boolean; __metric?: string; __markers?: "auto" | "on" | "off" }
+interface SeriesLike { name?: string; data: (number | null)[]; yAxisIndex?: number; itemStyle?: { color?: string }; __trend?: boolean; __total?: boolean;
+  /** The series' RAW column value, behind the display label `name` carries. Set by `decorateSeries`
+   *  on every series it builds; absent on the overlays built after it (trend, stack total), which
+   *  are never matched against a stored setting. See `settingsKey`. */
+  __raw?: string; __metric?: string; __markers?: "auto" | "on" | "off" }
 
 /**
  * Markers stop reading as points and start reading as a lumpy line once they touch. Applied after
@@ -233,19 +237,52 @@ function applySeriesOrder(series: SeriesLike[], cfg: CartesianBuildConfig): Seri
   const hidden = cfg.hiddenSeries;
   const order = cfg.seriesOrder;
   if (!hidden?.length && !order?.length) return series;
-  const out = hidden?.length ? series.filter((s) => !hidden.includes(s.name ?? "")) : [...series];
+  const out = hidden?.length ? series.filter((s) => !hidden.includes(settingsKey(s))) : [...series];
   if (order?.length) {
     const rank = new Map(order.map((n, i) => [n, i]));
     // A name that is no longer plotted simply ranks nowhere; anything the stored order does
     // not mention keeps its natural position after the ones it does.
     out.sort(
       (a, b) =>
-        (rank.get(a.name ?? "") ?? Number.MAX_SAFE_INTEGER) -
-        (rank.get(b.name ?? "") ?? Number.MAX_SAFE_INTEGER),
+        (rank.get(settingsKey(a)) ?? Number.MAX_SAFE_INTEGER) -
+        (rank.get(settingsKey(b)) ?? Number.MAX_SAFE_INTEGER),
     );
   }
   return out;
 }
+
+/**
+ * The name `hiddenSeries` / `seriesOrder` are WRITTEN AGAINST — the raw column value, not the label
+ * on screen.
+ *
+ * WHY THIS EXISTS. `applySeriesOrder` runs after `decorateSeries`, which has already replaced
+ * `name` with the DISPLAY label: the user's rename (`seriesLabels`), the period a bucket covers
+ * ("January 2026" for a raw `2026-01-01`), or the series column's own number/date format. The
+ * settings panel keys on the raw value at every step — `cartesianSeriesNames` reads it off the
+ * result, `SeriesListSection` stores back the name it was handed — so matching on `name` meant the
+ * Show switch and the reorder arrows went silently inert the moment a chart was renamed, bucketed
+ * or formatted. The switch moved, the config stored the value, and the band stayed on screen.
+ *
+ * `decorateSeries` had already met this bug once, from the other side, and its comment says so:
+ * "Filtering by the display label found nothing the moment a series was renamed — the rename
+ * silently broke the click." `__raw` was added for the DRILL then. This function was never updated
+ * to read it, so the same rename went on breaking the hide for as long as `__raw` had existed.
+ *
+ * `??` AND NOT `||`, deliberately, because the two differ on a `__raw` of `""` and the panel's
+ * vocabulary decides which is right. `viz/__tests__/cartesian.controls.test.tsx` keys its colour
+ * comparison with `||` for a stated reason — "an un-broken-out scatter's one group is named `""`
+ * and is labelled with its y-metric, which is the key both the builder and this panel use". That
+ * reason is about `scatterXY`'s series, and `scatterXY` returns from `buildCartesianOption` before
+ * this function is ever called (it also never calls it itself — see the note on `scatterXY`), so
+ * none of them reach here. Every series that DOES reach here comes from `decorateSeries`, where
+ * `__raw` is the panel's key unconditionally: a metric is listed under its own name and a null or
+ * empty breakout value is listed as `(empty)` by both sides (`groupName`, `cartesianSeriesNames`).
+ * On those paths an empty `__raw` could only be a metric literally named `""`, which the panel
+ * would also list as `""` — so `??` matches it and `||` would fall through to the label and miss.
+ *
+ * The `?? ""` tail is for `SeriesLike.name` being optional in the type; nothing built here omits it.
+ */
+const settingsKey = (s: SeriesLike): string => s.__raw ?? s.name ?? "";
 
 /**
  * Whether this chart stacks, resolving the default its KIND carries.
