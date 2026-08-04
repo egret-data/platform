@@ -13,7 +13,41 @@ function applySeparators(s: string, separators?: string): string {
   return s.replace(/,/g, " ").replace(/\./g, dec).replace(/ /g, thou ?? "");
 }
 
+/**
+ * The stored `decimals`, made safe to hand to `Intl.NumberFormat` / `Number#toExponential`.
+ *
+ * BOTH APIS THROW OUTSIDE 0..100 — `RangeError: …FractionDigits value is out of range`, naming
+ * whichever option the branch set first — and `formatNumber` passed the stored number straight in
+ * on all three of its branches. That throw is not cosmetic: `baseOption` formats the widest axis
+ * tick while measuring the gutter, so it fires during the OPTION BUILD, inside React's render, and
+ * `ChartErrorBoundary` replaces the whole card with "Couldn't render this chart:
+ * maximumFractionDigits value is out of range" — measured in the browser on a bar chart whose
+ * revenue column was given -1. A chart SAVED that way is un-renderable on every load afterwards,
+ * until someone edits the stored JSON.
+ *
+ * `FormatSection` now clamps what a user can type, and that is the fix for new edits — but it
+ * cannot reach a chart already saved, a `column_settings` written by anything else, or a value the
+ * API accepted (chart `params` validation checks the SHAPE of `column_settings`, not this field's
+ * range). So the formatter refuses to be the thing that takes a card down, which is the same rule
+ * the scatter's `sizeOf` states for the same reason: it runs per label on whatever the query and
+ * the stored settings happen to hold, and anything thrown there is invisible and total.
+ *
+ * WHAT IT DOES NOT DO: round. Intl TRUNCATES a fractional count itself (`2.5` formats to 2 digits),
+ * measured, and that is not a defect — so `Math.trunc` keeps that behaviour rather than quietly
+ * changing what a legal-but-odd stored value renders as. `NaN` is out of range to Intl too and
+ * lands on 0, the same answer as a negative.
+ */
+const MAX_FRACTION_DIGITS = 100;
+function safeDecimals(fmt: ColumnFormat): number | undefined {
+  if (typeof fmt.decimals !== "number") return undefined;
+  if (!Number.isFinite(fmt.decimals)) return 0;
+  return Math.min(MAX_FRACTION_DIGITS, Math.max(0, Math.trunc(fmt.decimals)));
+}
+
 function formatNumber(value: number, fmt: ColumnFormat): string {
+  // Read ONCE, here, and every branch below uses this rather than `fmt.decimals` — the guard has to
+  // hold on all three, and three separate calls is three chances for the next branch to forget.
+  const decimals = safeDecimals(fmt);
   let n = value;
   if (typeof fmt.scale === "number") n *= fmt.scale;
 
@@ -22,11 +56,11 @@ function formatNumber(value: number, fmt: ColumnFormat): string {
 
   let out: string;
   if (fmt.number_style === "scientific") {
-    out = abs.toExponential(fmt.decimals ?? 2);
+    out = abs.toExponential(decimals ?? 2);
   } else if (fmt.compact) {
     const opts: Intl.NumberFormatOptions = {
       notation: "compact",
-      maximumFractionDigits: fmt.decimals ?? 1,
+      maximumFractionDigits: decimals ?? 1,
     };
     // Compacting shortens the number; it should not also strip what the number MEANS.
     if (fmt.number_style === "currency") {
@@ -47,9 +81,9 @@ function formatNumber(value: number, fmt: ColumnFormat): string {
     } else if (style === "percent") {
       opts.style = "percent";
     }
-    if (typeof fmt.decimals === "number") {
-      opts.minimumFractionDigits = fmt.decimals;
-      opts.maximumFractionDigits = fmt.decimals;
+    if (decimals != null) {
+      opts.minimumFractionDigits = decimals;
+      opts.maximumFractionDigits = decimals;
     } else {
       opts.maximumFractionDigits = style === "currency" ? 2 : 3;
     }

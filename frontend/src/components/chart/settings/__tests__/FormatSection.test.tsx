@@ -180,3 +180,74 @@ describe("FormatSection — settings that had no control", () => {
     expect(screen.getByLabelText("Separator style")).toBeInTheDocument();
   });
 });
+
+/**
+ * DECIMAL PLACES CANNOT BE ALLOWED TO STORE A VALUE THAT TAKES THE CHART DOWN.
+ *
+ * `formatValue` hands this straight to `Intl.NumberFormat` as both `minimumFractionDigits` and
+ * `maximumFractionDigits`, which throw a `RangeError` outside 0..100 — and the throw fires during
+ * the OPTION BUILD (`baseOption` formats the widest axis tick to size the gutter), so the card is
+ * replaced by `ChartErrorBoundary`'s message rather than showing a wrong number. See
+ * `echarts/__tests__/decimalsOutOfRange.echarts.test.ts` for the measured table and the stack.
+ *
+ * `min={0}` on the input does NOT prevent this. PR #398 established in a real Chrome probe that
+ * `min`/`max`/`step` only decide `validity.*` flags at form submission and block no keystroke, so
+ * the handler has to do the clamping — which is exactly what the pie's own Decimal places
+ * (`PieDisplaySection`) has always done, and this box is the one that never copied it.
+ *
+ * Driven with `fireEvent.change` rather than `userEvent.type`: what is under test is what the
+ * handler stores for a given input value, and `type="number"` inputs report an intermediate `-`
+ * as `""`, which would make a character-by-character typing test assert about the browser's
+ * sanitiser instead of about this handler.
+ */
+describe("FormatSection — Decimal places cannot store a value Intl rejects", () => {
+  const openDecimals = (value: Record<string, ColumnFormat> = {}, onChange = vi.fn()) => {
+    render(<FormatSection columns={[{ name: "rev", type: "double" }]} value={value} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: /rev/ }));
+    return { input: screen.getByLabelText("Decimal places"), onChange };
+  };
+
+  it("clamps a negative to 0 rather than storing the RangeError", () => {
+    const { input, onChange } = openDecimals();
+    fireEvent.change(input, { target: { value: "-1" } });
+    expect(onChange).toHaveBeenCalledWith({ rev: { decimals: 0 } });
+  });
+
+  it("clamps above the maximum the box offers", () => {
+    const { input, onChange } = openDecimals();
+    fireEvent.change(input, { target: { value: "101" } });
+    expect(onChange).toHaveBeenCalledWith({ rev: { decimals: 10 } });
+  });
+
+  it("truncates a fractional count instead of storing it", () => {
+    const { input, onChange } = openDecimals();
+    fireEvent.change(input, { target: { value: "2.7" } });
+    expect(onChange).toHaveBeenCalledWith({ rev: { decimals: 2 } });
+  });
+
+  it.each([["3", 3], ["0", 0], ["10", 10]])("still stores a legal %s untouched", (typed, stored) => {
+    const { input, onChange } = openDecimals();
+    fireEvent.change(input, { target: { value: typed } });
+    expect(onChange).toHaveBeenCalledWith({ rev: { decimals: stored } });
+  });
+
+  // Clearing the box is the only way back to "Auto" — a clamp that read `Number("")` as 0 would
+  // take that away and pin the column to whole numbers instead. Rendered with a stored value so
+  // the input is genuinely non-empty first: `fireEvent.change` to the value already on screen
+  // dispatches nothing at all, and the assertion would pass without the handler running.
+  it("still clears back to Auto", () => {
+    const { input, onChange } = openDecimals({ rev: { decimals: 3 } });
+    expect(input).toHaveValue(3);
+    fireEvent.change(input, { target: { value: "" } });
+    expect(onChange).toHaveBeenCalledWith({ rev: { decimals: undefined } });
+  });
+
+  // The bounds the browser DOES enforce — the spinner arrows and the mouse wheel step within
+  // them — declared on the element so the control agrees with its own handler.
+  it("declares the bounds it clamps to", () => {
+    const { input } = openDecimals();
+    expect(input).toHaveAttribute("min", "0");
+    expect(input).toHaveAttribute("max", "10");
+    expect(input).toHaveAttribute("step", "1");
+  });
+});

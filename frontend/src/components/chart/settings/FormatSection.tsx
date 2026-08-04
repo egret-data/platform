@@ -143,10 +143,36 @@ export function FormatSection({
                       </div>
                     )}
 
+                    {/* CLAMPED IN THE HANDLER, not by `min`/`max`. `formatValue` passes this
+                        straight to `Intl.NumberFormat` as both `minimumFractionDigits` and
+                        `maximumFractionDigits`, which throw a RangeError outside 0..100 — and the
+                        throw lands during the OPTION BUILD (`baseOption` formats the widest axis
+                        tick to size the gutter), so a typed `-1` did not draw a wrong number, it
+                        replaced the whole card with `ChartErrorBoundary`'s message, and did so
+                        again on every load of a chart saved that way.
+
+                        `min={0}` had been here all along and stopped none of it: PR #398 measured
+                        in a real Chrome probe that `min`/`max`/`step` only set `validity.*` flags
+                        at form submission and block no keystroke. They stay because the spinner
+                        arrows and the wheel DO respect them, so the element now agrees with its
+                        own handler instead of contradicting it.
+
+                        The bounds and the clamp are the pie's, copied rather than re-derived
+                        (`PieDisplaySection`'s Decimal places, which has done this since it was
+                        written): 0..10, truncating, and an empty box still means Auto. Ten rather
+                        than Intl's own 100 because this is a Metabase-parity precision box, not an
+                        arbitrary-precision one — `format.ts` allows the full 0..100 for a value
+                        stored by anything else, so the ceiling here narrows what the panel offers
+                        without making a legal saved value unrenderable. */}
                     <Field label="Decimal places">
-                      <Input type="number" min={0} className="h-8" placeholder="Auto"
+                      <Input type="number" min={0} max={10} step={1} className="h-8" placeholder="Auto"
                         value={fmt.decimals ?? ""}
-                        onChange={(e) => patch({ decimals: e.target.value === "" ? undefined : Number(e.target.value) })} />
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          if (raw === "") return patch({ decimals: undefined });
+                          const n = Number(raw);
+                          patch({ decimals: Number.isNaN(n) ? undefined : Math.min(10, Math.max(0, Math.trunc(n))) });
+                        }} />
                     </Field>
 
                     {/* `scale` and `number_separators` were both honoured by `formatValue` and had
