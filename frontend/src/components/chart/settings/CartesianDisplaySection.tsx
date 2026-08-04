@@ -3,12 +3,25 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { DecimalInput } from "./DecimalInput";
-import { resolveXScale, stackModeOf, stackModePatch, type StackMode } from "@/components/chart/echarts/options/cartesian";
+import {
+  resolveXScale, seriesDisplayFor, stackModeOf, stackModePatch, type StackMode,
+} from "@/components/chart/echarts/options/cartesian";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
 import { AutoToggle } from "./AutoToggle";
-import { xTicksChoiceOf, xTicksPatch, type XTicksChoice } from "./ChartAxesSection";
+import { AxisGroup, xTicksChoiceOf, xTicksPatch, type XTicksChoice } from "./ChartAxesSection";
+
+/**
+ * Which half of the Axes tab a row belongs to. The CATEGORY axis is the dimension's and the VALUE
+ * axis the measure's — named that way rather than x/y because a horizontal chart swaps which letter
+ * each of them wears, and these rows are already relabelled accordingly.
+ *
+ * A control given no scope renders every row it owns, which is what a caller that is not laying the
+ * tab out by axis wants.
+ */
+type AxisScope = "category" | "value";
+const scoped = (scope: AxisScope | undefined, s: AxisScope) => scope == null || scope === s;
 
 function Toggle({ id, label, checked, onChange }: { id: string; label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -45,20 +58,52 @@ interface SectionProps {
  * mapping has folded it in.
  */
 
-export function SeriesOptions({ kind, config, onChange }: SectionProps & { seriesNames?: string[] }) {
+/** Metabase's `STACKABLE_SERIES_DISPLAY_TYPES` (shared/settings/cartesian-chart.ts) — the displays a
+ *  stack can be built out of. A line is not one of them, which is what makes a combo's count differ
+ *  from its series count. */
+const STACKABLE_DISPLAYS = new Set(["bar", "area"]);
+
+export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionProps & {
+  /** Every series the chart draws, from the last result — `cartesianSeriesNames`. Only the caller
+   *  can know it, because with a breakout the count is a property of the DATA, not of the config.
+   *  Falls back to the metrics, which is exactly what that function returns without a breakout. */
+  seriesNames?: string[];
+}) {
   // Combo stacks too — Metabase's own per-series display setting hides itself on
   // `stackable.stack_type`, which only means anything because a combo can reach that state there.
   // egret excluded combo, so the guard that hides the display select was unreachable and a combo
   // could not stack at all.
   const canStack = kind === "bar" || kind === "row" || kind === "area" || kind === "combo";
   const isLineish = kind === "line" || kind === "area";
+  /**
+   * Metabase's `getHidden` on `stackable.stack_type` (lib/settings/graph.ts): count the series whose
+   * display is stackable and hide the control at `<= 1`. A lone bar has nothing to stack against, so
+   * "Don't stack / Stack / Stack — 100%" reads as a choice while being none.
+   *
+   * `seriesDisplayFor` is the BUILDER's own per-series display, called rather than restated — it is
+   * what decides that a fresh combo draws its first metric as a line, and so that two metrics leave
+   * one stackable series. A second copy of that default here is how the panel comes to offer a
+   * stacking control for a chart the renderer will not stack.
+   *
+   * THE ROW CHART IS EXEMPT, and that is Metabase's rule too rather than an egret exception: the row
+   * chart does not spread `STACKABLE_SETTINGS`. It declares its own `stackable.stack_type`
+   * (visualizations/RowChart/utils/settings-definitions.ts) with NO `getHidden` at all, so a
+   * single-series row offers Stacking there. ("row" is also absent from
+   * `STACKABLE_SERIES_DISPLAY_TYPES`, so borrowing the cartesian rule would hide the control on
+   * every row chart, not just the single-series ones.)
+   */
+  const names = seriesNames ?? config.yMetrics;
+  const stackableCount = names.filter(
+    (n, i) => STACKABLE_DISPLAYS.has(seriesDisplayFor(kind, n, i, config.seriesTypes)),
+  ).length;
+  const showStacking = canStack && (kind === "row" || stackableCount > 1);
   return (
     <div className="space-y-2.5">
       {/* Three mutually exclusive states, offered as one choice — Metabase's own Stacking control.
           Two switches ("Stacked", then "100% stacked" appearing under it) made the reader discover
           the third state by turning the first one on, and let the panel store `normalized` while
           `stacked` was off: a combination no control could show and the renderer ignored. */}
-      {canStack && (
+      {showStacking && (
         <div className="space-y-1">
           <Label className="text-sm font-normal">Stacking</Label>
           <Select value={stackModeOf({ kind, stacked: config.stacked, normalized: config.normalized })}
@@ -72,7 +117,10 @@ export function SeriesOptions({ kind, config, onChange }: SectionProps & { serie
           </Select>
         </div>
       )}
-      {canStack && stackModeOf({ kind, stacked: config.stacked, normalized: config.normalized }) === "stacked" && (
+      {/* Goes with the control it configures: with stacking itself not on offer there is no stack
+          for a total to sit on top of. Metabase gates `graph.show_stack_values` on the stack type
+          for the same reason. */}
+      {showStacking && stackModeOf({ kind, stacked: config.stacked, normalized: config.normalized }) === "stacked" && (
         <Toggle id="cz-stacktotal" label="Stack totals" checked={!!config.showStackTotal} onChange={(v) => onChange({ showStackTotal: v })} />
       )}
       {isLineish && (
@@ -127,11 +175,15 @@ export function SeriesOptions({ kind, config, onChange }: SectionProps & { serie
 }
 
 /** X-axis scale, the left/right axis split for multi-metric charts, and the axis titles. */
-export function AxesOptions({ kind, config, onChange, xColumnType }: SectionProps & {
+export function AxesOptions({ kind, config, onChange, xColumnType, scope }: SectionProps & {
   /** The SQL type of the result column on `config.xAxis` — see the identical prop on
    *  `AxisRangeOptions`. Here it decides what the X-axis-scale trigger READS on a chart whose scale
    *  was resolved rather than stored. */
   xColumnType?: string;
+  /** Render only the rows belonging to one axis, so `CartesianAxesTab` can lay the two out under
+   *  their own headings. No row MOVES between the controls to make that work — each one still owns
+   *  exactly the settings it always did. */
+  scope?: AxisScope;
 }) {
   // On a horizontal chart the CATEGORY axis is the vertical one, so naming these controls after
   // the config keys (`xLabel` is the category axis, `yLabel` the value axis) prints them backwards
@@ -142,6 +194,25 @@ export function AxesOptions({ kind, config, onChange, xColumnType }: SectionProp
   const valAx = horiz ? "X" : "Y";   // the measure axis
   return (
     <div className="space-y-2.5">
+      {/* Metabase pairs each axis title with its own Show label switch. Kept apart from the text so
+          hiding a title does not make the user retype it to bring it back — with the text alone as
+          the control, "off" meant an empty box and the wording was gone for good.
+          The two titles lead their axis' block, as they do in Metabase (`graph.*_axis.labels_enabled`
+          and `.title_text` carry index 1 and 2 within their group). */}
+      {scoped(scope, "category") && (
+        <div className="space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="cz-xlabel" className="text-sm font-normal">{catAx} label</Label>
+            <Switch id="cz-show-xlabel" aria-label={`Show ${catAx} label`} checked={config.showXLabel !== false}
+              onCheckedChange={(v) => onChange({ showXLabel: v ? undefined : false })} />
+          </div>
+          {config.showXLabel !== false && (
+            <Input id="cz-xlabel" aria-label={`${catAx} label`} className="h-8" placeholder="Auto"
+              value={config.xLabel ?? ""} onChange={(e) => onChange({ xLabel: e.target.value })} />
+          )}
+        </div>
+      )}
+
       {/*
         WHY A SCATTER NOW GETS THIS SELECT. It was excluded while the exclusion was inert: a scatter
         always drew a category axis, which is what the hidden select would have said, so hiding it
@@ -160,7 +231,7 @@ export function AxesOptions({ kind, config, onChange, xColumnType }: SectionProp
         `xScale` at all. Offering the select there would store a setting nothing consults — the very
         defect the rotation rows below are greyed out to avoid.
       */}
-      {(kind !== "scatter" || config.xMetric == null) && kind !== "row" && !config.horizontal && (
+      {scoped(scope, "category") && (kind !== "scatter" || config.xMetric == null) && kind !== "row" && !config.horizontal && (
         <div className="flex items-center justify-between gap-2">
           <Label className="text-sm font-normal">X axis scale</Label>
           {/* The RESOLVED scale, not the stored one. Reading `config.xScale` here would print
@@ -179,7 +250,21 @@ export function AxesOptions({ kind, config, onChange, xColumnType }: SectionProp
         </div>
       )}
 
-      {config.yMetrics.length > 1 && !config.horizontal && kind !== "row" && (
+      {scoped(scope, "value") && (
+        <div className="space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <Label htmlFor="cz-ylabel" className="text-sm font-normal">{valAx} label</Label>
+            <Switch id="cz-show-ylabel" aria-label={`Show ${valAx} label`} checked={config.showYLabel !== false}
+              onCheckedChange={(v) => onChange({ showYLabel: v ? undefined : false })} />
+          </div>
+          {config.showYLabel !== false && (
+            <Input id="cz-ylabel" aria-label={`${valAx} label`} className="h-8" placeholder="Auto"
+              value={config.yLabel ?? ""} onChange={(e) => onChange({ yLabel: e.target.value })} />
+          )}
+        </div>
+      )}
+
+      {scoped(scope, "value") && config.yMetrics.length > 1 && !config.horizontal && kind !== "row" && (
         <div className="space-y-1.5 border-t pt-2">
           <div className="text-xs text-muted-foreground">Y axis</div>
           {/* "Auto" is the resting state, not "Left". With the automatic split turned on and nothing
@@ -211,33 +296,6 @@ export function AxesOptions({ kind, config, onChange, xColumnType }: SectionProp
         </div>
       )}
 
-      {/* Metabase pairs each axis title with its own Show label switch. Kept apart from the text so
-          hiding a title does not make the user retype it to bring it back — with the text alone as
-          the control, "off" meant an empty box and the wording was gone for good. */}
-      <div className="space-y-2 border-t pt-2">
-        <div className="space-y-1">
-          <div className="flex items-center justify-between gap-2">
-            <Label htmlFor="cz-xlabel" className="text-sm font-normal">{catAx} label</Label>
-            <Switch id="cz-show-xlabel" aria-label={`Show ${catAx} label`} checked={config.showXLabel !== false}
-              onCheckedChange={(v) => onChange({ showXLabel: v ? undefined : false })} />
-          </div>
-          {config.showXLabel !== false && (
-            <Input id="cz-xlabel" aria-label={`${catAx} label`} className="h-8" placeholder="Auto"
-              value={config.xLabel ?? ""} onChange={(e) => onChange({ xLabel: e.target.value })} />
-          )}
-        </div>
-        <div className="space-y-1">
-          <div className="flex items-center justify-between gap-2">
-            <Label htmlFor="cz-ylabel" className="text-sm font-normal">{valAx} label</Label>
-            <Switch id="cz-show-ylabel" aria-label={`Show ${valAx} label`} checked={config.showYLabel !== false}
-              onCheckedChange={(v) => onChange({ showYLabel: v ? undefined : false })} />
-          </div>
-          {config.showYLabel !== false && (
-            <Input id="cz-ylabel" aria-label={`${valAx} label`} className="h-8" placeholder="Auto"
-              value={config.yLabel ?? ""} onChange={(e) => onChange({ yLabel: e.target.value })} />
-          )}
-        </div>
-      </div>
     </div>
   );
 }
@@ -251,11 +309,13 @@ export function OrientationOption({ kind, config, onChange }: SectionProps) {
 }
 
 /** Manual axis bounds and log scale — not meaningful on a scatter's continuous axes. */
-export function AxisRangeOptions({ kind, config, onChange, xColumnType }: SectionProps & {
+export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }: SectionProps & {
   /** The SQL type of the result column on `config.xAxis`, which decides whether the x is drawn as a
    *  value axis when no scale is stored (`resolveXScale`). Optional: a caller with no result yet
    *  simply cannot know, and `valueX` below says what it does with that. */
   xColumnType?: string;
+  /** Render only one axis' rows — see the identical prop on `AxesOptions`. */
+  scope?: AxisScope;
 }) {
   // On a horizontal chart the CATEGORY axis is the vertical one, so naming these controls after
   // the config keys (`xLabel` is the category axis, `yLabel` the value axis) prints them backwards
@@ -285,7 +345,7 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType }: Sectio
     || (kind === "scatter" && config.xMetric != null);
   return (
     <div className="space-y-2.5">
-      {kind !== "scatter" && <Toggle id="cz-log" label="Log scale" checked={!!config.logScale} onChange={(v) => onChange({ logScale: v })} />}
+      {scoped(scope, "value") && kind !== "scatter" && <Toggle id="cz-log" label="Log scale" checked={!!config.logScale} onChange={(v) => onChange({ logScale: v })} />}
       {/* Metabase's `graph.x_axis.axis_enabled`, a FIVE-choice key of which this select offers four
           — Hide / Show / Rotate 45° / Rotate 90° — projected onto `xAxisTicks` + `xLabelRotation`
           through the SHARED mapping the waterfall/box-plot tab uses (`xTicksChoiceOf`/
@@ -313,6 +373,7 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType }: Sectio
 
           Stored as `false` only when turned off, so a chart saved before these existed keeps
           drawing both. */}
+      {scoped(scope, "category") && (
       <div className="space-y-1">
         <div className="flex items-center justify-between gap-2">
           <Label htmlFor="cz-xticks" className="text-sm font-normal">{catAx} axis lines and ticks</Label>
@@ -368,32 +429,41 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType }: Sectio
           </p>
         )}
       </div>
+      )}
       {/* Only meaningful with two or more metrics on one axis to separate. Metabase gates it the
           same way, and computes the split rather than asking which metric goes where — egret's
           per-metric Axis selects still win when they name anything. */}
-      {kind !== "scatter" && config.yMetrics.length > 1 && (
+      {scoped(scope, "value") && kind !== "scatter" && config.yMetrics.length > 1 && (
         <Toggle id="cz-autosplit" label="Split y-axis when necessary" checked={config.autoSplitY !== false}
           onChange={(v) => onChange({ autoSplitY: v ? undefined : false })} />
       )}
-      <Toggle id="cz-yticks" label={`${valAx} axis lines and ticks`} checked={config.yAxisTicks !== false}
-        onChange={(v) => onChange({ yAxisTicks: v ? undefined : false })} />
-      <div className="flex items-center justify-between gap-2">
-        <Label htmlFor="cz-ytickcount" className="text-sm font-normal">{valAx} tick marks</Label>
-        <Input
-          id="cz-ytickcount" aria-label={`${valAx} tick marks`} type="number" min={2} max={20} step={1}
-          className="h-7 w-20" placeholder="Auto"
-          value={config.yTickCount ?? ""}
-          onChange={(e) => {
-            const n = Number(e.target.value);
-            onChange({ yTickCount: e.target.value === "" || Number.isNaN(n) ? undefined : n });
-          }}
-        />
-      </div>
+      {scoped(scope, "value") && (
+        <Toggle id="cz-yticks" label={`${valAx} axis lines and ticks`} checked={config.yAxisTicks !== false}
+          onChange={(v) => onChange({ yAxisTicks: v ? undefined : false })} />
+      )}
+      {/* Metabase's `getHidden` on `graph.y_axis.split_number`: hidden while
+          `graph.y_axis.axis_enabled === false`. The row above is egret's half of that key, so with
+          it off there are no tick marks left for this number to divide — the same rule, on the same
+          setting, as the waterfall/box-plot tab's own "Number of tick marks". */}
+      {scoped(scope, "value") && config.yAxisTicks !== false && (
+        <div className="flex items-center justify-between gap-2">
+          <Label htmlFor="cz-ytickcount" className="text-sm font-normal">{valAx} tick marks</Label>
+          <Input
+            id="cz-ytickcount" aria-label={`${valAx} tick marks`} type="number" min={2} max={20} step={1}
+            className="h-7 w-20" placeholder="Auto"
+            value={config.yTickCount ?? ""}
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              onChange({ yTickCount: e.target.value === "" || Number.isNaN(n) ? undefined : n });
+            }}
+          />
+        </div>
+      )}
       {/* The same pair ChartAxesSection offers the waterfall/box-plot/sankey side, and the same
           reason for DecimalInput over `type="number"`: a bound is a data value, and a number input
           goes EMPTY the instant a decimal point is the last character typed. Both copies are fixed
           together — fixing one is how the defect came to live in two files. */}
-      {kind !== "scatter" && (
+      {scoped(scope, "value") && kind !== "scatter" && (
         <div className="grid grid-cols-2 gap-2 border-t pt-2">
           <label className="space-y-1">
             <span className="text-xs text-muted-foreground">{valAx} min</span>
@@ -409,6 +479,52 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType }: Sectio
           </label>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The Axes tab, laid out one block per axis the way Metabase lays out its own: every
+ * `graph.x_axis.*` / `graph.y_axis.*` setting there carries a `group` of "X-axis" or "Y-axis" and the
+ * panel renders a heading per group. egret's tab was one flat run — "X axis scale, X label, Y label,
+ * Log scale, X axis lines and ticks, Y axis lines and ticks, Y tick marks, Y min, Y max" — in which
+ * the two axes' settings alternated and answering "what can I change about the X axis" meant reading
+ * the whole list.
+ *
+ * PRESENTATION ONLY. Not one setting is added, dropped or moved between controls: `AxesOptions`
+ * still owns the scale, the titles and the left/right split, `AxisRangeOptions` still owns the
+ * bounds, the log scale and both lines-and-ticks selects. Each is asked TWICE, once per axis, and
+ * renders only the rows belonging to that one — which is why the fix is here and not a `group` in
+ * the descriptor. The shell deliberately flattens the Axes TAB (`StudioPanel`, `tab === "axes"`),
+ * since a group heading inside it would just repeat the tab's own name; the split that is wanted is
+ * a level below that, between the two axes.
+ *
+ * THE ONE THING THIS DOES NOT REACH is Metabase's within-group ORDER, which puts Scale last on the
+ * X-axis (Show label, Label, Show lines and tick marks, Scale) where this puts it third. Getting
+ * that would mean lifting the scale row out of `AxesOptions` and into the ticks control — a field
+ * moving between components, which is exactly what this change is not allowed to do.
+ *
+ * Headings follow the axis the READER sees: on a horizontal chart the dimension runs down the left,
+ * so its block is headed "Y-axis" — the same relabelling every row inside already does.
+ */
+export function CartesianAxesTab({ kind, config, onChange, xColumnType }: SectionProps & {
+  /** Passed straight through to both controls — see the prop's doc on `AxisRangeOptions`. */
+  xColumnType?: string;
+}) {
+  const horiz = kind === "row" || !!config.horizontal;
+  const catAx = horiz ? "Y" : "X";
+  const valAx = horiz ? "X" : "Y";
+  const shared = { kind, config, onChange, xColumnType };
+  return (
+    <div className="space-y-3">
+      <AxisGroup axis={catAx}>
+        <AxesOptions {...shared} scope="category" />
+        <AxisRangeOptions {...shared} scope="category" />
+      </AxisGroup>
+      <AxisGroup axis={valAx} className="border-t pt-3">
+        <AxesOptions {...shared} scope="value" />
+        <AxisRangeOptions {...shared} scope="value" />
+      </AxisGroup>
     </div>
   );
 }
@@ -480,11 +596,14 @@ export function TrendOption({ kind, config, onChange }: SectionProps) {
 }
 
 export function CartesianDisplaySection({
-  kind, config, onChange, seriesNames = [], xColumnType,
+  kind, config, onChange, seriesNames, xColumnType,
 }: {
   kind: CartesianViz;
   config: CartesianConfig;
   onChange: (patch: Partial<CartesianConfig>) => void;
+  /** Left UNDEFAULTED on purpose: `[]` would read as "this chart draws no series", which is what
+   *  decides whether Stacking is offered at all. Undefined means "not known here", and
+   *  `SeriesOptions` falls back to the metrics. */
   seriesNames?: string[];
   /** Passed straight through to `AxisRangeOptions` and `AxesOptions` — see the prop's doc there. */
   xColumnType?: string;

@@ -155,11 +155,42 @@ describe("ChartTable interactions", () => {
 
   it("paginates to pageSize rows with a working Next button", () => {
     render(<ChartTable columns={COLS} rows={mkRows(30)} tableState={{ pagination: { enabled: true, pageSize: 25 } }} />);
-    expect(screen.getByText("Showing 1–25 of 30")).toBeInTheDocument();
+    expect(screen.getByText("1–25 of 30")).toBeInTheDocument();
     const body = document.querySelector("tbody")!;
     expect(within(body).getAllByRole("row")).toHaveLength(25);
     fireEvent.click(screen.getByText("Next"));
-    expect(screen.getByText("Showing 26–30 of 30")).toBeInTheDocument();
+    expect(screen.getByText("26–30 of 30")).toBeInTheDocument();
+  });
+
+  /**
+   * The row count is not a pagination detail. Metabase prints one under EVERY table —
+   * `getRowCountMessage` / `QuestionRowCount` both render `Showing ${formatRowCount(n)}`, and
+   * `formatRowCount` is an `ngettext` over "row"/"rows" — while the page range (`1 - 10 of 100`,
+   * `PaginationControls`) is a separate thing that only appears when there is more than one page.
+   *
+   * egret had the count nested inside `{paginationEnabled && …}`, and pagination is off by default,
+   * so a 60-row table said nothing at all about how many rows it was showing.
+   */
+  it("prints the row count on an unpaginated table, which is every table by default", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(60)} />);
+    expect(screen.getByText("Showing 60 rows")).toBeInTheDocument();
+  });
+
+  it("says row, not rows, when there is one — Metabase's count is an ngettext", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(1)} />);
+    expect(screen.getByText("Showing 1 row")).toBeInTheDocument();
+  });
+
+  it("still counts an empty result rather than going silent", () => {
+    render(<ChartTable columns={COLS} rows={[]} />);
+    expect(screen.getByText("Showing 0 rows")).toBeInTheDocument();
+  });
+
+  /** …and the page range is what pagination adds ON TOP, not what unlocks the count. */
+  it("keeps the count beside the page range when pagination is on", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(30)} tableState={{ pagination: { enabled: true, pageSize: 25 } }} />);
+    expect(screen.getByText("Showing 30 rows")).toBeInTheDocument();
+    expect(screen.getByText("1–25 of 30")).toBeInTheDocument();
   });
 
   it("renders columns in tableState.columnOrder", () => {

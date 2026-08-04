@@ -2,7 +2,7 @@ import { pruneUnits } from "@/components/chart/temporal-units";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { FieldZone } from "@/components/chart/config/FieldZone";
 import {
-  SeriesOptions, AxesOptions, OrientationOption, AxisRangeOptions, FormatOptions, GoalOptions, TrendOption,
+  SeriesOptions, CartesianAxesTab, OrientationOption, FormatOptions, GoalOptions, TrendOption,
 } from "@/components/chart/settings/CartesianDisplaySection";
 import { colorsForKeys } from "@/components/chart/echarts/keyColors";
 import { SeriesListSection } from "@/components/chart/settings/SeriesListSection";
@@ -188,8 +188,15 @@ function displayControls(kind: CartesianViz): VizControl<CartesianConfig>[] {
   return [
     {
       id: "seriesOptions", section: "display", group: "Series",
-      render: ({ config, onChange }: VizControlProps<CartesianConfig>) => (
-        <SeriesOptions kind={kind} config={config} onChange={onChange} />
+      // The series NAMES travel in, and not because this section prints them — it does not. They
+      // decide whether the Stacking control is offered at all: Metabase hides `stackable.stack_type`
+      // once one stackable series is left, and with a breakout the count is a property of the LAST
+      // RESULT rather than of the config. The same call `SeriesListControl` makes, for the same set.
+      render: ({ config, onChange, resultColumns, rows }: VizControlProps<CartesianConfig>) => (
+        <SeriesOptions
+          kind={kind} config={config} onChange={onChange}
+          seriesNames={cartesianSeriesNames(resultColumns, rows, config)}
+        />
       ),
     },
     {
@@ -207,26 +214,19 @@ function displayControls(kind: CartesianViz): VizControl<CartesianConfig>[] {
       ),
     }] : []),
     {
+      // ONE control for the whole tab, where there used to be two ("axes" and "range"). Not a
+      // merge of their settings — `CartesianAxesTab` still asks each of them for its own rows — but
+      // the two axes' rows interleave across the pair, so nothing below the tab can group them by
+      // axis. Splitting them was also never a disclosure: the shell renders the Axes tab flat, so
+      // "range"'s `advanced` flag had no effect there.
       id: "axes", section: "display", group: "Axes",
-      // Same `resultColumns` lookup, and for the same reason, as the "range" control below — see
-      // the comment there. Here it decides what the X-axis-scale trigger READS on a chart whose
-      // scale was resolved rather than stored.
+      // `resultColumns`, not `columns`: the x-axis rotation rule and the x-axis-scale trigger both
+      // turn on the type the BUILDER will resolve against, and the builder reads the result's
+      // columns. The dataset's own list is the same types by a different route until a chart is
+      // pointed at an expression or the dataset drifts from the last run, at which point the two
+      // disagree and the result is the one on screen.
       render: ({ config, onChange, resultColumns }: VizControlProps<CartesianConfig>) => (
-        <AxesOptions
-          kind={kind} config={config} onChange={onChange}
-          xColumnType={resultColumns.find((c) => c.name === config.xAxis)?.type}
-        />
-      ),
-    },
-    {
-      id: "range", section: "display", group: "Axes", advanced: true,
-      // `resultColumns`, not `columns`: the x-axis rotation rule inside turns on the type the
-      // BUILDER will resolve against, and the builder reads the result's columns. The dataset's
-      // own list is the same types by a different route until a chart is pointed at an expression
-      // or the dataset drifts from the last run, at which point the two disagree and the result is
-      // the one on screen.
-      render: ({ config, onChange, resultColumns }: VizControlProps<CartesianConfig>) => (
-        <AxisRangeOptions
+        <CartesianAxesTab
           kind={kind} config={config} onChange={onChange}
           xColumnType={resultColumns.find((c) => c.name === config.xAxis)?.type}
         />
