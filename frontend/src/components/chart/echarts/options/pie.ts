@@ -66,6 +66,35 @@ export function resolvePercentVisibility(stored: string | undefined): PercentVis
   return PERCENT_VISIBILITIES.includes(stored) ? (stored as PercentVisibility) : "off";
 }
 
+/**
+ * Whether slice labels are drawn on the arcs — Metabase's `getDefaultShowLabels`
+ * (`shared/settings/pie.ts`): `false` at one dimension, `true` above it. An explicitly stored
+ * value always wins, `??` not `||`, so a saved `false` stays off.
+ *
+ * THE DEFAULT WAS `true` AT EVERY RING COUNT, and the reason written down for it does not survive
+ * being read: the pie spec (`docs/en/specs/2026-07-29-chart-redesign-05-pie.md`) says "Legend and
+ * slice labels default to on… a pie's colours say nothing without a key". That argues for the
+ * LEGEND, which is the key and which defaults on regardless; it says nothing about repeating the
+ * key on the arcs. Since `#392` moved the percentage default to "legend" at every ring count, the
+ * legend already reads `US  75%` — so arc names were the same string a second time, at 14px/700
+ * inside a wedge, truncated or dropped by `fitSliceLabel` whenever the wedge was too thin.
+ *
+ * ABOVE ONE RING THE ARGUMENT HOLDS, which is why this is a ring-count rule and not a flat flip.
+ * The legend lists ring 0 only, so a sunburst's outer rings have no key anywhere else on screen —
+ * exactly what the slice-label geometry below was built for, and exactly what Metabase's own
+ * `> 1` branch says.
+ *
+ * A one-ring pie is therefore not left blank: the legend still names every slice and states its
+ * share, the tooltip still answers a hover, and a reader who wants the names on the arcs turns
+ * `Show labels` on.
+ *
+ * Shared with `PieDisplaySection` — the panel has to say what Auto will do, and a second copy of
+ * this rule there is how the switch comes to describe a chart it is not looking at.
+ */
+export function resolveShowLabels(stored: boolean | undefined, dimensionCount: number): boolean {
+  return stored ?? dimensionCount > 1;
+}
+
 export interface PieBuildConfig {
   /** Up to three, drawn as nested rings from the centre out: dimensions[0] is the
    * innermost ring, each subsequent entry nests inside the previous one's slices. */
@@ -1673,9 +1702,12 @@ export function buildPieOption(
 
   // Label: name (showLabels) and/or percent (percentVisibility) — Metabase getSliceLabel. Applied
   // the same way to every ring. Defaults resolve here, at render time, never in stored settings
-  // (this program's standing rule) — `??` so an explicit `false` stays off; `||` would treat a
-  // saved `false` the same as "unset" and never let anyone turn labels off.
-  const showName = cfg.showLabels ?? true;
+  // (this program's standing rule). The ring-count rule and why it is one live on
+  // `resolveShowLabels`; counted off the CONFIGURED dimensions, which is what Metabase's
+  // `getPieDimensions(settings).length` counts and what `buildPieRings` turns one-for-one into
+  // rings — reading `ringCount` back off the built rings would make the panel's Auto hint and the
+  // chart disagree on a pie whose query returned nothing.
+  const showName = resolveShowLabels(cfg.showLabels, dims.length);
   // "both" means what its name says and what Metabase means by it: the legend AND the slice.
   // Before "legend" existed here, a stored "both" could only ever draw the inside half — the
   // value promised something the renderer had no way to deliver.

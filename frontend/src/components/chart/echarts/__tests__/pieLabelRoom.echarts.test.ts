@@ -118,7 +118,10 @@ const DOMINANT: [string, number][] = [
 
 function build(rows: [string, number][], size: { width: number; height: number }) {
   return buildPieOption(
-    cols, rows.map(([n, v]) => [n, v]), { dimensions: ["cat"], metric: "rev" }, measure, size,
+    // `showLabels: true` — this whole file is about WHERE a slice label goes and how much of it
+    // fits, and a one-ring pie's labels are off by default now (`resolveShowLabels`). Asking for
+    // them is what puts the subject of these tests on the canvas; nothing here tests the default.
+    cols, rows.map(([n, v]) => [n, v]), { dimensions: ["cat"], metric: "rev", showLabels: true }, measure, size,
   ) as unknown as Record<string, unknown>;
 }
 

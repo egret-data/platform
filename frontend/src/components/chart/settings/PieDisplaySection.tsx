@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/select";
 import { AutoToggle } from "./AutoToggle";
 import { DecimalInput } from "./DecimalInput";
-import { resolvePercentVisibility, DEFAULT_SLICE_THRESHOLD } from "@/components/chart/echarts/options/pie";
+import { resolvePercentVisibility, resolveShowLabels, DEFAULT_SLICE_THRESHOLD } from "@/components/chart/echarts/options/pie";
 
 // A Radix Select item cannot carry an empty value, so "leave it unset" needs a sentinel that
 // no real percentVisibility can collide with.
@@ -46,8 +46,9 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
   // stored order still produced a list in an order the pie never drew.
   // The number of rings the chart will actually draw — the same `dimensions` list buildPieOption
   // turns into rings. It decides whether there is a HOLE (a multi-ring pie always has one,
-  // whatever `donut` says); it no longer decides the percentage default, which is now "legend"
-  // at every ring count, matching Metabase's constant `getDefaultPercentVisibility`.
+  // whatever `donut` says) and what "Auto" means for slice labels (`resolveShowLabels`); it does
+  // NOT decide the percentage default, which is "legend" at every ring count, matching Metabase's
+  // constant `getDefaultPercentVisibility`.
   const ringCount = config.dimensions?.length ?? 0;
   const hasHole = !!config.donut || ringCount > 1;
   const effectivePercent = resolvePercentVisibility(config.percentVisibility);
@@ -160,12 +161,20 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
           autoHint="Auto writes the grand total into the hole"
         />
       )}
+      {/* Auto is not one behaviour: `resolveShowLabels` (shared with the builder, so the two
+          cannot drift) leaves a one-ring pie's arcs bare and names its slices in the legend
+          instead, and draws them on the arcs from two rings out — where the legend lists ring 0
+          only and the outer rings would otherwise have no key at all. Metabase's
+          `getDefaultShowLabels` makes the same split. The hint therefore has to be computed:
+          a fixed "Auto shows slice labels" was true of exactly half the pies it appeared on. */}
       <AutoToggle
         id="pz-labels"
         label="Show labels"
         value={config.showLabels}
         onChange={(v) => onChange({ showLabels: v })}
-        autoHint="Auto shows slice labels, hiding whichever ones would overlap"
+        autoHint={resolveShowLabels(undefined, ringCount)
+          ? "Auto writes each slice's name on its arc, hiding whichever ones would overlap"
+          : "Auto leaves the arcs bare — a single ring's slices are named in the legend"}
       />
       {/* Auto is a real option, not decoration: with nothing stored, a pie draws its percentages
           in the legend at any ring count (see resolvePercentVisibility, which the chart and this

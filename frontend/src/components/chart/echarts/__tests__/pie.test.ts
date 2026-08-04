@@ -159,10 +159,29 @@ describe("buildPieOption — Metabase-parity", () => {
     expect(buildPieLegend(cols, rows, { ...base, showLegend: true }).map((e) => e.name)).toEqual(["US", "EU"]);
     expect(buildPieLegend(cols, rows, { ...base, showLegend: false })).toEqual([]);
   });
-  it("showLabels defaults on; an explicit false turns it off", () => {
-    expect((buildPieOption(cols, rows, base) as any).series[0].label.show).toBe(true);
-    expect((buildPieOption(cols, rows, { ...base, showLabels: true }) as any).series[0].label.show).toBe(true);
-    expect((buildPieOption(cols, rows, { ...base, showLabels: false }) as any).series[0].label.show).toBe(false);
+  /**
+   * Metabase's `getDefaultShowLabels` (shared/settings/pie.ts): `false` once there is a single
+   * dimension, `true` above that. A one-ring pie therefore draws NOTHING on its arcs by default
+   * and leaves naming to the legend, which is already on and — since the percentage default moved
+   * to "legend" — already carries each slice's share beside its name.
+   */
+  const ringsOf = (dims: string[], extra: Record<string, unknown> = {}) =>
+    (buildPieOption(
+      [{ name: "region", type: "varchar" }, { name: "cat", type: "varchar" }, { name: "rev", type: "double" }],
+      [["EU", "A", 10], ["US", "B", 30]],
+      { dimensions: dims, metric: "rev", ...extra },
+    ) as any).series[0];
+
+  it("showLabels defaults OFF on a one-ring pie, ON above it; an explicit value always wins", () => {
+    expect(ringsOf(["region"]).label.show).toBe(false);
+    expect(ringsOf(["region"], { showLabels: true }).label.show).toBe(true);
+    expect(ringsOf(["region", "cat"]).label.show).toBe(true);
+    expect(ringsOf(["region", "cat"], { showLabels: false }).label.show).toBe(false);
+  });
+
+  it("the default one-ring pie still names its slices — in the legend, with their share", () => {
+    expect(buildPieLegend(cols, rows, base).map((e) => `${e.name} ${e.percent}`))
+      .toEqual(["US 75%", "EU 25%"]);
   });
 });
 
@@ -1700,12 +1719,17 @@ describe("buildPieOption — Metabase ring geometry, gaps and labels", () => {
       });
 
       // A single ring gets the same treatment as of task 5 — see the task-5 block at the bottom
-      // of this file. Its arcs stay clean either way; only the legend gains the number.
+      // of this file. Its arcs stay clean either way; only the legend gains the number. Cleaner
+      // still now that `resolveShowLabels` leaves a one-ring pie's arcs bare: the name goes with
+      // the percentage into the legend, and the arc gets the "nothing to show" sentinel.
       it("a single-ring pie gets it in the legend as well, and keeps its arcs clean", () => {
         const cfg = { dimensions: ["region"], metric: "rev" };
         expect(buildPieLegend(cols, rows, cfg).map((e) => e.percent)).toEqual(["75%", "25%"]);
         const opt = buildPieOption(cols, rows, cfg) as any;
-        expect(ring(opt, 0).find((d: any) => d.name === "US").label.formatter()).toBe("US");
+        expect(ring(opt, 0).find((d: any) => d.name === "US").label.formatter()).toBe(" ");
+        // …and asking for labels puts the name back on the arc, without the percentage.
+        const withLabels = buildPieOption(cols, rows, { ...cfg, showLabels: true }) as any;
+        expect(ring(withLabels, 0).find((d: any) => d.name === "US").label.formatter()).toBe("US");
       });
 
       it("an explicit off still wins over the default", () => {
@@ -2466,7 +2490,10 @@ describe("the tiny-slice floor changes the drawing, not the numbers", () => {
   });
 
   it("keeps the label on the true share", () => {
-    const opt = buildPieOption(cols2, rows2, { ...cfg, percentVisibility: "inside" }) as any;
+    // `showLabels: true` because this is a ONE-RING pie, whose arcs are bare by default
+    // (`resolveShowLabels`) — the name has to be asked for before there is a label to check the
+    // share against. Nothing here is about the default.
+    const opt = buildPieOption(cols2, rows2, { ...cfg, percentVisibility: "inside", showLabels: true }) as any;
     expect(ring(opt, 0)[1].label.formatter()).toBe("B: 0.1%");
   });
 
@@ -2539,7 +2566,10 @@ describe("a pie picks its percent decimals from the data", () => {
   // needs only one, so the labels stay a character shorter. That is exactly the split the live
   // Metabase shows: `23.88%` in the legend, `23.9%` on the slice.
   const rows2 = [["A", 2388], ["B", 512], ["C", 7100]];
-  const cfg = { dimensions: ["d"], metric: "m" };
+  // `showLabels: true` throughout: this is a one-ring pie, whose arcs are bare by default
+  // (`resolveShowLabels`), and every slice-label case below is about the PRECISION of a label
+  // that has to exist first. The legend cases ignore it.
+  const cfg = { dimensions: ["d"], metric: "m", showLabels: true };
 
   it("gives the legend three significant digits' worth", () => {
     const entries = buildPieLegend(cols2, rows2, { ...cfg, percentVisibility: "legend" });
@@ -2620,7 +2650,10 @@ describe("a percentage prints at its computed precision even when it rounds to a
   // precision (3 significant digits) needs 1 decimal, and a third (28.97%) that ROUNDS to an exact
   // 29 at that same precision — the case a naive `parseFloat` strips.
   const rows2 = [["A", 3640], ["B", 3463], ["C", 2897]];
-  const cfg = { dimensions: ["d"], metric: "m" };
+  // `showLabels: true` for the same reason as the describe above: a one-ring pie's arcs are bare
+  // by default (`resolveShowLabels`), and the slice-label case here is about the DIGITS a label
+  // prints, not about whether it is drawn.
+  const cfg = { dimensions: ["d"], metric: "m", showLabels: true };
 
   it("legend: a value that rounds to a whole number still shows the shared decimal", () => {
     const entries = buildPieLegend(cols2, rows2, { ...cfg, percentVisibility: "legend" });
@@ -3230,8 +3263,14 @@ describe("a single-ring pie's percentage and total defaults (task 5)", () => {
   });
 
   it("leaves the arcs themselves uncluttered — the legend is where the number goes", () => {
+    // The arcs are now bare outright, not merely percentage-free: `resolveShowLabels` defaults a
+    // one-ring pie's slice labels off, so the name goes to the legend with the share rather than
+    // being printed twice. `" "` is the builder's "nothing to show" sentinel.
     const opt = buildPieOption(cols, rows, oneRing) as any;
-    expect(ring(opt, 0).find((d: any) => d.name === "US").label.formatter()).toBe("US");
+    expect(ring(opt, 0).find((d: any) => d.name === "US").label.formatter()).toBe(" ");
+    // …and turning labels on puts the NAME back without dragging the percentage onto the arc.
+    const named = buildPieOption(cols, rows, { ...oneRing, showLabels: true }) as any;
+    expect(ring(named, 0).find((d: any) => d.name === "US").label.formatter()).toBe("US");
   });
 
   it("an explicit off still empties the legend of percentages", () => {
