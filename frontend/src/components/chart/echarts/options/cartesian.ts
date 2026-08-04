@@ -915,13 +915,30 @@ export function buildCartesianOption(
     const mi = idx[metric];
     const seriesValues = distinct(xrows.map((r) => r[gi]));
     const cell = new Map(xrows.map((r) => [`${catKey(r[xi])} ${catKey(r[gi])}`, r[mi] as number | null]));
-    // Grouped bars (>1 series, not stacked) must auto-size to sit side by side.
-    // How many of these will be drawn as bars decides whether bars must sit side by side. With a
-    // per-series display the answer is no longer one lookup — a combo can mix them.
-    const barCount = seriesValues.filter((_, si) => seriesDisplayFor(cfg.kind, "", si, cfg.seriesTypes) === "bar").length;
-    const grouped = !resolveStacked(cfg) && barCount > 1;
     // Metabase parity: null / empty-string breakout values render as "(empty)".
+    //
+    // HOISTED ABOVE THE BAR COUNT, and that is the fix rather than a tidy-up. The count below used
+    // to pass the series name as `""` — a hard-coded empty string, because `groupName` was not yet
+    // in scope here — so `cfg.seriesTypes[""]` matched nothing and every band on a combo fell back
+    // to `seriesDisplayFor`'s POSITIONAL default (`index === 0 ? "line" : "bar"`), while the
+    // display each band is actually drawn with was resolved from `groupName(sv)` fifteen lines
+    // further down. Measured on a two-band combo with both bands set to `bar`: the count came out
+    // 1, `grouped` came out false, and both series were then pinned at `barWidth: "80%"` at the
+    // same x — ECharts drew them on top of one another with only the last one visible.
+    //
+    // It has to be `groupName(sv)` and not `String(sv)`: `seriesTypes` is keyed by the name the
+    // PANEL shows, which for a null or empty band is `(empty)`. `String(null)` is `"null"`, a key
+    // nothing can ever write, and the lookup would silently miss again — for the same reason
+    // `decorateSeries` and `colorsForKeys` are both keyed on this function's output.
     const groupName = (sv: unknown) => (sv == null || sv === "" ? "(empty)" : String(sv));
+    // How many of these will be drawn as bars decides whether bars must sit side by side. With a
+    // per-series display the answer is no longer one lookup — a combo can mix them. Grouped bars
+    // (>1 series, not stacked) must auto-size to sit side by side; a stack shares an x on purpose,
+    // so it is never grouped.
+    const barCount = seriesValues.filter(
+      (sv, si) => seriesDisplayFor(cfg.kind, groupName(sv), si, cfg.seriesTypes) === "bar",
+    ).length;
+    const grouped = !resolveStacked(cfg) && barCount > 1;
     // Keyed by GROUP NAME so a breakout value keeps its colour across every card that breaks out by
     // it — a `Gadget` band is the same yellow whether the card also plots `Widget` or not, and
     // whether it is drawn second or fourth. An explicit `seriesColors` entry is folded in rather
