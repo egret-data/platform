@@ -165,16 +165,16 @@ export function TableColumnsSection({
 
         {picking && queryFields ? (
           <div className="space-y-3 rounded-md border p-2">
-            {queryFields.map((g) => (
+            {queryFields.map((g, gi) => (
               <div key={g.label} className="space-y-1">
-                <div className="text-xs font-medium uppercase text-muted-foreground">{g.label}</div>
+                <div className="truncate text-xs font-medium uppercase text-muted-foreground" title={g.label}>{g.label}</div>
                 {g.options.length === 0 && (
                   <p className="text-xs italic text-muted-foreground">Nothing to pick from.</p>
                 )}
                 {g.options.map((name) => (
                   <div key={name} className="flex items-center gap-2">
                     <Checkbox
-                      id={`qf-${g.label}-${name}`}
+                      id={`qf-${gi}-${name}`}
                       checked={g.selected.includes(name)}
                       onCheckedChange={() =>
                         g.onChange(
@@ -184,7 +184,7 @@ export function TableColumnsSection({
                         )
                       }
                     />
-                    <Label htmlFor={`qf-${g.label}-${name}`} className="cursor-pointer text-sm font-normal">{name}</Label>
+                    <Label htmlFor={`qf-${gi}-${name}`} className="cursor-pointer text-sm font-normal">{name}</Label>
                   </div>
                 ))}
               </div>
@@ -207,7 +207,13 @@ export function TableColumnsSection({
                 const i = ordered.indexOf(c);
                 const isHidden = hidden.has(c.name);
                 const title = titleFor(c);
-                const Icon = colIcon(c.type);
+                // A dashboard card carries its columns' NAMES and not their types
+                // (`DashboardView` builds them from the chart's stored spec), so `c.type` is
+                // routinely "". `colIcon`/`colKind` fall through to Text for an unknown type, and
+                // a TEXT badge on `subtotal` is a confident false statement — worse than no badge.
+                // Rendered as an absent type instead, with the icon's box kept so the names below
+                // it still line up.
+                const Icon = c.type ? colIcon(c.type) : null;
                 return (
                   <div
                     key={c.name}
@@ -223,12 +229,14 @@ export function TableColumnsSection({
                           off screen, so "up" would swap with something the reader cannot see. */}
                       <button type="button" aria-label={`Move ${c.name} up`} disabled={!!q || i === 0}
                         title={q ? "Clear the search to reorder" : undefined}
-                        className="text-[10px] text-muted-foreground disabled:opacity-40" onClick={() => move(i, -1)}>▲</button>
+                        className="rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-[10px] text-muted-foreground disabled:opacity-40" onClick={() => move(i, -1)}>▲</button>
                       <button type="button" aria-label={`Move ${c.name} down`} disabled={!!q || i === ordered.length - 1}
                         title={q ? "Clear the search to reorder" : undefined}
-                        className="text-[10px] text-muted-foreground disabled:opacity-40" onClick={() => move(i, 1)}>▼</button>
+                        className="rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-[10px] text-muted-foreground disabled:opacity-40" onClick={() => move(i, 1)}>▼</button>
                     </div>
-                    <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                    {Icon
+                      ? <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                      : <span className="h-3.5 w-3.5 shrink-0" aria-hidden />}
                     <span className="min-w-0 flex-1 truncate" title={c.name}>
                       {title}
                       {/* The raw name stays beside the rename — the anatomy the Formatting list
@@ -239,9 +247,11 @@ export function TableColumnsSection({
                         <span className="ml-1.5 text-xs text-muted-foreground">{c.name}</span>
                       )}
                     </span>
-                    <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground">
-                      {colKind(c.type)}
-                    </span>
+                    {c.type && (
+                      <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground">
+                        {colKind(c.type)}
+                      </span>
+                    )}
                     {onColumnSettings && (
                       <ColumnSettingsPopover
                         column={c}
@@ -257,7 +267,7 @@ export function TableColumnsSection({
                       aria-label={`Show ${c.name}`}
                       aria-pressed={!isHidden}
                       onClick={() => toggleHidden(c.name)}
-                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-muted-foreground hover:bg-accent hover:text-foreground"
                     >
                       {isHidden ? <EyeOff className="h-3.5 w-3.5" aria-hidden /> : <Eye className="h-3.5 w-3.5" aria-hidden />}
                     </button>

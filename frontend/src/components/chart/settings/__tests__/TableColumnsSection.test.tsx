@@ -405,3 +405,38 @@ describe("TableColumnsSection — Add or remove columns", () => {
     expect(groups[0].onChange).toHaveBeenCalledWith(["id", "total_revenue", "state", "vendor"]);
   });
 });
+
+/**
+ * A DASHBOARD CARD KNOWS ITS COLUMNS' NAMES AND NOT THEIR TYPES.
+ *
+ * `DashboardView` builds a card's column list out of the chart's stored SPEC, which carries names
+ * only, so every dimension and raw column arrives here as `type: ""`. The old checkbox list showed
+ * neither an icon nor a type, so it could not be wrong about one. The merged row shows both — and
+ * `colKind("")` falls through to "Text", which would have put a TEXT badge and a text icon on
+ * `subtotal` on every dashboard card in the app.
+ *
+ * An unknown type is rendered as an ABSENT type, not as a guess. (The underlying gap — that a card
+ * carries no types at all, which also means its drill-in offers no numeric formatting — is
+ * pre-existing and belongs to `DashboardView`, not here.)
+ */
+describe("TableColumnsSection — a column whose type is unknown", () => {
+  const UNTYPED = [{ name: "subtotal", type: "" }, { name: "state", type: "" }];
+
+  it("claims no type rather than claiming Text", () => {
+    render(<TableColumnsSection columns={UNTYPED} value={{}} onChange={() => {}} />);
+    expect(screen.queryByText("Text")).toBeNull();
+    expect(screen.queryByText("Number")).toBeNull();
+  });
+
+  it("still badges a column whose type IS known", () => {
+    render(<TableColumnsSection columns={THREE} value={{}} onChange={() => {}} />);
+    expect(screen.getAllByText("Number").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Text").length).toBeGreaterThan(0);
+  });
+
+  it("keeps the row itself intact, so an untyped column is still orderable and hideable", () => {
+    render(<TableColumnsSection columns={UNTYPED} value={{}} onChange={() => {}} />);
+    expect(screen.getByRole("button", { name: "Show subtotal" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Move state up")).toBeInTheDocument();
+  });
+});

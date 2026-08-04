@@ -257,7 +257,10 @@ export default function ChartExplore() {
     const cfg = descConfig as { columns?: string[]; metrics?: string[] };
     return [
       {
-        label: "Columns",
+        // The DATASET's name, the way Metabase heads this panel's field group with the source
+        // table's. It also stops the group repeating the section's own "Columns" heading directly
+        // above it, which is what a plain "Columns" here read as.
+        label: detail.data?.name ?? "Columns",
         options: columns.map((c) => c.column_name),
         selected: cfg.columns ?? [],
         onChange: (next: string[]) => patchDescConfig({ columns: next } as never),
