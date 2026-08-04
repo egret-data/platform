@@ -117,3 +117,58 @@ scatter, Comparisons của trend, chế độ nhãn Compact, Unpin from zero, Sh
   `CartesianDisplaySection`. #408 đã xác lập `seriesDisplayFor` import được từ component settings và
   luật thật sự chi phối `cfg.seriesLine` là `echartsTypeOf(display) === "line"` — nhưng khi đó nó có
   sẵn tên series trong tay, còn panel này thì có thể không. Kiểm trước khi giả định.
+
+---
+
+## Các điểm đã hiệu chỉnh khi thực thi kế hoạch
+
+Ghi lại thay vì lặng lẽ tiếp thu, vì mỗi điểm đều là tiền đề của một bước.
+
+- **Task 1, Bước 1 — nhánh thứ hai đúng, và luật rộng hơn phát hiện.** `resolveXScale` KHÔNG từ chối:
+  `if (xScale != null) return xScale` trả nguyên thang đã lưu, nên bản sửa nằm ở đó và mọi caller đều
+  hưởng. Nhưng ca đo được (`timeseries` trên cột text) chỉ là một trong bốn — `applyXScale` loại mọi
+  điểm có toạ độ không hữu hạn, nên `linear` trên cột text và `timeseries` trên cột SỐ cũng làm trắng
+  chart y hệt (`Date.parse("15.69")` là NaN). Vì vậy phép từ chối là một luật khớp kiểu cột tổng quát
+  (`xScaleFitsColumn`), cũng chính là luật của Metabase: Timeseries chỉ cho cột thời gian, Linear chỉ
+  cho cột số, Ordinal luôn có.
+
+  **Cái giá phải trả, nêu rõ chứ không giấu:** cột `varchar` chứa chuỗi ngày ISO vẫn ép kiểu tốt qua
+  `Date.parse` nhưng nay bị từ chối, nên chart như vậy lùi về trục ordinal. Mọi điểm vẫn được vẽ,
+  đúng thứ tự. Phương án khác — xét GIÁ TRỊ đã ép kiểu — không chia sẻ được với panel (panel không
+  giữ dòng dữ liệu), và sẽ khiến select làm mờ theo một luật còn chart tuân theo luật khác.
+
+- **Task 1, Bước 4 — lựa chọn, và vì sao nó ngược với các dòng xoay nhãn.** Panel hiện thang ĐÃ GIẢI
+  ("Ordinal"), không phải chữ đã lưu bị làm mờ. Điều đó suy ra từ việc select vốn đã gắn với
+  `resolveXScale`, và in "Timeseries" phía trên một chart đang vẽ category chính là lỗi mà cách gắn
+  đó sinh ra để loại bỏ. Khoá đã lưu không bao giờ bị ghi đè, nên trỏ chart sang cột ngày là
+  Timeseries quay lại. Các mục xoay nhãn khác ở chỗ `xTicksChoiceOf` đọc CONFIG; select này đọc kết
+  quả giải.
+
+- **Task 3, Bước 2 — chỗ yếu đã nêu không tồn tại.** `SeriesOptions` vốn đã nhận `seriesNames`, do
+  `viz/cartesian.tsx` truyền vào cho phần đếm Stacking, có fallback về danh sách metric. Cổng điều
+  kiện tính được ngay tại đây. Ca duy nhất thực sự rỗng là breakout chưa có kết quả truy vấn; khi đó
+  fallback là hỏi builder xem series 0 sẽ là gì.
+
+- **Task 4, Bước 2 — không thể tái dùng nguyên `ChartAxesSection`, và lý do liệt kê được.** Nó không
+  có scope theo trục, không có select thang trục x, không có tách metric trái/phải, không có
+  `autoSplitY`, không làm mờ xoay nhãn trên trục giá trị, và cứng "Y" ở chỗ cartesian phải gọi tên
+  trục mà người đọc thấy. Vì vậy phần tái dùng là bốn component con được export —
+  `CategoryTicksSelect`, `ValueTicksSelect`, `ValueRangeRows`, `TickCountRow` — do cả hai panel render,
+  khác biệt truyền vào qua prop. Mọi phần riêng của cartesian được giữ; không phần nào bị dời.
+
+- **Task 4 còn khép lại một khác biệt từ ngữ mà phát hiện không nêu.** Cùng những dòng đó được gán
+  nhãn "X axis lines and ticks" / "Y tick marks" ở tab này và "Show lines and tick marks" / "Number of
+  tick marks" ở tab kia. Chia sẻ component chốt lại theo từ ngữ của Metabase.
+
+- **Một test cũ phải đổi, và nó đang neo giữ một lỗi.** `scatterValueX.echarts.test.ts` khẳng định
+  thang `timeseries` tường minh thắng trên cột `double`, chỉ kiểm `xAxis.type`. Cả năm điểm đều bị
+  loại xuống một trục `time` không có biên — đúng lỗi Task 1 nói tới, mà suite vẫn xanh.
+
+## Phát hiện khi thực thi, chưa sửa
+
+- **Mô tả aria của scatter đọc ra `NaN` ở mọi giá trị y.** Đo trực tiếp trên `MB · Scatter`: "Scatter
+  chart of rating by price. 168 values: 15.69 NaN, 19.87 NaN, …". Lỗi có sẵn, không liên quan tới thay
+  đổi lần này — card đó không lưu `xScale` nên `resolveXScale` thoát sớm trước mọi mã mới. Cùng họ với
+  phát hiện aria của pie đã nằm trong danh sách ngoài phạm vi ở trên (từ #387, series trên trục giá trị
+  mang dữ liệu dạng object `{value: [x, y], name}`, còn bộ dựng aria đọc chúng như số trần). Thuộc về
+  nhóm đó.

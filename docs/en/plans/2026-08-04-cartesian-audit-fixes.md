@@ -206,3 +206,61 @@ mode, Unpin from zero, pie's Show total).
   `cfg.seriesLine` — but it had series names to hand and this panel may not. Check before assuming.
 - **Task 2's test must assert on what ECharts is handed**, not on the `grouped` local. A test that
   reaches inside would pass on a fix that computed the right boolean and used it wrongly.
+
+---
+
+## Corrections made while executing this plan
+
+Recorded here rather than silently absorbed, because each one was a premise of a step.
+
+- **Task 1, Step 1 — the dichotomy resolved to the second branch, and the rule is wider than the
+  finding.** `resolveXScale` did NOT refuse: `if (xScale != null) return xScale` handed the stored
+  scale back untouched, so the fix belongs there and every caller gets it. But the measured case
+  (`timeseries` on a text column) is one of four, not one of one — `applyXScale` drops any point
+  whose coordinate is not finite, so a stored `linear` on a text column and a stored `timeseries` on
+  a NUMERIC column blank the chart exactly the same way (`Date.parse("15.69")` is NaN). The refusal
+  is therefore a general column-type fit (`xScaleFitsColumn`), which is also Metabase's own rule:
+  Timeseries only on a temporal column, Linear only on a numeric one, Ordinal always.
+
+  **The cost this buys, named rather than hidden:** a `varchar` column holding ISO date strings
+  coerces fine through `Date.parse` and is now refused, so such a chart falls back to the ordinal
+  axis. Every point still draws, in order. The alternative — judging the coerced VALUES — cannot be
+  shared with the panel, which holds no rows, and would leave the select greying items out by one
+  rule while the chart honoured another.
+
+- **Task 1, Step 4 — the choice, and why it is the opposite of the rotation rows'.** The panel shows
+  the RESOLVED scale ("Ordinal"), not the stored word greyed. That follows from the select already
+  being bound to `resolveXScale`, and printing "Timeseries" over a chart drawing categories is the
+  defect that binding was added to remove. The stored key is never rewritten, so re-pointing the
+  chart at a date column brings Timeseries back. The rotation items differ because
+  `xTicksChoiceOf` reads the CONFIG; this select reads the resolution.
+
+- **Task 3, Step 2 — the flagged soft spot does not hold.** `SeriesOptions` already takes
+  `seriesNames`, threaded in by `viz/cartesian.tsx` for the Stacking count, with a fallback to the
+  metrics. The gate is computable here. The one genuinely empty case is a breakout whose query has
+  not returned; that falls back to asking the builder what series 0 would be.
+
+- **Task 4, Step 2 — `ChartAxesSection` cannot be reused whole, and the reason is enumerable.** It
+  has no per-axis scoping, no x-axis scale select, no left/right metric split, no `autoSplitY`, no
+  value-axis rotation greying, and hard-codes "Y" where cartesian must name the axis the reader sees.
+  The reuse is therefore four exported sub-components — `CategoryTicksSelect`, `ValueTicksSelect`,
+  `ValueRangeRows`, `TickCountRow` — rendered by both panels, with the differences passed in. Every
+  cartesian extra was kept; none moved.
+
+- **Task 4 also closed a wording split the finding did not name.** The same rows were labelled
+  "X axis lines and ticks" / "Y tick marks" on one tab and "Show lines and tick marks" / "Number of
+  tick marks" on the other. Sharing the component settles it on Metabase's wording.
+
+- **One existing test moved and it was pinning a bug.** `scatterValueX.echarts.test.ts` asserted
+  that an explicit `timeseries` scale won on a `double` column, checking only `xAxis.type`. All five
+  points were being dropped onto a `time` axis with no extent — the very defect Task 1 is about,
+  green in the suite.
+
+## Found while executing, not fixed
+
+- **The scatter's aria description reads `NaN` for every y.** Live on `MB · Scatter`: "Scatter chart
+  of rating by price. 168 values: 15.69 NaN, 19.87 NaN, …". Pre-existing and untouched by this work
+  — that card stores no `xScale`, so `resolveXScale` short-circuits before any new code runs. It is
+  the same class as the pie's aria finding already in the out-of-scope list above (a value-axis
+  series' data are `{value: [x, y], name}` item objects since #387, and the aria builder reads them
+  as if they were bare numbers). Belongs with that group.
