@@ -3,52 +3,9 @@ import { formatValue } from "../format";
 import { buildConditional } from "../conditional";
 import type { ColumnFormat, Rule } from "../format-types";
 import { pivotCellDrill, type DrillContext } from "../drill";
-
-const MIN_COL_WIDTH = 60;
-/** One arrow-key press. Chart 03 established that a mouse-only column interaction is a defect, so
- * the handle is focusable and resizes from the keyboard as well as from a drag. */
-const KEY_RESIZE_STEP = 16;
-
-function ResizeHandle({ label, onResize, getWidth }: {
-  label: string;
-  onResize: (width: number) => void;
-  /** Measured from the DOM at gesture start — the stored width may be absent (auto-sized). */
-  getWidth: (el: HTMLElement) => number;
-}) {
-  return (
-    <span
-      role="separator"
-      aria-orientation="vertical"
-      aria-label={label}
-      tabIndex={0}
-      className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize select-none hover:bg-primary/40 focus-visible:bg-primary/60 focus-visible:outline-none"
-      onKeyDown={(e) => {
-        if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-        e.preventDefault();
-        const cell = e.currentTarget.parentElement;
-        if (!cell) return;
-        const delta = e.key === "ArrowRight" ? KEY_RESIZE_STEP : -KEY_RESIZE_STEP;
-        onResize(Math.max(MIN_COL_WIDTH, getWidth(cell) + delta));
-      }}
-      onPointerDown={(e) => {
-        e.preventDefault();
-        e.stopPropagation(); // a header click cycles the sort; a drag must not
-        const cell = e.currentTarget.parentElement;
-        if (!cell) return;
-        const startX = e.clientX;
-        const startW = getWidth(cell);
-        const move = (ev: PointerEvent) =>
-          onResize(Math.max(MIN_COL_WIDTH, startW + ev.clientX - startX));
-        const up = () => {
-          window.removeEventListener("pointermove", move);
-          window.removeEventListener("pointerup", up);
-        };
-        window.addEventListener("pointermove", move);
-        window.addEventListener("pointerup", up);
-      }}
-    />
-  );
-}
+// `ResizeHandle` used to live here. It moved out when `ChartTable` needed the same control — see
+// `TableHeaderControls.tsx` for why it is shared rather than copied.
+import { ResizeHandle, SortButton, ariaSort } from "../TableHeaderControls";
 
 export interface PivotColumnWidths {
   /** by row-dimension position */
@@ -154,14 +111,28 @@ export function PivotTable({
               {li === levels - 1 &&
                 p.rowDimNames.map((name, di) => {
                   const dir = sortDirs[name];
+                  const title = columnSettings[name]?.column_title || name;
                   return (
                     <th
                       key={`rd-${di}`}
                       onClick={onCycleSort ? () => onCycleSort(name) : undefined}
+                      // The plain title. Without it Chrome leaves this columnheader UNNAMED once
+                      // its text is inside a labelled button — measured, see `SortButton` — and a
+                      // columnheader's name is announced for every cell under it.
+                      aria-label={title}
+                      // `aria-sort` only where there IS a sort to report: a dashboard card renders
+                      // this read-only, and announcing "not sorted" on a column that can never be
+                      // sorted is the same kind of lie the glyph told by staying silent.
+                      aria-sort={onCycleSort ? ariaSort(dir) : undefined}
                       className={`relative w-px sticky top-0 z-30 ${GRID} bg-accent px-4 py-1.5 text-left font-semibold whitespace-nowrap ${di === 0 ? "left-0" : ""} ${onCycleSort ? "cursor-pointer select-none" : ""}`}
                     >
-                      {columnSettings[name]?.column_title || name}
-                      {dir === "asc" ? " ▲" : dir === "desc" ? " ▼" : ""}
+                      {/* THIS HEADER USED TO BE A `<th onClick>` AND NOTHING ELSE — no `tabIndex`,
+                          no `onKeyDown`. Measured during the audit: `th.focus()` did not move
+                          `activeElement` and Enter fired the handler zero times, so the pivot's only
+                          sort control was unreachable without a mouse. */}
+                      {onCycleSort
+                        ? <SortButton label={title} direction={dir} onClick={() => onCycleSort(name)}>{title}</SortButton>
+                        : <>{title}{dir === "asc" ? " ▲" : dir === "desc" ? " ▼" : ""}</>}
                       {onResizeColumn && (
                         <ResizeHandle
                           label={`Resize ${name}`}

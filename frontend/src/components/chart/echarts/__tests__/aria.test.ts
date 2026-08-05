@@ -166,6 +166,167 @@ describe("a bucketed temporal axis is described the way it is drawn", () => {
   });
 });
 
+/**
+ * THE PIE DESCRIBES THE SLICES IT IS DRAWING, and until this commit it did not.
+ *
+ * The description was built from `effectiveRings[0]` while the arcs came from `pieRootSlices(...)`,
+ * which filters `toggledOffSlices` — the EPHEMERAL legend click, the one thing `buildPieRings` has
+ * deliberately not already applied (the saved `hiddenSlices` curation is applied before a ring is
+ * aggregated, so that every total and threshold re-bases; the click is applied to the finished
+ * rings, so they do not). With "US" clicked off, ring 0 drew ["APAC", "EU"] and a screen reader
+ * heard "3 values: US 30, APAC 20, EU 10". Both the count and the enumeration were false.
+ *
+ * The fixture's values are all distinct and none of the names is a substring of another, so no
+ * assertion below can pass on a coincidence.
+ */
+describe("the pie describes the slices it is drawing", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "m", type: "double" }];
+  const rows = [["US", 30], ["APAC", 20], ["EU", 10]];
+  const cfg = { dimensions: ["region"], metric: "m", sliceThreshold: 0 };
+  const descriptionOf = (c: Record<string, unknown>) =>
+    (buildPieOption(cols, rows, { ...cfg, ...c }) as { aria: { label: { description: string } } })
+      .aria.label.description;
+
+  it("counts and enumerates only what ring 0 draws once a legend entry is toggled off", () => {
+    const d = descriptionOf({ toggledOffSlices: ["US"] });
+    expect(d).toContain("2 values:");
+    expect(d).not.toContain("3 values:");
+    expect(d).toContain("APAC 20");
+    expect(d).toContain("EU 10");
+    expect(d).not.toContain("US 30");
+  });
+
+  it("is unchanged when nothing is toggled off", () => {
+    expect(descriptionOf({})).toBe(descriptionOf({ toggledOffSlices: [] }));
+    expect(descriptionOf({})).toContain("3 values: US 30, APAC 20, EU 10.");
+  });
+
+  // The divergence note is appended AFTER the description body and is computed from the full
+  // `effectiveRings`, not from what the legend leaves showing — the same rule the hole's total and
+  // the legend percentages follow. Sourcing the body from `rootSlices` must not disturb that.
+  it("still carries a ring's divergence note, and does not re-base it on the toggle", () => {
+    const ringCols = [
+      { name: "region", type: "varchar" }, { name: "category", type: "varchar" }, { name: "m", type: "double" },
+    ];
+    // The inner ring totals 40; the outer drops the -5 row by the zero/negative filter and totals 35.
+    const ringRows = [["US", "Widgets", 30], ["EU", "Gadgets", 10], ["EU", "Doohickeys", -5]];
+    const withNote = (c: Record<string, unknown>) =>
+      (buildPieOption(ringCols, ringRows, {
+        dimensions: ["region", "category"], metric: "m", sliceThreshold: 0, ...c,
+      }) as { aria: { label: { description: string } } }).aria.label.description;
+    expect(withNote({})).toContain("Note: the category ring totals");
+    const off = withNote({ toggledOffSlices: ["US"] });
+    expect(off).toContain("1 values:");
+    // `EU 5`, not `EU 10`: ring 0 aggregates the region, and EU's -5 row is part of that sum even
+    // though the OUTER ring's zero/negative filter refuses to draw it. That gap is the whole
+    // subject of the note below, and the description reads the value the wedge is drawn at.
+    expect(off).toContain("EU 5");
+    expect(off).not.toContain("US 30");
+    // Same note, same numbers — the note reads the rings, and a legend click does not touch them.
+    expect(off).toContain(withNote({}).slice(withNote({}).indexOf("Note:")));
+  });
+});
+
+/**
+ * THE VALUE-AXIS FAMILY READS THE Y OF ITS OWN DATUM.
+ *
+ * Measured live during #411: a scatter's description came out `"15.69 NaN, 19.87 NaN, …"` — every
+ * value unreadable. The aria builder zipped `drawnCategories` against `first.data[i]` and passed
+ * the datum straight to `Number()`, and since #387 a datum on a value/time axis is a
+ * `{value: [x, y], name}` item object, which `Number()` answers `NaN` to. `datumY` was introduced
+ * in #397 to unwrap exactly that, for `widestOf`; the aria path never picked it up.
+ *
+ * THE SECOND HALF WAS NOT IN THE BRIEF and is the more dangerous of the two: `applyXScale` FILTERS
+ * — a datum whose x will not parse is dropped from the series — so `first.data` is no longer
+ * index-aligned with `drawnCategories` at all. That does not read as `NaN`; it reads as a plausible
+ * sentence pairing the wrong number with the wrong label, which is worse.
+ *
+ * FIXTURE DISCIPLINE, the trap #397 recorded: every x and every y below is distinct and no y equals
+ * any x, so the mutation that reads `v[0]` instead of `v[1]` cannot pass.
+ */
+describe("a value/time x-axis is described with the y it plots", () => {
+  type Described = { aria: { label: { description: string } } };
+
+  it("reads a scatter's y rather than NaN", () => {
+    const o = buildCartesianOption(
+      [{ name: "weight", type: "double" }, { name: "score", type: "double" }],
+      [[100, 7], [200, 8], [300, 9]],
+      { kind: "scatter", xAxis: "weight", yMetrics: ["score"] },
+    ) as Described;
+    const d = o.aria.label.description;
+    expect(d).not.toContain("NaN");
+    // Both halves of every pair named: `100 100` is what reading `v[0]` produces.
+    expect(d).toContain("100 7");
+    expect(d).toContain("200 8");
+    expect(d).toContain("300 9");
+    expect(d).not.toContain("100 100");
+  });
+
+  it("does not slide the pairings when a point's x cannot be placed", () => {
+    // `Date.parse` REFUSES A REGION ZONE ID — `"… 00:00:00.000 Asia/Ho_Chi_Minh"` is `NaN`, while
+    // the same string with `UTC` parses — and that is precisely how Trino renders a
+    // `timestamp with time zone`. So this is a reachable production shape, not a contrived one, and
+    // it is the only way a point reaches `applyXScale` and is dropped: a NULL x loses its whole row
+    // further upstream, before `categories` is built, which keeps the two lists aligned by luck.
+    //
+    // The middle point is therefore not drawn and must not be described. What must NOT happen is
+    // the survivors sliding up into its slot — which is what zipping `drawnCategories` against a
+    // FILTERED `series.data` by index does, and it reads as a plausible sentence rather than as
+    // `NaN`, so nothing else would have caught it.
+    const o = buildCartesianOption(
+      [{ name: "order_ts", type: "timestamp" }, { name: "rev", type: "double" }],
+      [
+        ["2026-01-01 00:00:00.000 UTC", 11],
+        ["2026-02-01 00:00:00.000 Asia/Ho_Chi_Minh", 22],
+        ["2026-03-01 00:00:00.000 UTC", 33],
+      ],
+      { kind: "line", xAxis: "order_ts", yMetrics: ["rev"], xScale: "timeseries" },
+    ) as Described;
+    const d = o.aria.label.description;
+    expect(d).not.toContain("NaN");
+    expect(d).toContain("2 values:");
+    expect(d).toContain("2026-01-01 00:00:00.000 UTC 11");
+    expect(d).toContain("2026-03-01 00:00:00.000 UTC 33");
+    // The two shapes the old index-zip produced: the third point wearing the second's value, and
+    // the dropped point named at all.
+    expect(d).not.toContain("2026-03-01 00:00:00.000 UTC 22");
+    expect(d).not.toContain("Asia/Ho_Chi_Minh");
+  });
+
+  it("names the period on a TIME axis too, not the raw bucket the datum carries", () => {
+    // #400 decided that the description reads the period the axis draws rather than the truncated
+    // bucket, and pinned it on the ordinal path. This is the other path, and it needs saying
+    // separately: a value/time datum carries the RAW category (`ScaledPoint.name`, which exists so
+    // a drill can filter by it), so reading the datum's name straight out would have quietly undone
+    // #400 for every timeseries chart. A mutation replacing the `drawnByRaw` lookup with the raw
+    // name survived the whole suite until this case existed.
+    //
+    // `2026-01-01` and `January 2026` share no substring, so neither direction passes by accident.
+    const o = buildCartesianOption(
+      [{ name: "order_date", type: "date" }, { name: "rev", type: "double" }],
+      [["2026-01-01", 61], ["2026-02-01", 72]],
+      {
+        kind: "line", xAxis: "order_date", yMetrics: ["rev"],
+        xScale: "timeseries", xAxisUnit: "month", xAxisType: "date",
+      },
+    ) as Described;
+    const d = o.aria.label.description;
+    expect(d).toContain("January 2026 61");
+    expect(d).toContain("February 2026 72");
+    expect(d).not.toContain("2026-01-01");
+  });
+
+  it("still describes an ordinal axis positionally", () => {
+    // The other branch, which has no per-datum name to read and must keep zipping by index.
+    const o = buildCartesianOption(
+      [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }],
+      [["North", 41], ["South", 52]],
+      { kind: "bar", xAxis: "region", yMetrics: ["rev"] },
+    ) as Described;
+    expect(o.aria.label.description).toContain("2 values: North 41, South 52.");
+  });
+});
+
 describe("the aria component is registered", () => {
   // Without it ECharts silently ignores every `aria` option: no description, no decals.
   // That was the state of the app until this audit.

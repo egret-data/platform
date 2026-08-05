@@ -1694,7 +1694,10 @@ export function buildPieOption(
   const { rings: effectiveRings, groupOfByLevel } = buildPieRings(columns, rows, cfg);
 
   const dimension = dims[0];
-  const data = effectiveRings[0];
+  // NO `const data = effectiveRings[0]` ANY MORE. It had exactly one reader left — the `aria`
+  // description — and being the unfiltered ring is what made that description name slices the
+  // chart was not drawing. `rootSlices` (below) is the only ring-0 list anything here should be
+  // reaching for; leaving a shorter name for the wrong one beside it is an invitation.
   const ringCount = effectiveRings.length;
   const multiRing = ringCount > 1;
 
@@ -2062,7 +2065,17 @@ export function buildPieOption(
   // `buildPieBreakdown`), would then have no description at all.
   const baseAria = ariaDescription({
     kind: "Pie chart", metric: cfg.metric, dimension, format: fmt,
-    points: data.map((d) => ({ name: String(d.name), value: d.value })),
+    // `rootSlices`, NOT `data` (which is `effectiveRings[0]`), and the difference between the two is
+    // exactly one legend click. `pieRootSlices` is what `seriesData` is built from, so this now
+    // enumerates the arcs that are actually on the canvas. Reading the unfiltered ring meant a pie
+    // with "US" toggled off announced "3 values: US 30, APAC 20, EU 10" over two drawn wedges — the
+    // count and the enumeration both false, with no other route for a screen-reader user to notice.
+    //
+    // THE SAVED `hiddenSlices` CURATION NEVER HAD THIS PROBLEM and is not what changed: it is
+    // applied by `buildPieRings` before a ring is aggregated (so that every total and threshold
+    // re-bases), and was therefore already out of `data`. It is the EPHEMERAL click, applied to the
+    // finished rings a few lines above, that this had never learned about.
+    points: rootSlices.map((d) => ({ name: String(d.name), value: d.value })),
   });
   const aria = divergenceNotes.length > 0
     ? { ...baseAria, label: { description: `${baseAria.label.description} ${divergenceNotes.join(" ")}` } }

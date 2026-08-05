@@ -142,8 +142,12 @@ describe("builders accept a container size", () => {
     const sized = fingerprint(buildCartesianOption(cols, rows, cfg, SMALL)) as Record<string, never>;
     const unsized = fingerprint(buildCartesianOption(cols, rows, cfg)) as Record<string, never>;
     // tooltip, category-axis label, value-axis label — pinned exactly, for the reason
-    // `expectSizeIsUnread` gives.
-    expect(functionsIn(sized)).toBe(3);
+    // `expectSizeIsUnread` gives — plus `__ariaFor`, which is FOUR only because the fourth is not a
+    // formatter at all: it re-derives the screen-reader description for a given legend selection
+    // (`options/cartesian.ts`), and `EChartsRenderer` calls it from `legendselectchanged`. It is
+    // fingerprinted like any other closure, and it must not read the size either — which the
+    // equality below still checks, since it is probed in both builds.
+    expect(functionsIn(sized)).toBe(4);
 
     const axisLabelOf = (fp: Record<string, never>) =>
       (fp as unknown as { xAxis: { axisLabel: Record<string, unknown> } }).xAxis.axisLabel;
