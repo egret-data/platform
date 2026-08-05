@@ -287,7 +287,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
                     </select>
                     <input value={pv.value} onChange={(e) => set({ value: e.target.value })}
                       aria-label={`Value of ${n}`} placeholder="value"
-                      className="w-24 rounded-r-md border-l bg-transparent px-1.5 py-1 outline-none focus-visible:ring-1 focus-visible:ring-ring" />
+                      className="w-24 rounded-r-md border-l bg-transparent px-1.5 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring" />
                   </span>
                 );
               })}

@@ -365,7 +365,7 @@ export default function DashboardView() {
       <div className="mb-3 flex items-center justify-between border-b pb-3">
         {editing ? (
           <input aria-label="dashboard name" value={draftName} onChange={(e) => setDraftName(e.target.value)}
-            className="min-w-0 flex-1 rounded border border-transparent bg-transparent text-xl font-bold focus:border-border focus:bg-background focus:px-2 focus:outline-none" />
+            className="min-w-0 flex-1 rounded border border-transparent bg-transparent text-xl font-bold focus:bg-background focus:px-2 focus-visible:border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
         ) : (
           <h1 className="text-xl font-bold">{dash.name}</h1>
         )}

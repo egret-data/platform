@@ -511,3 +511,263 @@ describe("every ring offset names the colour it fills itself with", () => {
     expect(offenders, `ring offsets with no colour:\n  ${offenders.join("\n  ")}`).toEqual([]);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ONE FOCUS INDICATOR, NOT FIVE.
+//
+// #415 and #416 each deferred this on the same reasoning: unifying the focus
+// styles is real work with its own review, and conflating it with a contrast fix
+// would make both harder to judge. This is that separate change, and the first
+// thing it did was correct its own brief.
+//
+// The brief described TWO generations of shadcn output — an older
+// `ring-2 + ring-offset-2` and a newer `border-ring + ring-ring/50 + ring-[3px]`.
+// Swept properly (class strings, template literals included, comments stripped)
+// the repo had FIVE shapes, and the two named were the two SMALLEST:
+//
+//   offset ring   (`focus-visible:ring-2 … ring-offset-2`)          7 focus sites
+//   border+halo   (`border-ring` + `ring-ring/50` + `ring-[3px]`)   4 sites
+//   flush 2px     (`focus-visible:ring-2 focus-visible:ring-ring`) 14 sites  ← the real majority
+//   flush 1px     (`focus-visible:ring-1 focus-visible:ring-ring`)  9 sites
+//   inset 2px     (#416's menu/select/palette items)                9 sites
+//
+// So the question was never "which of the two shadcn generations wins". The
+// majority shape was already flush-2px-solid, and the job was to finish it.
+//
+// ── The chosen indicator ────────────────────────────────────────────────────
+//   `focus-visible:ring-2 focus-visible:ring-ring`
+//   (+ `focus-visible:ring-inset` wherever the container clips)
+//
+// ── Why solid, and never `border-ring` alone ────────────────────────────────
+// #415 measured it: `focus-visible:border-ring` sets a border COLOUR and paints
+// nothing unless a border WIDTH already exists. Button's `default`, `ghost` and
+// `link` variants report `border-top-width: 0px` in Chrome, so on the product's
+// most common control the half-alpha halo was the entire indicator — and a 50%
+// composite tops out near 1.73:1 however dark `--ring` gets. `border-ring` is
+// therefore allowed only as a SECOND cue on a control that has a border at rest,
+// never as the only thing painted. `assertOneIndicator` pins exactly that.
+//
+// ── Why 2px ─────────────────────────────────────────────────────────────────
+// Two independent reasons that happen to agree. WCAG 2.2 **2.4.13 Focus
+// Appearance** takes a 2px-thick perimeter as its reference indicator, so 1px is
+// under the bar on THICKNESS regardless of colour — the 9 `ring-1` sites below
+// were failing a criterion no contrast number would ever have caught. And
+// Metabase, which this product copies by policy, ships
+// `:focus-visible { outline: 2px solid var(--mb-color-focus) }` — read out of its
+// stylesheet in #416. Button's 3px (set by #415 when the halo had to carry the
+// bar on its own at half alpha) comes down to 2px now that it is solid.
+//
+// ── Why flush, and NOT `ring-offset-2` ──────────────────────────────────────
+// This is the counter-intuitive one, because the offset gap does exist for a
+// reason: it separates the ring from the control's own fill so the ring reads
+// against a known colour rather than against whatever the control is painted.
+// Three things kill it here anyway.
+//
+//   1. THE GAP IS FILLED WITH THE WRONG COLOUR. `ring-offset-background` — which
+//      is what every offset site in this repo uses, correctly, after #415's sweep
+//      — hard-codes `--background`. But a focused control almost never sits on
+//      `--background`; it sits on `--card`, `--popover`, `--secondary`,
+//      `--accent` or `--dashboard`. In dark mode `--background` is oklch(0.14)
+//      and `--card`/`--popover` are oklch(0.21), so a focused Switch inside a
+//      card drew a 2px near-black band between the control and its ring. In light
+//      mode the same band is oklch(1) against oklch(0.98) and is essentially
+//      invisible, which is exactly why it survived review for so long — it is a
+//      dark-mode-only artifact. `--background is not a stand-in for the surface`
+//      below pins the size of that mismatch.
+//   2. IT MAKES THE PINNED CONTRAST NUMBERS MEASURE A BOUNDARY THAT IS NOT
+//      PAINTED. Everything above this line measures `--ring` against each
+//      SURFACE. With an offset, the ring's inner neighbour is `--background`, not
+//      the surface — so on a card or a popover those tests were describing an
+//      edge that does not exist. Removing the offset is what makes the geometry
+//      match the assertions.
+//   3. IT NEEDS 4px OF UNCLIPPED SPACE. #416 established that egret's list
+//      containers clip; an offset ring is cropped in all of them, and `ring-inset`
+//      — which is the answer there — is mutually exclusive with an offset.
+//
+// The one thing the offset was buying, separation from the control's own fill, is
+// not needed for the bar being met: 1.4.11 and 2.4.13 both ask about the change
+// between the FOCUSED and UNFOCUSED states of the same pixels, and those pixels
+// are outside the border box, so their unfocused colour is the surface. That is
+// the ratio already pinned at the top of this file.
+//
+// ── What is deliberately NOT swept ──────────────────────────────────────────
+// `RuleEditor.tsx`'s two `ring-2 ring-primary ring-offset-1 ring-offset-background`
+// strings. They are not focus indicators — they mark the SELECTED colour swatch,
+// where the ring really does sit against an arbitrary user-chosen colour and the
+// offset really is load-bearing. They stay, and they keep the sweep in the
+// describe above non-vacuous.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Class strings including template literals, which `classStrings` above does not
+ * read. It does not need to — the menu items it sweeps are all plain strings —
+ * but several of the focus rings here live inside `` `… ${cond ? … : ""}` ``.
+ */
+const allClassStrings = (source: string): string[] => [
+  ...[...source.matchAll(/"([^"\n]*)"/g)].map((m) => m[1]),
+  ...[...source.matchAll(/`([^`]*)`/g)].map((m) => m[1]),
+];
+
+/** Anything that turns a ring or a border on for a focus state. */
+const DECLARES_FOCUS_INDICATOR = /(?:^|\s)(?:dark:)?focus(?:-visible|-within)?:(?:ring|border)-/;
+
+/**
+ * Every focus-variant ring COLOUR utility in a class string, as
+ * `[name, alpha]`. `ring-inset`, `ring-offset-*` and the bare widths are not
+ * colours and are filtered out by name.
+ */
+function focusRingColours(classes: string): { utility: string; name: string; alpha: number }[] {
+  const out: { utility: string; name: string; alpha: number }[] = [];
+  for (const m of classes.matchAll(
+    /(?:^|\s)(?:dark:)?focus(?:-visible|-within)?:ring-([a-z][\w-]*?)(?:\/(\d+))?(?![\w/[-])/g,
+  )) {
+    const name = m[1];
+    if (name === "inset" || name === "offset" || name.startsWith("offset-")) continue;
+    out.push({ utility: m[0].trim(), name, alpha: m[2] ? Number(m[2]) / 100 : 1 });
+  }
+  return out;
+}
+
+/** The declared focus ring width in px — `ring-2` or `ring-[3px]` — or 0. */
+function focusWidth(classes: string): number {
+  const m = classes.match(
+    /(?:^|\s)(?:dark:)?focus(?:-visible|-within)?:ring-(?:(\d+)|\[(\d+)px\])(?![\w/-])/,
+  );
+  return m ? Number(m[1] ?? m[2]) : 0;
+}
+
+describe("the focus indicator is one shape across the whole product", () => {
+  const walk = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) return e.name === "__tests__" ? [] : walk(full);
+      return e.name.endsWith(".tsx") || e.name.endsWith(".ts") ? [full] : [];
+    });
+
+  const srcRoot = path.resolve(__dirname, "..");
+  const files = ["components", "routes", "lib", "hooks"]
+    .map((r) => path.join(srcRoot, r))
+    .filter((d) => existsSync(d))
+    .flatMap(walk);
+
+  const declarations = files.flatMap((file) =>
+    allClassStrings(stripTsComments(readFileSync(file, "utf8")))
+      .filter((classes) => DECLARES_FOCUS_INDICATOR.test(classes))
+      .map((classes) => ({ where: path.relative(srcRoot, file), classes })),
+  );
+
+  /**
+   * The empty-run guard. Without it, renaming the utilities would empty
+   * `declarations` and every assertion below would pass by testing nothing —
+   * which is one of the four mutation-harness defects this programme recorded.
+   */
+  test("the sweep finds the focus indicators it is guarding", () => {
+    expect(files.length, "walked source files").toBeGreaterThan(200);
+    expect(declarations.length, "class strings declaring a focus indicator").toBeGreaterThan(25);
+  });
+
+  test("no focus ring is drawn with a ring offset", () => {
+    const offenders = declarations
+      .filter(({ classes }) => /(?:^|\s)(?:[\w[\]&:=.-]+:)?ring-offset-\d/.test(classes))
+      .map(({ where, classes }) => `${where} — ${classes.replace(/\s+/g, " ").slice(0, 110)}`);
+    expect(
+      offenders,
+      `these still separate the ring from the control with a band of \`--background\`:\n  ${offenders.join("\n  ")}`,
+    ).toEqual([]);
+  });
+
+  test("every focus ring is `--ring` at full alpha", () => {
+    const offenders: string[] = [];
+    for (const { where, classes } of declarations) {
+      for (const { utility, name, alpha } of focusRingColours(classes)) {
+        if (name === "ring" && alpha === 1) continue;
+        offenders.push(`${where} — \`${utility}\` (in: ${classes.replace(/\s+/g, " ").slice(0, 90)})`);
+      }
+    }
+    expect(
+      offenders,
+      `a focus ring that is not solid \`--ring\` cannot be reasoned about from the numbers pinned above:\n  ${offenders.join("\n  ")}`,
+    ).toEqual([]);
+  });
+
+  test("every focus ring is at least 2px thick", () => {
+    const offenders: string[] = [];
+    for (const { where, classes } of declarations) {
+      if (!focusRingColours(classes).some((c) => c.name === "ring")) continue;
+      const width = focusWidth(classes);
+      if (width >= 2) continue;
+      offenders.push(
+        `${where} — width ${width || "unset"} (in: ${classes.replace(/\s+/g, " ").slice(0, 90)})`,
+      );
+    }
+    expect(
+      offenders,
+      `WCAG 2.4.13 takes 2px as the reference thickness; these are thinner:\n  ${offenders.join("\n  ")}`,
+    ).toEqual([]);
+  });
+
+  test("`focus-visible:border-ring` is never the only thing painted", () => {
+    const offenders = declarations
+      .filter(
+        ({ classes }) =>
+          /(?:^|\s)(?:dark:)?focus(?:-visible|-within)?:border-ring(?![\w/-])/.test(classes) &&
+          !focusRingColours(classes).some((c) => c.name === "ring"),
+      )
+      .map(({ where, classes }) => `${where} — ${classes.replace(/\s+/g, " ").slice(0, 110)}`);
+    expect(
+      offenders,
+      `\`border-ring\` paints nothing at \`border-width: 0\` — see #415:\n  ${offenders.join("\n  ")}`,
+    ).toEqual([]);
+  });
+
+  /**
+   * `focus:` fires for a mouse click as well as for the keyboard. The whole point
+   * of the `focus-visible` variant everywhere else is that a pointer user does
+   * not get a ring; a handful of controls opting back into `focus:` is the same
+   * inconsistency in a different dimension. `focus-within:` is fine and stays —
+   * it is the only variant that works for a composite widget like `TagCombobox`,
+   * where the focusable element is a child of the box being ringed.
+   *
+   * Scoped to the INDICATOR utilities (`focus:ring-*`, `focus:border-ring`) and
+   * not to every `focus:border-*`, because the two inline title inputs — the
+   * chart studio's and the dashboard's — legitimately use `focus:bg-background`
+   * and `focus:border-border` as a click affordance that says "this is editable
+   * now". Those are not indicators and were never trying to be; the defect there
+   * was that they were ALSO the only thing painted, which the ring now fixes.
+   */
+  test("focus rings hang off `focus-visible:` (or `focus-within:`), not bare `focus:`", () => {
+    const offenders = declarations
+      .filter(({ classes }) =>
+        /(?:^|\s)(?:dark:)?focus:(?:ring-|border-ring(?![\w/-]))/.test(classes),
+      )
+      .map(({ where, classes }) => `${where} — ${classes.replace(/\s+/g, " ").slice(0, 110)}`);
+    expect(offenders, `bare \`focus:\` rings on the mouse path:\n  ${offenders.join("\n  ")}`).toEqual(
+      [],
+    );
+  });
+});
+
+/**
+ * The number behind reason 1 above, so that "the offset band is the wrong colour"
+ * is an assertion rather than a claim in a comment — the failure shape this repo
+ * has been bitten by four times.
+ *
+ * If a future change reintroduces `ring-offset-background`, this test is where
+ * the cost is written down: it fails the moment `--background` stops being
+ * interchangeable with the surfaces controls actually sit on, which it never was.
+ */
+test("`--background` is not a stand-in for the surface a control sits on", () => {
+  const mismatches: string[] = [];
+  for (const theme of ["light", "dark"] as const) {
+    const bg = token(theme, "background");
+    for (const surface of SURFACES) {
+      if (surface === "background") continue;
+      const ratio = contrastRatio(bg, token(theme, surface));
+      if (ratio > 1.1) mismatches.push(`${theme} --${surface}: ${ratio.toFixed(2)}:1`);
+    }
+  }
+  expect(
+    mismatches.length,
+    `a \`ring-offset-background\` gap on these surfaces paints a visibly different colour, not a seam:\n  ${mismatches.join("\n  ")}`,
+  ).toBeGreaterThan(0);
+});

@@ -140,7 +140,7 @@ export function ResultsGrid({ page, csvHref, truncated, error, statusLine, loadi
           <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
           <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter rows…"
             aria-label="Filter result rows"
-            className="h-7 w-48 rounded-md border bg-background pl-7 pr-2 text-xs outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring" />
+            className="h-7 w-48 rounded-md border bg-background pl-7 pr-2 text-xs outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring" />
         </div>
         <span className="text-xs tabular-nums text-muted-foreground">
           {filter ? `${rows.length.toLocaleString()} of ${page.row_count.toLocaleString()}` : `${page.row_count.toLocaleString()} rows`}

@@ -16,7 +16,7 @@ const Input = React.forwardRef<HTMLInputElement, React.ComponentProps<"input">>(
           // ring-inset → focus ring draws INSIDE the input box instead of outside,
           // so containers with overflow-hidden / overflow-y-auto (Dialog body, etc.)
           // can't clip the left/right edges of the ring.
-          "focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] focus-visible:ring-inset",
+          "focus-visible:border-ring focus-visible:ring-ring focus-visible:ring-2 focus-visible:ring-inset",
           "aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
           className,
         )}
