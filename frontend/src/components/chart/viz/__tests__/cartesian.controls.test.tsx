@@ -134,7 +134,7 @@ describe("cartesian controls are grouped and per-kind", () => {
     const user = userEvent.setup();
     const control = ctrls("scatter").find((c) => c.id === "axes");
     render(createElement(control!.render, numericScatterProps));
-    await user.click(screen.getByLabelText("X axis lines and ticks"));
+    await user.click(screen.getByLabelText("X show lines and tick marks"));
     expect(await screen.findByRole("option", { name: "Rotate 45°" })).toHaveAttribute("aria-disabled", "true");
   });
 
@@ -374,7 +374,7 @@ describe("cartesian controls are grouped and per-kind", () => {
    * THE AXES TAB, GROUPED BY AXIS. Metabase's axis settings each carry a `group` of "X-axis" or
    * "Y-axis" (`graph.x_axis.*` / `graph.y_axis.*` in lib/settings/graph.ts) and its panel renders
    * one block per group; egret's tab was one flat run in which "X label" sat two rows above "Log
-   * scale" and four above "X axis lines and ticks".
+   * scale" and four above "X show lines and tick marks".
    *
    * Asserted as rendered STRUCTURE — which controls are inside which labelled group — rather than by
    * looking for a heading somewhere on the page or for a class name. A heading with the right words
@@ -391,16 +391,20 @@ describe("cartesian controls are grouped and per-kind", () => {
       } as VizControlProps<CartesianConfig>));
     };
 
+    // A stored `yMin` so the bounds are on screen: they sit behind "Auto y-axis range" now, the
+    // gate the waterfall/box-plot tab has always had. The switch itself is in the Y list below,
+    // because it is a Y-axis row and would otherwise be the one control this never checks.
     it("puts every X control under X-axis and every Y control under Y-axis", () => {
-      renderAxes("bar", { yMetrics: ["revenue"], xAxis: "month" });
+      renderAxes("bar", { yMetrics: ["revenue"], xAxis: "month", yMin: 0 });
       const x = screen.getByRole("group", { name: "X-axis" });
       const y = screen.getByRole("group", { name: "Y-axis" });
 
-      for (const label of ["X axis scale", "Show X label", "X label", "X axis lines and ticks"]) {
+      for (const label of ["X axis scale", "Show X label", "X label", "X show lines and tick marks"]) {
         expect(within(x).getByLabelText(label), `${label} belongs under X-axis`).toBeInTheDocument();
         expect(within(y).queryByLabelText(label), `${label} must not be under Y-axis`).toBeNull();
       }
-      for (const label of ["Show Y label", "Y label", "Y scale", "Y axis lines and ticks", "Y tick marks", "Y min", "Y max"]) {
+      for (const label of ["Show Y label", "Y label", "Y scale", "Y show lines and tick marks",
+        "Number of tick marks", "Auto y-axis range", "Y min", "Y max"]) {
         expect(within(y).getByLabelText(label), `${label} belongs under Y-axis`).toBeInTheDocument();
         expect(within(x).queryByLabelText(label), `${label} must not be under X-axis`).toBeNull();
       }
@@ -414,7 +418,7 @@ describe("cartesian controls are grouped and per-kind", () => {
       // The dimension runs down the left, so its label is the Y one…
       expect(within(screen.getByRole("group", { name: "Y-axis" })).getByLabelText("Y label")).toBeInTheDocument();
       // …and the measure runs across.
-      expect(within(screen.getByRole("group", { name: "X-axis" })).getByLabelText("X tick marks")).toBeInTheDocument();
+      expect(within(screen.getByRole("group", { name: "X-axis" })).getByLabelText("Number of tick marks")).toBeInTheDocument();
     });
   });
 

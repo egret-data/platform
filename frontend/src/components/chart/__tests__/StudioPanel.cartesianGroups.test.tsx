@@ -41,8 +41,8 @@ describe("StudioPanel renders bar's grouped Display controls", () => {
   it("puts the bar's axis controls in the Axes tab", () => {
     render(<StudioPanel {...props} tab="axes" />);
     expect(screen.getByLabelText("X axis scale")).toBeInTheDocument();
-    expect(screen.getByLabelText("X axis lines and ticks")).toBeInTheDocument();
-    expect(screen.getByLabelText("Y tick marks")).toBeInTheDocument();
+    expect(screen.getByLabelText("X show lines and tick marks")).toBeInTheDocument();
+    expect(screen.getByLabelText("Number of tick marks")).toBeInTheDocument();
     // …and not the Series ones.
     expect(screen.queryByLabelText("Legend")).toBeNull();
   });
