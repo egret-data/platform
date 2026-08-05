@@ -35,7 +35,7 @@ function progressMessage(hasValue: boolean, hasGoal: boolean, value: number, goa
  * so the overshoot is visible. A pointer marks the value position.
  */
 export function ProgressChart({
-  columns, rows, metric, goal = 0, goalColumn, color, format = {},
+  columns, rows, metric, goal = 0, goalColumn, color, format = {}, onValueClick,
 }: {
   columns: ResultColumn[];
   rows: unknown[][];
@@ -48,6 +48,12 @@ export function ProgressChart({
   /** Metabase's `progress.color`. */
   color?: string;
   format?: ColumnFormat;
+  /** Present when the chart is drillable. A progress bar shows ONE aggregate against a goal, so its
+   *  drill context is empty — "show me the records behind this number", the same one the scalar and
+   *  the gauge make. Metabase's `Progress.tsx:72-77` builds `{ value, column, settings, event }`
+   *  with no `dimensions`, and hangs it on the WHOLE bar: there is no "clicked at 60% of the track"
+   *  behaviour to copy, and the goal is a setting rather than a column of anything. */
+  onValueClick?: (x: number, y: number) => void;
 }) {
   const mi = metric != null ? columns.findIndex((c) => c.name === metric) : -1;
   const raw = mi >= 0 && rows.length > 0 ? rows[0][mi] : undefined;
@@ -75,17 +81,17 @@ export function ProgressChart({
   const arrowPercent = hasValue && hasGoal ? Math.max(0, value < effectiveGoal ? value / effectiveGoal : 1) : 0;
 
   const fmt = (v: number) => formatValue(v, type, format);
+  /** The whole reading, as one sentence — the progressbar's `aria-valuetext` and, when the chart is
+   *  clickable, the button's accessible name. One expression so the two can never disagree. */
+  const reading = hasValue
+    ? `${fmt(value)}${hasGoal ? ` of ${fmt(effectiveGoal)}` : ""}${message ? `. ${message}` : ""}`
+    : "no value";
+  const clickable = onValueClick != null && hasValue;
 
-  return (
-    // A progress bar is exactly what ARIA's progressbar role describes; without it a screen
-    // reader gets a number and two loose axis labels.
-    <div className="flex h-full min-h-[5rem] flex-col justify-center px-10"
-      role="progressbar"
-      aria-valuenow={hasValue ? value : undefined}
-      aria-valuemin={0}
-      aria-valuemax={hasGoal ? effectiveGoal : undefined}
-      aria-valuetext={hasValue ? `${fmt(value)}${hasGoal ? ` of ${fmt(effectiveGoal)}` : ""}${message ? `. ${message}` : ""}` : "no value"}>
-      <div className="relative">
+  const OUTER = "flex h-full min-h-[5rem] w-full flex-col justify-center px-10";
+
+  const bar = (
+    <div className="relative">
         {/* The value floats above the fill end, like Metabase. */}
         <div data-progress-value className="absolute -top-7 -translate-x-1/2 whitespace-nowrap text-sm font-semibold tabular-nums text-foreground"
           style={{ left: `${arrowPercent * 100}%` }}>
@@ -114,13 +120,49 @@ export function ProgressChart({
         <div className="h-5 w-full overflow-hidden rounded" style={{ backgroundColor: exceeded ? DARK : LIGHT }}>
           <div data-progress-fill className="h-full rounded" style={{ width: `${barPercent * 100}%`, backgroundColor: MAIN }} />
         </div>
-        {hasGoal && (
-          <div className="mt-1 flex justify-between text-xs text-muted-foreground">
-            <span>{fmt(0)}</span>
-            <span>Goal {fmt(effectiveGoal)}</span>
-          </div>
-        )}
-      </div>
+      {hasGoal && (
+        <div className="mt-1 flex justify-between text-xs text-muted-foreground">
+          <span>{fmt(0)}</span>
+          <span>Goal {fmt(effectiveGoal)}</span>
+        </div>
+      )}
     </div>
+  );
+
+  /**
+   * THE TWO SHAPES THIS RENDERS IN, and why it is a choice rather than an oversight.
+   *
+   * ARIA's `progressbar` is exactly what this chart is, and without it a screen reader gets a
+   * number and two loose axis labels. But `progressbar` is CHILDREN-PRESENTATIONAL: a control
+   * nested inside one is not reachable at all, so "keep the role and put a button in it" is not an
+   * option that works — it is the option that looks like it works.
+   *
+   * So the clickable form drops the role and moves the whole reading onto the button's accessible
+   * name, which is the same trade `BigNumber` makes at the same seam (it drops its own `role="img"`
+   * the moment it becomes interactive). Nothing spoken is lost — `reading` is the identical string
+   * `aria-valuetext` carried — and what is gained is a drill a keyboard can reach. The unclickable
+   * form, which is what the studio preview and a dashboard in edit mode render, is untouched.
+   */
+  if (!clickable) {
+    return (
+      <div className={OUTER}
+        role="progressbar"
+        aria-valuenow={hasValue ? value : undefined}
+        aria-valuemin={0}
+        aria-valuemax={hasGoal ? effectiveGoal : undefined}
+        aria-valuetext={reading}>
+        {bar}
+      </div>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className={`${OUTER} text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}
+      aria-label={`${metric ? `${metric}: ` : ""}${reading}. Show records`}
+      onClick={(e) => onValueClick!(e.clientX, e.clientY)}
+    >
+      {bar}
+    </button>
   );
 }

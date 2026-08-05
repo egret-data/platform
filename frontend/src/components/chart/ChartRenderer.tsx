@@ -314,17 +314,38 @@ function CartesianChart({ columns, rows, cfg, onPointClick }: {
  * sibling's state change — and each one would re-run the builder and re-apply the option.
  *
  * Simpler than `CartesianChart` in the one way that matters: nothing is read back off a gauge's
- * option, so there is one memo rather than two and no `meta` to derive. There is no click handler
- * either — a gauge draws a single value, so there is no element on it that names a row to drill to;
- * Metabase's gauge has no drill either.
+ * option, so there is one memo rather than two and no `meta` to derive.
+ *
+ * THIS IS WHERE A COMMENT USED TO ARGUE THAT A GAUGE SHOULD NOT BE CLICKABLE. Half of it was a
+ * real argument — a gauge draws one aggregate, so there is no element on it that names a row — and
+ * the other half was a checked-sounding fact that was not one: "Metabase's gauge has no drill
+ * either". `Gauge.tsx:176-190` passes `onVisualizationClick` down to `GaugeArc`, which builds a
+ * click object out of the segment under the pointer (`GaugeArc.tsx:47-61`). It has always drilled.
+ *
+ * What survives of the first half is the answer to the second: a gauge segment does NOT drill to
+ * its own range. `GaugeArc` emits `{ value: segment.min, column: cols[0], settings, event }` with
+ * no `dimensions`, and `underlying_records.cljc:95-105,183-188` then iterates an empty dimensions
+ * seq — so the drill it produces adds no filter at all, and Metabase's other drills all decline it
+ * (they need non-empty dimensions, or a nil value). Every segment of a gauge therefore produces the
+ * SAME drill, which is why the click target here is the whole chart rather than an arc: there is no
+ * positional meaning to preserve, and reading a segment back off a size-function option would be
+ * work in service of a distinction that does not exist.
+ *
+ * So a gauge drills exactly the way the plain scalar beside it already does — `{ dims: [] }`, "show
+ * me the records behind this number" — and the two things that receive it were built for that case:
+ * `DrillMenu` renders no "Filter by" entries and no separator when `dims` is empty, and
+ * `DrillRecordsDialog` titles itself "All records".
  *
  * Hooks cannot live in `ChartRenderer` itself past its early returns, so this is a component
  * rather than a memo.
  */
-function GaugeChart({ columns, rows, cfg }: {
+function GaugeChart({ columns, rows, cfg, onValueClick }: {
   columns: ResultColumn[];
   rows: unknown[][];
   cfg: GaugeBuildConfig;
+  /** Present when the chart is drillable; handed the cursor position, since the context it makes
+   *  carries nothing else. */
+  onValueClick?: (x: number, y: number) => void;
 }) {
   // A VALUE key, deliberately not an identity dep — the same treatment, for the same reason,
   // `PieChart` and `CartesianChart` give their own configs above. `cfg` CANNOT be an identity dep:
@@ -342,7 +363,34 @@ function GaugeChart({ columns, rows, cfg }: {
     // rebuilds. Listing `cfg` as well would defeat the point.
     [columns, rows, cfgKey],
   );
-  return <EChartsRenderer option={option} />;
+  // The same three lines `buildGaugeOption` opens with, and `BigNumber` and `ProgressChart` with
+  // it. Repeated rather than read back off the build because the option is a FUNCTION of the
+  // measured size — it can be called, not inspected — and calling it here to recover one number
+  // would run the whole builder a second time (the box plot pays exactly that price, and only
+  // because a boxplot element reports no name at all). A null metric means no number on the card,
+  // and no number means no records worth asking about: `BigNumber` gates its own click identically.
+  const mi = cfg.metric != null ? columns.findIndex((c) => c.name === cfg.metric) : -1;
+  const hasValue = mi >= 0 && rows.length > 0 && rows[0][mi] != null;
+
+  const chart = <EChartsRenderer option={option} />;
+  if (!onValueClick || !hasValue) return chart;
+  // A BUTTON WRAPPING THE CANVAS, not an ECharts `click` handler. Two reasons, and the first is the
+  // one that matters: ECharts' gauge draws its arc as axis-line geometry rather than as data items,
+  // so there is no per-segment `click` to subscribe to — and since every segment drills the same
+  // thing (see above) there is nothing to distinguish anyway. The second is that a wrapper is the
+  // only form of this that a keyboard can reach; `BigNumber` made the same call at the same seam.
+  // That the click survives the trip out of ZRender's own handlers is pinned against REAL ECharts
+  // in `echarts/__tests__/singleValueClick.echarts.test.tsx` — a mocked renderer could not see it.
+  return (
+    <button
+      type="button"
+      className="flex h-full w-full rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      aria-label={`${cfg.metric ?? "Gauge"}. Show records`}
+      onClick={(e) => onValueClick(e.clientX, e.clientY)}
+    >
+      {chart}
+    </button>
+  );
 }
 
 /**
@@ -508,7 +556,24 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
   const preserveCategoryOrder = (params.spec.orderby?.length ?? 0) > 0;
 
   if (vizType === "object") {
-    return <ObjectDetail columns={columns} rows={rows} columnSettings={columnSettings} />;
+    return (
+      <ObjectDetail
+        columns={columns}
+        rows={rows}
+        columnSettings={columnSettings}
+        // PER FIELD, not per record. Metabase's object detail gives its VALUE cells a click object
+        // of `{ column, value }` and its label cells none (`ObjectDetailsTable.tsx:209-238`), which
+        // with no `dimensions` resolves to its quick-filter drill — `column = value`. The same
+        // predicate here, so "See these records" on a field answers "which other records share
+        // this?" rather than "show me the one I am already looking at".
+        //
+        // No temporal unit is attached, and that is not an omission: the object view is a RAW-rows
+        // surface (`spec.columns`, no metrics, no group-by), so its columns are never the bucketed
+        // output of a `temporal_units` grouping. Reading the map here would attach a month range to
+        // a raw timestamp and widen the filter from one record to a whole month.
+        onFieldClick={onValueClick && ((col, value, x, y) => onValueClick({ dims: [{ col, value }] }, x, y))}
+      />
+    );
   }
 
   if (vizType === "map") {
@@ -691,6 +756,10 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
           goalColumn={progress.goalColumn}
           color={progress.color}
           format={progress.metric ? columnSettings[progress.metric] : undefined}
+          // `{ dims: [] }`, the scalar's drill — a progress bar shows one aggregate against a goal
+          // and has no dimension to filter by. See `ProgressChart`'s own note, and `GaugeChart`
+          // above for the Metabase reading that settled all three of these.
+          onValueClick={onValueClick && ((x, y) => onValueClick({ dims: [] }, x, y))}
         />
       </div>
     );
@@ -716,8 +785,9 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          // no drill — see GaugeChart
-          : <GaugeChart columns={columns} rows={rows} cfg={gaugeCfg} />}
+          // `{ dims: [] }` — the scalar's own drill, and for the same reason. See GaugeChart.
+          : <GaugeChart columns={columns} rows={rows} cfg={gaugeCfg}
+            onValueClick={onValueClick && ((x, y) => onValueClick({ dims: [] }, x, y))} />}
       </div>
     );
   }
@@ -727,7 +797,24 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
-          : <FunnelChart columns={columns} rows={rows} {...funnel} columnSettings={columnSettings} metricTypes={metricTypes} />}
+          : <FunnelChart columns={columns} rows={rows} {...funnel} columnSettings={columnSettings} metricTypes={metricTypes}
+            // A funnel step IS a row, and its steps come from a dimension, so this is an ordinary
+            // dimensional drill — the same one the waterfall and the box plot make. This branch
+            // passed no handler at all, in EITHER of the funnel's two modes, so clicking a funnel
+            // did nothing; `FunnelChart` wires both modes onto this one prop.
+            //
+            // `step.name` is `String(row[dimensionIndex])` — the RAW value, straight off the result
+            // row (`funnelSteps`). The funnel happens to DRAW that same string, so raw and label
+            // coincide today; taking the drawn text instead would still be wrong, because it is the
+            // property that would silently stop coinciding the day steps become renameable, the way
+            // series labels and slice names already did in this codebase.
+            onStepClick={onValueClick && funnel.dimension ? (step, x, y) => {
+              const col = funnel.dimension as string;
+              const unit = params.spec.temporal_units?.[col];
+              const dim: DrillDim = unit ? { col, value: step.name, unit } : { col, value: step.name };
+              onValueClick({ dims: [dim] }, x, y);
+            } : undefined}
+          />}
       </div>
     );
   }
@@ -788,6 +875,30 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
           unit={smart.dimension ? params.spec.temporal_units?.[smart.dimension] : undefined}
           switchPositiveNegative={!!smart.switchPositiveNegative}
           compact={!!smart.compact}
+          /**
+           * THE TREND IS NOT ONE OF THE DIMENSION-LESS CHARTS, which is worth stating because this
+           * unit's own plan said it was, and being wrong about it in the other direction would have
+           * cost the whole point of the drill.
+           *
+           * A trend is GROUPED — dimension + metric — and the number it draws is the latest row of
+           * that grouping. Metabase agrees and says so in the click object it builds:
+           * `SmartScalar/compute.ts:311-325` ships `dimensions: [{ value: rows[latestRowIndex]
+           * [dimensionColIndex], column: cols[dimensionColIndex] }]`. So this drills to the LATEST
+           * PERIOD, and with the unit attached that is the whole period, not the instant its label
+           * names — the same half-open range every other bucketed chart sends.
+           *
+           * The fallback matters and is not a formality: `smart.dimension` is optional in the
+           * stored config, and without it there is no period to name. Emitting a dim with an
+           * `undefined` value would filter on nothing; `{ dims: [] }` is the honest answer and is
+           * the drill the gauge and the scalar already make.
+           */
+          onValueClick={onValueClick && ((latest, x, y) => {
+            const col = smart.dimension;
+            if (!col || latest == null) return onValueClick({ dims: [] }, x, y);
+            const unit = params.spec.temporal_units?.[col];
+            const dim: DrillDim = unit ? { col, value: latest, unit } : { col, value: latest };
+            onValueClick({ dims: [dim] }, x, y);
+          })}
         />
       </div>
     );

@@ -23,7 +23,7 @@ const PERIOD_NAME: Record<string, string> = {
 
 export function SmartScalarChart({
   columns, rows, dimension, metric, format = {}, dimensionFormat, unit,
-  switchPositiveNegative = false, compact = false,
+  switchPositiveNegative = false, compact = false, onValueClick,
 }: {
   columns: ResultColumn[];
   rows: unknown[][];
@@ -45,12 +45,41 @@ export function SmartScalarChart({
   switchPositiveNegative?: boolean;
   /** Metabase's "Compact number": 36,513 -> 36.5k, for a card too small to hold the full figure. */
   compact?: boolean;
+  /**
+   * Present when the chart is drillable. Handed the RAW dimension value of the row the big number
+   * came from — the LATEST period — which `ChartRenderer` turns into a `DrillContext`, attaching
+   * the temporal unit so the filter covers the whole period rather than its first instant.
+   *
+   * `undefined` when there is no dimension column configured (or the latest row holds no value for
+   * it): the caller then falls back to the dimension-less drill the gauge and the scalar make.
+   *
+   * ONLY THE VALUE IS A CLICK TARGET. Metabase wraps its primary value alone
+   * (`SmartScalar.tsx:125-134`); nothing under its `PreviousValueComparison/` carries an `onClick`,
+   * so the comparison period is never turned into a filter. Kept that way deliberately — the
+   * comparison is a DERIVED reading (a difference and a percentage), and the period it names is
+   * one the reader can already reach by drilling the trend's own chart.
+   */
+  onValueClick?: (latestDimensionValue: unknown, x: number, y: number) => void;
 }) {
   const mi = metric != null ? columns.findIndex((c) => c.name === metric) : -1;
   const di = dimension != null ? columns.findIndex((c) => c.name === dimension) : -1;
   const type = mi >= 0 ? columns[mi].type : "double";
 
-  const valid = mi >= 0 ? rows.filter((r) => Number.isFinite(Number(r[mi]))) : [];
+  /**
+   * The rows this chart can read a number off. `r[mi] != null && r[mi] !== ""` IS LOAD-BEARING and
+   * was missing: `Number(null)` and `Number("")` are both `0`, and `0` is finite — so a trailing
+   * month with no data yet passed for a real one. The card then read "0", labelled itself with that
+   * month, and said "▼ 100.00% vs previous month" — a metric reported as having collapsed to
+   * nothing when the truth was that nothing had been recorded. Wrong, confident, and with nothing
+   * on screen to say so.
+   *
+   * Found by the drill this chart gained: it pointed at that empty period. `false` and `[]` coerce
+   * to 0 the same way, but neither is a shape a numeric column returns; null and the empty string
+   * both are.
+   */
+  const valid = mi >= 0
+    ? rows.filter((r) => r[mi] != null && r[mi] !== "" && Number.isFinite(Number(r[mi])))
+    : [];
   const n = valid.length;
   const curRow = n > 0 ? valid[n - 1] : undefined;
   const prevRow = n > 1 ? valid[n - 2] : undefined;
@@ -105,17 +134,41 @@ export function SmartScalarChart({
   const period = unit != null ? PERIOD_NAME[unit] : undefined;
   const vsLabel = period ? `vs previous ${period}:` : "vs previous:";
 
+  const spoken = [
+    curLabel ? `${curLabel}: ` : "",
+    hasCur ? fmt(current) : "no value",
+    hasComparison
+      ? `, ${up ? "up" : down ? "down" : "unchanged"}${Number.isFinite(pct) ? ` ${(Math.abs(pct) * 100).toFixed(2)}%` : ""} versus previous ${period ? `${period} ` : ""}${fmt(previous)}`
+      : "",
+  ].join("");
+  const clickable = onValueClick != null && hasCur;
+  // THE ROW THE NUMBER ACTUALLY CAME FROM — `valid`'s last entry, not `rows`'s. A trailing row
+  // whose metric is null or non-finite is filtered out above, so the period on screen is the one
+  // before it; drilling `rows[rows.length - 1]` would filter a period the card is not showing.
+  const curDim = curRow && di >= 0 ? curRow[di] : undefined;
+
+  const value = <div className="text-[2.5rem] font-bold leading-none tabular-nums text-foreground">{hasCur ? fmt(current) : "—"}</div>;
+
   return (
     <div className="flex h-full min-h-[5rem] flex-col items-center justify-center gap-1"
-      role="img"
-      aria-label={[
-        curLabel ? `${curLabel}: ` : "",
-        hasCur ? fmt(current) : "no value",
-        hasComparison
-          ? `, ${up ? "up" : down ? "down" : "unchanged"}${Number.isFinite(pct) ? ` ${(Math.abs(pct) * 100).toFixed(2)}%` : ""} versus previous ${period ? `${period} ` : ""}${fmt(previous)}`
-          : "",
-      ].join("")}>
-      <div className="text-[2.5rem] font-bold leading-none tabular-nums text-foreground">{hasCur ? fmt(current) : "—"}</div>
+      // `img` collapses its subtree, which is what makes the whole card read as one sentence — and
+      // what makes a control inside it unreachable. `group` keeps the same name while leaving the
+      // value operable. Same trade as the funnel's step columns and `BigNumber`'s number.
+      role={clickable ? "group" : "img"}
+      aria-label={spoken}>
+      {clickable ? (
+        <button
+          type="button"
+          className="group rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:text-primary"
+          aria-label={`${spoken}. Show records`}
+          onClick={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            onValueClick!(curDim, r.left + r.width / 2, r.bottom);
+          }}
+        >
+          {value}
+        </button>
+      ) : value}
       {curLabel && <div className="text-sm text-muted-foreground">{curLabel}</div>}
       {hasComparison && (
         <div className="flex items-center gap-1.5 text-sm">

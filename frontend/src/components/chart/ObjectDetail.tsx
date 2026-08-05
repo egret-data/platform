@@ -77,10 +77,20 @@ export function ObjectDetail({
   columns,
   rows,
   columnSettings = {},
+  onFieldClick,
 }: {
   columns: ResultColumn[];
   rows: unknown[][];
   columnSettings?: Record<string, ColumnFormat>;
+  /**
+   * Present when the chart is drillable. Handed the field's column name and its RAW value —
+   * `row[ci]`, never the formatted text beside it — because that is the whole of what the filter
+   * needs and it is the one thing this component must not let the display shadow.
+   *
+   * `ChartRenderer` turns the pair into a `DrillContext`, the same division of labour the funnel,
+   * waterfall, box plot and sankey branches use.
+   */
+  onFieldClick?: (col: string, value: unknown, x: number, y: number) => void;
 }) {
   const [index, setIndex] = useState(0);
   // Reset to the first record whenever the data changes (a new query → new rows reference).
@@ -96,16 +106,43 @@ export function ObjectDetail({
     <div className="flex h-full flex-col">
       <div className="min-h-0 flex-1 overflow-auto">
         <dl className="divide-y">
-          {columns.map((c, ci) => (
-            <div key={c.name} className="flex gap-3 px-3 py-2">
-              <dt className="w-2/5 shrink-0 truncate text-xs font-medium uppercase tracking-wide text-muted-foreground" title={c.name}>{c.name}</dt>
-              <dd className="min-w-0 flex-1 break-words text-sm tabular-nums">
-                {/* Keyed by the record as well as the column: paging to the next record must
-                    collapse an expanded value rather than carry its state onto a different one. */}
-                <Value key={`${i}:${c.name}`} value={row[ci]} column={c} format={columnSettings[c.name]} />
-              </dd>
-            </div>
-          ))}
+          {columns.map((c, ci) => {
+            // A field with NO VALUE has nothing to filter by: `= NULL` matches no row in SQL, so
+            // the drill would return an empty table and pass for an answer. `tableCellDrill` skips
+            // null dims for the same reason. The row still renders — it just isn't a click target.
+            const drillable = onFieldClick != null && row[ci] != null && row[ci] !== "";
+            return (
+              <div key={c.name} className="flex gap-3 px-3 py-2">
+                {/* THE FIELD NAME IS INERT, and Metabase's is too — `DetailsTable` renders two
+                    cells per field and hands a click object to the value half only
+                    (`ObjectDetailsTable.tsx:209-238`), so its label cell fails
+                    `visualizationIsClickable` and does nothing. That is also the right answer on
+                    its own terms: a column name is not a value, so there is no predicate to
+                    build from it. */}
+                <dt data-object-name className="w-2/5 shrink-0 truncate text-xs font-medium uppercase tracking-wide text-muted-foreground" title={c.name}>{c.name}</dt>
+                {/* A PLAIN `onClick` ON THE CELL, not a `<button>` — the opposite of the call
+                    `BigNumber` and the funnel's step columns make, and for a reason specific to
+                    this cell. A value here can render as a `<pre>` (JSON), as an `<img>`, or with
+                    its own "Show more" button; none of the first two is phrasing content and the
+                    third would be a nested button, so a `<button>` wrapper is not legal markup for
+                    any of them. `role="button"` on the cell is worse still: it takes its name from
+                    its contents and hides the structure a reader needs. So this matches the other
+                    surface egret has of exactly this shape — `ChartTable`'s and `PivotTable`'s
+                    drillable cells, which are `<td onClick>` with `cursor-pointer` and no keyboard
+                    reach either. A keyboard route to a per-cell drill is a product-wide gap across
+                    all three, not this chart's to invent alone. */}
+                <dd
+                  data-object-value
+                  className={`min-w-0 flex-1 break-words text-sm tabular-nums ${drillable ? "cursor-pointer" : ""}`}
+                  onClick={drillable ? (e) => onFieldClick!(c.name, row[ci], e.clientX, e.clientY) : undefined}
+                >
+                  {/* Keyed by the record as well as the column: paging to the next record must
+                      collapse an expanded value rather than carry its state onto a different one. */}
+                  <Value key={`${i}:${c.name}`} value={row[ci]} column={c} format={columnSettings[c.name]} />
+                </dd>
+              </div>
+            );
+          })}
         </dl>
       </div>
       {rows.length > 1 && (
