@@ -1798,3 +1798,390 @@ describe("a sort the query already applied is not applied again before drawing",
     }
   });
 });
+
+/**
+ * THE FIVE THAT DID NOTHING WHEN YOU CLICKED THEM — funnel (both modes), object, gauge, progress
+ * and smartscalar.
+ *
+ * Every assertion below is a SEAM assertion: it renders `ChartRenderer` and asserts on the
+ * `onValueClick` it is handed. That is deliberate and it is the whole reason this defect shipped
+ * ten times. `FunnelChart.test.tsx`, `ObjectDetail.test.tsx`, `ProgressChart.test.tsx` and
+ * `SmartScalarChart.test.tsx` between them run ~60 assertions over these five charts and not one
+ * of them crosses this line, so all of them stayed green while clicking any of these five did
+ * nothing at all. A builder-level or component-level test CANNOT see a missing handler on the
+ * branch that renders the component.
+ */
+describe("funnel drill", () => {
+  const COLS = [{ name: "stage", type: "varchar" }, { name: "cnt", type: "double" }];
+  const ROWS = [["Visited", 100], ["Signed up", 40], ["Paid", 10]];
+  const funnelParams = (funnel: Record<string, unknown>, spec?: Record<string, unknown>) =>
+    params({ funnel, ...(spec ? { spec: spec as never } : {}) });
+
+  it("drills a funnel step by its own dimension value", () => {
+    const onValueClick = vi.fn();
+    const { container } = render(
+      <ChartRenderer
+        vizType="funnel"
+        params={funnelParams({ dimension: "stage", metric: "cnt" })}
+        columns={COLS} rows={ROWS} onValueClick={onValueClick}
+      />,
+    );
+    const steps = container.querySelectorAll("[data-funnel-step]");
+    expect(steps).toHaveLength(3);
+    fireEvent.click(steps[1], { clientX: 11, clientY: 22 });
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "stage", value: "Signed up" }] }, 11, 22);
+  });
+
+  /**
+   * THREE STEPS, REORDERED, AND THE MIDDLE ONE IS THE ASSERTION. `funnel.stepOrder` is what a
+   * reader drags in the settings panel, and it makes the DRAWN order differ from the ARRIVAL order.
+   * With `["Paid", "Visited", "Signed up"]` the middle COLUMN holds "Visited" while the middle ROW
+   * still holds "Signed up", so an implementation that indexed back into `rows` — or into the
+   * unsorted step list — drills to the wrong step while looking entirely plausible.
+   *
+   * A TWO-STEP FIXTURE CANNOT SEE THIS: swapping two items and reading either one back gives the
+   * same answer under both implementations.
+   */
+  it("drills the step drawn in that column, not the row that arrived in that position", () => {
+    const onValueClick = vi.fn();
+    const { container } = render(
+      <ChartRenderer
+        vizType="funnel"
+        params={funnelParams({ dimension: "stage", metric: "cnt", stepOrder: ["Paid", "Visited", "Signed up"] })}
+        columns={COLS} rows={ROWS} onValueClick={onValueClick}
+      />,
+    );
+    const steps = container.querySelectorAll("[data-funnel-step]");
+    fireEvent.click(steps[1], { clientX: 1, clientY: 2 });
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "stage", value: "Visited" }] }, 1, 2);
+  });
+
+  // The first step is an INFO column rather than a band, but it is still a row of the result with a
+  // dimension value of its own. Metabase's is NOT clickable — `FunnelNormal.tsx:140` builds its
+  // click infos from `funnelSteps.slice(1)` and hangs the handler on the band section, which the
+  // first step has none of. Deliberate divergence; see the note in `FunnelChart`.
+  it("drills the first step, which is drawn as an info column rather than a band", () => {
+    const onValueClick = vi.fn();
+    const { container } = render(
+      <ChartRenderer
+        vizType="funnel"
+        params={funnelParams({ dimension: "stage", metric: "cnt" })}
+        columns={COLS} rows={ROWS} onValueClick={onValueClick}
+      />,
+    );
+    fireEvent.click(container.querySelectorAll("[data-funnel-step]")[0], { clientX: 3, clientY: 4 });
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "stage", value: "Visited" }] }, 3, 4);
+  });
+
+  // `funnel.type: "bar"` builds a REAL cartesian option out of the same steps, and it passed no
+  // handler either — so the funnel was unclickable in both of its modes.
+  it("drills a step in bar mode too", () => {
+    const onValueClick = vi.fn();
+    render(
+      <ChartRenderer
+        vizType="funnel"
+        params={funnelParams({ dimension: "stage", metric: "cnt", type: "bar" })}
+        columns={COLS} rows={ROWS} onValueClick={onValueClick}
+      />,
+    );
+    mockClickPayload = { name: "Signed up", seriesName: "Signed up", value: 40, x: 7, y: 8 };
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "stage", value: "Signed up" }] }, 7, 8);
+  });
+
+  // A bucketed dimension carries its unit, so the drill filters the whole period rather than the
+  // instant its label happens to name — the same half-open range every other chart sends.
+  it("carries the dimension's temporal unit", () => {
+    const onValueClick = vi.fn();
+    const { container } = render(
+      <ChartRenderer
+        vizType="funnel"
+        params={funnelParams({ dimension: "month", metric: "cnt" }, {
+          metrics: ["cnt"], dimensions: ["month"], columns: [], filters: [], orderby: [],
+          row_limit: 1000, rollup_groups: [], temporal_units: { month: "month" },
+        })}
+        columns={[{ name: "month", type: "date" }, { name: "cnt", type: "double" }]}
+        rows={[["2026-01-01", 100], ["2026-02-01", 40]]}
+        onValueClick={onValueClick}
+      />,
+    );
+    fireEvent.click(container.querySelectorAll("[data-funnel-step]")[1], { clientX: 1, clientY: 2 });
+    expect(onValueClick).toHaveBeenCalledWith(
+      { dims: [{ col: "month", value: "2026-02-01", unit: "month" }] }, 1, 2);
+  });
+
+  // No handler from above means no click surface at all — a dashboard card in edit mode, where
+  // `onValueClick` is deliberately withheld, must not sprout buttons.
+  it("draws no click surface when the shell passes no handler", () => {
+    const { container } = render(
+      <ChartRenderer
+        vizType="funnel"
+        params={funnelParams({ dimension: "stage", metric: "cnt" })}
+        columns={COLS} rows={ROWS}
+      />,
+    );
+    expect(container.querySelectorAll("button")).toHaveLength(0);
+  });
+});
+
+/**
+ * OBJECT DETAIL — the one of the five whose drill is per-FIELD rather than per-chart.
+ *
+ * Measured against `metabase/frontend/src/metabase/visualizations/components/ObjectDetail/
+ * ObjectDetailsTable.tsx:209-238` (NOT `visualizations/ObjectDetail/ObjectDetailBody.tsx`, which is
+ * a pass-through): `DetailsTable` renders TWO cells per field and gives a `clicked` object to the
+ * VALUE half only — `{ value: columnValue, column, settings, origin, data }`. The LABEL half gets
+ * none, so `visualizationIsClickable` answers false there and clicking a field's name does nothing.
+ * With `column` and `value` set and `dimensions` absent, the drill that fires is `quick-filter`,
+ * i.e. `column = value`.
+ */
+describe("object detail drill", () => {
+  const COLS = [
+    { name: "id", type: "int" },
+    { name: "amount", type: "double" },
+    { name: "plan", type: "text" },
+  ];
+  const ROWS = [[1, 1234.5, "Basic"], [2, 7, "Premium"]];
+  const objectParams = () => params();
+
+  it("drills a field by its own column and value", () => {
+    const onValueClick = vi.fn();
+    const { container } = render(
+      <ChartRenderer vizType="object" params={objectParams()} columns={COLS} rows={ROWS}
+        onValueClick={onValueClick} />,
+    );
+    const values = container.querySelectorAll("[data-object-value]");
+    expect(values).toHaveLength(3);
+    fireEvent.click(values[2], { clientX: 9, clientY: 10 });
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "plan", value: "Basic" }] }, 9, 10);
+  });
+
+  /**
+   * THE RAW VALUE, NOT THE ONE ON SCREEN. `amount` carries a column format, so the cell reads
+   * "$1,234.50" while the row holds `1234.5`; a filter on the former matches nothing at all and
+   * returns an empty drill that looks like a chart with no rows behind it. Seven bugs in this
+   * codebase have come from keying on a display string.
+   *
+   * THREE FIELDS, FORMATTED ONE IN THE MIDDLE, on purpose: with the formatted field first or last
+   * an implementation that read the DOM text of the wrong cell would still land on an unformatted
+   * neighbour half the time and pass.
+   */
+  it("drills the raw value, not the formatted text the cell shows", () => {
+    const onValueClick = vi.fn();
+    const { container } = render(
+      <ChartRenderer
+        vizType="object"
+        params={params({ columnSettings: { amount: { prefix: "$", decimals: 2 } } })}
+        columns={COLS} rows={ROWS} onValueClick={onValueClick}
+      />,
+    );
+    expect(screen.getByText("$1,234.50")).toBeInTheDocument();
+    fireEvent.click(container.querySelectorAll("[data-object-value]")[1], { clientX: 1, clientY: 2 });
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "amount", value: 1234.5 }] }, 1, 2);
+  });
+
+  // The FIELD NAME is inert, as Metabase's is: its half of the row carries no click object, and a
+  // drill needs a value as well as a column.
+  it("does not drill the field name", () => {
+    const onValueClick = vi.fn();
+    const { container } = render(
+      <ChartRenderer vizType="object" params={objectParams()} columns={COLS} rows={ROWS}
+        onValueClick={onValueClick} />,
+    );
+    fireEvent.click(container.querySelectorAll("[data-object-name]")[0], { clientX: 1, clientY: 2 });
+    expect(onValueClick).not.toHaveBeenCalled();
+  });
+
+  // A field with no value has nothing to filter by — `= NULL` matches no row in SQL, so the drill
+  // would return an empty table and pass for an answer. The table's own cell drill skips null dims
+  // for exactly this reason (`tableCellDrill`).
+  it("refuses a field that has no value", () => {
+    const onValueClick = vi.fn();
+    const { container } = render(
+      <ChartRenderer vizType="object" params={objectParams()} columns={COLS} rows={[[1, null, "Basic"]]}
+        onValueClick={onValueClick} />,
+    );
+    fireEvent.click(container.querySelectorAll("[data-object-value]")[1], { clientX: 1, clientY: 2 });
+    expect(onValueClick).not.toHaveBeenCalled();
+    // …and its neighbours still drill, so this is a refusal and not a dead chart.
+    fireEvent.click(container.querySelectorAll("[data-object-value]")[0], { clientX: 1, clientY: 2 });
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "id", value: 1 }] }, 1, 2);
+  });
+
+  // The view pages through records. A drill must filter by the record ON SCREEN, not by the first
+  // one — the index is component state that never reaches ChartRenderer, so nothing above can
+  // correct this if the component reads the wrong row.
+  it("drills the record currently paged to", () => {
+    const onValueClick = vi.fn();
+    const { container } = render(
+      <ChartRenderer vizType="object" params={objectParams()} columns={COLS} rows={ROWS}
+        onValueClick={onValueClick} />,
+    );
+    fireEvent.click(screen.getByLabelText("next record"));
+    fireEvent.click(container.querySelectorAll("[data-object-value]")[2], { clientX: 1, clientY: 2 });
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "plan", value: "Premium" }] }, 1, 2);
+  });
+});
+
+/**
+ * THE THREE SINGLE-NUMBER CHARTS — gauge, progress, trend.
+ *
+ * What each click MEANS was settled by reading Metabase before any of this was written, because
+ * two of the three have no dimension under the cursor and the wrong answer there is either a
+ * filter on nothing or a new `DrillContext` shape smuggled in without review:
+ *
+ *  - **Gauge** (`GaugeArc.tsx:47-61`) builds `{ value: segment.min, column: cols[0], settings,
+ *    event }` — NO `dimensions`. Downstream, `underlying_records.cljc:95-105` accepts it on the
+ *    strength of the aggregation column alone and then iterates an EMPTY dimensions seq, so the
+ *    drill adds no filter at all; `quick-filter`, `automatic-insights` and `column-filter` all
+ *    refuse it (they need non-empty dimensions, or a nil value). **A gauge segment is not a range
+ *    filter.** It is the same dimension-less "show me the records behind this number" the plain
+ *    scalar already makes, which egret spells `{ dims: [] }` (`BigNumber`, wired at the `scalar`
+ *    branch) and whose two consumers already handle: `DrillMenu` renders no "Filter by" entries and
+ *    no separator, and `DrillRecordsDialog` titles itself "All records".
+ *  - **Progress** (`Progress.tsx:72-77`) is the same object, and its handler is on the whole bar —
+ *    there is no "clicked at 60% of the track" behaviour anywhere to copy.
+ *  - **Trend is NOT one of the dimension-less ones, and the plan for this unit said it was.**
+ *    `SmartScalar/compute.ts:311-325` ships `dimensions: [{ value: rows[latestRowIndex]
+ *    [dimensionColIndex], column: cols[dimensionColIndex] }]` — a real dimension, holding the
+ *    LATEST period. So a trend drills to a period like any grouped chart, and needs no new shape
+ *    either. Its previous-period comparison, by contrast, is not a click target at all: nothing
+ *    under `PreviousValueComparison/` carries an `onClick`.
+ */
+describe("gauge drill", () => {
+  const COLS = [{ name: "revenue", type: "double" }];
+
+  it("drills a gauge to the records behind the number, with no dimension to filter by", () => {
+    const onValueClick = vi.fn();
+    render(
+      <ChartRenderer
+        vizType="gauge" params={params({ gauge: { metric: "revenue" } })}
+        columns={COLS} rows={[[42000]]} onValueClick={onValueClick}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Show records/ }));
+    // `toStrictEqual` on the emitted context: `toHaveBeenCalledWith` and `toEqual` both skip
+    // `undefined` properties, so `{ dims: [], unit: undefined }` would pass a looser check.
+    expect(onValueClick).toHaveBeenCalledTimes(1);
+    expect(onValueClick.mock.calls[0][0]).toStrictEqual({ dims: [] });
+  });
+
+  it("draws no click surface when the shell passes no handler", () => {
+    render(
+      <ChartRenderer vizType="gauge" params={params({ gauge: { metric: "revenue" } })}
+        columns={COLS} rows={[[42000]]} />,
+    );
+    expect(screen.queryByRole("button", { name: /Show records/ })).toBeNull();
+  });
+
+  // No number, no records worth asking about — `BigNumber` gates its own click the same way
+  // (`isClickable = onValueClick != null && raw != null`).
+  it("draws no click surface when there is no value", () => {
+    render(
+      <ChartRenderer vizType="gauge" params={params({ gauge: { metric: "revenue" } })}
+        columns={COLS} rows={[[null]]} onValueClick={vi.fn()} />,
+    );
+    expect(screen.queryByRole("button", { name: /Show records/ })).toBeNull();
+  });
+});
+
+describe("progress drill", () => {
+  const COLS = [{ name: "revenue", type: "double" }];
+
+  it("drills a progress bar to the records behind the number", () => {
+    const onValueClick = vi.fn();
+    render(
+      <ChartRenderer
+        vizType="progress" params={params({ progress: { metric: "revenue", goal: 100 } })}
+        columns={COLS} rows={[[42]]} onValueClick={onValueClick}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Show records/ }));
+    expect(onValueClick).toHaveBeenCalledTimes(1);
+    expect(onValueClick.mock.calls[0][0]).toStrictEqual({ dims: [] });
+  });
+
+  it("draws no click surface when the shell passes no handler", () => {
+    render(
+      <ChartRenderer vizType="progress" params={params({ progress: { metric: "revenue", goal: 100 } })}
+        columns={COLS} rows={[[42]]} />,
+    );
+    expect(screen.queryByRole("button", { name: /Show records/ })).toBeNull();
+  });
+});
+
+describe("smartscalar drill", () => {
+  const COLS = [{ name: "month", type: "date" }, { name: "rev", type: "double" }];
+  /** THREE ROWS, so "the latest" is neither "the first" nor "the only". */
+  const ROWS = [["2026-01-01", 10], ["2026-02-01", 20], ["2026-03-01", 35]];
+  const trendParams = (extra: Record<string, unknown> = {}) => params({
+    smartscalar: { dimension: "month", metric: "rev", ...extra },
+    spec: {
+      metrics: ["rev"], dimensions: ["month"], columns: [], filters: [], orderby: [],
+      row_limit: 1000, rollup_groups: [], temporal_units: { month: "month" },
+    },
+  });
+
+  it("drills a trend to the LATEST period, with the dimension's temporal unit", () => {
+    const onValueClick = vi.fn();
+    render(<ChartRenderer vizType="smartscalar" params={trendParams()} columns={COLS} rows={ROWS}
+      onValueClick={onValueClick} />);
+    fireEvent.click(screen.getByRole("button", { name: /Show records/ }));
+    expect(onValueClick.mock.calls[0][0])
+      .toStrictEqual({ dims: [{ col: "month", value: "2026-03-01", unit: "month" }] });
+    // …and the unit turns it into the whole month, not the first instant of it.
+    expect(drillFilters(onValueClick.mock.calls[0][0])).toEqual([
+      { col: "month", op: "ge", value: "2026-03-01" },
+      { col: "month", op: "lt", value: "2026-04-01" },
+    ]);
+  });
+
+  /**
+   * THE LATEST ROW THE CHART DREW, not the last row it was handed. `SmartScalarChart` filters to
+   * the rows whose metric is finite before taking the last two, so a trailing row with a null
+   * metric is not the period on screen — the number above it belongs to the row before.
+   */
+  it("drills the row the number actually came from, past a trailing null", () => {
+    const onValueClick = vi.fn();
+    render(
+      <ChartRenderer vizType="smartscalar" params={trendParams()} columns={COLS}
+        rows={[...ROWS, ["2026-04-01", null]]} onValueClick={onValueClick} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Show records/ }));
+    expect(onValueClick.mock.calls[0][0])
+      .toStrictEqual({ dims: [{ col: "month", value: "2026-03-01", unit: "month" }] });
+  });
+
+  /**
+   * THE COMPARISON IS NOT A CLICK TARGET. Metabase wraps only its primary value
+   * (`SmartScalar.tsx:125-134`); nothing in its `PreviousValueComparison/` directory carries an
+   * `onClick`, so the previous period is never turned into a filter. Asserting there is exactly
+   * ONE control is what makes this a real assertion — "the value drills" would pass just as well
+   * with the comparison wired to the same period, which is the wrong answer wearing the right one's
+   * clothes.
+   */
+  it("offers exactly one click target — the value, not the comparison", () => {
+    render(<ChartRenderer vizType="smartscalar" params={trendParams()} columns={COLS} rows={ROWS}
+      onValueClick={vi.fn()} />);
+    expect(screen.getByText("▲", { exact: false })).toBeInTheDocument(); // the comparison IS drawn
+    expect(screen.getAllByRole("button")).toHaveLength(1);
+  });
+
+  // Without a dimension there is no period to name, so the trend falls back to the same
+  // nothing-dimensional drill the gauge and the scalar make rather than emitting a filter on a
+  // column that is not there.
+  it("falls back to the records-behind-the-number drill when no dimension is configured", () => {
+    const onValueClick = vi.fn();
+    render(
+      <ChartRenderer vizType="smartscalar" params={params({ smartscalar: { metric: "rev" } })}
+        columns={COLS} rows={ROWS} onValueClick={onValueClick} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Show records/ }));
+    expect(onValueClick.mock.calls[0][0]).toStrictEqual({ dims: [] });
+  });
+
+  it("draws no click surface when the shell passes no handler", () => {
+    render(<ChartRenderer vizType="smartscalar" params={trendParams()} columns={COLS} rows={ROWS} />);
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+});

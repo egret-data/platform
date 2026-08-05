@@ -187,4 +187,34 @@ describe("SmartScalarChart — the label names the period, not its first day", (
     );
     expect(screen.getByText("3")).toBeInTheDocument();
   });
+  /**
+   * A NULL METRIC IS NOT A ZERO, and this chart treated it as one.
+   *
+   * `valid` filters the rows to those whose metric is usable, and it asked
+   * `Number.isFinite(Number(r[mi]))`. `Number(null)` is `0` and `Number("")` is `0`, both finite —
+   * so a trailing month with no data became the LATEST period, the big number read 0, and the
+   * comparison read "down 100.00% vs previous month". A card saying revenue collapsed to nothing
+   * when the truth is that the month has not been loaded yet is the same class of defect as a
+   * drill that under-reports: wrong, confident, and with nothing on screen to say so.
+   *
+   * Found by the drill added in this unit, which pointed at that null row's period.
+   */
+  it("skips a trailing row whose metric is null rather than reading it as zero", () => {
+    render(
+      <SmartScalarChart columns={cols} rows={[...rows, ["2026-04-01", null]]}
+        dimension="d" metric="m" unit="month" />,
+    );
+    expect(screen.getByText("March 2026")).toBeInTheDocument();
+    expect(screen.queryByText("April 2026")).toBeNull();
+    expect(screen.queryByText(/100.00%/)).toBeNull();
+  });
+
+  // …and an empty string is the same case: `Number("")` is also 0.
+  it("skips a row whose metric is an empty string", () => {
+    render(
+      <SmartScalarChart columns={cols} rows={[...rows, ["2026-04-01", ""]]}
+        dimension="d" metric="m" unit="month" />,
+    );
+    expect(screen.getByText("March 2026")).toBeInTheDocument();
+  });
 });

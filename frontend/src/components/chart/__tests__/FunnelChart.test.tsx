@@ -101,4 +101,33 @@ describe("FunnelChart", () => {
     render(<FunnelChart columns={cols} rows={[]} dimension="stage" metric="cnt" />);
     expect(screen.getByText("No data")).toBeInTheDocument();
   });
+
+  /**
+   * BECOMING CLICKABLE MUST NOT CHANGE WHAT IS DRAWN. The step columns turn from `div` into
+   * `button` when a drill handler arrives, and a button carries UA styling a div does not — so this
+   * pins that the wrapper contributes no box (no padding, margin, width or border of its own) and
+   * that every child inside it is byte-identical. The funnel's typography is measured to the
+   * hundredth of a pixel elsewhere in this suite; a stray `p-1` here would move all of it, on the
+   * dashboard only, where none of those specs render.
+   */
+  it("draws the identical columns whether or not it is clickable", () => {
+    const plain = render(<FunnelChart columns={cols} rows={rows} dimension="stage" metric="cnt" />);
+    const live = render(
+      <FunnelChart columns={cols} rows={rows} dimension="stage" metric="cnt" onStepClick={() => {}} />,
+    );
+    const steps = (c: HTMLElement) => [...c.querySelectorAll("[data-funnel-step]")];
+    const a = steps(plain.container);
+    const b = steps(live.container);
+    expect(b).toHaveLength(a.length);
+    a.forEach((el, i) => {
+      expect(el.tagName).toBe("DIV");
+      expect(b[i].tagName).toBe("BUTTON");
+      // The drawn contents, unchanged.
+      expect(b[i].innerHTML).toBe(el.innerHTML);
+      // Every class the div had, still there — plus only affordance classes, none of them boxy.
+      for (const c of el.className.split(" ")) expect(b[i].classList.contains(c)).toBe(true);
+      const extra = b[i].className.split(" ").filter((c) => !el.className.split(" ").includes(c));
+      expect(extra.join(" ")).toBe("cursor-pointer text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring");
+    });
+  });
 });

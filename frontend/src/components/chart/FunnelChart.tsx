@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { EChartsRenderer } from "./echarts/EChartsRenderer";
 import { buildCartesianOption } from "./echarts/options/cartesian";
 import {
@@ -95,14 +95,63 @@ function useMeasuredSize() {
   };
 }
 
+/** One step's contribution to the chart's spoken description, reused as the accessible name of its
+ *  own button once the funnel is clickable. */
+const stepSpoken = (s: FunnelStep) => `${s.name} ${s.label}${s.share ? `, ${s.share} of the first step` : ""}`;
+
+/**
+ * One funnel column — a plain `div` normally, a real `button` when the chart is drillable.
+ *
+ * A BUTTON RATHER THAN AN `onClick` ON THE DIV, which is what the table and pivot cells do. Those
+ * two are inside a `table`, where a screen reader can already reach every cell by its own grid
+ * navigation and a click is an extra affordance on something already reachable; a funnel column is
+ * a bare div inside what was a `role="img"`, so an `onClick` there would be a drill only a mouse
+ * could ever perform. `BigNumber` made the same call for the same reason and is the precedent this
+ * follows.
+ *
+ * `text-left` because a UA styles a button's text `center` and the column's own children set their
+ * alignment; without it the un-aligned bits (nothing today, but any future child) would drift.
+ * `bg-transparent`/`p-0` are Tailwind preflight's already, and are not repeated here.
+ */
+function StepColumn({ step, onStepClick, className, children }: {
+  step: FunnelStep;
+  onStepClick?: (step: FunnelStep, x: number, y: number) => void;
+  className: string;
+  children: ReactNode;
+}) {
+  if (!onStepClick) return <div data-funnel-step className={className}>{children}</div>;
+  return (
+    <button
+      type="button"
+      data-funnel-step
+      // The same name the chart's own summary gives this step, plus what the click will do — the
+      // shape `BigNumber`'s "…. Show records" already uses.
+      aria-label={`${stepSpoken(step)}. Show records`}
+      className={`${className} cursor-pointer text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}
+      onClick={(e) => onStepClick(step, e.clientX, e.clientY)}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function FunnelChart({
   columns, rows, dimension, metric, stepOrder, hiddenSteps, columnSettings, metricTypes, type = "funnel",
+  onStepClick,
 }: FunnelBuildConfig & {
   columns: ResultColumn[];
   rows: unknown[][];
   /** Metabase's `funnel.type`. "bar" is a real bar chart of the same steps — what its own
    *  `funnelToBarTransform` produces — for when the steps are not really one flow. */
   type?: "funnel" | "bar";
+  /** Present when the chart is drillable — `ChartRenderer` turns the step into a `DrillContext`,
+   *  because that is where the dimension column and its temporal unit already are (the same
+   *  division of labour the waterfall, box plot and sankey branches use).
+   *
+   *  It is handed the whole `FunnelStep` rather than its name so that the RAW dimension value is
+   *  the only thing this component can pass on: `FunnelStep.name` is `String(row[dimensionIndex])`
+   *  (see `funnelSteps`), never a label. Nothing here reads back the text it drew. */
+  onStepClick?: (step: FunnelStep, x: number, y: number) => void;
 }) {
   const { ref, isNarrow, isShort } = useMeasuredSize();
 
@@ -115,12 +164,12 @@ export function FunnelChart({
   }
 
   const label = `Funnel chart of ${metric ?? "a metric"} by ${dimension ?? "a dimension"}. ${
-    steps.map((s) => `${s.name} ${s.label}${s.share ? `, ${s.share} of the first step` : ""}`).join("; ")
+    steps.map(stepSpoken).join("; ")
   }.`;
 
   if (type === "bar") {
     return <StepBars steps={steps} columns={columns} dimension={dimension} metric={metric}
-      columnSettings={columnSettings} metricTypes={metricTypes} />;
+      columnSettings={columnSettings} metricTypes={metricTypes} onStepClick={onStepClick} />;
   }
 
   const [first, ...rest] = steps;
@@ -165,15 +214,30 @@ export function FunnelChart({
       // `isSmall` in Metabase, which is `isShort || isNarrow` and reaches nothing but this padding.
       style={{ padding: isNarrow || isShort ? "0.5rem" : "1rem" }}
       className="flex h-full w-full text-sm text-muted-foreground"
-      role="img"
+      // `img` COLLAPSES ITS SUBTREE — that is the whole point of it, and it is why an unclickable
+      // funnel is spoken as one sentence rather than as thirteen loose fragments. It is also why
+      // it cannot stay once the steps become buttons: a control inside `role="img"` is not
+      // reachable at all. `group` keeps the same `aria-label` as the chart's name while leaving the
+      // children exposed, so the summary survives and the steps become operable. `BigNumber` makes
+      // the same trade at the same seam, dropping its own `role="img"` the moment it is clickable.
+      role={onStepClick ? "group" : "img"}
       aria-label={label}
     >
       {/* The first step: its value is what every share below is a share OF, so it is set large and
           centred rather than drawn. `shrink-0` with no width — Metabase sizes this column to its
           own text and gives the whole remaining width to the bands. That is also why its type has
           to shrink on a small card: this column takes what it needs FIRST, so every pixel it keeps
-          is one the later columns do not get, and at 184px they were left on their 20px floor. */}
-      <div className="flex shrink-0 flex-col border-r">
+          is one the later columns do not get, and at 184px they were left on their 20px floor.
+
+          CLICKABLE, AND METABASE'S IS NOT — a deliberate divergence, measured rather than assumed.
+          `FunnelNormal.tsx:140` builds its click infos from `funnelSteps.slice(1)`, and only those
+          infos get a `GraphSection`, which is where the handler hangs; the `FunnelStart` block
+          (lines 214-234) has none. That is an artifact of the first step having no band to draw,
+          not a decision about what the step means: it is a row of the result with a dimension value
+          like every other one, and "Visited: 131,320" is the number the whole funnel is a share of,
+          so being unable to ask what is behind it is a hole rather than a rule. Same call this file
+          already makes about Metabase's mismatched first-column spacer below. */}
+      <StepColumn step={first} onStepClick={onStepClick} className="flex shrink-0 flex-col border-r">
         <div data-funnel-step-name className="truncate p-[0.5em] text-right" title={first.name}>{first.name}</div>
         <div
           style={{ fontSize: font.start }}
@@ -197,10 +261,11 @@ export function FunnelChart({
           <div>&nbsp;</div>
           <div className="mt-[1em]">&nbsp;</div>
         </div>
-      </div>
+      </StepColumn>
 
       {rest.map((step, i) => (
-        <div key={step.name} className="flex min-w-[20px] flex-1 flex-col border-r">
+        <StepColumn key={step.name} step={step} onStepClick={onStepClick}
+          className="flex min-w-[20px] flex-1 flex-col border-r">
           <div data-funnel-step-name className="truncate p-[0.5em] text-right" title={step.name}>{step.name}</div>
           <div className="min-h-0 flex-1">
             <Band from={steps[i].fraction} to={step.fraction} opacity={stepOpacity(i, rest.length)} />
@@ -209,7 +274,7 @@ export function FunnelChart({
             <div data-funnel-share className="truncate">{step.share}</div>
             <div data-funnel-step-value className="mt-[1em] truncate tabular-nums">{step.label}</div>
           </div>
-        </div>
+        </StepColumn>
       ))}
     </div>
   );
@@ -224,9 +289,10 @@ export function FunnelChart({
  * a value only in its own column — and stacking, so the four series land in four x positions
  * instead of being grouped side by side inside each one.
  */
-function StepBars({ steps, columns, dimension, metric, columnSettings, metricTypes }: {
+function StepBars({ steps, columns, dimension, metric, columnSettings, metricTypes, onStepClick }: {
   steps: FunnelStep[];
   columns: ResultColumn[];
+  onStepClick?: (step: FunnelStep, x: number, y: number) => void;
 } & Pick<FunnelBuildConfig, "dimension" | "metric" | "columnSettings" | "metricTypes">) {
   const dimName = dimension ?? "step";
   const metricType = (metric ? metricTypes?.[metric] : undefined) ?? "double";
@@ -257,6 +323,22 @@ function StepBars({ steps, columns, dimension, metric, columnSettings, metricTyp
         yLabel: metric,
         metricTypes: Object.fromEntries(names.map((n) => [n, metricType])),
         columnSettings: format ? Object.fromEntries(names.map((n) => [n, format])) : undefined,
+      })}
+      // THE CARTESIAN ADAPTER IS NOT REUSABLE HERE, and it is worth saying why rather than leaving
+      // a reader to wonder: this option's x column is `dimName` but its SERIES are the step names,
+      // one single-valued series per step. `ChartRenderer`'s cartesian handler drills `xAxis` plus
+      // `cartesian.series` — and `cartesian.series` is a COLUMN name there, whereas here every step
+      // is its own series and the second dimension does not exist. Pointing that handler at this
+      // option would emit a second, imaginary dim.
+      //
+      // What it needs is one line, and the reason it is one line is that `applyXScale` puts the RAW
+      // category on the item's `name` (see the long note in `ChartRenderer`'s cartesian branch), so
+      // `p.name` is the step's own dimension value with no label anywhere in the path. The lookup
+      // back into `steps` is a guard, not a translation: it refuses a click on anything the funnel
+      // did not draw as a step.
+      onPointClick={onStepClick && ((p) => {
+        const step = steps.find((s) => s.name === p.name);
+        if (step) onStepClick(step, p.x, p.y);
       })}
     />
   );
