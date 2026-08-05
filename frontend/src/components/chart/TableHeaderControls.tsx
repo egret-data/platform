@@ -30,17 +30,18 @@ import type { DOMAttributes } from "react";
  *   light `--ring` solid   2.58:1  FAIL      dark `--ring` solid   4.08:1  pass
  *   light `ring-ring/50`   1.54:1  FAIL      dark `ring-ring/50`   1.83:1  FAIL
  *
- * — and the global `* { outline-ring/50 }` fallback in `index.css` is that same failing pair, so a
- * control with no focus style of its own gets a 1.54:1 indicator in light mode. That is a product
- * problem, not a chart one: `--ring` reaches 34 call sites across 26 files, nearly all of them
- * shadcn primitives, plus every focusable element in the notebook, SQL Lab and the control plane.
- * Changing the token belongs in its own PR (see `docs/en/plans/2026-08-05-chart-assistive-tech.md`,
- * task 7), so these two controls — which this commit is introducing — carry a passing indicator of
- * their own instead of shipping new keyboard-only affordances that a keyboard user cannot see.
+ * THOSE NUMBERS ARE HISTORY NOW — they were the state when these two controls were introduced, and
+ * they are kept here because they are why this file chose `--primary`. The product-wide fix landed
+ * in `docs/en/plans/2026-08-05-focus-indicator-contrast.md`: light `--ring` was darkened from
+ * `oklch(0.71 …)` to `oklch(0.63 …)` and the half-alpha halos were made solid, so `--ring` now
+ * measures 3.51:1 on `--background` in light and clears 3:1 on every surface in both themes.
  *
- * `--primary` measures 3.29:1 on `--accent` (the header cell's own background) and 3.58:1 on
- * `--background` in light, 5.26 / 6.93 in dark. `outline`, not `ring`, so it is not clipped by the
- * `overflow: auto` scroller both tables sit in.
+ * These controls still use `--primary` anyway, and the reason was never only contrast: `outline`,
+ * not `ring`, so the indicator is not clipped by the `overflow: auto` scroller both tables sit in —
+ * a `ring` is a box-shadow and box-shadows get cut off by the scroll container. `--primary`
+ * measures 3.29:1 on `--accent` (the header cell's own background) and 3.58:1 on `--background` in
+ * light, 5.26 / 6.93 in dark. Switching these to `--ring` would be a behaviour change with its own
+ * review, not a tidy-up, so the contrast PR deliberately left them alone.
  */
 const FOCUS_RING =
   "focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-primary";
