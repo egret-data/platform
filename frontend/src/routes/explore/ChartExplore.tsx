@@ -383,17 +383,42 @@ export default function ChartExplore() {
 
   function paramsForSave(): AnyChartParams {
     if (descriptor) {
-      return {
-        version: 2,
-        spec: specForRun(),
-        settings: {
-          // mergeVizSettings, not a bare spread: a setting the user has put back to "Auto"
-          // must LEAVE the stored settings, and a spread can only add or overwrite.
-          ...mergeVizSettings(settings, descriptor, descConfig),
-          column_settings: columnSettings,
-          conditional_formatting: conditionalFormatting,
-        },
+      const out: VizSettings = {
+        // mergeVizSettings, not a bare spread: a setting the user has put back to "Auto"
+        // must LEAVE the stored settings, and a spread can only add or overwrite.
+        ...mergeVizSettings(settings, descriptor, descConfig),
+        column_settings: columnSettings,
+        conditional_formatting: conditionalFormatting,
       };
+      /**
+       * The table's column layout — hidden columns, display order, widths, the freeze count.
+       *
+       * It was missing from here entirely, which is not the same as being missing from the chart:
+       * `settings` above is the blob this chart was LOADED with, so a stored `table.state` rode
+       * through untouched and the layout appeared to persist. Only edits made in this editor were
+       * lost — hide a column, save, reload, and it is back. Everything else the shell owns
+       * (`column_settings`, `conditional_formatting`) was already written from its own state; this
+       * key alone was read at hydration and never written.
+       *
+       * The same removal rule as `mergeVizSettings`, and for the same reason: the default state is
+       * the ABSENCE of the key (`shellSettings` reads it as `?? {}`), so a chart with nothing to
+       * store must not carry an empty object — every chart in the workspace would grow a
+       * `"table.state": {}` on its next save, including the pie and the scalar that cannot read
+       * one. `delete` and not merely "don't write": the blob spread above can already contain the
+       * key, and the whole point is that what is stored no longer outranks what is on screen.
+       * (Emptiness is measured on the KEYS. `{ hiddenColumns: [] }` — what `Show all` leaves
+       * behind — is kept as-is: it hydrates back to a state equal to itself, so pruning it further
+       * would need a per-key notion of "default" that `TableState` does not have and nothing
+       * would render differently for it.)
+       *
+       * `CardVizPanel` writes the same key from the dashboard's override editor without this
+       * clause, and that divergence is deliberate: an override is a sparse patch over the chart's
+       * own settings, so `{}` there means "override with nothing" and the panel's Reset button —
+       * not a key count — is what removes it.
+       */
+      if (Object.keys(tableState).length > 0) out["table.state"] = tableState;
+      else delete out["table.state"];
+      return { version: 2, spec: specForRun(), settings: out };
     }
     throw new Error(`no params builder for viz ${viz}`);
   }
@@ -465,24 +490,45 @@ export default function ChartExplore() {
    * decide whether to write. Identity here means "that effect has nothing left to do", so the
    * baseline is taken at the first render where that holds.
    *
-   * NOT included: `reconcileTableState`, the other load-time write-back. An arm for it was written
-   * here first and then removed, because the mutant that deleted that arm could not be killed —
-   * nothing observable depends on it. Two measurements say why, and both are worth keeping:
-   *   - `paramsForSave` never emits `tableState`. There is no `table.state` key among the settings
-   *     it builds; the only one that survives a round-trip is the value carried over verbatim in
-   *     `settings` at hydration. So pruning `tableState` cannot change `serializeConfig()` and
-   *     cannot move this flag — which also means a table's hidden/reordered/resized columns are
-   *     not persisted by this editor at all. That is a separate defect, reported alongside this
-   *     one and deliberately not fixed here.
-   *   - Even patched to serialize it, a mounted table stayed clean: the reconcile's first run is in
-   *     the same effect flush as hydration, and its functional updater therefore prunes the seeded
-   *     value inside the same batch, one render before this baseline is taken.
-   * If `table.state` ever does become part of the saved params, the second point stops holding as
-   * soon as the result arrives later than hydration (which it does outside the test harness, where
-   * the query is not instantaneous) and the arm belongs back here.
+   * `reconcileTableState` is the OTHER load-time write-back, and it is now in this gate. It was
+   * left out when this was written, on two measurements that were true at the time and are worth
+   * recording because only one of them survived:
+   *   - `paramsForSave` did not emit `tableState` at all, so pruning it could not change
+   *     `serializeConfig()` and could not move this flag. That was a defect in its own right — a
+   *     table's hidden/reordered/resized columns were not persisted by this editor — and fixing it
+   *     (see `paramsForSave`) is what puts this key inside the compared payload and ends that
+   *     argument.
+   *   - Even patched to serialize it, a mounted table stayed clean in the test harness: the
+   *     reconcile's first run is in the same effect flush as hydration, so its functional updater
+   *     prunes the seeded value inside the same batch, one render before this baseline is taken.
+   *     That holds only because the harness's query is instantaneous. In a browser the result
+   *     arrives well after hydration, the prune lands on a baseline already taken, and the chart is
+   *     dirty on load with the author having touched nothing — the exact bug this gate exists for,
+   *     one query round-trip later. Measured live on the kind deployment, with nothing done to slow
+   *     the query down: the chart's own GET completed 423ms after navigation and the result of its
+   *     query 600ms after that, and a build without this arm armed the beforeunload guard on load.
+   *     `ChartExplore.dirty.test.tsx` fakes that arrival delay, because a mocked query that answers
+   *     within the hydration flush cannot reproduce the ordering at all.
+   *
+   * The arm is not a copy of the effect's guards. Asking `reconcileTableState` with the columns of
+   * a result THAT HAS NOT ARRIVED yet — the empty list — answers a different and more useful
+   * question: is there anything in this state that a result could ever prune? If not (the common
+   * case, including every empty state), it is settled now and the baseline is taken immediately.
+   * If there is, the value on screen may still move, so the baseline waits for the result rather
+   * than guessing. `data.error` ends that wait: once the query has failed, no result is coming, and
+   * a baseline that is never taken is a guard that never arms — silent data loss, which is worse
+   * than the extra prompt a later successful run could cause.
    */
+  const tableStateSettled =
+    viz !== "table"
+      // Nothing else renders a `TableState`, so the reconcile effect cannot fire (its own note
+      // says why it must not) and there is nothing pending to wait for.
+      ? true
+      : data.hasResult && resultColumnNames.length > 0
+        ? reconcileTableState(tableState, resultColumnNames) === tableState
+        : reconcileTableState(tableState, []) === tableState || !!data.error;
   const loadNormalizersSettled =
-    withDefaultTemporalUnits(temporalUnits, activeDims, columns) === temporalUnits;
+    withDefaultTemporalUnits(temporalUnits, activeDims, columns) === temporalUnits && tableStateSettled;
 
   // Capture the "clean" baseline once the builder is ready: for a new chart that's the
   // empty default builder (first render); for a saved chart we wait until hydration has
