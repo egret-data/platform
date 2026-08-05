@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
 
@@ -58,9 +58,9 @@ const stripTsComments = (source: string) =>
   source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 
 const CSS = stripCssComments(readFileSync(path.resolve(__dirname, "../index.css"), "utf8"));
-const BUTTON_TSX = stripTsComments(
-  readFileSync(path.resolve(__dirname, "../components/ui/button.tsx"), "utf8"),
-);
+const src = (relative: string) =>
+  stripTsComments(readFileSync(path.resolve(__dirname, "..", relative), "utf8"));
+const BUTTON_TSX = src("components/ui/button.tsx");
 
 /** WCAG 1.4.11 Non-text Contrast. Named, not inlined, so the bar is greppable. */
 const NON_TEXT_CONTRAST_MINIMUM = 3;
@@ -216,5 +216,298 @@ describe("keyboard focus indicator meets WCAG 1.4.11 non-text contrast (3:1)", (
       expect(Number(hue), `${theme} --ring hue ${hue}`).toBeGreaterThan(280);
       expect(Number(hue), `${theme} --ring hue ${hue}`).toBeLessThan(290);
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A menu item is a DIFFERENT defect from the one above, and this is where it is
+// pinned.
+//
+// Everything up to here is about `--ring` being dark enough. A dropdown item, a
+// select option and the command palette's rows had no ring to darken: they carry
+// `outline-none` / `outline-hidden` and announce focus by swapping their
+// background to `--accent` and nothing else. Measured from the tokens in this
+// same file, that swap is **1.03:1 in light** (`--accent` oklch(0.97 0 0) against
+// a `--popover` of oklch(0.98 0 264.7)) and **1.18:1 in dark**. The bar is 3:1 —
+// WCAG 2.2 1.4.11 Non-text Contrast, the same non-text bar named at the top of
+// this file, not the 4.5:1 text bar.
+//
+// ── Why the fix is a ring and not a darker `--accent` ────────────────────────
+// Both were on the table. Darkening the token so the swap carries the contrast
+// by itself was rejected on measured blast radius, not on taste:
+//
+//   * `--accent` is read by 63 files and ~110 utility occurrences, of which 55
+//     are `hover:bg-accent` and 16 more are `hover:bg-accent/40|/50|/60`. It is
+//     the product's RESTING HOVER background — sidebar rows, table rows, filter
+//     pills, list rows, toolbar buttons — and only 5 occurrences are the `focus:`
+//     variant this defect is about.
+//   * to reach 3:1 against `--popover` the light token would have to fall from
+//     L 0.97 to **L 0.654**, and the dark token rise from L 0.27 to **L 0.504**.
+//     That is a mid-grey. Every mouse-hover in the product would become a slab,
+//     and `--accent-foreground` (light: oklch(0.21 …)) would then be sitting on a
+//     mid-grey at roughly 4:1 — under the 4.5:1 bar that DOES govern text.
+//
+// So a hover colour cannot double as a focus indicator without ceasing to be a
+// hover colour. The indicator gets its own channel, which is also the shape
+// Metabase uses: read out of its shipped stylesheet, its focusable controls are
+// `:focus-visible { outline: 2px solid var(--mb-color-focus) }` — a DEDICATED
+// focus token, 2px, on `:focus-visible`, with `outline-offset: -2px` (and, in one
+// case, `box-shadow: inset 0 0 0 2px`) where the element must not paint outside
+// itself. Metabase does not darken its hover background to carry contrast either.
+// The rule is copied; the value is not — egret's focus colour is `--ring`, which
+// the tests above already hold at 3:1 on every surface including `--accent`.
+//
+// ── Why `ring-inset` and not an outset ring ─────────────────────────────────
+// The list container clips. `DropdownMenuContent`/`SubContent` are
+// `overflow-hidden` with only `p-1` (4px) of padding, `SelectContent` is
+// `overflow-x-hidden overflow-y-auto`, and the palette's list is
+// `overflow-y-auto` — a scroll container clips at its padding box too. A 2px
+// outset ring on the first or last item would be cropped along the edge that
+// most needs to read. Inset draws inside the item's own box, so the ring's
+// neighbours are `--accent` (the focused item's own background) on one side and
+// `--popover` on the other, both of which are pinned below.
+//
+// ── What these tests do NOT pin, and why ────────────────────────────────────
+// The variant. `focus-visible:` was chosen expecting it to keep the ring off the
+// mouse path, since Radix moves real DOM focus onto an item on pointer move as
+// well as on arrow-key navigation. Measured in Chrome against the built bundle,
+// THAT EXPECTATION WAS WRONG: a real mousemove over an item leaves it matching
+// `:focus-visible` and the ring paints, because Radix focuses from script and
+// Chrome treats a script `focus()` the pointer did not target as keyboard-ish.
+// (The control: a nav link focused by a real mouse CLICK matches `:focus` and not
+// `:focus-visible`, so the discriminator works — it just cannot see through
+// Radix.) `dropdown-menu.tsx` carries the full note and why the variant is kept
+// anyway. It is unpinned here because jsdom runs no layout and no paint and
+// cannot evaluate `:focus-visible` at all, so an assertion about it would be an
+// assertion about jsdom. The assertions below therefore pin the utilities and the
+// contrast — the parts that ARE deterministic from source — and nothing about
+// which device makes the ring appear.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Every double-quoted string literal in a (comment-stripped) source file. */
+const classStrings = (source: string): string[] =>
+  [...source.matchAll(/"([^"\n]*)"/g)].map((m) => m[1]);
+
+/**
+ * The pixel width of the focus ring a class string declares, or 0 for none.
+ * Only an EXPLICIT numeric width counts: bare `ring` is 1px in Tailwind v4 and
+ * 3px in v3, and this repo contains both generations of shadcn output, so a bare
+ * `ring` would be an assertion about a number nobody in this file can see.
+ */
+function focusRingWidth(classes: string): number {
+  const found = classes.match(/(?:^|\s)focus(?:-visible)?:ring-(\d+)(?![\w/-])/);
+  return found ? Number(found[1]) : 0;
+}
+
+/** The alpha of the focus ring's COLOUR utility, or 0 when it names no colour. */
+function focusRingAlpha(classes: string): number {
+  const found = classes.match(/(?:^|\s)focus(?:-visible)?:ring-ring(?:\/(\d+))?(?![\w/-])/);
+  if (!found) return 0;
+  return found[1] ? Number(found[1]) / 100 : 1;
+}
+
+/**
+ * The surfaces a menu item's own focus ring lands between: its own focused
+ * background, and the popover it is drawn on. Both, because an inset ring abuts
+ * `--accent` on its inner edge and sits a padding-width from `--popover` on its
+ * outer one, and 1.4.11 asks about adjacent colours on both sides.
+ */
+const MENU_SURFACES = ["accent", "popover"] as const;
+
+function assertRingCarriesTheBar(classes: string, label: string) {
+  const width = focusRingWidth(classes);
+  expect(width, `${label}: no explicit focus ring width — ${classes.slice(0, 120)}…`).toBeGreaterThanOrEqual(2);
+
+  const alpha = focusRingAlpha(classes);
+  expect(alpha, `${label}: focus ring names no \`ring-ring\` colour`).toBeGreaterThan(0);
+
+  expect(
+    /(?:^|\s)focus(?:-visible)?:ring-inset(?:\s|$)/.test(classes),
+    `${label}: ring is not inset, and every one of these list containers clips its overflow`,
+  ).toBe(true);
+
+  for (const theme of ["light", "dark"] as const) {
+    for (const surface of MENU_SURFACES) {
+      const bg = token(theme, surface);
+      const ratio = contrastRatio(over(token(theme, "ring"), alpha, bg), bg);
+      expect(
+        Number(ratio.toFixed(2)),
+        `${label}: ring @ alpha ${alpha} on --${surface} in ${theme}: ${ratio.toFixed(2)}:1`,
+      ).toBeGreaterThanOrEqual(NON_TEXT_CONTRAST_MINIMUM);
+    }
+  }
+}
+
+describe("a menu item that opts out of the outline draws its own indicator", () => {
+  /**
+   * Deliberately a DIRECTORY sweep rather than a list of the two files that have
+   * the defect today. `components/ui` is where shadcn primitives get pasted in,
+   * and the shape this catches — "opt out of the outline, then signal focus with
+   * a background swap and nothing else" — is shadcn's default output. A
+   * `command.tsx`, `context-menu.tsx` or `menubar.tsx` added tomorrow arrives
+   * carrying it. (Those three were named as suspects in the plan and none of them
+   * exists in this repo; the sweep is how that stays true rather than needing to
+   * be re-checked by hand.)
+   */
+  const uiDir = path.resolve(__dirname, "../components/ui");
+  const uiFiles = readdirSync(uiDir).filter((f) => f.endsWith(".tsx"));
+
+  const suspects = uiFiles.flatMap((file) =>
+    classStrings(src(`components/ui/${file}`))
+      .filter(
+        (classes) =>
+          /(?:^|\s)outline-(?:none|hidden)(?:\s|$)/.test(classes) &&
+          /(?:^|\s)focus:bg-accent(?![\w/-])/.test(classes),
+      )
+      .map((classes, i) => ({ file, classes, i })),
+  );
+
+  test("the sweep finds the elements it is supposed to be guarding", () => {
+    // Without this, deleting `focus:bg-accent` everywhere would empty `suspects`
+    // and the whole describe below would pass by testing nothing — the exact
+    // "empty run scores as a pass" failure this repo's mutation harness guards
+    // against. 5 = 4 in dropdown-menu.tsx (sub-trigger, item, checkbox item,
+    // radio item) + 1 in select.tsx.
+    expect(suspects.map((s) => s.file).sort()).toEqual([
+      "dropdown-menu.tsx",
+      "dropdown-menu.tsx",
+      "dropdown-menu.tsx",
+      "dropdown-menu.tsx",
+      "select.tsx",
+    ]);
+  });
+
+  for (const { file, classes, i } of suspects) {
+    test(`${file} #${i} carries a solid inset --ring focus indicator`, () => {
+      assertRingCarriesTheBar(classes, `${file} #${i}`);
+    });
+  }
+
+  /**
+   * The command palette is the same defect with a different mechanism, and it
+   * cannot be swept up by the rule above. DOM focus never leaves its search
+   * input — the highlighted row is a VIRTUAL focus driven by a `selected` index —
+   * so `:focus-visible` can never match a row and the indicator has to hang off
+   * the same conditional that paints `bg-accent`. Which also means it shows for a
+   * mouse hover, because `onMouseEnter` sets the same index; that is right here,
+   * where "selected" is the only pointer of any kind the list has.
+   */
+  test("the command palette's virtually-focused row carries the same indicator", () => {
+    const active = classStrings(src("components/notebook/CommandPalette.tsx")).find((c) =>
+      /^bg-accent(?![\w/-])/.test(c),
+    );
+    expect(active, "the palette's active-row class string has moved or been renamed").toBeDefined();
+
+    const width = active!.match(/(?:^|\s)ring-(\d+)(?![\w/-])/);
+    expect(Number(width?.[1] ?? 0), `palette active row: ${active}`).toBeGreaterThanOrEqual(2);
+    expect(/(?:^|\s)ring-inset(?:\s|$)/.test(active!), `palette active row: ${active}`).toBe(true);
+
+    const alphaMatch = active!.match(/(?:^|\s)ring-ring(?:\/(\d+))?(?![\w/-])/);
+    expect(alphaMatch, `palette active row names no ring colour: ${active}`).not.toBeNull();
+    const alpha = alphaMatch![1] ? Number(alphaMatch![1]) / 100 : 1;
+
+    for (const theme of ["light", "dark"] as const) {
+      for (const surface of MENU_SURFACES) {
+        const bg = token(theme, surface);
+        const ratio = contrastRatio(over(token(theme, "ring"), alpha, bg), bg);
+        expect(
+          Number(ratio.toFixed(2)),
+          `palette ring @ alpha ${alpha} on --${surface} in ${theme}: ${ratio.toFixed(2)}:1`,
+        ).toBeGreaterThanOrEqual(NON_TEXT_CONTRAST_MINIMUM);
+      }
+    }
+  });
+
+  /**
+   * `ring-inset` above is justified by a claim about somebody ELSE's class
+   * string — that these lists clip, so an outset ring would be cropped. A
+   * behaviour a comment claims and no assertion pins is the shape four surviving
+   * mutants in this repo have had, so the claim is pinned rather than asserted in
+   * prose: if a future edit makes these containers non-clipping, this fails and
+   * the `ring-inset` requirement can be revisited on purpose.
+   */
+  test("the containers these items live in really do clip", () => {
+    /**
+     * EVERY matching container, not the first one. The draft of this took
+     * `.find()`, and mutation testing killed it: `dropdown-menu.tsx` has TWO
+     * popover surfaces — `DropdownMenuContent` and `DropdownMenuSubContent` — and
+     * making the first one `overflow-visible` left the assertion happily reading
+     * the second. A submenu is exactly where an unclipped ring would have gone
+     * unnoticed longest.
+     */
+    const clippers = (source: string, needle: string, expected: number) => {
+      const containers = classStrings(src(source)).filter((c) => c.includes(needle));
+      expect(
+        containers.length,
+        `${source}: expected ${expected} class string(s) containing \`${needle}\`, found ${containers.length}`,
+      ).toBe(expected);
+      // `auto`/`scroll` clip as surely as `hidden` does — a scroll container's
+      // padding box is still a clip boundary, so an outset ring on the first or
+      // last item is cropped either way.
+      return containers.map((c) =>
+        /(?:^|\s)overflow(?:-[xy])?-(?:hidden|auto|scroll)(?:\s|$)/.test(c),
+      );
+    };
+    expect(
+      clippers("components/ui/dropdown-menu.tsx", "bg-popover", 2),
+      "DropdownMenuSubContent and DropdownMenuContent",
+    ).toEqual([true, true]);
+    expect(clippers("components/ui/select.tsx", "bg-popover", 1), "SelectContent").toEqual([true]);
+    expect(clippers("components/notebook/CommandPalette.tsx", "max-h-80", 1), "palette list").toEqual([true]);
+  });
+});
+
+/**
+ * A RING OFFSET WITHOUT A RING-OFFSET COLOUR IS A WHITE BAND.
+ *
+ * `ring-offset-<n>` widens the gap between the element and its ring and fills it
+ * with `--tw-ring-offset-color`, which defaults to `#fff`. On a dark surface that
+ * paints a 2px white hairline *inside* the focus ring — brighter than either
+ * neighbour, and reading as a rendering fault rather than as focus.
+ *
+ * This is a repo-wide sweep rather than the one-line fix it was reported as. The
+ * plan handed this over as "real but a single site, not a pattern"; re-reading
+ * the code found FOUR, two of which are not focus rings at all but the selected
+ * state of a colour swatch, where a white band around a colour is worse still.
+ * A sweep is also the only version of this that stays fixed, since the mistake is
+ * simply forgetting the second utility.
+ *
+ * jsdom paints nothing, so the *appearance* of the band cannot be tested here.
+ * What can be tested — and is the whole of the defect — is that the offset is
+ * always accompanied by a colour for it.
+ */
+describe("every ring offset names the colour it fills itself with", () => {
+  const roots = ["components", "routes", "lib", "hooks"];
+  const walk = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) return e.name === "__tests__" ? [] : walk(full);
+      return e.name.endsWith(".tsx") || e.name.endsWith(".ts") ? [full] : [];
+    });
+
+  const srcRoot = path.resolve(__dirname, "..");
+  const files = roots
+    .map((r) => path.join(srcRoot, r))
+    .filter((d) => existsSync(d))
+    .flatMap(walk);
+
+  test("the sweep is actually reading files", () => {
+    // Guards the empty-run-scores-as-a-pass failure: a broken path would make
+    // `offenders` trivially empty and the assertion below vacuous.
+    expect(files.length).toBeGreaterThan(200);
+  });
+
+  test("no `ring-offset-<n>` is left without a `ring-offset-<colour>`", () => {
+    const offenders: string[] = [];
+    for (const file of files) {
+      const source = stripTsComments(readFileSync(file, "utf8"));
+      for (const classes of classStrings(source)) {
+        if (!/(?:^|\s)(?:[\w[\]&:=.-]+:)?ring-offset-\d+(?![\w/-])/.test(classes)) continue;
+        // A named colour is anything after `ring-offset-` that is not a number.
+        if (/(?:^|\s)(?:[\w[\]&:=.-]+:)?ring-offset-(?!\d)[\w-]+(?:\/\d+)?(?![\w/-])/.test(classes)) continue;
+        offenders.push(`${path.relative(srcRoot, file)} — ${classes.slice(0, 140)}`);
+      }
+    }
+    expect(offenders, `ring offsets with no colour:\n  ${offenders.join("\n  ")}`).toEqual([]);
   });
 });

@@ -280,7 +280,12 @@ export function RuleEditor({
             <div className="flex gap-1 pt-0.5">
               {PALETTE.map((c) => (
                 <button key={c} type="button" aria-label={`color ${c}`} onClick={() => setDraft((d) => ({ ...(d as SingleColorRule), color: c }))}
-                  className={`h-6 w-6 rounded ${(draft as SingleColorRule).color === c ? "ring-2 ring-primary ring-offset-1" : ""}`} style={{ backgroundColor: c }} />
+                  // `ring-offset-background`: the offset is the 1px gap between the swatch and
+                  // its selection ring, and an uncoloured offset fills that gap with white. On a
+                  // swatch the damage is worse than on a focus ring — a white hairline drawn around
+                  // a COLOUR reads as part of the colour, so in dark mode the selected swatch looked
+                  // like a paler shade than the one it stands for.
+                  className={`h-6 w-6 rounded ${(draft as SingleColorRule).color === c ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : ""}`} style={{ backgroundColor: c }} />
               ))}
             </div>
           </div>
@@ -302,7 +307,8 @@ export function RuleEditor({
               return (
                 <button key={p.label} type="button" aria-label={p.label} title={p.label}
                   onClick={() => setDraft((d) => ({ ...(d as ColorRangeRule), colors: [...p.colors] }))}
-                  className={`h-6 w-14 rounded border ${active ? "ring-2 ring-primary ring-offset-1" : ""}`}
+                  // Same uncoloured-offset fix as the single-colour swatches above.
+                  className={`h-6 w-14 rounded border ${active ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : ""}`}
                   style={{ background: `linear-gradient(to right, ${p.colors[0]}, ${p.colors[1]})` }} />
               );
             })}

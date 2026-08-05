@@ -104,8 +104,16 @@ function SelectItem({
   return (
     <SelectPrimitive.Item
       data-slot="select-item"
+      // A solid inset `--ring` is the same focus indicator the four
+      // `dropdown-menu.tsx` items carry, for the same reason and with the same
+      // trade-offs — that file holds the full rationale (why a ring rather than a
+      // darker `--accent`, why inset, and why the `focus-visible` variant is kept
+      // even though it was measured NOT to keep the ring off the mouse path).
+      // The one thing worth repeating here is the container: `SelectContent` is
+      // `overflow-x-hidden overflow-y-auto`, which clips on both axes as far as
+      // an outset ring is concerned, so inset is not a stylistic preference.
       className={cn(
-        "focus:bg-accent focus:text-accent-foreground [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full cursor-default items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
+        "focus:bg-accent focus:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full cursor-default items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
         className,
       )}
       {...props}

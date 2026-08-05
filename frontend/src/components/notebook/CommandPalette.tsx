@@ -113,9 +113,39 @@ export function CommandPalette({ open, onOpenChange, actions }: CommandPalettePr
                   action.run();
                   onOpenChange(false);
                 }}
+                /* THE HIGHLIGHTED ROW IS THE SAME 1.03:1 DEFECT the dropdown and
+                   select items had — `bg-accent` against a `--popover` that is
+                   nearly the same colour — and it needs the same `--ring`
+                   indicator to clear the 3:1 of WCAG 1.4.11. `dropdown-menu.tsx`
+                   holds the full rationale.
+
+                   What differs is where the indicator hangs. There it is a
+                   `focus-visible` variant, because Radix moves real DOM focus onto
+                   the item. Here DOM focus never leaves the search input — the
+                   highlighted row is a VIRTUAL focus driven by `selected`, which is
+                   what lets you keep typing while arrowing — so no focus
+                   pseudo-class on the row can ever match, and the ring has to ride
+                   the same conditional as the background.
+
+                   Which means it also shows on mouse hover, because `onMouseEnter`
+                   sets the same index. That turns out to match the dropdown rather
+                   than diverge from it: measured in Chrome, a Radix menu item hovered
+                   with a real mousemove matches `:focus-visible` too, so the ring
+                   paints there on hover as well. Correct in both places for the same
+                   reason — `selected` is the only pointer this list has, Enter runs
+                   whichever row it marks, and a mouse user who has just moved the
+                   selection has done exactly the thing the ring reports.
+                   `hover:bg-accent/50` below is the un-selected hover and stays
+                   ringless, so the two states remain distinguishable.
+
+                   `ring-inset` because the list is `overflow-y-auto`: a scroll
+                   container clips at its padding box, so an outset ring on the
+                   first or last row would be cropped. */
                 className={cn(
                   "flex w-full items-center justify-between gap-3 rounded-sm px-3 py-2 text-left text-sm",
-                  index === selected ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
+                  index === selected
+                    ? "bg-accent text-accent-foreground ring-2 ring-ring ring-inset"
+                    : "hover:bg-accent/50",
                 )}
               >
                 <span className="truncate">{action.label}</span>
