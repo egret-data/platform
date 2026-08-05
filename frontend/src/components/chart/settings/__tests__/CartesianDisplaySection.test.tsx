@@ -573,7 +573,7 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
     render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xAxisTicks: false }} onChange={onChange} />);
     await open(user);
     await user.click(await screen.findByRole("option", { name: "Rotate 45°" }));
-    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xLabelRotation: 45, xAxisTicks: undefined });
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xLabelRotation: 45, xAxisTicks: undefined, xLabelCompact: undefined });
   });
 
   it("choosing Rotate 90° stores 90, not 45", async () => {
@@ -582,7 +582,7 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
     render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={onChange} />);
     await open(user);
     await user.click(await screen.findByRole("option", { name: "Rotate 90°" }));
-    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xLabelRotation: 90, xAxisTicks: undefined });
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xLabelRotation: 90, xAxisTicks: undefined, xLabelCompact: undefined });
   });
 
   it("choosing Hide turns the axis off and drops the rotation with it", async () => {
@@ -591,7 +591,7 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
     render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xLabelRotation: 45 }} onChange={onChange} />);
     await open(user);
     await user.click(await screen.findByRole("option", { name: "Hide" }));
-    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xAxisTicks: false, xLabelRotation: undefined });
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xAxisTicks: false, xLabelRotation: undefined, xLabelCompact: undefined });
   });
 
   // The path back to "let the builder decide": Show must clear the rotation, or the measured fit
@@ -602,7 +602,7 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
     render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xLabelRotation: 90 }} onChange={onChange} />);
     await open(user);
     await user.click(await screen.findByRole("option", { name: "Show" }));
-    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xAxisTicks: undefined, xLabelRotation: undefined });
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xAxisTicks: undefined, xLabelRotation: undefined, xLabelCompact: undefined });
   });
 
   it("displays what is stored: a rotation, and Hide winning over one", () => {
@@ -622,7 +622,7 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
     const opt = await screen.findByRole("option", { name: "Rotate 45°" });
     expect(opt).not.toHaveAttribute("aria-disabled", "true");
     await user.click(opt);
-    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xLabelRotation: 45, xAxisTicks: undefined });
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xLabelRotation: 45, xAxisTicks: undefined, xLabelCompact: undefined });
   });
 
   /**
@@ -685,7 +685,7 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
     const opt = await screen.findByRole("option", { name: "Rotate 45°" });
     expect(opt).not.toHaveAttribute("aria-disabled", "true");
     await user.click(opt);
-    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xLabelRotation: 45, xAxisTicks: undefined });
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xLabelRotation: 45, xAxisTicks: undefined, xLabelCompact: undefined });
   });
 
   /**
@@ -700,7 +700,7 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
     render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xAxis: "price" }} onChange={() => {}} xColumnType="double" />);
     await open(user);
     expect(await screen.findByRole("option", { name: "Rotate 45°" })).toHaveAttribute("aria-disabled", "true");
-    expect(screen.getByText(/Rotation applies to a category axis/)).toBeInTheDocument();
+    expect(screen.getByText(/Rotation and Compact apply to a category axis/)).toBeInTheDocument();
   });
 
   /** A numeric column under any other kind is still a category axis — the builder's rule is scatter
@@ -734,7 +734,7 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
   it("explains the greying-out on the trigger, where it can actually be read", async () => {
     const user = userEvent.setup();
     render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"], xScale: "timeseries" }} onChange={() => {}} />);
-    const hint = screen.getByText(/Rotation applies to a category axis/);
+    const hint = screen.getByText(/Rotation and Compact apply to a category axis/);
     expect(screen.getByLabelText("X show lines and tick marks")).toHaveAttribute("aria-describedby", hint.id);
     // …and NOT on the items, where it would look like an explanation and reach nobody.
     await open(user);
@@ -743,13 +743,106 @@ describe("CartesianDisplaySection — the category-axis lines/ticks/rotation sel
 
   it("says nothing where every choice is live", () => {
     render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
-    expect(screen.queryByText(/Rotation applies to a category axis/)).toBeNull();
+    expect(screen.queryByText(/Rotation and Compact apply to a category axis/)).toBeNull();
     expect(screen.getByLabelText("X show lines and tick marks")).not.toHaveAttribute("aria-describedby");
   });
 
   it("still shows a rotation stored before the scale changed", () => {
     render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"], xScale: "linear", xLabelRotation: 45 }} onChange={() => {}} />);
     expect(screen.getByLabelText("X show lines and tick marks")).toHaveTextContent("Rotate 45°");
+  });
+
+  /**
+   * METABASE'S FIFTH CHOICE, WHICH THIS PANEL DEFERRED FOR THREE PRs on a reason that turned out to
+   * be scoped to one of its four x-scales. The comment on the control carries the correction; these
+   * pin that it is offered on the ordinal x every bucketed temporal chart actually draws, and greyed
+   * on the `scaleAxis` case that really is out of reach.
+   */
+  it("offers Compact on an ordinal x and greys it on a value x, exactly as the rotations are", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    await open(user);
+    expect(await screen.findByRole("option", { name: "Compact" })).not.toHaveAttribute("aria-disabled", "true");
+    await user.keyboard("{Escape}");
+    rerender(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"], xScale: "timeseries" }} onChange={() => {}} />);
+    await open(user);
+    expect(await screen.findByRole("option", { name: "Compact" })).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("stores Compact and clears the rotation it replaces", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xLabelRotation: 90 }} onChange={onChange} />);
+    await open(user);
+    await user.click(await screen.findByRole("option", { name: "Compact" }));
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({
+      xLabelCompact: true, xAxisTicks: undefined, xLabelRotation: undefined,
+    });
+  });
+});
+
+/**
+ * METABASE'S `graph.y_axis.unpin_from_zero`, and what this panel is responsible for is WHERE IT
+ * APPEARS — the arithmetic is the builder's and is pinned in `echarts/__tests__/unpinFromZero.test.ts`.
+ *
+ * Every arm below is a state a user reaches in ONE CLICK of a neighbouring control, which is why
+ * the row's condition calls the builder's `unpinFromZeroApplies` rather than restating it: a second
+ * copy of that rule here is how a control comes to be offered on a chart whose builder ignores it.
+ * Each assertion pairs a hidden case with a shown one, so none of them can pass against a row that
+ * is simply never rendered.
+ */
+describe("CartesianDisplaySection — Unpin from zero appears where Metabase offers it", () => {
+  const unpin = () => screen.queryByLabelText("Unpin from zero");
+
+  it("is offered on a line and refused on a bar, an area and a row", () => {
+    const { rerender } = render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    expect(unpin()).toBeInTheDocument();
+    for (const kind of ["bar", "area", "row"] as const) {
+      rerender(<CartesianDisplaySection kind={kind} config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+      expect(unpin()).toBeNull();
+    }
+  });
+
+  it("judges a combo by its SERIES, so changing one series' type moves the row", () => {
+    // A fresh combo is line-then-bar (`seriesDisplayFor`'s default), so it has a bar in it and is
+    // refused — which is what the live MB · Combo does. Naming both series Line brings it back.
+    const { rerender } = render(<CartesianDisplaySection kind="combo" config={{ yMetrics: ["rev", "orders"] }} onChange={() => {}} />);
+    expect(unpin()).toBeNull();
+    rerender(<CartesianDisplaySection kind="combo"
+      config={{ yMetrics: ["rev", "orders"], seriesTypes: { rev: "line", orders: "line" } }} onChange={() => {}} />);
+    expect(unpin()).toBeInTheDocument();
+  });
+
+  it("disappears when the value range stops being automatic", () => {
+    const { rerender } = render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    expect(unpin()).toBeInTheDocument();
+    // `{ yMin: 0 }` is exactly the patch `ValueRangeRows` emits when its switch is turned off, so
+    // this is the state one click away and not a fixture invented for the test.
+    rerender(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"], yMin: 0 }} onChange={() => {}} />);
+    expect(unpin()).toBeNull();
+  });
+
+  it("disappears once the chart stacks", () => {
+    render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev", "orders"], stacked: true }} onChange={() => {}} />);
+    expect(unpin()).toBeNull();
+  });
+
+  it("is not offered on a scatter, whose axes this panel does not own", () => {
+    // Not because a scatter cannot unpin — it is the one display Metabase unpins BY DEFAULT, and
+    // `scatterXY` honours that. There is simply no Y value-axis block here to hang the switch on.
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xMetric: "price" }} onChange={() => {}} />);
+    expect(unpin()).toBeNull();
+  });
+
+  it("stores true and clears the key rather than storing false", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const { rerender } = render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={onChange} />);
+    await user.click(screen.getByLabelText("Unpin from zero"));
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ unpinFromZero: true });
+    rerender(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"], unpinFromZero: true }} onChange={onChange} />);
+    await user.click(screen.getByLabelText("Unpin from zero"));
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ unpinFromZero: undefined });
   });
 });
 

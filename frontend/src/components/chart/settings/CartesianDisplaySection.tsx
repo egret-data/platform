@@ -4,8 +4,8 @@ import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { DecimalInput } from "./DecimalInput";
 import {
-  echartsTypeOf, resolveXScale, seriesDisplayFor, stackModeOf, stackModePatch, xScaleFitsColumn,
-  type StackMode,
+  echartsTypeOf, resolveXScale, seriesDisplayFor, stackModeOf, stackModePatch,
+  unpinFromZeroApplies, xScaleFitsColumn, type StackMode,
 } from "@/components/chart/echarts/options/cartesian";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
@@ -488,6 +488,17 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
           axis={catAx} id="cz-xticks" value={xTicksChoiceOf(config)}
           onChange={(v) => onChange(xTicksPatch(v))}
           rotationsDisabled={valueX}
+          // OFFERED ON EVERY CARTESIAN KIND, and greyed in exactly the states the rotations are.
+          // The comment above used to defer this on the grounds that "cartesian is the one family
+          // with a `timeseries` x-scale, which is exactly where a temporal shortener would bite, but
+          // that axis is `scaleAxis`, whose tick labels ECharts generates". Both clauses are true
+          // and the conclusion drawn from them was wrong: the ORDINAL x — the default, and what
+          // every bucketed temporal chart in the product actually draws — goes through `drawLabel`,
+          // which is precisely where Compact acts. So the deferral was scoped to the one x-scale
+          // Compact cannot reach and then applied to all four. The `scaleAxis` case is still out of
+          // reach, and `valueX` is the same fact the rotations are greyed for, so it greys this too.
+          offerCompact
+          compactDisabled={valueX}
           // The reason the rotations are greyed out hangs off the TRIGGER, which is focusable and
           // keeps its pointer events, and is read out by `aria-describedby`. It cannot hang off the
           // disabled items themselves: `data-[disabled]:pointer-events-none` (ui/select.tsx) means a
@@ -503,7 +514,7 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
             and it costs a line only in the state that needs one. */}
         {valueX && (
           <p id="cz-xticks-rotation" className="text-xs text-muted-foreground">
-            Rotation applies to a category axis; this chart plots values across.
+            Rotation and Compact apply to a category axis; this chart plots values across.
           </p>
         )}
       </div>
@@ -548,6 +559,35 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
         <div className="space-y-2 border-t pt-2">
           <ValueRangeRows axis={valAx} idPrefix="cz" min={config.yMin} max={config.yMax} onChange={onChange} />
         </div>
+      )}
+      {/*
+        Metabase's `graph.y_axis.unpin_from_zero` — let the value axis fit the data instead of
+        reaching the origin. One line upstream (`echarts/cartesian/option/axis.ts:380` writes
+        ECharts' own `scale`), and one stored boolean here.
+
+        WHERE IT APPEARS IS THE WHOLE CONTROL, which is why the condition is a call and not an
+        expression. `unpinFromZeroApplies` is the builder's own function — Metabase's
+        `isYAxisUnpinFromZeroValid`, arm for arm — asked here rather than restated, because every
+        arm of it is a state this panel can reach in one click: switching a combo's second series to
+        Bar, turning auto range off, or picking Stack. A hand-written copy of that rule in a panel is
+        exactly how a control comes to be offered on a chart whose builder ignores it.
+
+        SCATTER IS THE ONE KIND EXCLUDED HERE AND NOT UPSTREAM, and it is excluded for egret's own
+        reason rather than Metabase's: the metric-vs-metric scatter leaves through `scatterXY`,
+        which is already documented two blocks up as never reading this panel's Y value-axis keys.
+        It is not that a scatter cannot unpin — it is the ONE display Metabase unpins by default,
+        and `scatterXY` honours that default. It is that egret has no scatter Y-axis block to hang
+        the switch on, so the default is all a scatter gets. Named here so it is a decision on the
+        record rather than a gap; giving the scatter its own block is the same work
+        `CartesianDisplaySection.tsx:265-266` already defers.
+
+        HIDDEN RATHER THAN GREYED, unlike the rotations above — see the twin row in
+        `ChartAxesSection` for the argument, which is Metabase's `getHidden` plus the fact that a
+        stored flag the builder is ignoring has nothing worth showing.
+      */}
+      {scoped(scope, "value") && kind !== "scatter" && unpinFromZeroApplies({ ...config, kind }) && (
+        <Toggle id="cz-unpin" label="Unpin from zero" checked={config.unpinFromZero === true}
+          onChange={(v) => onChange({ unpinFromZero: v || undefined })} />
       )}
     </div>
   );

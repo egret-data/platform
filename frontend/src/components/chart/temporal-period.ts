@@ -148,8 +148,27 @@ function parseInOwnZone(value: unknown) {
  * TOTAL — never throws, for the same reason `temporalLabel` beside it is: this runs inside an
  * ECharts `formatter`, once per label, on whatever the query returned. An unknown unit, an
  * extraction unit, and a value that is not a date all fall through to the raw string.
+ *
+ * `compact` IS METABASE'S "Compact" x-axis mode, and it is A TOKEN SWAP ON THE PATTERN rather than
+ * a second table of formats. That is not a shortcut — it is what Metabase does, verbatim:
+ *
+ *     const getMonthFormat = (options) =>
+ *       options.compact || options.date_abbreviate ? "MMM" : "MMMM";
+ *     const getDayFormat = (options) =>
+ *       options.compact || options.date_abbreviate ? "ddd" : "dddd";
+ *     (`frontend/src/metabase/visualizations/lib/formatting/date.tsx:714-718`)
+ *
+ * and `formatDate` in egret's own `format.ts:103` already implements the identical swap for
+ * `date_abbreviate`. Expressing it the same way here buys two things a second table would not: a
+ * unit with no month token (a year, a quarter) is a no-op FOR FREE rather than through two more
+ * entries that could drift, and the day-of-month and the year are untouched by construction, so a
+ * compact month is the same format shortened rather than a different format.
+ *
+ * `dddd` is swapped too even though no `PERIOD_FORMAT` pattern contains one. Carried because it is
+ * half of Metabase's rule and the cost is nine characters; dropping it would make the day the next
+ * person adds a weekday pattern the day this quietly stops matching upstream.
  */
-export function periodName(unit: string | undefined, value: unknown): string {
+export function periodName(unit: string | undefined, value: unknown, compact = false): string {
   // Same nullish answer as `formatValue` (`format.ts:80`) so an empty cell reads the same wherever
   // it is drawn.
   if (value == null) return "";
@@ -170,8 +189,11 @@ export function periodName(unit: string | undefined, value: unknown): string {
   // starts reading a year nobody's data covers. No test can tell the two guards apart while they
   // agree, which is why the reason is written out here instead.
   if (unit == null || isExtractUnit(unit)) return String(value);
-  const fmt = PERIOD_FORMAT[unit];
-  if (fmt == null) return String(value);
+  const raw = PERIOD_FORMAT[unit];
+  if (raw == null) return String(value);
+  // AFTER both guards, so compact cannot smuggle a value past them: an extraction unit and an
+  // unknown unit still leave through the raw string whatever the flag says.
+  const fmt = compact ? raw.replace(/MMMM/g, "MMM").replace(/dddd/g, "ddd") : raw;
   const d = parseInOwnZone(value);
   return d.isValid() ? d.format(fmt) : String(value);
 }

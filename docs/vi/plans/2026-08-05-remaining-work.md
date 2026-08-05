@@ -277,6 +277,138 @@ thì dừng và báo chứ đừng phình phạm vi; `chartparams.rs` dễ dãi 
 
 ---
 
+## CẬP NHẬT — PR C đã tìm thấy gì khi thực thi chính mục này
+
+Viết sau khi làm xong, cùng tinh thần với ghi chú loại bớt và các phần cập nhật của PR A, PR B ở
+trên. **PR C giao C1 và C2 rồi DỪNG TRƯỚC C3**, và lý do không phải là lý do kế hoạch này dự đoán.
+Hai điểm của đề bài phải sửa, một quyết định đã ghi lại bị phép đo lật ngược, và hai tệp test mà một
+lượt thử bị ngắt để lại trên nhánh đều được GIỮ — nhưng một trong hai có fixture không bao giờ chạm
+tới đúng nhánh code mà nó khẳng định. Văn bản gốc được giữ nguyên.
+
+**Cả hai tệp test có sẵn đều được GIỮ, và mọi trích dẫn Metabase trong đó đều đúng nguyên văn.** Mọi
+số dòng trong phần header đã được kiểm lại với bản checkout Metabase và đều chính xác:
+`option/axis.ts:380` đúng là `scale: !!settings["graph.y_axis.unpin_from_zero"]` và đó là TOÀN BỘ
+phần cài đặt; `model/axis.ts:716/778/856` đúng là nói `compact: settings[...] === "compact"` ba lần;
+`cartesian-chart.ts:245-260` và `:242` đúng nguyên văn; `formatting/date.tsx:714-718` là phép hoán
+đổi `compact || date_abbreviate`. Cả hai tệp cũng đều fail vì đúng lý do trước khi viết dòng code nào
+— 18 fail trên hai tệp.
+
+**Một khẳng định trong đó bị sai, và sai đúng theo kiểu chương trình này hay sai: một tiền đề không ai
+đo.** Fixture của box plot là hai tên category ngắn trên thẻ 166x184, ở kích thước đó
+`verticalValueAxisFit` thấy đủ chỗ cho năm vạch nên TỪ CHỐI — không `min` nào được ghi và
+`expect(pinned.min).toBe(0)` đọc ra `undefined`. Đó là fixture không chạm tới nhánh đo đạc chứ không
+phải trục bị ghim. Đã sửa thành bốn tên, đúng hình dạng mà `options/boxplot.ts` đã đo lỗi của chính
+nó, và nhánh "pinned" giờ khẳng định `toBeDefined()` trước khi khẳng định giá trị.
+
+**Cờ unpin không làm gì ngoài đặt `scale` của ECharts, và chép mỗi điều đó thôi thì sẽ giao ra một
+control lưu được mà không vẽ.** Metabase không tính con số nào. Nhưng builder của egret không nhường
+extent cho ECharts — trên một thẻ đã đo, `verticalValueAxisFit` ghi `min`/`max` tường minh, và **một
+`min` tường minh thắng đứt `scale`**. Vì vậy cả hai hạt giống extent đều đi theo cờ. Dưới jsdom
+`measure-text` trả về số 0 theo thiết kế, nên một bộ test không mock không thể thấy nửa đó.
+
+**Đo trực tiếp trên trình duyệt của chính Metabase tại :3033**: "MB · Line" khi ghim vẽ
+`0 / 5.000 / … / 25.000`; cùng thẻ đó khi bỏ ghim vẽ `9.000 / 12.000 / … / 27.000`. Ma trận hiển thị
+được lái chứ không đọc: **Area ẩn, Bar ẩn, Combo ẩn, Waterfall ẩn, Boxplot hiện và chưa tick, Scatter
+hiện và ĐÃ TICK SẴN**. Không lưu gì cả.
+
+### Quyết định đã ghi của C2 ĐÚNG VỚI BOX PLOT VÀ SAI VỚI WATERFALL
+
+Đây chính là chỉ dẫn ở Task C2 của kế hoạch — "một đơn vị trước đã cố ý KHÔNG chép Compact sang
+waterfall … **Lý do đó không tổng quát hoá được**" — đã được xác nhận, và cần ghi rõ nửa nào còn
+đứng vững để không ai phải suy lại.
+
+**Lý do đã ghi, nguyên văn** (trong phần doc của `settings/ChartAxesSection.tsx` và lặp lại ở
+`CartesianDisplaySection.tsx`): Compact "rút ngắn nhãn trục thời gian, mà trục x của các chart này là
+category chạy qua format cột của nó, nên tuỳ chọn này sẽ chẳng làm gì ở đây". Một câu, viết một lần,
+phủ lên HAI chart cùng dùng tab Axes đó.
+
+**Đúng với box plot.** `options/boxplot.ts` **không có `axisLabel.formatter` nào** trên trục category
+— nó vẽ thẳng khoá nhóm thô và có nói rõ điều đó. Compact là cờ định dạng; không có formatter thì
+không có gì để nó tác động qua, và mở tuỳ chọn ở đó chính là kiểu control chết mà chương trình này
+liên tục gỡ bỏ. Chart đó vẫn không được nhận.
+
+**Sai với waterfall, và điểm bác bỏ là cấu trúc chứ không phải mức độ.**
+`options/waterfall.ts:234-242` mang `bucketedX = namesAPeriod(cfg.xAxisUnit)` và một `drawLabel` có
+nhánh thứ hai là `periodName(cfg.xAxisUnit, v)` — **đúng hai nhánh đó, gọi đúng module đó, giống
+`drawLabel` của builder cartesian**. Đó không phải trùng hợp: chính comment của waterfall nói hình
+dạng này là "cùng ba nhánh theo cùng thứ tự với cartesian, và cố ý không phải một lối viết thứ hai".
+Nên waterfall gom theo tháng HÔM NAY vẽ "January 2026" — một nhãn thời gian, đúng thứ Compact rút
+ngắn. Tiền đề "trục x của chart này là category chạy qua format cột" mô tả nhánh 1 và lặng lẽ bỏ qua
+nhánh 2, mà nhánh 2 mới là nhánh quan trọng.
+
+Bài học tổng quát, vì đây là lần thứ ba trong đợt này một lý do đã ghi bị áp rộng hơn phạm vi nó được
+đo: **lý do đó viết về cả TAB, mà tab có hai chart khác nhau đúng ở chỗ nó khẳng định.** Vì vậy
+Compact nay là một PROP (`offerCompact`), không còn là sự thật về tab. Chiều ngược lại cũng vậy với
+"Unpin from zero" — box plot có, waterfall không, vì `isYAxisUnpinFromZeroValid` loại display
+waterfall theo tên. Hai chart, hai setting, mỗi chart đúng một cái.
+
+**Việc hoãn của riêng cartesian sai vì một lý do thứ ba.** Nó hoãn vì "cartesian là họ duy nhất có
+thang x `timeseries`, đúng chỗ một bộ rút gọn thời gian sẽ có tác dụng, nhưng trục đó là `scaleAxis`
+mà nhãn vạch do ECharts sinh". Cả hai mệnh đề đều đúng; kết luận thì không. Trục x ORDINAL — mặc định,
+và là thứ mọi chart thời gian gom nhóm thực sự vẽ — đi qua `drawLabel`, đúng chỗ Compact tác động.
+`scaleAxis` vẫn ngoài tầm với và nay bị LÀM MỜ ở đó, theo đúng dữ kiện `valueX` mà các lựa chọn xoay
+đã bị làm mờ, thay vì bị giữ lại khỏi mọi chart.
+
+**Compact là MỘT cờ của Metabase và HAI trường của egret** (`date_abbreviate` cho ngày, `compact` cho
+số). Chỉ đặt `compact` sẽ khiến trục NGÀY compact trở thành no-op im lặng.
+
+**Một cái bẫy kế hoạch không thể gọi tên: phải hỏi `specifiesDateRendering` về format ĐÃ LƯU, không
+bao giờ hỏi về format đã thêm compact.** Compact thêm `date_abbreviate`, vốn là một trong bảy trường
+hàm đó tra — nên hỏi bản đã thêm sẽ làm nó true trên mọi trục gom nhóm và vẽ "Jan 1, 2026" thay vì
+"Jan 2026".
+
+**Một chỗ phải sửa trong chính chỉ dẫn của kế hoạch.** Mục `KEYS` trong `viz/cartesian-codec.ts` là
+**cần nhưng chưa đủ**: các interface config của BUILDER là kiểu riêng, và một key chỉ thêm vào kiểu
+phía API sẽ qua được codec mà không bao giờ tới chart. `tsc` bắt được (7 lỗi trong 3 tệp).
+
+### C3: ĐIỀU KIỆN DỪNG KHÔNG KÍCH HOẠT, VÀ TÔI VẪN DỪNG VÌ MỘT LÝ DO KHÁC
+
+**Chỗ phân biệt này mới là phần hữu ích của mục này, nên nói trước các con số.** Điều kiện dừng của kế
+hoạch là: *"một phép so sánh là một **hình dạng truy vấn thứ hai** … Nếu hoá ra cần việc phía backend
+thì dừng và báo; `chartparams.rs` dễ dãi nhưng *truy vấn* thì có thể không."*
+
+**Rủi ro đó không tồn tại.** Đó là phỏng đoán hợp lý và nó sai, ở cả hai nửa:
+
+- **`chartparams.rs` chấp nhận**, đúng như kế hoạch dự đoán — dễ dãi về hình dạng `settings` theo
+  thiết kế, có test khoá đúng điều đó (`accepts_settings_keys_this_build_does_not_know`).
+- **Đường truy vấn cũng chấp nhận, vì KHÔNG có truy vấn thứ hai.** `computeTrend` ở thượng nguồn là
+  **hàm thuần trên đúng những dòng thẻ đã lấy về**. Theo từng loại: `previousValue` lùi về DÒNG không
+  rỗng liền trước; `previousPeriod` là cùng phép quét với `dateUnitsAgo = 1`; `periodsAgo` cùng phép
+  quét với `dateUnitsAgo = N`; `staticNumber` chỉ đọc setting; `anotherColumn` đọc cột thứ hai của
+  CÙNG dòng. Không có gì phát request. Trend của egret vốn đã lấy toàn bộ chuỗi — `dimsAndMetrics` đặt
+  `row_limit` (mặc định 1000) và **không có LIMIT riêng cho trend ở đâu cả**.
+
+Nên tiền đề của kế hoạch sai hẳn với bốn trên năm loại, và chỉ đúng với `anotherColumn` theo nghĩa yếu
+là nó thêm một CỘT vào truy vấn sẵn có — đúng khuôn mẫu `goalColumn` đã dùng ở
+`viz/simple.tsx:283-286`. **Không việc backend. Không đổi truy vấn. Không hình dạng truy vấn mới.**
+
+**Tôi vẫn dừng, vì kích cỡ và khả năng review, và đó là một phán đoán chứ không phải một luật kích
+hoạt.** Chi phí đã đo, để người tiếp nhận C3 bắt đầu từ con số thay vì từ phỏng đoán của kế hoạch:
+
+| phần | chi phí |
+|---|---|
+| backend | **không** — `chartparams.rs` giữ nguyên |
+| truy vấn / spec | **không** — các dòng đã được lấy về sẵn |
+| khoá lưu mới | một, `smartscalar.comparisons`; tự động persist qua `fieldDescriptor` |
+| tính toán | một module mới port từ `SmartScalar/compute.ts:341-655`. **Rủi ro ngữ nghĩa thật sự duy nhất** là guard lệch múi giờ trong `areDatesTheSame` |
+| vẽ chú thích | nhỏ; trend đã in sẵn một dòng so sánh |
+| **UI settings** | **phần tốn kém nhất.** Metabase dùng sáu component trên chín tệp cho bộ chọn so sánh, so với khoảng hai tệp cho toàn bộ phần số học |
+| **tổng** | **5–7 tệp frontend**, phần lớn là UI |
+
+**Tập con rẻ nhất mà vẫn trung thực**, nếu có PR tiếp theo: mô hình danh sách cộng `staticNumber` +
+`previousValue` + `previousPeriod` sau một `<Select>` đơn giản mỗi dòng — khoảng bốn tệp và một module
+mới, vẫn không backend và không đổi truy vấn.
+
+**Tìm thấy khi đo C3, chưa sửa (1).** Trend của egret lấy `valid[n - 1]` và `valid[n - 2]` — dòng
+không rỗng liền trước, tức `previousValue` của Metabase — rồi chú thích là "vs previous month", tức
+`previousPeriod`. Đó là hai phép so sánh khác nhau ở thượng nguồn; một khoảng trống trong chuỗi làm
+chú thích nói sai.
+
+**Tìm thấy, chưa sửa (2).** Chỗ lệch đã ghi ở `CartesianDisplaySection.tsx:265-266` nay có một ngoại
+lệ: `scatterXY` tôn trọng mặc định unpin nhưng không có hàng panel nào để ghi đè.
+
+---
+
 ## Cố ý nằm ngoài phạm vi
 
 Hai thế hệ shadcn (vòng đặc `ring-2 ring-ring ring-offset-2` so với hai phần `border-ring` +

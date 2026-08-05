@@ -90,11 +90,22 @@ export interface CartesianConfig {
   /** An explicit category-label rotation, which SUPPRESSES the measured choice (see
    *  `echarts/axisLabelFit.ts`): Metabase's auto-selection likewise applies only while the setting
    *  is untouched. Metabase folds this into `graph.x_axis.axis_enabled` as one five-value key;
-   *  egret keeps two fields because the waterfall and the box plot already store this shape
+   *  egret keeps SEPARATE fields because the waterfall and the box plot already store this shape
    *  (`settings/ChartAxesSection.tsx`), and one control storing two different shapes across the
    *  chart module would be worse than differing from Metabase's key. The panel select is a
-   *  projection over both. */
+   *  projection over all of them — see `xTicksChoiceOf`/`xTicksPatch`, which is where the fact that
+   *  Metabase's five values are MUTUALLY EXCLUSIVE is enforced. */
   xLabelRotation?: 45 | 90;
+  /** Metabase's fifth `graph.x_axis.axis_enabled` value, "Compact". A FORMATTING flag on the
+   *  category label text and nothing else — see `options/cartesian.ts`'s `drawLabel`. It is the
+   *  same switch as `date_abbreviate` for a date and as `compact` for a number, which is exactly
+   *  how Metabase implements it (`formatting/date.tsx:717`: `options.compact || options.date_abbreviate`). */
+  xLabelCompact?: boolean;
+  /** Metabase's `graph.y_axis.unpin_from_zero` — let the value axis fit the data instead of
+   *  reaching the origin. Unset takes the display's default, which is unpinned on a scatter and
+   *  pinned everywhere else; `unpinFromZeroOn` in `options/cartesian.ts` resolves it, and
+   *  `unpinFromZeroApplies` beside it decides where the control is offered at all. */
+  unpinFromZero?: boolean;
   yAxisTicks?: boolean;          // …and the same for y.
   yTickCount?: number;           // Metabase "Number of tick marks" on the value axis. Unset = auto.
   normalized?: boolean;          // 100% stacking
@@ -229,6 +240,11 @@ export interface WaterfallConfig {
   /** Metabase folds label rotation into its "Show lines and tick marks" select. Unset lets the
    *  chart tilt long names on its own. */
   xLabelRotation?: 45 | 90;
+  /** The same select's "Compact". THE WATERFALL GETS THIS AND THE BOX PLOT DOES NOT, which
+   *  overturns a decision recorded twice in this repo — see `settings/ChartAxesSection.tsx`, where
+   *  the premise ("a waterfall's x is a category") and the measurement that falsifies it are set
+   *  out together. `options/waterfall.ts`'s `drawLabel` names periods exactly as cartesian's does. */
+  xLabelCompact?: boolean;
   yTickCount?: number;
   yMin?: number;
   yMax?: number;
@@ -266,6 +282,12 @@ export interface BoxplotConfig {
   xAxisTicks?: boolean;
   yAxisTicks?: boolean;
   xLabelRotation?: 45 | 90;
+  /** Metabase's `graph.y_axis.unpin_from_zero`. A box plot's display is none of the three
+   *  `isYAxisUnpinFromZeroValid` excludes, so it is offered here exactly as it is on a line — and
+   *  it matters MORE here than anywhere, since a distribution of prices between 40 and 60 spends
+   *  most of a pinned axis drawing empty space below the lowest whisker. No `xLabelCompact` twin:
+   *  this chart's category axis has no formatter to compact through (`options/boxplot.ts`). */
+  unpinFromZero?: boolean;
   yTickCount?: number;
   yMin?: number;
   yMax?: number;
