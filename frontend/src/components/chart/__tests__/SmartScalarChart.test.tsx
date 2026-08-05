@@ -5,21 +5,37 @@ import { SmartScalarChart } from "../SmartScalarChart";
 const cols = [{ name: "mo", type: "varchar" }, { name: "rev", type: "double" }];
 
 describe("SmartScalarChart", () => {
-  it("shows the latest value, its period, and the % change + previous value", () => {
+  /** MOVED: was `vs previous: 100`.
+   *
+   *  There is no unit here, so the default comparison is `previousValue` — the row walk — and that
+   *  arm now names the period it landed on instead of the vaguer "previous". This is the same
+   *  correction as the gapped-series one below, read from the other end: "previous" was never
+   *  wrong, it was merely silent about WHICH row it reached, and on a series with holes that
+   *  silence is what let the bug hide. Metabase captions this arm the same way ("vs. Dec 2028" on
+   *  the driven reference card, `vs. Sep` in its own `compute.unit.spec.ts:250-271`). */
+  it("shows the latest value, its period, and the % change + the period compared against", () => {
     render(<SmartScalarChart columns={cols} rows={[["Jan", 100], ["Feb", 120]]} dimension="mo" metric="rev" format={{ decimals: 0 }} />);
     expect(screen.getByText("120")).toBeInTheDocument();
     expect(screen.getByText("Feb")).toBeInTheDocument();            // current period label
     expect(screen.getByText(/20\.00%/)).toBeInTheDocument();
-    expect(screen.getByText(/vs previous: 100/)).toBeInTheDocument(); // previous value
+    expect(screen.getByText(/vs Jan: 100/)).toBeInTheDocument();    // the row it actually compared
   });
   it("marks a decrease with a down arrow", () => {
     const { container } = render(<SmartScalarChart columns={cols} rows={[["Jan", 100], ["Feb", 80]]} dimension="mo" metric="rev" />);
     expect(container.textContent).toContain("▼");
   });
-  it("shows just the value when there is no prior period", () => {
+  /** MOVED: asserted the card drew no "vs" line at all when there was nothing to compare against.
+   *
+   *  DRIVEN, not decided: an Orders/Count-by-month trend at :3033 filtered to a single month
+   *  (Apr 1–30, 2029) renders "344 / Apr 2029 / N/A / vs. previous month: (No data)". Metabase
+   *  draws the line and says the comparison is empty. Silence is the weaker answer — a card that
+   *  omits the comparison reads as though none was configured, which is exactly the ambiguity this
+   *  unit exists to remove. egret now says the same thing in the same two strings. */
+  it("says there is no comparison rather than drawing none", () => {
     render(<SmartScalarChart columns={cols} rows={[["Jan", 100]]} dimension="mo" metric="rev" format={{ decimals: 0 }} />);
     expect(screen.getByText("100")).toBeInTheDocument();
-    expect(screen.queryByText(/vs/)).not.toBeInTheDocument();
+    expect(screen.getByText("N/A")).toBeInTheDocument();
+    expect(screen.getByText(/vs previous: \(No data\)/)).toBeInTheDocument();
   });
   it("renders an em dash when there is no data", () => {
     render(<SmartScalarChart columns={cols} rows={[]} dimension="mo" metric="rev" />);
@@ -38,9 +54,16 @@ describe("SmartScalarChart — Metabase parity", () => {
     expect(screen.getByText(/vs previous month:/)).toBeInTheDocument();
   });
 
-  it("falls back to a bare 'vs previous' when the dimension carries no unit", () => {
+  /** MOVED: was `vs previous:`.
+   *
+   *  With no unit there is no period to count in, so the default comparison is `previousValue`
+   *  (Metabase's `getDefaultComparison` branches on exactly that), and that arm names the row it
+   *  reached. The bare "previous" survives only where there is genuinely nothing to name — no
+   *  earlier row, or no dimension column at all. */
+  it("names the row it compared against when the dimension carries no unit", () => {
     render(<SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" />);
-    expect(screen.getByText(/vs previous:/)).toBeInTheDocument();
+    expect(screen.getByText(/vs February 1, 2026:/)).toBeInTheDocument();
+    expect(screen.queryByText(/vs previous month/)).toBeNull();
   });
 
   // A metric where LESS is better — cost, churn, time to resolve — reads backwards otherwise:
@@ -216,6 +239,154 @@ describe("SmartScalarChart — the label names the period, not its first day", (
         dimension="d" metric="m" unit="month" />,
     );
     expect(screen.getByText("March 2026")).toBeInTheDocument();
+  });
+});
+
+/**
+ * THE CAPTION SAID "previous month" WHILE THE ARITHMETIC WAS "previous ROW".
+ *
+ * On a series with no gaps the two agree, which is why this shipped. On a gapped one they are
+ * different comparisons and the card states something false: with November present, December and
+ * January and February absent and March present, egret read November's number and captioned it
+ * "vs previous month".
+ *
+ * WHAT METABASE DOES ON A GAPPED SERIES — driven, not reasoned, on the reference instance at
+ * :3033. An ad-hoc Orders/Count-by-month question filtered to `Nov 1 – Dec 31 2028 OR Apr 1–30
+ * 2029`, so the rows are Nov 2028, Dec 2028, Apr 2029 with January–March missing. Its trend card,
+ * carrying one `previousPeriod` and one `previousValue` comparison, renders VERBATIM:
+ *
+ *     344
+ *     Apr 2029
+ *     N/A     vs. previous month: (No data)
+ *     ↓ 37.45%  vs. Dec 2028: 550
+ *
+ * Two different comparisons, computed by two different functions, and NEITHER of them is what
+ * egret drew. `previousPeriod` refuses to reach past the missing period and says so; `previousValue`
+ * reaches back to the previous non-empty ROW and then names the period it actually landed on
+ * ("Dec 2028"), never "previous month". Metabase's own unit spec pins both arms —
+ * `SmartScalar/compute.unit.spec.ts:487-505` expects `changeType: "missing"` for a `previousPeriod`
+ * over a two-year gap, and `:250-271` expects `dateStr: "Sep"` for a `previousValue` over a missing
+ * month.
+ *
+ * SO THE COMPUTATION IS WHAT MOVES, NOT THE CAPTION. egret's default is a temporal trend with a
+ * unit, and Metabase's default comparison for a series that HAS a date unit is `previousPeriod`
+ * (`SmartScalar/utils.ts`, `getDefaultComparison`) — the very caption egret already prints. Making
+ * the caption honest about the row-walk instead would have moved egret's default off Metabase's.
+ */
+describe("SmartScalarChart — a gapped series is not a previous period", () => {
+  const cols = [{ name: "d", type: "date" }, { name: "m", type: "double" }];
+  // November, then a three-month hole, then March. The previous ROW is November; the previous
+  // PERIOD (February) does not exist.
+  const gapped = [["2028-11-01", 550], ["2029-03-01", 344]];
+
+  it("does not present the previous row as the previous period", () => {
+    render(<SmartScalarChart columns={cols} rows={gapped} dimension="d" metric="m" unit="month" />);
+    expect(screen.getByText("March 2029")).toBeInTheDocument();
+    // The lie: 550 is November's, and it is four months back, not one.
+    expect(screen.queryByText(/vs previous month: 550/)).toBeNull();
+  });
+
+  it("says the previous period has no data rather than substituting another row", () => {
+    render(<SmartScalarChart columns={cols} rows={gapped} dimension="d" metric="m" unit="month" />);
+    expect(screen.getByText(/vs previous month: \(No data\)/)).toBeInTheDocument();
+    expect(screen.getByText("N/A")).toBeInTheDocument();
+  });
+
+  it("still compares a series with no gap, which is the case that always worked", () => {
+    render(
+      <SmartScalarChart columns={cols} rows={[["2029-02-01", 550], ["2029-03-01", 344]]}
+        dimension="d" metric="m" unit="month" format={{ decimals: 0 }} />,
+    );
+    expect(screen.getByText(/vs previous month: 550/)).toBeInTheDocument();
+    expect(screen.getByText(/37\.45%/)).toBeInTheDocument();
+  });
+});
+
+/**
+ * COMPARISONS — Metabase's trend Data tab carries a list of them and egret carried none.
+ *
+ * The list, its cap of three and the four types below are all Metabase's
+ * (`SmartScalar/constants.ts`, `MAX_COMPARISONS = 3` and `COMPARISON_TYPES`). The fifth type,
+ * `anotherColumn`, is deliberately absent — see `trend-comparison.ts` for why, and note that
+ * Metabase itself hides that option on a card with only one numeric column, which is every egret
+ * trend.
+ */
+describe("SmartScalarChart — comparisons", () => {
+  const cols = [{ name: "d", type: "date" }, { name: "m", type: "double" }];
+  const rows = [["2029-01-01", 400], ["2029-02-01", 550], ["2029-03-01", 344]];
+
+  it("renders more than one comparison line, in stored order", () => {
+    render(
+      <SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month"
+        format={{ decimals: 0 }}
+        comparisons={[
+          { id: "a", type: "previousPeriod" },
+          { id: "b", type: "staticNumber", value: 500, label: "Goal" },
+        ]} />,
+    );
+    expect(screen.getByText(/vs previous month: 550/)).toBeInTheDocument();
+    expect(screen.getByText(/vs Goal: 500/)).toBeInTheDocument();
+  });
+
+  it("compares against a fixed number of periods back", () => {
+    render(
+      <SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month"
+        format={{ decimals: 0 }}
+        comparisons={[{ id: "a", type: "periodsAgo", value: 2 }]} />,
+    );
+    // Two months before March 2029 is January 2029, whose value is 400 — NOT February's 550.
+    expect(screen.getByText(/vs January 2029: 400/)).toBeInTheDocument();
+  });
+
+  /** Metabase's `previousValue`: the previous non-empty ROW, captioned with the period it landed
+   *  on. This is the arithmetic egret already had — under the caption it belongs to. */
+  it("names the period a previous-value comparison actually landed on", () => {
+    render(
+      <SmartScalarChart columns={cols} rows={[["2028-11-01", 550], ["2029-03-01", 344]]}
+        dimension="d" metric="m" unit="month" format={{ decimals: 0 }}
+        comparisons={[{ id: "a", type: "previousValue" }]} />,
+    );
+    expect(screen.getByText(/vs November 2028: 550/)).toBeInTheDocument();
+    expect(screen.queryByText(/vs previous month/)).toBeNull();
+  });
+
+  it("keeps a comparison whose settings are incomplete from displacing the default", () => {
+    // A half-typed custom value — a number with no name — is not renderable. Metabase's
+    // `isComparisonValid` drops it and `getComparisons` falls back to the default rather than
+    // drawing "vs : 500".
+    //
+    // BOTH ARMS, because the fallback arm alone is green against a build that ignores the prop
+    // entirely — which is to say, indistinguishable from the feature not existing. The complete
+    // arm is what makes the incomplete one mean "dropped" rather than "never read".
+    const { rerender } = render(
+      <SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month"
+        format={{ decimals: 0 }}
+        comparisons={[{ id: "a", type: "staticNumber", value: 500, label: "Goal" }]} />,
+    );
+    expect(screen.getByText(/vs Goal: 500/)).toBeInTheDocument();
+    expect(screen.queryByText(/vs previous month/)).toBeNull();
+
+    rerender(
+      <SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month"
+        format={{ decimals: 0 }}
+        comparisons={[{ id: "a", type: "staticNumber", value: 500 }]} />,
+    );
+    expect(screen.getByText(/vs previous month: 550/)).toBeInTheDocument();
+    expect(screen.queryByText(/500/)).toBeNull();
+  });
+
+  it("speaks every comparison, not only the first", () => {
+    render(
+      <SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month"
+        format={{ decimals: 0 }}
+        comparisons={[
+          { id: "a", type: "previousPeriod" },
+          { id: "b", type: "staticNumber", value: 500, label: "Goal" },
+        ]} />,
+    );
+    const name = screen.getByRole("img").getAttribute("aria-label")!;
+    expect(name).toContain("previous month");
+    expect(name).toContain("Goal");
   });
 });
 

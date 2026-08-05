@@ -8,6 +8,10 @@ import {
   compactifyValue, MIN_SIZE_REM, SCALAR_PADDING, SIZE_STEP_REM, maxFontSizeRem,
 } from "./scalar";
 import { namesAPeriod, periodName } from "./temporal-period";
+import {
+  computeComparison, findPreviousNonEmptyRowIndex, resolveComparisons,
+  type TrendComparison,
+} from "./trend-comparison";
 import { useElementSize } from "./useElementSize";
 import { SERIES_PALETTE } from "./echarts/palette";
 
@@ -16,6 +20,13 @@ interface ResultColumn { name: string; type: string }
 const UP = SERIES_PALETTE[1];   // green
 const DOWN = SERIES_PALETTE[3]; // red
 
+/** Metabase's `CHANGE_TYPE_OPTIONS.MISSING` (`SmartScalar/compute.ts:709-715`), verbatim, both
+ *  halves. A comparison that resolved to nothing still draws a line — "N/A" where the percentage
+ *  goes and "(No data)" where the value goes — because a silently missing line reads as "there was
+ *  nothing to compare" when the truth is "the period you asked about is not in this series". */
+const NO_CHANGE_STR = "N/A";
+const NO_VALUE_STR = "(No data)";
+
 /** Fallback for the first paint, before the ResizeObserver has reported a box. This is the size
  * the card was FIXED at before it could size itself, so the initial frame is never larger than
  * what it settles to — `BigNumber` picks its own fallback the same way and for the same reason. */
@@ -23,21 +34,16 @@ const INITIAL_SIZE = "2.5rem";
 const VALUE_FONT_WEIGHT = 700;
 
 /**
- * Metabase-style Trend (SmartScalar): the latest value plus its change vs the
- * previous period. Rows are expected ordered by the dimension; the last two are
- * compared. Clean-room of Metabase's SmartScalar comparison.
+ * Metabase-style Trend (SmartScalar): the latest value plus what it is compared against. Rows are
+ * expected ordered by the dimension. Clean-room of Metabase's SmartScalar.
+ *
+ * WHICH ROWS ARE COMPARED IS NO LONGER THIS FILE'S BUSINESS — see `trend-comparison.ts`. It used to
+ * be "the last two", captioned "vs previous month", and those are two different comparisons that
+ * only agree on a series with no holes in it.
  */
-/** The period a temporal unit names, for the comparison caption. Metabase writes "vs. previous
- *  month" rather than a bare "vs. previous" — the reader should not have to remember which
- *  granularity the chart was grouped by to know what it is being compared against. */
-const PERIOD_NAME: Record<string, string> = {
-  minute: "minute", hour: "hour", day: "day", week: "week",
-  month: "month", quarter: "quarter", year: "year",
-};
-
 export function SmartScalarChart({
   columns, rows, dimension, metric, format = {}, dimensionFormat, unit,
-  switchPositiveNegative = false, compact = false, onValueClick, gridCols,
+  switchPositiveNegative = false, compact = false, comparisons, onValueClick, gridCols,
 }: {
   columns: ResultColumn[];
   rows: unknown[][];
@@ -59,6 +65,15 @@ export function SmartScalarChart({
   switchPositiveNegative?: boolean;
   /** Metabase's "Compact number": 36,513 -> 36.5k, for a card too small to hold the full figure. */
   compact?: boolean;
+  /**
+   * Metabase's `scalar.comparisons` — what the number is measured against, in authored order.
+   *
+   * UNDEFINED IS THE NORMAL CASE and is not the same as `[]`: both fall back to the default
+   * comparison, but the distinction is the panel's, not this component's. `resolveComparisons`
+   * owns the fallback and the validity filter, so an incompletely-typed row here draws the default
+   * rather than a caption with a hole in it.
+   */
+  comparisons?: TrendComparison[];
   /**
    * Present when the chart is drillable. Handed the RAW dimension value of the row the big number
    * came from — the LATEST period — which `ChartRenderer` turns into a `DrillContext`, attaching
@@ -94,32 +109,24 @@ export function SmartScalarChart({
   const type = mi >= 0 ? columns[mi].type : "double";
 
   /**
-   * The rows this chart can read a number off. `r[mi] != null && r[mi] !== ""` IS LOAD-BEARING and
-   * was missing: `Number(null)` and `Number("")` are both `0`, and `0` is finite — so a trailing
-   * month with no data yet passed for a real one. The card then read "0", labelled itself with that
-   * month, and said "▼ 100.00% vs previous month" — a metric reported as having collapsed to
-   * nothing when the truth was that nothing had been recorded. Wrong, confident, and with nothing
-   * on screen to say so.
+   * The row the big number comes from: the LAST one carrying both a number and a period.
    *
-   * Found by the drill this chart gained: it pointed at that empty period. `false` and `[]` coerce
-   * to 0 the same way, but neither is a shape a numeric column returns; null and the empty string
-   * both are.
+   * `findPreviousNonEmptyRowIndex` asked at `rows.length` — an INDEX into `rows`, where this used
+   * to be the last entry of a filtered copy. The index is what the comparisons need: `periodsAgo`
+   * bounds its search by how many rows back it may look, and a dense filtered array has thrown that
+   * information away. Same rows survive the filter either way.
+   *
+   * `r[mi] != null && r[mi] !== ""` IS LOAD-BEARING (it lives in `hasMetric` now): `Number(null)`
+   * and `Number("")` are both `0`, and `0` is finite — so a trailing month with no data yet passed
+   * for a real one. The card then read "0", labelled itself with that month, and said "▼ 100.00%
+   * vs previous month" — a metric reported as having collapsed to nothing when the truth was that
+   * nothing had been recorded.
    */
-  const valid = mi >= 0
-    ? rows.filter((r) => r[mi] != null && r[mi] !== "" && Number.isFinite(Number(r[mi])))
-    : [];
-  const n = valid.length;
-  const curRow = n > 0 ? valid[n - 1] : undefined;
-  const prevRow = n > 1 ? valid[n - 2] : undefined;
+  const curIndex = mi >= 0 ? findPreviousNonEmptyRowIndex(rows, di, mi, rows.length) : -1;
+  const curRow = curIndex >= 0 ? rows[curIndex] : undefined;
   const current = curRow ? Number(curRow[mi]) : NaN;
-  const previous = prevRow ? Number(prevRow[mi]) : NaN;
 
   const hasCur = Number.isFinite(current);
-  const hasComparison = hasCur && Number.isFinite(previous);
-  const change = hasComparison ? current - previous : NaN;
-  const pct = hasComparison && previous !== 0 ? change / Math.abs(previous) : NaN;
-  const up = change > 0;
-  const down = change < 0;
 
   const dimType = di >= 0 ? columns[di].type : "varchar";
   const fmt = (v: number) => formatValue(v, type, compact ? { ...format, compact: true } : format);
@@ -155,12 +162,38 @@ export function SmartScalarChart({
       : namesAPeriod(unit) ? periodName(unit, v)
         : formatValue(v, dimType);
   const curLabel = curRow && di >= 0 ? periodLabel(curRow[di]) : "";
-  // Which way is good. `up`/`down` stay factual — they drive the arrow — while the COLOUR follows
-  // this, so the arrow keeps saying what happened even when the reading of it is inverted.
-  const good = switchPositiveNegative ? down : up;
-  const bad = switchPositiveNegative ? up : down;
-  const period = unit != null ? PERIOD_NAME[unit] : undefined;
-  const vsLabel = period ? `vs previous ${period}:` : "vs previous:";
+
+  /**
+   * Every comparison line, resolved and measured.
+   *
+   * `periodLabel` IS PASSED IN rather than rebuilt inside the compute module, so a comparison's
+   * caption reads at the same granularity and through the same stored column format as the label
+   * above the number. Two labellers that are currently identical is the shape that stops being
+   * identical.
+   *
+   * `pct` KEEPS EGRET'S ZERO-BASELINE ANSWER rather than upstream's. `computeChange` returns
+   * ±Infinity when the thing compared against is 0 and `formatChange` draws "∞%"; egret has always
+   * drawn the ABSOLUTE change there instead, which says how much it moved rather than that the
+   * question is undefined. That is a deliberate retained divergence — porting it would change what
+   * every already-saved card with a zero baseline draws, for no gain to this task.
+   */
+  const lines = useMemo(() => {
+    if (!hasCur) return [];
+    const series = { rows, di, mi, unit, periodLabel };
+    return resolveComparisons(comparisons, unit).map((c) => {
+      const r = computeComparison(c, series, curIndex);
+      const has = r.value != null && Number.isFinite(r.value);
+      const change = has ? current - (r.value as number) : NaN;
+      const pct = has && r.value !== 0 ? change / Math.abs(r.value as number) : NaN;
+      return { ...r, has, change, up: change > 0, down: change < 0, pct };
+    });
+    // `periodLabel` is a fresh closure every render and is deliberately NOT a dependency: it is a
+    // pure function of `dimensionFormat`, `unit` and `dimType`, all of which ARE listed, so the
+    // memo is still correct — and including it would defeat the memo entirely without changing any
+    // answer. Stated rather than silenced: an `eslint-disable` was tried here first and ESLint
+    // reported the directive itself as unused, so the rule is not asking for it and a disable
+    // comment would have been a warning claiming to prevent one.
+  }, [hasCur, rows, di, mi, unit, comparisons, curIndex, current, dimensionFormat, dimType]);
 
   /**
    * What to draw for the big number, and what it really says.
@@ -209,14 +242,20 @@ export function SmartScalarChart({
     // 24,730.43, and compaction is now applied without the user asking for it — so the precision it
     // trades away on screen has to stay in the accessible name, where the width does not bind.
     hasCur ? full : "no value",
-    hasComparison
-      ? `, ${up ? "up" : down ? "down" : "unchanged"}${Number.isFinite(pct) ? ` ${(Math.abs(pct) * 100).toFixed(2)}%` : ""} versus previous ${period ? `${period} ` : ""}${fmt(previous)}`
-      : "",
+    // EVERY comparison, not the first. The card can now draw three lines, and a name that describes
+    // one of them is a name that describes a card nobody is looking at.
+    // The comma before the figure is not cosmetic: the caption's label is now a period NAME rather
+    // than the fixed word "previous", so without it a screen reader runs "versus Jan 100" together
+    // as one noun phrase. With it the two facts are separated the way the colon separates them on
+    // screen.
+    ...lines.map((l) => (l.has
+      ? `, ${l.up ? "up" : l.down ? "down" : "unchanged"}${Number.isFinite(l.pct) ? ` ${(Math.abs(l.pct) * 100).toFixed(2)}%` : ""} versus ${l.label}, ${fmt(l.value as number)}`
+      : `, no data for ${l.label}`)),
   ].join("");
   const clickable = onValueClick != null && hasCur;
-  // THE ROW THE NUMBER ACTUALLY CAME FROM — `valid`'s last entry, not `rows`'s. A trailing row
-  // whose metric is null or non-finite is filtered out above, so the period on screen is the one
-  // before it; drilling `rows[rows.length - 1]` would filter a period the card is not showing.
+  // THE ROW THE NUMBER ACTUALLY CAME FROM. A trailing row whose metric is null or non-finite is
+  // skipped above, so the period on screen is the one before it; drilling `rows[rows.length - 1]`
+  // would filter a period the card is not showing.
   const curDim = curRow && di >= 0 ? curRow[di] : undefined;
 
   // `leading-none` and `tabular-nums` stay; the fixed `text-[2.5rem]` does not. That constant is
@@ -277,15 +316,35 @@ export function SmartScalarChart({
           rather than each caption from its neighbour — the spacing on screen is unchanged. */}
       <div ref={captionRef} className="flex w-full shrink-0 flex-col items-center gap-1">
         {curLabel && <div className="text-sm text-muted-foreground">{curLabel}</div>}
-        {hasComparison && (
-          <div className="flex items-center gap-1.5 text-sm">
-            <span data-trend className="flex items-center gap-1 font-medium" style={{ color: good ? UP : bad ? DOWN : undefined }}>
-              {up ? "▲" : down ? "▼" : "•"}{" "}
-              {Number.isFinite(pct) ? `${(Math.abs(pct) * 100).toFixed(2)}%` : fmt(Math.abs(change))}
-            </span>
-            <span className="text-muted-foreground">{vsLabel} {fmt(previous)}</span>
-          </div>
-        )}
+        {/* ONE LINE PER COMPARISON, in authored order.
+            A line whose comparison resolved to nothing is still DRAWN — "N/A" and "(No data)",
+            Metabase's own strings — because the alternative is a card that quietly omits the
+            comparison the user configured and so reads as if it had never been asked for. That is
+            precisely the failure this unit fixed: the previous build never drew a missing line, it
+            substituted another row's number under the missing period's name. */}
+        {lines.map((l) => {
+          // Which way is good, per line. `up`/`down` stay factual — they drive the arrow — while
+          // the COLOUR follows `switchPositiveNegative`, so the arrow keeps saying what happened
+          // even when the reading of it is inverted.
+          const good = switchPositiveNegative ? l.down : l.up;
+          const bad = switchPositiveNegative ? l.up : l.down;
+          return (
+            <div key={l.id} className="flex items-center gap-1.5 text-sm">
+              <span data-trend className="flex items-center gap-1 font-medium"
+                style={{ color: l.has ? (good ? UP : bad ? DOWN : undefined) : undefined }}>
+                {l.has ? (
+                  <>
+                    {l.up ? "▲" : l.down ? "▼" : "•"}{" "}
+                    {Number.isFinite(l.pct) ? `${(Math.abs(l.pct) * 100).toFixed(2)}%` : fmt(Math.abs(l.change))}
+                  </>
+                ) : NO_CHANGE_STR}
+              </span>
+              <span className="text-muted-foreground">
+                vs {l.label}: {l.has ? fmt(l.value as number) : NO_VALUE_STR}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

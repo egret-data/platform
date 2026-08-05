@@ -526,6 +526,174 @@ explained away.
 
 ---
 
+## UPDATE — C3 executed, and the caption defect it was sized alongside
+
+Written after the work, in the spirit of the pruning note and the three updates above. **C3 ships,
+in the "cheapest honest subset" its own sizing note proposed plus one type, and the correctness gap
+that section filed under "found, not fixed" is fixed with it** — because it turned out not to be a
+separate item at all. The original text is left standing.
+
+### The caption that lied, and which way it was fixed
+
+C3's sizing note filed this as *"egret's trend takes `valid[n - 1]` and `valid[n - 2]` — the previous
+non-empty ROW, which is Metabase's `previousValue` — and then captions it 'vs previous month', which
+is Metabase's `previousPeriod`."* That is exactly right, and it leaves open which of the two moves.
+They are different products, so the brief for this unit required the answer to come from Metabase's
+behaviour rather than from taste.
+
+**THE COMPUTATION MOVES. THE CAPTION STAYS.** Three independent readings, all agreeing:
+
+1. **Driven at :3033**, on an ad-hoc Orders/Count-by-month question filtered to `Nov 1 – Dec 31 2028
+   OR Apr 1–30 2029` so that January to March are missing, carrying one `previousPeriod` and one
+   `previousValue` comparison. Verbatim:
+
+   ```text
+   344
+   Apr 2029
+   N/A       vs. previous month: (No data)
+   ↓ 37.45%  vs. Dec 2028: 550
+   ```
+
+   `previousPeriod` refuses to reach past the hole and says so. `previousValue` reaches the previous
+   ROW and then names the period it landed on — "Dec 2028", never "previous month". **Neither is
+   what egret drew**, which was `▼ 37.45% vs previous month: 550`.
+
+2. **Metabase's own unit spec**, both arms: `SmartScalar/compute.unit.spec.ts:487-505` expects
+   `changeType: "missing"` for a `previousPeriod` across a two-year gap, and `:250-271` expects
+   `dateStr: "Sep"` for a `previousValue` across a missing October.
+
+3. **`getDefaultComparison` (`SmartScalar/utils.ts`) settles which one egret's default should be**,
+   and this is the argument that makes it a fix rather than a swap: a series **with** a date unit
+   defaults to `previousPeriod`; one **without** defaults to `previousValue`. egret's trend prints
+   "vs previous month" exactly when it has a unit — so the caption it already shipped is the caption
+   Metabase's default produces. Making the caption honest about the row walk instead would have
+   moved egret's default OFF Metabase's default and lost the more useful of the two comparisons.
+
+So the arithmetic is now the search Metabase's caption describes, and `previousValue` is available
+as a type in its own right, captioned with the period it actually reached.
+
+**Two consequences that are behaviour changes, both driven before being adopted.** A trend over a
+single period used to draw the number alone; it now draws `N/A / vs previous month: (No data)`,
+which is what :3033 renders for the same query (checked separately, on a one-month filter). And a
+trend with no unit used to say "vs previous"; it now names the row — "vs Jan: 100". Silence is the
+weaker answer in the first case: a card that omits the comparison reads as though none was
+configured, which is the ambiguity this whole unit exists to remove.
+
+### What shipped, and the one type that did not
+
+**Four of the five comparison types**: `previousPeriod`, `periodsAgo`, `previousValue`,
+`staticNumber`. The list model, Metabase's cap of three, its validity rules and its default rule all
+come across.
+
+**`anotherColumn` is left out, and the line is sharper than the plan's.** C3's sizing note said the
+type "only adds a COLUMN to the existing query — which is the pattern `goalColumn` already uses". True,
+and it is still the only one of the five **that touches the query at all**: the trend's spec is
+`dimsAndMetrics([c.dimension], [c.metric], s)`, exactly one metric by construction. So the boundary
+drawn here is *everything that is a pure function of rows already fetched ships; the one that needs a
+second column in the spec does not.*
+
+**And Metabase agrees, which was not predicted.** Driving the type menu on a Count-by-month trend at
+:3033 shows exactly `Previous month / _ months ago / Previous value / Custom value…` — no fifth
+entry, because `getComparisonOptions` only offers `anotherColumn` when `getColumnsForComparison`
+finds a numeric column that is not the primary field. On every trend egret can currently build,
+there is none. **The four shipped here are Metabase's own list for this chart**, not a subset of it.
+
+**`periodsAgo` was added beyond the note's proposed subset** because its cost turned out to be
+marginal, not because the subset was wrong: it is `previousPeriod`'s computation with `back = N`
+(upstream serves both from one function reading `value ?? 1`), and both of its caption arms were
+needed anyway — the "previous month" arm by `previousPeriod` and the dated arm by `previousValue`.
+The only new surface is one integer input.
+
+**Reordering by drag is not here.** Metabase's rows carry a handle; with a cap of three, delete-and-
+re-add reaches every ordering, and a dnd-kit sortable is a bigger dependency than the ordering buys.
+
+### The sizing note's numbers, checked against what it cost
+
+| piece | predicted | actual |
+|---|---|---|
+| backend | none | **none** — `chartparams.rs` untouched, confirmed by reading its `accepts_settings_keys_this_build_does_not_know` test |
+| query / spec | none | **none** |
+| new stored key | one, persists free via `fieldDescriptor` | **correct, and the plan's own codec warning does not apply here** — `viz/cartesian-codec.ts` exists because the cartesian descriptor keeps a hand-maintained list; `fieldDescriptor` copies every key under a prefix generically, so `smartscalar.comparisons` needed no entry and `tsc` found nothing |
+| compute | one module; `areDatesTheSame`'s timezone guard the only real risk | **correct on both counts** — one module, and that guard was the one place the port needed its own reasoning |
+| settings UI | dominant cost, six components across nine files upstream | **one component, ~160 lines** — upstream's count is Mantine menu plumbing (`PeriodsAgoMenuOption`, `MenuItem.styled`, two form components) that a shadcn `Select` collapses |
+| total | 5–7 frontend files | **7 source files + 3 test files** |
+
+### A hazard the plan could not have named: `dayjs` accessors are plugins
+
+`areDatesTheSame`'s offset guard reads the unit's own number off the date — `target[dateUnit]()`
+upstream. **`.week()` is not core dayjs and `.quarter()` is not either.** Upstream gets both from a
+global registration; egret has none, so a week-bucketed trend would have thrown inside a render
+rather than returned a wrong answer. It is a `switch` here rather than an index, so a unit with no
+accessor is a compile error, and the module registers `weekOfYear` itself.
+
+One upstream quirk is carried verbatim with its reason written out: **dayjs's `.day()` is the day of
+the WEEK**, not of the month. It is sufficient — the guard only runs after `diff(…, "day") === 0`,
+which already bounds the two instants to under 24 hours apart — and `.date()` would read more
+obviously but would be a silent divergence from the code this is a port of.
+
+### Mutation: 25 of 29 killed, and the four survivors are argued rather than reported
+
+The harness journals file bytes before the first write, scores only on the child process exit code,
+requires every search string to match **exactly once**, refuses to score a run that executed no tests
+or far fewer than the baseline, restores on every signal path, and ends with a byte-for-byte journal
+comparison plus a clean full-suite run. **Its own first run was refused by its empty-run guard** —
+vitest colours its summary, so the count regex matched nothing — which is the guard working on the
+harness rather than on the code.
+
+One survivor was a **real gap**: deleting `areDatesTheSame`'s coarse `diff !== 0` check survived,
+because `.month()` is 0–11 and February 2028 and February 2029 both report 1 — so with only the
+unit-number guard, a February two years back is accepted as a March's "previous month". Two tests
+now pin it from both directions.
+
+**Three are equivalent mutants, with the argument rather than an apology:**
+
+- **the early bail and the search-window bound** are both pure short-circuits. The rows arrive in
+  ascending dimension order (the trend descriptor derives it and refuses `shared.orderby` so it
+  cannot be overridden) and a GROUP BY makes the dimension unique, so once a candidate is older than
+  the target no earlier row can match either. Removing either cannot change an answer. They are kept
+  because upstream keeps them and because a linear scan of a thousand-row series inside a render is
+  a real cost — but **no assertion should be written to pin them**, because an assertion that cannot
+  fail is worse than none.
+- **`comparableUnit`'s `namesAPeriod` gate** overlaps the seven-name list beside it, and neither is
+  alone — the same shape `periodName` already records about its own pair of guards. What the gate
+  buys is the DIRECTION of any future drift, which the list cannot express because it must be a
+  literal tuple to give `ComparableUnit` its type.
+- **`.day()` → `.date()`** is the expected survivor described above.
+
+### A comment this PR's own diff made stale, in four places
+
+The programme's rule that *a divergence note is a fact with a date on it* caught one here. Four
+sites asserted that `SmartScalarChart` reads `valid[n - 1]` and `valid[n - 2]` — `viz/orderby.ts`,
+`viz/simple.tsx`, and `viz/__tests__/orderby.test.ts` twice — as the justification for the trend
+being the one descriptor that ignores `shared.orderby`. **This PR is what made that false.** The
+conclusion survives and is in fact stronger: the backwards search stops at the first candidate older
+than the target, which is sound *only* under ascending order, so the ordering went from an incidental
+property of "the last two rows" to a stated precondition. All four now say the true thing.
+
+`temporal-period.ts`'s "what both callers need it for" was stale in the same way — there is a third
+kind of caller now, asking whether a period can be SUBTRACTED rather than rendered.
+
+### Found, not fixed
+
+**The narrow-card comparison line, now up to three of them.** PR B recorded that at the harness's
+166px card the single comparison line already wraps across four lines without overflowing. A card
+may now carry three, and the caption block is measured, so the big number shrinks to make room —
+correct, but small. Metabase solves this with `getValueHeight`, which drops to showing ONE comparison
+when they do not fit and moves the rest into a tooltip. That is a size-dependent rule, so **jsdom
+cannot test it at all** (`measureText` returns zeroes and every candidate "fits"), and it is a
+design decision of the same family as PR B's own deferred "shorten the comparison line on a narrow
+card". Named so it is on the record rather than rediscovered.
+
+**egret's zero-baseline percentage is a deliberate retained divergence.** Upstream's `computeChange`
+returns ±Infinity when the value compared against is 0 and draws "∞%"; egret has always drawn the
+absolute change instead. Porting it would change what every already-saved card with a zero baseline
+draws, for no gain to this task.
+
+**The `beforeunload`-on-any-canvas-click defect PR B reported is still live**, and was hit again
+while driving the studio here. Not this unit's.
+
+---
+
 ## Out of scope, deliberately
 
 The two shadcn generations (solid `ring-2 ring-ring ring-offset-2` versus two-part `border-ring` +
