@@ -1,0 +1,235 @@
+# Tất cả những gì còn mở — kế hoạch triển khai
+
+> **Bản tiếng Việt để tham chiếu.** Bản tiếng Anh tại `docs/en/plans/2026-08-05-remaining-work.md` là
+> bản chuẩn; mã nguồn, số dòng và các bước chạy lệnh nằm ở đó.
+
+**Mục tiêu:** Đóng những gì thật sự còn lại sau chín PR (#407–#415), trong ba đơn vị không trộn lẫn
+mối bận tâm.
+
+**Kiến trúc:** **PR A là accessibility** — những thứ người dùng bàn phím không thấy hoặc không với
+tới. **PR B là hai lỗi chart.** **PR C là ba tính năng Metabase có mà egret không có.** Chúng độc lập;
+làm A trước, vì đó là cái duy nhất có lỗi mà người dùng gặp ở **mọi** menu.
+
+---
+
+## Về nguồn gốc danh sách này, và những gì đã bị loại
+
+Ba lượt soát và chín PR để lại một danh sách tồn đọng. **Trước khi viết kế hoạch này, từng mục đã được
+kiểm lại với mã nguồn, và năm mục KHÔNG sống sót:**
+
+- **Bubble size của scatter** — đã có đủ. `bubbleMetric` nằm trong codec, builder đọc ở
+  `cartesian.ts:784`, tooltip dùng ở `:850`, và có test.
+- **Show total của pie** — đã có đủ. `pie.ts:857` đọc `cfg.showTotal ?? true`, có gate theo lỗ donut,
+  control ở `PieDisplaySection.tsx:153-160`.
+- **`resizable.tsx` "đặt màu vòng mà không có độ dày"** — sai. `focus-visible:ring-1` nằm ngay dòng
+  dưới dòng đặt màu.
+- **Khối trục giá trị Y của scatter** — không phải sơ suất. `CartesianDisplaySection.tsx:265-266` nói
+  rõ scatter metric-vs-metric đi qua `scatterXY`, nơi **dựng hai trục giá trị riêng và không bao giờ
+  đọc các key đó**. Một chỗ rẽ có lập luận, không phải khoảng trống.
+- **`ring-offset-2` thiếu `ring-offset-background`** — có thật nhưng chỉ **một** chỗ, không phải một
+  mẫu hình: `routes/control-plane/access/AccessOverview.tsx:376`. Gộp vào PR A thành một dòng.
+
+**Hai trong số đó đến từ một lượt soát panel lái thật, một từ mục "found, not fixed" của chính một
+PR.** Cả hai đều là nguồn thường đáng tin. Bài học nằm ở phần tự soát cuối; hãy coi mọi mục dưới đây là
+**đã kiểm lại**, vì đúng là đã kiểm.
+
+---
+
+# PR A — thứ người dùng bàn phím không thấy hoặc không với tới
+
+## Task A1 — mục menu đang focus thì vô hình
+
+**ĐO ĐƯỢC.** Một mục đang focus trong dropdown, select, context menu hay command palette **không có
+vòng focus nào cả** — nó mang `outline-none` và chỉ báo hiệu focus bằng cách đổi nền sang `--accent`.
+`--accent` sáng là `oklch(0.97 0 0)` trên một `--popover` gần như trắng: **1.03:1**.
+
+Các chỗ (kiểm lại danh sách, có thể đã dài thêm): `components/ui/dropdown-menu.tsx:28, 84, 100, 124`;
+`components/ui/select.tsx:108`; kiểm thêm `command.tsx`, `context-menu.tsx`, `menubar.tsx`,
+`navigation-menu.tsx` xem có cùng hình dạng không.
+
+**Đây KHÔNG phải lỗi mà #415 đã sửa.** #415 nâng `--ring` để các *vòng* focus đạt 3:1. Những phần tử
+này **không có vòng nào để nâng** — chúng đã tự loại mình ra bằng `outline-none`. Nên bản sửa là một
+quyết định khác, và là quyết định thật:
+
+- khôi phục một chỉ báo focus nhìn thấy được (một vòng, hoặc một vạch bên trái) trên mục đang focus;
+- làm tối `--accent` để chính cú đổi nền mang được 3:1;
+- hoặc cả hai.
+
+**Làm tối `--accent` có bán kính ảnh hưởng rộng hơn hẳn** — nó là nền hover/active khắp sản phẩm chứ
+không riêng menu, nên đổi nó là đổi trạng thái hover ở mọi nơi. **Kiểm xem còn gì đọc nó trước khi
+chọn.** Menu của Metabase đáng xem để lấy *hình dạng*, không phải lấy *giá trị*.
+
+Test: #415 đã thêm `frontend/src/__tests__/focusIndicatorContrast.test.ts` tính tương phản từ
+`index.css` một cách tất định — **mở rộng nó** chứ đừng viết bộ đo thứ hai. Ghim **cả hai theme** và
+ghim **3:1**, kèm comment nói vì sao là 3 chứ không phải 4.5.
+
+Rồi **NHÌN nó**. Một con số tương phản không phải một lượt review thiết kế — chương trình này có sẵn ca
+một caption đạt mọi phép kiểm bằng số trong khi nằm cách thứ nó chú thích 300px.
+
+## Task A2 — chỗ thiếu ring offset duy nhất
+
+`AccessOverview.tsx:376` dùng `focus-visible:ring-offset-2` mà không có `ring-offset-background`, nên
+`ring-offset-color` mặc định về trắng — một dải trắng 2px bên trong vòng khi ở theme tối. Sửa một dòng.
+
+## Task A3 — drill theo ô không có đường bàn phím
+
+`ChartTable`, `pivot/PivotTable` và object detail **đều** mở drill bằng `onClick` chuột, không có
+tương đương bàn phím. #412 đã cho *header* phần sắp xếp và kéo giãn bằng bàn phím; các **ô** thì bị bỏ
+lại.
+
+**Đây là MỘT quyết định, không phải ba bản vá** — cùng một câu hỏi ở ba chỗ, và nhánh object của #413
+đã ghi lại vì sao nó không tầm thường: một ô object-detail có thể chứa `<pre>`, `<img>` hoặc một nút
+lồng, nên biến chính cái ô thành nút không đương nhiên là đúng.
+
+**Chốt mẫu hình một lần.** Roving-tabindex trên một lưới (`role="grid"`) là câu trả lời thường dùng
+cho bảng có ô thao tác được, và nó tránh nhét hàng trăm phần tử vào thứ tự tab. Nói rõ chọn gì, vì sao,
+và cái giá ở từng chỗ trong ba chỗ.
+
+**Nếu kết luận trung thực là việc này cần một lượt thiết kế riêng thì nói vậy và dừng sau A1, A2.** Đó
+là kết cục chấp nhận được — một bản sửa accessibility làm việc điều hướng tệ đi thì không phải tiến bộ.
+Đừng ship nửa mẫu hình trên ba component.
+
+---
+
+## CẬP NHẬT — PR A đã tìm thấy gì khi kiểm lại chính mục này
+
+Viết sau khi làm xong, đúng tinh thần của phần "những gì đã bị loại" ở trên: **ba khẳng định trong
+chính các task của PR A không sống sót khi chạm vào mã nguồn**, và một giả định đưa ra *trong lúc
+triển khai* không sống sót khi chạm vào trình duyệt. Văn bản gốc được giữ nguyên để còn đọc được
+khoảng cách giữa điều đã tin và điều đúng.
+
+**Danh sách chỗ của A1 sai theo cả hai chiều.** Bốn tệp bị nghi — `command.tsx`, `context-menu.tsx`,
+`menubar.tsx`, `navigation-menu.tsx` — **không tồn tại trong repo này**. Nhưng command palette nhắc
+trong phần mô tả thì có thật: đó là `components/notebook/CommandPalette.tsx`, viết tay trên primitive
+Dialog, không dùng cmdk, và mang đúng lỗi 1.03:1 ở hàng đang được chọn. Vậy danh sách vừa thừa bốn tệp
+vừa thiếu một tệp. PR A sửa bốn mục trong `dropdown-menu.tsx`, mục của `select.tsx`, và hàng của
+palette, đồng thời thay danh sách tệp bằng một **lượt quét cả thư mục `components/ui`** để lần sau có
+ai dán thêm một menu shadcn thì bị bắt mà không cần kiểm tay.
+
+Palette không chỉ là bản sao thứ tư — nó cần cơ chế khác. Focus DOM không bao giờ rời ô tìm kiếm; hàng
+sáng là focus **ảo** do chỉ số `selected` điều khiển, nên không pseudo-class focus nào khớp được và chỉ
+báo phải đi cùng chính điều kiện đang vẽ nền.
+
+**A2 là bốn chỗ, không phải một.** Kế hoạch đã rút gọn thành "có thật nhưng chỉ một chỗ, không phải một
+mẫu hình". Lượt quét PR A thêm vào tìm thấy `ring-offset-<n>` không kèm `ring-offset-<màu>` ở **bốn**
+chỗ: `AccessOverview.tsx:376` (chỗ đã nêu), `ui/resizable.tsx:42`, và `RuleEditor.tsx` hai lần. Hai chỗ
+cuối không phải vòng focus mà là trạng thái **đã chọn** của ô màu, nơi một sợi trắng vẽ quanh một MÀU
+sẽ bị đọc thành một phần của chính màu đó. Cả bốn đã sửa và bất biến này giờ được quét toàn repo.
+
+Đáng ghi lại nguồn gốc của sai sót: `resizable.tsx` có mặt trong danh sách bị loại ở trên dưới một
+khẳng định **khác** ("đặt màu vòng mà không có độ dày"), và khẳng định đó đúng là sai. Sau khi bác bỏ
+đúng một khẳng định về tệp này, khẳng định thứ hai nằm ngay trên cùng dòng đã không được nhìn tới.
+
+**Quyết định của A1: thêm chỉ báo, không đụng `--accent`.** Đã đo trước khi chọn. `--accent` được 63
+tệp đọc với khoảng 110 lần dùng; **55 trong số đó là `hover:bg-accent`** và 16 lần nữa là
+`hover:bg-accent/40|/50|/60`, so với chỉ 5 lần `focus:bg-accent`. Nó là nền hover ở trạng thái nghỉ của
+cả sản phẩm. Để chính cú đổi nền đạt 3:1 so với `--popover`, `--accent` sáng phải tụt từ L 0,97 xuống
+**0,654** và bản tối phải lên từ 0,27 tới **0,504** — một mảng xám trung tính dưới mọi cú hover chuột
+trong sản phẩm, và khi đó `--accent-foreground` sẽ trượt ngưỡng **4,5:1** dành cho chữ, ngưỡng mà nó
+thật sự phải đạt. Stylesheet đã build của Metabase được đọc để lấy hình dạng và cho kết quả trùng: các
+control của nó dùng `:focus-visible { outline: 2px solid var(--mb-color-focus) }` — một token focus
+riêng, kèm `outline-offset: -2px` hoặc `box-shadow: inset 0 0 0 2px` ở nơi phần tử không được vẽ ra
+ngoài chính nó. Luật được chép; giá trị thì không — egret dùng `--ring` của mình.
+
+**A3 dừng, theo đúng điều kiện dừng của nó.** Mẫu hình không ra được thành một quyết định, và các rào
+cản mang tính cấu trúc chứ không phải chuyện công sức:
+
+- **ObjectDetail không phải lưới.** Nó là một `<dl>` gồm các hàng trường/giá trị, nên roving-tabindex
+  kiểu `role="grid"` không phải mẫu hình của nó — nó cần mẫu list/listbox. "Chốt mẫu hình một lần" ra
+  ít nhất hai mẫu hình chứ không phải một.
+- **Phím mũi tên của ChartTable đã có chủ.** `useSensor(KeyboardSensor, { coordinateGetter:
+  sortableKeyboardCoordinates })` gán phím mũi tên cho việc di chuyển cột đang nhấc, và dnd-kit đặt
+  `tabIndex=0` lên từng `<th>`. Roving tabindex `role="grid"` cần phím mũi tên để di chuyển ô và cần cả
+  bảng chỉ là MỘT điểm dừng tab — tức là phải tháo các điểm dừng ở header mà #412 đã cố ý tạo ra
+  (`SortButton`, `ResizeHandle`, activator kéo thả). Đó là làm lại mô hình của #412 bên trong một mô
+  hình mới, không phải mở rộng nó.
+- **Header của PivotTable không phải hình chữ nhật.** Header nhiều tầng với `colSpan`/`rowSpan`, nút
+  gập và vòng đổi sắp xếp; toạ độ roving-tabindex không xác định được nếu không có một mô hình lưới
+  thật.
+- **Callback drill nhận toạ độ viewport.** `onCellDrill(ctx, x, y)` dùng vị trí chuột để đặt popup.
+  Kích hoạt bằng bàn phím không có toạ độ đó, nên cả ba nơi gọi đều cần một điểm neo suy từ rect, cộng
+  thêm việc trả focus khi đóng — cả ba đều chưa viết.
+- **Một ô có thể chứa nội dung tương tác của riêng nó** (`<pre>`, `<img>`, nút "Show more"), cần tới
+  chế độ con vào-ô/thoát-ô của mẫu hình lưới, phần dễ sai nhất của nó.
+
+Vậy A3 cần lượt thiết kế riêng và PR riêng. `ObjectDetail.tsx:123-133` đã có sẵn ghi chú nói đúng điều
+đó; không có gì trong PR A mâu thuẫn với nó.
+
+**Một giả định lúc triển khai bị trình duyệt bác bỏ.** Vòng focus được treo vào `focus-visible:` với kỳ
+vọng giữ nó khỏi đường đi của chuột, vì Radix chuyển focus DOM khi con trỏ di qua. Đo trong Chrome trên
+bundle đã build: một cú mousemove thật lên mục menu vẫn khiến nó khớp `:focus-visible` và vòng vẫn vẽ.
+Phép đối chứng cho thấy bộ phân biệt vẫn chạy — một link điều hướng được focus bằng cú **click** chuột
+thật thì khớp `:focus` chứ không khớp `:focus-visible` — nó chỉ đơn giản là không nhìn xuyên được lời
+gọi `focus()` từ script của Radix. Hành vi này được chấp nhận (trong menu Radix, mục đang sáng chính là
+mục Enter sẽ chạy, bất kể thiết bị nào đưa nó tới đó) và khẳng định sai được **sửa lại** trong comment
+của `dropdown-menu.tsx` chứ không để nguyên.
+
+---
+
+# PR B — hai lỗi chart
+
+**B1 — số của trend tràn card hẹp.** ĐO ĐƯỢC ở #413: 203,75px số trong card 166px. Có sẵn từ trước —
+#413 đã ghim rằng vỏ nút mới của nó đóng góp 0px.
+**Tìm xem scalar làm gì**, vì `BigNumber` đã giải đúng bài toán này bằng `measureText` trên canvas +
+`findSize`, nén theo chiều rộng và tooltip giá trị đầy đủ. **Dùng lại nếu vừa.** Nếu bố cục của trend
+khiến không dùng được thì nói chính xác vì sao.
+jsdom không chạy layout và `measureText` trả về 0, nên một bộ tự-chỉnh-cỡ sẽ "đạt" ở bất kỳ cỡ nào
+vòng lặp chạm đáy. Test viết ra phải nói rõ nó chứng minh và không chứng minh được gì; phép kiểm thật
+là ảnh chụp ở đúng bề rộng 166px của card harness.
+
+**B2 — tiêu đề trục trái của combo đọc tên series đã ẩn.** Tìm được ở #412, **SUY LUẬN — phải tái hiện
+trước khi sửa**. Cùng họ "cũ đi sau khi click legend" với hai lỗi aria #412 đã đóng bằng cách đăng ký
+`legendselectchanged` trong `EChartsRenderer`.
+**Nếu không tái hiện được thì nói vậy và dừng.** Nếu tái hiện được, kiểm xem đăng ký #412 đã thêm có
+gánh luôn được không, thay vì thêm cơ chế thứ hai.
+
+---
+
+# PR C — ba tính năng Metabase có mà egret không có
+
+Cả ba đã kiểm bằng grep là **thật sự vắng**. Đây là **khoảng cách, không phải lỗi** — không có gì
+hỏng, egret chỉ đơn giản là ít hơn.
+
+**C1 — "Unpin from zero".** `graph.y_axis.unpin_from_zero` có trên line, scatter và box plot của
+Metabase. egret không có gì tương đương.
+Đọc bản cài của Metabase trước khi thiết kế. **Chép LUẬT, không chép giá trị** — bài học lặp nhiều
+nhất của chương trình này, đã dính sáu chart. Xác định nó thật sự làm gì với biên độ trục, và ECharts
+diễn đạt nó bằng `min: "dataMin"` hay bằng gì khác.
+Key lưu trữ mới ⇒ phải có mục trong `KEYS` của `viz/cartesian-codec.ts` (`satisfies keyof CartesianConfig`)
+nếu không nó sẽ không được lưu. Backend không cần gì: `chartparams.rs` chỉ kiểm hình dạng.
+
+**C2 — chế độ nhãn "Compact" trên trục x.** Select "Show lines and tick marks" của Metabase có 5 lựa
+chọn; của egret có 4 — **thiếu Compact**.
+**Một quyết định đã ghi, đọc trước khi bắt đầu:** một đơn vị trước **cố ý không** chép "Compact" sang
+**waterfall**, với lý do nó rút gọn nhãn THỜI GIAN còn trục x của waterfall là danh mục. **Lý do đó
+không tổng quát hoá được** — với một chart cartesian có trục x thời gian thì nó đúng y. Xác định chart
+nào nên có và ghi lại lý do.
+
+**C3 — "Comparisons" của trend.** Tab Data của trend Metabase có danh sách Comparisons; trend của egret
+không có control so sánh nào.
+**Đây là cái lớn nhất trong ba và có thể xứng đáng một PR riêng.** Xác định kích cỡ trước — một phép so
+sánh là một **hình dạng truy vấn thứ hai**, không chỉ là một setting. Nếu hoá ra cần việc phía backend
+thì dừng và báo chứ đừng phình phạm vi; `chartparams.rs` dễ dãi nhưng *truy vấn* thì có thể không.
+
+---
+
+## Cố ý nằm ngoài phạm vi
+
+Hai thế hệ shadcn (vòng đặc `ring-2 ring-ring ring-offset-2` so với hai phần `border-ring` +
+`ring-ring/50` + `ring-[3px]`) đáng được hợp nhất, và đó là việc riêng với lượt review riêng.
+
+Phần dọn dẹp người dùng chưa quyết: container `egret-pg-test`, và các ảnh `.png` vương trong thư mục
+cha của repo.
+
+## Tự soát
+
+- **Năm mục bị loại khỏi danh sách này nhờ đọc lại mã**, hai trong số đó từ một lượt soát panel lái
+  thật và một từ mục "found, not fixed" của chính một PR. **Một phát hiện chuyển tiếp mà không kiểm
+  lại chỉ là tin đồn**, dù nguồn có cẩn thận đến đâu. Mọi mục ở trên đã được kiểm lại; hãy làm y vậy
+  với bất cứ thứ gì kế hoạch này giao cho bạn.
+- **Task A3 có điều kiện dừng tường minh**, vì một mẫu hình bàn phím làm nửa vời trên ba component thì
+  tệ hơn không làm.
+- **Task C3 cũng có một điều kiện dừng**, vì kích cỡ.
+- **Chỗ yếu đã biết:** lựa chọn ở Task A1 giữa "thêm một vòng" và "làm tối `--accent`" là một quyết
+  định thiết kế thật mà tôi **không** quyết thay bạn, và bán kính ảnh hưởng của hai phương án lệch nhau
+  cả một bậc độ lớn. Xác định còn gì đọc `--accent` trước khi đụng vào nó.

@@ -373,7 +373,14 @@ function KpiTile({
   return (
     <Link
       to={to}
-      className="block rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+      // `ring-offset-background` is not decoration. `ring-offset-2` widens the gap
+      // between the card and its focus ring and fills that gap with
+      // `--tw-ring-offset-color`, which defaults to `#fff` — so without a colour
+      // this painted a 2px WHITE band inside the ring, on a dark page, brighter
+      // than either of its neighbours and reading as a rendering fault rather than
+      // as focus. Three other sites had the same omission and are fixed with it;
+      // `focusIndicatorContrast.test.ts` now sweeps the whole tree for it.
+      className="block rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
     >
       {card}
     </Link>
