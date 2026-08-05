@@ -404,8 +404,36 @@ không rỗng liền trước, tức `previousValue` của Metabase — rồi ch
 `previousPeriod`. Đó là hai phép so sánh khác nhau ở thượng nguồn; một khoảng trống trong chuỗi làm
 chú thích nói sai.
 
-**Tìm thấy, chưa sửa (2).** Chỗ lệch đã ghi ở `CartesianDisplaySection.tsx:265-266` nay có một ngoại
-lệ: `scatterXY` tôn trọng mặc định unpin nhưng không có hàng panel nào để ghi đè.
+**Tìm thấy và ĐÃ SỬA, sau khi ban đầu bị xếp nhầm mục — và chỗ xếp nhầm mới là phần đáng ghi.** Bản
+nháp đầu của PR này cho scatter mặc định-bỏ-ghim của Metabase ở BUILDER nhưng giữ control khỏi PANEL,
+rồi ghi chuyện đó thành một ghi chú cho ai làm C3. Đó không phải ghi chú C3. Đó là **một thay đổi hành
+vi do chính PR này gây ra mà không có control nào để đảo ngược**: mọi scatter đã lưu chuyển từ ghim
+(`scatterXY` không ghi `scale`, nên mặc định `false` của ECharts áp dụng) sang bỏ ghim, và không người
+dùng nào ghim lại được. Đó là "đã cài đặt nhưng không với tới được" — đúng họ lỗi mà #414 tồn tại để
+xử lý — và nó suýt được giao đi vì đã bị VIẾT RA như một giới hạn thay vì được nhận ra như một lỗi.
+
+**Chuyện nó xảy ra thế nào còn đáng giá hơn nó là gì.** Cổng của panel viết `kind !== "scatter"`, và
+lý do viện dẫn chỗ lệch đã ghi ở `CartesianDisplaySection.tsx:265-266`: scatter metric-vs-metric đi ra
+qua `scatterXY`, vốn không đọc khoá trục-giá-trị nào của panel này. Điều đó ĐÚNG, và chính PR này làm
+nó sai — `scatterXY` nay có đọc `unpinFromZero`. Ngoại lệ được khắc vào builder còn panel thì vẫn tiếp
+tục viện dẫn cái luật mà ngoại lệ vừa phá vỡ. **Một ghi chú về chỗ lệch là một sự thật CÓ NGÀY THÁNG,
+không phải một bất biến**, và đây là lần thứ hai trong PR này một lý do đã ghi bị áp quá điểm nó còn
+đúng (lần đầu là việc loại Compact khỏi waterfall).
+
+Bản sửa gồm cái cổng cộng hai điều mà chỉ sửa cổng thôi sẽ làm sai:
+
+- công tắc đọc giá trị **đã phân giải** (`unpinFromZeroOn`) chứ không đọc khoá đã lưu — nếu không, một
+  scatter chưa lưu gì sẽ vẽ công tắc TẮT bên dưới một chart rõ ràng đang bỏ ghim, tức một control nói
+  dối chứ không phải lỗi thẩm mỹ;
+- bản vá **có ý thức về mặc định** — "tắt" trên scatter phải lưu `false` tường minh, vì `undefined`
+  nghĩa là "lấy mặc định" mà mặc định ở đó là BẬT, nên công tắc sẽ bật lại và không lưu được.
+
+Chỗ lệch đã ghi vẫn đúng với `yMin`, `yMax`, `yTickCount` và `yAxisTicks`. Ba đột biến phủ bản sửa,
+gồm cả việc tái tạo đúng lỗi đó.
+
+**Một quan sát trực tiếp KHÔNG phải lỗi, đã kiểm chứ không phỏng đoán.** Trên "MB · Scatter" đã triển
+khai, công tắc lật nhưng trục không đổi: cột rating chạy **0 đến 5 với 24 dòng đúng bằng 0**, nên biên
+độ vốn đã chạm gốc và `scale` không có gì để nâng.
 
 ---
 

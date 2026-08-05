@@ -827,14 +827,51 @@ describe("CartesianDisplaySection — Unpin from zero appears where Metabase off
     expect(unpin()).toBeNull();
   });
 
-  it("is not offered on a scatter, whose axes this panel does not own", () => {
-    // Not because a scatter cannot unpin — it is the one display Metabase unpins BY DEFAULT, and
-    // `scatterXY` honours that. There is simply no Y value-axis block here to hang the switch on.
+  /**
+   * THE SCATTER IS OFFERED IT, AND THESE REPLACE A TEST ASSERTING THE OPPOSITE.
+   *
+   * The first draft excluded the scatter, reasoning that `scatterXY` reads none of this panel's Y
+   * value-axis keys. That was true until this PR made `scatterXY` read `unpinFromZero` — a scatter
+   * is the one display Metabase unpins by default, so the builder had to honour it. The exception
+   * went into the BUILDER and not the PANEL, which left every saved scatter silently unpinned with
+   * no control to pin it back: a behaviour change a user cannot undo, which is the "implemented and
+   * unreachable" family rather than a missing nicety.
+   *
+   * The three below are one story — it is SHOWN, it shows the RESOLVED state rather than the stored
+   * one, and turning it off PERSISTS — and each can break without the other two noticing.
+   */
+  it("is offered on a scatter, and checked by default as Metabase's is", () => {
     render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xMetric: "price" }} onChange={() => {}} />);
-    expect(unpin()).toBeNull();
+    expect(unpin()).toBeInTheDocument();
+    // The RESOLVED value. Reading the stored key would draw this OFF under a chart that is visibly
+    // unpinned — a control that lies, not a cosmetic slip.
+    expect(unpin()).toBeChecked();
   });
 
-  it("stores true and clears the key rather than storing false", async () => {
+  it("draws a non-scatter unchecked by default, so `checked` cannot be hard-coded", () => {
+    render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    expect(unpin()).not.toBeChecked();
+  });
+
+  it("persists a scatter turned OFF as an explicit false, because its default is on", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const cfg = { yMetrics: ["rev"], xMetric: "price" };
+    const { rerender } = render(<CartesianDisplaySection kind="scatter" config={cfg} onChange={onChange} />);
+    await user.click(screen.getByLabelText("Unpin from zero"));
+    // NOT `undefined`: on a scatter that means "take the default", which is ON — so the switch would
+    // spring straight back and the pin would be unsavable. That is the same failure `ValueRangeRows`
+    // records for its own derived switch, reached from the other side.
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ unpinFromZero: false });
+    // …and turning it back on CLEARS the key rather than storing `true`, since true is the default
+    // here. Round-tripping to the same absence a fresh scatter has is the point.
+    rerender(<CartesianDisplaySection kind="scatter" config={{ ...cfg, unpinFromZero: false }} onChange={onChange} />);
+    expect(unpin()).not.toBeChecked();
+    await user.click(screen.getByLabelText("Unpin from zero"));
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ unpinFromZero: undefined });
+  });
+
+  it("stores true and clears the key rather than storing false, where the default is off", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
     const { rerender } = render(<CartesianDisplaySection kind="line" config={{ yMetrics: ["rev"] }} onChange={onChange} />);

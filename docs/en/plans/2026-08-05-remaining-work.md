@@ -486,12 +486,43 @@ and Metabase separates them precisely because a gap in the series makes the row-
 which period it compared. On a series with no gaps the two agree, which is why this has never been
 seen. It belongs with C3 and is named here so it is on the record.
 
-**Found, not fixed (2).** `CartesianDisplaySection.tsx:265-266`'s stated divergence — the
-metric-vs-metric scatter leaves through `scatterXY` and reads none of the Y value-axis keys — now
-has one exception carved into it, because a scatter is the ONE display Metabase unpins by default and
-skipping that path would have meant the flag never reached it. `scatterXY` therefore honours the
-default but has no panel row to override it from, since there is no scatter Y-axis block to hang one
-on. Giving the scatter its own block is the same deferred work that comment already names.
+**Found and FIXED, after first being filed under the wrong heading — and the misfiling is the part
+worth recording.** The first draft of this PR gave the scatter Metabase's unpinned-by-default in the
+BUILDER and withheld the control from the PANEL, then wrote that up as a note for whoever picks up
+C3. It is not a C3 note. It was **a behaviour change this PR introduced with no control to reverse
+it**: every saved metric-vs-metric scatter went from pinned (`scatterXY` wrote no `scale`, so
+ECharts' default of `false` applied) to unpinned, and no user could pin it back. That is
+"implemented and unreachable" — the family #414 exists for — and it was one sentence away from
+shipping because it had been written down as a limitation instead of recognised as a defect.
+
+**How it happened is worth more than what it was.** The panel gate read `kind !== "scatter"`, and the
+justification quoted `CartesianDisplaySection.tsx:265-266`'s standing divergence: the
+metric-vs-metric scatter leaves through `scatterXY`, which reads none of this panel's Y value-axis
+keys. That was TRUE, and this PR is what made it false — `scatterXY` now reads `unpinFromZero`. The
+exception was carved into the builder and the panel went on quoting the rule the exception had just
+broken. **A divergence note is a fact with a date on it, not an invariant**, and this is the second
+time in this PR that a recorded reason was applied past the point where it stopped holding (the
+waterfall's Compact exclusion was the first).
+
+The fix is the gate plus two things the gate alone would have got wrong:
+
+- the switch reads the **resolved** value (`unpinFromZeroOn`), not the stored key — otherwise a
+  scatter with nothing stored draws the switch OFF beneath a chart that is visibly unpinned, which is
+  a control that lies rather than a cosmetic slip;
+- the patch is **default-aware** — "off" on a scatter must persist an explicit `false`, because
+  `undefined` means "take the default" and the default there is ON, so the switch would spring back
+  and the pin would be unsavable. Every other key in this panel keeps the same "store only what
+  differs from the default" rule; this is that rule with a default that is not always `false`.
+
+The divergence note still holds for `yMin`, `yMax`, `yTickCount` and `yAxisTicks`, which `scatterXY`
+genuinely does ignore. Three mutations cover the fix, including re-introducing the exact defect.
+
+**One live observation that is NOT a defect, checked rather than assumed.** On the deployed
+"MB · Scatter" the toggle flips but the axis does not move: the rating column runs **0 to 5 with 24
+rows at exactly 0**, so the extent already reaches the origin and `scale` has nothing to lift. The
+same shape as the box plot's non-movement, reached for a different reason — there ECharts'
+nice-rounding lands on 0, here the data does. Both were confirmed against the number rather than
+explained away.
 
 ---
 

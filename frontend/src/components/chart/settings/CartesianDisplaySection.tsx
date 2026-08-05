@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { DecimalInput } from "./DecimalInput";
 import {
   echartsTypeOf, resolveXScale, seriesDisplayFor, stackModeOf, stackModePatch,
-  unpinFromZeroApplies, xScaleFitsColumn, type StackMode,
+  unpinFromZeroApplies, unpinFromZeroOn, xScaleFitsColumn, type StackMode,
 } from "@/components/chart/echarts/options/cartesian";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
@@ -572,22 +572,43 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
         Bar, turning auto range off, or picking Stack. A hand-written copy of that rule in a panel is
         exactly how a control comes to be offered on a chart whose builder ignores it.
 
-        SCATTER IS THE ONE KIND EXCLUDED HERE AND NOT UPSTREAM, and it is excluded for egret's own
-        reason rather than Metabase's: the metric-vs-metric scatter leaves through `scatterXY`,
-        which is already documented two blocks up as never reading this panel's Y value-axis keys.
-        It is not that a scatter cannot unpin — it is the ONE display Metabase unpins by default,
-        and `scatterXY` honours that default. It is that egret has no scatter Y-axis block to hang
-        the switch on, so the default is all a scatter gets. Named here so it is a decision on the
-        record rather than a gap; giving the scatter its own block is the same work
-        `CartesianDisplaySection.tsx:265-266` already defers.
+        A SCATTER GETS THIS ROW, and the first draft of this PR excluded it — wrongly, in the way
+        this programme keeps having to fix. The reasoning was that the metric-vs-metric scatter
+        leaves through `scatterXY`, which the block two screens up documents as never reading this
+        panel's Y value-axis keys. That was true when it was written and this PR made it false:
+        `scatterXY` now reads `unpinFromZero`, because a scatter is the ONE display Metabase unpins
+        by default and skipping that path would have meant the flag never reached it.
+
+        So the exception was carved into the BUILDER and not into the PANEL, and the result was a
+        behaviour change with no control to reverse it: every saved scatter silently became
+        unpinned and no user could pin it back. That is "implemented and unreachable" — the exact
+        family #414 was about. The divergence note still holds for `yMin`, `yMax`, `yTickCount` and
+        `yAxisTicks`, which `scatterXY` really does ignore; it no longer holds for this one key, and
+        the gate now says so rather than inheriting a rule that has stopped being true.
+
+        Metabase agrees on both halves, measured on the live parity instance: its scatter shows this
+        control AND has it already checked.
 
         HIDDEN RATHER THAN GREYED, unlike the rotations above — see the twin row in
         `ChartAxesSection` for the argument, which is Metabase's `getHidden` plus the fact that a
         stored flag the builder is ignoring has nothing worth showing.
       */}
-      {scoped(scope, "value") && kind !== "scatter" && unpinFromZeroApplies({ ...config, kind }) && (
-        <Toggle id="cz-unpin" label="Unpin from zero" checked={config.unpinFromZero === true}
-          onChange={(v) => onChange({ unpinFromZero: v || undefined })} />
+      {scoped(scope, "value") && unpinFromZeroApplies({ ...config, kind }) && (
+        // THE RESOLVED VALUE, NOT THE STORED ONE. `unpinFromZero` is unset on every chart nobody has
+        // touched, and its default is not the same everywhere — `false` in general and TRUE on a
+        // scatter. Reading `config.unpinFromZero === true` would therefore have drawn the switch OFF
+        // underneath a scatter that is visibly unpinned, which is the "control that lies" defect
+        // rather than a cosmetic slip. Same function the builder resolves through, asked rather than
+        // restated.
+        //
+        // …and the patch is DEFAULT-AWARE for the same reason: storing "off" as `undefined` on a
+        // scatter would mean "take the default", which is on, so the switch would spring back. The
+        // rule is the one every other key in this panel keeps — persist only what differs from the
+        // default, clear the key when it matches — generalised to a default that is not always
+        // false. A scatter turned off therefore stores an explicit `false`, which `cartesianCodec`
+        // keeps (it drops only `undefined`).
+        <Toggle id="cz-unpin" label="Unpin from zero" checked={unpinFromZeroOn({ ...config, kind })}
+          onChange={(v) => onChange({ unpinFromZero: v === (kind === "scatter") ? undefined : v })} />
       )}
     </div>
   );
