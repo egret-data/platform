@@ -67,10 +67,19 @@ const PROBE_PARAMS = {
 };
 const PROBES: unknown[] = ["Widget", LONG_LABEL, 1234.5, PROBE_PARAMS, [PROBE_PARAMS]];
 
+/**
+ * SERIALISED, NOT `String()`-ed. Most option closures return a string and the two are the same for
+ * those; the ones that do NOT are exactly the ones a bare `String()` renders useless, because every
+ * object it is handed becomes the constant `"[object Object]"`. That was not hypothetical when this
+ * was written: `__ariaFor` (#412) and `__axisNamesFor` return objects, so both were being
+ * "probed" into the same six characters whatever they computed, and the equality below could not
+ * have seen a size leak in either. A serialised return is comparable, so it can.
+ */
 function probe(fn: (arg: never) => unknown): string[] {
   return PROBES.map((arg) => {
     try {
-      return `= ${String(fn(arg as never))}`;
+      const out = fn(arg as never);
+      return `= ${typeof out === "object" && out !== null ? JSON.stringify(out) : String(out)}`;
     } catch (e) {
       return `! ${e instanceof Error ? e.message : String(e)}`;
     }
@@ -142,12 +151,13 @@ describe("builders accept a container size", () => {
     const sized = fingerprint(buildCartesianOption(cols, rows, cfg, SMALL)) as Record<string, never>;
     const unsized = fingerprint(buildCartesianOption(cols, rows, cfg)) as Record<string, never>;
     // tooltip, category-axis label, value-axis label — pinned exactly, for the reason
-    // `expectSizeIsUnread` gives — plus `__ariaFor`, which is FOUR only because the fourth is not a
-    // formatter at all: it re-derives the screen-reader description for a given legend selection
-    // (`options/cartesian.ts`), and `EChartsRenderer` calls it from `legendselectchanged`. It is
-    // fingerprinted like any other closure, and it must not read the size either — which the
-    // equality below still checks, since it is probed in both builds.
-    expect(functionsIn(sized)).toBe(4);
+    // `expectSizeIsUnread` gives — plus TWO that are not formatters at all. Both re-derive
+    // something the builder computed from the SERIES LIST, for a given legend selection, and
+    // `EChartsRenderer` calls both from `legendselectchanged`: `__ariaFor` (#412) the screen-reader
+    // description, and `__axisNamesFor` the value axis's title. Neither may read the size either,
+    // which the equality below now genuinely checks — see `probe`, which had to start serialising
+    // object returns before it could tell one of these apart from another.
+    expect(functionsIn(sized)).toBe(5);
 
     const axisLabelOf = (fp: Record<string, never>) =>
       (fp as unknown as { xAxis: { axisLabel: Record<string, unknown> } }).xAxis.axisLabel;
