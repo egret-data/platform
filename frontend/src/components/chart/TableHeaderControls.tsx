@@ -19,6 +19,32 @@ import type { DOMAttributes } from "react";
  * without being told.
  */
 
+/**
+ * THE FOCUS INDICATOR FOR THE CONTROLS ON THIS PAGE, and it deliberately does not use `--ring`.
+ *
+ * WCAG 1.4.11 / 2.4.11 ask 3:1 of a non-text focus indicator against what is around it — NOT the
+ * 4.5:1 text bar, and saying which bar is being met matters more than the number. Converting the
+ * tokens from OKLCH to sRGB numerically and compositing the alpha (Ottosson's oklab→linear-sRGB,
+ * not a regex reading `oklch()`'s three numbers as RGB) gives, against `--background`:
+ *
+ *   light `--ring` solid   2.58:1  FAIL      dark `--ring` solid   4.08:1  pass
+ *   light `ring-ring/50`   1.54:1  FAIL      dark `ring-ring/50`   1.83:1  FAIL
+ *
+ * — and the global `* { outline-ring/50 }` fallback in `index.css` is that same failing pair, so a
+ * control with no focus style of its own gets a 1.54:1 indicator in light mode. That is a product
+ * problem, not a chart one: `--ring` reaches 34 call sites across 26 files, nearly all of them
+ * shadcn primitives, plus every focusable element in the notebook, SQL Lab and the control plane.
+ * Changing the token belongs in its own PR (see `docs/en/plans/2026-08-05-chart-assistive-tech.md`,
+ * task 7), so these two controls — which this commit is introducing — carry a passing indicator of
+ * their own instead of shipping new keyboard-only affordances that a keyboard user cannot see.
+ *
+ * `--primary` measures 3.29:1 on `--accent` (the header cell's own background) and 3.58:1 on
+ * `--background` in light, 5.26 / 6.93 in dark. `outline`, not `ring`, so it is not clipped by the
+ * `overflow: auto` scroller both tables sit in.
+ */
+const FOCUS_RING =
+  "focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-primary";
+
 /** Below this a column is unreadable; both tables clamp to it, dragging and from the keyboard. */
 export const MIN_COL_WIDTH = 60;
 /** One arrow-key press. Chart 03 established that a mouse-only column interaction is a defect. */
@@ -50,7 +76,8 @@ export function ResizeHandle({ label, onResize, getWidth, dragHandlers }: {
       aria-orientation="vertical"
       aria-label={label}
       tabIndex={0}
-      className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize touch-none select-none hover:bg-primary/40 focus-visible:bg-primary/60 focus-visible:outline-none"
+      // `focus-visible:bg-primary` SOLID, where the pivot's original said `/60`. See `FOCUS_RING`.
+      className={`absolute right-0 top-0 h-full w-1.5 cursor-col-resize touch-none select-none hover:bg-primary/40 focus-visible:bg-primary ${FOCUS_RING}`}
       {...dragHandlers}
       onKeyDown={(e) => {
         if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
@@ -113,7 +140,7 @@ export function SortButton({ label, direction, onClick, className, children }: {
       aria-label={`Sort by ${label}`}
       // No font of its own: Tailwind's preflight already gives a `<button>` `font: inherit`, so the
       // header text reads exactly as it did before it was wrapped in one.
-      className={`cursor-pointer bg-transparent p-0 text-inherit ${className ?? ""}`}
+      className={`cursor-pointer bg-transparent p-0 text-inherit ${FOCUS_RING} ${className ?? ""}`}
       // NOT stopped on pointerdown, deliberately: in `ChartTable` the `<th>` around this is a
       // dnd-kit drag activator with an 8px activation distance, so letting pointerdown through is
       // what keeps a column draggable by its own title. A press that never moves 8px starts no drag

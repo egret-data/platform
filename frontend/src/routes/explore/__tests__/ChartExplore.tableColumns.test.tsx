@@ -138,6 +138,17 @@ const tab = (name: string) => userEvent.click(screen.getByRole("tab", { name }))
  * The Data tab's checkboxes are untouched and are still driven by `getByLabelText(name)` below —
  * they were always labelled by the raw name, because that tab edits the query.
  */
+/**
+ * The Data tab's checkbox for one column, BY ROLE.
+ *
+ * `getByLabelText(name)` until the column headers gained an explicit `aria-label` of the plain
+ * column title — added so that the new "Sort by …" button inside a header would not become the
+ * cell's own accessible name, which a screen reader repeats for every cell under it. The header and
+ * the checkbox then shared a label and the bare query matched both. Naming the role is what the
+ * query always meant.
+ */
+const dataColumn = (name: string) => screen.getByRole("checkbox", { name });
+
 const eye = (name: string) => screen.getByRole("button", { name: `Show ${name}` });
 const noEye = (name: string) => screen.queryByRole("button", { name: `Show ${name}` });
 
@@ -153,8 +164,8 @@ describe("a column put back into the query is drawn again", () => {
 
     // ── step 2: drop `vendor` from the query in the Data tab
     await tab("Data");
-    await userEvent.click(screen.getByLabelText("vendor"));
-    expect(screen.getByLabelText("vendor")).not.toBeChecked();
+    await userEvent.click(dataColumn("vendor"));
+    expect(dataColumn("vendor")).not.toBeChecked();
     await tab("Display");
     // Waiting on the DRAWN HEADERS here would prove nothing — they are already `[id, state]` from
     // step 1, so the assertion passes before the debounced re-run has even gone out and step 3
@@ -165,8 +176,8 @@ describe("a column put back into the query is drawn again", () => {
 
     // ── step 3: put `vendor` back into the query
     await tab("Data");
-    await userEvent.click(screen.getByLabelText("vendor"));
-    expect(screen.getByLabelText("vendor")).toBeChecked();
+    await userEvent.click(dataColumn("vendor"));
+    expect(dataColumn("vendor")).toBeChecked();
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
 
     // …and the Display tab agrees, rather than showing it as still hidden.
@@ -207,7 +218,7 @@ describe("a column put back into the query is drawn again", () => {
 
     // An edit that re-runs the query without touching `vendor`: drop `state` instead.
     await tab("Data");
-    await userEvent.click(screen.getByLabelText("state"));
+    await userEvent.click(dataColumn("state"));
     await waitFor(() => expect(drawnHeaders()).toEqual(["id"]), { timeout: 3000 });
 
     await tab("Display");
@@ -234,12 +245,12 @@ describe("Add or remove columns, from the Display tab", () => {
     await userEvent.click(screen.getByRole("button", { name: /add or remove columns/i }));
     expect(noEye("vendor")).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByLabelText("vendor"));
+    await userEvent.click(dataColumn("vendor"));
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state"]), { timeout: 3000 });
 
     // …and the Data tab agrees, because there is one stored key, not two.
     await tab("Data");
-    expect(screen.getByLabelText("vendor")).not.toBeChecked();
+    expect(dataColumn("vendor")).not.toBeChecked();
   }, 30000);
 
   /**
@@ -252,7 +263,7 @@ describe("Add or remove columns, from the Display tab", () => {
 
     expect(screen.queryByLabelText("revenue")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: /add or remove columns/i }));
-    await userEvent.click(screen.getByLabelText("revenue"));
+    await userEvent.click(dataColumn("revenue"));
 
     // Aggregating turns the raw columns into dimensions and adds the metric to the result.
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor", "revenue"]), { timeout: 3000 });

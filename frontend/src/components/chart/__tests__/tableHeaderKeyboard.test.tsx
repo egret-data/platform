@@ -104,6 +104,25 @@ describe("ChartTable: the resize separator is operable from the keyboard", () =>
   });
 });
 
+describe("both new controls carry a focus indicator that does not depend on --ring", () => {
+  // WHAT THIS DOES AND DOES NOT PROVE, said plainly: jsdom runs no layout and computes no colour,
+  // so nothing here measures contrast. The 3:1 numbers are in `TableHeaderControls.tsx`, from a
+  // numeric OKLCH->sRGB conversion. This pins only that the class survives — which is what a
+  // refactor would silently drop, leaving both controls on the global `outline-ring/50` fallback
+  // that measures 1.54:1 in light mode.
+  it("names --primary rather than falling through to the global outline-ring/50", () => {
+    render(<ChartTable columns={COLS} rows={ROWS} onTableStateChange={vi.fn()} />);
+    const th = screen.getByRole("columnheader", { name: /region/ });
+    for (const el of [
+      within(th).getByRole("button", { name: /^Sort by region$/ }),
+      within(th).getByRole("separator", { name: "Resize region" }),
+    ]) {
+      expect(el.className).toContain("focus-visible:outline-primary");
+      expect(el.className).not.toContain("ring-ring");
+    }
+  });
+});
+
 describe("ChartTable: sorting has a keyboard route and a spoken direction", () => {
   it("sorts on Enter and reports the direction with aria-sort", async () => {
     const user = userEvent.setup();

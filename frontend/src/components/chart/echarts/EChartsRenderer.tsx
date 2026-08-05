@@ -126,8 +126,15 @@ export function EChartsRenderer({ option, className, onPointClick, onPointHover,
    * Every path that re-applies the whole option goes through here — a notMerge apply resets the
    * keys the overlay owns back to whatever the option says, so anything that skipped this would
    * snap the pie's hole back to its resting text in the middle of a hover. */
+  /**
+   * The option object most recently handed to ECharts — the resolved one, so a function-valued
+   * builder is not re-run just to read something off it. `legendselectchanged` is the only reader.
+   */
+  const resolvedRef = useRef<EChartsCoreOption | null>(null);
   const applyOption = (chart: ECharts) => {
-    chart.setOption(resolveOption(optionRef.current), true);
+    const resolved = resolveOption(optionRef.current);
+    resolvedRef.current = resolved;
+    chart.setOption(resolved, true);
     if (overlayRef.current) chart.setOption(resolveOption(overlayRef.current));
   };
 
@@ -164,6 +171,28 @@ export function EChartsRenderer({ option, className, onPointClick, onPointHover,
       });
     });
     chart.on("mouseout", "series", () => hoverRef.current?.(null));
+
+    /**
+     * THE DESCRIPTION HAS TO FOLLOW THE LEGEND. ECharts' legend hides a series without the option
+     * being rebuilt, so a description baked at build time goes stale the moment anyone clicks one.
+     * Confirmed in a browser on the deployed combo chart before this was written: with `orders`
+     * clicked off, the chart drew revenue alone and the container still announced "Combo chart of
+     * orders … 2 series; January 2026 205, …".
+     *
+     * The re-derivation belongs to the builder, which is the only thing that knows what the
+     * description is made of; a builder that has one offers it as `__ariaFor` on the option it
+     * returns, read HERE off the object this component holds rather than out of ECharts' model —
+     * `setOption` deep-copies what it is given and a function would not survive the trip.
+     *
+     * Merge mode, naming `aria` alone: a notMerge apply would reset the legend selection that just
+     * changed, which is the state being described.
+     */
+    chart.on("legendselectchanged", (params: unknown) => {
+      const selected = (params as { selected?: Record<string, boolean> }).selected;
+      const ariaFor = (resolvedRef.current as { __ariaFor?: (s?: Record<string, boolean>) => unknown } | null)?.__ariaFor;
+      if (typeof ariaFor !== "function" || selected == null) return;
+      chart.setOption({ aria: ariaFor(selected) } as EChartsCoreOption);
+    });
 
     // A ResizeObserver tick fires on every layout change — including, during an active
     // drag-resize, many times a second. Rebuilding a function-valued option re-runs the whole

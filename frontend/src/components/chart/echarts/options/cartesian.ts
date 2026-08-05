@@ -1806,9 +1806,32 @@ function baseOption(
   // The first plotted series carries the values a screen reader hears; the rest are named
   // in the count, since reading every series of a multi-series chart is worse than useless.
   const described = (series as SeriesLike[]).filter((s) => !s.__trend && !s.__total);
-  const first = described[0];
-  return {
-    aria: ariaDescription({
+
+  /**
+   * The description, for a given legend selection — `undefined` meaning "as built".
+   *
+   * WHY THIS IS A FUNCTION AND NOT A STRING. ECharts' legend is a live control that hides series
+   * without the option being rebuilt, and the description was baked once at build time. Confirmed
+   * in a browser on the deployed "MB · Combo": clicking `orders` off left the chart drawing revenue
+   * alone (its 0-400 axis gone) while the container's `aria-label` still read "Combo chart of
+   * orders … 2 series; January 2026 205, …" — named for the hidden series, counting it, and
+   * enumerating its values. Same shape as the pie's `toggledOffSlices`, one family over.
+   *
+   * `EChartsRenderer` calls this from `legendselectchanged` and merges the result back in. The
+   * alternative — dropping the enumeration from any chart that HAS a legend — was rejected: it
+   * pays for a state most readers never enter with a permanent loss for every reader, and the
+   * enumeration is the only part of this sentence carrying numbers.
+   *
+   * With everything hidden, `head` is `undefined` and `ariaDescription` says "No data." — which is
+   * the same answer the `metric: head?.name` line below already gives for a saved all-hidden
+   * curation, now reached by the ephemeral route too.
+   */
+  const ariaFor = (selected?: Record<string, boolean>) => {
+    const shown = selected == null
+      ? described
+      : described.filter((s) => s.name == null || selected[s.name] !== false);
+    const first = shown[0];
+    return ariaDescription({
       kind: `${cfg.kind === "line" ? "Line" : cfg.kind === "area" ? "Area" : cfg.kind === "scatter" ? "Scatter" : cfg.kind === "combo" ? "Combo" : "Bar"} chart`,
       // No fallback to cfg.yMetrics[0]: with every series hidden there is no metric being
       // described, and naming one would tell a screen reader about a chart nobody can see.
@@ -1821,7 +1844,9 @@ function baseOption(
       // takes a label off the card and should not take the dimension out of the description with it:
       // the bars are still there and still grouped by that column.
       dimension: cfg.xLabel ?? titleOf(cfg.xAxis),
-      seriesCount: described.length,
+      // What is SHOWN, not what was built: a count that keeps saying "2 series" over one drawn
+      // series is the same lie as naming the hidden one.
+      seriesCount: shown.length,
       format: (v) => fmtFor(cfg.yMetrics)(Number(v)),
       // `drawnCategories`, NOT `categories.map(String)` — the raw bucket is what this enumerated
       // until now, so a month-bucketed axis drew "January 2026" while a screen reader heard
@@ -1856,7 +1881,14 @@ function baseOption(
       // is the RAW value, so it goes back through `drawnByRaw` to reach the string the axis draws;
       // an ordinal datum is a bare number with no name and keeps the positional read it always had.
       points: first ? ariaPoints(first.data ?? [], drawnCategories, drawnByRaw) : [],
-    }),
+    });
+  };
+
+  return {
+    aria: ariaFor(),
+    /** Read by `EChartsRenderer` on `legendselectchanged` — see `ariaFor`. Not an ECharts key: it
+     *  is read off the object this function returns, before that object reaches `setOption`. */
+    __ariaFor: ariaFor,
     color: undefined,
     // The product's own typeface, at the option root — this is the one builder that composes its
     // whole option itself rather than spreading base.ts's `baseOption()`, so it has to say so.
