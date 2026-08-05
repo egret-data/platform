@@ -185,6 +185,70 @@ gánh luôn được không, thay vì thêm cơ chế thứ hai.
 
 ---
 
+## CẬP NHẬT — PR B đã tìm thấy gì khi thực thi chính mục này
+
+Viết sau khi làm xong, cùng tinh thần với ghi chú cắt tỉa và phần cập nhật của PR A ở trên. **Cả hai
+lỗi đều có thật; cái duy nhất mới chỉ là SUY LUẬN đã tái hiện được, và còn nặng hơn mô tả.** Hai điểm
+trong đề bài sai ở chi tiết, và một cạm bẫy thì không thể lường trước từ bản kế hoạch. Văn bản gốc
+được giữ nguyên.
+
+**B2 tái hiện được, trên Chrome, trước khi viết một dòng code — và tệ hơn mô tả.** Trên "MB · Combo"
+đã deploy, click tắt `orders` khiến ECharts chỉ vẽ revenue và **bỏ hẳn** nhãn vạch của trục trái
+(0/100/200/300/400/500 biến mất hết: trục không còn series nào, không còn biên độ, không còn gì để
+đánh số). Tiêu đề xoay dọc "orders" vẫn được vẽ cạnh cái trục rỗng đó, và hộp `<text>` của nó còn dịch
+từ x=573 sang x=549 khi vùng vẽ nở ra chiếm chỗ các con số vừa nhường. Vậy câu "trục đã đổi thang" của
+kế hoạch là nói giảm: trục **không còn thang nào cả**, và thứ duy nhất còn trên đó là tên một series
+không ai nhìn thấy. Đây là mục thứ sáu trong loạt này được kiểm lại trước khi hành động và **là mục
+đầu tiên sống sót** — đáng ghi lại, vì kỷ luật kiểm lại không phải thủ tục lúc nào cũng trả lời "đã sửa
+rồi".
+
+**Câu hỏi của B1 — "dùng lại bộ chỉnh cỡ của scalar nếu vừa" — câu trả lời là vừa, và đã dùng lại
+nguyên khối.** Không có bộ chỉnh cỡ thứ hai: `compactifyValue` → `findSize` → `measureText`,
+`maxFontSizeRem`, `SCALAR_PADDING`, `MIN_SIZE_REM`, `SIZE_STEP_REM` và tooltip giá trị đầy đủ đều được
+mang sang nguyên vẹn, còn `gridCols` được truyền từ `ChartRenderer` đúng như của scalar. Thứ KHÔNG
+mang sang chỉ là những gì trend không có: dải màu điều kiện và `label`/`sublabel` của `BigNumber`. Một
+khác biệt cấu trúc phải xử lý chứ không chép được: `BigNumber` chỉ có một `<div>` chú thích để đo,
+trong khi trend có hai khối anh em (nhãn kỳ và dòng so sánh), nên chúng được bọc thành một khối đo
+được duy nhất với `gap-1` bên ngoài được lặp lại bên trong. Khoảng cách trên màn hình không đổi; không
+có lớp bọc thì không có một chiều cao duy nhất để trừ đi.
+
+**Một cạm bẫy kế hoạch không thể gọi tên: bản vá merge của ECharts có khoá `name` sẽ được khớp THEO
+name.** Bản B2 chạy được đầu tiên vá hai trục y dưới dạng mảng, và `mappingToExists` của ECharts —
+khớp theo `id` trước, theo `name` sau — đã khớp phần tử thứ *hai* của bản vá vào trục *thứ nhất* qua
+cái tên rỗng. Kết quả đo được: `["", "rev"]`, tiêu đề nằm sai phía biểu đồ, chỉ sau thao tác tắt rồi
+bật lại một mục legend. Trường đang được vá chính là trường dùng để khớp. Nay cả hai trục giá trị đều
+mang `id` tường minh và bản vá gọi đích danh theo id.
+
+**Hai test có sẵn phải đổi, và cái thứ hai là lỗ hổng trong độ phủ của #412 chứ không phải cái giá của
+thay đổi này.** `sizeAware.test.ts` ghim đúng số closure một option mang theo, nên một closure mới có
+chủ đích đưa con số 4 → 5. Trong lúc sửa đó, hàm `probe` của nó lộ ra là render giá trị trả về của mọi
+hàm qua `String()` — thứ biến *mọi object* thành hằng `"[object Object]"`. `__ariaFor` (#412) và
+`__axisNamesFor` đều trả object, nên cả hai đang được "probe" thành sáu ký tự y hệt nhau bất kể chúng
+tính ra gì, và phép kiểm rò-rỉ-size mà file đó tồn tại vì nó thì không thể thấy được rò rỉ ở cả hai.
+`probe` nay tuần tự hoá giá trị trả về dạng object.
+
+**Tìm được nhưng không sửa (1).** Ở card 166px của harness, *dòng so sánh* của trend (`▲ 9.54% / vs
+previous month: 22.577,58`) xuống dòng giữa chừng thành bốn hàng. Nó không tràn — mọi hộp đều nằm
+trong card — nên không thuộc nhiệm vụ này, và rút gọn nó là câu hỏi thiết kế về đối chiếu Metabase
+(Metabase chỉ còn để lại phần trăm trên card hẹp) chứ không phải lỗi chỉnh cỡ. Ghi ra đây để nó là một
+quyết định có hồ sơ.
+
+**Tìm được nhưng không sửa (2), và đã khoanh vùng trước khi báo.** Trình sửa chart bật hộp thoại
+"chưa lưu thay đổi" (`beforeunload`) sau BẤT KỲ cú click nào trong vùng canvas — click legend, hay
+click vào vùng vẽ trống ở (700, 300) — dù không cái nào làm đổi thứ được lưu. Nó lộ ra khi điều khiển
+legend cho B2, nên nghi vấn đầu tiên là do `setOption` trên `legendselectchanged` của chính PR này.
+**Không phải:** cô lập bằng ba lần chạy — mở rồi rời trang chart mà KHÔNG tương tác thì không có gì,
+click legend thì có, click vào canvas trống cũng có. Vậy là bất kỳ cú click nào, không phải legend, và
+nó có trước cả PR này lẫn handler của #412. Cả hai chart đã điều khiển đều được fetch lại sau đó và
+`updated_at` không đổi (`2026-08-04T08:48Z`), tức là không có gì bị lưu.
+
+**Không phải chỗ sai của kế hoạch, nhưng là bẫy cho người đọc kế tiếp:** các UUID chart/dashboard trích
+trong những tài liệu kế hoạch trước của loạt này vẫn còn sống, nhưng bản lưu trong scratchpad thì
+không — dữ liệu demo đã được seed lại, và mọi id trong `charts-zzparity.json` giờ đều 404. Hãy đọc lại
+danh sách từ `/explore/demo/charts` thay vì từ fixture đã lưu.
+
+---
+
 # PR C — ba tính năng Metabase có mà egret không có
 
 Cả ba đã kiểm bằng grep là **thật sự vắng**. Đây là **khoảng cách, không phải lỗi** — không có gì

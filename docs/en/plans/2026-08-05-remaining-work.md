@@ -216,6 +216,73 @@ legend click" family as the two aria bugs #412 fixed, which were closed by subsc
 
 ---
 
+## UPDATE — what PR B found when it executed this section
+
+Written after the work, in the spirit of the pruning note and PR A's update above. **Both defects
+were real; the one that was only INFERRED reproduced, and understated itself.** Two points of the
+brief were wrong in detail and one hazard could not have been foreseen from the plan. The original
+text is left standing.
+
+**B2 reproduced, in Chrome, before a line was written — and it is worse than the claim.** On the
+deployed "MB · Combo", clicking `orders` off leaves ECharts drawing revenue alone and dropping the
+left axis's tick labels *entirely* (0/100/200/300/400/500 all gone: no series on that axis, no
+extent, nothing to number). The rotated title "orders" stays painted beside the empty axis, and its
+`<text>` box even moved from x=573 to x=549 as the plot expanded into the space the numbers vacated.
+So the plan's "the axis has switched scales" is generous: the axis has no scale at all, and the only
+thing left on it is the name of a series nobody can see. This is the sixth item in this run to be
+re-checked before acting on it and **the first that survived**, which is worth recording — the
+discipline is not a formality that always says "already fixed".
+
+**B1's "reuse the scalar's sizer if it fits" — it fits, and it is reused whole.** No second sizer
+exists: `compactifyValue` → `findSize` → `measureText`, `maxFontSizeRem`, `SCALAR_PADDING`,
+`MIN_SIZE_REM`, `SIZE_STEP_REM` and the full-value tooltip all come across unchanged, and `gridCols`
+is threaded from `ChartRenderer` exactly as the scalar's is. What did NOT transfer is only what the
+trend does not have: `BigNumber`'s conditional colour bands and its `label`/`sublabel`. One
+structural difference had to be absorbed rather than copied — `BigNumber` has a single caption
+`<div>` to measure, while the trend has two sibling captions (the period label and the comparison
+line), so they are wrapped in one measured block with the outer `gap-1` restated inside it. The
+spacing on screen is unchanged; without the wrapper there is no single height to subtract.
+
+**A hazard the plan could not have named: an ECharts merge patch keyed on `name` is matched BY
+name.** The first working version of B2 patched the two y-axes as an array, and ECharts'
+`mappingToExists` — which resolves a patch entry to an existing component by `id` first and by
+`name` second — matched the *second* patch entry to the *first* axis through its empty name.
+Measured result: `["", "rev"]`, the title on the wrong side of the chart, after nothing more exotic
+than toggling a legend entry off and on again. The field being patched was the field being matched
+on. Both value axes now carry explicit `id`s and the patch addresses one by id.
+
+**Two existing tests moved, and the second one is a hole in #412's coverage rather than a cost of
+this change.** `sizeAware.test.ts` pins the exact number of closures a built option carries, so a
+deliberate new one takes that 4 → 5. While making that change its `probe` helper turned out to
+render every function's return through `String()` — which collapses *any object* to the constant
+`"[object Object]"`. `__ariaFor` (#412) and `__axisNamesFor` both return objects, so both were being
+"probed" into six identical characters whatever they computed, and the size-leak check that file
+exists for could not have seen a leak in either. `probe` now serialises object returns.
+
+**Found, not fixed (1).** At the harness's 166px card the trend's *comparison line* (`▲ 9.54% / vs
+previous month: 22,577.58`) wraps mid-phrase across four lines. It does not overflow — every box is
+inside the card — so it is not this task, and shortening it is a Metabase-parity design question
+(Metabase drops to the percentage alone on a narrow card) rather than a sizing bug. Named here so it
+is a decision on the record.
+
+**Found, not fixed (2), and deliberately scoped before being reported.** The chart editor raises its
+"unsaved changes" `beforeunload` prompt after ANY click inside the chart canvas — a legend toggle, or
+a click on empty plot area at (700, 300) — although neither changes anything that is saved. It was
+first noticed while driving the legend for B2, so the first suspicion was that this PR's
+`setOption` on `legendselectchanged` caused it. **It does not:** isolated by three runs — a chart
+page visited and left with NO interaction raises nothing, a legend click raises it, and a click on
+bare canvas raises it too. So it is any click, not the legend, and it predates both this PR and
+#412's handler. Both charts driven here were re-fetched afterwards and their `updated_at` is
+unchanged (`2026-08-04T08:48Z`), so nothing was actually saved.
+
+**Not a correction to this plan, but a trap for the next reader:** the chart and dashboard UUIDs
+quoted in the earlier plan docs of this run (#412's `be2dce76…` among them) survived, but the ones
+cached in the scratchpad did not — the demo data has been reseeded since, and every id in
+`charts-zzparity.json` now 404s. Re-read the list from `/explore/demo/charts` rather than from a
+saved fixture.
+
+---
+
 # PR C — three Metabase features egret does not have
 
 All three verified absent by grep. These are **gaps, not defects** — nothing is broken, egret simply
