@@ -614,6 +614,28 @@ function applyXScale(categories: unknown[], series: unknown[], cfg: CartesianBui
  * compact-label threshold it feeds would have measured `NaN` and silently become "never compact"
  * on every value-axis chart. `cartesian.labels.test.ts` pins both directions of that.
  */
+/**
+ * The (name, value) pairs a screen reader hears, taken from the SERIES rather than from the
+ * category list — see the note at the `aria` block, which has the two defects this shape fixes.
+ *
+ * `drawnByRaw` maps a raw category to the string the axis draws for it, because an item object
+ * carries the raw value (that is what a drill filters by) while the description's whole premise is
+ * that it says what a sighted user sees.
+ */
+function ariaPoints(
+  data: unknown[], drawnCategories: string[], drawnByRaw: Map<string, string>,
+): { name: string; value: unknown }[] {
+  return data.map((d, i) => {
+    const raw = d != null && typeof d === "object" && !Array.isArray(d) && "name" in d
+      ? String((d as { name: unknown }).name)
+      : undefined;
+    // `?? raw` rather than `?? ""`: a name that is not in the map means the two lists have drifted,
+    // and the raw category is still a truthful thing to say where the drawn label is unavailable.
+    const name = raw != null ? (drawnByRaw.get(raw) ?? raw) : (drawnCategories[i] ?? "");
+    return { name, value: datumY(d) };
+  });
+}
+
 function datumY(d: unknown): unknown {
   const v = d != null && typeof d === "object" && !Array.isArray(d) && "value" in d
     ? (d as { value: unknown }).value
@@ -1313,6 +1335,9 @@ function baseOption(
    *  vertical chart and by the row chart's two fits further down, so the two cannot disagree about
    *  which strings are on the card. */
   const drawnCategories = categories.map((c) => drawLabel(String(c)));
+  /** Raw category -> the string the axis draws for it. `ariaPoints` needs the reverse lookup
+   *  because a value/time datum carries its RAW category and not its label. */
+  const drawnByRaw = new Map(categories.map((c, i) => [String(c), drawnCategories[i]]));
   const fit: XLabelFit | undefined = measurable && size && ordinalX && !explicitRotate
     ? fitXLabels({
         // THE STRING THE AXIS ACTUALLY DRAWS, by construction — same closure, same argument.
@@ -1812,7 +1837,25 @@ function baseOption(
       // there: a tooltip sits next to a drill and what a click FILTERS by is the raw bucket, so
       // naming the period on one while the other filters on the value trades a cosmetic mismatch for
       // a semantic one. A description has no click behind it, which is why it moves and that does not.
-      points: first ? drawnCategories.map((name, i) => ({ name, value: first.data?.[i] })) : [],
+      //
+      // READ OFF THE SERIES, NOT OFF THE CATEGORY LIST. This used to be
+      // `drawnCategories.map((name, i) => ({ name, value: first.data?.[i] }))`, which was wrong in
+      // two independent ways on a value/time x-axis and right on an ordinal one:
+      //
+      //   1. `Number(first.data[i])` is `NaN` for the `{value: [x, y], name}` item object a datum
+      //      became in #387 — measured live during #411, a scatter read "15.69 NaN, 19.87 NaN, …"
+      //      for every point. `datumY` is the single unwrap for that, introduced in #397 for
+      //      `widestOf` and never picked up here.
+      //   2. `applyXScale` FILTERS: a datum whose x will not parse is dropped, so `first.data` is
+      //      no longer index-aligned with `drawnCategories` and the zip silently paired each
+      //      survivor with the NEXT label's value. That does not read as `NaN` — it reads as a
+      //      correct-looking sentence, which is why it outlived the defect that was visible.
+      //
+      // The item object carries its own raw category as `name` (the whole reason it is an object —
+      // see `ScaledPoint`), so the pairing comes from the datum itself and cannot slide. That name
+      // is the RAW value, so it goes back through `drawnByRaw` to reach the string the axis draws;
+      // an ordinal datum is a bare number with no name and keeps the positional read it always had.
+      points: first ? ariaPoints(first.data ?? [], drawnCategories, drawnByRaw) : [],
     }),
     color: undefined,
     // The product's own typeface, at the option root — this is the one builder that composes its
