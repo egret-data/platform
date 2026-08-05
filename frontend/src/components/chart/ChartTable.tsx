@@ -17,12 +17,17 @@ import { isNumericType, type ColumnFormat, type Rule } from "./format-types";
 import type { TableState } from "@/api/charts";
 import { Button } from "@/components/ui/button";
 import { tableCellDrill, type DrillContext } from "./drill";
+import { ResizeHandle, SortButton, ariaSort, MIN_COL_WIDTH } from "./TableHeaderControls";
 
 export interface ResultColumn { name: string; type: string }
 
-function SortableHeader({ id, disabled, children, className, style, onClick }: {
+function SortableHeader({ id, disabled, children, className, style, onClick, label, sort }: {
   id: string; disabled?: boolean; children: ReactNode; className?: string;
   style?: CSSProperties; onClick?: MouseEventHandler;
+  /** The column as it is drawn. Pinned as the cell's own accessible name so that the "Sort by …"
+   * button inside it does not become the name announced for every cell in the column. */
+  label: string;
+  sort?: "asc" | "desc";
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id, disabled });
   // Destructure role out so we can override dnd-kit's "button" with "columnheader".
@@ -35,6 +40,10 @@ function SortableHeader({ id, disabled, children, className, style, onClick }: {
     <th
       ref={setNodeRef}
       role="columnheader"
+      aria-label={label}
+      // The direction used to be carried ONLY by a " ▲"/" ▼" glyph appended to the text, which a
+      // screen reader has no way to interpret. `aria-sort` is the attribute that means it.
+      aria-sort={ariaSort(sort)}
       onClick={onClick}
       style={{ ...style, transform: CSS.Translate.toString(transform), transition, opacity: isDragging ? 0.6 : 1 }}
       className={className}
@@ -46,7 +55,6 @@ function SortableHeader({ id, disabled, children, className, style, onClick }: {
   );
 }
 
-const MIN_COL_WIDTH = 60;
 /** px width of the "#" gutter — pinned columns start after it, or they slide underneath. */
 const ROW_INDEX_WIDTH = 40;
 
@@ -265,27 +273,58 @@ export function ChartTable({
     ...(paginationEnabled ? { getPaginationRowModel: getPaginationRowModel() } : {}),
   });
 
-  // persist widths (by name, pruned to existing columns) only when a resize gesture ends
+  /** `col_<i>` sizing -> widths by column NAME, pruned to columns that still exist. */
+  const commitWidths = (sizing: ColumnSizingState) => {
+    const widths: Record<string, number> = {};
+    Object.entries(sizing).forEach(([id, px]) => {
+      const name = columns[Number(id.slice(4))]?.name;  // "col_3" -> 3
+      if (name) widths[name] = px as number;
+    });
+    onTableStateChange?.({ ...tableState, columnWidths: widths });
+  };
+
+  // persist widths only when a resize gesture ends
   const isResizing = table.getState().columnSizingInfo.isResizingColumn;
   const wasResizing = useRef<string | false>(false);
   useEffect(() => {
-    if (wasResizing.current && !isResizing) {
-      const widths: Record<string, number> = {};
-      Object.entries(localSizing).forEach(([id, px]) => {
-        const name = columns[Number(id.slice(4))]?.name;  // "col_3" -> 3
-        if (name) widths[name] = px as number;
-      });
-      onTableStateChange?.({ ...tableState, columnWidths: widths });
-    }
+    if (wasResizing.current && !isResizing) commitWidths(localSizing);
     wasResizing.current = isResizing;
   }, [isResizing]);
 
+  /**
+   * An arrow-key resize, which is a gesture with no drag around it and therefore no END for the
+   * effect above to fire on: tanstack's `columnSizingInfo.isResizingColumn` only ever moves for a
+   * pointer gesture. Writing the new width into `localSizing` alone would have shown the column
+   * change and then lost it on the next render from the parent, which is the "green over a dead
+   * path" shape this programme keeps hitting — so the keyboard commits for itself, immediately.
+   * There is no spam risk in doing so: one keypress is one step, where a drag is a hundred moves.
+   */
+  // NO SECOND `Math.max(MIN_COL_WIDTH, …)` HERE, and that is a finding rather than an omission: the
+  // first draft clamped in both places, and the mutation that deleted the clamp inside `ResizeHandle`
+  // SURVIVED because this one silently covered for it. One clamp, in the shared control, where the
+  // pivot's call site depends on it too (`onResizeColumn` there clamps nothing of its own).
+  const resizeFromKeyboard = (id: string, width: number) => {
+    const next: ColumnSizingState = { ...localSizing, [id]: width };
+    setLocalSizing(next);
+    commitWidths(next);
+  };
+
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
-    // Without this, reordering a column is reachable only by dragging with a mouse. Its
-    // activator only listens on keydown (Space/Enter start a drag, arrows move it, Space/Enter
-    // again drop it) — sorting is wired to onClick alone, on a wholly separate event, so the
-    // two never fire off the same keypress.
+    // Without this, reordering a column is reachable only by dragging with a mouse. Its activator
+    // only listens on keydown (Space/Enter start a drag, arrows move it, Space/Enter again drop it).
+    //
+    // WHAT THAT COST, WHICH THIS NOTE USED TO GET WRONG. It said sorting "is wired to onClick
+    // alone, on a wholly separate event, so the two never fire off the same keypress" — true, and
+    // the wrong thing to be reassured by. The audit measured what a keyboard user actually got: the
+    // `<th>` is tabbable (dnd-kit's `tabIndex=0`) and announces itself `sortable`, Enter set
+    // `opacity: 0.6` — a lift — and the text never changed. Sorting had NO keyboard route, because
+    // "a wholly separate event" meant a mouse-only one. The two not colliding was the whole problem.
+    //
+    // Resolved by giving sorting its own control rather than by taking a key off the drag: a
+    // `SortButton` inside the `<th>` swallows Enter/Space before this activator sees them (see
+    // `TableHeaderControls.tsx`), so one keypress still does exactly one thing — and which thing now
+    // depends on which control has focus, which is a distinction a keyboard user can perceive.
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
   function handleDragEnd(e: DragEndEvent) {
@@ -336,14 +375,19 @@ export function ChartTable({
                 )}
                 <SortableContext items={table.getVisibleLeafColumns().map((c) => c.id)} strategy={horizontalListSortingStrategy}>
                 {hg.headers.map((h) => {
-                  const isNum = (h.column.columnDef.meta as { isNum?: boolean } | undefined)?.isNum ?? false;
+                  const meta = h.column.columnDef.meta as { isNum?: boolean; name?: string } | undefined;
+                  const isNum = meta?.isNum ?? false;
                   const sized = localSizing[h.column.id] != null;
                   const pinned = h.column.getIsPinned() === "left";
+                  const sorted = h.column.getIsSorted() as "asc" | "desc" | false;
+                  const title = String(h.column.columnDef.header ?? meta?.name ?? h.column.id);
                   return (
                     <SortableHeader
                       key={h.id}
                       id={h.column.id}
                       disabled={pinned}
+                      label={title}
+                      sort={sorted === false ? undefined : sorted}
                       onClick={h.column.getToggleSortingHandler()}
                       style={{
                         ...(sized ? { width: h.getSize() } : {}),
@@ -353,18 +397,25 @@ export function ChartTable({
                         pinned ? "z-30 border-r border-border/50" : "z-10"
                       } ${isNum ? "text-right" : "text-left"}`}
                     >
-                      {flexRender(h.column.columnDef.header, h.getContext())}
-                      {{ asc: " ▲", desc: " ▼" }[h.column.getIsSorted() as string] ?? ""}
+                      {/* SORTING'S ONLY ROUTE USED TO BE THE `<th>`'s `onClick`. The cell is
+                          tabbable — dnd-kit puts `tabIndex=0` on it — so a keyboard user reached it
+                          and Enter lifted it into a drag instead, leaving sorting with no keyboard
+                          route at all (`SortRows.tsx` edits the query's `orderby` and lives only in
+                          the builder). The `<th>` keeps its click, so a mouse still sorts by hitting
+                          anywhere in the cell; the button adds the route that was missing. */}
+                      <SortButton
+                        label={title}
+                        direction={sorted === false ? undefined : sorted}
+                        onClick={() => h.column.toggleSorting()}
+                      >
+                        {flexRender(h.column.columnDef.header, h.getContext())}
+                      </SortButton>
                       {h.column.getCanResize() && (
-                        <div
-                          role="separator"
-                          aria-orientation="vertical"
-                          aria-label="Resize column"
-                          onMouseDown={h.getResizeHandler()}
-                          onTouchStart={h.getResizeHandler()}
-                          onPointerDown={(e) => e.stopPropagation()}
-                          onClick={(e) => e.stopPropagation()}
-                          className="absolute right-0 top-0 h-full w-1 cursor-col-resize touch-none select-none hover:bg-primary/40"
+                        <ResizeHandle
+                          label={`Resize ${title}`}
+                          getWidth={(el) => localSizing[h.column.id] ?? el.getBoundingClientRect().width}
+                          onResize={(w) => resizeFromKeyboard(h.column.id, w)}
+                          dragHandlers={{ onMouseDown: h.getResizeHandler(), onTouchStart: h.getResizeHandler() }}
                         />
                       )}
                     </SortableHeader>

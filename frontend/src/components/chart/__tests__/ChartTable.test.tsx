@@ -433,7 +433,10 @@ it("does not announce a pinned column header as disabled", () => {
   );
   const th = screen.getByRole("columnheader", { name: /order_date/ });
   expect(th).not.toHaveAttribute("aria-disabled");
-  expect(within(th).getByRole("separator", { name: "Resize column" })).not.toHaveAttribute("aria-disabled");
+  // `"Resize order_date"`, not the `"Resize column"` this used to name: every handle carried the
+  // same string, so a screen-reader user heard N identical controls. Named per column since the
+  // handle became the pivot's shared `ResizeHandle`, which has taken a `label` since chart 03.
+  expect(within(th).getByRole("separator", { name: "Resize order_date" })).not.toHaveAttribute("aria-disabled");
 });
 
 describe("row index", () => {
