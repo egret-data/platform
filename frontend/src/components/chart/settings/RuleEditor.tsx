@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { isNumericType, type Rule, type SingleColorRule, type ColorRangeRule, type FormattingOperator } from "../format-types";
+import { isNumericType, isBooleanType, type Rule, type SingleColorRule, type ColorRangeRule, type FormattingOperator } from "../format-types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -15,6 +15,21 @@ interface ResultColumn { name: string; type: string }
 
 const NUMERIC_OPS: FormattingOperator[] = ["=", "!=", "<", ">", "<=", ">="];
 const STRING_OPS: FormattingOperator[] = ["=", "!=", "contains", "does-not-contain", "starts-with", "ends-with"];
+/**
+ * The pair `matchOperator` has always implemented and no dropdown could produce.
+ *
+ * `conditional.ts` handles `is-true`/`is-false` (and `NO_VALUE_OPS` below already knew to hide the
+ * value box for them), but the operator list was a two-way choice between numeric and string and
+ * neither offered them — so the only way to store one was to hand-edit a chart's params. Metabase
+ * names the identical pair `BOOLEAN_OPERATOR_NAMES` and offers it for the same column class.
+ *
+ * There IS such a column class here: `ColumnMeta.type` carries the engine's own type name, Trino
+ * reports `boolean`, and neither `isNumericType` nor `isTemporalType` claims it — so a boolean
+ * column is already offered to a rule and, until now, could only be asked about by typing the word
+ * "true" into the string editor's value box and leaning on `matchOperator`'s `String(cell)`
+ * fallback. That is why this is a list to ADD rather than an implementation to delete.
+ */
+const BOOLEAN_OPS: FormattingOperator[] = ["is-true", "is-false"];
 const NULL_OPS: FormattingOperator[] = ["is-null", "not-null"];
 const NO_VALUE_OPS = new Set<FormattingOperator>(["is-null", "not-null", "is-true", "is-false"]);
 const PALETTE = ["#ef4444", "#f59e0b", "#22c55e", "#3b82f6", "#a855f7"];
@@ -41,7 +56,31 @@ export function RuleEditor({
   const [draft, setDraft] = useState<Rule>(rule);
   const selected = columns.filter((c) => draft.columns.includes(c.name));
   const allNumeric = selected.length > 0 && selected.every((c) => isNumericType(c.type));
-  const ops = allNumeric ? [...NUMERIC_OPS, ...NULL_OPS] : [...STRING_OPS, ...NULL_OPS];
+  const allBoolean = selected.length > 0 && selected.every((c) => isBooleanType(c.type));
+  const ops = allBoolean
+    ? [...BOOLEAN_OPS, ...NULL_OPS]
+    : allNumeric
+      ? [...NUMERIC_OPS, ...NULL_OPS]
+      : [...STRING_OPS, ...NULL_OPS];
+
+  /**
+   * The operator actually in force, which is not always the one in the draft.
+   *
+   * The operator list depends on the COLUMNS, and the columns can change under a chosen operator: a
+   * new rule is minted with `>` (`ConditionalFormattingSection`), so picking a text column left the
+   * Select with a value none of its options carried — Radix renders that as an EMPTY trigger — and
+   * saving stored a `>` that `matchOperator` went on to evaluate as a string comparison. That is
+   * pre-existing, and adding `BOOLEAN_OPS` above adds a third way into it, so it is resolved here
+   * rather than widened.
+   *
+   * Falls back to `ops[0]` — `=` for text, `>` for numbers, `is-true` for booleans — which is the
+   * first thing the reader would have picked anyway, and never to a hidden state: what the trigger
+   * reads is what `onSave` writes, because both go through this.
+   */
+  const operator = draft.type === "single" && ops.includes(draft.operator) ? (draft as SingleColorRule).operator : ops[0];
+
+  /** What leaves this editor. See `operator` — the draft may hold one the columns cannot express. */
+  const save = () => onSave(draft.type === "single" ? { ...draft, operator } : draft);
 
   function setType(type: "single" | "range") {
     if (type === draft.type) return;
@@ -63,6 +102,93 @@ export function RuleEditor({
       return { ...r, colors };
     });
   }
+
+  /**
+   * WHERE A COLOUR RANGE STARTS AND ENDS — the four fields `conditional.ts` has always honoured and
+   * nothing could write.
+   *
+   * `min_type`/`max_type` are a three-way answer: `null` re-bases the gradient on EACH column's own
+   * extent, `"all"` takes one extent across every column the rule targets so they can be compared
+   * against each other, and `"custom"` pins an endpoint to a fixed number so two cards drawn a week
+   * apart mean the same thing. The editor hard-coded `null` for both on creation and offered no
+   * control, so only the first was ever reachable.
+   *
+   * THE OPTION SET IS METABASE'S, read off the running reference rather than guessed: with one
+   * column it is "Smallest value in this column" / "Custom value"; with two or more the first
+   * becomes "…in each column" and "…in all of these columns" appears between them. The conditional
+   * third option is the part worth copying — over a single column "all" and "each" compute the
+   * identical extent, so offering it there would be a choice with no consequence.
+   *
+   * Rendered as a `Select` where Metabase uses a radio group. Deliberate: every other control in
+   * this editor is a Select, and two stacked three-option radio groups with labels this long is a
+   * different weight of control in a panel this narrow. The labels and the stored values are
+   * Metabase's exactly.
+   */
+  const CUSTOM_DEFAULT = { min: 0, max: 100 };
+  const setEndpointType = (end: "min" | "max", v: string) =>
+    setDraft((d) => {
+      const r = { ...(d as ColorRangeRule) };
+      r[`${end}_type`] = v === "each" ? null : (v as "all" | "custom");
+      if (v === "custom") {
+        r[`${end}_value`] = r[`${end}_value`] ?? CUSTOM_DEFAULT[end];
+      } else {
+        // DELETED, not set to undefined. A stale `max_value` sitting under `max_type: null` is
+        // ignored by `conditional.ts` only by accident of its `=== "custom"` guard, and it would
+        // reappear the moment anyone chose Custom again — the box would be pre-filled with a number
+        // the reader had already taken back. `toStrictEqual` in the test is what holds this: both
+        // `toEqual` and `toHaveBeenCalledWith` skip an `undefined` property and would not see it.
+        delete r[`${end}_value`];
+      }
+      return r;
+    });
+  const setEndpointValue = (end: "min" | "max", raw: string) =>
+    setDraft((d) => {
+      const r = { ...(d as ColorRangeRule) };
+      const n = Number(raw);
+      // An empty box is not zero. Left undefined, `conditional.ts` falls back to the column's own
+      // extent for that end, which is the same thing the reader sees while they are mid-edit.
+      r[`${end}_value`] = raw.trim() === "" || Number.isNaN(n) ? undefined : n;
+      return r;
+    });
+
+  /**
+   * One endpoint's control pair.
+   *
+   * A FUNCTION RETURNING JSX, called inline — not a nested component. A component declared inside
+   * a render body is a new type on every render, so React unmounts and remounts its subtree: the
+   * number input below would lose focus after a single keystroke and the rest of a typed value
+   * would land nowhere.
+   */
+  const endpointField = (which: "min" | "max") => {
+    const label = which === "min" ? "Start the range at" : "End the range at";
+    const extreme = which === "min" ? "Smallest" : "Largest";
+    const many = range.columns.length > 1;
+    const type = range[`${which}_type`];
+    return (
+      <div className="space-y-1" key={which}>
+        <span className="text-xs text-muted-foreground">{label}</span>
+        <Select value={type ?? "each"} onValueChange={(v) => setEndpointType(which, v)}>
+          <SelectTrigger aria-label={label} className="h-8"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="each">{extreme} value in {many ? "each column" : "this column"}</SelectItem>
+            {/* Only with something to compare ACROSS. Over one column this computes the same number
+                as "each", so Metabase hides it and so does this. */}
+            {many && <SelectItem value="all">{extreme} value in all of these columns</SelectItem>}
+            <SelectItem value="custom">Custom value</SelectItem>
+          </SelectContent>
+        </Select>
+        {type === "custom" && (
+          <Input
+            type="number"
+            aria-label={which === "min" ? "Range start value" : "Range end value"}
+            className="h-8"
+            value={range[`${which}_value`] ?? ""}
+            onChange={(e) => setEndpointValue(which, e.target.value)}
+          />
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="space-y-3 text-sm">
@@ -135,14 +261,14 @@ export function RuleEditor({
         <div className="space-y-2">
           <label className="block space-y-1">
             <span className="text-xs text-muted-foreground">When a value is</span>
-            <Select value={draft.operator} onValueChange={(v) => setDraft((d) => ({ ...(d as SingleColorRule), operator: v as FormattingOperator }))}>
+            <Select value={operator} onValueChange={(v) => setDraft((d) => ({ ...(d as SingleColorRule), operator: v as FormattingOperator }))}>
               <SelectTrigger aria-label="Operator" className="h-8"><SelectValue /></SelectTrigger>
               <SelectContent>
                 {ops.map((op) => <SelectItem key={op} value={op}>{op}</SelectItem>)}
               </SelectContent>
             </Select>
           </label>
-          {!NO_VALUE_OPS.has(draft.operator) && (
+          {!NO_VALUE_OPS.has(operator) && (
             <label className="block space-y-1">
               <span className="text-xs text-muted-foreground">Value</span>
               <Input className="h-8" value={String((draft as SingleColorRule).value ?? "")}
@@ -192,12 +318,17 @@ export function RuleEditor({
                 value={end} onChange={(e) => setRangeColor(1, e.target.value)} />
             </div>
           </div>
+          {/* The colours say what the gradient looks like; these say what it MEANS. Both endpoints,
+              not just a custom minimum: a range pinned at one end and floating at the other is the
+              case that reads as a bug on a dashboard. */}
+          {endpointField("min")}
+          {endpointField("max")}
         </div>
       )}
 
       <div className="flex justify-end gap-2 pt-1">
         <Button type="button" variant="outline" size="sm" onClick={onCancel}>Cancel</Button>
-        <Button type="button" size="sm" disabled={draft.columns.length === 0} onClick={() => onSave(draft)}>Save rule</Button>
+        <Button type="button" size="sm" disabled={draft.columns.length === 0} onClick={save}>Save rule</Button>
       </div>
     </div>
   );

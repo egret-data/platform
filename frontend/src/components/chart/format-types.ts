@@ -59,3 +59,27 @@ export function isNumericType(type: string): boolean {
 export function isTemporalType(type: string): boolean {
   return TEMPORAL_RE.test(type) && !NUMERIC_RE.test(type);
 }
+
+/**
+ * A boolean column, as the ENGINE names it.
+ *
+ * Anchored (`^…$`) rather than the loose `.test()` the two above use, and that is the whole design:
+ * `isNumericType`'s pattern is a substring match, so an unanchored `bool` here would be a second
+ * loose matcher racing the first over names neither of them was written for. There is exactly one
+ * spelling to recognise — Trino reports `boolean` and `ColumnMeta.ty` passes the engine's own type
+ * name straight through — so this recognises that and nothing else.
+ *
+ * DELIBERATELY NOT USED BY `formatValue`. A boolean is neither numeric nor temporal there, and it
+ * falls out of the bottom as `String(value)` — "true"/"false" — which is what it should read as.
+ * This exists for the conditional-formatting operator list, which is the one place the DISTINCTION
+ * between a boolean and a string changes what the panel may offer.
+ *
+ * StarRocks is a known asymmetry and not one this can close: its connector reports the MySQL
+ * protocol type, and `BOOLEAN` and `TINYINT` are the same wire type there (`MYSQL_TYPE_TINY`), so a
+ * StarRocks boolean arrives numeric-looking and `isNumericType` claims it first. `typegen.rs`
+ * records the same limitation on the backend side.
+ */
+const BOOLEAN_RE = /^bool(ean)?$/i;
+export function isBooleanType(type: string): boolean {
+  return BOOLEAN_RE.test(type.trim());
+}

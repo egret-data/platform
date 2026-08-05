@@ -44,7 +44,7 @@ function ToggleRow({ id, label, checked, onChange }: {
 }
 
 export function FormatSection({
-  columns, value, onChange, allowMiniBar = true,
+  columns, value, onChange, allowMiniBar = true, allowViewAs = true,
 }: {
   columns: ResultColumn[];
   value: Record<string, ColumnFormat>;
@@ -53,6 +53,8 @@ export function FormatSection({
    * switch sat there doing nothing — offering a setting that cannot take effect is worse than
    * not offering it. */
   allowMiniBar?: boolean;
+  /** The same gate, for the same reason — see `ColumnFormatFields`. */
+  allowViewAs?: boolean;
 }) {
   // which column's settings are expanded (accordion); null = all collapsed
   const [open, setOpen] = useState<string | null>(null);
@@ -93,7 +95,8 @@ export function FormatSection({
 
             {isOpen && (
               <div className="space-y-3 border-t p-3">
-                <ColumnFormatFields column={c} fmt={fmt} onPatch={patch} allowMiniBar={allowMiniBar} />
+                <ColumnFormatFields column={c} fmt={fmt} onPatch={patch}
+                  allowMiniBar={allowMiniBar} allowViewAs={allowViewAs} />
               </div>
             )}
           </div>
@@ -116,12 +119,43 @@ export function FormatSection({
  * already hold "the column being edited" — the accordion in its `open` state, the popover in the
  * row it was opened from. Neither can address the wrong column by construction.
  */
-export function ColumnFormatFields({ column: c, fmt, onPatch: patch, allowMiniBar = true }: {
+export function ColumnFormatFields({
+  column: c, fmt, onPatch: patch, allowMiniBar = true, allowViewAs = true,
+}: {
   column: ResultColumn;
   fmt: ColumnFormat;
   onPatch: (p: Partial<ColumnFormat>) => void;
   /** Only the flat table draws mini bars — see FormatSection. */
   allowMiniBar?: boolean;
+  /**
+   * Whether to offer "Display as" and its two link templates.
+   *
+   * ONLY THE FLAT TABLE READS THEM. `ChartTable.renderTableCell` is the single place in the app
+   * that branches on `view_as`; everything else turns a cell value into text through `formatValue`,
+   * which does not consult it — `format.ts`'s `CONSULTED_BY_FORMAT_DATE` says so in as many words
+   * (`view_as: false, link_text: false, link_url: false`) and is `satisfies`-checked so it cannot
+   * go stale. So a pivot row-dimension, a cartesian x-axis, a pie dimension, a sankey node column
+   * and an object-detail field were all offering a Display-as → Link select and two template boxes
+   * that saved and painted nothing.
+   *
+   * THE SAME GATE AS `allowMiniBar`, deliberately, rather than a second mechanism: `show_mini_bar`
+   * had exactly this defect and was closed exactly this way, and two shapes of "this control is
+   * table-only" in one component is one more than the next reader can hold.
+   *
+   * VERIFIED BY RUNNING, not by reading. A probe rendered all nineteen viz types through
+   * `ChartRenderer` with these three fields behind recording getters: `table` was the only type
+   * whose access stacks reached a CONSUMING read. Every other touch was an object spread into a
+   * `ColumnFormat` bound for `formatValue` (`cartesian.ts`'s `{...col, compact}`, `scalar.ts`'s
+   * `compactifyValue`, `boxplot.ts`'s `fmt`) or a `JSON.stringify` memo key — copies, not reads.
+   * `__tests__/viewAsIsTableOnly.test.tsx` is what keeps that true.
+   *
+   * ALREADY-STORED VALUES ARE LEFT ALONE. A pie dimension that was given `view_as: "link"` before
+   * this gate keeps it in `column_settings`; nothing outside the table ever read it, so it paints
+   * exactly as it did, and stripping it would mean a migration that could only ever remove a value
+   * whose sole effect is to occupy a key. It becomes reachable again the moment that column is
+   * shown in a table, which is the one place it means something.
+   */
+  allowViewAs?: boolean;
 }) {
   return (
     <>
@@ -271,10 +305,69 @@ export function ColumnFormatFields({ column: c, fmt, onPatch: patch, allowMiniBa
               </Select>
             </Field>
             <ToggleRow id={`fmt-abbreviate-${c.name}`} label="Abbreviate" checked={!!fmt.date_abbreviate} onChange={(v) => patch({ date_abbreviate: v })} />
+
+            {/* THE SEPARATOR, ONLY WHERE THERE IS ONE TO REPLACE. `formatDate` applies this as
+                `dateFmt.replace(/\//g, fmt.date_separator)` — so on "January 31, 2024" or "Q1 2024"
+                it has nothing to act on and the control would save a value that changes no pixel.
+                Gated on the CHOSEN style rather than on a stored value, so an older chart carrying
+                a separator under an unslashed style does not resurrect it.
+
+                Live Metabase (:3033) renders this unconditionally; egret deliberately does not, for
+                the reason the rest of this PR exists. The three options are Metabase's. */}
+            {(fmt.date_style ?? "MMMM D, YYYY").includes("/") && (
+              <Field label="Date separator">
+                <Select value={fmt.date_separator ?? "/"}
+                  onValueChange={(v) => patch({ date_separator: v as ColumnFormat["date_separator"] })}>
+                  <SelectTrigger aria-label="Date separator" className="h-8"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="/">2024/01/31</SelectItem>
+                    <SelectItem value="-">2024-01-31</SelectItem>
+                    <SelectItem value=".">2024.01.31</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+            )}
+
+            {/* `time_enabled` is a BUCKET, not a switch: it says how much of the time to show, and
+                `formatDate` widens `h:mm` to `h:mm:ss` / `h:mm:ss.SSS` from it. Metabase's own four
+                options and their wording.
+
+                "Off" writes `null`, not `undefined`. `null` is what the type declares for "no time"
+                and what `specifiesDateRendering` already treats as silence; `undefined` would leave
+                the key present-and-absent, which is the state `format.ts` records as having cost an
+                axis its bucket label once already. */}
+            <Field label="Show the time">
+              <Select value={fmt.time_enabled ?? "off"}
+                onValueChange={(v) => patch({ time_enabled: v === "off" ? null : (v as ColumnFormat["time_enabled"]) })}>
+                <SelectTrigger aria-label="Show the time" className="h-8"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="off">Off</SelectItem>
+                  <SelectItem value="minutes">HH:MM</SelectItem>
+                  <SelectItem value="seconds">HH:MM:SS</SelectItem>
+                  <SelectItem value="milliseconds">HH:MM:SS.MS</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+
+            {/* `formatDate` reads `time_style` ONLY inside `if (fmt.time_enabled)`, so with the time
+                off this is a 12-versus-24-hour choice about a clock that is not drawn. Measured on
+                live Metabase, which shows it anyway; not copied, for the same reason as above. */}
+            {fmt.time_enabled && (
+              <Field label="Time style">
+                <Select value={fmt.time_style ?? "h:mm A"}
+                  onValueChange={(v) => patch({ time_style: v as ColumnFormat["time_style"] })}>
+                  <SelectTrigger aria-label="Time style" className="h-8"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="h:mm A">5:24 PM (12-hour clock)</SelectItem>
+                    <SelectItem value="HH:mm">17:24 (24-hour clock)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+            )}
           </div>
         )}
 
-        {!isNumericType(c.type) && !isTemporalType(c.type) && (
+        {allowViewAs && !isNumericType(c.type) && !isTemporalType(c.type) && (
           <div className="space-y-3">
             <Field label="Display as">
               <Select value={fmt.view_as ?? "auto"}

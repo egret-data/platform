@@ -440,3 +440,100 @@ describe("TableColumnsSection — a column whose type is unknown", () => {
     expect(screen.getByLabelText("Move state up")).toBeInTheDocument();
   });
 });
+
+/**
+ * THREE BEHAVIOURS THIS FILE'S COMMENTS CLAIM AND NO ASSERTION HELD.
+ *
+ * A mutation sweep ran 64 mutations across 12 source files against 15 chart test files; 55 of 59
+ * scoreable mutants died and four survived EVERY test in the suite. Three of them are here, and all
+ * four share one shape: a behaviour argued for at length in a comment, implemented correctly, and
+ * pinned by nothing. A comment is not a test — it does not fail when someone deletes the code it
+ * describes, which is precisely what each mutation below did.
+ *
+ * Each was run against its mutant before being kept.
+ */
+describe("TableColumnsSection — the comments, now asserted", () => {
+  /**
+   * MUTANT: `disabled={!!q || i === 0}` → `disabled={i === 0}` (both arrows).
+   *
+   * The comment says "the row above a match is off screen, so 'up' would swap with something the
+   * reader cannot see", and that is exactly what the mutant restores: `move()` swaps by the index
+   * in `ordered` — the FULL list — while the reader is looking at the filtered one, so pressing ▲
+   * on the top visible row silently reorders two columns neither of which is where they are
+   * pointing. The search box only appears at `COLUMN_FILTER_MIN` columns, so the fixture has to be
+   * that wide for the case to exist at all.
+   */
+  it("disables both reorder arrows while a search is filtering the list", async () => {
+    const cols = manyCols(14);
+    render(<TableColumnsSection columns={cols} value={{}} onChange={vi.fn()} />);
+    // Unfiltered, a middle row moves in both directions — the state the assertion below contrasts.
+    expect(screen.getByLabelText("Move col_7 up")).not.toBeDisabled();
+    expect(screen.getByLabelText("Move col_7 down")).not.toBeDisabled();
+
+    await userEvent.type(screen.getByLabelText("search columns"), "col_7");
+    expect(screen.getByLabelText("Move col_7 up")).toBeDisabled();
+    expect(screen.getByLabelText("Move col_7 down")).toBeDisabled();
+    // And it says why, rather than looking broken.
+    expect(screen.getByLabelText("Move col_7 up")).toHaveAttribute("title", "Clear the search to reorder");
+  });
+
+  it("gives the arrows back when the search is cleared", async () => {
+    render(<TableColumnsSection columns={manyCols(14)} value={{}} onChange={vi.fn()} />);
+    const box = screen.getByLabelText("search columns");
+    await userEvent.type(box, "col_7");
+    await userEvent.clear(box);
+    expect(screen.getByLabelText("Move col_7 up")).not.toBeDisabled();
+  });
+
+  /**
+   * MUTANT: `const Icon = c.type ? colIcon(c.type) : null` → `colIcon(c.type)`.
+   *
+   * `colIcon` falls through to the Text icon for anything it does not recognise, so the mutant
+   * draws a confident "this is text" glyph next to `subtotal` on every dashboard card — cards carry
+   * no column types at all. Only the BADGE half of that argument was pinned ("claims no type rather
+   * than claiming Text" above, which asserts the absent word); the icon half survived, because an
+   * icon has no text for `queryByText` to miss.
+   */
+  it("draws no type icon for a column whose type is unknown", () => {
+    const { container } = render(
+      <TableColumnsSection columns={[{ name: "subtotal", type: "" }]} value={{}} onChange={() => {}} />,
+    );
+    const row = container.querySelector('[data-column="subtotal"]')!;
+    // Not "no svg anywhere in the row" — the eye and the drill-in are svgs too and are supposed to
+    // be there. The icon slot is the element between the arrow stack and the name.
+    const slot = row.children[1];
+    expect(slot.tagName.toLowerCase()).toBe("span");
+    expect(slot.querySelector("svg")).toBeNull();
+  });
+
+  it("still draws one where the type IS known, so the assertion above is about the type", () => {
+    const { container } = render(
+      <TableColumnsSection columns={[{ name: "subtotal", type: "double" }]} value={{}} onChange={() => {}} />,
+    );
+    const slot = container.querySelector('[data-column="subtotal"]')!.children[1];
+    expect(slot.tagName.toLowerCase()).toBe("svg");
+  });
+
+  /**
+   * MUTANT: `Math.max(0, Math.min(n, columns.length))` → `n`.
+   *
+   * `ChartTable` pins the first `pinnedLeft` columns and offsets them past the row-index gutter, so
+   * a count past the end of the result is a promise the renderer cannot keep. `min`/`max` on the
+   * input do not stop it — PR #398 measured that they only set `validity.*` flags at form
+   * submission and block no keystroke — so the clamp has to be in the handler, and nothing asserted
+   * that it was.
+   */
+  it("clamps a freeze count past the end of the result", () => {
+    const onChange = vi.fn();
+    render(<TableColumnsSection columns={COLS} value={{}} onChange={onChange} />);
+    fireEvent.change(screen.getByLabelText("Freeze first columns"), { target: { value: "99" } });
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ pinnedLeft: 2 }));
+  });
+
+  it("clamps a negative freeze count to zero", () => {
+    const onChange = vi.fn();
+    render(<TableColumnsSection columns={COLS} value={{}} onChange={onChange} />);
+    fireEvent.change(screen.getByLabelText("Freeze first columns"), { target: { value: "-3" } });
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ pinnedLeft: 0 }));
+  });
+});
