@@ -60,6 +60,17 @@ export interface FieldDescriptorSpec {
   /** Reads a v1 chart that predates the nested key, from its spec. */
   legacyFromSpec?: (spec: QuerySpec) => Cfg;
   display?: VizControl<Cfg>[];
+  /**
+   * Extra controls for the DATA section, rendered after the field pickers.
+   *
+   * Separate from `display` rather than folded into it, even though a `VizControl` carries its own
+   * `section` and either array would work: `display` is passed to nine descriptors and reads as
+   * "this viz's display settings" at every one of them. The trend's Comparisons genuinely belong on
+   * the Data tab — that is where Metabase puts them, beside the primary-number picker, because a
+   * comparison is part of what the card SAYS and not how it looks — and slipping a data control
+   * into a list named `display` would make the next reader trust the name over the field.
+   */
+  data?: VizControl<Cfg>[];
 }
 
 const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
@@ -217,7 +228,7 @@ function DimensionsControl({ field, config, options, labelOf, onChange, unitRow 
  * control-panel definitions, without building a general widget framework for it.
  */
 export function fieldDescriptor(spec: FieldDescriptorSpec): VizDescriptor<Cfg> {
-  const { key, prefix, fields, legacyKey, legacyFromSpec, display = [] } = spec;
+  const { key, prefix, fields, legacyKey, legacyFromSpec, display = [], data = [] } = spec;
   return {
     key,
     meta: CHART_TYPES.find((t) => t.key === key)!,
@@ -264,6 +275,7 @@ export function fieldDescriptor(spec: FieldDescriptorSpec): VizDescriptor<Cfg> {
         section: "data",
         render: (props) => <FieldControl field={f} {...props} />,
       })),
+      ...data,
       ...display,
     ],
   };

@@ -51,6 +51,10 @@ describe("SmartScalarChart", () => {
     const label = screen.getByRole("img").getAttribute("aria-label") ?? "";
     expect(label).toContain("150");
     expect(label).toMatch(/up/);
-    expect(label).toContain("previous 100");
+    // MOVED: was `previous 100`. There is no temporal unit here, so the default comparison is
+    // `previousValue`, and that arm now names the row it reached rather than saying "previous".
+    // Same correction as `SmartScalarChart.test.tsx`'s — the accessible name tracks the caption,
+    // which is the property this test is really for.
+    expect(label).toContain("versus Jan, 100");
   });
 });

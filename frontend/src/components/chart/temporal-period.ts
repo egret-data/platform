@@ -116,6 +116,12 @@ const NUMERIC_OFFSET = /([+-])(\d{2}):?(\d{2})$/;
  * (`frontend/src/metabase/utils/time-dayjs.ts:95-96`) does the same through `moment.parseZone`'s
  * dayjs equivalent.
  *
+ * EXPORTED for `trend-comparison.ts`, which needs the identical parse for a different question:
+ * upstream's `computeComparisonPeriodsAgo` and `areDatesTheSame` are written throughout against
+ * `dayjs.parseZone`, and a "previous month" that lands on the wrong month because the viewer sits
+ * west of the data is the same defect this function exists for, arriving through arithmetic
+ * instead of through a format string.
+ *
  * This is not a nicety. A bucket labelled `2026-01-01T13:00:00Z` is the 13:00 bucket of the query
  * that produced it; handing it to a bare `dayjs()` renders it at the browser's offset, so the same
  * chart names the same bucket "1:00 PM" in London and "8:00 PM" in Saigon — and on a day or month
@@ -123,7 +129,7 @@ const NUMERIC_OFFSET = /([+-])(\d{2}):?(\d{2})$/;
  * defect this module exists to fix. Naive strings ("2026-01-01") have no zone to preserve and are
  * parsed locally, which reproduces the wall clock written in them.
  */
-function parseInOwnZone(value: unknown) {
+export function parseInOwnZone(value: unknown) {
   if (typeof value === "string") {
     if (UTC_SUFFIX.test(value)) return dayjs.utc(value);
     const m = NUMERIC_OFFSET.exec(value);
@@ -206,11 +212,18 @@ export function periodName(unit: string | undefined, value: unknown, compact = f
  * format entry yet would be reported as naming a period while `periodName` fell through to raw.
  *
  * `periodName` is total, so a caller whose fallback IS the raw string does not need this to make
- * the call — the axis formatter still calls `periodName` unguarded. What both callers need it for
- * is to know whether a period name is IN PLAY at all: the trend card because its own fallback is
- * `formatValue` rather than the raw string (a date column with no format there still reads
- * "March 1, 2026", and dropping that would be a regression), and both of them because a stored
- * column format only has to clear a higher bar when there is a period name for it to outrank.
+ * the call — the axis formatter still calls `periodName` unguarded. What the FORMATTING callers
+ * need it for is to know whether a period name is IN PLAY at all: the trend card because its own
+ * fallback is `formatValue` rather than the raw string (a date column with no format there still
+ * reads "March 1, 2026", and dropping that would be a regression), and both of them because a
+ * stored column format only has to clear a higher bar when there is a period name for it to
+ * outrank.
+ *
+ * A THIRD KIND OF CALLER arrived with the trend's comparisons and is asking something else again:
+ * `trend-comparison.ts`'s `comparableUnit` uses this to decide whether a period can be SUBTRACTED,
+ * not merely rendered. That is the same membership question reached from the arithmetic side, and
+ * routing it through here is what stops a "previous month" being offered at a granularity the
+ * caption could only print as a raw bucket value.
  *
  * A type predicate rather than a bare `boolean` so `boundarySteps` can use it as its own membership
  * check — and narrow `unit` to `string` for the `dayjs` `diff` inside it — instead of restating the

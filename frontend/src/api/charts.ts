@@ -18,6 +18,7 @@ import {
 } from "./generated/charts/charts";
 import type { ChartDataBody } from "./generated/model";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
+import type { TrendComparison } from "@/components/chart/trend-comparison";
 
 export type VizType =
   | "table" | "pivot_table"
@@ -257,6 +258,17 @@ export interface SmartScalarConfig {
   switchPositiveNegative?: boolean;
   /** Metabase "Compact number": 36,513 -> 36.5k. */
   compact?: boolean;
+  /**
+   * Metabase's `scalar.comparisons` — what the number is measured against, in authored order,
+   * capped at `MAX_COMPARISONS`. Undefined means "use the default", which is a period comparison on
+   * a bucketed trend and a previous-value one otherwise; see `chart/trend-comparison.ts`.
+   *
+   * NO CODEC ENTRY IS NEEDED, unlike the cartesian family: `fieldDescriptor` copies every stored
+   * key under the viz's prefix generically, so `smartscalar.comparisons` persists with no
+   * hand-maintained list to update. (`viz/cartesian-codec.ts` exists because the cartesian
+   * descriptor is hand-written and does keep such a list.)
+   */
+  comparisons?: TrendComparison[];
 }
 export interface BoxplotConfig {
   category?: string;

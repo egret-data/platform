@@ -875,6 +875,11 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
           unit={smart.dimension ? params.spec.temporal_units?.[smart.dimension] : undefined}
           switchPositiveNegative={!!smart.switchPositiveNegative}
           compact={!!smart.compact}
+          // Passed through unvalidated ON PURPOSE — `resolveComparisons` inside the card is the one
+          // place that decides which stored rows are drawable and what to fall back to, so a stored
+          // blob written by an older build (or by hand) gets the same treatment as one the panel
+          // just produced. Validating here as well would be a second rule to keep in step.
+          comparisons={smart.comparisons}
           // Same thread as the scalar's, for the same auto-sizer: a card owning more of the grid
           // earns a bigger ceiling for its number. Unset in the studio preview, where there is no
           // grid to measure a share of.

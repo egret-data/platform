@@ -437,6 +437,119 @@ khai, công tắc lật nhưng trục không đổi: cột rating chạy **0 đ�
 
 ---
 
+## CẬP NHẬT — C3 đã thực thi, và lỗi caption được ước lượng cùng nó
+
+Viết sau khi làm, cùng tinh thần với ghi chú loại bỏ và ba mục cập nhật ở trên. **C3 được ship, ở
+đúng "tập con trung thực rẻ nhất" mà chính ghi chú ước lượng của nó đề xuất cộng thêm một kiểu, và
+khoảng trống đúng-sai mà mục đó xếp vào "tìm thấy, không sửa" được sửa cùng luôn** — vì hoá ra nó
+không phải một mục riêng. Văn bản gốc được giữ nguyên.
+
+### Caption nói dối, và nó đã được sửa theo hướng nào
+
+Ghi chú ước lượng của C3 xếp việc này thành: *"trend của egret lấy `valid[n - 1]` và `valid[n - 2]` —
+DÒNG không rỗng liền trước, tức `previousValue` của Metabase — rồi caption nó là 'vs previous month',
+tức `previousPeriod` của Metabase."* Điều đó hoàn toàn đúng, và nó để ngỏ việc bên nào phải đổi. Đó là
+hai sản phẩm khác nhau, nên yêu cầu của đơn vị này là câu trả lời phải đến từ HÀNH VI của Metabase chứ
+không từ khẩu vị.
+
+**PHẦN TÍNH TOÁN ĐỔI. CAPTION GIỮ NGUYÊN.** Ba nguồn độc lập, tất cả đều thống nhất:
+
+1. **Lái trực tiếp tại :3033**, trên một câu hỏi ad-hoc Orders/Count-theo-tháng lọc `Nov 1 – Dec 31
+   2028 HOẶC Apr 1–30 2029` để tháng 1 đến tháng 3 bị khuyết, mang một comparison `previousPeriod` và
+   một `previousValue`. Nguyên văn:
+
+   ```text
+   344
+   Apr 2029
+   N/A       vs. previous month: (No data)
+   ↓ 37.45%  vs. Dec 2028: 550
+   ```
+
+   `previousPeriod` từ chối với qua chỗ khuyết và nói rõ điều đó. `previousValue` với tới DÒNG liền
+   trước rồi gọi tên đúng kỳ nó chạm được — "Dec 2028", không bao giờ là "previous month". **Không
+   cái nào là thứ egret đã vẽ**, vốn là `▼ 37.45% vs previous month: 550`.
+
+2. **Unit spec của chính Metabase**, cả hai nhánh: `SmartScalar/compute.unit.spec.ts:487-505` kỳ vọng
+   `changeType: "missing"` cho `previousPeriod` qua khoảng trống hai năm, và `:250-271` kỳ vọng
+   `dateStr: "Sep"` cho `previousValue` qua một tháng 10 khuyết.
+
+3. **`getDefaultComparison` (`SmartScalar/utils.ts`) quyết định mặc định của egret phải là cái nào**:
+   một chuỗi **có** đơn vị thời gian mặc định là `previousPeriod`; **không có** thì mặc định là
+   `previousValue`. Trend của egret in "vs previous month" đúng khi nó có đơn vị — nên caption nó đã
+   ship chính là caption mà mặc định của Metabase tạo ra. Làm caption trung thực về phép duyệt dòng
+   sẽ đẩy mặc định của egret RA KHỎI mặc định của Metabase.
+
+**Hai hệ quả là thay đổi hành vi, cả hai đều được lái trước khi chấp nhận.** Một trend chỉ có một kỳ
+trước đây chỉ vẽ con số; giờ nó vẽ `N/A / vs previous month: (No data)`, đúng như :3033 hiển thị cho
+cùng truy vấn (kiểm riêng, với bộ lọc một tháng). Và một trend không có đơn vị trước nói "vs
+previous"; giờ nó gọi tên dòng — "vs Jan: 100".
+
+### Cái gì được ship, và một kiểu không được
+
+**Bốn trong năm kiểu comparison**: `previousPeriod`, `periodsAgo`, `previousValue`, `staticNumber`.
+Mô hình danh sách, giới hạn ba của Metabase, các quy tắc hợp lệ và quy tắc mặc định đều được mang qua.
+
+**`anotherColumn` bị bỏ, và ranh giới sắc hơn ranh giới của kế hoạch.** Nó là kiểu DUY NHẤT trong năm
+kiểu **chạm vào truy vấn**: spec của trend là `dimsAndMetrics([c.dimension], [c.metric], s)`, đúng một
+metric theo cấu trúc. Ranh giới vẽ ở đây là: *mọi thứ là hàm thuần trên các dòng đã lấy về thì ship;
+cái cần thêm một cột vào spec thì không.*
+
+**Và Metabase cũng đồng ý, điều này không được dự đoán trước.** Lái menu kiểu trên một trend
+Count-theo-tháng tại :3033 cho đúng `Previous month / _ months ago / Previous value / Custom value…` —
+không có mục thứ năm, vì `getComparisonOptions` chỉ mời `anotherColumn` khi
+`getColumnsForComparison` tìm được một cột số khác cột chính. Trên mọi trend egret hiện dựng được thì
+không có. **Bốn kiểu ship ở đây CHÍNH LÀ danh sách của Metabase cho chart này**, không phải tập con.
+
+**`periodsAgo` được thêm ngoài tập con đề xuất** vì chi phí biên hoá ra không đáng kể: nó là phép tính
+của `previousPeriod` với `back = N`, và cả hai nhánh caption của nó đều đã cần cho việc khác.
+
+### Một mối nguy kế hoạch không thể gọi tên: accessor của `dayjs` là plugin
+
+Chốt lệch múi giờ của `areDatesTheSame` đọc số của đơn vị từ ngày — `target[dateUnit]()` ở thượng
+nguồn. **`.week()` không thuộc dayjs lõi và `.quarter()` cũng vậy.** Thượng nguồn lấy cả hai từ một
+đăng ký toàn cục; egret không có, nên một trend gom theo tuần sẽ ném lỗi trong lúc render chứ không
+trả về đáp án sai. Ở đây nó là `switch` chứ không phải index, nên một đơn vị không có accessor là lỗi
+biên dịch, và module tự đăng ký `weekOfYear`.
+
+Một điểm lạ của thượng nguồn được mang nguyên văn kèm lý do: **`.day()` của dayjs là thứ trong TUẦN**,
+không phải trong tháng. Nó đủ dùng — chốt chỉ chạy sau `diff(…, "day") === 0` — và `.date()` dễ đọc
+hơn nhưng sẽ là một sai lệch âm thầm so với mã đang được port.
+
+### Mutation: giết 25 trong 29, và bốn cái sống sót đều được lập luận
+
+Harness ghi nhật ký byte của file TRƯỚC lần ghi đầu tiên, chấm điểm chỉ theo mã thoát tiến trình con,
+yêu cầu mọi chuỗi tìm kiếm khớp **đúng một lần**, từ chối chấm một lần chạy không có test nào, khôi
+phục trên mọi đường tín hiệu, và kết thúc bằng so sánh byte-với-byte cùng một lần chạy sạch toàn bộ.
+**Lần chạy đầu của chính nó bị chốt "không có test" từ chối** — vitest tô màu phần tổng kết nên regex
+đếm không khớp gì — đó là chốt hoạt động trên chính harness.
+
+Một cái sống sót là **khoảng trống thật**: xoá chốt thô `diff !== 0` của `areDatesTheSame` sống sót,
+vì `.month()` là 0–11 nên tháng 2 năm 2028 và tháng 2 năm 2029 đều báo 1. Hai test giờ ghim nó.
+
+**Ba cái là mutant tương đương, kèm lập luận:** hai chốt biên của phép tìm kiếm chỉ là đường tắt (các
+dòng đến theo thứ tự tăng dần nên một khi ứng viên cũ hơn mục tiêu thì không dòng nào trước đó khớp
+được); chốt `namesAPeriod` của `comparableUnit` chồng lấn với danh sách bảy tên bên cạnh; và
+`.day()` → `.date()` là cái đã dự đoán trước.
+
+### Một chú thích mà chính diff của PR này làm lỗi thời, ở bốn chỗ
+
+Bốn chỗ khẳng định `SmartScalarChart` đọc `valid[n - 1]` và `valid[n - 2]` — `viz/orderby.ts`,
+`viz/simple.tsx`, và `viz/__tests__/orderby.test.ts` hai lần. **Chính PR này làm điều đó thành sai.**
+Kết luận vẫn đứng và thực ra mạnh hơn: phép tìm kiếm ngược dừng ở ứng viên đầu tiên cũ hơn mục tiêu,
+chỉ đúng dưới thứ tự tăng dần, nên thứ tự chuyển từ tính chất ngẫu nhiên của "hai dòng cuối" thành
+tiền đề được phát biểu. Cả bốn chỗ giờ nói đúng.
+
+### Tìm thấy, không sửa
+
+**Dòng comparison trên card hẹp, giờ có thể tới ba dòng.** Metabase giải bằng `getValueHeight` (rớt về
+một comparison khi không đủ chỗ). Đó là quy tắc phụ thuộc kích thước nên **jsdom không kiểm được**, và
+là quyết định thiết kế cùng họ với mục PR B đã hoãn.
+
+**Phần trăm với mẫu số bằng 0 của egret là sai lệch cố ý giữ lại.** Thượng nguồn vẽ "∞%"; egret luôn
+vẽ thay đổi tuyệt đối. Port nó sẽ đổi mọi card đã lưu có mẫu số 0.
+
+---
+
 ## Cố ý nằm ngoài phạm vi
 
 Hai thế hệ shadcn (vòng đặc `ring-2 ring-ring ring-offset-2` so với hai phần `border-ring` +

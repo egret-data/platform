@@ -45,11 +45,12 @@ describe("an authored sort reaches every descriptor's spec", () => {
   }
 
   /**
-   * THE EXCEPTION, and why. `SmartScalarChart` reads `valid[n - 1]` and `valid[n - 2]` as "this
-   * period" and "the one before it", and labels the delta with the period the last row covers. Its
-   * dimension order is not a default nobody asked for — the thing Metabase's rule lets an author
-   * override — it is a precondition of the arithmetic. An authored `revenue DESC` would still draw
-   * a number and a period caption, both wrong, with nothing on screen saying so.
+   * THE EXCEPTION, and why. `trend-comparison.ts` searches BACKWARDS from the latest row for the
+   * one whose date is a whole period earlier, and stops as soon as a candidate is older than the
+   * target — sound only because the rows arrive in ascending dimension order. (It used to be a
+   * simpler claim, "the last two rows", which the comparisons work replaced; the precondition is
+   * the same one and is now explicit rather than incidental.) An authored `revenue DESC` would
+   * still draw a number and a period caption, both wrong, with nothing on screen saying so.
    */
   it("smartscalar keeps its own dimension order, because its arithmetic depends on it", () => {
     const d = simple("smartscalar");
@@ -211,8 +212,9 @@ describe("honoursOrderby", () => {
   });
 
   it("is false for the trend, whose dimension order is a precondition of its arithmetic", () => {
-    // `SmartScalarChart` reads valid[n-1] and valid[n-2] as this period and the one before, so an
-    // authored sort would draw a number and a caption computed from two rows that are neither.
+    // `trend-comparison.ts` searches backwards for the row one period earlier and stops at the
+    // first candidate older than the target, which needs ascending order; an authored sort would
+    // draw a number and a caption computed from rows that are neither.
     expect(honoursOrderby(getDescriptor("smartscalar")!, { dimension: "day", metric: "revenue" } as never)).toBe(false);
     // Also with nothing configured yet — the control must not flicker into existence.
     expect(honoursOrderby(getDescriptor("smartscalar")!, {} as never)).toBe(false);

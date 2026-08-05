@@ -37,12 +37,16 @@ export function sortableFields(spec: QuerySpec): string[] {
  * spec with a sentinel clause and looking for it, rather than kept as a list of viz keys here that
  * a new descriptor would have to remember to join.
  *
- * Smartscalar is the one that answers no, and deliberately: `SmartScalarChart` reads `valid[n - 1]`
- * and `valid[n - 2]` as "this period" and "the one before", so its dimension order is a
- * precondition of the arithmetic rather than a default an author may override. Under an authored
- * `revenue DESC` a trend would still draw a number and a "vs. previous month" caption, both
- * computed from two rows that are neither, with nothing on screen to say so. So the control is not
- * offered there — an absent control beats a silently wrong number.
+ * Smartscalar is the one that answers no, and deliberately — and the reason is STRONGER since the
+ * comparisons work, not weaker. It used to be that `SmartScalarChart` read the last two usable rows
+ * as "this period" and "the one before". It no longer does: `trend-comparison.ts` searches for the
+ * row whose DATE is one period back. That search walks backwards and stops the moment a candidate
+ * is older than the target, which is only sound because the rows arrive in ascending dimension
+ * order — so the order is now a documented precondition of the search rather than an implicit
+ * property of "the last two". Under an authored `revenue DESC` a trend would still draw a number
+ * and a "vs previous month" caption, both computed from rows that are neither, with nothing on
+ * screen to say so. So the control is not offered there — an absent control beats a silently wrong
+ * number.
  */
 export function honoursOrderby(descriptor: VizDescriptor<never>, config: never): boolean {
   const probed = descriptor.buildSpec(config, { ...NO_SHARED, orderby: [{ field: PROBE, desc: false }] });

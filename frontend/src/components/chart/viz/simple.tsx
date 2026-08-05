@@ -5,6 +5,8 @@ import { WaterfallBarsSection, WaterfallFormatSection } from "@/components/chart
 import { ChartAxesSection } from "@/components/chart/settings/ChartAxesSection";
 import { BoxplotDisplaySection } from "@/components/chart/settings/BoxplotDisplaySection";
 import { SankeyDisplaySection } from "@/components/chart/settings/SankeyDisplaySection";
+import { TrendComparisonsSection } from "@/components/chart/settings/TrendComparisonsSection";
+import type { TrendComparison } from "@/components/chart/trend-comparison";
 import { AXES_GROUP } from "@/components/chart/StudioPanel";
 import type { BoxplotConfig, GaugeSegment, PieConfig, SankeyConfig, ScalarConfig, WaterfallConfig } from "@/api/charts";
 import { Label } from "@/components/ui/label";
@@ -99,6 +101,32 @@ function TrendDisplayControl({ config, onChange }: VizControlProps<Cfg>) {
 }
 
 const trendDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display", render: TrendDisplayControl }];
+
+/**
+ * The trend's Comparisons list, on the DATA tab where Metabase puts it.
+ *
+ * `temporalUnits` is a PROP of the control rather than something read off `config` for the same
+ * reason the pie's slice list takes it: the bucketing is QUERY state (`spec.temporal_units`), owned
+ * by no descriptor. Two of the four comparison types have nothing to count without it, so the panel
+ * would otherwise offer "Previous month" on a chart with no months in it — a control that saves and
+ * cannot paint.
+ *
+ * FROZEN WITH THE RESULT, like every other consumer of that map: it is the unit the query on screen
+ * actually ran with, so the menu describes the chart the user is looking at rather than one they
+ * have half-configured.
+ */
+function TrendComparisonsControl({ config, onChange, temporalUnits }: VizControlProps<Cfg>) {
+  const dimension = typeof config.dimension === "string" ? config.dimension : undefined;
+  return (
+    <TrendComparisonsSection
+      comparisons={config.comparisons as TrendComparison[] | undefined}
+      unit={dimension ? temporalUnits[dimension] : undefined}
+      onChange={(comparisons) => onChange({ comparisons } as Partial<Cfg>)}
+    />
+  );
+}
+
+const trendData: VizControl<Cfg>[] = [{ id: "comparisons", section: "data", render: TrendComparisonsControl }];
 
 /** The progress bar's colour and its goal-from-a-column, both Metabase's. */
 function ProgressDisplayControl({ config, onChange, metrics }: VizControlProps<Cfg>) {
@@ -358,21 +386,26 @@ export const SIMPLE_DESCRIPTORS: VizDescriptor<Cfg>[] = [
     legacyFromSpec: (spec) => ({ xAxis: spec.dimensions?.[0], metric: spec.metrics?.[0] }),
   }),
   fieldDescriptor({
-    key: "smartscalar", prefix: "smartscalar.", legacyKey: "smartscalar", display: trendDisplay,
+    key: "smartscalar", prefix: "smartscalar.", legacyKey: "smartscalar",
+    display: trendDisplay, data: trendData,
     fields: [
       { id: "dimension", label: "Time / order dimension", kind: "dimension", required: "a time dimension", temporal: true },
       { id: "metric", label: "Metric", kind: "metric", required: "a metric" },
     ],
     /**
-     * Trend compares the last two periods, so the rows must come back in dimension order.
+     * Trend compares its latest period against an earlier one, so the rows must come back in
+     * dimension order.
      *
      * THE ONE DESCRIPTOR THAT IGNORES `shared.orderby`, deliberately. Metabase's precedence rule
      * lets an author override the query processor's implicit ascending breakout clause — a default
-     * nobody asked for. This is not that: `SmartScalarChart` reads `valid[n - 1]` and `valid[n - 2]`
-     * as "this period" and "the one before", and captions the delta with the period the last row
-     * covers. The order is a precondition of the arithmetic, not a default. Under an authored
-     * `revenue DESC` the card would still draw a number and a "vs. previous month" caption, both
-     * computed from two rows that are neither, with nothing on screen to say so.
+     * nobody asked for. This is not that. The claim here used to be "`SmartScalarChart` reads
+     * `valid[n - 1]` and `valid[n - 2]`", which the comparisons work replaced and which is why this
+     * paragraph was rewritten rather than left standing: `trend-comparison.ts` now searches
+     * backwards for the row whose DATE is one period earlier and stops at the first candidate older
+     * than the target. That short-circuit is sound only under ascending order, so the order is a
+     * STATED precondition of the search rather than an incidental property of "the last two". Under
+     * an authored `revenue DESC` the card would still draw a number and a "vs previous month"
+     * caption, both computed from rows that are neither, with nothing on screen to say so.
      *
      * The honest consequence for the sort control: it must not be offered on a trend, or it would
      * be an inert control. Silently accepting it and drawing a wrong number is the worse of the two.
