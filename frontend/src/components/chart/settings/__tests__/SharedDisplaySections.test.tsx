@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { SharedDisplaySections, styleColumnsFor, ruleColumnsFor } from "../SharedDisplaySections";
 import type { VizType } from "@/api/charts";
 
@@ -174,5 +175,99 @@ describe("SharedDisplaySections — the table has ONE column list", () => {
     render(<SharedDisplaySections vizType="pivot_table" {...common}
       styleColumns={[{ name: "revenue", type: "bigint" }]} only="format" />);
     expect(screen.getByText("Formatting")).toBeInTheDocument();
+  });
+});
+
+/**
+ * "Display as" — and the two link templates under it — belong to the TABLE and to nothing else.
+ *
+ * `ChartTable.renderTableCell` is the only renderer in the app that branches on `view_as`; every
+ * other viz turns a cell value into text through `formatValue`, which does not consult it (and
+ * says so, exhaustively, in `format.ts`'s `CONSULTED_BY_FORMAT_DATE`). So a pivot row-dimension, a
+ * cartesian x-axis, a pie dimension, a sankey node column and an object-detail field all offered a
+ * "Display as → Link" select and two template inputs that saved and painted nothing.
+ *
+ * VERIFIED BY RUNNING, not only by reading: a probe rendered all nineteen viz types through
+ * `ChartRenderer` with `view_as`/`link_text`/`link_url` behind recording getters. `table` was the
+ * only type whose stacks reached a consuming read (`ChartTable.tsx` `renderTableCell`); every other
+ * touch was an object SPREAD into a `ColumnFormat` bound for `formatValue`
+ * (`cartesian.ts` `{...col, compact}`, `scalar.ts` `compactifyValue`, `boxplot.ts` `fmt`) or a
+ * `JSON.stringify` memo key. `viewAsIsTableOnly.test.tsx` keeps that conclusion pinned.
+ *
+ * The gate is `allowMiniBar`'s, reused rather than re-invented — `show_mini_bar` had exactly this
+ * defect and was closed the same way.
+ */
+describe("SharedDisplaySections — Display as is the table's, and only the table's", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "revenue", type: "bigint" }];
+  const common = {
+    resultColumns: cols,
+    styleColumns: cols,
+    tableState: {},
+    columnSettings: {},
+    conditionalFormatting: [],
+    onTableState: vi.fn(),
+    onColumnSettings: vi.fn(),
+    onConditionalFormatting: vi.fn(),
+  };
+
+  // Every viz that mounts the shared Formatting accordion, i.e. all of them but the table. Named
+  // one by one rather than looped over `VizType` so that a new viz is a deliberate addition here
+  // — but broad enough that the gate cannot be wired for the pivot alone and left off the rest.
+  const NON_TABLE: VizType[] = ["pivot_table", "bar", "line", "pie", "sankey", "object", "map"];
+
+  it.each(NON_TABLE)("%s offers no Display as", async (vizType) => {
+    render(<SharedDisplaySections vizType={vizType} {...common} only="format" />);
+    // The accordion body only mounts once its column row is expanded.
+    await userEvent.click(screen.getByText("region"));
+    // Vacuity guard. A row that failed to expand renders no fields at all, and every assertion
+    // below would then pass while proving nothing — which is the exact shape of the mutation this
+    // whole PR's Group C is about. `Column title` is in the body for a column of any type.
+    expect(screen.getByText("Column title")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Display as")).not.toBeInTheDocument();
+    expect(screen.queryByText("Link text")).not.toBeInTheDocument();
+    expect(screen.queryByText("Link URL")).not.toBeInTheDocument();
+  });
+
+  // The other half of the same rule: where the setting IS read, the control has to still be there.
+  // Without this, "delete the control" passes the assertion above just as well as "gate it".
+  it("the table still offers it, in the row's drill-in", async () => {
+    render(<SharedDisplaySections vizType="table" {...common} only="format" />);
+    await userEvent.click(screen.getByLabelText("settings region"));
+    expect(screen.getByLabelText("Display as")).toBeInTheDocument();
+  });
+});
+
+/**
+ * #410 moved the table's formatting into a per-row drill-in, so `ColumnFormatFields` now has TWO
+ * mounts — the accordion every other viz gets, and `ColumnSettingsPopover`. A control added to the
+ * temporal branch has to arrive at both, and the only reason it does is that they share the
+ * component rather than each holding a copy. Pinned here so a future "just add it to the accordion"
+ * cannot quietly re-fork them.
+ */
+describe("SharedDisplaySections — the date/time controls reach both surfaces", () => {
+  const cols = [{ name: "ordered_at", type: "timestamp" }];
+  const common = {
+    resultColumns: cols,
+    styleColumns: cols,
+    tableState: {},
+    columnSettings: { ordered_at: { time_enabled: "minutes" as const } },
+    conditionalFormatting: [],
+    onTableState: vi.fn(),
+    onColumnSettings: vi.fn(),
+    onConditionalFormatting: vi.fn(),
+  };
+
+  it("in the pivot's Formatting accordion", async () => {
+    render(<SharedDisplaySections vizType="pivot_table" {...common} only="format" />);
+    await userEvent.click(screen.getByText("ordered_at"));
+    expect(screen.getByLabelText("Show the time")).toBeInTheDocument();
+    expect(screen.getByLabelText("Time style")).toBeInTheDocument();
+  });
+
+  it("and in the table's row drill-in", async () => {
+    render(<SharedDisplaySections vizType="table" {...common} only="format" />);
+    await userEvent.click(screen.getByLabelText("settings ordered_at"));
+    expect(screen.getByLabelText("Show the time")).toBeInTheDocument();
+    expect(screen.getByLabelText("Time style")).toBeInTheDocument();
   });
 });

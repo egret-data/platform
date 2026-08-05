@@ -80,4 +80,50 @@ describe("CardVizPanel", () => {
     expect(screen.queryByLabelText("Show 1")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Show 3")).not.toBeInTheDocument();
   });
+
+  /**
+   * THE DEAD "DISPLAY AS" REACHED DASHBOARD CARDS BY A DIFFERENT ROUTE, and it is the route most
+   * likely to survive a gate written against the builder alone.
+   *
+   * `DashboardView` cannot see a card's result columns, so it builds the panel's column list out of
+   * the chart's saved spec and gives every dimension `type: ""` (only metrics get a real
+   * `"double"`). An empty type is neither numeric nor temporal, so EVERY dimension on EVERY card
+   * lands in exactly the branch that used to offer Display as — a bar card's x-axis showed the
+   * link select and its two template boxes even though nothing but a flat table can draw a link.
+   *
+   * The fixture keeps `type: ""` for that reason: giving these columns "varchar" would test a
+   * shape this panel never actually receives.
+   */
+  const dashColumns = [{ name: "region", type: "" }, { name: "rev", type: "double" }];
+
+  it("a bar card offers no Display as for its untyped dimension", async () => {
+    const user = userEvent.setup();
+    const barChart = {
+      ...chart,
+      params: {
+        spec: { metrics: ["rev"], dimensions: ["region"], columns: [], filters: [], orderby: [], row_limit: 100, rollup_groups: [] },
+        cartesian: { xAxis: "region", yMetrics: ["rev"] },
+      },
+    } as unknown as Chart;
+    render(<CardVizPanel chart={barChart} override={undefined} columns={dashColumns} rows={[]} onChange={vi.fn()} />);
+    await user.click(screen.getByText("region"));
+    // Vacuity guard: the accordion row really did expand, so "absent" is a statement about the
+    // control rather than about an unopened body.
+    expect(screen.getByText("Column title")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Display as")).not.toBeInTheDocument();
+  });
+
+  it("a TABLE card still offers it — the card's renderer is the one that reads it", async () => {
+    const user = userEvent.setup();
+    const tableChart = {
+      ...chart,
+      viz_type: "table",
+      params: {
+        spec: { metrics: [], dimensions: [], columns: ["region", "rev"], filters: [], orderby: [], row_limit: 100, rollup_groups: [] },
+      },
+    } as unknown as Chart;
+    render(<CardVizPanel chart={tableChart} override={undefined} columns={dashColumns} rows={[]} onChange={vi.fn()} />);
+    await user.click(screen.getByLabelText("settings region"));
+    expect(screen.getByLabelText("Display as")).toBeInTheDocument();
+  });
 });

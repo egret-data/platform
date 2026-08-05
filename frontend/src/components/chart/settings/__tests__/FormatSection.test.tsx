@@ -251,3 +251,75 @@ describe("FormatSection — Decimal places cannot store a value Intl rejects", (
     expect(input).toHaveAttribute("step", "1");
   });
 });
+
+/**
+ * THREE DATE/TIME FIELDS THE FORMATTER READ AND THE PANEL COULD NOT WRITE.
+ *
+ * `formatDate` consults `date_separator`, `time_enabled` and `time_style` — and `format.ts`'s
+ * `CONSULTED_BY_FORMAT_DATE` marks all three `true`, which is as explicit as a codebase gets about
+ * a setting mattering — while the temporal branch here offered only `date_style` and
+ * `date_abbreviate`. A month bucket could be styled and a timestamp could not have its time shown
+ * at all, which is the same shape of defect that had already cost `scale`, `number_separators` and
+ * the pie's four settings.
+ *
+ * BOTH CONTROLS ARE CONDITIONAL, and that is this PR's own rule rather than the reference's. Live
+ * Metabase at :3033 renders `date_separator` and `time_style` unconditionally — measured, with the
+ * time set to Off and the radios still in the popover. egret does not, because `formatDate` reads
+ * `time_style` ONLY inside `if (fmt.time_enabled)`, and applies `date_separator` only as
+ * `dateFmt.replace(/\//g, …)` — so under "Off", and under a date style with no slash in it, each is
+ * a control that saves a value and changes nothing. Offering that is precisely what Group A of this
+ * PR removes elsewhere; it would be incoherent to add two more of them here for parity's sake. The
+ * OPTION SETS and the labels are Metabase's exactly.
+ */
+describe("FormatSection — the temporal branch's missing controls", () => {
+  const openDate = (value: Record<string, ColumnFormat> = {}, onChange = vi.fn()) => {
+    render(<FormatSection columns={[{ name: "d", type: "timestamp" }]} value={value} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: /d/ }));
+    return onChange;
+  };
+
+  it("offers Show the time, and writes the bucket the formatter reads", async () => {
+    const onChange = openDate();
+    await userEvent.click(screen.getByLabelText("Show the time"));
+    await userEvent.click(await screen.findByRole("option", { name: "HH:MM:SS" }));
+    expect(onChange).toHaveBeenCalledWith({ d: { time_enabled: "seconds" } });
+  });
+
+  it("Off clears time_enabled rather than storing a string", async () => {
+    const onChange = openDate({ d: { time_enabled: "minutes" } });
+    await userEvent.click(screen.getByLabelText("Show the time"));
+    await userEvent.click(await screen.findByRole("option", { name: "Off" }));
+    expect(onChange.mock.calls.at(-1)![0]).toStrictEqual({ d: { time_enabled: null } });
+  });
+
+  it("hides Time style until the time is shown at all", async () => {
+    openDate();
+    expect(screen.queryByLabelText("Time style")).not.toBeInTheDocument();
+  });
+
+  it("offers Time style once the time is on, and writes the 24-hour clock", async () => {
+    const onChange = openDate({ d: { time_enabled: "minutes" } });
+    await userEvent.click(screen.getByLabelText("Time style"));
+    await userEvent.click(await screen.findByRole("option", { name: "17:24 (24-hour clock)" }));
+    expect(onChange).toHaveBeenCalledWith({ d: { time_enabled: "minutes", time_style: "HH:mm" } });
+  });
+
+  it("hides Date separator for a date style with no separator to replace", () => {
+    openDate({ d: { date_style: "MMMM D, YYYY" } });
+    expect(screen.queryByLabelText("Date separator")).not.toBeInTheDocument();
+  });
+
+  it("offers Date separator for a slashed date style, and writes it", async () => {
+    const onChange = openDate({ d: { date_style: "M/D/YYYY" } });
+    await userEvent.click(screen.getByLabelText("Date separator"));
+    await userEvent.click(await screen.findByRole("option", { name: "2024-01-31" }));
+    expect(onChange).toHaveBeenCalledWith({ d: { date_style: "M/D/YYYY", date_separator: "-" } });
+  });
+
+  // The default style is unslashed, so a stored separator on a style that cannot use it is
+  // reachable only from an older chart — it must not resurrect the control.
+  it("stays hidden for an unslashed style even when a separator is already stored", () => {
+    openDate({ d: { date_style: "YYYY", date_separator: "." } });
+    expect(screen.queryByLabelText("Date separator")).not.toBeInTheDocument();
+  });
+});

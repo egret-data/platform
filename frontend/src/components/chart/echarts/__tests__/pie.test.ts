@@ -3294,3 +3294,65 @@ describe("a single-ring pie's percentage and total defaults (task 5)", () => {
     expect((buildPieOption(cols, rows, { ...oneRing, showTotal: true }) as any).graphic).toBeFalsy();
   });
 });
+
+/**
+ * `sliceOrder` IS RING 0'S, AND ONLY RING 0'S.
+ *
+ * MUTANT: `if (level === 0 && cfg.sliceOrder?.length)` → `if (cfg.sliceOrder?.length)`. It survived
+ * the entire suite. `hiddenSlices`' ring-0-only rule is asserted ("curation applies to ring 0 only"
+ * above) and `sliceOrder`'s — stated in the same breath, two lines apart, by a comment that says
+ * "Ring 0 only" outright — was not.
+ *
+ * WHY IT MATTERS RATHER THAN BEING A TECHNICALITY. The panel's reorder arrows list the FIRST
+ * dimension's values and nothing else, so `sliceOrder` is a vocabulary of ring-0 keys. `Slice.raw`
+ * is each ring's own dimension value, though, so a string that happens to occur in both rings —
+ * a region also used as a category, a month also used as a label — would be reordered in a ring
+ * whose order the reader was never offered a control over, and only in that one.
+ *
+ * THE FIXTURE NEEDS THREE CHILDREN UNDER ONE PARENT. With two, "moved to the front" and "already
+ * at the front" are the same array half the time; with three, the natural (value-desc) order and
+ * the overridden one differ in a way no swap can produce by accident. The moved value is the
+ * SMALLEST, so nothing but an order override could put it first.
+ */
+describe("sliceOrder applies to ring 0 and leaves the rings outside it alone", () => {
+  const COLS2 = [
+    { name: "region", type: "varchar" },
+    { name: "category", type: "varchar" },
+    { name: "m", type: "double" },
+  ];
+  // EU's three children are deliberately unequal: value-desc is Y(30), Z(20), X(10).
+  const ROWS2: unknown[][] = [
+    ["EU", "Y", 30], ["EU", "Z", 20], ["EU", "X", 10], ["US", "W", 40],
+  ];
+  const build = (extra: Record<string, unknown> = {}) =>
+    buildPieOption(COLS2, ROWS2, { dimensions: ["region", "category"], metric: "m", ...extra }) as any;
+
+  it("the fixture draws two rings in the orders the assertions below are about", () => {
+    const opt = build();
+    expect(ring(opt, 0).map((d: any) => d.name)).toEqual(["EU", "US"]);
+    // Depth-first: EU's children in value-desc order, then US's.
+    expect(ring(opt, 1).map((d: any) => d.name)).toEqual(["Y", "Z", "X", "W"]);
+  });
+
+  it("naming a ring-1 value in sliceOrder does not reorder ring 1", () => {
+    const opt = build({ sliceOrder: ["X"] });
+    // Unchanged. Under the mutant X leads its parent's run and this reads ["X", "Y", "Z", "W"].
+    expect(ring(opt, 1).map((d: any) => d.name)).toEqual(["Y", "Z", "X", "W"]);
+  });
+
+  it("and does not disturb ring 0 either — the name is not a ring-0 value at all", () => {
+    expect(ring(build({ sliceOrder: ["X"] }), 0).map((d: any) => d.name)).toEqual(["EU", "US"]);
+  });
+
+  /**
+   * The positive control. Without it, deleting the whole `sliceOrder` block would pass both
+   * assertions above — "ring 1 is untouched" is satisfied most cheaply by touching nothing.
+   */
+  it("but naming a RING-0 value does reorder ring 0, and carries its children with it", () => {
+    const opt = build({ sliceOrder: ["US"] });
+    expect(ring(opt, 0).map((d: any) => d.name)).toEqual(["US", "EU"]);
+    // The children follow their parent because the sunburst nests them, not because ring 1 was
+    // re-sorted: US's single child leads, then EU's three in their own untouched order.
+    expect(ring(opt, 1).map((d: any) => d.name)).toEqual(["W", "Y", "Z", "X"]);
+  });
+});

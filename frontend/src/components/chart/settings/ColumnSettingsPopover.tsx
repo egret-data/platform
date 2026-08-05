@@ -23,12 +23,19 @@ interface ResultColumn { name: string; type: string }
  * UNLIKE the series popover, this button is never pruned. Every column has at least a title to
  * rename, whatever its type, so there is no column whose popover would open empty.
  */
-export function ColumnSettingsPopover({ column, value, onChange, allowMiniBar = true }: {
+export function ColumnSettingsPopover({
+  column, value, onChange, allowMiniBar = true, allowViewAs = true,
+}: {
   column: ResultColumn;
   /** The whole map, because the write is a merge over it — see `onChange` below. */
   value: Record<string, ColumnFormat>;
   onChange: (next: Record<string, ColumnFormat>) => void;
   allowMiniBar?: boolean;
+  /** Defaults ON, and stays on for every caller today: this popover is opened from the TABLE's
+   *  column list, and the table is the one viz whose renderer reads `view_as` at all. The prop
+   *  exists so that a future non-table list reusing this drill-in has to make the same decision
+   *  `SharedDisplaySections` makes, rather than inheriting a dead control by default. */
+  allowViewAs?: boolean;
 }) {
   const fmt = value[column.name] ?? {};
   const shown = fmt.column_title || column.name;
@@ -70,6 +77,7 @@ export function ColumnSettingsPopover({ column, value, onChange, allowMiniBar = 
             // format, and a popover that emitted only its own would wipe the other columns'.
             onPatch={(p) => onChange({ ...value, [column.name]: { ...fmt, ...p } })}
             allowMiniBar={allowMiniBar}
+            allowViewAs={allowViewAs}
           />
         </div>
       </PopoverContent>

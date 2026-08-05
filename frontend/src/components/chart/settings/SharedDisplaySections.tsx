@@ -139,12 +139,18 @@ export function SharedDisplaySections({
       {showFormat && vizType !== "table" && styleColumns.length > 0 && (
         <div className="space-y-1.5">
           <SectionLabel>Formatting</SectionLabel>
-          {/* `false`, flatly. This branch is now every viz EXCEPT the table, and the table was the
-              only one that drew a mini bar — the old `vizType === "table"` here would read as a
-              live condition that is in fact never true. The table's own mini-bar switch is in the
-              drill-in above, where `ColumnSettingsPopover` defaults it on. */}
+          {/* `false`, flatly, on BOTH. This branch is now every viz EXCEPT the table, and the
+              table was the only one that drew a mini bar or read "Display as" — the old
+              `vizType === "table"` here would read as a live condition that is in fact never true.
+              The table's own mini-bar switch and Display-as select are in the drill-in above, where
+              `ColumnSettingsPopover` defaults both on.
+
+              `allowViewAs` is the newer of the two and closes the identical defect: `view_as`,
+              `link_text` and `link_url` are read by `ChartTable.renderTableCell` and by nothing
+              else, so on every viz below this line the select and its two template boxes saved a
+              value that painted nowhere. See `ColumnFormatFields`. */}
           <FormatSection columns={styleColumns} value={columnSettings} onChange={onColumnSettings}
-            allowMiniBar={false} />
+            allowMiniBar={false} allowViewAs={false} />
         </div>
       )}
       {showConditional && (vizType === "table" || vizType === "pivot_table") && (
