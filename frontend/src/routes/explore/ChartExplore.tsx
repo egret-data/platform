@@ -99,6 +99,24 @@ export default function ChartExplore() {
   // Guarded so a mid-edit refetch/remount cannot re-seed and clobber in-progress edits;
   // seeds exactly once per chart id.
   const hydratedRef = useRef<string | null>(null);
+  /**
+   * The same fact as `hydratedRef`, in state rather than in a ref, because the baseline capture
+   * below needs it to arrive with the seeded values and a ref cannot do that.
+   *
+   * A ref is mutated DURING this effect, which React runs before it processes the `setState` calls
+   * the effect makes. The baseline effect runs later in the very same flush, so it saw
+   * `hydratedRef.current === id` while every piece of builder state was still at its pre-hydration
+   * default — and captured THAT as the chart's clean baseline. One render later the seeded values
+   * landed, the live config no longer matched, and every saved chart was born dirty: the
+   * beforeunload guard was armed from the moment the page finished loading, with the author having
+   * touched nothing. (In Chrome the dialog is only *shown* once the page has been interacted with,
+   * which is why it read as "any click in the canvas dirties the chart" — the click supplied the
+   * user activation, not the change.)
+   *
+   * State is set in the same batch as the seeding writes, so the render that first observes
+   * `hydratedId === id` is the render that has them.
+   */
+  const [hydratedId, setHydratedId] = useState<string | null>(null);
   // Serialized "clean" builder config, captured once the builder is ready (see below).
   // `dirty` compares the live config to this baseline to drive the beforeunload guard.
   const snapshotRef = useRef<string | null>(null);
@@ -106,6 +124,11 @@ export default function ChartExplore() {
     const c = existing.data;
     if (!c || hydratedRef.current === id) return;
     hydratedRef.current = id ?? "new";
+    setHydratedId(id ?? "new");
+    // Re-seeding replaces the config wholesale, so any baseline taken against the previous one is
+    // meaningless — including the one `save()` takes for a NEW chart, which is captured before the
+    // navigation to /charts/<new id> brings the server's copy back through here.
+    snapshotRef.current = null;
     setDatasetId(c.dataset_id);
     setViz(c.viz_type);
     const p = c.params;
@@ -426,16 +449,58 @@ export default function ChartExplore() {
     setTemporalUnits({}); setOrderby([]);
   }
 
+  /**
+   * Is every LOAD-TIME normalization that can move the saved config already a fixed point?
+   *
+   * `withDefaultTemporalUnits` writes config back on LOAD rather than in response to the author:
+   * a temporal dimension with no unit stored on it gets the Metabase-style monthly default, and
+   * that write lands one render AFTER the state it normalizes. A baseline captured the instant
+   * hydration finishes is therefore a baseline the load itself then moves away from — the chart is
+   * dirty before the author has done anything, the same failure as the ref-vs-state bug above but
+   * one render later. (Measured: a chart on a date axis saved without units, e.g. anything seeded
+   * by the parity-harness script rather than by this editor.)
+   *
+   * Rather than guess at a settling delay, ask the normalizer itself: it returns its own argument
+   * by identity when there is nothing to change, which is exactly the test its effect uses to
+   * decide whether to write. Identity here means "that effect has nothing left to do", so the
+   * baseline is taken at the first render where that holds.
+   *
+   * NOT included: `reconcileTableState`, the other load-time write-back. An arm for it was written
+   * here first and then removed, because the mutant that deleted that arm could not be killed —
+   * nothing observable depends on it. Two measurements say why, and both are worth keeping:
+   *   - `paramsForSave` never emits `tableState`. There is no `table.state` key among the settings
+   *     it builds; the only one that survives a round-trip is the value carried over verbatim in
+   *     `settings` at hydration. So pruning `tableState` cannot change `serializeConfig()` and
+   *     cannot move this flag — which also means a table's hidden/reordered/resized columns are
+   *     not persisted by this editor at all. That is a separate defect, reported alongside this
+   *     one and deliberately not fixed here.
+   *   - Even patched to serialize it, a mounted table stayed clean: the reconcile's first run is in
+   *     the same effect flush as hydration, and its functional updater therefore prunes the seeded
+   *     value inside the same batch, one render before this baseline is taken.
+   * If `table.state` ever does become part of the saved params, the second point stops holding as
+   * soon as the result arrives later than hydration (which it does outside the test harness, where
+   * the query is not instantaneous) and the arm belongs back here.
+   */
+  const loadNormalizersSettled =
+    withDefaultTemporalUnits(temporalUnits, activeDims, columns) === temporalUnits;
+
   // Capture the "clean" baseline once the builder is ready: for a new chart that's the
   // empty default builder (first render); for a saved chart we wait until hydration has
-  // seeded the state (hydratedRef === id) so the baseline reflects the loaded chart.
+  // seeded the state (hydratedId === id) and the load-time normalizers have settled, so the
+  // baseline reflects the loaded chart as the author is actually looking at it.
   useEffect(() => {
     if (snapshotRef.current !== null) return;
-    if (id && hydratedRef.current !== id) return;
+    if (id && hydratedId !== id) return;
+    if (!loadNormalizersSettled) return;
     snapshotRef.current = serializeConfig();
   });
-  // beforeunload guard only — never gates Save/Run. Errs toward an extra prompt (safe),
-  // never toward silently dropping edits.
+  // beforeunload guard only — never gates Save/Run.
+  //
+  // `snapshotRef.current === null` means the baseline has not been taken yet, and that reads as
+  // CLEAN: before the load has settled there is no edit to lose, and treating "not ready" as dirty
+  // is what made every chart prompt on the way out. The old note here claimed erring toward an
+  // extra prompt was the safe direction; in practice it trained the author to dismiss the dialog,
+  // which is strictly worse than not showing it during the second the chart is loading.
   const dirty = snapshotRef.current !== null && serializeConfig() !== snapshotRef.current;
   useUnsavedChangesWarning(dirty);
 
