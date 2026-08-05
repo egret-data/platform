@@ -111,7 +111,17 @@
   --destructive-foreground: oklch(0.99 0 0);
   --border: oklch(0.92 0 286.61);
   --input: oklch(0.92 0 286.61);
-  --ring: oklch(0.71 0.01 286.09);
+  /* Keyboard focus indicator. Was `oklch(0.71 …)`, which measured 2.58:1 against
+     `--background` and only 2.23:1 against `--secondary` — a fail of WCAG 1.4.11
+     Non-text Contrast (3:1; the 4.5:1 bar is 1.4.3 and governs text, not rings).
+     0.63 is the first lightness that clears 3:1 on EVERY surface a focused
+     control actually lands on, not just the page: background/card 3.51,
+     popover 3.31, accent 3.21, dashboard 3.07, secondary 3.03. Hue and chroma
+     are untouched on purpose — this is a neutral, and tinting it would be a
+     visual change nobody asked for. Dark is left alone; it already passes
+     (4.08 on background, 3.09 worst-surface). Pinned by
+     src/__tests__/focusIndicatorContrast.test.ts. */
+  --ring: oklch(0.63 0.01 286.09);
 
   /* Functional highlight (amber) — a warm accent for a page's single primary
      emphasis: "recommended" badges, featured/active markers, upsell CTAs. The
@@ -243,7 +253,28 @@ code {
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    /* Solid `outline-ring`, NOT the half-alpha variant it used to be. (The old
+       value is spelled out nowhere in this file on purpose: Tailwind v4 scans
+       source text for class-name candidates and does not know a comment from
+       code, so writing the old utility here made it emit a dead
+       `outline-color: color-mix(… 50% …)` rule into the shipped bundle — which
+       then looks, to anyone auditing that bundle, exactly like the fix failing
+       to land.)
+
+       This is the focus indicator for every
+       focusable element that does not style its own focus, and that is not a rare
+       fallback — tabbing the control-plane pages shows 11 of the first 14 stops
+       (the whole left navigation) landing here, painted by Chrome's default
+       `outline-style: auto` in this colour. #412 confirmed with a forced red
+       outline that `auto` does honour an author `outline-color`, so this really is
+       what the user sees.
+
+       At half alpha it measured 1.54:1 in light and 1.83:1 in dark. Unlike the
+       shadcn two-part pattern there is no solid border underneath to carry the
+       contrast, so the alpha had to go: half-alpha CANNOT reach 3:1 at any ring
+       lightness (even a much darker `--ring` only lifts it to ~1.73), which is why
+       darkening the token alone would not have fixed these elements. */
+    @apply border-border outline-ring;
   }
 
   body {
