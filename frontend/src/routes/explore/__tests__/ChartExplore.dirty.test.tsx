@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter, Routes, Route, useNavigate } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -58,11 +58,14 @@ const TEMPORAL = {
 
 /**
  * A table whose stored column state names a column the result does not carry, so the load-time
- * reconcile against the result columns actually fires. It is here as the second load-time
- * write-back, and it is worth saying what it turned out to prove: measured, that write is batched
- * into the same render as hydration, and `paramsForSave` does not serialize `tableState` anyway —
- * so this fixture pins a table mounting clean, not the ordering. See the note on
- * `loadNormalizersSettled`.
+ * reconcile against the result columns actually fires — the second load-time write-back, and the
+ * one whose ordering against the baseline decides whether a table loads clean.
+ *
+ * Mounted TWICE below, and the pair is the point. With the result already present (the mock's
+ * default) the reconcile batches into the hydration flush and the chart is clean whatever the
+ * baseline gate says — that is the arrangement this file used to have, and it could not see the
+ * bug. With the result arriving a beat later (`ctl.lateResult`, which is what a real query does)
+ * the prune lands after hydration, and only a baseline that waited for it stays clean.
  */
 const TABLE = {
   ...BASE,
@@ -93,21 +96,50 @@ vi.mock("@/api/charts", async (importOriginal) => ({
 }));
 
 /**
+ * Per-test switches for the query mock, hoisted so the module factory can read them. Set BEFORE
+ * mounting; the hook reads each one once, at mount.
+ */
+const ctl = vi.hoisted(() => ({ lateResult: false, failed: false }));
+
+/**
  * The result carries a column per dimension the spec asked for, plus the metric — i.e. it CHANGES
  * when the spec changes, the way a real result does. A fixed column list would leave the table
  * reconcile's dependencies identical before and after hydration, so that effect would never re-run
  * and the table fixture below would exercise nothing at all.
+ *
+ * WHEN it arrives is the other half. By default it is already there on the first render, which no
+ * real query ever is — the request has not even been sent at that point — and that instantaneous
+ * arrival is precisely what hides an ordering bug between the result and the baseline: the prune it
+ * triggers batches into the hydration flush and lands before anything can observe it. `lateResult`
+ * pushes the arrival one macrotask out, which is enough to put it in a later flush than hydration
+ * and is the shape a browser always has. `failed` is the third case: a query that comes back with
+ * an error, so no result is ever coming.
  */
-vi.mock("@/api/useSpecData", () => ({
-  useSpecData: (_ws: string, _ds: string | null, spec: QuerySpec | null) => ({
-    columns: [
-      ...(spec?.dimensions ?? []).map((d) => ({ name: d, type: "varchar" })),
-      { name: "total_revenue", type: "double" },
-    ],
-    rows: [["North", 1]],
-    isLoading: false, error: null, hasResult: true,
-  }),
-}));
+vi.mock("@/api/useSpecData", async () => {
+  const { useState, useEffect } = await import("react");
+  return {
+    useSpecData: (_ws: string, _ds: string | null, spec: QuerySpec | null) => {
+      const [arrived, setArrived] = useState(!ctl.lateResult && !ctl.failed);
+      const [failed] = useState(ctl.failed);
+      useEffect(() => {
+        if (arrived || failed) return;
+        const t = setTimeout(() => setArrived(true), 0);
+        return () => clearTimeout(t);
+      }, []);
+      if (!arrived) {
+        return { columns: [], rows: [], isLoading: !failed, error: failed ? "boom" : null, hasResult: false };
+      }
+      return {
+        columns: [
+          ...(spec?.dimensions ?? []).map((d) => ({ name: d, type: "varchar" })),
+          { name: "total_revenue", type: "double" },
+        ],
+        rows: [["North", 1]],
+        isLoading: false, error: null, hasResult: true,
+      };
+    },
+  };
+});
 
 vi.mock("@/api/datasets", () => ({
   useDatasets: () => ({ data: [{ id: "d1", name: "Demo Sales" }], isLoading: false }),
@@ -163,6 +195,9 @@ async function mountChart(id: string, alsoOffer?: string) {
 }
 
 describe("ChartExplore unsaved-changes guard", () => {
+  // Back to "the result is already there" for every test that does not ask otherwise.
+  afterEach(() => { ctl.lateResult = false; ctl.failed = false; });
+
   it("leaves a freshly loaded chart clean, so nothing cancels an unload", async () => {
     await mountChart("c-bar");
     expect(await screen.findByDisplayValue("1000")).toBeInTheDocument();
@@ -188,6 +223,49 @@ describe("ChartExplore unsaved-changes guard", () => {
     expect(await screen.findByDisplayValue("Table v2")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("Row limit")).toHaveValue(1000));
     expect(guardArmed()).toBe(false);
+  });
+
+  /**
+   * THE SAME TABLE, with the result arriving when a result actually arrives — after hydration.
+   *
+   * The prune itself is deliberately invisible: `reconcileTableState` only ever drops names the
+   * result no longer carries, and dropping them changes neither what is drawn nor its order (that
+   * is the whole reason the leak went unnoticed for so long). So the observable IS the dirty flag,
+   * and what makes this test mean something is the ORDER: the assertion is taken after the
+   * rendered result proves the query landed, which is one commit after the reconcile effect that
+   * commit scheduled. Confirmed by mutation — dropping `tableStateSettled` from the baseline gate
+   * fails this test and nothing else in the suite.
+   */
+  it("leaves a table clean when the prune lands after hydration, then arms on a real edit", async () => {
+    ctl.lateResult = true;
+    await mountChart("c-table");
+    expect(await screen.findByDisplayValue("Table v2")).toBeInTheDocument();
+    // The drawn header is the proof the result arrived: before it there are no columns at all.
+    await waitFor(() => expect(screen.getAllByRole("columnheader").length).toBeGreaterThan(0));
+    expect(guardArmed()).toBe(false);
+    // The transition, and not the clean half alone: a baseline that is NEVER taken also reads as
+    // clean, so "waits for the prune" and "waits forever" are indistinguishable without this. It
+    // is the same reason the row-limit test below asserts a transition rather than an end state.
+    const rowLimit = screen.getByLabelText("Row limit");
+    fireEvent.change(rowLimit, { target: { value: "500" } });
+    await waitFor(() => expect(rowLimit).toHaveValue(500));
+    expect(guardArmed()).toBe(true);
+  });
+
+  /**
+   * …and the other end of that wait. A baseline that waits for a result which is never coming is a
+   * guard that never arms, which loses an edit silently — strictly worse than the spurious prompt
+   * the waiting exists to prevent. A failed query ends the wait.
+   */
+  it("still arms after a real edit when the query failed and no result is coming", async () => {
+    ctl.failed = true;
+    await mountChart("c-table");
+    const rowLimit = await screen.findByLabelText("Row limit");
+    await waitFor(() => expect(rowLimit).toHaveValue(1000));
+    expect(guardArmed()).toBe(false);
+    fireEvent.change(rowLimit, { target: { value: "500" } });
+    await waitFor(() => expect(rowLimit).toHaveValue(500));
+    expect(guardArmed()).toBe(true);
   });
 
   /**
