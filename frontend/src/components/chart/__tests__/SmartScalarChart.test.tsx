@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { SmartScalarChart } from "../SmartScalarChart";
 
@@ -216,5 +216,144 @@ describe("SmartScalarChart — the label names the period, not its first day", (
         dimension="d" metric="m" unit="month" />,
     );
     expect(screen.getByText("March 2026")).toBeInTheDocument();
+  });
+});
+
+/**
+ * THE NUMBER IS SIZED TO ITS CARD, instead of being drawn at a fixed 2.5rem whatever the card.
+ *
+ * MEASURED, in Chrome, on the "ZZ Chart Parity" dashboard where every card is 182px wide with a
+ * 166px content box: the trend's value `24,730.43` occupied **203.75px** and its box ran from
+ * x=444 to x=648 against a content box of 463–629. So the number hung 19px past BOTH edges of its
+ * own card, over the neighbours on either side, and the screenshot shows it clipped mid-digit at
+ * each end. Pre-existing — #413 pinned that the drill button it added contributes 0px.
+ *
+ * THE FIX IS THE SCALAR'S, NOT A SECOND ONE. `BigNumber` solved this exact problem: compact the
+ * value against the box's width (`compactifyValue`), then pick the largest font at which the
+ * RESULT still fits (`findSize` over canvas `measureText`), and put the exact figure in a tooltip
+ * whenever compaction changed it. Every piece of that is already shared, already ported from
+ * Metabase and already tested; this card reuses it whole rather than growing a second sizer.
+ *
+ * WHAT THESE TESTS DO AND DO NOT PROVE. **jsdom runs no layout**, so `measure-text.ts`
+ * deliberately returns `{0, 0}` with no 2D context — which makes every candidate font "fit" and
+ * sends `findSize` straight to its ceiling. So NOTHING here proves the chosen size is *right*, or
+ * that the number fits: those claims belong to a browser and rest on the screenshot at the 166px
+ * card width. What IS provable without layout is everything that is arithmetic over the box rather
+ * than over the glyphs — whether the value compacts (`shouldCompact`, pure over string length and
+ * width) and what ceiling the fit is allowed to reach (`maxFontSizeRem`, pure over the card's width
+ * and grid share). The BOX is therefore stubbed below rather than left at jsdom's 0×0: a size the
+ * test chose is a size the assertions can reason about, and a 0×0 box makes the sizer's answer
+ * (2.5rem, its narrow-card ceiling) coincidentally equal to the constant it replaced — which is to
+ * say, indistinguishable from the defect.
+ */
+describe("SmartScalarChart — the number is sized to its card", () => {
+  const cols = [{ name: "d", type: "date" }, { name: "m", type: "double" }];
+  // The live values off the parity harness, and the exact pair the measurement above came from.
+  const rows = [["2026-11-01", 22577.58], ["2026-12-01", 24730.43]];
+
+  /** Give every element a fixed box, the way the ECharts specs under `echarts/__tests__` do.
+   *  `useElementSize` reads `getBoundingClientRect` on mount, so this is what the sizer sees. */
+  const withBox = (width: number, height: number) => {
+    Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ width, height, top: 0, left: 0, right: width, bottom: height, x: 0, y: 0, toJSON() {} }),
+    });
+  };
+  afterEach(() => {
+    delete (HTMLElement.prototype as unknown as Record<string, unknown>).getBoundingClientRect;
+  });
+
+  /** The harness's card: 182px wide, 166px of content. */
+  const NARROW = 166;
+
+  it("compacts a value too long for its card instead of letting it overflow", () => {
+    withBox(NARROW, NARROW);
+    render(<SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month" />);
+    // 166px of card less `SCALAR_PADDING` is 134, under Metabase's 250px compaction threshold, and
+    // nine characters is over its six-character floor. So this one cannot be drawn in full.
+    expect(screen.queryByText("24,730.43")).toBeNull();
+    expect(screen.getByText(/24\.7k/i)).toBeInTheDocument();
+  });
+
+  it("draws the same value in full when the card is wide enough for it", () => {
+    // THE OTHER HALF OF THE RULE, and the one that fails if compaction is applied unconditionally:
+    // same number, same format, wider box. Compaction costs precision and is only worth paying for
+    // when the alternative is a number hanging off the card.
+    withBox(600, 400);
+    render(<SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month" />);
+    expect(screen.getByText("24,730.43")).toBeInTheDocument();
+    expect(screen.queryByText(/24\.7k/i)).toBeNull();
+  });
+
+  it("still speaks the exact figure it stopped drawing", () => {
+    // A screen reader has no use for "24.7k" when the number is 24,730.43 — `BigNumber`'s rule,
+    // and the reason compaction is safe to apply without the user having asked for it.
+    withBox(NARROW, NARROW);
+    render(<SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month" />);
+    expect(screen.getByRole("img", { name: /24,730\.43/ })).toBeInTheDocument();
+  });
+
+  it("leaves a short value alone even on the narrowest card", () => {
+    // The negative, and the one an over-eager compaction breaks: six characters or fewer is
+    // Metabase's `COMPACT_MIN_LENGTH` floor, below which compacting saves nothing and only costs
+    // precision.
+    withBox(NARROW, NARROW);
+    render(<SmartScalarChart columns={cols} rows={[["2026-11-01", 100], ["2026-12-01", 120]]}
+      dimension="d" metric="m" format={{ decimals: 0 }} />);
+    expect(screen.getByText("120")).toBeInTheDocument();
+  });
+
+  it("caps the font at the narrow-card ceiling on a narrow card", () => {
+    // `maxFontSizeRem` returns `NARROW_CARD_MAX_SIZE` (2.5rem) under 240px — Metabase's own
+    // constant, ported verbatim. jsdom measures every candidate as fitting, so what this pins is
+    // the CEILING the fit is allowed to reach, which is the part that is arithmetic over the box.
+    withBox(NARROW, NARROW);
+    const { container } = render(
+      <SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month" />,
+    );
+    expect(container.querySelector<HTMLElement>(".tabular-nums")!.style.fontSize).toBe("2.5rem");
+  });
+
+  it("lets a roomier card reach a bigger ceiling", () => {
+    // The same assertion read the other way, and the one that dies if the size goes back to a
+    // constant: off the grid, a card past the narrow threshold may reach `NO_GRID_MAX_SIZE`.
+    withBox(600, 400);
+    const { container } = render(
+      <SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month" />,
+    );
+    const value = container.querySelector<HTMLElement>(".tabular-nums")!;
+    expect(value.style.fontSize).toBe("4rem");
+    expect(value.className).not.toContain("text-[2.5rem]");
+  });
+
+  it("earns a bigger ceiling from the card's share of the dashboard grid", () => {
+    // `gridCols` has to be THREADED, not merely accepted: `ChartRenderer` passes the card's width
+    // in grid columns, exactly as it does for the scalar. A full-width card is `MAX_SIZE_LARGE`.
+    withBox(600, 400);
+    const { container } = render(
+      <SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month" gridCols={24} />,
+    );
+    expect(container.querySelector<HTMLElement>(".tabular-nums")!.style.fontSize).toBe("7rem");
+  });
+
+  it("measures the whole card without taking part in its layout", () => {
+    // `BigNumber`'s recorded scar: a first attempt gave the measuring element `flex-1 basis-0`, it
+    // swallowed the card's spare height, and the captions ended up ~300px below the number. Every
+    // numeric check passed; only the screenshot showed it. jsdom cannot see the gap either — what
+    // it CAN see is the structure that caused it.
+    const { container } = render(
+      <SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month" />,
+    );
+    const sizer = container.querySelector("[aria-hidden]");
+    expect(sizer, "the measuring element should exist").not.toBeNull();
+    expect(sizer!.className).toContain("absolute");
+    expect(sizer!.className).not.toContain("flex-1");
+  });
+
+  it("keeps the drill on the value, with the exact figure in its name", () => {
+    // #413 wired this button; compaction must not cost it the precision it announces.
+    render(<SmartScalarChart columns={cols} rows={rows} dimension="d" metric="m" unit="month"
+      onValueClick={() => {}} />);
+    expect(screen.getByRole("button", { name: /24,730\.43.*Show records/ })).toBeInTheDocument();
   });
 });

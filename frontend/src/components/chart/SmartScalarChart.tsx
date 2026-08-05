@@ -1,12 +1,26 @@
+import { useMemo, useRef } from "react";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { GRID_COLS } from "./dashboard-grid";
 import { formatValue, specifiesDateRendering } from "./format";
 import type { ColumnFormat } from "./format-types";
+import { findSize, measureText } from "./measure-text";
+import {
+  compactifyValue, MIN_SIZE_REM, SCALAR_PADDING, SIZE_STEP_REM, maxFontSizeRem,
+} from "./scalar";
 import { namesAPeriod, periodName } from "./temporal-period";
+import { useElementSize } from "./useElementSize";
 import { SERIES_PALETTE } from "./echarts/palette";
 
 interface ResultColumn { name: string; type: string }
 
 const UP = SERIES_PALETTE[1];   // green
 const DOWN = SERIES_PALETTE[3]; // red
+
+/** Fallback for the first paint, before the ResizeObserver has reported a box. This is the size
+ * the card was FIXED at before it could size itself, so the initial frame is never larger than
+ * what it settles to — `BigNumber` picks its own fallback the same way and for the same reason. */
+const INITIAL_SIZE = "2.5rem";
+const VALUE_FONT_WEIGHT = 700;
 
 /**
  * Metabase-style Trend (SmartScalar): the latest value plus its change vs the
@@ -23,7 +37,7 @@ const PERIOD_NAME: Record<string, string> = {
 
 export function SmartScalarChart({
   columns, rows, dimension, metric, format = {}, dimensionFormat, unit,
-  switchPositiveNegative = false, compact = false, onValueClick,
+  switchPositiveNegative = false, compact = false, onValueClick, gridCols,
 }: {
   columns: ResultColumn[];
   rows: unknown[][];
@@ -60,7 +74,21 @@ export function SmartScalarChart({
    * one the reader can already reach by drilling the trend's own chart.
    */
   onValueClick?: (latestDimensionValue: unknown, x: number, y: number) => void;
+  /** The card's width in dashboard grid columns. A card that owns more of the grid earns a bigger
+   * size ceiling; without it (the studio preview) the ceiling is `NO_GRID_MAX_SIZE`. Same field,
+   * same meaning and the same source as `BigNumber`'s. */
+  gridCols?: number;
 }) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const captionRef = useRef<HTMLDivElement>(null);
+  const size = useElementSize(hostRef);
+  const captionSize = useElementSize(captionRef);
+  // The period label and the comparison line sit in the same centred column as the number, so the
+  // room left for the number is the box minus whatever they take. MEASURED rather than assumed —
+  // `BigNumber` records what assuming cost there: a value host given `flex-1 basis-0` swallowed the
+  // spare height and stranded its captions ~300px below the number, passing every numeric check.
+  const captionHeight = captionSize?.height ?? 0;
+
   const mi = metric != null ? columns.findIndex((c) => c.name === metric) : -1;
   const di = dimension != null ? columns.findIndex((c) => c.name === dimension) : -1;
   const type = mi >= 0 ? columns[mi].type : "double";
@@ -134,9 +162,53 @@ export function SmartScalarChart({
   const period = unit != null ? PERIOD_NAME[unit] : undefined;
   const vsLabel = period ? `vs previous ${period}:` : "vs previous:";
 
+  /**
+   * What to draw for the big number, and what it really says.
+   *
+   * COMPACT AGAINST THE BOX, THEN SIZE THE RESULT — `BigNumber`'s order, and it matters: sizing the
+   * uncompacted string would pick a font for text that is not on screen. `format.compact` (the
+   * user's own "Compact number" switch) still wins outright inside `compactifyValue`; what this
+   * adds is the case they have not decided, where the alternative is the number spilling out of the
+   * card, which is what it did.
+   *
+   * `full` is the uncompacted figure whatever the setting, so the tooltip and the accessible name
+   * below can both offer it.
+   */
+  const { display, full } = useMemo(() => {
+    if (!hasCur) return { display: "—", full: "—" };
+    const width = size ? Math.max(size.width - SCALAR_PADDING, 0) : Number.POSITIVE_INFINITY;
+    return compactifyValue(current, type, width, compact ? { ...format, compact: true } : format);
+  }, [hasCur, current, type, size, format, compact]);
+
+  const fontSize = useMemo(() => {
+    if (!size || !hasCur) return INITIAL_SIZE;
+    const host = hostRef.current;
+    // The family must be the one the DOM actually renders: a fit computed against the wrong family
+    // is wrong by however much the two differ in advance width (chart 05's scar, in full at
+    // `BigNumber`).
+    const fontFamily = host ? window.getComputedStyle(host).fontFamily : "inherit";
+    return findSize({
+      text: display,
+      targetHeight: Math.max(size.height - captionHeight - SCALAR_PADDING, 0),
+      targetWidth: Math.max(size.width - SCALAR_PADDING, 0),
+      unit: "rem",
+      fontFamily,
+      fontWeight: VALUE_FONT_WEIGHT,
+      step: SIZE_STEP_REM,
+      min: MIN_SIZE_REM,
+      max: maxFontSizeRem(gridCols, GRID_COLS, size.width),
+      measurer: measureText,
+    });
+  }, [size, display, hasCur, gridCols, captionHeight]);
+
+  const isCompacted = display !== full;
+
   const spoken = [
     curLabel ? `${curLabel}: ` : "",
-    hasCur ? fmt(current) : "no value",
+    // THE FULL FIGURE, not what is drawn. A screen reader has no use for "24.7k" when the number is
+    // 24,730.43, and compaction is now applied without the user asking for it — so the precision it
+    // trades away on screen has to stay in the accessible name, where the width does not bind.
+    hasCur ? full : "no value",
     hasComparison
       ? `, ${up ? "up" : down ? "down" : "unchanged"}${Number.isFinite(pct) ? ` ${(Math.abs(pct) * 100).toFixed(2)}%` : ""} versus previous ${period ? `${period} ` : ""}${fmt(previous)}`
       : "",
@@ -147,38 +219,74 @@ export function SmartScalarChart({
   // before it; drilling `rows[rows.length - 1]` would filter a period the card is not showing.
   const curDim = curRow && di >= 0 ? curRow[di] : undefined;
 
-  const value = <div className="text-[2.5rem] font-bold leading-none tabular-nums text-foreground">{hasCur ? fmt(current) : "—"}</div>;
+  // `leading-none` and `tabular-nums` stay; the fixed `text-[2.5rem]` does not. That constant is
+  // what put 203.75px of number in a 166px card — a class cannot answer to a card width, and the
+  // trend's card is exactly the one that varies most, from a dashboard tile to a full-page preview.
+  const valueEl = (
+    <span
+      className="font-bold leading-none tabular-nums text-foreground"
+      style={{ fontSize, fontWeight: VALUE_FONT_WEIGHT }}
+    >
+      {display}
+    </span>
+  );
+
+  const interactive = clickable ? (
+    <button
+      type="button"
+      className="group rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:text-primary"
+      aria-label={`${spoken}. Show records`}
+      onClick={(e) => {
+        const r = e.currentTarget.getBoundingClientRect();
+        onValueClick!(curDim, r.left + r.width / 2, r.bottom);
+      }}
+    >
+      {valueEl}
+    </button>
+  ) : valueEl;
 
   return (
-    <div className="flex h-full min-h-[5rem] flex-col items-center justify-center gap-1"
+    <div className="relative flex h-full min-h-[5rem] w-full flex-col items-center justify-center gap-1"
       // `img` collapses its subtree, which is what makes the whole card read as one sentence — and
       // what makes a control inside it unreachable. `group` keeps the same name while leaving the
       // value operable. Same trade as the funnel's step columns and `BigNumber`'s number.
       role={clickable ? "group" : "img"}
       aria-label={spoken}>
-      {clickable ? (
-        <button
-          type="button"
-          className="group rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:text-primary"
-          aria-label={`${spoken}. Show records`}
-          onClick={(e) => {
-            const r = e.currentTarget.getBoundingClientRect();
-            onValueClick!(curDim, r.left + r.width / 2, r.bottom);
-          }}
-        >
-          {value}
-        </button>
-      ) : value}
-      {curLabel && <div className="text-sm text-muted-foreground">{curLabel}</div>}
-      {hasComparison && (
-        <div className="flex items-center gap-1.5 text-sm">
-          <span data-trend className="flex items-center gap-1 font-medium" style={{ color: good ? UP : bad ? DOWN : undefined }}>
-            {up ? "▲" : down ? "▼" : "•"}{" "}
-            {Number.isFinite(pct) ? `${(Math.abs(pct) * 100).toFixed(2)}%` : fmt(Math.abs(change))}
-          </span>
-          <span className="text-muted-foreground">{vsLabel} {fmt(previous)}</span>
-        </div>
-      )}
+      {/* `absolute inset-0`: this measures the WHOLE box without taking part in the layout, so the
+          number and its captions stay one centred group. Sizing it by `flex-1` instead made it
+          swallow the spare height and stranded `BigNumber`'s captions at the bottom of the card. */}
+      <div ref={hostRef} aria-hidden className="pointer-events-none absolute inset-0" />
+
+      <div className="flex w-full min-w-0 items-center justify-center px-2">
+        {isCompacted ? (
+          <TooltipProvider delayDuration={200}>
+            <Tooltip>
+              {/* `asChild` keeps the button/span as the trigger, so the exact figure is reachable by
+                  keyboard focus and not only by hover. */}
+              <TooltipTrigger asChild>{interactive}</TooltipTrigger>
+              <TooltipContent>{full}</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        ) : (
+          interactive
+        )}
+      </div>
+
+      {/* ONE MEASURED BLOCK, so the space the captions take can be subtracted from the number's own.
+          The inner `gap-1` restates the outer one, which now separates this block from the number
+          rather than each caption from its neighbour — the spacing on screen is unchanged. */}
+      <div ref={captionRef} className="flex w-full shrink-0 flex-col items-center gap-1">
+        {curLabel && <div className="text-sm text-muted-foreground">{curLabel}</div>}
+        {hasComparison && (
+          <div className="flex items-center gap-1.5 text-sm">
+            <span data-trend className="flex items-center gap-1 font-medium" style={{ color: good ? UP : bad ? DOWN : undefined }}>
+              {up ? "▲" : down ? "▼" : "•"}{" "}
+              {Number.isFinite(pct) ? `${(Math.abs(pct) * 100).toFixed(2)}%` : fmt(Math.abs(change))}
+            </span>
+            <span className="text-muted-foreground">{vsLabel} {fmt(previous)}</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
