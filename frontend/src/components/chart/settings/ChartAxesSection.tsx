@@ -4,6 +4,7 @@ import { DecimalInput } from "./DecimalInput";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { unpinFromZeroAppliesToBoxplot } from "@/components/chart/echarts/options/boxplot";
 
 /**
  * The Axes tab, shared by every chart whose axes are "one ordinal dimension across, one measure up".
@@ -25,6 +26,14 @@ export interface AxesConfig {
   xAxisTicks?: boolean;
   yAxisTicks?: boolean;
   xLabelRotation?: 45 | 90;
+  /** Metabase's fifth "Show lines and tick marks" value. Optional on the SHARED shape because only
+   *  one of this tab's two charts stores it — the box plot's category axis has no label formatter
+   *  for it to act through, so its config carries no such key at all. */
+  xLabelCompact?: boolean;
+  /** Metabase's `graph.y_axis.unpin_from_zero`, and the mirror image of the field above: the BOX
+   *  PLOT stores this one and the waterfall does not, because `isYAxisUnpinFromZeroValid` excludes
+   *  a waterfall display outright. */
+  unpinFromZero?: boolean;
   yTickCount?: number;
   yMin?: number;
   yMax?: number;
@@ -43,23 +52,39 @@ export interface AxesConfig {
  * meaning different things depending on which tab the user opened. The layout differs between the
  * two panels; the mapping must not.
  */
-export type XTicksChoice = "hide" | "show" | "rotate45" | "rotate90";
+export type XTicksChoice = "hide" | "show" | "compact" | "rotate45" | "rotate90";
 
-export function xTicksChoiceOf(cfg: { xAxisTicks?: boolean; xLabelRotation?: 45 | 90 }): XTicksChoice {
+export function xTicksChoiceOf(cfg: { xAxisTicks?: boolean; xLabelRotation?: 45 | 90; xLabelCompact?: boolean }): XTicksChoice {
   // "Hide" wins over a stored rotation: with the axis off there is nothing to tilt, and the select
-  // can only show one of the four.
+  // can only show one of the five.
   if (cfg.xAxisTicks === false) return "hide";
-  return cfg.xLabelRotation === 90 ? "rotate90" : cfg.xLabelRotation === 45 ? "rotate45" : "show";
+  if (cfg.xLabelRotation === 90) return "rotate90";
+  if (cfg.xLabelRotation === 45) return "rotate45";
+  // BELOW the rotations, not above, and the order is the tie-break for a state Metabase's single
+  // key cannot represent but egret's three CAN: a chart saved with Compact before a rotation was
+  // picked would carry both. A rotation is the more visible of the two, so it is what the trigger
+  // reports — and `xTicksPatch` clears the other key on every choice, so the pair can only arise
+  // from a config written by hand or by an older build, never from this control.
+  return cfg.xLabelCompact === true ? "compact" : "show";
 }
 
-/** Both keys are always written, `undefined` included: picking Rotate 45° while hidden has to CLEAR
- *  `xAxisTicks`, and picking Show has to clear the rotation. A patch that omitted the key it is not
- *  setting would leave the other half of the pair behind and let the select display a state it did
- *  not put the config in. */
-export function xTicksPatch(v: XTicksChoice): { xAxisTicks: false | undefined; xLabelRotation: 45 | 90 | undefined } {
+/** EVERY key is always written, `undefined` included: picking Rotate 45° while hidden has to CLEAR
+ *  `xAxisTicks`, picking Show has to clear the rotation, and picking either has to clear Compact.
+ *  A patch that omitted the key it is not setting would leave the rest of the group behind and let
+ *  the select display a state it did not put the config in.
+ *
+ *  THIS IS WHERE METABASE'S MUTUAL EXCLUSION LIVES. Upstream `graph.x_axis.axis_enabled` is ONE key
+ *  holding one of five values, so "Compact and rotated 45°" is unrepresentable there. egret spells
+ *  the same choice across three fields (see `CartesianConfig.xLabelRotation`'s note for why), which
+ *  makes that combination expressible — so the exclusion has to be enforced by this function rather
+ *  than by the shape. It is the only writer, which is what makes that enough. */
+export function xTicksPatch(v: XTicksChoice): {
+  xAxisTicks: false | undefined; xLabelRotation: 45 | 90 | undefined; xLabelCompact: true | undefined;
+} {
   return {
     xAxisTicks: v === "hide" ? false : undefined,
     xLabelRotation: v === "rotate45" ? 45 : v === "rotate90" ? 90 : undefined,
+    xLabelCompact: v === "compact" ? true : undefined,
   };
 }
 
@@ -129,8 +154,9 @@ export function AxisGroup({ axis, className, children }: {
  * stored keys (`xTicksChoiceOf`/`xTicksPatch`) stays in one place and visible at the call site.
  */
 
-/** Metabase's `graph.x_axis.axis_enabled` on the CATEGORY axis: Hide / Show / Rotate 45° / 90°. */
-export function CategoryTicksSelect({ axis, id, value, onChange, rotationsDisabled, describedBy }: {
+/** Metabase's `graph.x_axis.axis_enabled` on the CATEGORY axis: Hide / Show / Compact / Rotate 45°
+ *  / 90°, in Metabase's own order (`lib/settings/graph.ts:746-778`). */
+export function CategoryTicksSelect({ axis, id, value, onChange, rotationsDisabled, offerCompact, compactDisabled, describedBy }: {
   /** The axis letter the READER sees — "Y" for the category axis of a horizontal chart. */
   axis: string;
   id: string;
@@ -141,6 +167,29 @@ export function CategoryTicksSelect({ axis, id, value, onChange, rotationsDisabl
    *  whose x is always the ordinal sequence of categories. Disabled rather than hidden: a chart
    *  that stored 45° and later changed scale must still show what it stored. */
   rotationsDisabled?: boolean;
+  /**
+   * Whether "Compact" EXISTS on this chart at all — a STRUCTURAL question, which is why it is
+   * absence rather than the greying below.
+   *
+   * Compact is a formatting flag on the category label text, so it needs a label formatter to act
+   * through. The waterfall and the cartesian family both run their categories through a `drawLabel`
+   * closure that names periods; the BOX PLOT does not — `options/boxplot.ts` gives its category axis
+   * no `axisLabel.formatter` and draws the raw group key. Greying it out there would be dishonest in
+   * the other direction: a greyed item says "not here, but elsewhere on this chart", and there is no
+   * state of a box plot in which Compact does anything.
+   *
+   * This overturns a decision recorded in this file's own section doc and in
+   * `CartesianDisplaySection.tsx`, both of which withheld Compact from the waterfall on the grounds
+   * that "a waterfall's x is a category". `options/waterfall.ts`'s `drawLabel` carries the
+   * measurement that falsifies it for that chart and confirms it for this one.
+   */
+  offerCompact?: boolean;
+  /** Greys "Compact" out for the SAME reason and in the same states as `rotationsDisabled` — a
+   *  chart drawing a VALUE axis across has ECharts-generated tick labels rather than the category
+   *  array, so neither the rotation nor the formatter is in play. Kept as its own prop rather than
+   *  folded into `rotationsDisabled`, because the two coincide today by fact and not by definition:
+   *  a caller that ever wanted one without the other should not have to unpick a shared name. */
+  compactDisabled?: boolean;
   /** Id of the caption explaining that greying, hung off the TRIGGER — the disabled items
    *  themselves are unreachable by mouse, keyboard and screen reader alike. */
   describedBy?: string;
@@ -154,6 +203,7 @@ export function CategoryTicksSelect({ axis, id, value, onChange, rotationsDisabl
         <SelectContent>
           <SelectItem value="hide">Hide</SelectItem>
           <SelectItem value="show">Show</SelectItem>
+          {offerCompact && <SelectItem value="compact" disabled={compactDisabled}>Compact</SelectItem>}
           {(["rotate45", "rotate90"] as const).map((v) => (
             <SelectItem key={v} value={v} disabled={rotationsDisabled}>
               {v === "rotate45" ? "Rotate 45°" : "Rotate 90°"}
@@ -270,15 +320,32 @@ function AxisTitleRow({ id, axis, label, shown, onLabel, onShown }: {
  * "Show lines and tick marks" is a SELECT rather than a switch because Metabase folds label
  * rotation into the same control (`graph.x_axis.axis_enabled`: Hide / Show / Compact / Rotate 45° /
  * Rotate 90°), and rotation is the part egret had no way to ask for at all — it tilted long names
- * at 30° on a guess and offered no override. **"Compact" is not offered**: it shortens temporal
- * axis labels, and these charts' x is a category run through its column format, so the option
- * would do nothing here.
+ * at 30° on a guess and offered no override.
+ *
+ * **"Compact" USED TO BE WITHHELD FROM BOTH CHARTS HERE, and that was half wrong.** The reason
+ * recorded was that "it shortens temporal axis labels, and these charts' x is a category run
+ * through its column format, so the option would do nothing here". That is true of the box plot and
+ * false of the waterfall: `options/waterfall.ts` runs its steps through a `drawLabel` with the same
+ * two arms as the cartesian builder's, `namesAPeriod` and `periodName`, so a month-bucketed
+ * waterfall draws "January 2026" and has a label to shorten. The box plot's category axis genuinely
+ * has no `axisLabel.formatter` (`options/boxplot.ts`). The two charts that share this tab differ on
+ * this one point, so it is now a PROP rather than a fact about the tab — which is what stops the
+ * next reader inferring the withheld half from the offered one, as this comment invited.
+ *
+ * The same is true in the other direction for "Unpin from zero": the box plot has it and the
+ * waterfall does not, because `isYAxisUnpinFromZeroValid` excludes a waterfall display outright.
+ * Two charts, two settings, and each chart gets exactly one of them.
  */
-export function ChartAxesSection<C extends AxesConfig>({ config, onChange, idPrefix = "ax" }: {
+export function ChartAxesSection<C extends AxesConfig>({ config, onChange, idPrefix = "ax", offerCompact, offerUnpin }: {
   config: C;
   onChange: (patch: Partial<C>) => void;
   /** Distinct per chart so two panels on one page cannot share a label's `htmlFor`. */
   idPrefix?: string;
+  /** See `CategoryTicksSelect`'s prop of the same name — true for the waterfall, false for the box
+   *  plot, and the asymmetry is measured rather than assumed. */
+  offerCompact?: boolean;
+  /** …and its mirror image: true for the box plot, false for the waterfall. */
+  offerUnpin?: boolean;
 }) {
   return (
     <div className="space-y-3">
@@ -288,7 +355,11 @@ export function ChartAxesSection<C extends AxesConfig>({ config, onChange, idPre
         {/* No `rotationsDisabled`: these two charts' x is always the ordinal sequence of categories,
             so the rotation always applies. Cartesian's tab passes it, because a linear/timeseries x
             draws a value axis whose labels `scaleAxis` gives no `rotate`. */}
+        {/* No `compactDisabled` beside `offerCompact` for the same reason there is no
+            `rotationsDisabled`: these two charts' x is always the ordinal sequence of categories,
+            so where the option exists at all it always applies. */}
         <CategoryTicksSelect axis="X" id={`${idPrefix}-xticks`} value={xTicksChoiceOf(config)}
+          offerCompact={offerCompact}
           onChange={(v) => onChange(xTicksPatch(v) as Partial<C>)} />
       </AxisGroup>
 
@@ -297,6 +368,22 @@ export function ChartAxesSection<C extends AxesConfig>({ config, onChange, idPre
           onLabel={(v) => onChange({ yLabel: v } as Partial<C>)} onShown={(v) => onChange({ showYLabel: v ? undefined : false } as Partial<C>)} />
         <ValueRangeRows axis="Y" idPrefix={idPrefix} min={config.yMin} max={config.yMax}
           onChange={(patch) => onChange(patch as Partial<C>)} />
+        {/* IMMEDIATELY BELOW the auto-range switch, which is where Metabase puts it — `auto_range` is
+            index 4 and `unpin_from_zero` index 5 in the same Y-axis group
+            (`lib/settings/graph.ts:791`, `:817`) — and the adjacency is the explanation: the row
+            DISAPPEARS when auto range is turned off, and a control that vanishes is much easier to
+            read as a rule when the thing that banished it is the row above.
+
+            HIDDEN, NOT GREYED, which is the opposite of what the rotations two blocks up do, so it
+            needs saying. Metabase hides it (`getHidden`, `graph.ts:826-829`), and the local
+            precedent agrees: `TickCountRow` below is gated away the same way by the same kind of
+            neighbour. The rotations are greyed instead because a chart may have STORED one and must
+            still show what it stored; there is nothing to show here, since `unpinFromZeroApplies`
+            being false already means the builder ignores the stored flag outright. */}
+        {offerUnpin && unpinFromZeroAppliesToBoxplot(config) && (
+          <Toggle id={`${idPrefix}-unpin`} label="Unpin from zero" checked={config.unpinFromZero === true}
+            onChange={(v) => onChange({ unpinFromZero: v || undefined } as Partial<C>)} />
+        )}
         {/* Metabase's Scale select offers Linear / Power / Log. **Power is not offered**: ECharts'
             value axis has no power scale, Metabase implements its own, and a third option that
             silently drew a linear axis would be worse than its absence. */}

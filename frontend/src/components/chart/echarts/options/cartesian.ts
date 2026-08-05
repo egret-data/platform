@@ -93,6 +93,14 @@ export interface CartesianBuildConfig {
    *  values waterfall and box plot already store (`options/waterfall.ts`, `options/boxplot.ts`).
    *  The panel control that writes it is Task 3; this is the field the builder reads. */
   xLabelRotation?: 45 | 90;
+  /** Metabase's fifth `graph.x_axis.axis_enabled` value, "Compact" — a FORMATTING flag on the
+   *  category label text, read by `drawLabel` and nowhere else. Same field name the waterfall
+   *  stores; the box plot has no twin, because its category axis has no formatter. */
+  xLabelCompact?: boolean;
+  /** Metabase's `graph.y_axis.unpin_from_zero`. Unset takes the DISPLAY's default, which is
+   *  unpinned on a scatter and pinned everywhere else — `unpinFromZeroOn` resolves it, and
+   *  `unpinFromZeroApplies` decides where it is honoured at all. */
+  unpinFromZero?: boolean;
   /** Metabase's "Number of tick marks" on the value axis. Unset lets ECharts choose. */
   yTickCount?: number;
   seriesUnit?: string;           // temporal unit of the BREAKOUT dimension, same role as xAxisUnit
@@ -706,6 +714,66 @@ export function seriesDisplayFor(
   return kind; // "bar" | "line"
 }
 
+/**
+ * Whether "Unpin from zero" is OFFERED on this chart — Metabase's `isYAxisUnpinFromZeroValid`
+ * (`frontend/src/metabase/visualizations/shared/settings/cartesian-chart.ts:245-260`), arm for arm:
+ *
+ *     if (!settings["graph.y_axis.auto_range"] || settings["stackable.stack_type"] != null) {
+ *       return false;
+ *     }
+ *     return seriesDisplays.every(
+ *       (display) => display !== "area" && display !== "bar" && display !== "waterfall",
+ *     );
+ *
+ * THE THREE REFUSALS ARE NOT ARBITRARY and porting them without the reason would make this look
+ * like a list to trim. A bar and an area are drawn from a BASELINE — the bar's rectangle and the
+ * area's fill both start at zero and their length IS the value — so an axis that does not include
+ * zero draws bars whose relative heights lie about their relative values. A line and a scatter draw
+ * a POSITION, which is legible at any extent. A stack is the same objection reached from the other
+ * side: the pile is measured from the baseline, so its bottom cannot move. Metabase's third
+ * exclusion, `waterfall`, is not a cartesian kind in egret and is expressed here as structure
+ * instead — `viz/simple.tsx`'s waterfall panel simply never renders the control.
+ *
+ * THE FIRST GATE IS A TRANSLATION, not a copy, and it is the one thing here that is not verbatim.
+ * Metabase stores `graph.y_axis.auto_range` as its own boolean key; egret has no such key, because
+ * its "Auto y-axis range" switch is DERIVED — `ValueRangeRows` computes it as `yMin == null &&
+ * yMax == null` and its own doc explains why (a fourth key is a fourth thing to disagree with the
+ * two boxes). So the same rule is read off the same state by a different route. It matters for the
+ * same reason it does upstream: an explicit bound already decides the extent outright, so a flag
+ * asking for a different one would be an inert control.
+ *
+ * `kind` DECIDES A ROW WITHOUT ASKING ITS SERIES: `seriesDisplayFor` answers "bar" for a row chart,
+ * so it is refused by the same line that refuses a bar rather than by a special case. A combo is
+ * the case that needs the per-series walk, and it is the case where the default matters — a combo
+ * left alone is line-then-bar, so it is refused until its second series is changed, which is
+ * exactly what the live "MB · Combo" does.
+ */
+export function unpinFromZeroApplies(
+  cfg: Pick<CartesianBuildConfig, "kind" | "yMetrics" | "seriesTypes" | "stacked" | "normalized" | "yMin" | "yMax">,
+): boolean {
+  // `!= null` and not truthiness: `yMin: 0` is a bound a user set, and it is the ONE bound a
+  // truthiness test would drop — the pinned axis spelled out by hand.
+  if (cfg.yMin != null || cfg.yMax != null) return false;
+  if (resolveStacked(cfg)) return false;
+  return (cfg.yMetrics ?? []).every((m, i) => {
+    const d = seriesDisplayFor(cfg.kind, m, i, cfg.seriesTypes);
+    return d !== "area" && d !== "bar";
+  });
+}
+
+/**
+ * …and whether it is ON, which is a second question because the DEFAULT is not the same on every
+ * chart. Metabase's `getYAxisUnpinFromZeroDefault` (`cartesian-chart.ts:242`) is
+ * `display === "scatter"` — a scatter is unpinned out of the box and everything else is pinned —
+ * so a scatter that has never been touched must come out unpinned rather than merely offerable.
+ */
+export function unpinFromZeroOn(
+  cfg: Pick<CartesianBuildConfig, "kind" | "yMetrics" | "seriesTypes" | "stacked" | "normalized" | "yMin" | "yMax" | "unpinFromZero">,
+): boolean {
+  if (!unpinFromZeroApplies(cfg)) return false;
+  return cfg.unpinFromZero ?? cfg.kind === "scatter";
+}
+
 /** The ECharts series type behind a display. An area is a line that happens to be filled.
  *
  *  Exported because the settings panel has to ask the same question the builder does: `decorateSeries`
@@ -863,7 +931,27 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
     },
     ...(groups.length > 1 ? { legend: { type: "scroll", bottom: 0, textStyle: { color: axisLabelColor } } } : {}),
     xAxis: { type: "value", name: cfg.xMetric, nameLocation: "middle", nameGap: 28, axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmtM(cfg.xMetric!, v) }, splitLine: { lineStyle: { color: gridLine } } },
-    yAxis: { type: "value", name: yMetric, axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmtM(yMetric, v) }, splitLine: { lineStyle: { color: gridLine } } },
+    /**
+     * THE ONE CHART METABASE UNPINS BY DEFAULT, so this axis has to carry the flag even though this
+     * function is a documented divergence from the rest of the Y value-axis block.
+     *
+     * `settings/CartesianDisplaySection.tsx:265-266` records that the metric-vs-metric scatter
+     * leaves through here and builds its own pair of value axes, never reading `yMin`, `yMax`,
+     * `yTickCount` or `yAxisTicks` — a stated divergence rather than a gap. Unpin is an exception to
+     * that divergence and not a hole in it: `getYAxisUnpinFromZeroDefault` is
+     * `display === "scatter"` (`cartesian-chart.ts:242`), so leaving this path alone would have
+     * meant the flag never reached the ONE display that has it on out of the box.
+     *
+     * WRITTEN UNCONDITIONALLY, unlike `mkValueAxis`, and the asymmetry is the point rather than an
+     * inconsistency: there the default is pinned and matches ECharts', so an absence says it; here
+     * the default is UNPINNED, so an absence would say the opposite of what was decided and there
+     * would be no way to express a deliberate pin at all. Metabase writes its own line
+     * unconditionally for the same reason — `!!settings[...]` has no third state.
+     *
+     * X IS LEFT PINNED. The key is `graph.y_axis.unpin_from_zero`; Metabase has no x-axis twin, and
+     * inventing one here would be a setting with no parity and no control.
+     */
+    yAxis: { type: "value", scale: unpinFromZeroOn(cfg), name: yMetric, axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmtM(yMetric, v) }, splitLine: { lineStyle: { color: gridLine } } },
     series,
   };
 }
@@ -1311,6 +1399,11 @@ function baseOption(
   // it. The deferral stands; the owner named for it never existed.
   const ordinalX = !horizontal && !usesXScale(cfg);
 
+  /** Metabase's `graph.y_axis.unpin_from_zero`, resolved ONCE for the whole option — the axis flag
+   *  below and `axisExtent` above are two halves of the same decision, and computing it twice is
+   *  how they would come to disagree on a chart whose stacking or bounds changed mid-build. */
+  const unpin = unpinFromZeroOn(cfg);
+
   /**
    * What a category is DRAWN AS. Hoisted above the fit below rather than written inline on
    * `axisLabel.formatter`, because the fitter has to measure THIS STRING and nothing else — see
@@ -1336,14 +1429,53 @@ function baseOption(
    * `SmartScalarChart.tsx`, where arms 1 and 2 are these and ARM 3 IS NOT, and says so.
    */
   const bucketedX = namesAPeriod(cfg.xAxisUnit);
+  /**
+   * METABASE'S "Compact", THE FIFTH `graph.x_axis.axis_enabled` VALUE, AND IT IS SMALLER THAN THE
+   * NAME SUGGESTS. Its three x-axis model builders say the same thing three times —
+   * `echarts/cartesian/model/axis.ts:716` (timeseries), `:778` (numeric), `:856` (category) —
+   * and each says only:
+   *
+   *     compact: settings["graph.x_axis.axis_enabled"] === "compact",
+   *
+   * spread into `formatValue`'s options. It is A FORMATTING FLAG ON THE LABEL TEXT. Nothing about
+   * layout, tick density or rotation is touched upstream, and nothing is touched here either.
+   *
+   * WHY THAT IS THE RULE AND NOT WHAT YOU SEE. Measured live at :3033 on "MB · Line" (12 monthly
+   * buckets): Show drew SIX labels (March 2026 / May / July / September / November / January),
+   * Compact drew TWELVE (Feb 2026 / Mar 2026 / … / Jan 2026). A reader would reasonably conclude
+   * Compact means "draw every label". It does not — twelve labels are a CONSEQUENCE: shorter
+   * strings stop colliding, so the tick chooser stops thinning. Porting "draw every label" would
+   * have been copying the value instead of the rule, and it would break the moment a card was
+   * narrow enough that even "Jan 2026" did not fit. Nothing below tells the fitter anything: it is
+   * handed `drawnCategories`, which is this closure's own output, so the density follows for free.
+   *
+   * BOTH ARMS TAKE IT, because Metabase's single `compact` reaches both halves of `formatValue` —
+   * a date's month token and a number's magnitude suffix. egret spells those as two `ColumnFormat`
+   * fields (`date_abbreviate` and `compact`, `format.ts:103` and `:60`), so ONE flag here sets
+   * BOTH; setting only `compact` would have made a compact date axis a no-op, silently, on the very
+   * axis the feature is named for. Spread OVER the stored format rather than replacing it, which is
+   * again Metabase's shape (`{...columnSettings, compact}`): a user who has chosen a date style
+   * keeps it and gets it abbreviated, instead of having it swapped out from under them.
+   */
+  const compactX = cfg.xLabelCompact === true;
   const drawLabel = (v: string) => {
-    const fmt = cfg.xAxis ? cfg.columnSettings?.[cfg.xAxis] : undefined;
-    const formatWins = fmt != null && (bucketedX ? specifiesDateRendering(fmt) : true);
+    const stored = cfg.xAxis ? cfg.columnSettings?.[cfg.xAxis] : undefined;
+    // Compact is itself something the format now SAYS, so it makes arm 1 reachable on a column that
+    // has no stored settings at all. Without this line a numeric category axis with an untouched
+    // format fell through to arm 3 and drew `12400` with Compact on — an inert control on one of the
+    // two halves of Metabase's single flag, which is the defect this programme keeps closing.
+    const fmt = compactX ? { ...stored, compact: true, date_abbreviate: true } : stored;
+    // ASKED OF `stored`, NEVER OF `fmt`, and this is the one line where the difference bites. The
+    // `date_abbreviate` compact adds would make `specifiesDateRendering` true on every bucketed
+    // axis, handing it to `formatDate`'s DEFAULTS — so a compact monthly axis would have drawn
+    // "Jan 1, 2026" instead of "Jan 2026". Compact is a modifier on whatever wins; it is not itself
+    // a reason for the column format to outrank the period name.
+    const formatWins = fmt != null && (bucketedX ? specifiesDateRendering(stored) : true);
     if (formatWins && v != null) {
       const out = formatValue(v, cfg.xAxisType ?? "varchar", fmt);
       if (out !== "") return out;
     }
-    return periodName(cfg.xAxisUnit, v);
+    return periodName(cfg.xAxisUnit, v, compactX);
   };
 
   // An explicit rotation SKIPS the measurement rather than merely outranking it. Computing the fit
@@ -1474,11 +1606,22 @@ function baseOption(
   const axisExtent = (metrics: string[]): { lo: number; hi: number } => {
     if (normalized) return { lo: 0, hi: 100 };
     const stacked = resolveStacked(cfg);
+    // THE HALF OF "UNPIN FROM ZERO" THAT `scale: true` CANNOT REACH, and the reason the flag is
+    // read here as well as on the axis. Metabase hands ECharts nothing but `scale`; this builder
+    // does not stop there — it measures the card and, when the ticks would crowd, writes an
+    // EXPLICIT `min`/`max` from `verticalValueAxisFit` (and, on a row chart, an `interval` from
+    // `intervalThatFits`). Both are derived from this function, whose seed of `lo = 0, hi = 0` is
+    // itself a statement that the axis includes the origin. An explicit `min` outranks `scale`
+    // OUTRIGHT in ECharts, so porting the flag alone would have left the axis pinned on exactly
+    // the small cards a user looks at — a browser measures, jsdom does not — while every unmeasured
+    // unit test passed. That is this programme's recurring "saves but does not paint" defect
+    // reached from a new direction, which is why the seed moves with the flag.
+    const seed = unpin ? { lo: Infinity, hi: -Infinity } : { lo: 0, hi: 0 };
     // Per category index, so a stack is summed where it is drawn. Positives and negatives are kept
     // apart because they grow in opposite directions from the baseline — ECharts stacks them into
     // two piles, not one net figure, and an axis sized on the net one is too short at both ends.
     const up: number[] = [], down: number[] = [];
-    let lo = 0, hi = 0;
+    let lo = seed.lo, hi = seed.hi;
     for (const s of plotted) {
       // A breakout splits one metric into many series, each still tagged with __metric. An untagged
       // series predates that and is counted against whichever axis asks — `widestOf`'s rule.
@@ -1501,6 +1644,13 @@ function baseOption(
       hi = Math.max(hi, ...up.filter((v) => Number.isFinite(v)));
       lo = Math.min(lo, ...down.filter((v) => Number.isFinite(v)));
     }
+    // An unpinned axis with NO finite datum still holds its seed, and `±Infinity` is not an extent
+    // — the fits below would take a span of `-Infinity` and decline, which is the right answer by
+    // accident rather than by statement. Fall back to the pinned seed so the two paths agree about
+    // what an empty chart's axis is, and so nothing downstream has to hold an infinity.
+    // (`stacked` cannot be true here while `unpin` is: `unpinFromZeroApplies` refuses a stack, so
+    // the `Math.min(Infinity, ...[])` this line would otherwise have to answer for is unreachable.)
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) { lo = 0; hi = 0; }
     return { lo: cfg.yMin ?? lo, hi: cfg.yMax ?? hi };
   };
   // A LOG axis is excluded: its ticks are powers, so a linear interval means something else
@@ -1767,6 +1917,17 @@ function baseOption(
       // axis's are tall.
       nameGap: horizontal ? 28 : 44,
       position,
+      // Metabase's `graph.y_axis.unpin_from_zero`, and its whole implementation there is one line —
+      // `scale: !!settings["graph.y_axis.unpin_from_zero"]` (`echarts/cartesian/option/axis.ts:380`).
+      // ECharts' own `scale` is the flag: `false` (its default) forces a value axis to include the
+      // origin, `true` lets it fit the data. Nothing is computed, so there is no number to copy and
+      // nowhere for one to drift.
+      //
+      // WRITTEN ONLY WHEN TRUE, which `scatterXY` deliberately does NOT do — see the note there.
+      // Pinned is ECharts' default as well as egret's, so writing `scale: false` would say the same
+      // thing more loudly while changing the emitted option of every chart in the product; an
+      // absence here means "pinned" for the same reason it does upstream.
+      ...(unpin ? { scale: true } : {}),
       ...(normalized ? { max: 100 } : {}),
       // The ends the vertical fit's interval divides — see `verticalValueAxisFit`, which explains why
       // ECharts will not round them itself once an `interval` is named, and what the short last step

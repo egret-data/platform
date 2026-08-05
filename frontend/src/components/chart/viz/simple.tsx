@@ -204,8 +204,21 @@ const waterfallDisplay: VizControl<Cfg>[] = [
   },
   {
     id: "axes", section: "display", group: AXES_GROUP,
+    /**
+     * COMPACT YES, UNPIN NO, and both halves are Metabase's rather than a preference.
+     *
+     * Compact acts through this chart's own `drawLabel` (`echarts/options/waterfall.ts`), which
+     * names periods with the same two arms cartesian's does — so a month-bucketed waterfall really
+     * does draw "January 2026" and really does shorten to "Jan 2026". That overturns a decision
+     * recorded twice in this repo; the builder carries the measurement.
+     *
+     * Unpin is refused because `isYAxisUnpinFromZeroValid` excludes a `waterfall` display BY NAME
+     * (`shared/settings/cartesian-chart.ts:257-259`), and the reason generalises where the Compact
+     * one did not: a waterfall's bars are measured from a baseline, so an axis that misses zero
+     * draws steps whose heights no longer mean their deltas.
+     */
     render: ({ config, onChange }: VizControlProps<Cfg>) => (
-      <ChartAxesSection idPrefix="wf" config={config as WaterfallConfig}
+      <ChartAxesSection idPrefix="wf" config={config as WaterfallConfig} offerCompact
         onChange={onChange as (p: Partial<WaterfallConfig>) => void} />
     ),
   },
@@ -235,8 +248,20 @@ const boxplotDisplay: VizControl<Cfg>[] = [
   },
   {
     id: "axes", section: "display", group: AXES_GROUP,
+    /**
+     * THE EXACT MIRROR of the waterfall's line above: unpin YES, compact NO.
+     *
+     * Unpin is valid because a boxplot display is none of the three `isYAxisUnpinFromZeroValid`
+     * excludes, and it matters more here than on any other chart — a distribution of prices between
+     * 40 and 60 spends two thirds of a pinned axis drawing nothing.
+     *
+     * Compact is withheld because this chart's category axis has NO `axisLabel.formatter` at all
+     * (`echarts/options/boxplot.ts` draws the raw group key), so a formatting flag has nothing to
+     * act through. This is the half of the original "Compact does nothing on these charts" decision
+     * that survived re-checking.
+     */
     render: ({ config, onChange }: VizControlProps<Cfg>) => (
-      <ChartAxesSection idPrefix="bp" config={config as BoxplotConfig}
+      <ChartAxesSection idPrefix="bp" config={config as BoxplotConfig} offerUnpin
         onChange={onChange as (p: Partial<BoxplotConfig>) => void} />
     ),
   },

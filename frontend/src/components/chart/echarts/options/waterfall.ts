@@ -32,6 +32,9 @@ export interface WaterfallBuildConfig {
   xAxisTicks?: boolean;
   yAxisTicks?: boolean;
   xLabelRotation?: 45 | 90;
+  /** Metabase's "Compact" x-axis mode. This chart HAS a label formatter for it to act through —
+   *  `drawLabel` below — which is what makes it different from the box plot. */
+  xLabelCompact?: boolean;
   yTickCount?: number;
   yMin?: number;
   yMax?: number;
@@ -232,14 +235,35 @@ export function buildWaterfallOption(
    * because there are no categories to draw.
    */
   const bucketedX = namesAPeriod(cfg.xAxisUnit);
+  /**
+   * …AND THE WATERFALL GETS METABASE'S "Compact" TOO, which overturns a decision this repo had
+   * recorded twice. `settings/ChartAxesSection.tsx` said Compact "shortens temporal axis labels,
+   * and these charts' x is a category run through its column format, so the option would do nothing
+   * here", and `CartesianDisplaySection.tsx` repeated the premise. **The premise is false for this
+   * chart**: `bucketedX` two lines up is `namesAPeriod(cfg.xAxisUnit)` and arm 2 below is
+   * `periodName(cfg.xAxisUnit, v)` — the same two arms, on the same module, as the cartesian
+   * builder's. A month-bucketed waterfall draws "January 2026" today, so there is a temporal label
+   * here to shorten and the reason for withholding it does not apply.
+   *
+   * IT REMAINS TRUE OF THE BOX PLOT, which is why that chart still does not get the option: its
+   * category axis has no `axisLabel.formatter` at all (`options/boxplot.ts` draws the raw group
+   * key, and says so), so there is nothing for a formatting flag to act through. The original
+   * decision was right about one of the two charts it covered and wrong about the other — see the
+   * note in `settings/ChartAxesSection.tsx`, where the split is now stated as structure.
+   *
+   * The three-line shape is the cartesian builder's, deliberately, including which of `stored` and
+   * `fmt` `specifiesDateRendering` is asked about — that comment carries the measurement.
+   */
+  const compactX = cfg.xLabelCompact === true;
   const drawLabel = (v: string) => {
-    const colFmt = cfg.xAxis ? cfg.columnSettings?.[cfg.xAxis] : undefined;
-    const formatWins = colFmt != null && (bucketedX ? specifiesDateRendering(colFmt) : true);
+    const stored = cfg.xAxis ? cfg.columnSettings?.[cfg.xAxis] : undefined;
+    const colFmt = compactX ? { ...stored, compact: true, date_abbreviate: true } : stored;
+    const formatWins = colFmt != null && (bucketedX ? specifiesDateRendering(stored) : true);
     if (formatWins && v != null) {
       const out = formatValue(v, columns[xi ?? 0]?.type ?? "varchar", colFmt);
       if (out !== "") return out;
     }
-    return periodName(cfg.xAxisUnit, v);
+    return periodName(cfg.xAxisUnit, v, compactX);
   };
 
   // Whether the step names fit is a question about WIDTH, and until `size` existed this builder

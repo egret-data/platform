@@ -9,10 +9,16 @@ import { ChartAxesSection, xTicksChoiceOf, xTicksPatch, type AxesConfig } from "
  * same projection. Without one, the whole waterfall/box-plot side of `xTicksChoiceOf`/`xTicksPatch`
  * could be broken by a change made for cartesian's sake and nothing here would say so.
  *
- * Assertions are on the emitted patch, not the DOM: one control writes TWO stored fields, and the
- * failure worth catching is a patch that sets half the pair. `toStrictEqual`, because `toEqual`
- * ignores `undefined` properties and so cannot tell a patch that CLEARS the other key from one that
- * quietly leaves it behind.
+ * Assertions are on the emitted patch, not the DOM: one control writes THREE stored fields, and the
+ * failure worth catching is a patch that sets some of the group. `toStrictEqual`, because `toEqual`
+ * ignores `undefined` properties and so cannot tell a patch that CLEARS the other keys from one that
+ * quietly leaves them behind.
+ *
+ * THE EXPECTATIONS BELOW GAINED A THIRD KEY when Metabase's fifth choice, "Compact", was added, and
+ * that is `toStrictEqual` doing exactly the job the paragraph above claims for it: `xLabelCompact:
+ * undefined` is invisible to `toEqual` and to `toHaveBeenCalledWith`, so under either of those the
+ * new key could have been added — or forgotten — with every assertion here still green. Two tests
+ * failing on a key nobody asserted is the cost of that guarantee and the proof it is real.
  */
 const cfg = (over: Partial<AxesConfig> = {}): AxesConfig => ({ ...over });
 
@@ -23,7 +29,7 @@ describe("ChartAxesSection — the x lines/ticks/rotation select", () => {
     render(<ChartAxesSection config={cfg({ xAxisTicks: false })} onChange={onChange} />);
     await user.click(screen.getByLabelText("X show lines and tick marks"));
     await user.click(await screen.findByRole("option", { name: "Rotate 90°" }));
-    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xLabelRotation: 90, xAxisTicks: undefined });
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xLabelRotation: 90, xAxisTicks: undefined, xLabelCompact: undefined });
   });
 
   it("choosing Hide turns the axis off and drops the rotation with it", async () => {
@@ -32,7 +38,7 @@ describe("ChartAxesSection — the x lines/ticks/rotation select", () => {
     render(<ChartAxesSection config={cfg({ xLabelRotation: 45 })} onChange={onChange} />);
     await user.click(screen.getByLabelText("X show lines and tick marks"));
     await user.click(await screen.findByRole("option", { name: "Hide" }));
-    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xAxisTicks: false, xLabelRotation: undefined });
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ xAxisTicks: false, xLabelRotation: undefined, xLabelCompact: undefined });
   });
 
   it("displays what is stored", () => {
@@ -49,6 +55,84 @@ describe("ChartAxesSection — the x lines/ticks/rotation select", () => {
     render(<ChartAxesSection config={cfg()} onChange={() => {}} />);
     await user.click(screen.getByLabelText("X show lines and tick marks"));
     expect(await screen.findByRole("option", { name: "Rotate 45°" })).not.toHaveAttribute("aria-disabled", "true");
+  });
+});
+
+/**
+ * THE TWO CHARTS THAT SHARE THIS TAB GET ONE NEW SETTING EACH, AND NOT THE SAME ONE — which is the
+ * whole reason both are props rather than facts about the tab.
+ *
+ * Both directions on both settings, because a one-sided assertion cannot tell "correctly withheld"
+ * from "never wired up": the offering test would pass against a component that always showed the
+ * row, and the withholding test would pass against one that never did.
+ */
+describe("ChartAxesSection — Compact is the waterfall's and Unpin is the box plot's", () => {
+  it("offers Compact only where a caller says the chart has a label formatter", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<ChartAxesSection config={cfg()} offerCompact onChange={() => {}} />);
+    await user.click(screen.getByLabelText("X show lines and tick marks"));
+    expect(await screen.findByRole("option", { name: "Compact" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    // The box plot's arm. Its category axis has no `axisLabel.formatter` at all, so the option is
+    // ABSENT rather than greyed — there is no state of that chart in which it would do something.
+    rerender(<ChartAxesSection config={cfg()} onChange={() => {}} />);
+    await user.click(screen.getByLabelText("X show lines and tick marks"));
+    expect(await screen.findByRole("option", { name: "Show" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Compact" })).toBeNull();
+  });
+
+  it("stores Compact and clears the rotation with it — Metabase's five values are exclusive", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<ChartAxesSection config={cfg({ xLabelRotation: 45 })} offerCompact onChange={onChange} />);
+    await user.click(screen.getByLabelText("X show lines and tick marks"));
+    await user.click(await screen.findByRole("option", { name: "Compact" }));
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({
+      xLabelCompact: true, xAxisTicks: undefined, xLabelRotation: undefined,
+    });
+  });
+
+  it("shows a stored Compact on the trigger, and lets a rotation outrank it", () => {
+    const { rerender } = render(<ChartAxesSection config={cfg({ xLabelCompact: true })} offerCompact onChange={() => {}} />);
+    expect(screen.getByLabelText("X show lines and tick marks")).toHaveTextContent("Compact");
+    // The pair this control cannot write but an older build's config can hold — see
+    // `xTicksChoiceOf`, which reports the more visible of the two rather than inventing a sixth
+    // choice for the combination.
+    rerender(<ChartAxesSection config={cfg({ xLabelCompact: true, xLabelRotation: 90 })} offerCompact onChange={() => {}} />);
+    expect(screen.getByLabelText("X show lines and tick marks")).toHaveTextContent("Rotate 90°");
+  });
+
+  it("offers Unpin from zero only where a caller says the display allows it", () => {
+    const { rerender } = render(<ChartAxesSection config={cfg()} offerUnpin onChange={() => {}} />);
+    expect(screen.getByLabelText("Unpin from zero")).toBeInTheDocument();
+    // The waterfall's arm: `isYAxisUnpinFromZeroValid` excludes that display by name.
+    rerender(<ChartAxesSection config={cfg()} onChange={() => {}} />);
+    expect(screen.queryByLabelText("Unpin from zero")).toBeNull();
+  });
+
+  it("withdraws Unpin once a bound is set, and brings it back when the bound is cleared", () => {
+    // Metabase's own gate, `!settings["graph.y_axis.auto_range"]`, read off egret's derived pair.
+    // The second half is what stops this passing against a row that is simply never rendered.
+    const { rerender } = render(<ChartAxesSection config={cfg({ yMin: 0 })} offerUnpin onChange={() => {}} />);
+    expect(screen.queryByLabelText("Unpin from zero")).toBeNull();
+    rerender(<ChartAxesSection config={cfg({ yMax: 100 })} offerUnpin onChange={() => {}} />);
+    expect(screen.queryByLabelText("Unpin from zero")).toBeNull();
+    rerender(<ChartAxesSection config={cfg()} offerUnpin onChange={() => {}} />);
+    expect(screen.getByLabelText("Unpin from zero")).toBeInTheDocument();
+  });
+
+  it("stores Unpin as true, and CLEARS the key rather than storing false", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const { rerender } = render(<ChartAxesSection config={cfg()} offerUnpin onChange={onChange} />);
+    await user.click(screen.getByLabelText("Unpin from zero"));
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ unpinFromZero: true });
+    // Off is an ABSENCE, not a stored `false`, so a chart that never touched this reads identically
+    // to one toggled on and back off — the same rule every other "unset means the default" key in
+    // this panel keeps, and what lets `mergeVizSettings` delete it.
+    rerender(<ChartAxesSection config={cfg({ unpinFromZero: true })} offerUnpin onChange={onChange} />);
+    await user.click(screen.getByLabelText("Unpin from zero"));
+    expect(onChange.mock.lastCall?.[0]).toStrictEqual({ unpinFromZero: undefined });
   });
 });
 

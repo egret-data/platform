@@ -321,6 +321,211 @@ trend has no comparison control at all.
 
 ---
 
+---
+
+## UPDATE — what PR C found when it executed this section
+
+Written after the work, in the spirit of the pruning note and PR A's and PR B's updates above. **PR C
+ships C1 and C2 and STOPS BEFORE C3**, and the reason is not the one this plan predicted. Two points
+of the brief needed correcting, one recorded decision was overturned by measurement, and the two
+test files an interrupted attempt had left on the branch were kept — but one of them had a fixture
+that never reached the path it was asserting about. The original text is left standing.
+
+**Both pre-existing test files were KEPT, and their Metabase citations are all verbatim.** Every
+line number in their headers was re-checked against the sibling checkout and every one is exact:
+`option/axis.ts:380` really is `scale: !!settings["graph.y_axis.unpin_from_zero"]` and is the whole
+implementation; `model/axis.ts:716/778/856` really do say `compact: settings[...] === "compact"`
+three times; `cartesian-chart.ts:245-260` and `:242` are verbatim; `formatting/date.tsx:714-718` is
+the `compact || date_abbreviate` swap. Both files also failed for the right reason before a line was
+written — 18 failures across the two, none of them an import error dressed up as an assertion,
+except the five `unpinFromZeroApplies` cases which correctly reported `TypeError: … is not a
+function` for a function that did not exist.
+
+**One assertion in them was wrong, and it was wrong in the way this programme keeps being wrong: a
+precondition nobody measured.** The box plot's fixture was two short category names on a 166x184
+card, at which `verticalValueAxisFit` finds room for its five ticks and DECLINES — so no `min` is
+written at all and `expect(pinned.min).toBe(0)` read `undefined`. That is a fixture failing to reach
+the measured path, not a chart that is pinned; the file's own header warns about exactly this class
+of gap on the mocking side and then fell into it on the fixture side. Corrected to four names, which
+is the shape `options/boxplot.ts` measured its own defect on, and the pinned arm now asserts
+`toBeDefined()` before asserting the value so the two arms cannot agree at `undefined`.
+
+**The unpin flag does nothing but set ECharts' `scale`, and copying only that would have shipped a
+control that saves and does not paint.** Metabase computes no number: `scale: false` (ECharts'
+default) forces a value axis to include the origin, `true` lets it fit the data. But egret's builders
+do not leave the extent to ECharts — on a measured card `verticalValueAxisFit` writes an explicit
+`min`/`max`, and **an explicit `min` outranks `scale` outright**. Both extent seeds therefore move
+with the flag (`axisExtent` in `options/cartesian.ts`, `axisLo`/`axisHi` in `options/boxplot.ts`).
+Under jsdom `measure-text` returns zeroes by design, so an unmocked suite cannot see that half at
+all — which is why both new test files mock it with zrender's own estimator, and why the mutation
+"seed at the origin even when unpinned" is a mutation worth having.
+
+**Measured in Metabase's own browser at :3033 before designing, and again after**: "MB · Line"
+pinned draws `0 / 5,000 / 10,000 / 15,000 / 20,000 / 25,000`; the same card unpinned draws `9,000 /
+12,000 / 15,000 / 18,000 / 21,000 / 24,000 / 27,000`. The presence matrix was driven rather than
+read: **Area hidden, Bar hidden, Combo hidden** (its default second series is a bar), **Waterfall
+hidden, Boxplot shown and unchecked, Scatter shown and ALREADY CHECKED** — a scatter is unpinned out
+of the box and everything else is pinned. Metabase's panel puts the row immediately under "Auto
+y-axis range", and egret's now does too. Nothing was saved; every change was made on an ad-hoc
+(unsaved) question.
+
+### C2's recorded decision was RIGHT ABOUT THE BOX PLOT AND WRONG ABOUT THE WATERFALL
+
+This is the plan's own Task C2 instruction — "a previous unit deliberately did NOT copy Compact to
+the waterfall … **That reason does not generalise**" — confirmed, and it is worth writing down which
+half of it survived so nobody re-derives this.
+
+**The recorded reason, verbatim**, from `settings/ChartAxesSection.tsx`'s section doc and repeated in
+`CartesianDisplaySection.tsx`: Compact "shortens temporal axis labels, and these charts' x is a
+category run through its column format, so the option would do nothing here". One sentence, written
+once, covering the TWO charts that share that Axes tab.
+
+**It is true of the box plot.** `options/boxplot.ts` gives its category axis **no
+`axisLabel.formatter` at all** — it draws the raw group key and says so. Compact is a formatting flag;
+with no formatter there is nothing for it to act through, and offering it there would be exactly the
+inert control this programme keeps deleting. That chart still does not get it.
+
+**It is false of the waterfall, and the falsifier is structural rather than a matter of degree.**
+`options/waterfall.ts:234-242` carries `bucketedX = namesAPeriod(cfg.xAxisUnit)` and a `drawLabel`
+whose second arm is `periodName(cfg.xAxisUnit, v)` — **the same two arms, calling the same module, as
+the cartesian builder's `drawLabel`**. That is not an accident of implementation: the waterfall's own
+comment says the shape is cartesian's "same three arms in the same order, and deliberately not a
+second idiom". So a month-bucketed waterfall draws "January 2026" TODAY, which is a temporal label,
+which is precisely the thing Compact shortens. The premise "this chart's x is a category run through
+its column format" describes arm 1 and silently omits arm 2, which is the arm that matters.
+
+The general lesson, since this is the third time in this run a single recorded reason has been
+applied wider than it was measured: **the reason was written about the tab, and the tab has two
+charts that differ on the fact it asserts.** Compact is therefore a PROP now (`offerCompact`), not a
+fact about the tab, so the next reader cannot infer the withheld half from the offered one. The same
+split runs the other way for "Unpin from zero" — the box plot has it and the waterfall does not,
+because `isYAxisUnpinFromZeroValid` excludes a waterfall display by name. Two charts, two settings,
+each chart getting exactly one of them.
+
+**Cartesian's own deferral was wrong for a third and different reason.** It read: Compact is
+deferred because "cartesian is the one family with a `timeseries` x-scale, which is exactly where a
+temporal shortener would bite, but that axis is `scaleAxis`, whose tick labels ECharts generates".
+Both clauses are true; the conclusion is not. The ORDINAL x — the default, and what every bucketed
+temporal chart in the product actually draws — goes through `drawLabel`, which is where Compact acts.
+The deferral was scoped to the one x-scale Compact cannot reach and then applied to all four.
+`scaleAxis` remains out of reach and is now GREYED there, on the same `valueX` fact the rotations are
+already greyed for, rather than withheld from every chart.
+
+**Compact is one Metabase flag and TWO egret fields.** `formatValue`'s `compact` upstream reaches
+both a date's month token and a number's magnitude suffix; egret spells those as `date_abbreviate`
+and `compact` on `ColumnFormat`. Setting only `compact` would have made a compact DATE axis a silent
+no-op — on the very axis the feature is named for. The mutation run pins both halves separately.
+
+**A trap the plan could not have named: `specifiesDateRendering` must be asked about the STORED
+format, never the compact-augmented one.** Compact adds `date_abbreviate`, which is one of the seven
+fields that function consults — so asking it the augmented format makes it true on every bucketed
+axis, handing the label to `formatDate`'s DEFAULTS and drawing "Jan 1, 2026" where "Jan 2026" was
+wanted. Compact is a modifier on whatever wins; it is not itself a reason for the column format to
+outrank the period name. It has its own mutation.
+
+**A correction to this plan's own instructions.** The brief says a new stored key needs "a `KEYS`
+entry in `viz/cartesian-codec.ts` … Backend needs nothing." Both halves are true and the first is
+**necessary but not sufficient**: the BUILDER configs (`CartesianBuildConfig`,
+`WaterfallBuildConfig`, `BoxplotBuildConfig`) are separate interfaces from the API-facing
+`CartesianConfig`/`WaterfallConfig`/`BoxplotConfig`, and a key added only to the latter type-checks
+in the codec and never reaches the chart. `tsc` caught it (7 errors in 3 files), which is the system
+working — but a codec-only change would have persisted the setting and drawn nothing. The waterfall
+and box plot need no codec entry at all: `fieldDescriptor` copies every key under a prefix
+generically, so only the cartesian family has a hand-maintained list.
+
+### C3: THE STOP CONDITION DID NOT FIRE, AND I STOPPED ANYWAY ON A DIFFERENT GROUND
+
+**This distinction is the useful part of this section, so it is stated before the numbers.** The
+plan's stop condition is: *"a comparison is a **second query shape**, not just a setting … If it
+turns out to need backend work, stop and report rather than expanding scope; `chartparams.rs`
+validates shape only and is permissive, but the *query* path may not be."*
+
+**That risk does not exist.** It was a reasonable guess and it is wrong, in both halves:
+
+- **`chartparams.rs` accepts it**, as the plan expected — it is shape-permissive on `settings` by
+  explicit design, with a test locking exactly that in
+  (`accepts_settings_keys_this_build_does_not_know`).
+- **The query path accepts it too, because there is no second query.** `computeTrend` upstream is a
+  **pure function of the rows the card already fetched**. Per type: `previousValue` walks back to the
+  previous non-empty ROW; `previousPeriod` is the same scan with `dateUnitsAgo = 1`; `periodsAgo` the
+  same with `dateUnitsAgo = N`; `staticNumber` reads only the setting; `anotherColumn` reads a second
+  column of the SAME row. Nothing issues a request. egret's trend already fetches the whole grouped
+  series — `dimsAndMetrics` sets `row_limit` (default 1000) and there is **no trend-specific LIMIT
+  anywhere** — so every row a comparison needs is already in the browser.
+
+So the plan's premise is false for four of the five types outright, and true for `anotherColumn` only
+in the weak sense that it adds a COLUMN to the existing query — which is the pattern `goalColumn`
+already uses at `viz/simple.tsx:283-286`. **No backend work. No query change. No new query shape.**
+
+**I stopped anyway, on size and reviewability, and that is a judgement rather than a rule firing.**
+The measured cost, so whoever picks C3 up starts from a number instead of the plan's guess:
+
+| piece | cost |
+|---|---|
+| backend | **none** — `chartparams.rs` unchanged |
+| query / spec | **none** — the rows are already fetched |
+| new stored key | one, `smartscalar.comparisons`, an array of tagged objects; persists free via `fieldDescriptor` |
+| compute | one new module porting `SmartScalar/compute.ts:341-655`. **The only real semantic risk in the whole feature** is `areDatesTheSame`'s timezone-offset guard — the same class of bug `parseInOwnZone` exists for in `temporal-period.ts` |
+| caption rendering | small; the trend already prints one comparison line |
+| **settings UI** | **the dominant cost.** Metabase spends six components across nine files on the comparison picker (add/remove/reorder rows, a type select, and a different second control per type) against roughly two files for all of the arithmetic |
+| **total** | **5–7 frontend files**, of which the UI is the majority |
+
+Landing that inside a PR whose other two units are axis settings would make neither reviewable, and
+the C3 half would dominate the diff of a PR named for the other two.
+
+**The cheapest honest subset**, if a follow-up wants one: the list model plus `staticNumber` +
+`previousValue` + `previousPeriod` behind a plain per-row `<Select>` — about four files and one new
+module, still no backend and no query change. `periodsAgo` and `anotherColumn` are the two that add
+UI without adding arithmetic.
+
+**Found while sizing C3, not fixed (1), and it is a correctness gap rather than a missing feature.**
+egret's trend takes `valid[n - 1]` and `valid[n - 2]` — the previous non-empty ROW, which is
+Metabase's `previousValue` — and then captions it "vs previous month", which is Metabase's
+`previousPeriod`. Those are two different comparisons upstream, computed by two different functions,
+and Metabase separates them precisely because a gap in the series makes the row-based one lie about
+which period it compared. On a series with no gaps the two agree, which is why this has never been
+seen. It belongs with C3 and is named here so it is on the record.
+
+**Found and FIXED, after first being filed under the wrong heading — and the misfiling is the part
+worth recording.** The first draft of this PR gave the scatter Metabase's unpinned-by-default in the
+BUILDER and withheld the control from the PANEL, then wrote that up as a note for whoever picks up
+C3. It is not a C3 note. It was **a behaviour change this PR introduced with no control to reverse
+it**: every saved metric-vs-metric scatter went from pinned (`scatterXY` wrote no `scale`, so
+ECharts' default of `false` applied) to unpinned, and no user could pin it back. That is
+"implemented and unreachable" — the family #414 exists for — and it was one sentence away from
+shipping because it had been written down as a limitation instead of recognised as a defect.
+
+**How it happened is worth more than what it was.** The panel gate read `kind !== "scatter"`, and the
+justification quoted `CartesianDisplaySection.tsx:265-266`'s standing divergence: the
+metric-vs-metric scatter leaves through `scatterXY`, which reads none of this panel's Y value-axis
+keys. That was TRUE, and this PR is what made it false — `scatterXY` now reads `unpinFromZero`. The
+exception was carved into the builder and the panel went on quoting the rule the exception had just
+broken. **A divergence note is a fact with a date on it, not an invariant**, and this is the second
+time in this PR that a recorded reason was applied past the point where it stopped holding (the
+waterfall's Compact exclusion was the first).
+
+The fix is the gate plus two things the gate alone would have got wrong:
+
+- the switch reads the **resolved** value (`unpinFromZeroOn`), not the stored key — otherwise a
+  scatter with nothing stored draws the switch OFF beneath a chart that is visibly unpinned, which is
+  a control that lies rather than a cosmetic slip;
+- the patch is **default-aware** — "off" on a scatter must persist an explicit `false`, because
+  `undefined` means "take the default" and the default there is ON, so the switch would spring back
+  and the pin would be unsavable. Every other key in this panel keeps the same "store only what
+  differs from the default" rule; this is that rule with a default that is not always `false`.
+
+The divergence note still holds for `yMin`, `yMax`, `yTickCount` and `yAxisTicks`, which `scatterXY`
+genuinely does ignore. Three mutations cover the fix, including re-introducing the exact defect.
+
+**One live observation that is NOT a defect, checked rather than assumed.** On the deployed
+"MB · Scatter" the toggle flips but the axis does not move: the rating column runs **0 to 5 with 24
+rows at exactly 0**, so the extent already reaches the origin and `scale` has nothing to lift. The
+same shape as the box plot's non-movement, reached for a different reason — there ECharts'
+nice-rounding lands on 0, here the data does. Both were confirmed against the number rather than
+explained away.
+
+---
+
 ## Out of scope, deliberately
 
 The two shadcn generations (solid `ring-2 ring-ring ring-offset-2` versus two-part `border-ring` +

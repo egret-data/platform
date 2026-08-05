@@ -14,6 +14,24 @@ import {
 
 export interface ResultColumn { name: string; type: string }
 
+/**
+ * Whether "Unpin from zero" is OFFERED on a box plot — Metabase's `isYAxisUnpinFromZeroValid`
+ * (`shared/settings/cartesian-chart.ts:245-260`) with everything that cannot vary here removed.
+ *
+ * Upstream that function refuses three DISPLAYS (area, bar, waterfall) and any stacked chart. A box
+ * plot is none of the three and has no stacking, so both of those arms are answered by the chart
+ * type itself; all that is left is the auto-range arm, which egret reads off the derived pair
+ * rather than off Metabase's stored `graph.y_axis.auto_range` (see `unpinFromZeroApplies` in
+ * `./cartesian.ts`, which carries the full translation and the reason).
+ *
+ * EXPORTED so the builder and the settings panel ask the SAME function. Restating "…and no bound is
+ * set" in the panel is how a control comes to be offered on a chart that will not honour it — this
+ * programme's "saves but does not paint" defect, reached from the control side.
+ */
+export function unpinFromZeroAppliesToBoxplot(cfg: { yMin?: number; yMax?: number }): boolean {
+  return cfg.yMin == null && cfg.yMax == null;
+}
+
 /** Metabase's `boxplot.whisker_type`. */
 export type WhiskerType = "tukey" | "min-max";
 /** Metabase's `boxplot.points_mode`. */
@@ -41,6 +59,9 @@ export interface BoxplotBuildConfig {
   xAxisTicks?: boolean;
   yAxisTicks?: boolean;
   xLabelRotation?: 45 | 90;
+  /** Metabase's `graph.y_axis.unpin_from_zero`. NO `xLabelCompact` twin here, deliberately: this
+   *  chart's category axis has no `axisLabel.formatter`, so a formatting flag would be inert. */
+  unpinFromZero?: boolean;
   yTickCount?: number;
   yMin?: number;
   yMax?: number;
@@ -332,9 +353,23 @@ export function buildBoxplotOption(
    * interval divides a DISTANCE: a distribution running -40 to +60 is 100 across while its biggest
    * number is 60. `yMin`/`yMax` replace their end when the user has set one.
    */
+  //
+  // …UNLESS THE CHART IS UNPINNED, which is why the seed below is not the literal `0, 0` this
+  // paragraph described until now. Metabase's `graph.y_axis.unpin_from_zero` is one line on the
+  // axis upstream (`scale: !!settings[...]`), but this builder does not leave the extent to
+  // ECharts: `down` writes an explicit `min`/`max`, and an explicit `min` outranks `scale`
+  // outright. Setting the flag without moving the seed would have left the axis pinned on exactly
+  // the measured cards — the ones small enough for `verticalValueAxisFit` to engage — which is the
+  // "saves but does not paint" defect, silent under jsdom because nothing there is measured.
+  //
+  // The gate is the same rule `unpinFromZeroApplies` states for the cartesian family, reduced to
+  // what can vary here: a box plot's display is none of the three Metabase excludes and it cannot
+  // stack, so all that is left of `isYAxisUnpinFromZeroValid` is its auto-range arm — an explicit
+  // bound already decides the extent, so the flag would be inert beside one.
+  const unpin = cfg.unpinFromZero === true && unpinFromZeroAppliesToBoxplot(cfg);
   // REDUCED rather than spread into `Math.min`: "All points" draws every raw row, and a spread of
   // one argument per point is a call frame that overflows on a big enough result set.
-  let axisLo = 0, axisHi = 0;
+  let axisLo = unpin ? Infinity : 0, axisHi = unpin ? -Infinity : 0;
   for (const v of [
     ...stats.flatMap((s) => s.box),
     ...outlierPoints.map((p) => p[1]), ...allPoints.map((p) => p[1]), ...meanPoints.map((p) => p[1]),
@@ -343,6 +378,10 @@ export function buildBoxplotOption(
     if (v < axisLo) axisLo = v;
     if (v > axisHi) axisHi = v;
   }
+  // A chart with nothing finite to plot keeps its seed, and `±Infinity` is not an extent — see the
+  // identical fallback in `options/cartesian.ts`'s `axisExtent` for why this is stated rather than
+  // left to the fits' own `isFinite` guards to answer by accident.
+  if (!Number.isFinite(axisLo) || !Number.isFinite(axisHi)) { axisLo = 0; axisHi = 0; }
   const down = categoryGutter != null && size && !cfg.logScale && cfg.yTickCount == null
     ? verticalValueAxisFit({
         plotHeight: plotHeightLessLabels({ size, band: categoryBand, grid }),
@@ -437,6 +476,11 @@ export function buildBoxplotOption(
     },
     yAxis: {
       type: cfg.logScale ? "log" : "value",
+      // Metabase's `graph.y_axis.unpin_from_zero`, whose whole upstream implementation is ECharts'
+      // own `scale` flag (`echarts/cartesian/option/axis.ts:380`). Written only when true, as on the
+      // cartesian family: pinned is ECharts' default too, so an absence already says it and every
+      // existing box plot's option stays byte-identical.
+      ...(unpin ? { scale: true } : {}),
       name: yTitle, nameLocation: "middle", nameGap: 44,
       nameTextStyle: { color: axisLabelColor },
       // The ends the fit's interval divides, written FIRST so a range the user set outranks them —
