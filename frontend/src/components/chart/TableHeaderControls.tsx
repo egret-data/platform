@@ -119,10 +119,16 @@ export function ResizeHandle({ label, onResize, getWidth, dragHandlers }: {
  * user's target has not shrunk — the button IS the title.
  *
  * `aria-label` rather than leaning on that text: the button has to say what it DOES, or a screen
- * reader announces "region, button" and the user has to guess. The cost of an `aria-label` here is
- * that it would otherwise become the `<th>`'s own accessible name (a columnheader is named from its
- * contents), which is announced again for every cell in the column — so both call sites give the
- * `<th>` an explicit `aria-label` of the plain column title to keep that reading intact.
+ * reader announces "region, button" and the user has to guess.
+ *
+ * THE COST, MEASURED IN CHROME rather than reasoned about. Wrapping the header text in a labelled
+ * control changes what the `<th>` around it is called: with the button's `aria-label` in place and
+ * no label on the cell, Chrome's accessibility tree gave that columnheader NO NAME AT ALL — read
+ * off the live page by deleting the attribute from one header and re-reading the tree, which showed
+ * `columnheader [ref=…]` beside nine siblings each still named for their column. A columnheader with
+ * no name is announced for every cell under it, so both call sites give the `<th>` an explicit
+ * `aria-label` of the plain column title. jsdom's accname implementation does NOT reproduce this —
+ * it answers "region" either way — so the specs can state the intent but cannot police it.
  *
  * The DIRECTION is on the `<th>` as `aria-sort`, never in here: the glyph below is decoration.
  */

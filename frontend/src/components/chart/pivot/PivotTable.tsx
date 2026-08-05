@@ -116,8 +116,9 @@ export function PivotTable({
                     <th
                       key={`rd-${di}`}
                       onClick={onCycleSort ? () => onCycleSort(name) : undefined}
-                      // The plain title, so that naming the button "Sort by …" does not rename the
-                      // column for every cell announced under it.
+                      // The plain title. Without it Chrome leaves this columnheader UNNAMED once
+                      // its text is inside a labelled button — measured, see `SortButton` — and a
+                      // columnheader's name is announced for every cell under it.
                       aria-label={title}
                       // `aria-sort` only where there IS a sort to report: a dashboard card renders
                       // this read-only, and announcing "not sorted" on a column that can never be

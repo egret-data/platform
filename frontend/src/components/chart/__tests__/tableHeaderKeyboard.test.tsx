@@ -137,6 +137,45 @@ describe("ChartTable: sorting has a keyboard route and a spoken direction", () =
     expect(th).toHaveAttribute("aria-sort", "descending");
   });
 
+  it("is named for its column and not for the controls inside it", () => {
+    // The cell's contents are now two aria-labelled controls, which changes what the cell itself is
+    // called. MEASURED IN CHROME by deleting the attribute from one live header and re-reading the
+    // accessibility tree: that columnheader came back with NO NAME, beside nine siblings still
+    // named for their column — and a columnheader's name is announced for every cell under it.
+    //
+    // SAID PLAINLY: jsdom does not reproduce that. dom-accessibility-api answers "region" with or
+    // without the attribute, so this assertion states the intent and the mutation that deletes the
+    // attribute survives it. The browser measurement is the evidence; this is the reminder.
+    render(<ChartTable columns={COLS} rows={ROWS} onTableStateChange={vi.fn()} />);
+    // A STRING `name` IS ALREADY AN EXACT MATCH here — `ByRoleOptions` has no `exact` key, and
+    // passing one is a type error rather than a silently ignored option. `/region/` would pass on
+    // "Sort by region" too, which is the whole thing being ruled out.
+    expect(screen.getByRole("columnheader", { name: "region" })).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: /Sort by/ })).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: /Resize/ })).toBeNull();
+  });
+
+  it("does not call the header 'sortable' when that word means drag-to-reorder", () => {
+    // dnd-kit's own word, and the one the audit found on the cell: a keyboard user heard
+    // "sortable", pressed Enter and got a drag. dnd-kit's screen-reader instructions on the same
+    // context already say "draggable item", so this is the cell agreeing with them.
+    render(<ChartTable columns={COLS} rows={ROWS} />);
+    const th = screen.getByRole("columnheader", { name: /region/ });
+    expect(th).toHaveAttribute("aria-roledescription", "draggable column");
+  });
+
+  it("keeps Enter on the HEADER itself for the drag, without sorting as well", async () => {
+    // The two controls are distinct and both reachable; one keypress must still do one thing.
+    // Driven live too: Enter on the `<th>` set `opacity: 0.6` and announced "Draggable item col_9
+    // was moved over droppable area col_9" while `aria-sort` stayed put.
+    const user = userEvent.setup();
+    render(<ChartTable columns={COLS} rows={ROWS} />);
+    const th = screen.getByRole("columnheader", { name: /region/ });
+    await tabTo(user, th);
+    await user.keyboard("{Enter}");
+    expect(th).toHaveAttribute("aria-sort", "none");
+  });
+
   it("still sorts on a click anywhere in the header, exactly once", async () => {
     // The header keeps its click; the button only adds a route. A button that let its click bubble
     // to the <th> would toggle twice and land back where it started.
@@ -169,6 +208,17 @@ describe("PivotTable: the row-dimension header is reachable", () => {
     await user.keyboard("{Enter}");
     expect(onCycleSort).toHaveBeenCalledTimes(1);
     expect(onCycleSort).toHaveBeenCalledWith("region");
+  });
+
+  it("is named for its dimension and not for the button inside it", () => {
+    // Same reason, and the same jsdom caveat, as the ChartTable case above; pinned separately
+    // because the two cells are built by different components.
+    render(<PivotTable input={pivotInput} onCycleSort={vi.fn()} />);
+    // A STRING `name` IS ALREADY AN EXACT MATCH here — `ByRoleOptions` has no `exact` key, and
+    // passing one is a type error rather than a silently ignored option. `/region/` would pass on
+    // "Sort by region" too, which is the whole thing being ruled out.
+    expect(screen.getByRole("columnheader", { name: "region" })).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: /Sort by/ })).toBeNull();
   });
 
   it("reports the direction with aria-sort rather than only a glyph", () => {

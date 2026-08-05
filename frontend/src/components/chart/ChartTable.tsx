@@ -24,8 +24,8 @@ export interface ResultColumn { name: string; type: string }
 function SortableHeader({ id, disabled, children, className, style, onClick, label, sort }: {
   id: string; disabled?: boolean; children: ReactNode; className?: string;
   style?: CSSProperties; onClick?: MouseEventHandler;
-  /** The column as it is drawn. Pinned as the cell's own accessible name so that the "Sort by …"
-   * button inside it does not become the name announced for every cell in the column. */
+  /** The column as it is drawn, pinned as the cell's own accessible name — without it Chrome leaves
+   * this columnheader unnamed once the header text is inside a labelled button. See `SortButton`. */
   label: string;
   sort?: "asc" | "desc";
 }) {
@@ -35,12 +35,24 @@ function SortableHeader({ id, disabled, children, className, style, onClick, lab
   // it lands on is still fully operable — click to sort, drag the separator to resize. A pinned
   // column was therefore announced (and its resize handle with it, since the state propagates to
   // descendants) as unavailable while both controls worked.
-  const { role: _dndRole, "aria-disabled": _dndDisabled, ...restAttributes } = attributes;
+  //
+  // `aria-roledescription` goes the same way, replaced rather than dropped. dnd-kit's word for it
+  // is "sortable", meaning drag-to-REORDER — and the audit measured what that cost: a keyboard user
+  // heard "sortable", pressed Enter, and got a drag lift, with sorting reachable only by mouse.
+  // Sorting now has its own button in the cell, so the two would be announced with one word between
+  // them. "draggable column" is also what dnd-kit's OWN screen-reader instructions on this context
+  // already say ("To pick up a draggable item, press the space bar"), so this makes the cell agree
+  // with the sentence read out beside it rather than introducing a third vocabulary.
+  const {
+    role: _dndRole, "aria-disabled": _dndDisabled, "aria-roledescription": _dndRoleDesc,
+    ...restAttributes
+  } = attributes;
   return (
     <th
       ref={setNodeRef}
       role="columnheader"
       aria-label={label}
+      aria-roledescription="draggable column"
       // The direction used to be carried ONLY by a " ▲"/" ▼" glyph appended to the text, which a
       // screen reader has no way to interpret. `aria-sort` is the attribute that means it.
       aria-sort={ariaSort(sort)}
