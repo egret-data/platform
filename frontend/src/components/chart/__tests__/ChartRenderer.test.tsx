@@ -2184,4 +2184,35 @@ describe("smartscalar drill", () => {
     render(<ChartRenderer vizType="smartscalar" params={trendParams()} columns={COLS} rows={ROWS} />);
     expect(screen.queryByRole("button")).toBeNull();
   });
+
+  /**
+   * THE CARD'S GRID WIDTH REACHES THE TREND'S AUTO-SIZER. `SmartScalarChart` gained the scalar's
+   * `findSize`/`maxFontSizeRem` sizer so its number stops overflowing a narrow card, and that sizer
+   * reads `gridCols` for its ceiling — a card owning more of the grid earns a bigger number. The
+   * prop existing on the component proves nothing if this branch never passes it, which is the
+   * shape of defect this file's own "SPREADS its config" note is about, so the thread is pinned
+   * from the SHELL rather than only from the component's own spec.
+   *
+   * `DashboardCardView` is what supplies `gridCols` in production (`card.size_x`); the studio
+   * preview passes none, and the sizer's `NO_GRID_MAX_SIZE` covers that case.
+   */
+  it("passes the card's grid width down to the trend's auto-sizer", () => {
+    Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ width: 600, height: 400, top: 0, left: 0, right: 600, bottom: 400, x: 0, y: 0, toJSON() {} }),
+    });
+    try {
+      const { container, rerender } = render(
+        <ChartRenderer vizType="smartscalar" params={trendParams()} columns={COLS} rows={ROWS} gridCols={24} />,
+      );
+      const size = () => container.querySelector<HTMLElement>(".tabular-nums")!.style.fontSize;
+      // A full-width card reaches `MAX_SIZE_LARGE`; the same card off the grid reaches only
+      // `NO_GRID_MAX_SIZE`. Two different answers, so a dropped prop cannot pass for a threaded one.
+      expect(size()).toBe("7rem");
+      rerender(<ChartRenderer vizType="smartscalar" params={trendParams()} columns={COLS} rows={ROWS} />);
+      expect(size()).toBe("4rem");
+    } finally {
+      delete (HTMLElement.prototype as unknown as Record<string, unknown>).getBoundingClientRect;
+    }
+  });
 });

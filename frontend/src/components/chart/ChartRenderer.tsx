@@ -875,6 +875,10 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
           unit={smart.dimension ? params.spec.temporal_units?.[smart.dimension] : undefined}
           switchPositiveNegative={!!smart.switchPositiveNegative}
           compact={!!smart.compact}
+          // Same thread as the scalar's, for the same auto-sizer: a card owning more of the grid
+          // earns a bigger ceiling for its number. Unset in the studio preview, where there is no
+          // grid to measure a share of.
+          gridCols={gridCols}
           /**
            * THE TREND IS NOT ONE OF THE DIMENSION-LESS CHARTS, which is worth stating because this
            * unit's own plan said it was, and being wrong about it in the other direction would have

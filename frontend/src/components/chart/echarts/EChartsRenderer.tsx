@@ -173,25 +173,42 @@ export function EChartsRenderer({ option, className, onPointClick, onPointHover,
     chart.on("mouseout", "series", () => hoverRef.current?.(null));
 
     /**
-     * THE DESCRIPTION HAS TO FOLLOW THE LEGEND. ECharts' legend hides a series without the option
-     * being rebuilt, so a description baked at build time goes stale the moment anyone clicks one.
-     * Confirmed in a browser on the deployed combo chart before this was written: with `orders`
-     * clicked off, the chart drew revenue alone and the container still announced "Combo chart of
-     * orders … 2 series; January 2026 205, …".
+     * WHAT THE BUILDER DERIVED FROM THE SERIES LIST HAS TO FOLLOW THE LEGEND. ECharts' legend hides
+     * a series without the option being rebuilt, so anything baked at build time from that list
+     * goes stale the moment anyone clicks one.
      *
-     * The re-derivation belongs to the builder, which is the only thing that knows what the
-     * description is made of; a builder that has one offers it as `__ariaFor` on the option it
-     * returns, read HERE off the object this component holds rather than out of ECharts' model —
-     * `setOption` deep-copies what it is given and a function would not survive the trip.
+     * TWO THINGS ARE NOW IN THAT CLASS, and they share this one subscription deliberately: the
+     * description (`__ariaFor`, #412) and the value axis's title (`__axisNamesFor`, measured on the
+     * same deployed "MB · Combo" — with `orders` clicked off, the left axis lost its numbers and
+     * kept its "orders" title). They are the same bug seen from two components, so a second event
+     * handler for the second one would be two half-answers to one question; the patch below is
+     * assembled from whichever the builder offers and applied in a single merge. Both were
+     * confirmed in a browser on the deployed chart before either was written — the description
+     * still read "Combo chart of orders … 2 series; January 2026 205, …" with `orders` hidden.
      *
-     * Merge mode, naming `aria` alone: a notMerge apply would reset the legend selection that just
-     * changed, which is the state being described.
+     * THE RE-DERIVATION BELONGS TO THE BUILDER, which is the only thing that knows what either was
+     * made of, and both arrive as functions ON the option object — read HERE, off the object this
+     * component holds, rather than out of ECharts' model: `setOption` deep-copies what it is given
+     * and a function would not survive the trip.
+     *
+     * MERGE MODE, always. A notMerge apply would reset the legend selection that just changed,
+     * which is the state both patches describe.
      */
     chart.on("legendselectchanged", (params: unknown) => {
       const selected = (params as { selected?: Record<string, boolean> }).selected;
-      const ariaFor = (resolvedRef.current as { __ariaFor?: (s?: Record<string, boolean>) => unknown } | null)?.__ariaFor;
-      if (typeof ariaFor !== "function" || selected == null) return;
-      chart.setOption({ aria: ariaFor(selected) } as EChartsCoreOption);
+      if (selected == null) return;
+      type LegendAware = {
+        __ariaFor?: (s?: Record<string, boolean>) => unknown;
+        __axisNamesFor?: (s?: Record<string, boolean>) => Record<string, unknown>;
+      };
+      const built = resolvedRef.current as LegendAware | null;
+      const patch: Record<string, unknown> = {};
+      if (typeof built?.__ariaFor === "function") patch.aria = built.__ariaFor(selected);
+      if (typeof built?.__axisNamesFor === "function") Object.assign(patch, built.__axisNamesFor(selected));
+      // Nothing to say — every other builder. Applying an empty option is not free (ECharts still
+      // walks its components) and would repaint on every legend click for no reason.
+      if (Object.keys(patch).length === 0) return;
+      chart.setOption(patch as EChartsCoreOption);
     });
 
     // A ResizeObserver tick fires on every layout change — including, during an active

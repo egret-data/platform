@@ -135,6 +135,14 @@ export function cartesianSeriesNames(
   return [...cfg.yMetrics];
 }
 
+/**
+ * The ECharts component id of the axis the METRICS are plotted against — the left `yAxis` on a
+ * column chart, the `xAxis` on a row one. It exists so `axisNamesFor`'s merge patch can address
+ * that axis by id rather than by array position; see `mkValueAxis`, which records what a
+ * position-matched patch actually did.
+ */
+const VALUE_AXIS_ID = "yValue";
+
 const BAR_MIN_HEIGHT = 1; // keep sub-pixel bars visible, like Metabase's barMinHeight
 /** Above this many points on one line, markers merge into the line rather than marking it. */
 const MARKER_AUTO_MAX = 30;
@@ -1236,9 +1244,28 @@ function baseOption(
   // and metricTitle (single-metric only) would stop titling breakout charts' axis.
   const dual = plotted.some((s) => s.yAxisIndex === 1);
   const rightSide = dual ? rightMetrics(cfg) : [];
-  const leftSide = [...new Set(plotted.filter((s) => s.yAxisIndex !== 1).map((s) => s.__metric ?? s.name ?? ""))]
-    .filter(Boolean);
-  const yTitle = cfg.showYLabel === false ? undefined : (cfg.yLabel ?? metricTitle(leftSide));
+  /**
+   * The metrics on the LEFT value axis (on a row chart, on the only one), for a given legend
+   * selection — `undefined` meaning "as built", which is what every build-time reader wants.
+   *
+   * A PARAMETER RATHER THAN A CONSTANT because a legend click hides a series without the option
+   * being rebuilt, so anything derived from the series list here goes stale the moment one is
+   * clicked. `yTitleFor` is the reader that cares; see `axisNamesFor` below for the measurement.
+   */
+  const leftSideFor = (selected?: Record<string, boolean>) => {
+    const shown = selected == null
+      ? plotted
+      : plotted.filter((s) => s.name == null || selected[s.name] !== false);
+    return [...new Set(shown.filter((s) => s.yAxisIndex !== 1).map((s) => s.__metric ?? s.name ?? ""))]
+      .filter(Boolean);
+  };
+  const leftSide = leftSideFor();
+  /** The value axis's title, for a legend selection. The ladder is unchanged and its ORDER is
+   *  load-bearing: an author's own `yLabel` and their `showYLabel: false` are decisions, not
+   *  derivations, so neither may follow the legend — only the metric-name arm does. */
+  const yTitleFor = (selected?: Record<string, boolean>) =>
+    cfg.showYLabel === false ? undefined : (cfg.yLabel ?? metricTitle(leftSideFor(selected)));
+  const yTitle = yTitleFor();
   const widestOf = (metrics: string[]) => {
     let widest = 0;
     for (const s of plotted) {
@@ -1709,6 +1736,29 @@ function baseOption(
     const down = verticalFit(metrics);
     const measuredInterval = valueInterval ?? down?.interval;
     return {
+      // A STABLE HANDLE FOR THE LEGEND PATCH, and the trap it avoids is worth stating in full
+      // because it is not a hypothetical — both halves below were measured, not reasoned about.
+      //
+      // `axisNamesFor` re-titles this axis through a merge `setOption`, and ECharts resolves which
+      // existing component a patch entry refers to via `mappingToExists`, which matches on `id`
+      // FIRST and on `name` second. The axis's `name` is the very field being patched. With no id,
+      // a two-axis patch of `[{name: "rev"}, {name: ""}]` against axes currently named `["", ""]`
+      // came back `["", "rev"]` — the title on the wrong side of the chart, after nothing more
+      // exotic than toggling one legend entry off and on again.
+      //
+      // THE ID MUST MATCH ON BOTH SIDES OR IT IS WORSE THAN NEITHER. Removing it from here while
+      // `axisNamesFor` still names it does not fall back to position: a patch naming an id no
+      // component has makes ECharts CREATE that component. Measured on the dual-axis combo — three
+      // y-axes where there were two, the phantom carrying the new title and the real left axis
+      // keeping the stale one. `cartesianLegendAxisTitle.echarts.test.tsx` pins the count for
+      // exactly this reason.
+      //
+      // Honest about what is NOT proven: with today's single-entry patch, dropping the id from
+      // BOTH sides still lands on the right axis, because ECharts falls through to index matching
+      // and index 0 is the left axis. That is a coincidence of this patch's shape — it was the
+      // array shape that transposed — so the id is deliberate defence rather than the only thing
+      // holding the current code up, and the mutation run records it surviving.
+      id: position === "right" ? "yValueRight" : VALUE_AXIS_ID,
       type: cfg.logScale ? ("log" as const) : ("value" as const),
       name: position === "right" ? undefined : yTitle,
       nameLocation: "middle" as const,
@@ -1884,11 +1934,42 @@ function baseOption(
     });
   };
 
+  /**
+   * The value axis's title as a MERGE PATCH, for a given legend selection.
+   *
+   * Same defect as `ariaFor`'s, one component over, and confirmed in a browser before it was
+   * written rather than inferred from the shape: on the deployed "MB · Combo", clicking `orders`
+   * off left ECharts drawing revenue alone and dropping the left axis's tick labels entirely (no
+   * series, no extent, no numbers) while the rotated title "orders" stayed painted beside the empty
+   * axis — its `<text>` box even shifted from x=573 to x=549 as the plot expanded into the space
+   * the numbers vacated. A title naming a series that is not on the chart, next to an axis carrying
+   * nothing.
+   *
+   * WHY A PATCH RATHER THAN A STRING. Which component holds the value axis depends on the chart:
+   * a row chart swaps the two, so its `yAxis` is the CATEGORY axis and writing the metric name
+   * there would overwrite the dimension's title. Returning the shape to merge keeps that decision
+   * here, beside the `if (horizontal)` that made it, instead of restating it in the renderer.
+   *
+   * ADDRESSED BY `id`, never by position — `mkValueAxis` carries the measurement of what happens
+   * without one. Only the left axis appears in the patch: an id-matched merge leaves every
+   * component it does not name alone, so the right axis (never titled) needs no restating.
+   *
+   * `""` RATHER THAN `undefined` for "no title". An explicit `undefined` is not a reliable way to
+   * clear a value already set through a merge; `""` is, and it is what ECharts' own model reports
+   * for an axis nobody named, so "clear it" and "it was never set" end in the same state.
+   */
+  const axisNamesFor = (selected?: Record<string, boolean>) => {
+    const axis = { id: VALUE_AXIS_ID, name: yTitleFor(selected) ?? "" };
+    return horizontal ? { xAxis: axis } : { yAxis: axis };
+  };
+
   return {
     aria: ariaFor(),
     /** Read by `EChartsRenderer` on `legendselectchanged` — see `ariaFor`. Not an ECharts key: it
      *  is read off the object this function returns, before that object reaches `setOption`. */
     __ariaFor: ariaFor,
+    /** Read by the same handler, off the same event — see `axisNamesFor`. Also not an ECharts key. */
+    __axisNamesFor: axisNamesFor,
     color: undefined,
     // The product's own typeface, at the option root — this is the one builder that composes its
     // whole option itself rather than spreading base.ts's `baseOption()`, so it has to say so.
