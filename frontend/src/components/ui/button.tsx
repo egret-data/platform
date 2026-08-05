@@ -5,40 +5,53 @@ import * as React from "react";
 import { cn } from "@/lib/utils";
 
 /**
- * `focus-visible:ring-ring` at FULL alpha, where shadcn ships `ring-ring/50`.
+ * `focus-visible:ring-2 focus-visible:ring-ring` — the product's ONE focus
+ * indicator. The full reasoning, the inventory it came out of and the assertions
+ * that hold it live at the bottom of `src/__tests__/focusIndicatorContrast.test.ts`.
+ * Two things are worth repeating on this file specifically.
  *
- * shadcn's newer focus style is two parts — a solid `border-ring` plus a soft
- * half-alpha `ring-[3px]` halo — and on `Input`, `Badge` and `SelectTrigger` that
- * works, because those components carry a border-width at rest, so the solid half
- * is what carries the contrast and the halo is decoration.
+ * FIRST, why the ring and not `border-ring`. shadcn's newer focus style is two
+ * parts — a solid `border-ring` plus a soft half-alpha halo — and on `Input`,
+ * `Badge` and `SelectTrigger` that reads, because those carry a border-width at
+ * rest so the solid half carries the contrast. Button is the exception, and it is
+ * the exception on the control that appears most: its `default`, `ghost` and
+ * `link` variants set no border-width at all. Measured in Chrome,
+ * `border-top-width` on a focused header button is `0px`, so `border-ring` sets a
+ * colour on a border that is never painted and the halo was the ENTIRE indicator.
+ * Scanned out of a screenshot, that halo was `#cfcfd3` on white (1.54:1) and
+ * `#44444d` on the dark header (1.83:1) against a 3:1 bar (WCAG 1.4.11 Non-text
+ * Contrast — the non-text bar; 4.5:1 is 1.4.3 and governs text). Half alpha
+ * cannot be rescued by darkening `--ring` either: diluted 50% into the surface it
+ * tops out near 1.73:1. `border-ring` stays as a second cue for the `outline`
+ * variant, which does have a border, and is now never the only thing painted.
  *
- * Button is the exception, and it is the exception on the control that appears
- * most: its `default`, `ghost` and `link` variants set no border-width at all.
- * Measured in Chrome, `border-top-width` on a focused header button is `0px` — so
- * `focus-visible:border-ring` sets a colour on a border that is never painted, and
- * the halo is not decoration, it is the ENTIRE indicator. Scanned out of a
- * screenshot, that halo was `#cfcfd3` on white (1.54:1) and `#44444d` on the dark
- * header (1.83:1), against a 3:1 bar (WCAG 1.4.11 Non-text Contrast — the non-text
- * bar; 4.5:1 is 1.4.3 and governs text).
+ * SECOND, the destructive variant used to override this ring and lose. It carried
+ * `focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40`, and
+ * because `cva` appends variant classes after the base, `twMerge` resolved the
+ * `focus-visible` ring-colour conflict in the VARIANT's favour and dropped
+ * `focus-visible:ring-ring` from the output entirely — verified by running
+ * `twMerge` on the two strings. So every Delete/Remove button in the product was
+ * focus-ringed at 20% alpha (40% in dark), which is worse than the half-alpha case
+ * above and cannot reach 3:1 at any token value. The override is deleted rather
+ * than made solid: a destructive button is already unmistakably red, and giving it
+ * a second, differently-coloured focus indicator is exactly the divergence this
+ * change exists to remove. `aria-invalid:ring-destructive/*` is left alone — that
+ * is an error state, not a focus indicator, and it is a separate question.
  *
- * Half alpha cannot be rescued by darkening `--ring`: even at a much darker token
- * the composite only reaches ~1.73:1, because it is being diluted 50% into the
- * surface. So the alpha goes rather than the geometry. The visual cost is that the
- * button's focus ring is now a solid 3px band instead of a soft one — heavier than
- * stock shadcn, and deliberately so.
- *
- * Left alone on purpose: `ring-ring/50` on Input, Badge and SelectTrigger, whose
- * solid `border-ring` does carry the indicator once `--ring` itself passes.
+ * The width came down from #415's `ring-[3px]` to `ring-2`: 3px was chosen when
+ * the halo was fighting to be seen at half alpha; solid, 2px matches the other
+ * ~30 focus rings in the tree, WCAG 2.4.13's reference thickness, and Metabase's
+ * own `:focus-visible { outline: 2px solid … }`.
  */
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all cursor-pointer disabled:cursor-not-allowed disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all cursor-pointer disabled:cursor-not-allowed disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring focus-visible:ring-2 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
   {
     variants: {
       variant: {
         default:
           "bg-primary text-primary-foreground shadow-xs hover:bg-primary/90",
         destructive:
-          "bg-destructive text-white shadow-xs hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40 dark:bg-destructive/60",
+          "bg-destructive text-white shadow-xs hover:bg-destructive/90 dark:bg-destructive/60",
         outline:
           "border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:bg-input/30 dark:border-input dark:hover:bg-input/50",
         secondary:

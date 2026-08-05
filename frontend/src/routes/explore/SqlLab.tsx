@@ -32,7 +32,7 @@ function SqlLabWorkspace({ ws }: { ws: string }) {
                     : "border-t-2 border-t-transparent text-muted-foreground hover:bg-accent/60"}`}>
                 {editing === t.id ? (
                   <input autoFocus defaultValue={t.title}
-                    className="my-1.5 w-28 rounded bg-transparent px-1 outline-none ring-1 ring-ring"
+                    className="my-1.5 w-28 rounded bg-transparent px-1 outline-none ring-2 ring-ring"
                     onBlur={(e) => { renameTab(t.id, e.target.value || t.title); setEditing(null); }}
                     onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") setEditing(null); }} />
                 ) : (

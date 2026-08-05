@@ -46,7 +46,7 @@ export function FieldLabel({
               <button
                 type="button"
                 aria-label={`Help: ${label}`}
-                className="inline-flex text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
+                className="inline-flex text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
               >
                 <Info className="size-3.5" />
               </button>

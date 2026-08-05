@@ -69,7 +69,7 @@ export function PieBreakdown({ breakdown, defaultOpen }: {
     >
       {/* Says what opening it gets you. "Details" alone would make the one control a screen-reader
           user has to find in order to read the chart the least descriptive thing on the page. */}
-      <summary className="cursor-pointer select-none px-2 py-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+      <summary className="cursor-pointer select-none px-2 py-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
         Slice breakdown — {rows.length} slices across {levels.length} rings
       </summary>
       {/* Bounded and scrollable, like the legend's own list: a three-ring chart can run to dozens

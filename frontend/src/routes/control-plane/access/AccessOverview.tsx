@@ -373,14 +373,23 @@ function KpiTile({
   return (
     <Link
       to={to}
-      // `ring-offset-background` is not decoration. `ring-offset-2` widens the gap
-      // between the card and its focus ring and fills that gap with
-      // `--tw-ring-offset-color`, which defaults to `#fff` — so without a colour
-      // this painted a 2px WHITE band inside the ring, on a dark page, brighter
-      // than either of its neighbours and reading as a rendering fault rather than
-      // as focus. Three other sites had the same omission and are fixed with it;
-      // `focusIndicatorContrast.test.ts` now sweeps the whole tree for it.
-      className="block rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+      // The offset is gone entirely now, not merely coloured. `ring-offset-2`
+      // widened the gap between the card and its focus ring and filled it with
+      // `--tw-ring-offset-color`; left unset that defaulted to `#fff` and painted
+      // a 2px WHITE band inside the ring on a dark page, so #415 set it to
+      // `ring-offset-background`. That fixed the white, but `--background` is not
+      // the surface these cards sit on either — they are a grid of `--card` tiles,
+      // and in dark mode `--background` is oklch(0.14) against a card of
+      // oklch(0.21), i.e. the band merely changed from too-bright to too-dark.
+      // There is no colour that is correct here, because the gap wants to be
+      // "whatever is behind the card" and Tailwind can only be told one colour.
+      // A flush ring has no gap to fill and abuts the card directly, which is
+      // also the boundary `focusIndicatorContrast.test.ts` actually measures. See
+      // the long note at the bottom of that file for the rest of the reasoning,
+      // including why an offset also cannot coexist with the `ring-inset` that
+      // clipping containers need. That file now sweeps the whole tree, so this
+      // cannot drift back in unnoticed.
+      className="block rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
       {card}
     </Link>

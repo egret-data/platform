@@ -355,7 +355,7 @@ export function DataPanel({ ws, dbId, onDb, onInsert, onWords, onSchema, onPrevi
             placeholder="Search tables…"
             aria-label="Filter database objects"
             disabled={!dbId}
-            className="h-8 w-full rounded-md border bg-background pl-7 pr-2 text-xs outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+            className="h-8 w-full rounded-md border bg-background pl-7 pr-2 text-xs outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
           />
         </div>
       </div>

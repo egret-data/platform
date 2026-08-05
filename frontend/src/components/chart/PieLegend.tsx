@@ -78,7 +78,7 @@ export function PieLegend({ entries, placement, toggledOff, onToggle, highlighte
               onBlur={() => onHover?.(null)}
               data-pie-legend-faded={faded || undefined}
               className={cn(
-                "flex w-full min-w-0 items-center gap-2 rounded px-1 py-0.5 text-left transition-opacity hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                "flex w-full min-w-0 items-center gap-2 rounded px-1 py-0.5 text-left transition-opacity hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                 faded && "opacity-40",
               )}
             >

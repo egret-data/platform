@@ -285,7 +285,7 @@ export function CellEditor({
               onBlur={() => {
                 if (sqlIntoLocal !== (cell.sql_into ?? "")) onChangeSqlInto?.(sqlIntoLocal);
               }}
-              className="h-7 w-32 rounded border bg-transparent px-2 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+              className="h-7 w-32 rounded border bg-transparent px-2 font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               placeholder="df"
             />
           </div>
