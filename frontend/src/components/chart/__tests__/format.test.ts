@@ -58,6 +58,74 @@ describe("formatValue numbers", () => {
   });
 });
 
+/**
+ * THE TWO SEPARATOR STYLES THE PANEL COULD NOT OFFER, AND THE REASON IT COULD NOT.
+ *
+ * Metabase offers five (`visualizations/lib/settings/column.ts`, `number_separators`); egret offered
+ * the first three, and the two missing ones are `100000.00` (`"."`, no thousands separator at all)
+ * and `100’000.00` (`".’"`). The second character of the stored string is the THOUSANDS separator,
+ * so "no separator" is expressed by a one-character value whose `[dec, thou]` destructure leaves
+ * `thou` undefined — which is a shape the option list simply never produced.
+ *
+ * WHY THE OPTIONS COULD NOT JUST BE ADDED. `applySeparators` did the swap in three passes using a
+ * SPACE as its scratch marker: `,`→" ", `.`→dec, " "→thou. That is safe only while no space in the
+ * string means anything, and `Intl.NumberFormat`'s `currencyDisplay: "name"` puts real spaces in —
+ * `"100,000.00 US dollars"`. Under the EXISTING `100.000,00` option that already drew
+ * `100.000,00.US.dollars` on a live bar chart's y-axis (measured in the browser on `MB By Category`
+ * with Display = "dollars"), and both new options would have extended the same defect: `"."` maps
+ * the marker to the empty string, so it would have drawn `100000.00USdollars`.
+ *
+ * So `applySeparators` is now a SINGLE pass with a per-character map and no scratch marker — which
+ * is, character for character, Metabase's own `replaceNumberSeparators`
+ * (`utils/formatting/numbers.tsx:293`), down to `groupingSeparator || ""` carrying the one-character
+ * case. The three existing options are unchanged on every input that has no space in it, which is
+ * every non-`name` currency display; the fourth test below is the one that was failing.
+ *
+ * The STORED VALUE stays Metabase's two-character string and stays the thing `formatNumber` reads,
+ * so nothing migrates. Note the apostrophe is U+2019 (’), not ASCII — Metabase's option is `".’"`,
+ * and storing `".'"` would be a silently different value that no Metabase export would match.
+ */
+describe("formatValue — the five separator styles, as Metabase spells them", () => {
+  const n = 100000;
+  it("100,000.00 — the default, and the one that means 'change nothing'", () => {
+    expect(formatValue(n, "double", { number_separators: ".,", decimals: 2 })).toBe("100,000.00");
+  });
+  it("100 000,00", () => {
+    expect(formatValue(n, "double", { number_separators: ", ", decimals: 2 })).toBe("100 000,00");
+  });
+  it("100.000,00", () => {
+    expect(formatValue(n, "double", { number_separators: ",.", decimals: 2 })).toBe("100.000,00");
+  });
+  it("100000.00 — no thousands separator, which nothing could express before", () => {
+    expect(formatValue(n, "double", { number_separators: ".", decimals: 2 })).toBe("100000.00");
+  });
+  it("100’000.00 — U+2019, not an ASCII apostrophe", () => {
+    expect(formatValue(n, "double", { number_separators: ".’", decimals: 2 })).toBe("100’000.00");
+  });
+
+  // The measured defect. `currencyDisplay: "name"` is the only Display option that puts an ASCII
+  // space in the formatted string, and the three-pass swap ate it.
+  it("leaves the spaces inside a spelled-out currency name alone", () => {
+    const fmt = {
+      number_style: "currency", currency: "USD", currency_style: "name", decimals: 2,
+    } as const;
+    expect(formatValue(n, "double", { ...fmt, number_separators: ",." })).toBe("100.000,00 US dollars");
+    expect(formatValue(n, "double", { ...fmt, number_separators: "." })).toBe("100000.00 US dollars");
+    expect(formatValue(n, "double", { ...fmt, number_separators: ".’" }))
+      .toBe("100’000.00 US dollars");
+  });
+
+  // `currencyDisplay: "code"` separates the code from the number with U+00A0, not U+0020, so it
+  // never hit the defect above — asserted so a future rewrite of this function cannot start
+  // treating that gap as a thousands separator either.
+  it("leaves the non-breaking gap after a currency code alone", () => {
+    expect(formatValue(n, "double", {
+      number_style: "currency", currency: "USD", currency_style: "code", decimals: 2,
+      number_separators: ".",
+    })).toBe("USD 100000.00");
+  });
+});
+
 describe("formatValue dates", () => {
   it("default date style", () => {
     expect(formatValue("2024-01-31", "date")).toBe("January 31, 2024");

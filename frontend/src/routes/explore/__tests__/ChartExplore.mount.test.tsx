@@ -222,18 +222,37 @@ describe("ChartExplore mounts", () => {
     expect(screen.getByText(/^Set up your/).parentElement!.parentElement).toBe(column);
   });
 
-  it("keeps the table's column section on the Display tab", async () => {
+  /**
+   * TWO ASSERTIONS HERE USED TO PIN THE DEFECT THIS PR FIXES, and both are rewritten rather than
+   * updated in place, because what they were reaching for is now spelled differently.
+   *
+   * `getByRole("tab", { name: "Colors" })` asserted the tab's OLD name. The tab holds Metabase's
+   * `Conditional Formatting` section (`Table.tsx`, `PivotTable/settings.ts`), and the panel's own
+   * section heading inside it has read "Conditional formatting" since it was written — so "Colors"
+   * was the one place in egret that named the feature by its colour rather than by itself, and the
+   * test made that permanent.
+   *
+   * `queryByText("Conditional formatting")).not.toBeInTheDocument()` was the sharper trap. It meant
+   * "the rules EDITOR is not stacked into the Display tab" — the panel-length defect the split
+   * closed — but it asserted it by the absence of a STRING, and that string is now the tab's own
+   * label, which is present on every tab. It is replaced by a query for the editor's own prose,
+   * which is what "the editor is not here" actually means and cannot be satisfied by a tab label.
+   */
+  it("keeps the table's column section on the Display tab, without the rules editor", async () => {
     await mountChart("c-table", "display");
     expect(await screen.findByText("Columns")).toBeInTheDocument();
-    // Conditional formatting moved to its own tab — stacked in here it made the panel long
-    // enough to read as cut off, which is what Metabase avoids by splitting the two.
-    expect(screen.queryByText("Conditional formatting")).not.toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Colors" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add rule" })).not.toBeInTheDocument();
+  });
+
+  it("names the rules tab after the feature, the way the reference does", async () => {
+    await mountChart("c-table", "display");
+    expect(screen.getByRole("tab", { name: "Conditional formatting" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Colors" })).not.toBeInTheDocument();
   });
 
   it("puts conditional formatting on its own tab", async () => {
     await mountChart("c-table", "rules");
-    expect(await screen.findByText("Conditional formatting")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Add rule" })).toBeInTheDocument();
   });
 
   /**

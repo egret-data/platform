@@ -313,3 +313,43 @@ describe("the pie's slice list under a temporal extraction unit", () => {
     expect(keysOf(buildPieOption(monthCols, monthRows, monthCfg))).toEqual(keysOf(withUnit));
   });
 });
+
+/**
+ * THE SANKEY'S THIRD DATA FIELD IS CALLED "VALUE".
+ *
+ * Metabase's `metricSetting("sankey.value", …)` is titled `Value` (`SankeyChart/chart-definition.ts`)
+ * and egret's read "Metric". Behaviour was identical on both sides — this is the wording alone.
+ * "Value" is also the better of the two here on its own merits: the number on a sankey link is the
+ * WIDTH of a flow, not a metric being compared across categories, and the box plot next door already
+ * calls the same kind of column "Value column".
+ *
+ * Asserted through the rendered control, on the text a reader sees, rather than against
+ * `fields[2].label`: a label map is exactly the shape of thing that can be right in the descriptor
+ * and never reach the panel, and `fieldDescriptor` builds the control from the field list rather
+ * than the panel reading the field list itself.
+ */
+describe("the sankey's data fields, as the panel spells them", () => {
+  const sankey = SIMPLE_DESCRIPTORS.find((d) => d.key === "sankey")!;
+  const renderData = (id: string) =>
+    render(createElement(sankey.controls.find((c) => c.id === id)!.render, {
+      config: {},
+      onChange: () => {},
+      columns: [], metrics: [], resultColumns: [], rows: [],
+      temporalUnits: {}, unitRow: () => null,
+    } as VizControlProps<Record<string, unknown>>));
+
+  it("labels the value column Value, not Metric", () => {
+    renderData("metric");
+    expect(screen.getByText("Value")).toBeInTheDocument();
+    expect(screen.queryByText("Metric")).not.toBeInTheDocument();
+  });
+
+  // Source and Target already match; asserted alongside so a later edit cannot quietly rename one
+  // of the three while this file is only watching the other.
+  it("still labels the two dimensions Source and Target", () => {
+    renderData("source");
+    expect(screen.getByText("Source")).toBeInTheDocument();
+    renderData("target");
+    expect(screen.getByText("Target")).toBeInTheDocument();
+  });
+});

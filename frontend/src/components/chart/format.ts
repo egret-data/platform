@@ -7,10 +7,39 @@ import { isNumericType, isTemporalType, type ColumnFormat } from "./format-types
 
 dayjs.extend(advancedFormat);
 
+/**
+ * Re-point the `en`-formatted string's `.` and `,` at the separators the column asked for.
+ *
+ * `formatNumber` below always builds with `new Intl.NumberFormat("en", …)` precisely so that the
+ * two separators are KNOWN characters this can rewrite — the same trick, and the same comment, as
+ * Metabase's `numberFormatterForOptions` ("always use 'en' locale so we have known number
+ * separators we can replace"). The stored value is Metabase's two-character
+ * `"[decimal][thousands]"`; a ONE-character value means "no thousands separator at all", which is
+ * how `100000.00` is expressed and why `thou` is allowed to be undefined.
+ *
+ * ONE PASS, WITH NO SCRATCH MARKER — and that is the whole point of this function's shape. It used
+ * to run three passes using a SPACE as the intermediate (`,`→" ", `.`→dec, " "→thou), which is
+ * correct only while no space in the string means anything. `currencyDisplay: "name"` puts real
+ * ASCII spaces in — `"100,000.00 US dollars"` — so under the `100.000,00` option a live bar chart's
+ * y-axis drew `100.000,00.US.dollars`, measured in the browser on `MB By Category` with Display set
+ * to "dollars". The two styles added in this PR would each have extended the same defect in their
+ * own way: `"."` maps the marker to the empty string (`100000.00USdollars`) and `".’"` maps it to
+ * the apostrophe (`100’000.00’US’dollars`).
+ *
+ * A per-character map cannot have that failure mode, because no output character is ever fed back
+ * in as an input. This is character-for-character Metabase's `replaceNumberSeparators`
+ * (`frontend/src/metabase/utils/formatting/numbers.tsx`), including `?? ""` for the one-character
+ * case; copying it rather than inventing a fourth spelling is deliberate, since the two functions
+ * have to agree about what a stored `number_separators` means for a chart exported from either app.
+ *
+ * `currencyDisplay: "code"` was never affected: ICU separates the code from the number with U+00A0,
+ * not U+0020, so the old space-marker pass walked straight past it. Recorded because it is the
+ * reason the defect looked narrower than it was and only ever showed up under one Display option.
+ */
 function applySeparators(s: string, separators?: string): string {
   if (!separators || separators === ".,") return s;
   const [dec, thou] = separators;
-  return s.replace(/,/g, " ").replace(/\./g, dec).replace(/ /g, thou ?? "");
+  return s.replace(/[.,]/g, (ch) => (ch === "," ? thou ?? "" : dec));
 }
 
 /**

@@ -182,6 +182,117 @@ describe("FormatSection — settings that had no control", () => {
 });
 
 /**
+ * ALL FIVE SEPARATOR STYLES, ASSERTED BY THE STRING THE READER PICKS FROM.
+ *
+ * The option list is where the two missing styles were missing — `format.ts`'s `applySeparators`
+ * could already express `100000.00` and `100’000.00` on a plain number, so nothing here was ever
+ * blocked by the formatter; the select simply stopped at three. (What the formatter COULD not do,
+ * and what `format.test.ts` now pins, is keep the spaces inside a spelled-out currency name while
+ * doing the swap — a defect the existing `100.000,00` option already had.)
+ *
+ * Asserted by rendering the open list and reading its option NAMES rather than by counting them or
+ * by inspecting a constant: an option list is exactly the shape of thing a test can pass against
+ * while the panel shows something else, and "there are five" would still pass if two of them were
+ * duplicates of the first. The stored values are asserted separately, one per new option, because
+ * the value is what `formatValue` reads and the name is only what the reader sees.
+ */
+describe("FormatSection — the five separator styles Metabase offers", () => {
+  const openSeparators = async (onChange = vi.fn()) => {
+    const user = userEvent.setup();
+    render(<FormatSection columns={[{ name: "rev", type: "bigint" }]} value={{}} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: /rev/ }));
+    await user.click(screen.getByLabelText("Separator style"));
+    return { user, onChange };
+  };
+
+  it("lists every style the reference does, in its order", async () => {
+    await openSeparators();
+    const names = (await screen.findAllByRole("option")).map((o) => o.textContent);
+    expect(names).toStrictEqual([
+      "100,000.00", "100 000,00", "100.000,00", "100000.00", "100’000.00",
+    ]);
+  });
+
+  it("stores a one-character value for 'no thousands separator'", async () => {
+    const { user, onChange } = await openSeparators();
+    await user.click(await screen.findByRole("option", { name: "100000.00" }));
+    expect(onChange).toHaveBeenCalledWith({ rev: { number_separators: "." } });
+  });
+
+  // U+2019, not the ASCII apostrophe. Metabase's stored value is `".’"`; `".'"` would render the
+  // same on screen and be a different string in every export and comparison.
+  it("stores the apostrophe style with Metabase's own U+2019", async () => {
+    const { user, onChange } = await openSeparators();
+    await user.click(await screen.findByRole("option", { name: "100’000.00" }));
+    expect(onChange).toHaveBeenCalledWith({ rev: { number_separators: ".’" } });
+  });
+});
+
+/**
+ * THE CURRENCY CONTROL IS A PICKER, NOT A TEXT BOX.
+ *
+ * It was an `<Input>` pre-filled `USD` with an `onChange` that upper-cased whatever was typed, so
+ * the panel accepted `VNND`, `dong`, or the empty string, and the only way to find out was to look
+ * at the chart. Metabase gives a select of its 122 named currencies with `searchProp: "name"`
+ * (`visualizations/lib/settings/column.ts`, `currency`), and this project's own standing preference
+ * is a picker over free text.
+ *
+ * THE STORED VALUE IS UNCHANGED AND THAT IS THE POINT OF THE THIRD TEST. `formatNumber` reads
+ * `fmt.currency` as `Intl.NumberFormat`'s `opts.currency`, which takes the ISO code; storing the
+ * display name would need a migration and would buy nothing. So the picker searches on the name and
+ * writes the code, and the test names both halves.
+ *
+ * Driven through the real combobox rather than by asserting over `CURRENCIES`: a list constant with
+ * 122 correct entries and a picker wired to the wrong field would satisfy any test written against
+ * the constant.
+ */
+describe("FormatSection — Currency", () => {
+  const openCurrency = async (value: Record<string, ColumnFormat>, onChange = vi.fn()) => {
+    const user = userEvent.setup();
+    render(<FormatSection columns={[{ name: "rev", type: "double" }]} value={value} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: /rev/ }));
+    return { user, onChange };
+  };
+  const currencyStyle = { rev: { number_style: "currency" } } as Record<string, ColumnFormat>;
+
+  it("is a combobox, not a free-text box the reader has to know ISO 4217 to use", async () => {
+    await openCurrency(currencyStyle);
+    expect(screen.getByLabelText("Currency")).toHaveAttribute("role", "combobox");
+  });
+
+  it("shows the stored code's NAME, so USD does not read as three letters", async () => {
+    await openCurrency({ rev: { number_style: "currency", currency: "VND" } });
+    expect(screen.getByLabelText("Currency")).toHaveTextContent("Vietnamese Dong");
+  });
+
+  it("searches on the name and stores the code", async () => {
+    const { user, onChange } = await openCurrency(currencyStyle);
+    await user.click(screen.getByLabelText("Currency"));
+    await user.type(screen.getByLabelText("Search currencies"), "vietnam");
+    await user.click(await screen.findByRole("option", { name: /Vietnamese Dong/ }));
+    expect(onChange).toHaveBeenCalledWith({ rev: { number_style: "currency", currency: "VND" } });
+  });
+
+  it("narrows the list to what was typed rather than listing all 122 regardless", async () => {
+    const { user } = await openCurrency(currencyStyle);
+    await user.click(screen.getByLabelText("Currency"));
+    const all = (await screen.findAllByRole("option")).length;
+    await user.type(screen.getByLabelText("Search currencies"), "dollar");
+    const narrowed = screen.getAllByRole("option");
+    expect(narrowed.length).toBeLessThan(all);
+    expect(narrowed.every((o) => /dollar/i.test(o.textContent ?? ""))).toBe(true);
+  });
+
+  // The Display select is the one control on this row where egret is AHEAD of the reference — it
+  // offers `narrowSymbol`, which Metabase's three-way radio does not — so the picker landing next
+  // to it must not disturb it.
+  it("leaves the Display select and its four options alone", async () => {
+    await openCurrency(currencyStyle);
+    expect(screen.getByLabelText("Currency display")).toHaveTextContent("$");
+  });
+});
+
+/**
  * DECIMAL PLACES CANNOT BE ALLOWED TO STORE A VALUE THAT TAKES THE CHART DOWN.
  *
  * `formatValue` hands this straight to `Intl.NumberFormat` as both `minimumFractionDigits` and

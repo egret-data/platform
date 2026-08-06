@@ -448,7 +448,13 @@ export const SIMPLE_DESCRIPTORS: VizDescriptor<Cfg>[] = [
     fields: [
       { id: "source", label: "Source", kind: "dimension", required: "a source" },
       { id: "target", label: "Target", kind: "dimension", required: "a target", excludes: "source" },
-      { id: "metric", label: "Metric", kind: "metric", required: "a metric" },
+      // "Value", not "Metric" — Metabase's own title for `sankey.value`
+      // (`SankeyChart/chart-definition.ts`), and the more accurate of the two on its own terms: this
+      // number is the WIDTH of a link, not a measure being compared across categories. The box plot
+      // two descriptors up already calls the equivalent column "Value column". The field's `id`
+      // stays `metric` because it is the stored key under `sankey.` and the builder reads it;
+      // renaming that would be a migration for a label change.
+      { id: "metric", label: "Value", kind: "metric", required: "a metric" },
     ],
     buildSpec: (c, s, h) => h.dimsAndMetrics([c.source, c.target], [c.metric], s),
     legacyFromSpec: (spec) => ({ source: spec.dimensions?.[0], target: spec.dimensions?.[1], metric: spec.metrics?.[0] }),
