@@ -210,8 +210,8 @@ export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionPr
   );
 }
 
-/** X-axis scale, the left/right axis split for multi-metric charts, and the axis titles. */
-export function AxesOptions({ kind, config, onChange, xColumnType, scope }: SectionProps & {
+/** X-axis scale, the per-series left/right axis split, and the axis titles. */
+export function AxesOptions({ kind, config, onChange, xColumnType, scope, seriesNames }: SectionProps & {
   /** The SQL type of the result column on `config.xAxis` — see the identical prop on
    *  `AxisRangeOptions`. Here it decides what the X-axis-scale trigger READS on a chart whose scale
    *  was resolved rather than stored. */
@@ -220,7 +220,19 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope }: Sect
    *  their own headings. No row MOVES between the controls to make that work — each one still owns
    *  exactly the settings it always did. */
   scope?: AxisScope;
+  /** Every series the chart draws, from the last result — the same `cartesianSeriesNames` call the
+   *  Series group makes. It is what the Y-axis-position rows are keyed on, and only the caller can
+   *  know it: with a breakout the bands are a property of the DATA. */
+  seriesNames?: string[];
 }) {
+  // Undefined means "not known here" — a caller that holds no result at all. Without a breakout the
+  // metrics ARE what `cartesianSeriesNames` returns, so falling back to them is exact rather than a
+  // guess. WITH one it would be a lie in the direction this panel is not allowed to lie in: the
+  // builder keys the split on band names, so offering a row per METRIC would offer sides for things
+  // that are not on the chart — #423's finding, and still true of a config nobody can name the bands
+  // of. An empty list withdraws the group, which is also what a breakout whose query has not
+  // returned gets (`cartesianSeriesNames` can only name bands from rows).
+  const axisNames = seriesNames ?? (config.series ? [] : config.yMetrics);
   // On a horizontal chart the CATEGORY axis is the vertical one, so naming these controls after
   // the config keys (`xLabel` is the category axis, `yLabel` the value axis) prints them backwards
   // from what the reader sees: "Y min" would govern the horizontal extent. Metabase relabels the
@@ -317,23 +329,36 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope }: Sect
         </div>
       )}
 
-      {/* `!config.series` IS PART OF "there are two metrics to separate".
-          `config.yMetrics.length > 1` and a breakout are reachable at once — the Data tab prints
-          "With a series, only the first metric is plotted." underneath the Series select for
-          exactly this pair (`viz/cartesian.tsx`) — and under one the builder plots
-          `cfg.yMetrics[0]` alone and gives its bands no `yAxisIndex` at all. Measured on
-          `series: "g"`, `yMetrics: ["v","w"]`, `rightAxisMetrics: ["w"]`: the option's series come
-          out `[["L",null],["R",null]]`, both on axis 0, with `w` not drawn. So this offered a side
-          for a metric that is not on the chart, and no side at all for the one that is — while the
-          `yAxis` stayed a single object, so nothing was drawn wrong, only offered wrongly.
-          `cartesian.breakoutAxisControls` pins that measurement so this reason cannot rot.
+      {/* ONE ROW PER SERIES THE CHART DRAWS — its metrics, or its breakout BANDS when it has one.
+          Metabase's `axis` is a per-series setting keyed the same way (`lib/settings/series.ts`,
+          keyed per formatted breakout value in `echarts/cartesian/model/series.ts`).
 
-          NOT THE CAPABILITY GAP, which is real and is elsewhere. egret's left/right choice is
-          per-METRIC (`rightAxisMetrics`), so under a breakout it cannot split BANDS across two axes
-          the way Metabase can. Closing that means teaching the builder's breakout branch about two
-          axes; withdrawing a control that cannot act is not a step towards it and does not pretend
-          to be. */}
-      {scoped(scope, "value") && config.yMetrics.length > 1 && !config.series && !config.horizontal && kind !== "row" && (
+          `!config.series` USED TO BE PART OF THE GATE and #423 put it there for a measured reason:
+          the builder took `cfg.yMetrics[0]` and asked about that one metric for every band, so with
+          `series: "g"`, `yMetrics: ["v","w"]`, `rightAxisMetrics: ["w"]` the option came out
+          `[["L",null],["R",null]]` on a single `yAxis` — a side offered for a metric that is not on
+          the chart and none at all for the one that is. That comment ended "NOT THE CAPABILITY GAP,
+          which is real and is elsewhere… closing it means teaching the builder's breakout branch
+          about two axes". This is that PR, so the gate comes off in it — the rule this panel keeps
+          is that it offers exactly what the builder honours, in both directions.
+
+          `seriesNames` IS WHAT DECIDES THE ROWS, and it has to come from the last RESULT: with a
+          breakout the band names are a property of the data, not of the config. It falls back to
+          the metrics, which is what `cartesianSeriesNames` returns without a breakout anyway.
+
+          "AUTO" MEANS LEFT UNDER A BREAKOUT, and that is Metabase's own behaviour rather than a
+          shortfall dressed up: `getYAxisSplit` collects an `auto` bucket and, where the automatic
+          split cannot run, "assign all auto to the left" (`model/axis.ts`). egret's automatic split
+          is per-METRIC — it compares metric extents — so it has nothing to say about bands, which is
+          why the "Split y-axis when necessary" switch below keeps its `!config.series` gate while
+          these selects lose theirs. The two gates differ because the two settings do. */}
+      {/* …AND NOT ON A STACK, which `rightAxisSeries` refuses outright and states its reason for: a
+          stack is measured from one baseline, so its parts cannot sit on two scales. Offering the
+          rows here would be a control the builder throws away, which is the one thing this panel is
+          not allowed to be. `stackModeOf` is the resolved mode, not `config.stacked`, because an
+          area chart is stacked with nothing stored. */}
+      {scoped(scope, "value") && axisNames.length > 1 && !config.horizontal && kind !== "row"
+        && stackModeOf({ kind, stacked: config.stacked, normalized: config.normalized }) === "none" && (
         <div className="space-y-1.5 border-t pt-2">
           <div className="text-xs text-muted-foreground">Y axis</div>
           {/* "Auto" is the resting state, not "Left". With the automatic split turned on and nothing
@@ -341,7 +366,7 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope }: Sect
               selects used to say "Left" underneath a chart that was visibly doing otherwise.
               Choosing either side turns the split off for the whole chart, which is what an
               explicit assignment means. */}
-          {config.yMetrics.map((m) => {
+          {axisNames.map((m) => {
             const assigned = (config.rightAxisMetrics ?? []).length > 0;
             const onRight = (config.rightAxisMetrics ?? []).includes(m);
             return (
@@ -703,9 +728,11 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
  * Headings follow the axis the READER sees: on a horizontal chart the dimension runs down the left,
  * so its block is headed "Y-axis" — the same relabelling every row inside already does.
  */
-export function CartesianAxesTab({ kind, config, onChange, xColumnType }: SectionProps & {
+export function CartesianAxesTab({ kind, config, onChange, xColumnType, seriesNames }: SectionProps & {
   /** Passed straight through to both controls — see the prop's doc on `AxisRangeOptions`. */
   xColumnType?: string;
+  /** …and straight through to `AxesOptions`, which keys the Y-axis-position rows on it. */
+  seriesNames?: string[];
 }) {
   const horiz = kind === "row" || !!config.horizontal;
   const catAx = horiz ? "Y" : "X";
@@ -714,11 +741,11 @@ export function CartesianAxesTab({ kind, config, onChange, xColumnType }: Sectio
   return (
     <div className="space-y-3">
       <AxisGroup axis={catAx}>
-        <AxesOptions {...shared} scope="category" />
+        <AxesOptions {...shared} seriesNames={seriesNames} scope="category" />
         <AxisRangeOptions {...shared} scope="category" />
       </AxisGroup>
       <AxisGroup axis={valAx} className="border-t pt-3">
-        <AxesOptions {...shared} scope="value" />
+        <AxesOptions {...shared} seriesNames={seriesNames} scope="value" />
         <AxisRangeOptions {...shared} scope="value" />
       </AxisGroup>
     </div>
@@ -835,7 +862,7 @@ export function CartesianDisplaySection({
       <OrientationOption kind={kind} config={config} onChange={onChange} />
       <TrendOption kind={kind} config={config} onChange={onChange} />
       <AxisRangeOptions kind={kind} config={config} onChange={onChange} xColumnType={xColumnType} />
-      <AxesOptions kind={kind} config={config} onChange={onChange} xColumnType={xColumnType} />
+      <AxesOptions kind={kind} config={config} onChange={onChange} xColumnType={xColumnType} seriesNames={seriesNames} />
       <GoalOptions kind={kind} config={config} onChange={onChange} />
       <FormatOptions kind={kind} config={config} onChange={onChange} />
     </div>

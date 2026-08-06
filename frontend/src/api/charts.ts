@@ -65,6 +65,11 @@ export interface LineSeriesStyle {
   style?: "solid" | "dashed" | "dotted";
   size?: "S" | "M" | "L";
   markers?: "auto" | "on" | "off";
+  /** Metabase's per-series `line.missing`, whose chart-wide twin it marks DEPRECATED. Unset takes
+   *  `CartesianConfig.missing`, then "interpolate". The argument for keeping this chart-wide — that
+   *  "zero" rewrites the data and so contaminates stack totals, normalisation and trend fits — is
+   *  on `decorateSeries`, along with the measurement that retired two thirds of it. */
+  missing?: "interpolate" | "zero" | "none";
 }
 export interface CartesianConfig {
   xAxis?: string;            // single dimension (category / x)
@@ -77,11 +82,15 @@ export interface CartesianConfig {
   showLegend?: boolean;      // legend visibility
   xLabel?: string;
   yLabel?: string;
-  // combo only: SERIES name -> how it is drawn. Keyed by series, not by metric, so a broken-out
-  // combo can draw each band differently — and so one panel row can carry a series' colour, its
-  // rename and its display together.
+  // SERIES name -> how it is drawn. Keyed by series, not by metric, so a broken-out chart can draw
+  // each band differently — and so one panel row can carry a series' colour, its rename and its
+  // display together. Honoured on line, area, bar and combo, which is the set Metabase's
+  // `series.display` offers itself on (`perSeriesDisplayApplies`).
   seriesTypes?: Record<string, "bar" | "line" | "area">;
-  rightAxisMetrics?: string[];   // metrics plotted against a 2nd (right) Y axis
+  /** The SERIES plotted against a 2nd (right) Y axis — metrics on a plain chart, breakout BANDS on
+   *  one with a `series`. The key name predates the second case; `rightAxisSeries` in
+   *  `echarts/options/cartesian.ts` is the only reader and states the trade. */
+  rightAxisMetrics?: string[];
   logScale?: boolean;            // value axis uses a log scale
   bubbleMetric?: string;         // scatter only: the metric whose value sizes each bubble
   autoSplitY?: boolean;          // Metabase "Split y-axis when necessary". Unset = on.
