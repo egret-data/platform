@@ -85,14 +85,20 @@ describe("CardVizPanel", () => {
    * THE DEAD "DISPLAY AS" REACHED DASHBOARD CARDS BY A DIFFERENT ROUTE, and it is the route most
    * likely to survive a gate written against the builder alone.
    *
-   * `DashboardView` cannot see a card's result columns, so it builds the panel's column list out of
-   * the chart's saved spec and gives every dimension `type: ""` (only metrics get a real
-   * `"double"`). An empty type is neither numeric nor temporal, so EVERY dimension on EVERY card
-   * lands in exactly the branch that used to offer Display as — a bar card's x-axis showed the
-   * link select and its two template boxes even though nothing but a flat table can draw a link.
+   * An empty column type is neither numeric nor temporal, so a column carrying one lands in exactly
+   * the branch that used to offer Display as — a bar card's x-axis showed the link select and its
+   * two template boxes even though nothing but a flat table can draw a link. What these two tests
+   * pin is that the gate is on the VIZ TYPE, not on the column's: the bar refuses it and the table
+   * offers it, for the same column list.
    *
-   * The fixture keeps `type: ""` for that reason: giving these columns "varchar" would test a
-   * shape this panel never actually receives.
+   * THE FIXTURE'S PROVENANCE CHANGED, and the note it used to carry is preserved here because the
+   * change is the point. `type: ""` used to be what `DashboardView` handed this panel for EVERY
+   * dimension on every card — it reconstructed the column list from `params.spec` and had no result
+   * to type it from. That is what the dashcard-panel work replaced: the route now passes the card's
+   * own result columns, so a dimension arrives as `date`/`varchar` like it does in the builder. The
+   * spec-derived list survives only as the fallback for a card whose query has not landed or has
+   * errored, which is still a shape this panel receives — so the fixture stays, now testing the
+   * degenerate arm on purpose rather than the everyday one by accident.
    */
   const dashColumns = [{ name: "region", type: "" }, { name: "rev", type: "double" }];
 
@@ -111,6 +117,62 @@ describe("CardVizPanel", () => {
     // control rather than about an unopened body.
     expect(screen.getByText("Column title")).toBeInTheDocument();
     expect(screen.queryByLabelText("Display as")).not.toBeInTheDocument();
+  });
+
+  /**
+   * THE AXES CONTROLS WERE DROPPED ENTIRELY, and by an omission rather than a decision.
+   *
+   * `StudioPanel`'s `tab="display"` filter is `c.section === "display" && c.group !== AXES_GROUP` —
+   * it EXCLUDES the Axes group, because on the builder route that group is promoted out of the
+   * Display tab into a tab of its own (`tab="axes"`). This panel asked for `tab="display"` and
+   * nothing else, so on every viz that declares axes controls — the waterfall, the box plot and the
+   * whole cartesian family — the exclusion had no matching inclusion anywhere and the group fell on
+   * the floor. On a dashboard you could not override an axis label, hide gridlines, set a y-range or
+   * rotate x labels, all of which the builder offers for the same chart.
+   *
+   * Metabase's dashcard modal keeps a full Axes tab (checked on its waterfall and its box plot), so
+   * this is a straight defect on both counts: against Metabase, and against egret's own builder.
+   *
+   * The sidebar has no tabs, so the group is rendered as a labelled SECTION in the same scroll —
+   * which is what the Display tab does with every other `group` a descriptor declares.
+   */
+  it("a waterfall card offers the Axes controls its builder route does", () => {
+    const wfChart = {
+      ...chart,
+      viz_type: "waterfall",
+      params: {
+        version: 2,
+        spec: { metrics: ["rev"], dimensions: ["month"], columns: [], filters: [], orderby: [], row_limit: 100, rollup_groups: [] },
+        settings: { "waterfall.xAxis": "month", "waterfall.metric": "rev" },
+      },
+    } as unknown as Chart;
+    render(<CardVizPanel chart={wfChart} override={undefined}
+      columns={[{ name: "month", type: "date" }, { name: "rev", type: "double" }]} rows={[]} onChange={vi.fn()} />);
+
+    // The two `role="group"` blocks `ChartAxesSection` renders, named for the axis they own.
+    expect(screen.getByRole("group", { name: "X-axis" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Y-axis" })).toBeInTheDocument();
+    // …and a control from inside each, so this is about the settings and not just the headings.
+    expect(screen.getByLabelText("X label")).toBeInTheDocument();
+    expect(screen.getByLabelText("Number of tick marks")).toBeInTheDocument();
+  });
+
+  // A viz with no axes controls must not grow an empty "Axes" heading. The pie is the case the
+  // builder route guards with `hasAxesControls`, and the same guard has to hold here.
+  it("a pie card grows no Axes section, because a pie has no axes", () => {
+    const pieChart = {
+      ...chart,
+      viz_type: "pie",
+      params: {
+        version: 2,
+        spec: { metrics: ["rev"], dimensions: ["region"], columns: [], filters: [], orderby: [], row_limit: 100, rollup_groups: [] },
+        settings: { "pie.dimensions": ["region"], "pie.metric": "rev" },
+      },
+    } as unknown as Chart;
+    render(<CardVizPanel chart={pieChart} override={undefined}
+      columns={[{ name: "region", type: "varchar" }, { name: "rev", type: "double" }]} rows={[]} onChange={vi.fn()} />);
+    expect(screen.queryByText("Axes")).toBeNull();
+    expect(screen.queryByRole("group", { name: "X-axis" })).toBeNull();
   });
 
   it("a TABLE card still offers it — the card's renderer is the one that reads it", async () => {
