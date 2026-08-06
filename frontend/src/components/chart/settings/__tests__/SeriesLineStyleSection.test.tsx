@@ -11,9 +11,9 @@ import { SeriesLineStyleSection } from "../SeriesLineStyleSection";
  * popover" case lives in SeriesListSection.test.tsx, where the popover actually is.
  */
 describe("SeriesLineStyleSection", () => {
-  it("renders all four of LineSeriesStyle for the series it is given", () => {
+  it("renders all five of LineSeriesStyle for the series it is given", () => {
     render(<SeriesLineStyleSection name="a" onChange={() => {}} />);
-    for (const f of ["shape", "style", "size", "markers"]) {
+    for (const f of ["shape", "style", "size", "markers", "missing"]) {
       expect(screen.getByLabelText(`${f} a`)).toBeInTheDocument();
     }
   });
@@ -122,5 +122,57 @@ describe("SeriesLineStyleSection — shape and markers", () => {
     render(<SeriesLineStyleSection name="a" seriesLine={{ a: { shape: "smooth", markers: "on" } }} onChange={() => {}} />);
     expect(screen.getByLabelText("shape a")).toHaveTextContent("Smooth");
     expect(screen.getByLabelText("markers a")).toHaveTextContent("On");
+  });
+});
+
+/**
+ * `missing` IS THE FIFTH FIELD AND THE LAST TO ARRIVE, because `LineSeriesStyle` deliberately did
+ * not carry it. The argument, on `decorateSeries`, was that the other four are appearance while
+ * `missing: "zero"` REWRITES THE DATA — "and that zero then counts in stack totals, in
+ * normalisation and in a trend fit" — so two bands disagreeing would make the chart say two things
+ * at once. Measuring it ended it: the stack total and every other band's normalised share are
+ * byte-identical across all three values, and the trend fit that really does move is fitted per
+ * series off that series' own data. `cartesian.perSeriesMissing` holds the three numbers.
+ *
+ * The wording here is egret's chart-wide control's ("Missing values", Connect / Zero / Gap), not
+ * Metabase's ("Replace missing values with", Zero / Nothing / Linear Interpolated), for the reason
+ * the `markers` row already gives: Auto on this select FALLS BACK to that control, and two names
+ * for one setting is how a reader stops believing the fallback exists.
+ */
+describe("SeriesLineStyleSection — missing values", () => {
+  it("choosing one emits it under that series' key, merged over its other fields", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <SeriesLineStyleSection name="b" seriesLine={{ a: { size: "L" }, b: { style: "dotted" } }} onChange={onChange} />,
+    );
+    await user.click(screen.getByLabelText("missing b"));
+    await user.click(await screen.findByRole("option", { name: "Zero" }));
+    expect(onChange).toHaveBeenCalledWith({
+      seriesLine: { a: { size: "L" }, b: { style: "dotted", missing: "zero" } },
+    });
+  });
+
+  it("offers exactly the three the builder resolves, plus Auto", async () => {
+    const user = userEvent.setup();
+    render(<SeriesLineStyleSection name="a" onChange={() => {}} />);
+    await user.click(screen.getByLabelText("missing a"));
+    // Not a superset check: a fourth option here would be a value `decorateSeries` silently ignores.
+    expect((await screen.findAllByRole("option")).map((o) => o.textContent))
+      .toEqual(["Auto", "Connect", "Zero", "Gap"]);
+  });
+
+  it("Auto clears it back to undefined so the chart-wide value applies", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<SeriesLineStyleSection name="a" seriesLine={{ a: { missing: "zero" } }} onChange={onChange} />);
+    await user.click(screen.getByLabelText("missing a"));
+    await user.click(await screen.findByRole("option", { name: "Auto" }));
+    expect(onChange).toHaveBeenCalledWith({ seriesLine: { a: { missing: undefined } } });
+  });
+
+  it("shows the stored value on the trigger", () => {
+    render(<SeriesLineStyleSection name="a" seriesLine={{ a: { missing: "none" } }} onChange={() => {}} />);
+    expect(screen.getByLabelText("missing a")).toHaveTextContent("Gap");
   });
 });

@@ -7,7 +7,8 @@ import {
 import { colorsForKeys } from "@/components/chart/echarts/keyColors";
 import { SeriesListSection } from "@/components/chart/settings/SeriesListSection";
 import {
-  cartesianSeriesNames, stackModeOf, seriesDisplayFor, echartsTypeOf,
+  cartesianSeriesNames, stackModeOf, seriesDisplayFor, echartsTypeOf, perSeriesDisplayApplies,
+  type SeriesDisplay,
 } from "@/components/chart/echarts/options/cartesian";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -156,10 +157,31 @@ function SeriesListControl({ kind, config, onChange, resultColumns, rows }: VizC
       colors={config.seriesColors}
       labels={config.seriesLabels}
       types={config.seriesTypes}
-      // Only a combo lets a series choose; every other kind draws what its type says. Hidden while
-      // stacked, as Metabase hides it — a stack of mixed shapes is not a thing anyone can read.
-      defaultDisplay={kind === "combo" && stackModeOf({ kind, stacked: config.stacked, normalized: config.normalized }) === "none"
-        ? (i) => (i === 0 ? "line" : "bar")
+      /**
+       * WHICH KINDS OFFER THE SELECT AT ALL — Metabase's `series.display` `getHidden`, both arms.
+       *
+       * It used to read `kind === "combo"`, and Metabase's own list is `["line", "area", "bar",
+       * "combo"]`: on a line chart there, one series can be flipped to bar without turning the whole
+       * chart into a combo. THAT WAS NOT ONLY A PANEL GATE, which a probe settled before the gate
+       * moved — `seriesDisplayFor` consulted `seriesTypes` on `combo` alone and returned the chart
+       * kind for the rest, so a stored per-series display on a line chart was DISCARDED by the
+       * builder (measured: `seriesDisplayFor("line", "w", 1, {w: "bar"})` -> `"line"`, both bands
+       * `type: "line"`). Opening this alone would have shipped a control that saves and does not
+       * paint. The builder learned the other three kinds in the same PR; `perSeriesDisplayApplies`
+       * is its answer to this question, asked rather than restated.
+       *
+       * Row and scatter stay out for Metabase's reason: a row chart IS a horizontal bar and a
+       * scatter IS points, so there is no alternative to offer.
+       *
+       * HIDDEN WHILE STACKED, which is Metabase's second arm — a stack of mixed shapes is not a
+       * thing anyone can read. egret keeps it in the PANEL only, deliberately: withholding the
+       * control hides a choice, whereas refusing the stored value in the builder would throw a
+       * user's display away the moment they turned stacking on.
+       */
+      defaultDisplay={perSeriesDisplayApplies(kind) && stackModeOf({ kind, stacked: config.stacked, normalized: config.normalized }) === "none"
+        // The BUILDER's own default for a series nobody has set — one call, so the combo's
+        // first-is-a-line rule cannot come to be spelled differently in the two places.
+        ? (i) => seriesDisplayFor(kind, "", i, undefined) as SeriesDisplay
         : undefined}
       defaultColor={(name) => swatchColors[name]}
       seriesLine={config.seriesLine}
@@ -230,10 +252,14 @@ function displayControls(kind: CartesianViz): VizControl<CartesianConfig>[] {
       // columns. The dataset's own list is the same types by a different route until a chart is
       // pointed at an expression or the dataset drifts from the last run, at which point the two
       // disagree and the result is the one on screen.
-      render: ({ config, onChange, resultColumns }: VizControlProps<CartesianConfig>) => (
+      render: ({ config, onChange, resultColumns, rows }: VizControlProps<CartesianConfig>) => (
         <CartesianAxesTab
           kind={kind} config={config} onChange={onChange}
           xColumnType={resultColumns.find((c) => c.name === config.xAxis)?.type}
+          // The Y-axis-position rows are one per SERIES now, not one per metric — a breakout's
+          // bands can each choose a side. Same call the Series group makes, for the same set;
+          // under a breakout it is the only thing that can name them, since they come from the data.
+          seriesNames={cartesianSeriesNames(resultColumns, rows, config)}
         />
       ),
     },

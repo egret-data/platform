@@ -4,7 +4,7 @@ import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
 
-/** The four rows, in Metabase's own order: shape, style, size, dots. */
+/** The five rows, in Metabase's own order: shape, style, size, dots, missing values. */
 const ROWS = [
   {
     field: "shape" as const, label: "Line shape",
@@ -22,11 +22,30 @@ const ROWS = [
     field: "markers" as const, label: "Markers", options: [["on", "On"], ["off", "Off"]],
     autoTitle: "Auto shows markers only when there are few enough points to read",
   },
+  // NAMED AFTER egret's CHART-WIDE CONTROL for the same reason `markers` is — "Missing values",
+  // Connect / Zero / Gap. Metabase calls this one "Replace missing values with" over
+  // Zero / Nothing / Linear Interpolated; copying its wording HERE while the chart-wide select two
+  // panels away keeps egret's would make one setting read as two, which is precisely what the
+  // Auto fallback needs the reader to disbelieve.
+  {
+    field: "missing" as const, label: "Missing values",
+    options: [["interpolate", "Connect"], ["zero", "Zero"], ["none", "Gap"]],
+    autoTitle: "Auto follows the chart's own Missing values setting",
+  },
 ];
 
 /**
- * ONE series' line appearance — all four of `LineSeriesStyle`, as the body of that series'
+ * ONE series' line appearance — all five of `LineSeriesStyle`, as the body of that series'
  * drill-in popover (SeriesSettingsPopover).
+ *
+ * `missing` IS THE FIFTH AND IT ARRIVED LAST, because `LineSeriesStyle` deliberately did not carry
+ * it: the argument was that the other four are appearance while `missing: "zero"` rewrites the
+ * DATA, so two bands disagreeing would contaminate stack totals, normalisation and trend fits. Two
+ * of those three turned out not to happen at all and the third stops at the band that asked for it
+ * — the numbers are on `decorateSeries` and pinned by `cartesian.perSeriesMissing`. Until then this
+ * panel had no door to it and the chart-wide select was the only one, which is the state Metabase
+ * left behind when it moved `line.missing` into its series settings and marked the chart-wide twin
+ * DEPRECATED.
  *
  * This used to be an N-row grid, one row per series with a Select per field, declared
  * `advanced: true` in viz/cartesian.tsx so it hid behind the Series group's "More options".

@@ -1202,46 +1202,105 @@ describe("the cartesian Axes tab speaks the same vocabulary as the waterfall's",
 });
 
 /**
- * A BREAKOUT PLOTS ONE METRIC, SO BOTH TWO-METRIC AXIS CONTROLS HAVE NOTHING TO ACT ON.
+ * THE TWO AXIS CONTROLS A BREAKOUT USED TO WITHDRAW TOGETHER, AND ONLY ONE OF THEM STILL DOES.
  *
- * `config.series` and `config.yMetrics.length > 1` are both reachable at once — the Data tab says
- * so in as many words, printing "With a series, only the first metric is plotted." underneath the
- * Series select (`viz/cartesian.tsx`). The Axes tab then offered a Left/Right select per metric and
- * a "Split y-axis when necessary" switch, while `buildCartesianOption`'s breakout branch plots
- * `cfg.yMetrics[0]` alone and gives its bands no `yAxisIndex` at all.
+ * #423 hid the per-metric Left/Right selects AND the "Split y-axis when necessary" switch whenever
+ * `config.series` was set, for one measured reason that covered both: `buildCartesianOption`'s
+ * breakout branch took `cfg.yMetrics[0]` and asked about that single metric for every band, so on
+ * `series: "g"`, `yMetrics: ["v","w"]`, `rightAxisMetrics: ["w"]` the option came out
+ * `[["L",null],["R",null]]` on one `yAxis`, and `autoSplitY: false` built a byte-identical option.
+ * Its own doc block ended: "If a later change teaches the breakout branch about two y-axes … these
+ * tests are the ones that should fail, and the panel gate should be reopened in the same PR."
  *
- * MEASURED, on `series: "g"`, `yMetrics: ["v","w"]`:
- *   - with `rightAxisMetrics: ["w"]` the option's series come out `[["L",null],["R",null]]` — both
- *     bands on axis 0, and `w` not drawn at all;
- *   - `autoSplitY: false` and the default produce a BYTE-IDENTICAL option, so that switch is
- *     equally inert.
- * Neither draws a phantom right axis (`yAxis` is a single object, not an array) — the controls were
- * lying about what they could do, not about what was on screen. `cartesian.breakoutAxisControls`
- * pins both halves of that measurement so the panel's reason cannot rot away from the builder.
+ * THIS IS THAT PR AND THE FIRST GATE IS REOPENED. `rightAxisSeries` now takes the DRAWN series
+ * names, so a band can be sent to the right axis and the second axis is built for it
+ * (`cartesian.breakoutSeriesAxis` holds the measurements). One row per series is therefore correct
+ * and hiding it would be the omission.
  *
- * NOT A CAPABILITY BUILT HERE. egret's left/right choice is per-METRIC (`rightAxisMetrics`), so
- * under a breakout it cannot split BANDS across two axes the way Metabase can. Closing that gap is
- * a builder change, not a panel one; this only stops the panel offering what it cannot deliver.
+ * THE SECOND GATE STAYS, and the two differing is the point rather than an inconsistency. egret's
+ * automatic split compares METRIC EXTENTS (`shouldAutoSplitY`, `computeAxisSplit`) and has nothing
+ * to say about bands, so `autoSplitY` remains as inert under a breakout as #423 measured it. The
+ * rule the panel keeps is not "match Metabase's control set" but "offer exactly what the builder
+ * honours" — which cuts both ways in the same file, in the same PR.
  */
-describe("CartesianDisplaySection — the two-metric axis controls under a breakout", () => {
+describe("CartesianDisplaySection — the axis controls under a breakout", () => {
   const twoMetrics = { yMetrics: ["rev", "cnt"] };
+  const breakout = { ...twoMetrics, series: "g" };
 
-  it("withdraws the per-metric Left/Right selects once a series is chosen", () => {
+  it("offers one Left/Right select per BAND once the bands are known", () => {
     const { rerender } = render(
       <CartesianDisplaySection kind="bar" config={twoMetrics} onChange={() => {}} />,
     );
     expect(screen.getByLabelText("axis rev")).toBeInTheDocument();
-    rerender(<CartesianDisplaySection kind="bar" config={{ ...twoMetrics, series: "g" }} onChange={() => {}} />);
+    rerender(
+      <CartesianDisplaySection kind="bar" config={breakout} onChange={() => {}} seriesNames={["L", "R"]} />,
+    );
+    expect(screen.getByLabelText("axis L")).toBeInTheDocument();
+    expect(screen.getByLabelText("axis R")).toBeInTheDocument();
+    // The METRICS are not the series any more, and offering a side for one would be offering it for
+    // something the builder does not draw — #423's finding, still true of the metric names.
     expect(screen.queryByLabelText("axis rev")).toBeNull();
     expect(screen.queryByLabelText("axis cnt")).toBeNull();
   });
 
-  it("withdraws the automatic split too, which the builder ignores just as completely", () => {
+  it("stores the band name, which is what the builder reads", () => {
+    const onChange = vi.fn();
+    render(
+      <CartesianDisplaySection kind="bar" config={breakout} onChange={onChange} seriesNames={["L", "R"]} />,
+    );
+    fireEvent.click(screen.getByLabelText("axis R"));
+    fireEvent.click(screen.getByRole("option", { name: "Right" }));
+    expect(onChange).toHaveBeenCalledWith({ rightAxisMetrics: ["R"] });
+  });
+
+  // A breakout whose query has not returned names no bands. Both this and the `undefined` case
+  // below must withdraw the group rather than fall back to the metrics: the metrics are NOT the
+  // series here, so a row per metric would be exactly the control #423 removed.
+  it("offers nothing while the bands are unknown", () => {
+    render(<CartesianDisplaySection kind="bar" config={breakout} onChange={() => {}} seriesNames={[]} />);
+    expect(screen.queryByLabelText("axis rev")).toBeNull();
+    expect(screen.queryByLabelText("axis L")).toBeNull();
+  });
+
+  // …and the same for a caller that holds no result at all, which is the arm the `??` fallback
+  // decides. `seriesNames ?? config.yMetrics` would pass the test above and fail this one, because
+  // `[]` is not nullish and never reaches the fallback — the two cases are not one case.
+  it("offers nothing when the caller cannot name the series either", () => {
+    render(<CartesianDisplaySection kind="bar" config={breakout} onChange={() => {}} />);
+    expect(screen.queryByLabelText("axis rev")).toBeNull();
+    expect(screen.queryByLabelText("axis cnt")).toBeNull();
+  });
+
+  // The stack caveat, on the panel's side. `rightAxisSeries` refuses a stacked chart outright, so
+  // rows here would be a control the builder throws away.
+  it("withdraws the rows from a stacked chart, which the builder refuses to split", () => {
+    const { rerender } = render(
+      <CartesianDisplaySection kind="bar" config={breakout} onChange={() => {}} seriesNames={["L", "R"]} />,
+    );
+    expect(screen.getByLabelText("axis L")).toBeInTheDocument();
+    rerender(
+      <CartesianDisplaySection kind="bar" config={{ ...breakout, stacked: true }} onChange={() => {}} seriesNames={["L", "R"]} />,
+    );
+    expect(screen.queryByLabelText("axis L")).toBeNull();
+  });
+
+  // `stackModeOf`, not `config.stacked`: an area chart is stacked with nothing stored, and reading
+  // the raw field would leave the rows on it.
+  it("withdraws them from an area chart with nothing stored", () => {
+    render(
+      <CartesianDisplaySection kind="area" config={breakout} onChange={() => {}} seriesNames={["L", "R"]} />,
+    );
+    expect(screen.queryByLabelText("axis L")).toBeNull();
+  });
+
+  it("still withdraws the automatic split, which the builder still ignores", () => {
     const { rerender } = render(
       <CartesianDisplaySection kind="bar" config={twoMetrics} onChange={() => {}} />,
     );
     expect(screen.getByLabelText("Split y-axis when necessary")).toBeInTheDocument();
-    rerender(<CartesianDisplaySection kind="bar" config={{ ...twoMetrics, series: "g" }} onChange={() => {}} />);
+    rerender(
+      <CartesianDisplaySection kind="bar" config={breakout} onChange={() => {}} seriesNames={["L", "R"]} />,
+    );
     expect(screen.queryByLabelText("Split y-axis when necessary")).toBeNull();
   });
 
@@ -1252,5 +1311,12 @@ describe("CartesianDisplaySection — the two-metric axis controls under a break
     render(<CartesianDisplaySection kind="bar" config={{ ...twoMetrics, series: undefined }} onChange={() => {}} />);
     expect(screen.getByLabelText("axis rev")).toBeInTheDocument();
     expect(screen.getByLabelText("Split y-axis when necessary")).toBeInTheDocument();
+  });
+
+  // A single band has no second axis to split onto, exactly as a single metric has none — the same
+  // `> 1` the metric path always kept, now counted over the drawn series.
+  it("keeps the group away from a one-band breakout", () => {
+    render(<CartesianDisplaySection kind="bar" config={breakout} onChange={() => {}} seriesNames={["L"]} />);
+    expect(screen.queryByLabelText("axis L")).toBeNull();
   });
 });

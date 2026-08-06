@@ -29,8 +29,13 @@ export interface CartesianBuildConfig {
   showLegend?: boolean;
   xLabel?: string;
   yLabel?: string;
-  seriesTypes?: Record<string, SeriesDisplay>;   // series name -> how it is drawn (combo)
-  rightAxisMetrics?: string[];   // metrics plotted against a second (right) Y axis
+  /** Series name -> how it is drawn. Offered on line, area, bar and combo — the four kinds
+   *  Metabase's `series.display` names; see `perSeriesDisplayApplies`. */
+  seriesTypes?: Record<string, SeriesDisplay>;
+  /** The SERIES drawn against a second (right) value axis: the chart's metrics on a plain chart,
+   *  its breakout BANDS on one with a `series` column. The name is older than the meaning — see
+   *  `rightAxisSeries`, which is the only thing that reads it. */
+  rightAxisMetrics?: string[];
   /** Metabase's "Split y-axis when necessary". Unset means on, as it is there. Only consulted when
    *  `rightAxisMetrics` is empty — an explicit assignment always wins over a computed one. */
   /** Scatter only: the metric whose value sizes each bubble. */
@@ -351,10 +356,59 @@ function normalizeStacks(series: { data: (number | null)[] }[]) {
 /** A metric's [min, max] over the drawn rows. */
 type Extent = [number, number];
 
-// Right-axis is active only when it splits the metrics (≥1 left and ≥1 right) on a
-// vertical chart — clean-room of Metabase's left/right axis split.
-function rightMetrics(cfg: CartesianBuildConfig): string[] {
-  return (cfg.rightAxisMetrics ?? []).filter((m) => cfg.yMetrics.includes(m));
+/**
+ * WHICH OF THIS CHART'S SERIES ARE DRAWN AGAINST THE RIGHT-HAND VALUE AXIS — Metabase's per-series
+ * `axis` (`lib/settings/series.ts`), decided for the WHOLE SET because "everything on one side" is
+ * not a split and a lone axis with nothing on it is a rendering fault rather than a preference.
+ *
+ * `names` IS WHAT THE CHART ACTUALLY DRAWS: its metrics on a plain chart, its breakout BANDS on one
+ * with a `series` column. That parameter is the entire fix. `decorateSeries` used to be handed
+ * `cfg.yMetrics[0]` as the metric for every band of a breakout and ask `rightMetrics(cfg)` about
+ * that one name — one metric, one answer, all bands — so the per-metric control was inert under a
+ * breakout and #423 withdrew it. Metabase has no such limit because its `axis` hangs off a series
+ * key that is a metric on one chart and a formatted breakout value on the other; asking about the
+ * drawn names is the same idea with the same single stored list.
+ *
+ * NO SECOND STORED KEY, DELIBERATELY. `rightAxisMetrics` was always a list of names filtered against
+ * what the chart draws; only the list it is filtered against widened. A `seriesAxis` map beside it
+ * would be two places holding one answer plus a precedence rule between them, which is the shape
+ * this programme keeps removing rather than adding.
+ *
+ * THE HAZARD IT TRADES FOR, stated because it is real: a stored value can only hold METRIC names —
+ * the panel wrote `config.yMetrics.map(...)` and since #423 wrote nothing at all under a breakout —
+ * so every existing breakout chart starts inert here, measured. The exception is a band whose value
+ * is spelled exactly like one of the chart's metrics, which would now move to the right axis on
+ * load. That is the price of one key instead of two, and it is smaller than a migration.
+ *
+ * A HORIZONTAL CHART IS OUT at the top rather than at each call site: its value axis is the
+ * horizontal one and there is no second edge to put another on, which is where `isDualAxis` used to
+ * say it.
+ */
+export function rightAxisSeries(
+  cfg: Pick<CartesianBuildConfig, "kind" | "horizontal" | "stacked" | "rightAxisMetrics">, names: string[],
+): string[] {
+  if (isHorizontal(cfg as CartesianBuildConfig)) return [];
+  // A STACK CANNOT STAND ON TWO AXES, and this is the same refusal `shouldAutoSplitY` already makes
+  // one screen up, in its own words: "A stack answers a different question — the parts of one total
+  // — so a second scale would make the stack meaningless." Refusing to CREATE such a split while
+  // honouring one somebody typed would be the same rule applied to half the ways of reaching it.
+  //
+  // METABASE COLLAPSES RATHER THAN REFUSING (`echarts/cartesian/model/stack.ts`): a stack goes to
+  // the right only when EVERY series in it was sent right, and otherwise the whole stack goes left,
+  // leaving a non-stacked series beside it free to take the other axis. egret is narrower on
+  // purpose. `resolveStacked` here is chart-wide, so egret has no per-display stack groups to take
+  // an "every member" vote within; reproducing the vote would mean modelling those groups for the
+  // one case a combo reaches — a stacked bar pair beside a free line. That is a bigger change than
+  // the control it would serve, and refusing outright is honest where a partial collapse would draw
+  // a split for some assignments and silently ignore others.
+  //
+  // THE PANEL WITHDRAWS THE ROWS IN THE SAME STATE, so nothing is offered that this refuses.
+  if (resolveStacked(cfg)) return [];
+  const right = (cfg.rightAxisMetrics ?? []).filter((n) => names.includes(n));
+  // ≥1 on each side, or it is not a split. Metabase reaches the same place from the other
+  // direction: `getYAxisSplit` collects a `left`, a `right` and an `auto` bucket and only ever
+  // builds the second axis when both named sides are non-empty.
+  return right.length > 0 && right.length < names.length ? right : [];
 }
 
 /** Per-metric [min, max] over the drawn rows. The split decision needs one range per metric — the
@@ -474,10 +528,11 @@ export function computeAxisSplit(metrics: string[], extents: Record<string, Exte
   }
   return best?.[1] ?? [];
 }
-function isDualAxis(cfg: CartesianBuildConfig): boolean {
-  const right = rightMetrics(cfg);
-  return !isHorizontal(cfg) && right.length > 0 && right.length < cfg.yMetrics.length;
-}
+// `isDualAxis(cfg)` used to live here, asking `rightMetrics(cfg).length` against
+// `cfg.yMetrics.length`. It is `rightAxisSeries` now, which takes the DRAWN series names instead —
+// the same two conditions over a list a breakout can also answer. Nothing reads a config-only
+// answer any more: `baseOption` decides the axis shape from the series that survived hiding
+// (`plotted.some(s => s.yAxisIndex === 1)`), which it already had to.
 
 // A row chart is a horizontal bar chart.
 const isHorizontal = (cfg: CartesianBuildConfig) =>
@@ -695,23 +750,59 @@ function seriesDisplayName(cfg: CartesianBuildConfig, raw: string): string {
 export type SeriesDisplay = "bar" | "line" | "area";
 
 /**
- * A combo series' display, keyed by the SERIES name — the same key space as its colour and its
- * rename, so one row of the panel can carry all of them. It used to be keyed by metric, which a
- * breakout has only one of: every band of a broken-out combo was forced to share one display.
+ * Whether a series on this chart kind may choose its own display — Metabase's `getHidden` on
+ * `series.display` (`lib/settings/series.ts`), whose first arm names the four kinds verbatim:
  *
- * The default is Metabase's, verbatim (`getSeriesDefaultDisplay`): `index === 0 ? "line" : "bar"`.
- * egret defaulted every series to "bar", so a fresh combo was indistinguishable from a bar chart
- * until the user changed something — the one thing the chart type exists to show was off by
- * default.
+ *     !["line", "area", "bar", "combo"].includes(single.card.display ?? "")
+ *
+ * A ROW CHART AND A SCATTER ARE ABSENT FROM THAT LIST UPSTREAM, and the reason is the same one that
+ * keeps them out of `seriesDisplayFor`'s lookup below: a row chart IS a horizontal bar and a scatter
+ * IS points, so "draw this one as a line" would be a request to draw a chart the reader did not
+ * open. Everything else in the family is a chart of BANDS OVER A CATEGORY AXIS, where a bar and a
+ * line are two ways of drawing the same numbers and mixing them is the whole point of the combo.
+ *
+ * METABASE'S SECOND ARM — `settings["stackable.stack_type"] != null` — IS NOT HERE, on purpose. It
+ * is a statement about a panel (a stack of mixed shapes is not readable), not about what the
+ * builder can draw, and the panel already keeps it: `SeriesListControl` withholds the select while
+ * `stackModeOf` is anything but "none". Restating it here would ALSO throw away a display a chart
+ * had already stored the moment someone turned stacking on, which is a different and worse thing
+ * than hiding a control.
+ */
+export function perSeriesDisplayApplies(kind: CartesianViz): boolean {
+  return kind === "line" || kind === "area" || kind === "bar" || kind === "combo";
+}
+
+/**
+ * A series' display, keyed by the SERIES name — the same key space as its colour and its rename, so
+ * one row of the panel can carry all of them. It used to be keyed by metric, which a breakout has
+ * only one of: every band of a broken-out combo was forced to share one display.
+ *
+ * IT USED TO CONSULT `seriesTypes` ON `combo` ALONE and return the chart kind for everything else,
+ * which made a stored per-series display on a line, area or bar chart something the builder
+ * DISCARDED rather than merely something the panel would not offer. Measured on a line chart
+ * carrying `seriesTypes: {w: "bar"}`: `seriesDisplayFor("line", "w", 1, {w: "bar"})` answered
+ * `"line"` and both bands came out `type: "line"`. Metabase offers the setting on all four kinds
+ * (see `perSeriesDisplayApplies`), so the narrow lookup was the gap, and opening the panel gate
+ * without it would have shipped a control that saves and does not paint.
+ *
+ * The DEFAULT stays where it was, and only the combo has a positional one: Metabase's
+ * `getSeriesDefaultDisplay`, `index === 0 ? "line" : "bar"`. egret defaulted every series to "bar",
+ * so a fresh combo was indistinguishable from a bar chart until the user changed something — the
+ * one thing the chart type exists to show was off by default. The other three kinds default to
+ * THEMSELVES, so a chart with nothing stored is byte-identical to what it was.
+ *
+ * A CHART SWITCHED FROM COMBO TO LINE NOW KEEPS ITS PER-SERIES DISPLAYS, because the cartesian
+ * settings namespace is deliberately shared across kinds (`cartesian-codec.ts`) so bar→line keeps
+ * its config. That is a behaviour change on already-saved charts and it is the intended one:
+ * Metabase's `series.display` persists across a display change in exactly the same way, and the
+ * alternative — clearing the map on every kind change — would throw away work the user did.
  */
 export function seriesDisplayFor(
   kind: CartesianViz, seriesName: string, index: number, seriesTypes?: Record<string, SeriesDisplay>,
 ): SeriesDisplay | "scatter" {
-  if (kind === "combo") return seriesTypes?.[seriesName] ?? (index === 0 ? "line" : "bar");
-  if (kind === "area") return "area";
   if (kind === "scatter") return "scatter";
   if (kind === "row") return "bar";
-  return kind; // "bar" | "line"
+  return seriesTypes?.[seriesName] ?? (kind === "combo" ? (index === 0 ? "line" : "bar") : kind);
 }
 
 /**
@@ -1107,12 +1198,17 @@ export function buildCartesianOption(
     // than layered on top, so it CONSUMES its colour and the series that would have hashed onto it
     // moves along instead of being drawn identically.
     const groupColors = colorsForKeys(seriesValues.map(groupName), cfg.seriesColors);
+    // Which BANDS go on the right value axis, decided once for the whole set for the same reason
+    // the colours are: "one side holds everything" is a property of the set, not of any one band.
+    // Keyed by group name, so it lands in the same key space as the colour, the rename and the
+    // display — the panel row that offers all four addresses them with one string.
+    const onRight = new Set(rightAxisSeries(cfg, seriesValues.map(groupName)));
     const builtSeries = seriesValues.map((sv, si) => {
       const data = categories.map((c) => {
         const v = cell.get(`${catKey(c)} ${catKey(sv)}`);
         return v === undefined ? null : v;
       });
-      return decorateSeries({ name: groupName(sv), data }, metric, si, cfg, fmt, groupColors, grouped);
+      return decorateSeries({ name: groupName(sv), data }, metric, si, cfg, fmt, groupColors, grouped, onRight);
     });
     const series = applySeriesOrder(builtSeries as unknown as SeriesLike[], cfg) as unknown as typeof builtSeries;
     if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
@@ -1141,13 +1237,16 @@ export function buildCartesianOption(
   // metric being drawn the same is a fair reading of that config, and the old scheme already
   // collapsed them the moment either had a `seriesColors` entry, which is keyed by name too.
   const metricColors = colorsForKeys(cfg.yMetrics, cfg.seriesColors);
+  // Without a breakout a series IS a metric, so this is the per-metric split egret has always had,
+  // reached through the function the breakout branch also uses rather than through a second one.
+  const onRight = new Set(rightAxisSeries(cfg, cfg.yMetrics));
   let series = cfg.yMetrics.map((metric, si) => {
     const mi = idx[metric];
     const data = categories.map((c) => {
       const r = rowByCat.get(catKey(c));
       return r == null ? null : (r[mi] as number | null);
     });
-    return decorateSeries({ name: metric, data }, metric, si, cfg, fmt, metricColors, grouped);
+    return decorateSeries({ name: metric, data }, metric, si, cfg, fmt, metricColors, grouped, onRight);
   });
 
   // Folding is offered only where "Other" means one clear thing: a single metric, no
@@ -1209,6 +1308,11 @@ function decorateSeries(
    *  a positional one would be a second, silent colour rule that no test could see. */
   colors: Record<string, string>,
   grouped = false,
+  /** The series on the RIGHT value axis, by raw name — `rightAxisSeries`' answer for this chart's
+   *  whole set. Passed in for the same reason `colors` is: whether a right axis exists at all
+   *  depends on how the OTHER series were assigned, so it cannot be decided one series at a time.
+   *  Keyed by `s.name` and not by `metric`, which is what a breakout has only one of. */
+  onRight: ReadonlySet<string> = new Set(),
 ) {
   const display = seriesDisplayFor(cfg.kind, s.name ?? metric, colorIdx, cfg.seriesTypes);
   const type = echartsTypeOf(display);
@@ -1276,27 +1380,44 @@ function decorateSeries(
     // rewrite the data afterwards, and "auto" is a question about the points that actually get
     // drawn.
     out.__markers = ln.markers ?? cfg.markers ?? "auto";
-    // CHART-WIDE ONLY, AND DELIBERATELY. `LineSeriesStyle` carries shape, style, size and markers
-    // but no `missing`, and this is a divergence from Metabase rather than a gap in the port:
-    // Metabase makes "Replace missing values with" a per-series setting, and setting one band of a
-    // four-band chart to Zero while the others interpolate is stored and drawn there with no
-    // warning, no badge, and nothing in the legend or tooltip to say so. (Measured on the live
-    // instance; an earlier version of this comment implied Metabase forbade it, which is false.)
+    // PER SERIES, over a chart-wide default — the same one-link-longer chain the four fields above
+    // take, and Metabase's own arrangement: `line.missing` lives in its SERIES settings and its
+    // chart-wide twin is marked `// DEPRECATED: moved to series settings` (`lib/settings/graph.ts`,
+    // `LINE_SETTINGS`).
     //
-    // egret keeps it chart-wide because of what the setting DOES here rather than what Metabase
-    // does with it. The other four are appearance — a dashed line and a solid line are the same
-    // number drawn differently. `missing: "zero"` is not: it rewrites the data (see below), and
-    // that zero then counts in stack totals, in normalisation and in a trend fit. Per series, one
-    // band asserting "the absent value was 0" while the next asserts "there was no value" makes
-    // the stack total and the trend describe two different datasets, with nothing on the chart
-    // that could tell a reader which. That is a bad trade for the case it buys, so it stays one
-    // answer for the whole chart until something turns up that actually needs two.
+    // THIS LINE CARRIED A CAREFUL ARGUMENT FOR THE OPPOSITE, AND MEASURING IT ENDED IT. The
+    // argument was that the other four fields are APPEARANCE — a dashed line and a solid line are
+    // the same number drawn differently — whereas `missing: "zero"` REWRITES THE DATA (see below),
+    // "and that zero then counts in stack totals, in normalisation and in a trend fit", so two
+    // bands disagreeing would make the chart say two things at once with nothing on screen to
+    // signal it. Two of those three consequences do not exist. Measured on `v = [1, null, 3, 4]`
+    // beside `w = [10, 20, 30, 40]`, chart-wide, before anything changed:
+    //
+    //   stack total    interpolate [11,20,33,44]  zero [11,20,33,44]  none [11,20,33,44]
+    //   normalised w   [90.9,100,90.9,90.9]       …identical…         …identical…
+    //   trend of v     [1,2,3,4]                  [0.2,1.4,2.6,3.8]   [1,2,3,4]
+    //
+    // The stack total does not move because `stackTotalSeries` sums with `typeof v === "number"`:
+    // a null contributes nothing and a zero contributes zero, which is the same number.
+    // `normalizeStacks` totals the same way, so neither the total nor any OTHER band's percentage
+    // moves — only the zeroed band's own point, which draws at 0% instead of leaving a gap, which
+    // is what the reader asked for. The trend genuinely does move, and it is the one real
+    // consequence; but `trendSeries` fits each series independently off its own `data`, so it
+    // moves that band's OWN trend line and nothing else. There is no cross-series contamination
+    // left to protect anyone from, and `cartesian.perSeriesMissing` pins all three numbers so this
+    // conclusion cannot rot the way its predecessor did.
+    //
+    // The one residue, recorded rather than hidden: in a category where EVERY band is null, a
+    // zeroed band flips `stackTotalSeries`' `any` flag, so the total prints "0" where it would
+    // otherwise print nothing. That is the chart-wide setting's existing behaviour reached one
+    // band at a time, not something per-series introduces.
+    //
     // A log axis has no zero, so filling with one cannot mean what it says — ECharts would drop
     // the point and break the line at exactly the place the user asked to have filled. Leaving
-    // the gap is the honest version of "this value cannot be shown here".
-    const missing = cfg.logScale && (cfg.missing ?? "interpolate") === "zero"
-      ? "none"
-      : (cfg.missing ?? "interpolate");
+    // the gap is the honest version of "this value cannot be shown here". Asked of the RESOLVED
+    // value, so a per-series "zero" cannot slip past a guard written for the chart-wide one.
+    const chosen = ln.missing ?? cfg.missing ?? "interpolate";
+    const missing = cfg.logScale && chosen === "zero" ? "none" : chosen;
     out.connectNulls = missing === "interpolate";
     if (missing === "zero") {
       // ECharts can bridge a null or break at it, but it has no notion of treating one as
@@ -1324,7 +1445,9 @@ function decorateSeries(
   }
   // Scatter series get a distinct marker shape per series (shape, not colour).
   if (type === "scatter") { out.symbol = symbolShape(colorIdx); out.symbolSize = CHART_THEME.symbolSize; out.itemStyle = { color, opacity: CHART_THEME.scatterOpacity }; }
-  if (isDualAxis(cfg) && rightMetrics(cfg).includes(metric)) out.yAxisIndex = 1;
+  // BY SERIES NAME, not by metric. The metric is what every band of a breakout shares, so asking
+  // about it gave one answer for the whole chart — the defect this line used to be.
+  if (onRight.has(s.name)) out.yAxisIndex = 1;
   if (cfg.showLabels) {
     out.label = {
       show: true, fontSize: CHART_THEME.labelFontSize, fontWeight: CHART_THEME.labelWeight,
@@ -1375,7 +1498,21 @@ function baseOption(
   // metric across many series, so without deduping, leftSide would list it once per series
   // and metricTitle (single-metric only) would stop titling breakout charts' axis.
   const dual = plotted.some((s) => s.yAxisIndex === 1);
-  const rightSide = dual ? rightMetrics(cfg) : [];
+  /**
+   * The plotted series on one value axis.
+   *
+   * EVERYTHING BELOW THAT USED TO SELECT BY `__metric` SELECTS THROUGH THIS NOW, and under a
+   * breakout that is the difference between a working split and a decorative one: every band of a
+   * breakout carries the SAME `__metric`, so a metric-name filter answers "yes" for both sides and
+   * each axis would be sized over all the data. Measured: `small` [1,2] and `big` [1000,4000] split
+   * across two axes came out with both axes spanning 0–4000. The assignment lives on the series, so
+   * the question is asked of the series.
+   */
+  const onAxis = (side: 0 | 1) => plotted.filter((s) => (s.yAxisIndex === 1 ? 1 : 0) === side);
+  /** …and the METRICS behind a set of series, for the readers that format or title by column. A Set
+   *  because a breakout splits one metric across many bands. */
+  const metricsOf = (list: SeriesLike[]) =>
+    [...new Set(list.map((s) => s.__metric ?? s.name ?? ""))].filter(Boolean);
   /**
    * The metrics on the LEFT value axis (on a row chart, on the only one), for a given legend
    * selection — `undefined` meaning "as built", which is what every build-time reader wants.
@@ -1388,22 +1525,26 @@ function baseOption(
     const shown = selected == null
       ? plotted
       : plotted.filter((s) => s.name == null || selected[s.name] !== false);
-    return [...new Set(shown.filter((s) => s.yAxisIndex !== 1).map((s) => s.__metric ?? s.name ?? ""))]
-      .filter(Boolean);
+    return metricsOf(shown.filter((s) => s.yAxisIndex !== 1));
   };
-  const leftSide = leftSideFor();
+  /** The SERIES each value axis carries, as built — what the extent, the number format and the
+   *  width estimate all take now. A `leftSide` holding the left axis's METRIC NAMES used to stand
+   *  here and feed all three; it is gone because under a breakout every band names the same metric,
+   *  so a metric list cannot tell the two axes apart. `leftSideFor` survives it, and only for the
+   *  axis TITLE, which genuinely is asking "which columns is this axis showing". */
+  const leftSeries = onAxis(0);
+  const rightSeries = onAxis(1);
   /** The value axis's title, for a legend selection. The ladder is unchanged and its ORDER is
    *  load-bearing: an author's own `yLabel` and their `showYLabel: false` are decisions, not
    *  derivations, so neither may follow the legend — only the metric-name arm does. */
   const yTitleFor = (selected?: Record<string, boolean>) =>
     cfg.showYLabel === false ? undefined : (cfg.yLabel ?? metricTitle(leftSideFor(selected)));
   const yTitle = yTitleFor();
-  const widestOf = (metrics: string[]) => {
+  // OVER A SERIES LIST, not over metric names — see `onAxis`. It used to skip a series whose
+  // `__metric` was absent from the list, which cannot tell one breakout band from another.
+  const widestOf = (list: SeriesLike[]) => {
     let widest = 0;
-    for (const s of plotted) {
-      // A breakout splits one metric into many series, each still tagged with __metric.
-      // An untagged series predates that and is counted against whichever axis asks.
-      if (s.__metric != null && !metrics.includes(s.__metric)) continue;
+    for (const s of list) {
       for (const d of (s.data ?? []) as unknown[]) {
         // On a value/time x-axis the datum is a `{value: [x, y], name}` item — the y is what the
         // axis shows. `datumY` unwraps both that and the bare `[x, y]` pair it replaced.
@@ -1414,9 +1555,10 @@ function baseOption(
     return widest;
   };
 
-  const fmtFor = (metrics: string[]) => {
+  const fmtFor = (list: SeriesLike[]) => {
+    const metrics = metricsOf(list);
     // 10,000 is where a grouped number reaches six characters and "10K" starts winning.
-    const compact = normalized ? false : (cfg.compactValues ?? widestOf(metrics) >= 10_000);
+    const compact = normalized ? false : (cfg.compactValues ?? widestOf(list) >= 10_000);
     return (v: number) => {
       if (normalized) return `${Math.round(v)}%`;
       const m = metrics[0];
@@ -1558,7 +1700,7 @@ function baseOption(
         // The widest VALUE the left axis carries and the axis's own formatter — not the formatted
         // datum, which is what this passed until the gutter was found reserving 10px for "24.7K" on
         // an axis whose top tick is "25K". `estimatePlotWidth` rounds to a tick it would draw.
-        plotWidth: estimatePlotWidth(size, widestOf(leftSide), fmtFor(leftSide), Boolean(yTitle)),
+        plotWidth: estimatePlotWidth(size, widestOf(leftSeries), fmtFor(leftSeries), Boolean(yTitle)),
         // The CONTAINER's height, not an inset one: the 70% guard is a share of the whole card
         // (Metabase's `checkHeight`), so passing a grid-adjusted height silently tightens it.
         outerHeight: size.height,
@@ -1647,7 +1789,7 @@ function baseOption(
    * each measured from the same baseline, so the axis only has to reach the tallest single one.
    * `resolveStacked` is false for them, which is the whole distinction.
    */
-  const axisExtent = (metrics: string[]): { lo: number; hi: number } => {
+  const axisExtent = (list: SeriesLike[]): { lo: number; hi: number } => {
     if (normalized) return { lo: 0, hi: 100 };
     const stacked = resolveStacked(cfg);
     // THE HALF OF "UNPIN FROM ZERO" THAT `scale: true` CANNOT REACH, and the reason the flag is
@@ -1666,10 +1808,11 @@ function baseOption(
     // two piles, not one net figure, and an axis sized on the net one is too short at both ends.
     const up: number[] = [], down: number[] = [];
     let lo = seed.lo, hi = seed.hi;
-    for (const s of plotted) {
-      // A breakout splits one metric into many series, each still tagged with __metric. An untagged
-      // series predates that and is counted against whichever axis asks — `widestOf`'s rule.
-      if (s.__metric != null && !metrics.includes(s.__metric)) continue;
+    // OVER THE SERIES ON THIS AXIS, not over the ones whose metric it names — see `onAxis`. Under a
+    // breakout the `__metric` filter this replaces admitted every band to both axes, so a split of
+    // `small` [1,2] from `big` [1000,4000] produced two axes both spanning 0–4000 and the split
+    // changed nothing a reader could see.
+    for (const s of list) {
       const data = (s.data ?? []) as unknown[];
       for (let i = 0; i < data.length; i++) {
         // On a value/time x-axis the datum is an [x, y] pair — the y is what the axis shows.
@@ -1705,7 +1848,7 @@ function baseOption(
   // still the row chart's alone. Without it every vertical chart would be handed the horizontal
   // budget for its left-hand ticks — the axis where a label's width costs nothing.
   const rowExtent = horizontal && categoryGutter != null && size && !cfg.logScale
-    ? axisExtent(leftSide) : undefined;
+    ? axisExtent(leftSeries) : undefined;
   const valueInterval = rowExtent && size
     ? intervalThatFits({
         plotWidth: plotWidthLessGutter(size, categoryGutter!, Boolean(xTitle)),
@@ -1718,7 +1861,7 @@ function baseOption(
         // On a horizontal chart `leftSide` is the metric side whatever the name says — the split is
         // by series, and `isDualAxis` is false here, so every plotted series is in it.
         widestValue: Math.max(Math.abs(rowExtent.lo), Math.abs(rowExtent.hi)),
-        format: fmtFor(leftSide),
+        format: fmtFor(leftSeries),
       })
     : undefined;
   // Metabase puts the legend along the top; reserve room there for it. The category axis
@@ -1772,12 +1915,12 @@ function baseOption(
     ? plotHeightLessLabels({ size, band: categoryBand, grid })
     : undefined;
   /** The scale a VERTICAL value axis needs, per axis — `mkValueAxis` is called twice on a dual
-   *  chart and the two carry different metrics, so the extent is asked for the metrics that axis
+   *  chart and the two carry different series, so the extent is asked for the series that axis
    *  actually shows rather than for the chart. A NORMALISED axis is 0-100 by construction and
    *  already divides cleanly, so it takes the interval and keeps its own ends. */
-  const verticalFit = (metrics: string[]) => {
+  const verticalFit = (list: SeriesLike[]) => {
     if (verticalPlot == null) return undefined;
-    const e = axisExtent(metrics);
+    const e = axisExtent(list);
     return verticalValueAxisFit({ plotHeight: verticalPlot, lo: e.lo, hi: e.hi });
   };
   // Either way the axis has now DECIDED, and a decided axis never leaves ECharts the subset
@@ -1922,12 +2065,14 @@ function baseOption(
     splitLine: { show: false as const },
   };
   const xCategory = usesXScale(cfg) ? scaleAxis : categoryAxis;
-  const mkValueAxis = (metrics: string[], position?: "left" | "right") => {
+  /** `list` IS THE SERIES ON THIS AXIS, not the metrics behind them — see `onAxis`. A breakout
+   *  gives both axes the same one metric, so a metric-name argument could not describe either. */
+  const mkValueAxis = (list: SeriesLike[], position?: "left" | "right") => {
     // Whichever of the two fits this axis's orientation makes reachable — exactly one of them can be
     // non-`undefined` on any chart, and both are `undefined` on a card with room to spare. The row
     // chart's answers an interval alone; the vertical one answers the two ends it divides as well,
     // and `verticalValueAxisFit` argues why the horizontal one ought to and does not yet.
-    const down = verticalFit(metrics);
+    const down = verticalFit(list);
     const measuredInterval = valueInterval ?? down?.interval;
     return {
       // A STABLE HANDLE FOR THE LEGEND PATCH, and the trap it avoids is worth stating in full
@@ -1982,7 +2127,7 @@ function baseOption(
       // Manual axis range (Metabase y-axis min/max) overrides the auto extent.
       ...(cfg.yMin != null ? { min: cfg.yMin } : {}),
       ...(cfg.yMax != null ? { max: cfg.yMax } : {}),
-      axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: fmtFor(metrics) },
+      axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: fmtFor(list) },
       axisLine: { show: cfg.yAxisTicks !== false, lineStyle: { color: gridLine } },
       axisTick: { show: cfg.yAxisTicks !== false },
       // `splitNumber` is a HINT — ECharts still rounds to human intervals, so asking for 5 can
@@ -2008,14 +2153,14 @@ function baseOption(
   let xAxis: unknown;
   let yAxis: unknown;
   if (horizontal) {
-    xAxis = mkValueAxis(leftSide);
+    xAxis = mkValueAxis(leftSeries);
     yAxis = categoryAxis;
   } else if (dual) {
     xAxis = xCategory;
-    yAxis = [mkValueAxis(leftSide, "left"), mkValueAxis(rightSide, "right")];
+    yAxis = [mkValueAxis(leftSeries, "left"), mkValueAxis(rightSeries, "right")];
   } else {
     xAxis = xCategory;
-    yAxis = mkValueAxis(leftSide);
+    yAxis = mkValueAxis(leftSeries);
   }
 
   // Goal line — a horizontal reference at goalValue, drawn via the first series' markLine.
@@ -2102,7 +2247,11 @@ function baseOption(
       // What is SHOWN, not what was built: a count that keeps saying "2 series" over one drawn
       // series is the same lie as naming the hidden one.
       seriesCount: shown.length,
-      format: (v) => fmtFor(cfg.yMetrics)(Number(v)),
+      // OVER THE PLOTTED SERIES, which is what `fmtFor` takes now. It read `cfg.yMetrics`, and the
+      // two agree on every chart except one where a metric is hidden: there the description used to
+      // be formatted through a column that is not on the card. Same direction as `seriesCount`
+      // above — describe what is shown.
+      format: (v) => fmtFor(plotted)(Number(v)),
       // `drawnCategories`, NOT `categories.map(String)` — the raw bucket is what this enumerated
       // until now, so a month-bucketed axis drew "January 2026" while a screen reader heard
       // "2026-01-01". `ariaDescription`'s own header says it exists to state "what a sighted user

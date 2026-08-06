@@ -113,6 +113,102 @@ describe("cartesian controls are grouped and per-kind", () => {
   });
 
   /**
+   * THE PER-SERIES DISPLAY SELECT, ON THE FOUR KINDS METABASE OFFERS IT ON.
+   *
+   * `SeriesListControl` used to gate `defaultDisplay` on `kind === "combo"`; Metabase's own
+   * `getHidden` on `series.display` names `["line", "area", "bar", "combo"]`. Driven through the
+   * descriptor rather than by rendering `SeriesListSection` with a stub `defaultDisplay`, for the
+   * reason the drill-in tests above already give: a section test with a stub passes just as happily
+   * when nothing threads the real rule in.
+   */
+  it("offers the display select on line, bar and combo", () => {
+    for (const k of ["line", "bar", "combo"] as const) {
+      cleanup();
+      render(createElement(ctrls(k).find((c) => c.id === "seriesList")!.render, lineProps));
+      expect(screen.getByLabelText("display revenue"), `${k} should offer it`).toBeInTheDocument();
+    }
+  });
+
+  /**
+   * AREA IS IN THE LIST AND STILL DOES NOT SHOW IT HERE, and the interaction is worth pinning
+   * rather than working around. `resolveStacked` is `cfg.stacked ?? cfg.kind === "area"`, so an
+   * area chart is stacked with nothing stored — and Metabase's second `getHidden` arm withdraws the
+   * select from any stacked chart. The two rules meet on this one kind. (Metabase agrees on this
+   * exact fixture too: `getDefaultStackingValue` stacks an area card once it has more than one
+   * metric or dimension, and this one has two metrics.) Turn stacking off and the select is there,
+   * which is what proves the kind is genuinely in the list.
+   */
+  it("offers it on area once that chart is not stacked", () => {
+    render(createElement(ctrls("area").find((c) => c.id === "seriesList")!.render, lineProps));
+    expect(screen.queryByLabelText("display revenue")).toBeNull();
+    cleanup();
+    render(createElement(ctrls("area").find((c) => c.id === "seriesList")!.render, {
+      ...lineProps, config: { ...lineProps.config, stacked: false },
+    }));
+    expect(screen.getByLabelText("display revenue")).toBeInTheDocument();
+  });
+
+  // A row chart IS a horizontal bar and a scatter IS points — neither has an alternative to offer,
+  // and both are absent from Metabase's list.
+  it("withholds it from row and scatter", () => {
+    for (const k of ["row", "scatter"] as const) {
+      cleanup();
+      render(createElement(ctrls(k).find((c) => c.id === "seriesList")!.render, lineProps));
+      expect(screen.queryByLabelText("display revenue"), `${k} should withhold it`).toBeNull();
+    }
+  });
+
+  // The trigger shows the BUILDER's default for a series nobody has set, and only the combo has a
+  // positional one. A line chart's rows must read "Line", not "Line" then "Bar".
+  it("defaults each row to what the builder would draw", () => {
+    render(createElement(ctrls("line").find((c) => c.id === "seriesList")!.render, lineProps));
+    expect(screen.getByLabelText("display revenue")).toHaveTextContent("Line");
+    expect(screen.getByLabelText("display orders")).toHaveTextContent("Line");
+    cleanup();
+    render(createElement(ctrls("combo").find((c) => c.id === "seriesList")!.render, lineProps));
+    expect(screen.getByLabelText("display revenue")).toHaveTextContent("Line");
+    expect(screen.getByLabelText("display orders")).toHaveTextContent("Bar");
+  });
+
+  // Metabase's second `getHidden` arm. A stack of mixed shapes is not a thing anyone can read.
+  it("withholds it from a stacked chart of any kind", () => {
+    for (const k of ["bar", "line", "combo"] as const) {
+      cleanup();
+      render(createElement(ctrls(k).find((c) => c.id === "seriesList")!.render, {
+        ...lineProps, config: { ...lineProps.config, stacked: true },
+      }));
+      expect(screen.queryByLabelText("display revenue"), `${k} stacked should withhold it`).toBeNull();
+    }
+  });
+
+  /**
+   * THE OTHER SEAM S3 NEEDED: the Y-axis-position rows are one per SERIES now, so the axes control
+   * has to be handed the band names off the last result. Without the thread it falls back to the
+   * metrics, which under a breakout are not what the chart draws — exactly the control #423 removed.
+   */
+  const breakoutProps: VizControlProps<CartesianConfig> = {
+    config: { xAxis: "month", series: "region", yMetrics: ["revenue"] },
+    onChange: () => {},
+    columns: [], metrics: [],
+    resultColumns: [
+      { name: "month", type: "varchar" },
+      { name: "region", type: "varchar" },
+      { name: "revenue", type: "double" },
+    ],
+    rows: [["2026-01", "North", 1], ["2026-01", "South", 2], ["2026-02", "North", 3]],
+    temporalUnits: {},
+    unitRow: () => null,
+  };
+
+  it("hands the breakout's band names to the axes control, which offers a side per band", () => {
+    render(createElement(ctrls("bar").find((c) => c.id === "axes")!.render, breakoutProps));
+    expect(screen.getByLabelText("axis North")).toBeInTheDocument();
+    expect(screen.getByLabelText("axis South")).toBeInTheDocument();
+    // Not the metric, which is one column shared by both bands and not a thing with a side.
+    expect(screen.queryByLabelText("axis revenue")).toBeNull();
+  });
+
+  /**
    * THE DESCRIPTOR -> PANEL SEAM, which is what PR 02 found untested on all three chart families
    * and only a mutation caught. `AxisRangeOptions` greys out the x-label rotations wherever the
    * builder will draw a value axis, and since PR 03 that answer turns on the x column's TYPE — so
