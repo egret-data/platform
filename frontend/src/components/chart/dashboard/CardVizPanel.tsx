@@ -1,5 +1,6 @@
 import { applyVizOverride } from "./params";
-import { StudioPanel } from "@/components/chart/StudioPanel";
+import { StudioPanel, hasAxesControls } from "@/components/chart/StudioPanel";
+import { SectionLabel } from "@/components/chart/settings/SectionLabel";
 import { SharedDisplaySections, styleColumnsFor, ruleColumnsFor } from "@/components/chart/settings/SharedDisplaySections";
 import { getDescriptor } from "@/components/chart/viz/registry";
 import { vizConfig, shellSettings, mergeVizSettings } from "@/components/chart/viz/renderConfig";
@@ -53,6 +54,24 @@ export function CardVizPanel({ chart, override, columns, rows = [], onChange }: 
   // A rule may only target what the viz can actually colour — narrower than what it can format.
   const ruleColumns = ruleColumnsFor(eff.viz_type, styleParams, columns);
 
+  // Everything the two StudioPanel renders below share. Shared rather than copied so the Axes
+  // section cannot drift from the Display one — the `resultColumns`/`rows` pair in particular, since
+  // an Axes tab reading a different result from the Display tab beside it is precisely the class of
+  // bug this PR exists to close.
+  const studioProps = {
+    config: config as never,
+    columns: [],
+    metrics: [],
+    resultColumns: columns,
+    rows,
+    // The units `rows` were fetched with, straight off the effective params — the same field
+    // `ChartRenderer` builds the card's chart from, so the panel keys on what was drawn. A
+    // dashboard has no unit picker (see `unitRow` below), which is exactly why this cannot be
+    // derived here: the answer lives in the spec the card's query ran with.
+    temporalUnits: eff.params.spec.temporal_units ?? {},
+    unitRow: () => null,
+  };
+
   return (
     <div className="flex flex-col gap-3 p-3">
       <div className="flex items-center justify-between">
@@ -61,27 +80,47 @@ export function CardVizPanel({ chart, override, columns, rows = [], onChange }: 
           onClick={() => onChange(undefined)}>Reset to chart defaults</button>
       </div>
       {descriptor && (
-        <StudioPanel
-          descriptor={descriptor}
-          config={config as never}
-          onConfigChange={((p: object) =>
-            // mergeVizSettings, not `patch`: `patch` spreads over the existing override, and a
-            // setting the user has put back to "Auto" has to LEAVE it — a spread can only add
-            // or overwrite, so Auto would silently re-save the value it was replacing.
-            onChange(mergeVizSettings(override ?? {}, descriptor, { ...(config as object), ...p } as never))) as (p: never) => void}
-          columns={[]}
-          metrics={[]}
-          resultColumns={columns}
-          rows={rows}
-          // The units `rows` were fetched with, straight off the effective params — the same field
-          // `ChartRenderer` builds the card's chart from, so the panel keys on what was drawn. A
-          // dashboard has no unit picker (see `unitRow` below), which is exactly why this cannot be
-          // derived here: the answer lives in the saved spec.
-          temporalUnits={eff.params.spec.temporal_units ?? {}}
-          unitRow={() => null}
-          tab="display"
-          hasMoreBelow
-        />
+        <>
+          <StudioPanel
+            {...studioProps}
+            descriptor={descriptor}
+            onConfigChange={((p: object) =>
+              // mergeVizSettings, not `patch`: `patch` spreads over the existing override, and a
+              // setting the user has put back to "Auto" has to LEAVE it — a spread can only add
+              // or overwrite, so Auto would silently re-save the value it was replacing.
+              onChange(mergeVizSettings(override ?? {}, descriptor, { ...(config as object), ...p } as never))) as (p: never) => void}
+            tab="display"
+            hasMoreBelow
+          />
+          {/* ── AXES ──
+              `StudioPanel`'s display filter is `section === "display" && group !== AXES_GROUP`: the
+              Axes group is EXCLUDED there because the builder route promotes it out of the Display
+              tab and into a tab of its own (`tab="axes"`). This panel asked for the display tab and
+              nothing else, so on the waterfall, the box plot and the whole cartesian family the
+              exclusion had no matching inclusion anywhere and the group fell on the floor — on a
+              dashboard you could not override an axis label, hide gridlines, set a y-range or rotate
+              x labels, all of which egret's own builder offers for the same chart. Metabase's
+              dashcard modal keeps a full Axes tab (checked on its waterfall and its box plot), so
+              this was a defect against the parity target and against ourselves at once.
+
+              A SECTION rather than a tab, because this sidebar has none — and a labelled section is
+              exactly how the Display tab already presents every other `group` a descriptor declares
+              (`ControlGroup` renders the same `SectionLabel`), so nothing new is being invented.
+              Guarded by `hasAxesControls`, the same predicate the builder hides its tab behind, so a
+              pie does not grow an empty heading. */}
+          {hasAxesControls(descriptor) && (
+            <div className="space-y-1.5">
+              <SectionLabel>Axes</SectionLabel>
+              <StudioPanel
+                {...studioProps}
+                descriptor={descriptor}
+                onConfigChange={((p: object) =>
+                  onChange(mergeVizSettings(override ?? {}, descriptor, { ...(config as object), ...p } as never))) as (p: never) => void}
+                tab="axes"
+              />
+            </div>
+          )}
+        </>
       )}
       <SharedDisplaySections
         vizType={eff.viz_type}

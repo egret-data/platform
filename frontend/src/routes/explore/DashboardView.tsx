@@ -5,6 +5,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { type Layout } from "react-grid-layout";
 import { useDashboard, useDashboardMutations, type DashboardCard as Card, type DashboardParameter } from "@/api/dashboards";
 import { useCharts, type Chart, type ChartFilter } from "@/api/charts";
+import { useChartData } from "@/api/useChartData";
 import { useDataset } from "@/api/datasets";
 import { resolveClick, type ClickBehavior } from "@/components/chart/dashboard/click-behavior";
 import { resolveValuesSource } from "@/components/chart/dashboard/valuesSource";
@@ -90,6 +91,52 @@ export default function DashboardView() {
   const [records, setRecords] = useState<{ filters: ChartFilter[]; datasetId: string | null } | null>(null);
   // Load the drilled dataset's columns so the records dialog can SELECT them (no-op while records is null).
   const recordsDataset = useDataset(ws, records?.datasetId ?? null);
+
+  // ── THE CARD SETTINGS PANEL'S VIEW OF ITS OWN CARD'S RESULT ─────────────────────────────────
+  //
+  // Three of the panel's controls read the RESULT, not the saved spec, and every one of them
+  // degrades SILENTLY to a wrong-but-plausible answer when it does not get one. This route used to
+  // hand the panel a column list reconstructed from `params.spec` — names only, `type: ""` for
+  // every dimension — and no rows at all, with a comment saying result columns "aren't readily
+  // available in DashboardView". They are; the card beside the panel has already run this exact
+  // query to draw itself. What that omission cost, measured against the builder route on the same
+  // charts:
+  //
+  //   - THE GAUGE'S RANGES, and this is the one that destroys a card. `GaugeDisplayControl` sizes
+  //     its default zones from `rows[0][metricIndex]`; with no rows that is `0`, and
+  //     `defaultGaugeSegments(0)` returns the 0-25 / 25-50 / 50-100 placeholder. So the panel
+  //     offered 0/25/50/100 next to an arc drawn on 0 - 3,021,243.38 — and because
+  //     `SegmentRangesSection` emits the WHOLE array on any edit, nudging one bound wrote all three
+  //     placeholder rows into the card's override and re-scaled the card to 0-100 with a 1.5M
+  //     metric. Destructive, from a control the panel gave the user every reason to trust.
+  //   - EVERY FORMAT POPOVER. `ColumnFormatFields` branches on `isNumericType(c.type)` /
+  //     `isTemporalType(c.type)`, and `""` is neither — so a date dimension and a numeric
+  //     non-metric column both rendered as Text with nothing but "Column title", and a date format
+  //     authored in the builder could not be edited from the dashboard at all.
+  //   - THE PIE'S SLICES. `PieDisplayControl` derives its per-slice rows with
+  //     `pieSliceRows(resultColumns, rows, …)`; no rows means no slices, so the reorder / colour /
+  //     rename / hide block simply was not there.
+  //
+  // THE INJECTED CHART, NOT THE SAVED ONE. `applyParamsToChart` is what the edit-mode tile renders
+  // (see `injected` in the card map below), so keying on it means two things at once: the panel
+  // describes the numbers actually on screen under a dashboard filter, and `useSpecData`'s query key
+  // (`JSON.stringify(spec)`) is byte-identical to the tile's, making this a react-query CACHE READ
+  // rather than a second round trip. Keying on the base chart would have looked identical on a
+  // dashboard with no filters and been wrong on both counts on one with them.
+  //
+  // These hooks sit above the `isLoading` early return because they have to run unconditionally;
+  // everything they read (`dash`, `draftCards`, `chartById`, `paramSource`, `editPanel`) is declared
+  // above it for the same reason. `enabled` is false unless the viz panel is actually open, so a
+  // dashboard nobody is editing runs nothing extra.
+  const vizPanelChart = useMemo(() => {
+    if (editPanel?.kind !== "viz") return null;
+    const list = (editing && draftCards ? draftCards : dash?.cards) ?? [];
+    const card = list.find((c) => c.id === editPanel.cardId);
+    const base = card ? chartById.get(card.chart_id ?? "") : undefined;
+    if (!card || !base) return null;
+    return applyParamsToChart(base, paramSource, paramsState.values, (card.options.paramMappings as Record<string, string>) ?? {});
+  }, [editPanel, editing, draftCards, dash?.cards, chartById, paramSource, paramsState.values]);
+  const vizPanelData = useChartData(ws, vizPanelChart, view.refreshNonce, !!vizPanelChart);
 
   useEffect(() => {
     setEditing(false);
@@ -324,23 +371,36 @@ export default function DashboardView() {
       return { cardId: c.id, label: ch?.name ?? "Card", columns: ch ? [...ch.params.spec.dimensions, ...ch.params.spec.columns] : [] };
     });
 
-  // Per-card viz override panel data. Result columns aren't readily available in DashboardView, so
-  // offer the chart's spec dimensions/columns as the formatting column list (mirrors cardColumns).
+  // Per-card viz override panel data, built on the card's OWN RESULT — see the long note beside
+  // `vizPanelChart` above for the three controls that read it and what each of them showed instead.
   const vizForPanel = (() => {
     if (editPanel?.kind !== "viz") return undefined;
     const card = (cards as DraftCard[]).find((c) => c.id === editPanel.cardId);
     const chart = card ? chartById.get(card.chart_id ?? "") : undefined;
     if (!card || !chart) return undefined;
+    // `__grp_` columns are the grouping-set bookkeeping the pivot's compiler adds to the projection;
+    // the builder route strips them from `resultColumns` too (`ChartExplore`), so both editors offer
+    // the same list and neither shows a column the user never asked for.
+    const resultColumns = vizPanelData.columns.filter((c) => !c.name.startsWith("__grp_"));
     return {
-      chart,
+      // The injected chart when we have it, so `CardVizPanel`'s `spec.temporal_units` — which is
+      // what tells the pie's slice list whether the ring keys are "Mon" or `1` — is the bucketing
+      // the ROWS came back under rather than the saved one a "Time grouping" param has re-gridded.
+      chart: vizPanelChart ?? chart,
       override: card.options.vizOverride as Record<string, unknown> | undefined,
-      // Metrics belong here too: without them a cartesian card's Formatting section has
-      // nothing to offer, since it lists exactly the plotted metrics.
-      columns: [
+      // The spec-derived list survives ONLY as the degenerate fallback: a card whose query has not
+      // landed yet, or errored, has nothing to show and this at least keeps the Formatting
+      // accordion populated with the right NAMES, exactly as before. It cannot desynchronise the
+      // rows from the columns, because `columns` and `rows` come from one response — an empty
+      // `columns` implies an empty `rows`, so no control can index a real row against a fake
+      // column list. Metrics are typed `double` here for the same reason they always were:
+      // without them a cartesian card's Formatting section lists nothing at all.
+      columns: resultColumns.length > 0 ? resultColumns : [
         ...chart.params.spec.dimensions.map((name) => ({ name, type: "" })),
         ...chart.params.spec.columns.map((name) => ({ name, type: "" })),
         ...chart.params.spec.metrics.map((name) => ({ name, type: "double" })),
       ],
+      rows: vizPanelData.rows,
     };
   })();
 
