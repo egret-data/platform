@@ -930,28 +930,72 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
       },
     },
     ...(groups.length > 1 ? { legend: { type: "scroll", bottom: 0, textStyle: { color: axisLabelColor } } } : {}),
-    xAxis: { type: "value", name: cfg.xMetric, nameLocation: "middle", nameGap: 28, axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmtM(cfg.xMetric!, v) }, splitLine: { lineStyle: { color: gridLine } } },
     /**
-     * THE ONE CHART METABASE UNPINS BY DEFAULT, so this axis has to carry the flag even though this
-     * function is a documented divergence from the rest of the Y value-axis block.
+     * `xAxisTicks` REACHES THIS AXIS NOW, and it is the one place in the family it did not.
+     * `xCategory` and `scaleAxis` have both keyed their `axisLine`/`axisTick` on it since they were
+     * written, so a metric-vs-metric scatter was the single chart whose "X show lines and tick
+     * marks" select was offered and thrown away. Found while measuring the Y rows below rather than
+     * reported separately, and fixed in the same breath rather than left for whoever noticed second.
      *
-     * `settings/CartesianDisplaySection.tsx:265-266` records that the metric-vs-metric scatter
-     * leaves through here and builds its own pair of value axes, never reading `yMin`, `yMax`,
-     * `yTickCount` or `yAxisTicks` — a stated divergence rather than a gap. Unpin is an exception to
-     * that divergence and not a hole in it: `getYAxisUnpinFromZeroDefault` is
-     * `display === "scatter"` (`cartesian-chart.ts:242`), so leaving this path alone would have
-     * meant the flag never reached the ONE display that has it on out of the box.
-     *
-     * WRITTEN UNCONDITIONALLY, unlike `mkValueAxis`, and the asymmetry is the point rather than an
-     * inconsistency: there the default is pinned and matches ECharts', so an absence says it; here
-     * the default is UNPINNED, so an absence would say the opposite of what was decided and there
-     * would be no way to express a deliberate pin at all. Metabase writes its own line
-     * unconditionally for the same reason — `!!settings[...]` has no third state.
-     *
-     * X IS LEFT PINNED. The key is `graph.y_axis.unpin_from_zero`; Metabase has no x-axis twin, and
-     * inventing one here would be a setting with no parity and no control.
+     * NO SCALE AND NO BOUNDS HERE, deliberately. Metabase's keys are `graph.y_axis.scale`/`.min`/
+     * `.max` with no x twin, so an x log axis or an x range would be a setting with no parity, no
+     * control, and no way to undo it. `xAxisTicks` is not in that class — it is an existing stored
+     * key whose control this chart has always shown.
      */
-    yAxis: { type: "value", scale: unpinFromZeroOn(cfg), name: yMetric, axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmtM(yMetric, v) }, splitLine: { lineStyle: { color: gridLine } } },
+    xAxis: {
+      type: "value", name: cfg.xMetric, nameLocation: "middle", nameGap: 28,
+      axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmtM(cfg.xMetric!, v) },
+      axisLine: { show: cfg.xAxisTicks !== false, lineStyle: { color: gridLine } },
+      axisTick: { show: cfg.xAxisTicks !== false },
+      splitLine: { lineStyle: { color: gridLine } },
+    },
+    /**
+     * THE VALUE-AXIS KEYS THIS PATH USED TO IGNORE, and the note that used to stand here was the
+     * record of it: "never reading `yMin`, `yMax`, `yTickCount` or `yAxisTicks` — a stated
+     * divergence rather than a gap". That reading was already half-retired when it was written —
+     * #418 had just carved `unpinFromZero` into this function as an exception — and MEASURING IT
+     * ENDED IT. The Axes tab was offering "Y show lines and tick marks" and "Number of tick marks"
+     * on this very chart: driven live on `MB · Scatter` with an X metric picked, the tick-count box
+     * read `3` while the rendered `yAxis.splitNumber` stayed at ECharts' default `5`.
+     *
+     * So it was never a divergence with the controls withheld to match. It was three live controls
+     * (the x one above included) saving and not painting, which is the family of defect this
+     * programme keeps closing. A DIVERGENCE IS ONLY HONEST WHILE THE PANEL KEEPS ITS HALF OF IT, and
+     * this one had stopped. Fixing it in the builder rather than withdrawing the rows also settles
+     * the question the other way round: a scatter with an X metric and one without are the same
+     * chart type to the reader, and controls that vanish when a neighbouring select changes read as
+     * a glitch rather than as a rule — the argument this file already makes about the x-scale
+     * rotations.
+     *
+     * WHAT IS BORROWED FROM `mkValueAxis` AND WHAT IS NOT. The five keys are read exactly as it
+     * reads them, spelling included, so the two paths cannot drift into meaning different things by
+     * the same name. What is NOT borrowed is its measured `interval` fallback: that comes from the
+     * category/vertical fits, which need a category axis to measure against and this chart has
+     * none. With no tick count stored, nothing is written and ECharts picks — which is what this
+     * axis has always done.
+     *
+     * `scale` STAYS WRITTEN UNCONDITIONALLY, unlike `mkValueAxis`, and the asymmetry is still the
+     * point: there the default is pinned and matches ECharts', so an absence says it; here the
+     * default is UNPINNED (`getYAxisUnpinFromZeroDefault` is `display === "scatter"`,
+     * `cartesian-chart.ts:242`), so an absence would say the opposite of what was decided and a
+     * deliberate pin could not be expressed at all. `unpinFromZeroOn` already returns false once a
+     * bound is set, so an explicit range outranks the unpin here exactly as it does on every other
+     * kind, and the panel hides the switch in the same state.
+     *
+     * X IS LEFT PINNED, unchanged: `graph.y_axis.unpin_from_zero` has no x-axis twin upstream.
+     */
+    yAxis: {
+      type: cfg.logScale ? ("log" as const) : ("value" as const),
+      scale: unpinFromZeroOn(cfg),
+      name: yMetric,
+      axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmtM(yMetric, v) },
+      axisLine: { show: cfg.yAxisTicks !== false, lineStyle: { color: gridLine } },
+      axisTick: { show: cfg.yAxisTicks !== false },
+      ...(cfg.yMin != null ? { min: cfg.yMin } : {}),
+      ...(cfg.yMax != null ? { max: cfg.yMax } : {}),
+      ...(cfg.yTickCount != null ? { splitNumber: cfg.yTickCount } : {}),
+      splitLine: { lineStyle: { color: gridLine } },
+    },
     series,
   };
 }

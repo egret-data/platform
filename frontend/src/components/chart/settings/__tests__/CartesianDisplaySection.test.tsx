@@ -971,6 +971,107 @@ describe("AxisRangeOptions — the value axis' Scale select", () => {
   });
 });
 
+/**
+ * THE SCATTER GETS THE VALUE-AXIS SCALE AND RANGE, which every other cartesian kind has had all
+ * along. Bar, line, area, combo and row offered "Y scale", "Auto y-axis range" and the Y min / Y max
+ * pair; a scatter offered none of the three, so it was the odd kind out inside egret before it was
+ * a divergence from Metabase — whose `ScatterPlot.tsx` spreads `GRAPH_AXIS_SETTINGS` and therefore
+ * carries the same `graph.y_axis.*` keys as its bar chart.
+ *
+ * THE EXCLUSION HAD A STATED REASON AND IT IS THE REASON THAT CHANGED, not the rule. The
+ * metric-vs-metric scatter leaves through `scatterXY`, which built its own pair of value axes and
+ * read none of these keys — so hiding the rows kept the panel honest. What ended that was measuring
+ * the tab: "Y show lines and tick marks" and "Number of tick marks" were ALREADY on offer there and
+ * already thrown away (driven live on `MB · Scatter` with an X metric: the tick box read `3`, the
+ * rendered `splitNumber` stayed at ECharts' default `5`). A divergence only holds while both halves
+ * keep it, and this one had already been broken from the panel side.
+ *
+ * So the fix went into the builder — `cartesian.scatterValueAxis` owns that half — and the rows are
+ * simply no longer withheld. GATING THEM ON `xMetric == null` INSTEAD, which is what the X-axis
+ * scale select above does, was considered and rejected: that select is hidden because a metric x has
+ * no scale to choose, whereas here the whole Y group would appear and vanish as a neighbouring Data
+ * select changed. This file already argues that options which come and go read as a glitch rather
+ * than as a rule.
+ *
+ * Asserted through to the BUILT OPTION on BOTH scatter flavours, for the reason the Scale block
+ * above gives: a control that emits the right patch into a builder that ignores it is exactly the
+ * defect being closed, and only the `xMetric` fixture exercises the path that ignored it.
+ */
+describe("AxisRangeOptions — a scatter's value-axis scale and range", () => {
+  const cols = [{ name: "d", type: "varchar" }, { name: "px", type: "double" }, { name: "rev", type: "double" }];
+  const rows = [["a", 1, 10], ["b", 2, 20]];
+  /** The two scatter flavours, named by what distinguishes them: an `xMetric` routes through
+   *  `scatterXY`, its absence falls through to `baseOption` like every other kind. */
+  const flavours: [string, CartesianConfig][] = [
+    ["metric-vs-metric", { yMetrics: ["rev"], xAxis: "d", xMetric: "px" }],
+    ["dimension-vs-metric", { yMetrics: ["rev"], xAxis: "d" }],
+  ];
+  const built = (config: CartesianConfig, patch: Partial<CartesianConfig>) =>
+    buildCartesianOption(cols, rows, { kind: "scatter", ...config, ...patch }) as {
+      yAxis: { type?: string; min?: number };
+    };
+
+  it.each(flavours)("offers the Y scale on the %s scatter", (_name, config) => {
+    render(<AxisRangeOptions kind="scatter" config={config} onChange={() => {}} />);
+    expect(screen.getByLabelText("Y scale")).toBeInTheDocument();
+  });
+
+  it.each(flavours)("choosing Log builds a log axis on the %s scatter", async (_name, config) => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<AxisRangeOptions kind="scatter" config={config} onChange={onChange} />);
+    await user.click(screen.getByLabelText("Y scale"));
+    await user.click(await screen.findByRole("option", { name: "Log" }));
+    expect(built(config, onChange.mock.lastCall![0] as Partial<CartesianConfig>).yAxis.type).toBe("log");
+  });
+
+  it.each(flavours)("offers the auto-range switch on the %s scatter", (_name, config) => {
+    render(<AxisRangeOptions kind="scatter" config={config} onChange={() => {}} />);
+    expect(screen.getByLabelText("Auto y-axis range")).toBeChecked();
+    // The pair stays behind the switch here exactly as it does on a bar — the scatter is joining the
+    // shared vocabulary, not getting a third variant of it.
+    expect(screen.queryByLabelText("Y min")).toBeNull();
+  });
+
+  it.each(flavours)("turning the range off reveals the bounds and reaches the axis on the %s scatter", (_name, config) => {
+    const onChange = vi.fn();
+    const { rerender } = render(<AxisRangeOptions kind="scatter" config={config} onChange={onChange} />);
+    fireEvent.click(screen.getByLabelText("Auto y-axis range"));
+    const patch = onChange.mock.lastCall![0] as Partial<CartesianConfig>;
+    expect(patch).toStrictEqual({ yMin: 0 });
+    rerender(<AxisRangeOptions kind="scatter" config={{ ...config, ...patch }} onChange={onChange} />);
+    expect(screen.getByLabelText("Y min")).toBeInTheDocument();
+    expect(screen.getByLabelText("Y max")).toBeInTheDocument();
+    // …and the seeded bound is one the builder actually draws with. `yMin: 0` is the bound a
+    // truthiness test drops, so this doubles as the guard against writing the range that way.
+    expect(built(config, patch).yAxis.min).toBe(0);
+  });
+
+  /** Typing a bound has to land on the axis of both flavours — the assertion that fails if only the
+   *  panel gate is opened and `scatterXY` is left reading none of it. */
+  it.each(flavours)("a typed maximum reaches the built axis on the %s scatter", (_name, config) => {
+    const onChange = vi.fn();
+    render(<AxisRangeOptions kind="scatter" config={{ ...config, yMin: 0 }} onChange={onChange} />);
+    fireEvent.change(screen.getByLabelText("Y min"), { target: { value: "7" } });
+    expect(built(config, onChange.mock.lastCall![0] as Partial<CartesianConfig>).yAxis.min).toBe(7);
+  });
+
+  /**
+   * THE NEGATIVE THAT KEEPS THE ABOVE FROM PASSING VACUOUSLY. "Split y-axis when necessary" is still
+   * withheld from a scatter, and for a reason that has not changed: `scatterXY` plots
+   * `cfg.yMetrics[0]` alone, so there is no second metric to move to a second axis. A blanket
+   * deletion of every `kind !== "scatter"` in this control would satisfy every assertion above and
+   * fail this one.
+   */
+  it("still withholds the y-axis split from a scatter, which plots one metric", () => {
+    render(<AxisRangeOptions kind="scatter" config={{ yMetrics: ["rev", "cnt"], xMetric: "px" }} onChange={() => {}} />);
+    expect(screen.queryByLabelText("Split y-axis when necessary")).toBeNull();
+    cleanup();
+    render(<AxisRangeOptions kind="bar" config={{ yMetrics: ["rev", "cnt"] }} onChange={() => {}} />);
+    expect(screen.getByLabelText("Split y-axis when necessary")).toBeInTheDocument();
+  });
+});
+
 /*
  * THE PANEL-SIDE COLOUR RULE IS ASSERTED IN `viz/__tests__/cartesian.controls.test.tsx`, not here.
  *

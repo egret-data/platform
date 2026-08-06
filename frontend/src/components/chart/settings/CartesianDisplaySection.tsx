@@ -431,8 +431,25 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
           cannot carry a third value), not a control change.
 
           The stored key is therefore untouched: `logScale: true` for Log, cleared for Linear, so
-          every already-saved chart round-trips exactly as before. */}
-      {scoped(scope, "value") && kind !== "scatter" && (
+          every already-saved chart round-trips exactly as before.
+
+          A SCATTER GETS THIS ROW NOW, and the argument is the one the "Unpin from zero" block below
+          already had to make once. The exclusion said the metric-vs-metric scatter leaves through
+          `scatterXY`, which read none of this panel's Y value-axis keys — true when written, and
+          MEASURED FALSE from the panel's own side: "Y show lines and tick marks" and "Number of
+          tick marks" were being offered on that very chart and thrown away (driven live on
+          `MB · Scatter` with an X metric picked, the tick box read `3` while the rendered
+          `splitNumber` stayed at ECharts' default `5`). A divergence is honest only while the panel
+          keeps its half of it, and this one had already stopped.
+
+          So the builder learned the five keys instead — `cartesian.scatterValueAxis` owns that half
+          and pins it — and this gate simply goes. GATING ON `xMetric == null` LIKE THE X-SCALE
+          SELECT ABOVE was the other option and is wrong here: that select is hidden because a metric
+          x has no scale to choose, whereas this would make the whole Y group appear and vanish as a
+          Data-tab select changed, which this file elsewhere calls reading as a glitch rather than as
+          a rule. Metabase agrees on the outcome — `ScatterPlot.tsx` spreads `GRAPH_AXIS_SETTINGS`,
+          so its scatter carries the same `graph.y_axis.*` keys as its bar chart. */}
+      {scoped(scope, "value") && (
         <div className="flex items-center justify-between gap-2">
           <Label htmlFor="cz-scale" className="text-sm font-normal">{valAx} scale</Label>
           <Select value={config.logScale ? "log" : "linear"}
@@ -577,8 +594,21 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
           disagree — and every already-saved chart carrying a bound arrives with the switch off and
           the boxes open, which is exactly what it was drawing before.
 
-          STILL NOT ON A SCATTER, unchanged: that kind's continuous axes are not bounded from here. */}
-      {scoped(scope, "value") && kind !== "scatter" && (
+          ON A SCATTER TOO NOW. This used to read "STILL NOT ON A SCATTER: that kind's continuous
+          axes are not bounded from here", which was a statement about `scatterXY` and is no longer
+          one — it reads `yMin`/`yMax` exactly as `mkValueAxis` does. The full argument is on the
+          Y scale select above; the short version is that the panel had already broken its side of
+          the divergence by offering two other Y rows on the same chart and discarding them, and that
+          a scatter with an X metric and one without are the same chart type to the reader.
+
+          THE BOUNDS ALSO SILENCE "Unpin from zero", on a scatter more visibly than anywhere else,
+          and that is `unpinFromZeroApplies`' existing first gate rather than anything new here: an
+          explicit bound decides the extent outright. It matters more on this kind because a scatter
+          is the one display that is unpinned by DEFAULT, so the switch disappearing is the reader's
+          only signal that their typed minimum has taken over from it. The builder agrees —
+          `unpinFromZeroOn` returns false once a bound is set, asserted in
+          `cartesian.scatterValueAxis`. */}
+      {scoped(scope, "value") && (
         <div className="space-y-2 border-t pt-2">
           <ValueRangeRows axis={valAx} idPrefix="cz" min={config.yMin} max={config.yMax} onChange={onChange} />
         </div>
@@ -605,9 +635,20 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
         So the exception was carved into the BUILDER and not into the PANEL, and the result was a
         behaviour change with no control to reverse it: every saved scatter silently became
         unpinned and no user could pin it back. That is "implemented and unreachable" — the exact
-        family #414 was about. The divergence note still holds for `yMin`, `yMax`, `yTickCount` and
-        `yAxisTicks`, which `scatterXY` really does ignore; it no longer holds for this one key, and
-        the gate now says so rather than inheriting a rule that has stopped being true.
+        family #414 was about.
+
+        THE DIVERGENCE THIS PARAGRAPH USED TO PRESERVE IS GONE ENTIRELY. It closed with the sentence
+        "the divergence note still holds for `yMin`, `yMax`, `yTickCount` and `yAxisTicks`, which
+        `scatterXY` really does ignore" — accurate the day it was written and no longer true of any
+        of the four. What retired it was not a decision to widen the scope but a MEASUREMENT: two of
+        those four already had live controls on this tab, so the panel had stopped keeping its half
+        of the bargain and the note was describing a state that no longer existed. `scatterXY` reads
+        all five keys now, and the two gates above that used to say `kind !== "scatter"` are gone
+        with it.
+
+        The lesson survives its own example, which is why it is kept at length: an exception carved
+        into one side of a panel/builder pair is a claim with an expiry date, and #418 spent it in
+        the same PR that made it.
 
         Metabase agrees on both halves, measured on the live parity instance: its scatter shows this
         control AND has it already checked.
