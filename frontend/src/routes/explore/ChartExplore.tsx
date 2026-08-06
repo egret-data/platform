@@ -710,6 +710,14 @@ export default function ChartExplore() {
                     // params below carried no `pie` key at all, so the filter matched nothing and
                     // the section stayed hidden however the descriptor was configured.
                     pie: descConfig as { dimensions?: string[]; metric?: string },
+                    // …and the map offers its METRIC only, so its key has to be here for exactly
+                    // the same reason the pie's does — `styleColumnsFor`'s map arm filters on
+                    // `params.map?.metric`, and filtering against a key this object never carried
+                    // matched nothing and hid the accordion outright. CAUGHT IN THE BROWSER, on the
+                    // very PR that added the arm: the unit tests around `styleColumnsFor` build a
+                    // real `ChartParams`, so nothing below this line is visible to them. That is
+                    // twice now for this one object, which is why every arm that filters is listed.
+                    map: descConfig as { region?: string; metric?: string },
                     metrics: (descConfig as { metrics?: string[] }).metrics,
                     // The pivot formats its dimensions as well as its measures — without these
                     // two, `styleColumnsFor` saw no rows/cols and offered measures only.
@@ -754,6 +762,9 @@ export default function ChartExplore() {
                     // params below carried no `pie` key at all, so the filter matched nothing and
                     // the section stayed hidden however the descriptor was configured.
                     pie: descConfig as { dimensions?: string[]; metric?: string },
+                  // See the Display tab's copy above: without this the map's arm filters on
+                  // `undefined` and the section disappears.
+                  map: descConfig as { region?: string; metric?: string },
                   metrics: (descConfig as { metrics?: string[] }).metrics,
                   rows: (descConfig as { rows?: string[] }).rows,
                   cols: (descConfig as { cols?: string[] }).cols,
@@ -771,6 +782,9 @@ export default function ChartExplore() {
                     // params below carried no `pie` key at all, so the filter matched nothing and
                     // the section stayed hidden however the descriptor was configured.
                     pie: descConfig as { dimensions?: string[]; metric?: string },
+                  // See the Display tab's copy above: without this the map's arm filters on
+                  // `undefined` and the section disappears.
+                  map: descConfig as { region?: string; metric?: string },
                   metrics: (descConfig as { metrics?: string[] }).metrics,
                   rows: (descConfig as { rows?: string[] }).rows,
                   cols: (descConfig as { cols?: string[] }).cols,

@@ -212,8 +212,12 @@ describe("sankey node-label room", () => {
     // NOT the widest label on the chart: "Doohickey Assembly" is 126px and sits in the FIRST
     // column, whose labels are drawn into the diagram and cost the gutter nothing.
     expect(s.right).toBeLessThan(40 + stubMeasure("Doohickey Assembly"));
-    // Nothing had to be cut at this size, so there is no formatter to cut it.
-    expect(s.label.formatter).toBeUndefined();
+    // Nothing had to be cut at this size. The formatter EXISTS regardless — it is also what runs a
+    // node's name through its own column format — so what is asserted is that it cuts nothing,
+    // which is the claim this test was always making. It used to be spread in only when the cap
+    // bound, and `toBeUndefined()` was standing in for "cuts nothing"; that stopped being the same
+    // statement the moment the formatter grew a second job.
+    expect(LAST_COLUMN.map((n) => s.label.formatter({ name: n }))).toEqual(LAST_COLUMN);
   });
 
   it("keeps the last column's labels inside the canvas on the 166px card", () => {
@@ -276,7 +280,9 @@ describe("sankey node-label room", () => {
   it("leaves the gutter alone when the caller has no measurement", () => {
     const s = labelRoom(undefined);
     expect(s.right).toBe("8%");
-    expect(s.label.formatter).toBeUndefined();
+    // Same substitution as above: unmeasured means UNCUT, not unformatted. Every name comes back
+    // whole, including the two that the 100px card cuts to nothing.
+    expect(LAST_COLUMN.map((n) => s.label.formatter({ name: n }))).toEqual(LAST_COLUMN);
   });
 });
 
@@ -332,5 +338,78 @@ describe("hasCyclicFlow", () => {
   it("handles a chain far longer than the call stack", () => {
     const chain = Array.from({ length: 50_000 }, (_, i) => [`n${i}`, `n${i + 1}`]);
     expect(hasCyclicFlow(chain, 0, 1)).toBe(false);
+  });
+});
+
+/**
+ * A NODE NAME IS A VALUE, AND IT HAS A FORMAT — the last of the four charts `styleColumnsFor` fell
+ * through to with no builder to catch it.
+ *
+ * The source and target columns reach `FormatSection` (the fall-through at
+ * `settings/SharedDisplaySections.tsx`'s `return resultColumns`), so both get a Date style / prefix
+ * select; `buildSankeyOption` read `columnSettings?.[cfg.metric]` only. Measured in the browser on
+ * a flow whose source was a month-bucketed `order_month`: the panel read `Date style: January 2024`
+ * while every node still read `2026-01-01`.
+ *
+ * WHICH column's settings, for a node that appears in both, is Metabase's rule copied exactly —
+ * `echarts/graph/sankey/model/formatters.ts`: `node = !hasOutputs ? target(raw) : source(raw)`. A
+ * sink takes the TARGET column's format; everything else takes the SOURCE column's. The two can
+ * genuinely differ, so guessing would have been a coin toss.
+ *
+ * `data[].name` AND `links[].source`/`.target` STAY RAW, asserted below. They are the graph's
+ * identity — the DAG check, the per-name colours and the click drill (`ChartRenderer` matches the
+ * clicked edge's `data.source` back to a row) all key on them — so the format is a `formatter`,
+ * never a rename of the node itself. Formatting the identity is the drill-on-display-strings
+ * defect four chart families have now had.
+ */
+describe("buildSankeyOption — the node label's own format", () => {
+  const datedCols = [{ name: "s", type: "timestamp" }, { name: "t", type: "timestamp" }, { name: "v", type: "double" }];
+  const datedRows = [["2026-01-01", "2026-02-01", 10], ["2026-02-01", "2026-03-01", 5]];
+  const datedCfg: SankeyBuildConfig = { source: "s", target: "t", metric: "v" };
+  const labelOf = (opt: any, name: string) => opt.series[0].label.formatter({ name });
+
+  it("draws each node label through the source column's stored format", () => {
+    const opt = buildSankeyOption(datedCols, datedRows, {
+      ...datedCfg, columnSettings: { s: { date_style: "MMMM YYYY" } },
+    }) as any;
+    expect(labelOf(opt, "2026-01-01")).toBe("January 2026");
+    expect(nodeNamesOf(opt)).toEqual(["2026-01-01", "2026-02-01", "2026-03-01"]);
+    expect(opt.series[0].links[0].source).toBe("2026-01-01");
+  });
+
+  // Metabase's split: a node with no outgoing edge is read through the TARGET column's settings.
+  // `2026-03-01` is the only sink here, so it is the only node the target format may reach.
+  it("reads a sink through the target column's format and everything else through the source's", () => {
+    const opt = buildSankeyOption(datedCols, datedRows, {
+      ...datedCfg,
+      columnSettings: { s: { date_style: "YYYY" }, t: { date_style: "MMMM YYYY" } },
+    }) as any;
+    expect(labelOf(opt, "2026-01-01")).toBe("2026");
+    expect(labelOf(opt, "2026-02-01")).toBe("2026");
+    expect(labelOf(opt, "2026-03-01")).toBe("March 2026");
+  });
+
+  it("carries a text node's prefix", () => {
+    const opt = buildSankeyOption(cols, rows, {
+      ...cfg, columnSettings: { s: { prefix: "from " } },
+    }) as any;
+    expect(labelOf(opt, "A")).toBe("from A");
+  });
+
+  // The rename hazard `specifiesDateRendering` guards, for the third time in this PR.
+  it("is not restyled by a format that says nothing about dates", () => {
+    const opt = buildSankeyOption(datedCols, datedRows, {
+      ...datedCfg, columnSettings: { s: { column_title: "Month" } },
+    }) as any;
+    expect(labelOf(opt, "2026-01-01")).toBe("2026-01-01");
+  });
+
+  // The label the eye reads and the label the screen reader hears are one label.
+  it("uses the formatted names in the aria description", () => {
+    const opt = buildSankeyOption(datedCols, datedRows, {
+      ...datedCfg, columnSettings: { s: { date_style: "MMMM YYYY" }, t: { date_style: "MMMM YYYY" } },
+    }) as any;
+    expect(opt.aria.label.description).toContain("January 2026 to February 2026");
+    expect(opt.aria.label.description).not.toContain("2026-01-01");
   });
 });

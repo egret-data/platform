@@ -172,11 +172,19 @@ export function CategoryTicksSelect({ axis, id, value, onChange, rotationsDisabl
    * absence rather than the greying below.
    *
    * Compact is a formatting flag on the category label text, so it needs a label formatter to act
-   * through. The waterfall and the cartesian family both run their categories through a `drawLabel`
-   * closure that names periods; the BOX PLOT does not — `options/boxplot.ts` gives its category axis
-   * no `axisLabel.formatter` and draws the raw group key. Greying it out there would be dishonest in
-   * the other direction: a greyed item says "not here, but elsewhere on this chart", and there is no
-   * state of a box plot in which Compact does anything.
+   * through — and, since the flag is spread OVER the stored format, a stored format for it to be
+   * spread over. The waterfall and the cartesian family both run their categories through a
+   * `drawLabel` closure that names PERIODS, so there is always a label to shorten whether or not
+   * anyone has set a format.
+   *
+   * THE BOX PLOT NOW HAS A FORMATTER AND STILL DOES NOT QUALIFY, which is a narrower reason than
+   * the one recorded here before. `options/boxplot.ts`'s `catLabel` draws its category through that
+   * column's own `column_settings` — it used to draw the raw group key and this comment said so —
+   * but it names no period, so with nothing stored it still falls back to the raw cell and Compact
+   * has nothing to act on. Offering it would give a control that works on the box plots whose
+   * category someone has already formatted and silently does nothing on the rest, decided from a
+   * different panel. A greyed item says "not here, but elsewhere on this chart"; "here, if you
+   * first go and set an unrelated thing" is not a state a control can express.
    *
    * This overturns a decision recorded in this file's own section doc and in
    * `CartesianDisplaySection.tsx`, both of which withheld Compact from the waterfall on the grounds
@@ -327,10 +335,13 @@ function AxisTitleRow({ id, axis, label, shown, onLabel, onShown }: {
  * through its column format, so the option would do nothing here". That is true of the box plot and
  * false of the waterfall: `options/waterfall.ts` runs its steps through a `drawLabel` with the same
  * two arms as the cartesian builder's, `namesAPeriod` and `periodName`, so a month-bucketed
- * waterfall draws "January 2026" and has a label to shorten. The box plot's category axis genuinely
- * has no `axisLabel.formatter` (`options/boxplot.ts`). The two charts that share this tab differ on
- * this one point, so it is now a PROP rather than a fact about the tab — which is what stops the
- * next reader inferring the withheld half from the offered one, as this comment invited.
+ * waterfall draws "January 2026" and has a label to shorten. The box plot names no period: its
+ * category axis now has an `axisLabel.formatter` (`options/boxplot.ts`'s `catLabel`, which reads
+ * the category's own `column_settings`) but falls back to the raw cell whenever nothing is stored,
+ * so there is no state of it in which Compact reliably does anything — see `offerCompact`'s own
+ * comment, which carries the narrowed argument. The two charts that share this tab differ on this
+ * one point, so it is a PROP rather than a fact about the tab — which is what stops the next reader
+ * inferring the withheld half from the offered one, as this comment invited.
  *
  * The same is true in the other direction for "Unpin from zero": the box plot has it and the
  * waterfall does not, because `isYAxisUnpinFromZeroValid` excludes a waterfall display outright.

@@ -297,20 +297,40 @@ function StepBars({ steps, columns, dimension, metric, columnSettings, metricTyp
   const dimName = dimension ?? "step";
   const metricType = (metric ? metricTypes?.[metric] : undefined) ?? "double";
   const format = metric ? columnSettings?.[metric] : undefined;
-  const names = steps.map((s) => s.name);
+  /**
+   * THE RAW CELL IS THE KEY; THE FORMATTED NAME IS ONLY A LABEL.
+   *
+   * Every step is its own single-valued series here, so a step's name is doing three jobs at once:
+   * the x category, the series id, and the string `onPointClick` matches back to find which step
+   * was clicked. Once `funnelSteps` began formatting the name (see its `raw` field) two steps could
+   * share one — a date style of "MMMM YYYY" collapses every day of a month onto "January 2026" —
+   * and the `.find` below would then have answered the click with whichever came first. Keying on
+   * `raw` keeps the identity exactly what it was before the format existed and leaves the format
+   * doing the one thing it is for.
+   *
+   * The label reaches the chart by two routes rather than one, because the chart draws it in two
+   * places. `seriesLabels` is what the legend and the labels read. The AXIS tick is not a series
+   * name at all, so it comes from the x column's own stored format through `buildCartesianOption`'s
+   * `drawLabel` — the cartesian builder has honoured that since the axis-format fix, so this hands
+   * it the dimension's `column_settings` and gets the same string the trapezoid mode draws, out of
+   * the same rule rather than a second copy of it.
+   */
+  const keys = steps.map((s) => s.raw);
+  const dimFormat = dimension ? columnSettings?.[dimension] : undefined;
 
   const wideColumns: ResultColumn[] = [
     { name: dimName, type: columns.find((c) => c.name === dimName)?.type ?? "varchar" },
-    ...names.map((name) => ({ name, type: metricType })),
+    ...keys.map((name) => ({ name, type: metricType })),
   ];
-  const wideRows = steps.map((s, i) => [s.name, ...steps.map((_, j) => (i === j ? s.value : null))]);
+  const wideRows = steps.map((s, i) => [s.raw, ...steps.map((_, j) => (i === j ? s.value : null))]);
 
   return (
     <EChartsRenderer
       option={buildCartesianOption(wideColumns, wideRows, {
         kind: "bar",
         xAxis: dimName,
-        yMetrics: names,
+        yMetrics: keys,
+        seriesLabels: Object.fromEntries(steps.map((s) => [s.raw, s.name])),
         // Stacked, and the y-axis never split: with one series per step an automatic split would
         // read the steps as two different measures. Metabase pins both the same way.
         stacked: true,
@@ -321,8 +341,13 @@ function StepBars({ steps, columns, dimension, metric, columnSettings, metricTyp
         preserveCategoryOrder: true,
         // The axis is still measuring the one metric, whatever the series are called.
         yLabel: metric,
-        metricTypes: Object.fromEntries(names.map((n) => [n, metricType])),
-        columnSettings: format ? Object.fromEntries(names.map((n) => [n, format])) : undefined,
+        metricTypes: Object.fromEntries(keys.map((n) => [n, metricType])),
+        // The metric's format on every pseudo-metric column, AND the dimension's on the x column —
+        // the second is what makes the axis ticks read the same as the trapezoid mode's step names.
+        columnSettings: {
+          ...(format ? Object.fromEntries(keys.map((n) => [n, format])) : {}),
+          ...(dimFormat ? { [dimName]: dimFormat } : {}),
+        },
       })}
       // THE CARTESIAN ADAPTER IS NOT REUSABLE HERE, and it is worth saying why rather than leaving
       // a reader to wonder: this option's x column is `dimName` but its SERIES are the step names,
@@ -337,7 +362,8 @@ function StepBars({ steps, columns, dimension, metric, columnSettings, metricTyp
       // back into `steps` is a guard, not a translation: it refuses a click on anything the funnel
       // did not draw as a step.
       onPointClick={onStepClick && ((p) => {
-        const step = steps.find((s) => s.name === p.name);
+        // `s.raw`, not `s.name`: the category on the option is the raw cell — see `keys` above.
+        const step = steps.find((s) => s.raw === p.name);
         if (step) onStepClick(step, p.x, p.y);
       })}
     />

@@ -151,18 +151,40 @@ describe("a bucketed temporal axis is described the way it is drawn", () => {
     expect(o.aria.label.description).not.toContain("2026-01-01");
   });
 
-  // THE BOX PLOT IS NOT AFFECTED, and this is the check that keeps it that way rather than an
-  // assumption: it takes no `xAxisUnit`, has no `drawLabel`, and its category axis carries no
-  // `axisLabel.formatter` — so the group key IS the drawn label, and feeding the aria the raw
-  // categories is already correct. The day a formatter is added there, this fails.
-  it("box plot: the drawn label is the group key, so its description already matches", () => {
-    const o = buildBoxplotOption(
+  /**
+   * THE BOX PLOT STILL DESCRIBES WHAT IT DRAWS — the same claim, now checked against a formatter
+   * instead of against its absence.
+   *
+   * This test used to assert `axisLabel.formatter` was UNDEFINED and said "the day a formatter is
+   * added there, this fails". It did, on the PR that gave the category axis its column format
+   * (`options/boxplot.ts`'s `catLabel`), and failing was the correct behaviour: the assertion was a
+   * proxy for "the description matches the ticks", and the proxy stopped standing for the claim the
+   * moment a formatter existed. What replaces it is the claim itself, asserted directly and in both
+   * states — the ticks and the description are read from the same option and compared to each
+   * other, so no future formatter can move one without the other.
+   *
+   * The box plot still takes no `xAxisUnit` and names no period, which is why the UNFORMATTED case
+   * below draws the raw group key and is not a regression from what this used to pin.
+   */
+  it("box plot: the description says whatever the ticks say, formatted or not", () => {
+    const build = (columnSettings?: Record<string, { date_style: string }>) => buildBoxplotOption(
       [{ name: "order_date", type: "date" }, { name: "v", type: "double" }],
       [["2026-01-01", 1], ["2026-01-01", 3], ["2026-02-01", 10]],
-      { category: "order_date", value: "v" },
+      { category: "order_date", value: "v", columnSettings },
     ) as Described;
-    expect(o.xAxis.axisLabel?.formatter).toBeUndefined();
-    for (const c of o.xAxis.data ?? []) expect(o.aria.label.description).toContain(String(c));
+
+    // No stored format: the tick is the raw group key, and so is the description.
+    const plain = build();
+    const plainTicks = (plain.xAxis.data ?? []).map((c) => plain.xAxis.axisLabel?.formatter?.(String(c)));
+    expect(plainTicks).toEqual(["2026-01-01", "2026-02-01"]);
+    for (const t of plainTicks) expect(plain.aria.label.description).toContain(String(t));
+
+    // A date style: both move together, and the raw key is heard nowhere.
+    const styled = build({ order_date: { date_style: "MMMM YYYY" } });
+    const styledTicks = (styled.xAxis.data ?? []).map((c) => styled.xAxis.axisLabel?.formatter?.(String(c)));
+    expect(styledTicks).toEqual(["January 2026", "February 2026"]);
+    for (const t of styledTicks) expect(styled.aria.label.description).toContain(String(t));
+    expect(styled.aria.label.description).not.toContain("2026-01-01");
   });
 });
 

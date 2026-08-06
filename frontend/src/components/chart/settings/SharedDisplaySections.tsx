@@ -51,6 +51,36 @@ export function styleColumnsFor(
     ]);
     return resultColumns.filter((c) => named.has(c.name));
   }
+  if (vizType === "map") {
+    // ITS METRIC ONLY — the one viz below this line that narrows rather than threads.
+    //
+    // The bare `return resultColumns` beneath handed a Formatting accordion to every result column
+    // on a funnel, a box plot, a sankey and a map, while all four builders read `columnSettings`
+    // for the metric alone. The first three are fixed by THREADING the dimension's format into the
+    // label they draw, because that is what Metabase does — `FunnelNormal`'s `formatDimension`,
+    // `echarts/boxplot/model`'s `createXAxisFormatter`, `sankey/model/formatters`' `node`. The map
+    // is the exception on both counts.
+    //
+    // METABASE FORMATS NOTHING HERE. `ChoroplethMap.tsx`'s only `settings.column?.(…)` call is on
+    // the METRIC, for the legend; the region cell goes through `getCanonicalRowKey` (lowercase, and
+    // state/country names to codes) and the name actually PAINTED is the geojson feature's own
+    // `region_name` property. `Map.tsx` passes `showColumnSetting` on neither its dimension nor its
+    // metric, so its sidebar offers no per-column format widget at all.
+    //
+    // AND EGRET COULD NOT THREAD IT IF IT WANTED TO. `MapChart` builds each datum as
+    // `{ name: normalizeKey(cell) }` and ECharts matches that string against the registered
+    // geojson's `properties.key` to decide which shape to shade. A prefix or a date style there
+    // does not restyle a label — it breaks the match and the region stops being drawn. There is no
+    // second place the raw region text appears; the tooltip's name is the matched key.
+    //
+    // THE METRIC STAYS, which is a deliberate divergence from Metabase's "no widget at all": egret's
+    // map really does format its metric — `MapChart`'s `fmt` feeds both `itemTooltip` and the
+    // `visualMap` range labels, and `options/map.ts` records that being added on purpose — so
+    // withdrawing that control would remove a setting that IS honoured. That is this same defect in
+    // the mirror, and the rule being copied from Metabase is which columns can take effect, not
+    // which widgets it happens to draw.
+    return resultColumns.filter((c) => c.name === params.map?.metric);
+  }
   return resultColumns;
 }
 

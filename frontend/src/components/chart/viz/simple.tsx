@@ -162,8 +162,25 @@ function ProgressDisplayControl({ config, onChange, metrics }: VizControlProps<C
 
 const progressDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display", render: ProgressDisplayControl }];
 
-/** The funnel's steps, in order, each hideable — Metabase's `funnel.rows`. Names come from the
- *  last result rather than anything precomputed, the same way the cartesian series list works. */
+/**
+ * The funnel's steps, in order, each hideable — Metabase's `funnel.rows`. Names come from the
+ * last result rather than anything precomputed, the same way the cartesian series list works.
+ *
+ * THE RAW CELL, DELIBERATELY, and it is now the one place a step is named that way. `funnelSteps`
+ * draws each step through the dimension's own `column_settings`, so a month-bucketed funnel given a
+ * date style reads "January 2026" on the chart and `2026-01-01` in this list. The RAW value is what
+ * `stepOrder` and `hiddenSteps` store — matching them against a formatted name would drop a
+ * hand-made order the moment anyone chose a format — so what is stated here is the key, and it is
+ * at least honest about that.
+ *
+ * SHOWING THE FORMATTED LABEL HERE IS A SHELL CHANGE, NOT A CONTROL ONE, which is why it is not in
+ * this PR. `SeriesListSection` already takes a `labels` map, so the display half is three lines;
+ * what it needs is the chart's `column_settings`, and `VizControlProps` carries the config, the
+ * dataset and the last result but no shell settings at all. Adding one prop for one control would
+ * put a shell-owned map into every viz descriptor's signature — the same "shared display sections
+ * belong to the SHELL" boundary the studio work drew — so it wants doing once, for every control
+ * that could use it, rather than smuggled in here.
+ */
 function FunnelStepsControl({ config, onChange, resultColumns, rows }: VizControlProps<Cfg>) {
   const dim = typeof config.dimension === "string" ? config.dimension : undefined;
   const di = dim ? resultColumns.findIndex((c) => c.name === dim) : -1;

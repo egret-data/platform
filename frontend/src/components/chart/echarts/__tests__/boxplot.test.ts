@@ -293,3 +293,64 @@ describe("a box plot's nominal axis draws in a stable order", () => {
     expect(opt.xAxis.data).toEqual(["2", "9", "10"]);
   });
 });
+
+/**
+ * THE CATEGORY IS A VALUE, AND IT HAS A FORMAT — the fifth chart family to need this said out loud.
+ *
+ * `styleColumnsFor` falls through to `return resultColumns` for a box plot, so the CATEGORY column
+ * reaches `FormatSection` and gets a Date style select of its own; `buildBoxplotOption` read
+ * `columnSettings?.[cfg.value]` and nothing for `cfg.category`, so everything typed there was
+ * stored and drawn nowhere. Measured in the browser over `MB Monthly`: the panel read
+ * `Date style: January 2024` while the axis and the aria description still read `2026-01-01`.
+ *
+ * Metabase formats it. `echarts/boxplot/model/index.ts`'s `createXAxisFormatter` spreads
+ * `settings.column?.(dimensionColumn)` into `formatValue` for every tick — its box plot has a
+ * formatter on this axis where egret's had none — so the rule is copied, not invented.
+ *
+ * `xAxis.data` STAYS RAW and is asserted so in every case below. It is the drill's identity:
+ * `BoxplotChart` reads the clicked category back off `xAxis.data[dataIndex]` and hands it to
+ * `onValueClick` as the filter value, so formatting that array is the drill-on-display-strings
+ * defect this programme has now had in four families. The label is a `formatter`; the data is not.
+ */
+describe("buildBoxplotOption — the category's own format", () => {
+  const dated = [{ name: "d", type: "timestamp" }, { name: "v", type: "double" }];
+  const datedRows = [["2026-01-01", 10], ["2026-01-01", 20], ["2026-02-01", 5], ["2026-02-01", 7]];
+  const labelOf = (opt: any, i: number) => opt.xAxis.axisLabel.formatter(opt.xAxis.data[i], i);
+
+  it("draws each tick through the category's stored format", () => {
+    const opt = buildBoxplotOption(dated, datedRows, {
+      category: "d", value: "v", columnSettings: { d: { date_style: "MMMM YYYY" } },
+    }) as any;
+    expect([labelOf(opt, 0), labelOf(opt, 1)]).toEqual(["January 2026", "February 2026"]);
+    expect(opt.xAxis.data).toEqual(["2026-01-01", "2026-02-01"]);
+  });
+
+  it("carries a text category's prefix", () => {
+    const opt = buildBoxplotOption(cols, rows, {
+      category: "g", value: "v", columnSettings: { g: { prefix: "Cat " } },
+    }) as any;
+    expect(labelOf(opt, 0)).toBe("Cat A");
+    expect(opt.xAxis.data).toEqual(["A", "B"]);
+  });
+
+  // The same rename hazard `format.ts`'s `specifiesDateRendering` exists for: `{column_title}` is
+  // truthy and silent about dates, and handing it to `formatValue` on a temporal column takes
+  // `formatDate`'s DEFAULT style — so renaming the column would restyle every tick.
+  it("is not restyled by a format that says nothing about dates", () => {
+    const opt = buildBoxplotOption(dated, datedRows, {
+      category: "d", value: "v", columnSettings: { d: { column_title: "Month" } },
+    }) as any;
+    expect(labelOf(opt, 0)).toBe("2026-01-01");
+  });
+
+  // The tooltip heading and the spoken description are the same label the axis draws. A chart that
+  // formats its axis and then reads the raw key aloud has two names for one category.
+  it("uses the formatted category in the tooltip heading and the aria description", () => {
+    const opt = buildBoxplotOption(dated, datedRows, {
+      category: "d", value: "v", columnSettings: { d: { date_style: "MMMM YYYY" } },
+    }) as any;
+    expect(opt.tooltip.formatter({ seriesType: "boxplot", dataIndex: 0 })).toContain("January 2026");
+    expect(opt.aria.label.description).toContain("January 2026");
+    expect(opt.aria.label.description).not.toContain("2026-01-01");
+  });
+});

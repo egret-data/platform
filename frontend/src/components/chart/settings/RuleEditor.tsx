@@ -32,6 +32,46 @@ const STRING_OPS: FormattingOperator[] = ["=", "!=", "contains", "does-not-conta
 const BOOLEAN_OPS: FormattingOperator[] = ["is-true", "is-false"];
 const NULL_OPS: FormattingOperator[] = ["is-null", "not-null"];
 const NO_VALUE_OPS = new Set<FormattingOperator>(["is-null", "not-null", "is-true", "is-false"]);
+
+/**
+ * WHAT EACH OPERATOR READS AS. The stored token is not the label, and printing it as one is how
+ * `does-not-contain` and `not-null` — kebab-case identifiers — came to be shown to a user.
+ *
+ * The dropdown was `ops.map((op) => <SelectItem value={op}>{op}</SelectItem>)`, so the label was
+ * the identifier by construction and every operator was affected, not just the two hyphenated
+ * ones: `!=` and `>=` are mathematical notation in a panel whose every other control is a sentence.
+ *
+ * COPIED STRING FOR STRING from Metabase's `ALL_OPERATOR_NAMES`
+ * (`visualizations/components/settings/ChartSettingsTableFormatting/get-operators-for-columns.ts`),
+ * not re-worded, and read back off the running reference at :3033 to confirm the rendering matches
+ * the source. The one that would have been guessed wrong is `not-null`: it reads "is not null",
+ * with an "is" the token has no trace of.
+ *
+ * THE KEYS ARE THE STORED VALUES AND STAY EXACTLY AS THEY ARE. `conditional.ts`'s `matchOperator`
+ * switches on these tokens, `FormattingOperator` is their type, and every chart already saved
+ * carries them in its `conditional_formatting`. Relabelling is one file; renaming would be a
+ * migration whose only purchase is a prettier value nobody sees.
+ *
+ * `Record<FormattingOperator, string>` ON PURPOSE, not a partial map with a `?? op` fallback. A
+ * fallback would let a newly added operator quietly print its own token again — which is the whole
+ * defect — where this makes `tsc` demand a label the moment `FormattingOperator` grows.
+ */
+const OPERATOR_LABELS: Record<FormattingOperator, string> = {
+  "=": "is equal to",
+  "!=": "is not equal to",
+  "<": "is less than",
+  ">": "is greater than",
+  "<=": "is less than or equal to",
+  ">=": "is greater than or equal to",
+  contains: "contains",
+  "does-not-contain": "does not contain",
+  "starts-with": "starts with",
+  "ends-with": "ends with",
+  "is-true": "is true",
+  "is-false": "is false",
+  "is-null": "is null",
+  "not-null": "is not null",
+};
 const PALETTE = ["#ef4444", "#f59e0b", "#22c55e", "#3b82f6", "#a855f7"];
 const RANGE = ["#ffffff", "#3b82f6"];
 
@@ -264,7 +304,7 @@ export function RuleEditor({
             <Select value={operator} onValueChange={(v) => setDraft((d) => ({ ...(d as SingleColorRule), operator: v as FormattingOperator }))}>
               <SelectTrigger aria-label="Operator" className="h-8"><SelectValue /></SelectTrigger>
               <SelectContent>
-                {ops.map((op) => <SelectItem key={op} value={op}>{op}</SelectItem>)}
+                {ops.map((op) => <SelectItem key={op} value={op}>{OPERATOR_LABELS[op]}</SelectItem>)}
               </SelectContent>
             </Select>
           </label>

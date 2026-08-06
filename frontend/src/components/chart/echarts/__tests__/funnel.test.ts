@@ -66,3 +66,80 @@ describe("funnelSteps — a sequence, not a ranking", () => {
     expect(funnelSteps(cols, rows, { metric: "cnt" })).toEqual([]);
   });
 });
+
+/**
+ * THE STEP NAME IS A VALUE, AND IT HAS A FORMAT — the defect this codebase has now closed on the
+ * pivot, the cartesian, the pie and the smart scalar, and had left open here.
+ *
+ * `styleColumnsFor` falls through to `return resultColumns` for a funnel, so the DIMENSION reaches
+ * `FormatSection` and gets a Date style / prefix / decimals select of its own. `funnelSteps` read
+ * `columnSettings` for the metric only, so everything typed into that select was stored and drawn
+ * nowhere. Measured in the browser on a month-bucketed funnel over `MB Monthly`: the panel read
+ * `Date style: January 2024` while all twelve steps still read `2026-01-01`.
+ *
+ * Metabase formats it — `FunnelNormal.tsx`'s `formatDimension` spreads
+ * `settings.column?.(cols[dimensionIndex])` into `formatValue` for every step header — so the rule
+ * copied here is "the dimension's own column settings decide the step name", not a rule invented
+ * for egret.
+ */
+describe("funnelSteps — the step name's own format", () => {
+  const dated = [{ name: "d", type: "timestamp" }, { name: "cnt", type: "double" }];
+  const datedRows = [["2026-01-01", 10], ["2026-02-01", 5]];
+
+  it("draws the step name through the dimension's stored format", () => {
+    const steps = funnelSteps(dated, datedRows, {
+      dimension: "d", metric: "cnt", columnSettings: { d: { date_style: "MMMM YYYY" } },
+    });
+    expect(steps.map((s) => s.name)).toEqual(["January 2026", "February 2026"]);
+  });
+
+  it("carries a text dimension's prefix and suffix", () => {
+    const steps = funnelSteps(cols, [["Visited", 10]], {
+      dimension: "stage", metric: "cnt", columnSettings: { stage: { prefix: "→ " } },
+    });
+    expect(steps[0].name).toBe("→ Visited");
+  });
+
+  /**
+   * THE HAZARD THE OTHER FOUR FIXES ALL RECORD. `FormatSection`'s `patch` spreads into
+   * `{...fmt, ...p}`, so RENAMING the column stores `{column_title: "Month"}` — truthy, and silent
+   * about dates. Handing that to `formatValue` on a temporal column takes `formatDate`'s DEFAULT
+   * style and turns "2026-01-01" into "January 1, 2026", i.e. a rename that quietly restyles every
+   * step. `specifiesDateRendering` is the guard `format.ts` exists to provide; this is the test
+   * that keeps it wired up here. A title typed and then deleted leaves the key with no value,
+   * which is a truthy object too.
+   */
+  it("is not restyled by a format that says nothing about dates", () => {
+    const titled = funnelSteps(dated, datedRows, {
+      dimension: "d", metric: "cnt", columnSettings: { d: { column_title: "Month" } },
+    });
+    expect(titled.map((s) => s.name)).toEqual(["2026-01-01", "2026-02-01"]);
+    const emptied = funnelSteps(dated, datedRows, {
+      dimension: "d", metric: "cnt", columnSettings: { d: { column_title: undefined } },
+    });
+    expect(emptied.map((s) => s.name)).toEqual(["2026-01-01", "2026-02-01"]);
+  });
+
+  /**
+   * The step name is also the IDENTITY a stored order and a hidden-step list are keyed on
+   * (`stepOrder`, `hiddenSteps`) and the value a click drills by (`FunnelChart` hands `step.row`
+   * to the drill so it filters on the RAW cell, not on this text). Formatting the name must not
+   * move either: a chart whose steps were ordered by hand and then given a date style would
+   * otherwise silently lose its order. That is the drill-on-display-strings defect four chart
+   * families have now had, and it is why `raw` below is asserted alongside the label.
+   */
+  it("keeps ordering, hiding and the drill value on the raw cell", () => {
+    const steps = funnelSteps(dated, datedRows, {
+      dimension: "d", metric: "cnt",
+      stepOrder: ["2026-02-01", "2026-01-01"],
+      columnSettings: { d: { date_style: "MMMM YYYY" } },
+    });
+    expect(steps.map((s) => s.name)).toEqual(["February 2026", "January 2026"]);
+    expect(steps.map((s) => s.raw)).toEqual(["2026-02-01", "2026-01-01"]);
+    const hidden = funnelSteps(dated, datedRows, {
+      dimension: "d", metric: "cnt", hiddenSteps: ["2026-01-01"],
+      columnSettings: { d: { date_style: "MMMM YYYY" } },
+    });
+    expect(hidden.map((s) => s.name)).toEqual(["February 2026"]);
+  });
+});

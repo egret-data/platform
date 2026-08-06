@@ -232,15 +232,23 @@ describe("RuleEditor — boolean columns", () => {
   const singleRule = (cols: string[], operator: FormattingOperator = ">") =>
     ({ columns: cols, type: "single" as const, operator, value: "", color: "#ef4444" });
 
-  it("offers is-true / is-false for a boolean column", async () => {
+  /**
+   * NAMED BY LABEL, NOT BY TOKEN. These three assertions used to read `"is-true"`, `"is-false"` and
+   * `">"` — the stored identifiers — because the dropdown printed them as its labels. They were
+   * pinning the defect `RuleEditor — the operator dropdown reads as English` below closes, so when
+   * that fix landed these failed and it was these that were wrong: an accessible name is what a
+   * user hears, and no user should ever have heard "is-true". The tokens themselves are unchanged
+   * and are still asserted where they belong, on what `onSave` stores.
+   */
+  it("offers is true / is false for a boolean column", async () => {
     render(<RuleEditor columns={columns} rule={singleRule(["is_paid"])} isPivot={false}
       onSave={vi.fn()} onCancel={() => {}} />);
     await userEvent.click(screen.getByLabelText("Operator"));
-    expect(await screen.findByRole("option", { name: "is-true" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "is-false" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "is true" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "is false" })).toBeInTheDocument();
     // and not the ones that mean nothing about a boolean
     expect(screen.queryByRole("option", { name: "contains" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: ">" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "is greater than" })).not.toBeInTheDocument();
   });
 
   it("does not offer them for a text column", async () => {
@@ -248,7 +256,7 @@ describe("RuleEditor — boolean columns", () => {
       onSave={vi.fn()} onCancel={() => {}} />);
     await userEvent.click(screen.getByLabelText("Operator"));
     expect(await screen.findByRole("option", { name: "contains" })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "is-true" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "is true" })).not.toBeInTheDocument();
   });
 
   /**
@@ -263,8 +271,100 @@ describe("RuleEditor — boolean columns", () => {
     const onSave = vi.fn();
     render(<RuleEditor columns={columns} rule={singleRule(["region"], ">")} isPivot={false}
       onSave={onSave} onCancel={() => {}} />);
-    expect(screen.getByLabelText("Operator")).toHaveTextContent("=");
+    // The trigger reads the LABEL and `onSave` writes the TOKEN — the two halves of the relabelling
+    // below, asserted here on the same fallback they were already about.
+    expect(screen.getByLabelText("Operator")).toHaveTextContent("is equal to");
     fireEvent.click(screen.getByText("Save rule"));
     expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ operator: "=" }));
+  });
+});
+
+/**
+ * THE OPERATOR DROPDOWN PRINTED ITS STORED TOKENS.
+ *
+ * `ops.map((op) => <SelectItem value={op}>{op}</SelectItem>)` used the identifier as the label, so
+ * the panel read `does-not-contain` and `not-null` — kebab-case machine tokens shown to a user — and
+ * `!=`, `>=` where Metabase reads "is not equal to" and "is greater than or equal to". Read off
+ * both sides today: egret `= != < > <= >= contains does-not-contain starts-with ends-with is-null
+ * not-null`; live Metabase at :3033 `is equal to / is not equal to / is less than / is greater than
+ * / is less than or equal to / is greater than or equal to / contains / does not contain / starts
+ * with / ends with / is null / is not null`.
+ *
+ * THE LABELS ARE `ALL_OPERATOR_NAMES` FROM
+ * `visualizations/components/settings/ChartSettingsTableFormatting/get-operators-for-columns.ts`,
+ * copied string for string rather than re-worded, including the one place the two families disagree
+ * about the same token: `not-null` reads "is not null", not "not null".
+ *
+ * THE STORED VALUES DO NOT MOVE, and the assertions below say so on the same line as the label.
+ * `conditional.ts`'s `matchOperator` switches on these exact tokens, `FormattingOperator` is their
+ * type, and every saved chart's `conditional_formatting` already holds them — relabelling is a
+ * one-file display change, while renaming would be a migration bought for nothing.
+ */
+describe("RuleEditor — the operator dropdown reads as English", () => {
+  const numericRule = {
+    columns: ["revenue"], type: "single", operator: ">", value: "1", color: "#ff0000",
+  } as const;
+  const openOperators = async (columns: { name: string; type: string }[], rule: unknown) => {
+    render(
+      <RuleEditor columns={columns} rule={rule as never} isPivot={false} onSave={vi.fn()} onCancel={() => {}} />,
+    );
+    await userEvent.click(screen.getByLabelText("Operator"));
+  };
+
+  it("labels the numeric operators the way Metabase does", async () => {
+    await openOperators([{ name: "revenue", type: "double" }], numericRule);
+    const labels = screen.getAllByRole("option").map((o) => o.textContent);
+    expect(labels).toEqual([
+      "is equal to", "is not equal to", "is less than", "is greater than",
+      "is less than or equal to", "is greater than or equal to", "is null", "is not null",
+    ]);
+  });
+
+  it("labels the string operators the way Metabase does", async () => {
+    await openOperators([{ name: "region", type: "varchar" }], { ...numericRule, columns: ["region"] });
+    const labels = screen.getAllByRole("option").map((o) => o.textContent);
+    expect(labels).toEqual([
+      "is equal to", "is not equal to", "contains", "does not contain",
+      "starts with", "ends with", "is null", "is not null",
+    ]);
+  });
+
+  it("labels the boolean pair the way Metabase does", async () => {
+    await openOperators([{ name: "flag", type: "boolean" }], { ...numericRule, columns: ["flag"] });
+    const labels = screen.getAllByRole("option").map((o) => o.textContent);
+    expect(labels).toEqual(["is true", "is false", "is null", "is not null"]);
+  });
+
+  // The point of the whole change: the label moved and the stored token did not.
+  it("still saves the kebab-case token the matcher switches on", async () => {
+    const onSave = vi.fn();
+    render(
+      <RuleEditor
+        columns={[{ name: "region", type: "varchar" }]}
+        rule={{ columns: ["region"], type: "single", operator: "=", value: "x", color: "#ff0000" }}
+        isPivot={false}
+        onSave={onSave}
+        onCancel={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByLabelText("Operator"));
+    await userEvent.click(await screen.findByRole("option", { name: "does not contain" }));
+    await userEvent.click(screen.getByText("Save rule"));
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ operator: "does-not-contain" }));
+  });
+
+  // The trigger reads the label too — a Select showing "=" over options reading "is equal to" would
+  // be the same defect one click later.
+  it("shows the label rather than the token on the closed trigger", () => {
+    render(
+      <RuleEditor
+        columns={[{ name: "region", type: "varchar" }]}
+        rule={{ columns: ["region"], type: "single", operator: "does-not-contain", value: "x", color: "#ff0000" }}
+        isPivot={false}
+        onSave={vi.fn()}
+        onCancel={() => {}}
+      />,
+    );
+    expect(screen.getByLabelText("Operator")).toHaveTextContent("does not contain");
   });
 });

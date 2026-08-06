@@ -245,11 +245,14 @@ export function buildWaterfallOption(
    * builder's. A month-bucketed waterfall draws "January 2026" today, so there is a temporal label
    * here to shorten and the reason for withholding it does not apply.
    *
-   * IT REMAINS TRUE OF THE BOX PLOT, which is why that chart still does not get the option: its
-   * category axis has no `axisLabel.formatter` at all (`options/boxplot.ts` draws the raw group
-   * key, and says so), so there is nothing for a formatting flag to act through. The original
-   * decision was right about one of the two charts it covered and wrong about the other — see the
-   * note in `settings/ChartAxesSection.tsx`, where the split is now stated as structure.
+   * IT REMAINS TRUE OF THE BOX PLOT, which is why that chart still does not get the option — but
+   * for a narrower reason than when this was written. Its category axis DOES have an
+   * `axisLabel.formatter` now (`options/boxplot.ts`'s `catLabel`, which reads the category column's
+   * own `column_settings`, where before it drew the raw group key); what it still has is no PERIOD
+   * NAMING, so with nothing stored it falls back to the raw cell and a formatting flag has nothing
+   * to act through. The original decision was right about one of the two charts it covered and
+   * wrong about the other — see the note in `settings/ChartAxesSection.tsx`, where the split is
+   * stated as structure and the narrowed argument is written out.
    *
    * The three-line shape is the cartesian builder's, deliberately, including which of `stored` and
    * `fmt` `specifiesDateRendering` is asked about — that comment carries the measurement.

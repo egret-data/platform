@@ -1099,3 +1099,57 @@ describe("the cartesian Axes tab speaks the same vocabulary as the waterfall's",
     expect(screen.getByLabelText("X show lines and tick marks")).toBeInTheDocument();
   });
 });
+
+/**
+ * A BREAKOUT PLOTS ONE METRIC, SO BOTH TWO-METRIC AXIS CONTROLS HAVE NOTHING TO ACT ON.
+ *
+ * `config.series` and `config.yMetrics.length > 1` are both reachable at once — the Data tab says
+ * so in as many words, printing "With a series, only the first metric is plotted." underneath the
+ * Series select (`viz/cartesian.tsx`). The Axes tab then offered a Left/Right select per metric and
+ * a "Split y-axis when necessary" switch, while `buildCartesianOption`'s breakout branch plots
+ * `cfg.yMetrics[0]` alone and gives its bands no `yAxisIndex` at all.
+ *
+ * MEASURED, on `series: "g"`, `yMetrics: ["v","w"]`:
+ *   - with `rightAxisMetrics: ["w"]` the option's series come out `[["L",null],["R",null]]` — both
+ *     bands on axis 0, and `w` not drawn at all;
+ *   - `autoSplitY: false` and the default produce a BYTE-IDENTICAL option, so that switch is
+ *     equally inert.
+ * Neither draws a phantom right axis (`yAxis` is a single object, not an array) — the controls were
+ * lying about what they could do, not about what was on screen. `cartesian.breakoutAxisControls`
+ * pins both halves of that measurement so the panel's reason cannot rot away from the builder.
+ *
+ * NOT A CAPABILITY BUILT HERE. egret's left/right choice is per-METRIC (`rightAxisMetrics`), so
+ * under a breakout it cannot split BANDS across two axes the way Metabase can. Closing that gap is
+ * a builder change, not a panel one; this only stops the panel offering what it cannot deliver.
+ */
+describe("CartesianDisplaySection — the two-metric axis controls under a breakout", () => {
+  const twoMetrics = { yMetrics: ["rev", "cnt"] };
+
+  it("withdraws the per-metric Left/Right selects once a series is chosen", () => {
+    const { rerender } = render(
+      <CartesianDisplaySection kind="bar" config={twoMetrics} onChange={() => {}} />,
+    );
+    expect(screen.getByLabelText("axis rev")).toBeInTheDocument();
+    rerender(<CartesianDisplaySection kind="bar" config={{ ...twoMetrics, series: "g" }} onChange={() => {}} />);
+    expect(screen.queryByLabelText("axis rev")).toBeNull();
+    expect(screen.queryByLabelText("axis cnt")).toBeNull();
+  });
+
+  it("withdraws the automatic split too, which the builder ignores just as completely", () => {
+    const { rerender } = render(
+      <CartesianDisplaySection kind="bar" config={twoMetrics} onChange={() => {}} />,
+    );
+    expect(screen.getByLabelText("Split y-axis when necessary")).toBeInTheDocument();
+    rerender(<CartesianDisplaySection kind="bar" config={{ ...twoMetrics, series: "g" }} onChange={() => {}} />);
+    expect(screen.queryByLabelText("Split y-axis when necessary")).toBeNull();
+  });
+
+  // The negative that a too-wide gate would break: an EMPTY series is no series. `cartesian.ts`'s
+  // own breakout guard is `cfg.series != null && cfg.series !== ""`, so a stored empty string still
+  // plots both metrics and both controls must stay.
+  it("keeps both controls when the series is unset", () => {
+    render(<CartesianDisplaySection kind="bar" config={{ ...twoMetrics, series: undefined }} onChange={() => {}} />);
+    expect(screen.getByLabelText("axis rev")).toBeInTheDocument();
+    expect(screen.getByLabelText("Split y-axis when necessary")).toBeInTheDocument();
+  });
+});

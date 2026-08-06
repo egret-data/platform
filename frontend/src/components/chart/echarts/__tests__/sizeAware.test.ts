@@ -187,9 +187,12 @@ describe("builders accept a container size", () => {
   it.each([
     ["box plot", (size?: EChartsSize) => buildBoxplotOption(
       cols, [["Widget", 10], ["Widget", 20], ["Gadget", 30], ["Gadget", 40]], { category: "k", value: "v" }, size,
-    // Two: the tooltip and the value-axis label. The box plot's CATEGORY axis has no formatter of
-    // its own — it draws the raw group key — where the waterfall's four include one.
-    ), 2],
+    // Three: the tooltip, the value-axis label and — since the category-format fix — the CATEGORY
+    // axis label too, which used to draw the raw group key with no formatter at all. That brings it
+    // level with the waterfall's four less its `axisPointer` one. None of the three is a function
+    // OF the size; the assertions below are what say so, and the exact count is what stops a fourth
+    // arriving unremarked.
+    ), 3],
     ["waterfall", (size?: EChartsSize) => buildWaterfallOption(cols, rows, { xAxis: "k", metric: "v" }, size), 4],
   ] as const)("%s reads the size, and reads it ONLY for the x-axis label decision", (_what, build, fns) => {
     const sized = fingerprint(build(SMALL)) as Record<string, never>;
@@ -220,10 +223,16 @@ describe("builders accept a container size", () => {
    * are — the two builds must differ, and differ ONLY there.
    *
    * The `right` gutter is the whole seam by design: on this fixture the single last-column node is
-   * `"X"`, whose label is far inside the quarter-width cap, so nothing is truncated and no label
-   * formatter appears. That is what makes the exact-function-count assertion below still worth
-   * having: it stays at two, and a fit that started emitting a truncating formatter on a chart with
-   * nothing to truncate would fail here rather than pass quietly.
+   * `"X"`, whose label is far inside the quarter-width cap, so nothing is truncated — and the label
+   * formatter returns every name whole in both builds, which is why it cancels out of the
+   * `toStrictEqual` below rather than masking a leak.
+   *
+   * THE COUNT IS THREE, not the two it was. The node-label formatter is now emitted
+   * unconditionally, because it carries the node's own column format as well as the truncation
+   * (`options/sankey.ts`'s `nodeLabel`); it used to be spread in only when the cap bound, and on
+   * this fixture it does not. The count is still pinned exactly for the reason
+   * `expectSizeIsUnread` gives — a formatter that collapsed into a plain string would otherwise
+   * leave the comparison unnoticed — it is the number that moved, not the check.
    */
   it("sankey reads the size, and reads it ONLY for the node-label gutter", () => {
     const scols = [{ name: "s", type: "varchar" }, { name: "t", type: "varchar" }, { name: "v", type: "double" }];
@@ -232,8 +241,8 @@ describe("builders accept a container size", () => {
     // `undefined` is the measurer (position 4); the size is position 5, as in `buildPieOption`.
     const sized = fingerprint(buildSankeyOption(scols, srows, cfg, undefined, SMALL)) as Record<string, never>;
     const unsized = fingerprint(buildSankeyOption(scols, srows, cfg)) as Record<string, never>;
-    // tooltip, edge label — pinned exactly, for the reason `expectSizeIsUnread` gives.
-    expect(functionsIn(sized)).toBe(2);
+    // tooltip, edge label, node label — pinned exactly, for the reason `expectSizeIsUnread` gives.
+    expect(functionsIn(sized)).toBe(3);
 
     const seriesOf = (fp: Record<string, never>) =>
       (fp as unknown as { series: Record<string, unknown>[] }).series[0];
