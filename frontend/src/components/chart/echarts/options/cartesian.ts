@@ -254,7 +254,14 @@ function trendSeries(series: SeriesLike[]): SeriesLike[] {
  * rather than from cfg for the same reason). Order matters beyond the legend: it is also the
  * stacking order and the draw order.
  */
-function applySeriesOrder(series: SeriesLike[], cfg: CartesianBuildConfig): SeriesLike[] {
+function applySeriesOrder<T extends { __raw?: string; name?: string }>(
+  // GENERIC over the series shape rather than fixed to `SeriesLike`, so `scatterXY` — whose data is
+  // an array of `{value: [x, y]}` points and not the `(number | null)[]` a bar's is — can call THIS
+  // function instead of growing a second copy of the hide-and-reorder rule. Nothing in here touches
+  // `data`; it reads `settingsKey` and nothing else, which is exactly the shape both kinds share.
+  series: T[],
+  cfg: CartesianBuildConfig,
+): T[] {
   const hidden = cfg.hiddenSeries;
   const order = cfg.seriesOrder;
   if (!hidden?.length && !order?.length) return series;
@@ -290,20 +297,37 @@ function applySeriesOrder(series: SeriesLike[], cfg: CartesianBuildConfig): Seri
  * to read it, so the same rename went on breaking the hide for as long as `__raw` had existed.
  *
  * `??` AND NOT `||`, deliberately, because the two differ on a `__raw` of `""` and the panel's
- * vocabulary decides which is right. `viz/__tests__/cartesian.controls.test.tsx` keys its colour
- * comparison with `||` for a stated reason — "an un-broken-out scatter's one group is named `""`
- * and is labelled with its y-metric, which is the key both the builder and this panel use". That
- * reason is about `scatterXY`'s series, and `scatterXY` returns from `buildCartesianOption` before
- * this function is ever called (it also never calls it itself — see the note on `scatterXY`), so
- * none of them reach here. Every series that DOES reach here comes from `decorateSeries`, where
- * `__raw` is the panel's key unconditionally: a metric is listed under its own name and a null or
- * empty breakout value is listed as `(empty)` by both sides (`groupName`, `cartesianSeriesNames`).
- * On those paths an empty `__raw` could only be a metric literally named `""`, which the panel
- * would also list as `""` — so `??` matches it and `||` would fall through to the label and miss.
+ * vocabulary decides which is right. `__raw` is THE PANEL'S KEY on every path that reaches here — a
+ * metric is listed under its own name and a null or empty breakout value is listed as `(empty)` by
+ * both sides (`groupName`, `cartesianSeriesNames`) — so an empty `__raw` could only be a metric
+ * literally named `""`, which the panel would also list as `""`. `??` matches that and `||` would
+ * fall through to the label and miss.
+ *
+ * `scatterXY` REACHES HERE NOW, and this paragraph used to say it could not: "`scatterXY` returns
+ * from `buildCartesianOption` before this function is ever called (it also never calls it itself)".
+ * It calls `applySeriesOrder` since the Show switch and the reorder arrows on its own series rows
+ * turned out to be stored and thrown away. Its series therefore carry `__raw = groupKey(g)` — the
+ * y-metric for the one group of an un-broken-out scatter, whose raw value is `""` and which the
+ * panel has never named that. That is the same invariant the previous paragraph states for every
+ * other path, not an exception to it, and the drill is unaffected: `ChartRenderer` reads
+ * `rawSeriesAt` only inside `if (cartesian.series)`, and with a breakout `groupKey` is the identity.
  *
  * The `?? ""` tail is for `SeriesLike.name` being optional in the type; nothing built here omits it.
  */
-const settingsKey = (s: SeriesLike): string => s.__raw ?? s.name ?? "";
+const settingsKey = (s: { __raw?: string; name?: string }): string => s.__raw ?? s.name ?? "";
+
+/**
+ * The DISPLAY name of a column, by the precedence every titling surface in this family uses: the
+ * user's per-series rename first, then the column's own `column_title`, then the raw name.
+ *
+ * Extracted from `baseOption`'s local `titleOf` so `scatterXY` can ask the same question rather than
+ * spell the chain out again — that chart used to name its two axes `cfg.xMetric` and `yMetric` flat,
+ * which made it the one cartesian flavour where renaming a column left its axis on the raw name.
+ * Two copies of a precedence rule is how the two come to disagree about which of a rename and a
+ * `column_title` wins.
+ */
+const displayTitle = (cfg: CartesianBuildConfig, col: string | undefined): string | undefined =>
+  col == null ? undefined : (cfg.seriesLabels?.[col] ?? cfg.columnSettings?.[col]?.column_title ?? col);
 
 /**
  * Whether this chart stacks, resolving the default its KIND carries.
@@ -534,9 +558,36 @@ export function computeAxisSplit(metrics: string[], extents: Record<string, Exte
 // answer any more: `baseOption` decides the axis shape from the series that survived hiding
 // (`plotted.some(s => s.yAxisIndex === 1)`), which it already had to.
 
-// A row chart is a horizontal bar chart.
-const isHorizontal = (cfg: CartesianBuildConfig) =>
-  cfg.kind === "row" || (!!cfg.horizontal && cfg.kind !== "scatter");
+/**
+ * A row chart is a horizontal bar chart — and `horizontal` is the BAR's flag and no other kind's.
+ *
+ * THE EXCLUSION USED TO READ `cfg.kind !== "scatter"`, which honoured the flag on line, area and
+ * combo as well. Measured: `xAxis.type` went `category` → `value` and `yAxis.type` `value` →
+ * `category` on all three. `OrientationOption` has only ever rendered the switch for `kind ===
+ * "bar"`, and `cartesian.horizontal` lives in the SHARED cartesian namespace, so it survives a
+ * chart-type switch — which made a bar chart turned horizontal and then switched to a line a
+ * sideways line chart with no control anywhere in the product to stand it back up.
+ *
+ * METABASE HAS NO ORIENTATION SETTING. Its horizontal bar is a separate display type (`row`) with
+ * its own d3 renderer that never touches the ECharts cartesian pipeline; `buildAxes`
+ * (`echarts/cartesian/option/axis.ts`) is hardcoded dimension-x / metrics-y with no orientation
+ * parameter, and a line, area or combo chart there cannot be horizontal at all. So the rule copied
+ * is "orientation belongs to the bar family", and the half that moves is the BUILDER's — which is
+ * also where the same clause already lived for the scatter, whose own two value axes have nothing
+ * to swap.
+ *
+ * NOTHING IS MIGRATED AND NO STORED VALUE IS DESTROYED, deliberately: a chart that carries
+ * `horizontal: true` on a line simply draws upright, and switching it back to a bar draws it
+ * sideways again. That is how `xMetric` already behaves one namespace over — stored on any
+ * cartesian chart, honoured only on a scatter (`buildCartesianOption`'s opening line).
+ *
+ * EXPORTED because `settings/CartesianDisplaySection.tsx` relabels the Axes tab's rows by the axis
+ * the READER sees, and it used to answer that question with its own `kind === "row" ||
+ * !!config.horizontal`. A second copy of this rule is exactly how a line chart with a stale flag
+ * comes to print "Y label" over the control that titles its horizontal axis.
+ */
+export const isHorizontal = (cfg: Pick<CartesianBuildConfig, "kind" | "horizontal">) =>
+  cfg.kind === "row" || (!!cfg.horizontal && cfg.kind === "bar");
 
 // A non-ordinal x-scale (linear/timeseries) positions points by their real x value
 // instead of evenly-spaced categories — only on a vertical chart.
@@ -939,12 +990,48 @@ export function bubbleDiameter(value: number, lo: number, hi: number): number {
   return 2 * Math.sqrt((areaLo + t * (areaHi - areaLo)) / Math.PI);
 }
 
-// Metric-vs-metric scatter (Metabase's true scatter): each dimension row is a point
-// at (xMetric, yMetric) on two value axes.
+/**
+ * Metric-vs-metric scatter (Metabase's true scatter): each dimension row is a point at
+ * (xMetric, yMetric) on two value axes.
+ *
+ * THE CHART-WIDE PANEL KEYS THIS FUNCTION USED TO IGNORE, and the reason the list is now empty.
+ *
+ * This builder makes its own option from nothing rather than falling through to `baseOption`, which
+ * is why it kept arriving at the same defect from a new direction: every setting `baseOption` learns
+ * has to be taught to it separately or it is silently dropped on one chart type. #418 and #424 taught
+ * it the six axis keys (`yMin`, `yMax`, `yTickCount`, `yAxisTicks`, `unpinFromZero`, `xAxisTicks`)
+ * and left eleven more, all of which the Display and Axes tabs go on offering with an X metric
+ * picked: `xLabel`, `showXLabel`, `yLabel`, `showYLabel`, `showLegend`, `showLabels`, `labelDensity`,
+ * `compactValues`, `goalValue`/`goalLabel`, `hiddenSeries` and `seriesOrder`. Measured by building
+ * the same chart twice, once with each key set and once without: byte-identical, every time, while
+ * the same key on a scatter WITHOUT an X metric changes the option. Same chart type to the reader,
+ * one Data-tab select apart.
+ *
+ * WHY READ THEM RATHER THAN WITHDRAW THE ROWS, per the rule stated on the `yAxis` literal below —
+ * *a divergence is only honest while the panel keeps its half of it*. Withdrawing a row here only
+ * moves the inconsistency: the panel cannot hide `Data labels` on one scatter and show it on the
+ * other without controls that appear and vanish as a neighbouring select changes, and a chart that
+ * already stored `showLabels: true` would keep painting on the category-x flavour with nothing left
+ * to turn it off. Metabase's own `ScatterViz` spreads `GRAPH_AXIS_SETTINGS` and `GRAPH_GOAL_SETTINGS`
+ * outright, so the titles and the goal line are parity rather than invention; `showLabels` and
+ * `labelDensity` are not (its scatter omits `GRAPH_DISPLAY_VALUES_SETTINGS` entirely), and they are
+ * honoured anyway because egret already ships them live on the category-x scatter.
+ *
+ * WHAT IS STILL DELIBERATELY ABSENT, so the next sweep does not report it a third time:
+ * `maxCategories` (the control is not declared for any scatter — there is no category axis to fold),
+ * `trendLine` (`TrendOption` renders nothing on a scatter, so no row is offered), and
+ * `xLabelRotation` / `xLabelCompact` (offered on every cartesian kind but visibly greyed here, with
+ * a caption, because both axes are value axes whose ticks ECharts generates). All three are the
+ * panel keeping its half; none of them is a key saved and dropped.
+ *
+ * NO X-AXIS SCALE OR X BOUNDS EITHER, unchanged: Metabase's keys are `graph.y_axis.scale`/`.min`/
+ * `.max` with no x twin, so those would be settings with no parity, no control and no way to undo.
+ */
 function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBuildConfig): EChartsCoreOption {
   const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
   const di = cfg.xAxis != null ? idx[cfg.xAxis] : undefined;
-  const xi = idx[cfg.xMetric!];
+  const xMetric = cfg.xMetric!;
+  const xi = idx[xMetric];
   const yMetric = cfg.yMetrics[0];
   const yi = idx[yMetric];
   const gi = cfg.series != null ? idx[cfg.series] : undefined;
@@ -991,25 +1078,124 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
   // series. Keying the lookup on "" meant `cfg.seriesColors` could never match on this path.
   const groupKey = (g: string) => (g === "" ? yMetric : g);
   const groupColors = colorsForKeys(groups.map(groupKey), cfg.seriesColors);
-  const series = groups.map((g) => {
+  /**
+   * THE DATA LABEL, and it is the Y value on purpose. A point here has two numbers and only one of
+   * them can be written beside it without the label becoming a second chart; `baseOption`'s own
+   * label formatter picks the y for exactly the same reason on a value/time x-axis
+   * ("the datum is an [x, y] pair — label the y"), and this is the same rule on the same shape.
+   *
+   * THROUGH THE EXACT FORMATTER, not the compact one two lines down. A label sits on the data and
+   * an axis tick sits on the scale; the normal path splits them the same way (`fmt` for labels,
+   * `fmtFor` for axes), so "Shorten large numbers" shortens an axis and never a value.
+   */
+  const pointLabel = cfg.showLabels
+    ? {
+      label: {
+        show: true, fontSize: CHART_THEME.labelFontSize, fontWeight: CHART_THEME.labelWeight,
+        position: "top" as const,
+        formatter: (p: { value: unknown }) =>
+          fmtM(yMetric, Array.isArray(p.value) ? p.value[1] : p.value),
+      },
+      // "fit" is the default here too, and a scatter needs it more than a bar chart does: its
+      // points overlap by nature, so "all" on a dense plot is a wall of numbers.
+      ...(cfg.labelDensity !== "all" ? { labelLayout: { hideOverlap: true } } : {}),
+    }
+    : {};
+  const built = groups.map((g) => {
     const own = points.filter((p) => p.group === g);
     const color = groupColors[groupKey(g)];
     return {
       type: "scatter" as const,
-      name: cfg.seriesLabels?.[g] ?? (g === "" ? yMetric : g),
-      __raw: g,
+      // `groupKey(g)`, NOT the raw `g` — the same key the colour lookup two lines up uses, and for
+      // the same reason it was introduced. `cartesianSeriesNames` hands the settings panel the
+      // Y-METRIC for a scatter with no breakout, `SeriesListSection` stores the rename back under
+      // whatever name it was handed, and this line then looked it up under the raw group `""`. So a
+      // rename was written to `seriesLabels.revenue` and read from `seriesLabels[""]`: saved,
+      // round-tripped through the codec, and drawn nowhere. `seriesColors` worked and `seriesLabels`
+      // did not, off two lookups seven lines apart on the same value.
+      //
+      // `settingsKey`'s comment in this file had already written down the fact that settles it —
+      // "an un-broken-out scatter's one group is named `""` and is labelled with its y-metric, which
+      // is the key both the builder and this panel use" — while the line it describes used the
+      // other one.
+      //
+      // The `?? groupKey(g)` tail is what the old expression's `(g === "" ? yMetric : g)` spelled
+      // out by hand; it is the same value, said once. A breakout band is unaffected either way,
+      // `groupKey` being the identity on any non-empty group — which is exactly why a fix that only
+      // reached the empty case would look complete and pin nothing.
+      name: cfg.seriesLabels?.[groupKey(g)] ?? groupKey(g),
+      // `groupKey(g)` HERE TOO, and this is the settings key rather than the drill's — see
+      // `settingsKey`, which `applySeriesOrder` below reads it through. The two differ only when
+      // `g` is `""`, which happens only without a breakout, and `ChartRenderer` consults
+      // `rawSeriesAt` only inside `if (cartesian.series)`. So no drill can observe the difference
+      // and the Show switch, which is keyed on what `cartesianSeriesNames` returns, can.
+      __raw: groupKey(g),
       itemStyle: { color, opacity: CHART_THEME.scatterOpacity },
       symbolSize: (_v: unknown, params?: { data?: Pt }) => sizeOf(params?.data),
       // The same lift-and-recede the rest of the family got; a scatter with several bands needs it
       // most, since its points overlap by nature.
       emphasis: { focus: "series" as const },
       blur: { itemStyle: { opacity: CHART_THEME.blurOpacity } },
+      ...pointLabel,
       data: own,
     };
   });
+  // The panel's own Show switch and reorder arrows, through the SHARED function rather than a
+  // second copy of it — `applySeriesOrder` was made generic for this call. Order is the draw order
+  // and the legend order, and on a scatter it is also which band's points land on top.
+  const series = applySeriesOrder(built, cfg);
+
+  /**
+   * SHORTENED AXIS NUMBERS, per axis rather than chart-wide, and that asymmetry is `baseOption`'s
+   * own: "a dual-axis chart has two scales on purpose, and the small one should not inherit the big
+   * one's shorthand". This chart is always two-scaled, so the point applies to every one of them.
+   * 10,000 is where a grouped number reaches six characters and "10K" starts winning — the same
+   * threshold, read from the same place, so the two paths cannot drift into different ideas of
+   * "wide". A column stating its own `compact` still outranks the chart-wide answer.
+   */
+  const widestOfMetric = (i: number) =>
+    points.reduce((w, p) => Math.max(w, Math.abs(p.value[i])), 0);
+  const axisFmt = (m: string, widest: number) => {
+    const compact = cfg.compactValues ?? widest >= 10_000;
+    const col = cfg.columnSettings?.[m];
+    return (v: number) =>
+      formatValue(v, cfg.metricTypes?.[m] ?? "double", { ...col, compact: col?.compact ?? compact });
+  };
+
+  /**
+   * THE AXIS TITLES. `displayTitle` is `baseOption`'s precedence asked rather than restated — a
+   * per-series rename, then the column's `column_title`, then the raw name — which is what stopped
+   * this being the one cartesian flavour where renaming a column left its axis on the machine name.
+   *
+   * The two `show…Label` switches HIDE rather than blank, and the grid gives the 22px back when the
+   * bottom title goes: a hidden title that still reserves its gutter is the setting only half done.
+   */
+  const xTitle = cfg.showXLabel === false ? undefined : (cfg.xLabel || displayTitle(cfg, xMetric));
+  const yTitle = cfg.showYLabel === false ? undefined : (cfg.yLabel || displayTitle(cfg, yMetric));
+
+  /**
+   * THE LEGEND, now an override of the automatic answer rather than the automatic answer alone.
+   * `?? (groups.length > 1)` is the same shape `baseOption` uses (`cfg.showLegend ?? (hasBreakout ||
+   * yMetrics.length > 1)`), and it is read off the GROUPS rather than off the surviving series so
+   * that hiding bands down to one does not silently retract a legend the reader asked for.
+   */
+  const showLegend = cfg.showLegend ?? groups.length > 1;
+
+  // Goal line — a horizontal reference at goalValue, on the first series' markLine, exactly as
+  // `baseOption` draws it. `!= null` and not truthiness: a goal of 0 is a break-even line. Guarded
+  // on there being a series at all, since hiding every band leaves nothing to hang it off.
+  if (cfg.goalValue != null && series.length > 0) {
+    (series[0] as Record<string, unknown>).markLine = {
+      silent: true,
+      symbol: "none",
+      data: [{ yAxis: cfg.goalValue }],
+      label: { formatter: cfg.goalLabel ?? "Goal", position: "insideEndTop", color: axisLabelColor },
+      lineStyle: { color: axisLabelColor, type: "dashed" },
+    };
+  }
 
   return {
-    grid: { ...CHART_THEME.grid, bottom: (CHART_THEME.grid.bottom as number) + 22 },
+    grid: { ...CHART_THEME.grid, bottom: (CHART_THEME.grid.bottom as number) + (xTitle != null ? 22 : 0) },
     tooltip: {
       trigger: "item", ...tooltipSurface(),
       formatter: (p: { data: Pt; value: number[] }) => {
@@ -1020,7 +1206,7 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
         return `${head}${cfg.xMetric}: ${fmtM(cfg.xMetric!, p.value[0])}<br/>${yMetric}: ${fmtM(yMetric, p.value[1])}${bubble}`;
       },
     },
-    ...(groups.length > 1 ? { legend: { type: "scroll", bottom: 0, textStyle: { color: axisLabelColor } } } : {}),
+    ...(showLegend ? { legend: { type: "scroll", bottom: 0, textStyle: { color: axisLabelColor } } } : {}),
     /**
      * `xAxisTicks` REACHES THIS AXIS NOW, and it is the one place in the family it did not.
      * `xCategory` and `scaleAxis` have both keyed their `axisLine`/`axisTick` on it since they were
@@ -1034,8 +1220,8 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
      * key whose control this chart has always shown.
      */
     xAxis: {
-      type: "value", name: cfg.xMetric, nameLocation: "middle", nameGap: 28,
-      axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmtM(cfg.xMetric!, v) },
+      type: "value", name: xTitle, nameLocation: "middle", nameGap: 28,
+      axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: axisFmt(xMetric, widestOfMetric(0)) },
       axisLine: { show: cfg.xAxisTicks !== false, lineStyle: { color: gridLine } },
       axisTick: { show: cfg.xAxisTicks !== false },
       splitLine: { lineStyle: { color: gridLine } },
@@ -1078,8 +1264,8 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
     yAxis: {
       type: cfg.logScale ? ("log" as const) : ("value" as const),
       scale: unpinFromZeroOn(cfg),
-      name: yMetric,
-      axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmtM(yMetric, v) },
+      name: yTitle,
+      axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: axisFmt(yMetric, widestOfMetric(1)) },
       axisLine: { show: cfg.yAxisTicks !== false, lineStyle: { color: gridLine } },
       axisTick: { show: cfg.yAxisTicks !== false },
       ...(cfg.yMin != null ? { min: cfg.yMin } : {}),
@@ -1479,9 +1665,10 @@ function baseOption(
   const hasBreakout = cfg.series != null && cfg.series !== "";
   const showLegend = cfg.showLegend ?? (hasBreakout || cfg.yMetrics.length > 1);
   // A renamed series is what the legend and tooltip already show, so the axis follows it
-  // first; `column_title` is the per-column rename the Formatting panel will write.
-  const titleOf = (col: string | undefined) =>
-    col == null ? undefined : (cfg.seriesLabels?.[col] ?? cfg.columnSettings?.[col]?.column_title ?? col);
+  // first; `column_title` is the per-column rename the Formatting panel will write. Lifted to
+  // `displayTitle` so `scatterXY`, which builds its own axes, asks the same question rather than
+  // spelling the precedence out a second time.
+  const titleOf = (col: string | undefined) => displayTitle(cfg, col);
   // An axis plotting several metrics has no one name — the legend names them instead.
   const metricTitle = (metrics: string[]) => (metrics.length === 1 ? titleOf(metrics[0]) : undefined);
   const xTitle = cfg.showXLabel === false ? undefined : (cfg.xLabel ?? titleOf(cfg.xAxis));

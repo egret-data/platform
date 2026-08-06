@@ -137,3 +137,71 @@ describe("cartesian series colours", () => {
     expect(seriesColorsOf(opt)[0]).not.toBe(pinned);
   });
 });
+
+/**
+ * THE RENAME'S HALF OF THE SAME KEY, which the colour above has had since it was written and the
+ * LABEL did not.
+ *
+ * `scatterXY` keys its colours through `groupKey(g) = g === "" ? yMetric : g` — added precisely so an
+ * un-broken-out scatter's one group, whose raw name is `""`, is looked up under the name the panel
+ * actually stores against. Seven lines below it the series' `name` did its own lookup on the RAW `g`,
+ * so `seriesColors` matched and `seriesLabels` could not: `SeriesListSection` writes the rename under
+ * whatever `cartesianSeriesNames` handed it, and that function returns the Y-METRIC for a chart with
+ * no breakout. The rename was therefore stored under `revenue` and read under `""` — typed, saved,
+ * round-tripped, and never drawn.
+ *
+ * `settingsKey`'s own comment in `options/cartesian.ts` had already written down the fact that
+ * settles this — "an un-broken-out scatter's one group is named `""` and is labelled with its
+ * y-metric, which is the key both the builder and this panel use" — while the line it describes was
+ * using the other key.
+ *
+ * THE BREAKOUT CASE IS PINNED TOO, and with FOUR bands renaming the SECOND. `groupKey` is the
+ * identity on any non-empty group, so a fix that reached only the empty one would be no fix at all;
+ * and a two-band fixture cannot see a name-keyed bug, because dropping one name and re-appending it
+ * yields the identical list. Renaming a middle band means position and name disagree.
+ */
+describe("cartesian series renames", () => {
+  it("renames a scatter's lone series under its y-metric, the key the panel stores", () => {
+    const opt = buildCartesian({
+      kind: "scatter", xMetric: "orders", yMetrics: ["revenue"],
+      seriesLabels: { revenue: "Revenue (USD)" },
+    });
+    expect(seriesOf(opt).map((s) => s.name)).toEqual(["Revenue (USD)"]);
+  });
+
+  it("does not read a scatter's rename under the raw empty group name", () => {
+    // The mirror of the assertion above: `""` is not a key the panel can write, so a config
+    // carrying one must not be what makes the rename appear.
+    const opt = buildCartesian({
+      kind: "scatter", xMetric: "orders", yMetrics: ["revenue"],
+      seriesLabels: { "": "Should not appear" },
+    });
+    expect(seriesOf(opt).map((s) => s.name)).toEqual(["revenue"]);
+  });
+
+  it("renames one of a scatter's breakout bands and leaves the other three alone", () => {
+    const opt = buildCartesian({
+      kind: "scatter", xMetric: "orders", yMetrics: ["revenue"], series: "category",
+      seriesLabels: { Doohickey: "Doohickeys" },
+    });
+    expect(seriesOf(opt).map((s) => s.name)).toEqual(["Widget", "Doohickeys", "Gizmo", "Gadget"]);
+  });
+
+  it("a renamed scatter band keeps the colour its RAW name hashes to", () => {
+    // The two settings are keyed alike and must stay so: renaming a band must not move its ink.
+    const plain = buildCartesian({ kind: "scatter", xMetric: "orders", yMetrics: ["revenue"], series: "category" });
+    const renamed = buildCartesian({
+      kind: "scatter", xMetric: "orders", yMetrics: ["revenue"], series: "category",
+      seriesLabels: { Doohickey: "Doohickeys" },
+    });
+    expect(seriesColorsOf(renamed)).toEqual(seriesColorsOf(plain));
+  });
+
+  it("a renamed lone scatter series keeps the colour its Y-METRIC hashes to", () => {
+    const renamed = buildCartesian({
+      kind: "scatter", xMetric: "orders", yMetrics: ["revenue"],
+      seriesLabels: { revenue: "Revenue (USD)" },
+    });
+    expect(seriesColorsOf(renamed)).toEqual([colorsForKeys(["revenue"]).revenue]);
+  });
+});

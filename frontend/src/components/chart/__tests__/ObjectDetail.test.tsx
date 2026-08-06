@@ -102,4 +102,71 @@ describe("ObjectDetail", () => {
     expect(container.querySelector("img")).toBeNull();
     expect(screen.getByText("https://x.test/page")).toBeTruthy();
   });
+
+  /**
+   * THE FIELD LABEL IS WHERE A RENAME BELONGS, and this view drew the raw column name in the one
+   * place the whole visualisation consists of.
+   *
+   * `SharedDisplaySections` hands an object detail a Formatting accordion with a Column title box
+   * for every result column, and the `<dd>` beside this label has always honoured the rest of that
+   * same `ColumnFormat` — currency, decimals, date style, prefix and suffix all reach `Value`. Only
+   * the name half went nowhere.
+   *
+   * THIS IS METABASE'S OWN BEHAVIOUR, not an egret extension, and it is the reason the fix here is
+   * to THREAD rather than to withdraw the control. `column_title` is not a general Metabase column
+   * setting: exactly four visualizations declare it (`Table`, `ObjectDetail`, `List`, `PivotTable`
+   * — it is absent from `COMMON_COLUMN_SETTINGS` and comes only from a viz's own static
+   * `columnSettings`), and Object detail is one of the four. `ObjectDetail.tsx:34` registers it and
+   * `components/ObjectDetail/ObjectDetailsTable.tsx:56-57` paints it into the label cell:
+   * `columnSettings?.["_column_title_full"] || displayNameForColumn(column)`.
+   *
+   * THE `title=` ATTRIBUTE FOLLOWS IT. The label is `truncate`d, and the tooltip is what a reader
+   * with a long name has to fall back on — leaving it on the raw name would make the hover
+   * contradict the text under the cursor.
+   *
+   * THE DRILL DOES NOT. `onFieldClick` is still handed `c.name`: a filter is built against the
+   * COLUMN, and this programme has closed the same raw-vs-display defect eight times in the other
+   * direction. The rename is display, and display is where it stops.
+   */
+  it("draws a renamed column's title as the field label", () => {
+    render(
+      <ObjectDetail columns={cols} rows={rows} columnSettings={{ plan: { column_title: "Subscription" } }} />,
+    );
+    expect(screen.getByText("Subscription")).toBeTruthy();
+    expect(screen.queryByText("plan")).toBeNull();
+  });
+
+  it("puts the rename on the truncation tooltip too", () => {
+    const { container } = render(
+      <ObjectDetail columns={cols} rows={rows} columnSettings={{ plan: { column_title: "Subscription" } }} />,
+    );
+    const labels = Array.from(container.querySelectorAll("dt"));
+    expect(labels.map((el) => el.getAttribute("title"))).toEqual(["id", "Subscription"]);
+  });
+
+  it("leaves an unrenamed column on its own name", () => {
+    render(
+      <ObjectDetail columns={cols} rows={rows} columnSettings={{ plan: { column_title: "Subscription" } }} />,
+    );
+    expect(screen.getByText("id")).toBeTruthy();
+  });
+
+  it("drills on the RAW column name, not on the rename", () => {
+    const clicks: unknown[][] = [];
+    render(
+      <ObjectDetail columns={cols} rows={rows}
+        columnSettings={{ plan: { column_title: "Subscription" } }}
+        onFieldClick={(col, value) => clicks.push([col, value])} />,
+    );
+    fireEvent.click(screen.getByText("Basic"));
+    expect(clicks).toEqual([["plan", "Basic"]]);
+  });
+
+  // `||`, not `??` — the same choice `rowsToCsv` makes and for the same reason. Settings are not
+  // key-whitelisted server-side, so a hand-edited `column_title: ""` is reachable, and `??` would
+  // draw a field with no label at all.
+  it("falls back to the column name for an empty rename", () => {
+    render(<ObjectDetail columns={cols} rows={rows} columnSettings={{ plan: { column_title: "" } }} />);
+    expect(screen.getByText("plan")).toBeTruthy();
+  });
 });
