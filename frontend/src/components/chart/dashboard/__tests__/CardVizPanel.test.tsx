@@ -127,3 +127,62 @@ describe("CardVizPanel", () => {
     expect(screen.getByLabelText("Display as")).toBeInTheDocument();
   });
 });
+
+/**
+ * THE SYNTHETIC `styleParams` HAS TO CARRY EVERY KEY `styleColumnsFor` INSPECTS.
+ *
+ * That function takes a real `ChartParams`; both editors hand it an object assembled by hand from
+ * the effective config, and a key left out of that object is indistinguishable from a viz that is
+ * not configured yet — `styleColumnsFor` filters on `undefined`, matches nothing, and
+ * `SharedDisplaySections` hides the whole Formatting accordion behind its `styleColumns.length > 0`
+ * gate. Silent in both directions.
+ *
+ * IT HAS NOW HAPPENED TWICE. The pie's `styleColumnsFor` arm was widened to include its dimensions,
+ * the builder route's object grew a `pie` key, and this one did not — so a pie card could be
+ * formatted from the chart editor and not from the dashboard. The map's arm, added in the same PR
+ * as this test, would have been the second: it narrows the map to its metric, and narrowing against
+ * a key that is not present hides the section outright.
+ *
+ * FOUND IN THE BROWSER on the builder route, which is the only reason it was found at all — the
+ * unit tests around `styleColumnsFor` construct a real `ChartParams` and so cannot see a missing
+ * key in either editor's synthetic one. These two render the PANEL, which is what closes that seam.
+ */
+describe("CardVizPanel — the Formatting section reaches the viz types that narrow", () => {
+  const mapChart = {
+    ...chart,
+    viz_type: "map",
+    params: {
+      version: 2,
+      spec: { metrics: ["rev"], dimensions: ["state"], columns: [], filters: [], orderby: [], row_limit: 100, rollup_groups: [] },
+      settings: { "map.region": "state", "map.metric": "rev" },
+    },
+  } as unknown as Chart;
+  const mapColumns = [{ name: "state", type: "VARCHAR" }, { name: "rev", type: "DOUBLE" }];
+
+  it("offers the map's metric — and not its region, which is a geojson key", () => {
+    render(<CardVizPanel chart={mapChart} override={undefined} columns={mapColumns} rows={[]} onChange={vi.fn()} />);
+    expect(screen.getByText("Formatting")).toBeInTheDocument();
+    // The accordion's rows are buttons named for the column they open.
+    expect(screen.getByRole("button", { name: /^rev/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^state/ })).toBeNull();
+  });
+
+  // The sibling omission, fixed in the same line. A pie formats its dimensions AND its metric.
+  it("offers the pie's dimensions and its metric", () => {
+    const pieChart = {
+      ...chart,
+      viz_type: "pie",
+      params: {
+        version: 2,
+        spec: { metrics: ["rev"], dimensions: ["region"], columns: [], filters: [], orderby: [], row_limit: 100, rollup_groups: [] },
+        settings: { "pie.dimensions": ["region"], "pie.metric": "rev" },
+      },
+    } as unknown as Chart;
+    render(
+      <CardVizPanel chart={pieChart} override={undefined}
+        columns={[{ name: "region", type: "VARCHAR" }, { name: "rev", type: "DOUBLE" }]} rows={[]} onChange={vi.fn()} />,
+    );
+    expect(screen.getByRole("button", { name: /^region/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^rev/ })).toBeInTheDocument();
+  });
+});

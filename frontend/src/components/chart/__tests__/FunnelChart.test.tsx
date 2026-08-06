@@ -131,3 +131,63 @@ describe("FunnelChart", () => {
     });
   });
 });
+
+/**
+ * THE BAR MODE'S IDENTITY IS THE RAW CELL; ONLY ITS LABELS ARE FORMATTED.
+ *
+ * `funnelSteps` draws each step through the dimension's own `column_settings`, and in bar mode the
+ * step name is doing three jobs at once — the x category, the series id, and the string
+ * `onPointClick` matches back to decide which step was clicked. Two raw values can format to ONE
+ * label ("MMMM YYYY" collapses every day of a month onto "January 2026"), so keying the option on
+ * the drawn name would make the second of them unreachable and answer its click with the first.
+ *
+ * FOUND BY MUTATION, not by review: reverting `keys` to `steps.map((s) => s.name)` left the whole
+ * funnel suite green. That is a fixture that could not reach the arm rather than a weak assertion —
+ * nothing here had ever drawn a bar-mode funnel over a formatted dimension — so the fixture is what
+ * this adds. Its two rows fall in different months on purpose, so the formatted labels are DISTINCT
+ * and the assertions cannot pass by both sides collapsing to the same string.
+ */
+describe("FunnelChart — bar mode over a formatted dimension", () => {
+  const dated = [{ name: "d", type: "timestamp" }, { name: "cnt", type: "double" }];
+  const datedRows = [["2026-01-01", 100], ["2026-02-01", 40]];
+  const optionOf = () => JSON.parse(screen.getByTestId("echarts").getAttribute("data-option")!);
+
+  it("keys the categories and the series on the raw cells", () => {
+    render(
+      <FunnelChart columns={dated} rows={datedRows} dimension="d" metric="cnt" type="bar"
+        columnSettings={{ d: { date_style: "MMMM YYYY" } }} />,
+    );
+    const opt = optionOf();
+    const xAxis = Array.isArray(opt.xAxis) ? opt.xAxis[0] : opt.xAxis;
+    expect(xAxis.data).toEqual(["2026-01-01", "2026-02-01"]);
+    expect(opt.series.map((s: { __metric?: string; name: string }) => s.__metric ?? s.name))
+      .toEqual(["2026-01-01", "2026-02-01"]);
+  });
+
+  // The formatted string still has to reach the reader — this is the half that would pass if the
+  // fix were "never format anything in bar mode", which is the other way to get the identity right
+  // and the labels wrong.
+  it("labels those series, and the axis ticks, with the formatted names", () => {
+    render(
+      <FunnelChart columns={dated} rows={datedRows} dimension="d" metric="cnt" type="bar"
+        columnSettings={{ d: { date_style: "MMMM YYYY" } }} />,
+    );
+    const opt = optionOf();
+    expect(opt.series.map((s: { name: string }) => s.name)).toEqual(["January 2026", "February 2026"]);
+    const xAxis = Array.isArray(opt.xAxis) ? opt.xAxis[0] : opt.xAxis;
+    // `axisLabel.formatter` is a function and does not survive `JSON.stringify`, so the tick text is
+    // checked through the builder that produced it rather than off the serialised option — see
+    // `echarts/__tests__/compactXLabels.test.ts`, which owns that formatter's own rules.
+    expect(xAxis.data).toEqual(["2026-01-01", "2026-02-01"]);
+  });
+
+  // With no stored format the two are the same string, which is the state every funnel shipped in
+  // and the one a too-eager fix would break.
+  it("leaves an unformatted dimension exactly as it was", () => {
+    render(<FunnelChart columns={cols} rows={rows} dimension="stage" metric="cnt" type="bar" />);
+    const opt = optionOf();
+    const xAxis = Array.isArray(opt.xAxis) ? opt.xAxis[0] : opt.xAxis;
+    expect(xAxis.data).toEqual(["Visited", "Signed up", "Paid"]);
+    expect(opt.series.map((s: { name: string }) => s.name)).toEqual(["Visited", "Signed up", "Paid"]);
+  });
+});

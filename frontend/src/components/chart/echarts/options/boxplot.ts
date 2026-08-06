@@ -1,7 +1,7 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { EChartsSize } from "../EChartsRenderer";
 import type { ColumnFormat } from "../../format-types";
-import { formatValue } from "../../format";
+import { formatValue, formatDimensionValue } from "../../format";
 import {
   bottomNameGapClearOf, categoryLabelBand, estimatePlotWidth, fitXLabels, plotHeightLessLabels,
   verticalValueAxisFit, widestLabelWidth, type XLabelFit,
@@ -59,8 +59,20 @@ export interface BoxplotBuildConfig {
   xAxisTicks?: boolean;
   yAxisTicks?: boolean;
   xLabelRotation?: 45 | 90;
-  /** Metabase's `graph.y_axis.unpin_from_zero`. NO `xLabelCompact` twin here, deliberately: this
-   *  chart's category axis has no `axisLabel.formatter`, so a formatting flag would be inert. */
+  /**
+   * Metabase's `graph.y_axis.unpin_from_zero`.
+   *
+   * STILL NO `xLabelCompact` TWIN, and the reason has narrowed rather than gone. This axis now HAS
+   * an `axisLabel.formatter` (`catLabel`, below) — the note that used to sit here said it had none,
+   * and `waterfall.ts` cites this chart as the one its own Compact argument does not extend to, so
+   * both were true and are now only half true. What a compact flag would act through is a
+   * `date_abbreviate` / `compact` pair spread over the category's STORED format, which `catLabel`
+   * consults only when the reader has already set one; with no stored format the category still
+   * falls back to the raw cell and the flag has nothing to change. Offering it would therefore be a
+   * control that works on some box plots and not others, decided by a setting two panels away.
+   * Making it honest means giving this chart the bucketing fallback the cartesian and the waterfall
+   * have (`periodName`), which is a different change and is not this one.
+   */
   unpinFromZero?: boolean;
   yTickCount?: number;
   yMin?: number;
@@ -269,6 +281,36 @@ export function buildBoxplotOption(
     });
   };
 
+  /**
+   * A CATEGORY AS THE TICK IT IS DRAWN AS — the format this builder read for its value column and
+   * never for its category one.
+   *
+   * `styleColumnsFor` offers the box plot's CATEGORY a Formatting accordion (it fell through to
+   * `return resultColumns`), and `fmt` above resolves `columnSettings?.[cfg.value]` only, so a Date
+   * style typed there was stored and drawn nowhere. Measured in the browser over `MB Monthly`: the
+   * panel read `Date style: January 2024` while the axis and the spoken description both read
+   * `2026-01-01`.
+   *
+   * Metabase's box plot formats it — `echarts/boxplot/model/index.ts`'s `createXAxisFormatter`
+   * spreads `settings.column?.(dimensionColumn)` into `formatValue` for every tick — and its
+   * generic cartesian axis does the same (`cartesian/model/axis.ts`), which is the rule egret's own
+   * bar and line charts already follow. This chart was the one left out.
+   *
+   * A FORMATTER, NOT A REWRITE OF `categories`. That array is the drill's identity: `BoxplotChart`
+   * reads the clicked category back off `xAxis.data[dataIndex]` and hands it to `onValueClick` as
+   * the filter value, and `groups` is keyed on it. Formatting it in place is the
+   * drill-on-display-strings defect four chart families have now had. So `xAxis.data` stays raw and
+   * everything a reader SEES — the ticks, the tooltip heading, the aria description, and the label
+   * measurements that decide rotation and gutters — goes through this.
+   */
+  const catFormat = cfg.category != null ? cfg.columnSettings?.[cfg.category] : undefined;
+  const catLabel = (c: unknown) => formatDimensionValue(c, catType, catFormat);
+  // Computed ONCE and reused by the three measurements and the aria below. `widestLabelWidth` and
+  // `fitXLabels` both walk the whole list against a canvas, and a per-call `.map` would put a
+  // formatter between them and the strings ECharts will really draw — which is exactly the drift
+  // that makes a fitted axis disagree with the axis on screen.
+  const drawnCategories = categories.map(catLabel);
+
   const xTitle = cfg.showXLabel === false ? undefined : (cfg.xLabel ?? cfg.category);
   const yTitle = cfg.showYLabel === false ? undefined : (cfg.yLabel ?? cfg.value);
   // Whether the labels fit is a question about WIDTH, and until `size` existed this builder could
@@ -298,9 +340,12 @@ export function buildBoxplotOption(
   const explicitRotate = cfg.xLabelRotation != null;
   const fit: XLabelFit | undefined = measurable && size && !explicitRotate
     ? fitXLabels({
-        // The categories as DRAWN: this axis has no `axisLabel.formatter`, so the raw group key is
-        // the label — unlike the cartesian and waterfall axes, which format theirs.
-        labels: categories,
+        // The categories as DRAWN, which is now a different array from the ones the boxes are
+        // keyed on: this axis DOES have an `axisLabel.formatter` (`catLabel`), like the cartesian
+        // and waterfall axes. Measuring the raw keys would size the gutter and choose the rotation
+        // against text ECharts is not going to draw — "2026-01-01" is ten characters where
+        // "January 2026" is twelve, so the fit would have been decided a tick too narrow.
+        labels: drawnCategories,
         // The gutter is the widest value the y-axis can print — `axisWidest`, which counts the
         // outlier and mean points too, NOT the boxes-only `widest`; see its comment above — through
         // the y-axis's own formatter (`fmt(v, true)` below). `yTitle` is what adds 26 to
@@ -334,7 +379,7 @@ export function buildBoxplotOption(
    * MEASURED OR DECLINED, the same rule the x-label fit above keeps: `widestLabelWidth` reports 0
    * where there is no canvas, and a band computed from that is a guess about a card nobody measured.
    */
-  const measuredCategories = measurable ? widestLabelWidth(categories) : 0;
+  const measuredCategories = measurable ? widestLabelWidth(drawnCategories) : 0;
   const categoryGutter = measuredCategories > 0 ? measuredCategories : undefined;
   const categoryBand = categoryGutter != null && fit?.kind !== "hide"
     ? categoryLabelBand({ rotate, widestLabel: categoryGutter })
@@ -425,7 +470,7 @@ export function buildBoxplotOption(
     // A box is five numbers; the median is the one worth reading aloud per category.
     aria: ariaDescription({
       kind: "Box plot", metric: cfg.value, dimension: cfg.category, format: (v) => fmt(v),
-      points: categories.map((c, i) => ({ name: String(c), value: stats[i]?.box?.[2] })),
+      points: drawnCategories.map((c, i) => ({ name: c, value: stats[i]?.box?.[2] })),
     }),
     grid,
     // The series-level `tooltip: { trigger: "item" }` entries below only make the point series
@@ -440,7 +485,7 @@ export function buildBoxplotOption(
           const s = stats[i];
           if (!s) return "";
           const row = (k: string, v: number) => `<div>${k}: ${fmt(v)}</div>`;
-          return `<div style="font-weight:600">${categories[i]}</div>`
+          return `<div style="font-weight:600">${drawnCategories[i]}</div>`
             + row("Max", s.box[4]) + row("Q3", s.box[3]) + row("Median", s.box[2])
             + row("Q1", s.box[1]) + row("Min", s.box[0])
             + (showMean ? row("Mean", s.mean) : "");
@@ -448,7 +493,7 @@ export function buildBoxplotOption(
         // A point series datum is `[categoryIndex, value]`.
         const d = Array.isArray(p.data) ? p.data : undefined;
         const i = d ? Number(d[0]) : 0;
-        return `<div style="font-weight:600">${categories[i] ?? ""}</div><div>${fmt(d ? d[1] : p.value)}</div>`;
+        return `<div style="font-weight:600">${drawnCategories[i] ?? ""}</div><div>${fmt(d ? d[1] : p.value)}</div>`;
       },
     },
     xAxis: {
@@ -467,6 +512,9 @@ export function buildBoxplotOption(
       axisLabel: {
         fontSize: CHART_THEME.axisFontSize, color: axisLabelColor,
         interval: decided ? (0 as const) : ("auto" as const), rotate,
+        // The category's own `column_settings`, applied to the tick and to nothing else — see
+        // `catLabel`. `xAxis.data` above stays the raw key the drill filters by.
+        formatter: (v: unknown) => catLabel(v),
         // The third answer the ladder can give: when even a rotated label would eat 70% of the
         // card's height, Metabase draws no axis rather than a wall of text.
         show: fit?.kind !== "hide",

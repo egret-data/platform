@@ -317,7 +317,23 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope }: Sect
         </div>
       )}
 
-      {scoped(scope, "value") && config.yMetrics.length > 1 && !config.horizontal && kind !== "row" && (
+      {/* `!config.series` IS PART OF "there are two metrics to separate".
+          `config.yMetrics.length > 1` and a breakout are reachable at once — the Data tab prints
+          "With a series, only the first metric is plotted." underneath the Series select for
+          exactly this pair (`viz/cartesian.tsx`) — and under one the builder plots
+          `cfg.yMetrics[0]` alone and gives its bands no `yAxisIndex` at all. Measured on
+          `series: "g"`, `yMetrics: ["v","w"]`, `rightAxisMetrics: ["w"]`: the option's series come
+          out `[["L",null],["R",null]]`, both on axis 0, with `w` not drawn. So this offered a side
+          for a metric that is not on the chart, and no side at all for the one that is — while the
+          `yAxis` stayed a single object, so nothing was drawn wrong, only offered wrongly.
+          `cartesian.breakoutAxisControls` pins that measurement so this reason cannot rot.
+
+          NOT THE CAPABILITY GAP, which is real and is elsewhere. egret's left/right choice is
+          per-METRIC (`rightAxisMetrics`), so under a breakout it cannot split BANDS across two axes
+          the way Metabase can. Closing that means teaching the builder's breakout branch about two
+          axes; withdrawing a control that cannot act is not a step towards it and does not pretend
+          to be. */}
+      {scoped(scope, "value") && config.yMetrics.length > 1 && !config.series && !config.horizontal && kind !== "row" && (
         <div className="space-y-1.5 border-t pt-2">
           <div className="text-xs text-muted-foreground">Y axis</div>
           {/* "Auto" is the resting state, not "Left". With the automatic split turned on and nothing
@@ -521,8 +537,15 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
       )}
       {/* Only meaningful with two or more metrics on one axis to separate. Metabase gates it the
           same way, and computes the split rather than asking which metric goes where — egret's
-          per-metric Axis selects still win when they name anything. */}
-      {scoped(scope, "value") && kind !== "scatter" && config.yMetrics.length > 1 && (
+          per-metric Axis selects still win when they name anything.
+
+          `!config.series` FOR THE SAME REASON THE SELECTS ABOVE TAKE IT, and it is if anything more
+          clear-cut here: under a breakout `autoSplitY: false` and the default produce a
+          BYTE-IDENTICAL option (measured, `JSON.stringify` equal), because the split is resolved
+          into `rightAxisMetrics` and the breakout branch never reads them. A switch whose two
+          positions build the same chart is the same defect as a select whose choices do, so it is
+          withdrawn in the same breath rather than left for whoever notices second. */}
+      {scoped(scope, "value") && kind !== "scatter" && config.yMetrics.length > 1 && !config.series && (
         <Toggle id="cz-autosplit" label="Split y-axis when necessary" checked={config.autoSplitY !== false}
           onChange={(v) => onChange({ autoSplitY: v ? undefined : false })} />
       )}

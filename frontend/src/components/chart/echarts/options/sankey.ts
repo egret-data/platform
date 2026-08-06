@@ -1,7 +1,7 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { EChartsSize } from "../EChartsRenderer";
 import type { ColumnFormat } from "../../format-types";
-import { formatValue } from "../../format";
+import { formatValue, formatDimensionValue } from "../../format";
 import { ariaDescription, baseOption, tooltipSurface } from "../base";
 import { CHART_THEME, COLOR_FALLBACK, resolveColor, resolveFontFamily } from "../palette";
 import { colorsForKeys } from "../keyColors";
@@ -248,6 +248,43 @@ export function buildSankeyOption(
   const nodeColors = colorsForKeys([...names]);
   const data = [...names].map((name) => ({ name, itemStyle: { color: nodeColors[name] } }));
 
+  /**
+   * A NODE'S NAME AS THE LABEL IT IS DRAWN AS — the format this builder read for its metric and
+   * never for its two dimensions.
+   *
+   * The source and target columns reach `FormatSection` (`styleColumnsFor` fell through to
+   * `return resultColumns` for a sankey), so both get a Date style / prefix select; `fmt` below
+   * resolves `columnSettings?.[cfg.metric]` only, so everything typed into either was stored and
+   * drawn nowhere. Measured in the browser on a flow whose source was a month-bucketed
+   * `order_month`: the panel read `Date style: January 2024` while every node read `2026-01-01`.
+   *
+   * WHICH COLUMN'S FORMAT, for a name that appears as both a source and a target, is Metabase's
+   * rule copied exactly — `echarts/graph/sankey/model/formatters.ts`:
+   * `node = !hasOutputs ? target(rawName) : source(rawName)`. A SINK takes the target column's
+   * format; every other node takes the source column's. The two formats can genuinely differ, and
+   * upstream accepts the consequence that one value then reads differently at different depths, so
+   * guessing a single column here would have been a coin toss with a plausible-looking answer.
+   *
+   * A FORMATTER, NOT A REWRITE OF THE GRAPH. `data[].name` and `links[].source`/`.target` stay the
+   * raw cells: they are the DAG the cycle check walks, the keys `colorsForKeys` assigns accents to,
+   * and the strings `ChartRenderer`'s sankey drill matches back to a row to build its filter.
+   * Formatting the identity is the drill-on-display-strings defect four chart families have now
+   * had, and here it would also mean two raw values that format alike silently merging into one
+   * node. So only what a reader sees — the node label, the tooltip, the aria description and the
+   * right-gutter measurement — goes through this.
+   */
+  const hasOutputs = new Set(links.map((l) => l.source));
+  const srcType = si != null ? columns[si].type : "varchar";
+  const tgtType = ti != null ? columns[ti].type : "varchar";
+  const srcFormat = cfg.source != null ? cfg.columnSettings?.[cfg.source] : undefined;
+  const tgtFormat = cfg.target != null ? cfg.columnSettings?.[cfg.target] : undefined;
+  const nodeLabel = (raw: unknown) => {
+    const name = String(raw ?? "");
+    return hasOutputs.has(name)
+      ? formatDimensionValue(name, srcType, srcFormat)
+      : formatDimensionValue(name, tgtType, tgtFormat);
+  };
+
   const widest = links.reduce((n, l) => Math.max(n, l.value), 0);
   const fmt = (v: unknown, compact?: boolean) => {
     if (cfg.metric == null) return String(v);
@@ -278,7 +315,10 @@ export function buildSankeyOption(
   let cutNodes: Set<string> | undefined;
   if (size != null && size.width > 0 && names.size > 0) {
     const rightmost = rightmostNodeNames([...names], links, cfg.nodeAlign ?? "left");
-    const widest = Math.max(0, ...[...rightmost].map((n) => measureText(n, nodeLabelFont)));
+    // The label as DRAWN, not the raw key: the gutter exists to hold the text ECharts will paint,
+    // and "2026-01-01" is ten characters where "January 2026" is twelve. Measuring the key would
+    // reserve a gutter the labels then run out of — the exact failure this measurement replaced.
+    const widest = Math.max(0, ...[...rightmost].map((n) => measureText(nodeLabel(n), nodeLabelFont)));
     const cap = size.width * MAX_RIGHT_LABEL_PERCENT;
     rightGutter = Math.max(size.width * GUTTER_PERCENT, GUTTER_MIN) + Math.min(cap, widest);
     // Only when the cap actually binds. Below it every label fits the room reserved for it, so
@@ -296,14 +336,24 @@ export function buildSankeyOption(
       kind: "Sankey diagram", metric: cfg.metric, format: (v) => fmt(v),
       points: [...links]
         .sort((a, b) => b.value - a.value)
-        .map((l) => ({ name: `${l.source} to ${l.target}`, value: l.value })),
+        .map((l) => ({ name: `${nodeLabel(l.source)} to ${nodeLabel(l.target)}`, value: l.value })),
     }),
     // A node has no value of its own, so only edges show one.
     tooltip: {
       trigger: "item",
       ...tooltipSurface(),
-      formatter: (p: { dataType?: string; name?: string; value?: unknown }) =>
-        (p.dataType === "edge" ? `${p.name}: ${fmt(p.value)}` : String(p.name ?? "")),
+      // A NODE hover is formatted here; an EDGE hover is not, and the asymmetry is ECharts', not a
+      // choice. For an edge `p.name` is a string ECharts has already built by joining the two ends
+      // with " > ", so there are no raw values left to format — only a joined label to take apart
+      // and guess at. `p.data` carries the link, so the ends ARE recoverable, and they are: the
+      // edge branch rebuilds the label from them rather than reprinting ECharts' join.
+      formatter: (p: { dataType?: string; name?: string; value?: unknown; data?: { source?: unknown; target?: unknown } }) => {
+        if (p.dataType !== "edge") return nodeLabel(p.name);
+        const ends = p.data?.source != null && p.data?.target != null
+          ? `${nodeLabel(p.data.source)} > ${nodeLabel(p.data.target)}`
+          : String(p.name ?? "");
+        return `${ends}: ${fmt(p.value)}`;
+      },
     },
     series: [{
       type: "sankey",
@@ -332,18 +382,20 @@ export function buildSankeyOption(
         // value — plenty of genuine categories ARE two-letter codes — so on a card too narrow to
         // cut honestly the label is dropped instead. A name that FITS is untouched however short it
         // is; the floor is about cutting, not about length. `?? ""` because ECharts wants a string.
-        ...(cutNodes != null && cutTo != null
-          ? {
-            formatter: (p: { name?: unknown }) => {
-              const name = String(p.name ?? "");
-              if (!cutNodes.has(name)) return name;
-              return fitSliceLabel({
-                label: name, availableSpace: cutTo, showLabels: true,
-                measureText, fontStyle: nodeLabelFont,
-              }) ?? "";
-            },
-          }
-          : {}),
+        //
+        // UNCONDITIONAL NOW, where it used to be spread in only when the cap bound. The formatter
+        // has a second job — running the node's name through its own column format (`nodeLabel`) —
+        // and that job applies to every node whether or not anything is being cut. The truncation
+        // is applied to the FORMATTED label, which is the only order that can be right: the cap is
+        // a pixel width and the pixels belong to the text being drawn.
+        formatter: (p: { name?: unknown }) => {
+          const label = nodeLabel(p.name);
+          if (cutNodes == null || cutTo == null || !cutNodes.has(String(p.name ?? ""))) return label;
+          return fitSliceLabel({
+            label, availableSpace: cutTo, showLabels: true,
+            measureText, fontStyle: nodeLabelFont,
+          }) ?? "";
+        },
       },
       edgeLabel: {
         show: !!cfg.showEdgeLabels,

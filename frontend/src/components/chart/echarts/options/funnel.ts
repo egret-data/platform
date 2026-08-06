@@ -1,5 +1,5 @@
 import type { ColumnFormat } from "../../format-types";
-import { formatValue } from "../../format";
+import { formatValue, formatDimensionValue } from "../../format";
 
 export interface ResultColumn { name: string; type: string }
 export interface FunnelBuildConfig {
@@ -15,7 +15,20 @@ export interface FunnelBuildConfig {
 }
 
 export interface FunnelStep {
+  /** The step's name AS DRAWN — the dimension cell run through that column's own stored format.
+   *  See `raw` for the value it came from, which is not the same string once a format is set. */
   name: string;
+  /**
+   * The dimension cell as it came out of the query, before its column format.
+   *
+   * THE IDENTITY, and the reason this field exists at all. `stepOrder` and `hiddenSteps` are stored
+   * by `FunnelStepsControl`, which derives its list from `String(row[dimensionIndex])` — raw — so
+   * ranking and hiding have to be keyed on the raw cell or a chart whose steps were ordered by hand
+   * would lose that order the moment someone chose a date style. Callers that need to identify a
+   * step (`FunnelChart`'s bar mode keys its per-step lookups on it) use this; only what a reader
+   * SEES uses `name`.
+   */
+  raw: string;
   value: number;
   /** Formatted through the metric's own column settings. */
   label: string;
@@ -48,21 +61,43 @@ export function funnelSteps(columns: ResultColumn[], rows: unknown[][], cfg: Fun
   const hidden = new Set(cfg.hiddenSteps ?? []);
   const rank = new Map((cfg.stepOrder ?? []).map((n, i) => [n, i]));
   const raw = rows
-    .map((r) => ({ name: String(r[di] ?? ""), value: Number(r[mi]), row: r }))
+    .map((r) => ({ raw: String(r[di] ?? ""), value: Number(r[mi]), row: r }))
     // A step worth ZERO is kept, as Metabase keeps it: "nobody got this far" is the single most
     // important thing a funnel can say, and dropping the row silently shortens the sequence.
-    .filter((s) => Number.isFinite(s.value) && !hidden.has(s.name))
+    //
+    // HIDING AND RANKING ARE KEYED ON `raw`, NOT ON THE DRAWN NAME. `FunnelStepsControl` builds the
+    // panel's step list out of `String(row[dimensionIndex])`, so that is what `stepOrder` and
+    // `hiddenSteps` hold; matching them against a formatted name would silently drop a hand-made
+    // order the first time anyone set a date style. See `FunnelStep.raw`.
+    .filter((s) => Number.isFinite(s.value) && !hidden.has(s.raw))
     // A stored order names the steps it knows; anything new keeps its natural place after them,
     // the rule `applySeriesOrder` and the pie's `sliceOrder` already use.
-    .sort((a, b) => (rank.get(a.name) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.name) ?? Number.MAX_SAFE_INTEGER));
+    .sort((a, b) => (rank.get(a.raw) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.raw) ?? Number.MAX_SAFE_INTEGER));
 
   const fmt = (v: unknown) =>
     cfg.metric ? formatValue(v, cfg.metricTypes?.[cfg.metric] ?? "double", cfg.columnSettings?.[cfg.metric]) : String(v);
 
+  /**
+   * THE STEP NAME IS A VALUE AND IT HAS A FORMAT — the half of this builder that was missing.
+   *
+   * `styleColumnsFor` offers the funnel's DIMENSION a Formatting accordion (it fell through to
+   * `return resultColumns`), and this function read `columnSettings` for the metric only, so a Date
+   * style typed there was stored and drawn nowhere. Measured in the browser over `MB Monthly`: the
+   * panel read `Date style: January 2024` while all twelve steps read `2026-01-01`.
+   *
+   * Metabase formats it — `FunnelNormal.tsx`'s `formatDimension` spreads
+   * `settings.column?.(cols[dimensionIndex])` into `formatValue` for every step header — so this is
+   * a copied rule, not an invented one. `formatDimensionValue` carries the guard that stops a plain
+   * RENAME from restyling every step; see its comment, which is where the trap is written down.
+   */
+  const dimType = columns[di]?.type ?? "varchar";
+  const dimFormat = cfg.dimension != null ? cfg.columnSettings?.[cfg.dimension] : undefined;
+
   const first = raw[0]?.value;
   const max = raw.reduce((m, s) => Math.max(m, s.value), 0);
   return raw.map((s, i) => ({
-    name: s.name,
+    name: formatDimensionValue(s.raw, dimType, dimFormat),
+    raw: s.raw,
     value: s.value,
     label: fmt(s.value),
     share: i > 0 && first ? `${((s.value / first) * 100).toFixed(2)} %` : "",

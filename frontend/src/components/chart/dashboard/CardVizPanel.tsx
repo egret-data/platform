@@ -29,10 +29,22 @@ export function CardVizPanel({ chart, override, columns, rows = [], onChange }: 
   const patch = (next: Record<string, unknown>) => onChange({ ...(override ?? {}), ...next });
 
   // styleColumnsFor inspects a handful of fields; hand it those, from the effective config.
+  //
+  // EVERY KEY IT INSPECTS, and the two below were missing. `styleColumnsFor` filters the pie on
+  // `params.pie` and the map on `params.map?.metric`; a synthetic object without those keys filters
+  // on `undefined`, matches nothing, and the Formatting section simply does not appear — silently,
+  // because an empty `styleColumns` is also the legitimate "not configured yet" state. The pie half
+  // was fixed in the builder route (`routes/explore/ChartExplore.tsx`) and not here, so a dashboard
+  // card could format a pie's slices in one editor and not the other; the map half would have been
+  // INTRODUCED by narrowing the map's arm if this were left alone — the arm that used to fall
+  // through to every column now filters, and filtering on a key that is not there hides the lot.
+  // One omission, two symptoms, so both keys land together.
   const styleParams = {
     spec: eff.params.spec,
     cartesian: config as { yMetrics: string[] },
     scalar: config as { metric?: string },
+    pie: config as { dimensions?: string[]; metric?: string },
+    map: config as { region?: string; metric?: string },
     metrics: isParamsV2(eff.params) ? (eff.params.settings["pivot.metrics"] as string[]) : undefined,
     rows: isParamsV2(eff.params) ? (eff.params.settings["pivot.rows"] as string[]) : undefined,
     cols: isParamsV2(eff.params) ? (eff.params.settings["pivot.cols"] as string[]) : undefined,

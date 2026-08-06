@@ -176,3 +176,59 @@ export function formatValue(value: unknown, columnType: string, fmt: ColumnForma
   const s = String(value);
   return fmt.prefix || fmt.suffix ? `${fmt.prefix ?? ""}${s}${fmt.suffix ?? ""}` : s;
 }
+
+/**
+ * A DIMENSION CELL AS THE TEXT A CHART DRAWS FOR IT — the format when the column has one, the raw
+ * value when it does not.
+ *
+ * WHY THIS EXISTS AS ONE FUNCTION. `styleColumnsFor` fell through to `return resultColumns` for the
+ * funnel, the box plot, the sankey and the map, so all four handed their DIMENSION a Formatting
+ * accordion while their builders read `columnSettings` for the metric alone — a Date style typed
+ * into the panel, stored in the chart, and drawn nowhere. Measured in the browser on all three that
+ * draw a label. Metabase formats every one of them (`FunnelNormal`'s `formatDimension`,
+ * `echarts/boxplot/model`'s `createXAxisFormatter`, `sankey/model/formatters`' `node`), so the fix
+ * is to read the format, not to withdraw the control — except on the map, whose region name is a
+ * geojson matching key rather than a label and which therefore narrows instead
+ * (`settings/SharedDisplaySections.tsx`).
+ *
+ * Three builders needed the same rule at once, and the rule has a trap in it, so it is written once
+ * here rather than three times there.
+ *
+ * THE TRAP, which `CONSULTED_BY_FORMAT_DATE` above exists for and which has cost this codebase an
+ * axis label once already: `FormatSection`'s `patch` spreads into `{ ...fmt, ...p }`, so merely
+ * RENAMING a column stores `{ column_title: "Month" }` — a truthy object that says nothing about
+ * dates. Handing that to `formatValue` on a temporal column takes `formatDate`'s DEFAULT style and
+ * silently turns "2026-01-01" into "January 1, 2026". A title typed and then deleted leaves
+ * `{ column_title: undefined }`, which is truthy too. So on a temporal column the format has to
+ * SPECIFY date rendering before it wins; `if (fmt)` is the wrong question and was asked twice
+ * before anyone noticed.
+ *
+ * ON A NON-TEMPORAL COLUMN ANY STORED FORMAT WINS, which is the same shape `waterfall.ts`'s
+ * `drawLabel` already uses and is deliberately not guarded further. One consequence worth stating:
+ * a NUMERIC dimension carrying only a `column_title` now renders through `formatNumber`, so "1234"
+ * becomes "1,234". That is what Metabase draws for the same column — it formats the dimension
+ * unconditionally — and it is reachable only on a column the reader has already opened and edited.
+ * Narrowing it further would need a second `satisfies`-checked field list for numbers and text, and
+ * a second mechanism for "does this format say anything" is how the two would come to disagree.
+ *
+ * WHAT IT IS NOT: a bucketing rule. `periodName` / `namesAPeriod` turn a month bucket into
+ * "January 2026" and belong to the charts that already carry a temporal unit (the cartesian, the
+ * waterfall, the smart scalar); none of the three callers here has ever named a period, so adding
+ * one would restyle every existing funnel, box plot and sankey rather than close the defect this is
+ * for. `waterfall.ts`'s `drawLabel` is the shape to copy when one of them grows a unit.
+ */
+export function formatDimensionValue(
+  value: unknown,
+  columnType: string,
+  fmt: ColumnFormat | undefined,
+): string {
+  const formatWins = fmt != null && (isTemporalType(columnType) ? specifiesDateRendering(fmt) : true);
+  if (formatWins) {
+    const out = formatValue(value, columnType, fmt);
+    // An empty result is not a label. `formatValue` returns "" for a null cell, and so does the
+    // fallback below — but a format that produces "" from a real value would blank a step name or
+    // an axis tick, which reads as missing data rather than as a formatting choice.
+    if (out !== "") return out;
+  }
+  return String(value ?? "");
+}

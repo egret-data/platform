@@ -271,3 +271,52 @@ describe("SharedDisplaySections — the date/time controls reach both surfaces",
     expect(screen.getByLabelText("Time style")).toBeInTheDocument();
   });
 });
+
+/**
+ * THE MAP IS THE ONE THAT NARROWS RATHER THAN THREADS.
+ *
+ * Four viz types fell through `styleColumnsFor`'s bare `return resultColumns` while their builders
+ * read `columnSettings` for the metric only — funnel, box plot, sankey and map. Three of them are
+ * fixed by THREADING the dimension's format into the label the builder draws, because that is what
+ * Metabase does (`FunnelNormal`'s `formatDimension`, `echarts/boxplot/model`'s
+ * `createXAxisFormatter`, `sankey/model/formatters`' `node`). The map is the exception on BOTH
+ * counts and so takes the other fix.
+ *
+ * WHAT METABASE DOES: `ChoroplethMap.tsx`'s only `settings.column?.(…)` call is on the METRIC, for
+ * the legend. The region cell is run through `getCanonicalRowKey`, which lowercases and maps names
+ * to codes, and the name actually PAINTED comes off the geojson feature's own `region_name`
+ * property — never the column. `Map.tsx` passes `showColumnSetting` on neither its dimension nor
+ * its metric, so its settings sidebar exposes no per-column format widget at all.
+ *
+ * WHY EGRET CANNOT THREAD IT EVEN IF IT WANTED TO: `MapChart` builds every series datum as
+ * `{ name: normalizeKey(cell) }`, and ECharts matches that string against the registered geojson's
+ * `properties.key` to decide which shape to shade. A prefix or a date style applied there does not
+ * restyle a label — it breaks the match and the region stops being drawn. There is no second place
+ * the raw region text is rendered: the tooltip's name is the matched key.
+ *
+ * The METRIC stays, and that is a deliberate divergence from Metabase's "no widget at all". egret's
+ * map genuinely formats its metric — `MapChart`'s `fmt` feeds both `itemTooltip` and the
+ * `visualMap` range labels, and `options/map.ts` records that being added on purpose — so removing
+ * the control would take away a setting that IS honoured, which is the same defect in the mirror.
+ */
+describe("styleColumnsFor — map", () => {
+  const cols = [
+    { name: "state", type: "varchar" },
+    { name: "revenue", type: "double" },
+  ];
+
+  it("offers the metric only — the region is a geojson key, not a label", () => {
+    const params = { map: { region: "state", metric: "revenue" } } as never;
+    expect(styleColumnsFor("map", params, cols).map((c) => c.name)).toEqual(["revenue"]);
+  });
+
+  it("offers nothing while the map is still unconfigured", () => {
+    expect(styleColumnsFor("map", {} as never, cols)).toEqual([]);
+  });
+
+  // The three that thread keep their dimension, and this is what stops a later narrowing from
+  // being copied across the fall-through by symmetry: they are NOT the same case.
+  it.each(["funnel", "boxplot", "sankey"] as const)("still offers every column on a %s", (viz) => {
+    expect(styleColumnsFor(viz, {} as never, cols).map((c) => c.name)).toEqual(["state", "revenue"]);
+  });
+});
