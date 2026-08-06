@@ -132,9 +132,13 @@ function TotalsControl({ config, onChange, columns }: VizControlProps<PivotConfi
     <div className="space-y-1">
       <SectionLabel>Totals</SectionLabel>
       <div className="space-y-2.5 pt-1.5">
-        {row("show-row-totals", "Row totals", config.showRowTotals ?? true, "showRowTotals",
+        {/* "Show …", the way Metabase titles `pivot.show_row_totals` / `pivot.show_column_totals`
+            (`PivotTable/settings.ts`) and the way the third switch in this very group already read.
+            A bare noun next to a toggle reads as a heading for the row rather than as the thing the
+            toggle turns on, which is why two of these three needed the verb and one did not. */}
+        {row("show-row-totals", "Show row totals", config.showRowTotals ?? true, "showRowTotals",
           "A Total column down the right-hand side.")}
-        {row("show-col-totals", "Column totals", colTotalsOn, "showColTotals",
+        {row("show-col-totals", "Show column totals", colTotalsOn, "showColTotals",
           "Subtotal bands per group, and a Grand totals row at the bottom.")}
         {row("condense-totals", "Condense duplicate totals", config.condense ?? true, "condense",
           "Hides a subtotal row when its group has only one row, so the two would read the same.")}

@@ -764,7 +764,30 @@ export function FormatOptions({ config, onChange }: SectionProps) {
   );
 }
 
-/** Goal (reference line) value and its label. */
+/**
+ * Goal (reference line) value and its label.
+ *
+ * THE LABEL FOLLOWS THE VALUE, because with no goal there is nothing to label and `buildCartesianOption`
+ * reads `goalLabel` only inside `if (cfg.goalValue != null && series.length > 0)`. Left ungated it
+ * was a box that stored a string no renderer would ever consult — the same defect this panel's
+ * neighbours have had removed from them repeatedly (`view_as` off every non-table viz, the date
+ * separator under an unslashed style, the y-axis split on a breakout chart).
+ *
+ * NO `showGoal` BOOLEAN, DELIBERATELY, and this is where egret and Metabase diverge on purpose.
+ * Metabase carries `graph.show_goal` (`lib/settings/goal.ts`) and gates BOTH controls on it, but it
+ * needs that boolean: its `graph.goal_value` is a `widget: "number"` with `getDefault: () => 0`, so
+ * the field always holds a number and cannot say "no goal" by itself. egret's `goalValue` is
+ * `number | undefined` behind a DecimalInput placeheld "none", and all three builders that draw a
+ * goal line already gate on `!= null` — so "empty" is already the honest off switch, and a second
+ * key expressing the same state would only create a `{ goalValue: 50, showGoal: false }` that
+ * nothing knows how to draw. See `__tests__/goalLabelGating.test.tsx` for the full argument.
+ *
+ * `!= null` and not truthiness: a goal of 0 is a break-even line and a legitimate thing to label.
+ *
+ * The COLUMN COUNT is deliberately unchanged. The grid stays two-wide with one cell empty rather
+ * than reflowing to a single full-width box, so that typing a goal does not shove the Goal value
+ * field sideways under the reader's cursor.
+ */
 export function GoalOptions({ config, onChange }: SectionProps) {
   return (
     <div className="grid grid-cols-2 gap-2 pt-2">
@@ -776,10 +799,12 @@ export function GoalOptions({ config, onChange }: SectionProps) {
           value={config.goalValue}
           onChange={(goalValue) => onChange({ goalValue })} />
       </label>
-      <label className="space-y-1">
-        <span className="text-xs text-muted-foreground">Goal label</span>
-        <Input className="h-8" placeholder="Goal" value={config.goalLabel ?? ""} onChange={(e) => onChange({ goalLabel: e.target.value || undefined })} />
-      </label>
+      {config.goalValue != null && (
+        <label className="space-y-1">
+          <span className="text-xs text-muted-foreground">Goal label</span>
+          <Input className="h-8" placeholder="Goal" value={config.goalLabel ?? ""} onChange={(e) => onChange({ goalLabel: e.target.value || undefined })} />
+        </label>
+      )}
     </div>
   );
 }

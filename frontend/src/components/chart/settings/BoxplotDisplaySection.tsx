@@ -122,11 +122,17 @@ export function BoxplotDisplaySection({ config, onChange }: Props) {
             value={config.goalValue}
             onChange={(goalValue) => onChange({ goalValue })} />
         </label>
-        <label className="space-y-1">
-          <span className="text-xs text-muted-foreground">Goal label</span>
-          <Input className="h-8" placeholder="Goal" aria-label="Goal label" value={config.goalLabel ?? ""}
-            onChange={(e) => onChange({ goalLabel: e.target.value || undefined })} />
-        </label>
+        {/* GATED ON THE GOAL VALUE, the same rule and the same reason as `GoalOptions` in
+            `CartesianDisplaySection` — this builder reads `cfg.goalLabel` only inside
+            `if (cfg.goalValue != null)`, so with no goal the box stored a string nothing would
+            draw. `!= null` rather than truthiness, because 0 is a legal goal. */}
+        {config.goalValue != null && (
+          <label className="space-y-1">
+            <span className="text-xs text-muted-foreground">Goal label</span>
+            <Input className="h-8" placeholder="Goal" aria-label="Goal label" value={config.goalLabel ?? ""}
+              onChange={(e) => onChange({ goalLabel: e.target.value || undefined })} />
+          </label>
+        )}
       </div>
     </div>
   );

@@ -634,9 +634,24 @@ export default function ChartExplore() {
             )}
             {/* Its own tab, the way Metabase splits Columns | Conditional Formatting. Stacked in
                 with the rest, it made the pivot's panel the longest in the app and the reason it
-                read as cut off. Only table and pivot have rules, so the tab only exists there. */}
+                read as cut off. Only table and pivot have rules, so the tab only exists there.
+
+                NAMED AFTER THE FEATURE, NOT AFTER COLOUR. It read "Colors" while the section
+                heading inside it read "Conditional formatting" (`SharedDisplaySections`) — one
+                feature under two names, and the shorter one describes the effect rather than the
+                thing. Metabase's own section is `Conditional Formatting` (`Table.tsx`,
+                `PivotTable/settings.ts`); the lower-case f is deliberate, because Metabase is
+                itself inconsistent about it (`RuleListing.tsx` writes "Conditional formatting")
+                and egret's existing heading already picked one.
+
+                IT FITS, MEASURED — this is the widest label in the strip and the strip does not
+                wrap. Read off the live panel: the tab list is 255px with a 16px gap and the label
+                renders at 139px in the panel's 13px/500 Inter, against Data at 29 and Display at
+                45. 29 + 16 + 45 + 16 + 139 = 245. Only table and pivot reach this branch and
+                neither of them draws the Axes tab, so 245 is the worst case rather than a
+                best one. */}
             {hasConditionalRules && (
-              <TabsTrigger value="rules" className={UNDERLINE_TRIGGER}>Colors</TabsTrigger>
+              <TabsTrigger value="rules" className={UNDERLINE_TRIGGER}>Conditional formatting</TabsTrigger>
             )}
           </TabsList>
 

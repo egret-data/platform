@@ -3,6 +3,7 @@ import { Hash, Calendar, Type, ChevronDown, type LucideIcon } from "lucide-react
 import { isNumericType, isTemporalType, type ColumnFormat } from "../format-types";
 import { Input } from "@/components/ui/input";
 import { DecimalInput } from "./DecimalInput";
+import { CurrencySelect } from "./CurrencySelect";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import {
@@ -190,10 +191,23 @@ export function ColumnFormatFields({
 
             {fmt.number_style === "currency" && (
               <div className="flex gap-2">
-                <Field label="Currency">
-                  <Input className="h-8" value={fmt.currency ?? "USD"}
-                    onChange={(e) => patch({ currency: e.target.value.toUpperCase() })} />
-                </Field>
+                {/* A PICKER, NOT A TEXT BOX — see `CurrencySelect`, and `currencies.ts` for where
+                    the list comes from and why it is vendored rather than taken from `Intl`. The
+                    box this replaces was pre-filled `USD` and upper-cased whatever was typed, so
+                    it accepted `VNND` and `dong` alike; `formatNumber` then hands the string to
+                    `Intl.NumberFormat` as `opts.currency`, which throws a RangeError on an unknown
+                    code — during the option build, which is the failure mode `safeDecimals` in the
+                    same file records as replacing the whole card with an error message.
+
+                    NOT a `Field`: `Field` wraps its child in a `<label>`, and a `<label>` around a
+                    combobox trigger makes the click on the label re-fire on the button, which
+                    toggles the popover shut the moment it opens. The name comes from the control's
+                    own `aria-label` instead, which is what every other non-native control in this
+                    panel does. */}
+                <div className="block min-w-0 flex-1 space-y-1">
+                  <span className="text-xs text-muted-foreground">Currency</span>
+                  <CurrencySelect value={fmt.currency} onChange={(currency) => patch({ currency })} />
+                </div>
                 <Field label="Display">
                   <Select value={fmt.currency_style ?? "symbol"}
                     onValueChange={(v) => patch({ currency_style: v as ColumnFormat["currency_style"] })}>
@@ -252,6 +266,16 @@ export function ColumnFormatFields({
                   <SelectItem value=".,">100,000.00</SelectItem>
                   <SelectItem value=", ">100 000,00</SelectItem>
                   <SelectItem value=",.">100.000,00</SelectItem>
+                  {/* The two Metabase offers that egret did not, and the reason the gap mattered:
+                      there was NO WAY to render a number with no thousands separator. The stored
+                      string is "[decimal][thousands]", so "no separator" is a ONE-character value
+                      whose missing second character `applySeparators` reads as the empty string.
+
+                      The apostrophe is U+2019 (’), which is what Metabase's option is — `".’"`.
+                      An ASCII `'` would draw identically and be a different stored string, so a
+                      chart moved between the two apps would silently lose the setting. */}
+                  <SelectItem value=".">100000.00</SelectItem>
+                  <SelectItem value=".’">100’000.00</SelectItem>
                 </SelectContent>
               </Select>
             </Field>
