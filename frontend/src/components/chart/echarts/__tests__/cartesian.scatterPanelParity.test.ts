@@ -22,10 +22,15 @@ import { buildCartesianOption, type CartesianBuildConfig } from "../options/cart
  * WHAT WAS ALREADY HONEST AND IS DELIBERATELY NOT TOUCHED, because the sweep that produced this
  * list over-reported three keys and the corrections belong in the record:
  *
- *   - `trendLine` — `TrendOption` returns `null` for `kind === "scatter"`, so the row is not on
- *     offer on EITHER scatter flavour. (Metabase's `ScatterViz` does spread `GRAPH_TREND_SETTINGS`,
- *     so egret is the narrower one here; that gap predates this change and closing it is a builder
- *     feature, not a panel/builder disagreement.)
+ *   - `trendLine` — THIS ENTRY WAS WRONG AND THE BLOCK AT THE FOOT OF THIS FILE IS THE CORRECTION.
+ *     It read: "`TrendOption` returns `null` for `kind === "scatter"`, so the row is not on offer on
+ *     EITHER scatter flavour… that gap predates this change and closing it is a builder feature,
+ *     not a panel/builder disagreement." The first clause was a fact about `TrendOption` stated as
+ *     a fact about scatters, and the conclusion followed from it: a scatter with a DIMENSION on x
+ *     never reaches `scatterXY` at all, and the ordinary path has drawn its trend line for as long
+ *     as the switch has existed. So it was a panel/builder disagreement — the same one this file is
+ *     about, with the arrow reversed, which is why a sweep looking only for offered-and-discarded
+ *     keys could not see it.
  *   - `maxCategories` — `viz/cartesian.tsx` declares the control only for `kind !== "scatter"`.
  *   - `xLabelRotation` / `xLabelCompact` — the Category-ticks select renders on every cartesian
  *     kind, but its Rotate-45°, Rotate-90° and Compact items are `disabled` exactly when
@@ -254,5 +259,86 @@ describe("scatterXY — hidden and reordered bands", () => {
     expect(names(build({ seriesLabels: { rev: "Revenue" }, hiddenSeries: ["rev"] }))).toEqual([]);
     expect(names(build({ seriesLabels: { rev: "Revenue" }, hiddenSeries: ["Revenue"] })))
       .toEqual(["Revenue"]);
+  });
+});
+
+/**
+ * THE TREND LINE, AND THE CORRECTION TO THIS FILE'S OWN NOTE ABOUT IT.
+ *
+ * The header above listed `trendLine` under "what was already honest", on the ground that
+ * `TrendOption` returns `null` for `kind === "scatter"` so "the row is not on offer on EITHER
+ * scatter flavour", and concluded that "closing it is a builder feature, not a panel/builder
+ * disagreement". The second half of that is wrong, and this block is the measurement that settles
+ * it.
+ *
+ * #428 swept in ONE DIRECTION — a key the panel offers and the builder throws away — and found
+ * eleven. This is the other direction: a key the BUILDER ALREADY HONOURS and the panel does not
+ * offer. `buildCartesianOption` early-returns into `scatterXY` only for `kind === "scatter" &&
+ * cfg.xMetric && cfg.yMetrics.length > 0`; a scatter with a dimension on x falls through to the
+ * ordinary path, where `if (cfg.trendLine) series.push(...trendSeries(series))` has stood at both
+ * call sites since the trend line was written. So on that flavour egret has been drawing a trend
+ * line all along and the panel was the only thing withholding the switch — a panel/builder
+ * disagreement of exactly the kind #428 existed to close, pointing the other way.
+ *
+ * WHY THE METRIC-VS-METRIC FLAVOUR STAYS OUT, and this is a MEANINGFULNESS argument rather than an
+ * unhonoured-key one — the distinction `AxisRangeOptions` draws between the x-scale select (hidden
+ * on a metric x, because a metric x has no scale to choose) and the Y group (not hidden, because
+ * that would be a control appearing and vanishing as a Data-tab select changed).
+ *
+ * egret's trend line is a fit against SERIES POSITION: `trendData` solves `y = m·i + b` where `i`
+ * is the datum's INDEX, and it runs before `applyXScale` re-keys the points onto real coordinates,
+ * so even on a time axis the fit is over position and not over the x value. That is a coherent
+ * statistic on an ordered axis and has no referent at all on a metric-vs-metric scatter, whose
+ * points are an unordered cloud — index there is the row order the engine happened to return.
+ * Fitting y on x instead would be a DIFFERENT statistic under the same switch on one chart type,
+ * which is worse than not offering it.
+ *
+ * MEASURED IN METABASE, which lands in the same place by a different route. `ScatterPlot.tsx` does
+ * spread `GRAPH_TREND_SETTINGS`, but `graph.show_trendline.getHidden` is
+ * `!insights || insights.length === 0 || graphDimensions.length > 1`, and `insights` is produced
+ * server-side only for a `timeseries?` result — `(pos? (count numbers)) (= (count datetimes) 1)`,
+ * `analyze/fingerprint/insights.clj`. Its fit is `y = f(days-from-epoch)` and
+ * `model/trend-line.ts` writes a trend datum only where `tryGetDate(x) != null`. Driven live at
+ * localhost:3033: `MB · Scatter` (`graph.dimensions: ["price"]`, a numeric x) shows a Display tab of
+ * "Goal line / Additional tooltip columns" and NO Trend line; the same question re-displayed as a
+ * scatter over `CREATED_AT: Quarter` shows "Goal line / Trend line / Stack series / Additional
+ * tooltip columns" and draws two dashed fits. So Metabase offers it on the temporal-x scatter and
+ * withholds it on the numeric-x one, which is the line drawn here.
+ *
+ * A CHART THAT CARRIES `trendLine: true` INTO A METRIC X keeps the stored key and draws nothing —
+ * asserted below. Inert rather than wrong, recoverable by clearing the X metric, and identical to
+ * what `xScale` already does on that flavour.
+ */
+describe("scatterXY — the trend line, on the flavour that has one", () => {
+  /** The enabling fact, and the reason the panel row below is safe to offer: the builder has always
+   *  drawn this. `__trend` is the marker `trendSeries` stamps and the legend/tooltip/aria filters
+   *  all key off. */
+  it("draws a trend series on a scatter with a dimension on x", () => {
+    const o = buildCartesianOption(cols, rows, {
+      kind: "scatter", xAxis: "d", yMetrics: ["rev"], trendLine: true,
+    }) as unknown as { series: { name: string; __trend?: boolean; data: unknown[] }[] };
+    const trends = o.series.filter((s) => s.__trend);
+    expect(trends).toHaveLength(1);
+    expect(trends[0].name).toBe("rev trend");
+    // Fitted through the four points, not copied from them: rev is 10/20/30/40 against index
+    // 0..3, so the least-squares line IS the data and every fitted value is exact.
+    expect(trends[0].data).toEqual([10, 20, 30, 40]);
+  });
+
+  /** …and the vacuity guard for it: without the switch there is no such series, so the assertion
+   *  above is about `trendLine` and not about something the scatter always appends. */
+  it("draws none without the switch", () => {
+    const o = buildCartesianOption(cols, rows, {
+      kind: "scatter", xAxis: "d", yMetrics: ["rev"],
+    }) as unknown as { series: { __trend?: boolean }[] };
+    expect(o.series.filter((s) => s.__trend)).toHaveLength(0);
+  });
+
+  /** The metric-vs-metric flavour, pinned as the DIVERGENCE it is: the key rides along in the
+   *  config and `scatterXY` never calls `trendSeries`. This is what the panel keeping its half
+   *  below is keeping its half OF. */
+  it("draws none on a metric-vs-metric scatter, which has no series position to fit against", () => {
+    const o = build({ trendLine: true }) as unknown as { series: { __trend?: boolean }[] };
+    expect(o.series.filter((s) => s.__trend)).toHaveLength(0);
   });
 });
