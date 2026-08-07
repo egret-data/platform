@@ -256,8 +256,23 @@ function FunnelTypeControl({ config, onChange }: VizControlProps<Cfg>) {
 
 // The steps list sits under DATA, beside the column that produces them, and only the funnel type
 // is a display choice — Metabase's own split, checked in its panel.
+//
+// `cardOverridable` on the steps, and Metabase's source settles it rather than a guess: `Funnel.tsx`
+// gives `funnel.dimension`, `funnel.metric` AND `funnel.rows` all `getSection: () => t`Data``, then
+// marks only the first two `dashboard: false` — the flag that hides a setting from dashboard UI
+// (`settings/typed-utils.ts`). So the step list is a Data-tab setting Metabase offers on a dashcard,
+// and egret's could not be reached from one.
+//
+// It passes egret's own test too: `buildSpec` is `h.dimsAndMetrics([c.dimension], [c.metric], s)`,
+// and neither `stepOrder` nor `hiddenSteps` is in it — both are applied when the funnel is drawn.
+// Hiding a step does NOT drop its row from the query; it stops that band being painted, which is why
+// a card may do it and may not choose the column that produced the bands.
+//
+// That Metabase keeps `getSection` and `dashboard` as two INDEPENDENT fields is the clearest
+// statement of why `VizControl.cardOverridable` exists: a tab and an eligibility are different
+// questions, and egret had one field answering both.
 const funnelDisplay: VizControl<Cfg>[] = [
-  { id: "steps", section: "data", render: FunnelStepsControl },
+  { id: "steps", section: "data", cardOverridable: true, render: FunnelStepsControl },
   { id: "type", section: "display", render: FunnelTypeControl },
 ];
 

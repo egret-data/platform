@@ -409,4 +409,61 @@ describe("DashboardView — presentation settings filed under the Data tab still
       expect(stored["map.metric"]).toBe("rev");
     });
   });
+
+  /**
+   * F3, THE THIRD INSTANCE — found by sweeping the descriptors while here, and kept because it is
+   * MEASURED rather than merely plausible. Metabase's own source settles it without touching the
+   * parity dashboard: `Funnel.tsx` gives all three of `funnel.dimension`, `funnel.metric` and
+   * `funnel.rows` `getSection: () => t`Data``, and marks only the first two `dashboard: false` —
+   * the flag whose contract is spelled out in `settings/typed-utils.ts` ("Settings with
+   * `dashboard: false` are hidden from dashboard UI"). So Metabase puts the step list on the Data
+   * tab AND offers it on a dashcard, which is exactly the combination egret could not express.
+   *
+   * egret's own test agrees: the funnel's `buildSpec` is `h.dimsAndMetrics([c.dimension],
+   * [c.metric], s)`, and `stepOrder`/`hiddenSteps` appear nowhere in it — the reorder and the hide
+   * are applied when the funnel is drawn.
+   *
+   * THAT METABASE MODELS THIS WITH TWO INDEPENDENT FIELDS IS THE POINT, and it is the strongest
+   * evidence for the mechanism this PR chose: `getSection` and `dashboard` are separate in
+   * Metabase because a tab and an eligibility are separate questions. egret had one field doing
+   * both jobs, which is why all three of these defects exist.
+   */
+  it("a funnel card can reorder and hide its steps, and the change lands on the card", async () => {
+    const user = userEvent.setup();
+    charts = [{
+      id: "f", name: "Funnel", dataset_id: "d", viz_type: "funnel",
+      params: {
+        version: 2,
+        spec: { metrics: ["rev"], dimensions: ["step"], columns: [], filters: [], orderby: [], row_limit: 100, rollup_groups: [] },
+        settings: { "funnel.dimension": "step", "funnel.metric": "rev" },
+      },
+    }];
+    cards = [chartCard("f")];
+    chartsChRunSpec.mockResolvedValue({
+      data: {
+        columns: [{ name: "step", type: "varchar" }, { name: "rev", type: "double" }],
+        rows: [["Visit", 100], ["Cart", 60], ["Buy", 20]],
+      },
+    });
+
+    renderView();
+    await openVizPanel();
+
+    // Vacuity guard: the funnel's DISPLAY control, which this panel already offered.
+    expect(screen.getByLabelText("Funnel type")).toBeInTheDocument();
+
+    expect(await screen.findByLabelText("Show Visit")).toBeInTheDocument();
+    expect(screen.getByLabelText("Show Cart")).toBeInTheDocument();
+    expect(screen.getByLabelText("Show Buy")).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText("Show Cart"));
+
+    await vi.waitFor(() => {
+      const stored = JSON.parse(screen.getByTestId("disp-c1").getAttribute("data-viz-override")!);
+      expect(stored["funnel.hiddenSteps"]).toStrictEqual(["Cart"]);
+    });
+    // The step column itself stays out — it IS the query, exactly as Metabase's `dashboard: false`
+    // on `funnel.dimension` says.
+    expect(screen.queryByLabelText("Stage (dimension)")).toBeNull();
+  });
 });
