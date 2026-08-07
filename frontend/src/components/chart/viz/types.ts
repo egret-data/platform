@@ -87,7 +87,42 @@ export interface VizControlProps<Cfg> {
 
 export interface VizControl<Cfg> {
   id: string;
+  /**
+   * WHICH BUILDER TAB this control renders under, and nothing more. `ChartExplore` is the only
+   * consumer that reads it as a tab (`tab="data"`/`tab="display"`), and `StudioPanel` filters on it.
+   *
+   * It is NOT the answer to "does this setting touch the query" — see `cardOverridable`, which is.
+   * The two coincided for long enough that `CardVizPanel` borrowed this field as a proxy for the
+   * second question, which is the defect that flag exists to close.
+   */
   section: "data" | "display";
+  /**
+   * This DATA-tab control changes nothing about the query, so a dashboard card may override it.
+   *
+   * `CardVizPanel` offers presentation overrides and never data overrides — a card may restyle its
+   * chart, but it may not silently re-point the query that the dashboard's filters and its other
+   * cards are reasoning about. That line is right and stays. What it had no way to express is a
+   * setting that belongs on the Data TAB (because that is where Metabase puts it, and because it
+   * reads beside the fields it describes) while being pure presentation. Two are:
+   *
+   *   - the trend's Comparisons — `smartscalar`'s `buildSpec` reads `dimension` and `metric` only,
+   *     and `computeTrend` is pure over rows already fetched;
+   *   - the map's `mapKey` — `mapDescriptor.buildSpec` reads `metric` and `region` only; the key
+   *     picks which geojson the SAME rows are painted onto.
+   *
+   * AN ALLOW-LIST RATHER THAN A RECLASSIFICATION, deliberately, and this is the decision worth
+   * recording. Flipping either control to `section: "display"` would have been one word and would
+   * also have MOVED IT IN THE BUILDER — the trend's Comparisons out of the Data tab where Metabase
+   * has it and where `fields.tsx`'s `data` field explains it belongs, for the sake of a different
+   * surface entirely. Opt-in keeps `section` meaning exactly one thing, leaves every builder tab
+   * where it was, and makes each inclusion a claim a reviewer can check against that viz's
+   * `buildSpec`. It is the same shape #427 gave the Axes group: the descriptor declares, the card
+   * panel asks by name.
+   *
+   * THE DEFAULT IS THE SAFE ONE. Omitted means "assume this is query state", so a new data control
+   * is excluded from cards until someone has looked at `buildSpec` and said otherwise.
+   */
+  cardOverridable?: boolean;
   /** Heading this control sits under; ungrouped controls render before any group. */
   group?: string;
   /** Hidden behind the group's "More options" disclosure. */

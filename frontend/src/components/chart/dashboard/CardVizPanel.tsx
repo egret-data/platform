@@ -1,5 +1,5 @@
 import { applyVizOverride } from "./params";
-import { StudioPanel, hasAxesControls } from "@/components/chart/StudioPanel";
+import { StudioPanel, hasAxesControls, hasCardDataControls } from "@/components/chart/StudioPanel";
 import { SectionLabel } from "@/components/chart/settings/SectionLabel";
 import { SharedDisplaySections, styleColumnsFor, ruleColumnsFor } from "@/components/chart/settings/SharedDisplaySections";
 import { getDescriptor } from "@/components/chart/viz/registry";
@@ -86,6 +86,40 @@ export function CardVizPanel({ chart, override, columns, rows = [], onChange }: 
       </div>
       {descriptor && (
         <>
+          {/* ── PRESENTATION SETTINGS THAT LIVE ON THE DATA TAB ──
+              `StudioPanel`'s display filter is `section === "display"`, and this panel asked for the
+              display tab and nothing else — so a control the builder puts on the DATA tab could not
+              reach a card even when it changed nothing about the query. Two do:
+
+                - the trend's Comparisons. Metabase's dashcard modal for its trend has Data | Display
+                  and Data holds "Comparisons — Previous month — Add comparison"; egret's card had no
+                  way to re-base the number at all, and no hint the control existed. `smartscalar`'s
+                  `buildSpec` reads `dimension` and `metric` only.
+                - the map's Region map. Metabase's Map dashcard modal offers Map type, Region map,
+                  Metric field, Region field and Color; egret's offered Color, so a US-states card
+                  could not be shown as World or Vietnam. `mapDescriptor.buildSpec` reads `metric`
+                  and `region` only — `mapKey` decides which geojson the same rows are painted onto.
+
+              WHAT IS NOT HERE IS THE POINT. The map's region and metric ARE the query and stay
+              excluded: a card may restyle its chart, not silently re-point what it asks for while
+              the dashboard's filters and its other cards reason about the old one. That is why this
+              is an allow-list keyed on `cardOverridable` and not a widened section filter — see
+              `VizControl.cardOverridable`, where the default is the safe one.
+
+              FIRST IN THE SCROLL, because Metabase orders its dashcard modal Data then Display, and
+              because these controls describe WHAT the card says before the rest describes how it
+              looks. Unlabelled: unlike Axes below, these are individually-picked controls that each
+              draw their own heading, so a wrapper called "Data" would be both redundant and a lie
+              about what a card can change. */}
+          {hasCardDataControls(descriptor) && (
+            <StudioPanel
+              {...studioProps}
+              descriptor={descriptor}
+              onConfigChange={((p: object) =>
+                onChange(mergeVizSettings(override ?? {}, descriptor, { ...(config as object), ...p } as never))) as (p: never) => void}
+              tab="card-data"
+            />
+          )}
           <StudioPanel
             {...studioProps}
             descriptor={descriptor}

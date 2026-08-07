@@ -128,7 +128,23 @@ function TrendComparisonsControl({ config, onChange, temporalUnits }: VizControl
   );
 }
 
-const trendData: VizControl<Cfg>[] = [{ id: "comparisons", section: "data", render: TrendComparisonsControl }];
+/**
+ * `cardOverridable` because a comparison is PRESENTATION, however firmly it sits on the Data tab.
+ *
+ * The tab placement is right and is not what changes here: Metabase puts Comparisons on Data, beside
+ * the primary-number picker, and `fields.tsx`'s `data` field records why. What was wrong is that
+ * `CardVizPanel` read `section` as "is this query state", so a trend on a dashboard could not be
+ * re-based at all — no "vs previous month", no custom value, and no hint the control existed.
+ *
+ * The claim this flag makes, checkable against the descriptor immediately below: `buildSpec` reads
+ * `c.dimension` and `c.metric` and derives its own `orderby` from the dimension. `comparisons` is
+ * not in it, and no comparison type issues a second query — `computeTrend` is pure over the series
+ * the card has already fetched (`trend-comparison.ts`). Overriding it restyles a card; it cannot
+ * re-point one.
+ */
+const trendData: VizControl<Cfg>[] = [
+  { id: "comparisons", section: "data", cardOverridable: true, render: TrendComparisonsControl },
+];
 
 /** The progress bar's colour and its goal-from-a-column, both Metabase's. */
 function ProgressDisplayControl({ config, onChange, metrics }: VizControlProps<Cfg>) {
