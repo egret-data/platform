@@ -4,7 +4,9 @@ import { createElement } from "react";
 import { SIMPLE_DESCRIPTORS } from "../simple";
 import { StudioPanel } from "@/components/chart/StudioPanel";
 import { buildPieOption } from "@/components/chart/echarts/options/pie";
+import { funnelSteps } from "@/components/chart/echarts/options/funnel";
 import { temporalLabel } from "@/components/chart/temporal-units";
+import type { ColumnFormat } from "@/components/chart/format-types";
 import type { VizControlProps } from "../types";
 
 /**
@@ -46,6 +48,7 @@ describe("the pie's slice list, through the descriptor's own control", () => {
       resultColumns: cols,
       rows,
       temporalUnits: {},
+      columnSettings: {},
       unitRow: () => null,
     } as VizControlProps<Record<string, unknown>>));
 
@@ -149,7 +152,7 @@ describe("the pie's slice list, through the descriptor's own control", () => {
     render(createElement(control.render, {
       config: { ...base, sliceThreshold: 26 },
       onChange, columns: [], metrics: [], resultColumns: cols, rows,
-      temporalUnits: {}, unitRow: () => null,
+      temporalUnits: {}, columnSettings: {}, unitRow: () => null,
     } as VizControlProps<Record<string, unknown>>));
     expect(screen.getByLabelText("Move Widget up")).toBeDisabled();
     expect(screen.getByLabelText("Move Gadget down")).toBeDisabled();
@@ -227,6 +230,7 @@ describe("the pie's slice list under a temporal extraction unit", () => {
       resultColumns: cols,
       rows,
       temporalUnits: units,
+      columnSettings: {},
       unitRow: () => null,
     } as VizControlProps<Record<string, unknown>>));
 
@@ -288,6 +292,7 @@ describe("the pie's slice list under a temporal extraction unit", () => {
         resultColumns={cols}
         rows={rows}
         temporalUnits={temporalUnits}
+        columnSettings={{}}
         unitRow={() => null}
         tab="display"
       />,
@@ -315,6 +320,126 @@ describe("the pie's slice list under a temporal extraction unit", () => {
 });
 
 /**
+ * THE STEPS LIST NAMES A STEP THE WAY THE FUNNEL DRAWS IT.
+ *
+ * #423 gave the funnel's DIMENSION its own format — `funnelSteps` runs each step name through that
+ * column's `column_settings`, so a month-bucketed funnel with a Date style draws "January 2026".
+ * `FunnelStepsControl` went on listing `String(row[dimensionIndex])`, so the panel read
+ * `2026-01-01` beside a chart reading "January 2026" and there was nothing on screen to connect
+ * the two. The audit that recorded this could not measure it: the parity harness's funnel runs on
+ * a TEXT step column, where the raw cell and the formatted cell are the same string, so the
+ * fixtures below are the point — a text-dimension fixture is blind to this in exactly the way the
+ * pie block above records for truncation units.
+ *
+ * WHAT DID NOT CHANGE, AND MUST NOT. The raw cell is the IDENTITY: `stepOrder` and `hiddenSteps`
+ * store it, and `FunnelChart` drills on it. Keying the list on the drawn label would silently drop
+ * a hand-made order the first time anyone picked a date style — the drill-on-display-strings defect
+ * four chart families have now had. So the row SHOWS the label and STORES the raw, and both tests
+ * below assert the pair together; either alone would pass against the wrong fix.
+ *
+ * The raw is also still on screen, muted, beside the label — `FormatSection` renders a renamed
+ * column the same way (`column_title` first, then the real name). Without it the panel would name
+ * a step one thing while every control on the row acts on another, which is the mismatch that made
+ * this worth fixing rather than a second spelling of it.
+ */
+describe("the funnel's steps list, against the funnel the chart draws", () => {
+  const funnel = SIMPLE_DESCRIPTORS.find((d) => d.key === "funnel")!;
+  const control = funnel.controls.find((c) => c.id === "steps")!;
+  const cols = [{ name: "d", type: "timestamp" }, { name: "cnt", type: "double" }];
+  const rows: unknown[][] = [["2026-01-01", 10], ["2026-02-01", 5]];
+  const base = { dimension: "d", metric: "cnt" };
+  const columnSettings = { d: { date_style: "MMMM YYYY" } };
+
+  const drawnNames = (cfg: Record<string, unknown> = {}) =>
+    funnelSteps(cols, rows, { ...base, columnSettings, ...cfg }).map((s) => s.name);
+
+  const renderPanel = (
+    cfg: Record<string, unknown> = {},
+    onChange: (patch: Record<string, unknown>) => void = () => {},
+    formats: Record<string, ColumnFormat> = columnSettings,
+  ) =>
+    render(createElement(control.render, {
+      config: { ...base, ...cfg },
+      onChange,
+      columns: [], metrics: [],
+      resultColumns: cols,
+      rows,
+      temporalUnits: {},
+      columnSettings: formats,
+      unitRow: () => null,
+    } as VizControlProps<Record<string, unknown>>));
+
+  it("draws a funnel whose step names are nothing like the raw cells", () => {
+    // The premise, asserted rather than assumed: this fixture CAN tell the two namings apart.
+    expect(drawnNames()).toEqual(["January 2026", "February 2026"]);
+    for (const raw of ["2026-01-01", "2026-02-01"]) expect(drawnNames()).not.toContain(raw);
+  });
+
+  it("shows the drawn label for each step, with the stored key beside it", () => {
+    renderPanel();
+    for (const drawn of drawnNames()) expect(screen.getByText(drawn)).toBeInTheDocument();
+    // The key stays visible — the row's own controls act on it, so hiding it would leave the
+    // panel naming a step one thing and editing another.
+    for (const raw of ["2026-01-01", "2026-02-01"]) expect(screen.getByText(raw)).toBeInTheDocument();
+  });
+
+  /**
+   * THE ROUND TRIP, and the half that makes the display change safe: a hide authored HERE has to
+   * reach the step the chart DREW, via the raw key. Fed back into `funnelSteps` rather than
+   * asserted as text, so a key that merely looks plausible ("January 2026") still fails.
+   */
+  it("stores the raw cell, so a hide authored in the panel reaches the drawn step", () => {
+    const onChange = vi.fn();
+    renderPanel({}, onChange);
+    fireEvent.click(screen.getByLabelText("Show 2026-01-01"));
+    const patch = onChange.mock.calls.at(-1)![0] as { hiddenSteps: string[] };
+    expect(patch.hiddenSteps).toEqual(["2026-01-01"]);
+    expect(drawnNames(patch)).toEqual(["February 2026"]);
+  });
+
+  /**
+   * THE HAZARD EVERY ONE OF THESE FORMAT FIXES RECORDS. `FormatSection`'s patch spreads, so a
+   * RENAME stores `{column_title: "Month"}` — truthy, and silent about dates. `formatValue` on a
+   * temporal column would take `formatDate`'s default style and turn "2026-01-01" into
+   * "January 1, 2026", i.e. a rename that quietly restyles every row. `funnelSteps` guards that
+   * with `formatDimensionValue`; the panel has to use the SAME function, or the two disagree in
+   * exactly the state this test names.
+   */
+  it("is not restyled by a format that says nothing about dates", () => {
+    renderPanel({}, () => {}, { d: { column_title: "Month" } });
+    expect(screen.getByText("2026-01-01")).toBeInTheDocument();
+    expect(screen.queryByText("January 1, 2026")).toBeNull();
+    // …and with the raw and the label identical there is no second, muted copy of it.
+    expect(screen.getAllByText("2026-01-01")).toHaveLength(1);
+  });
+
+  /**
+   * THE SHELL SEAM, the reason this was deferred out of #423 and the only part of it that is not
+   * local to the control. `column_settings` belongs to the SHELL, not to any descriptor's config,
+   * so the control can only read it if `VizControlProps` carries it — exactly as `temporalUnits`
+   * is carried for the pie above. Rendering the control directly cannot catch a `StudioPanel` that
+   * accepts the map and drops it on the floor, which is what this asserts.
+   */
+  it("carries column_settings through the real StudioPanel to the descriptor's control", () => {
+    render(
+      <StudioPanel
+        descriptor={funnel}
+        config={base}
+        onConfigChange={() => {}}
+        columns={[]} metrics={[]}
+        resultColumns={cols}
+        rows={rows}
+        temporalUnits={{}}
+        columnSettings={columnSettings}
+        unitRow={() => null}
+        tab="data"
+      />,
+    );
+    expect(screen.getByText("January 2026")).toBeInTheDocument();
+  });
+});
+
+/**
  * THE SANKEY'S THIRD DATA FIELD IS CALLED "VALUE".
  *
  * Metabase's `metricSetting("sankey.value", …)` is titled `Value` (`SankeyChart/chart-definition.ts`)
@@ -335,7 +460,7 @@ describe("the sankey's data fields, as the panel spells them", () => {
       config: {},
       onChange: () => {},
       columns: [], metrics: [], resultColumns: [], rows: [],
-      temporalUnits: {}, unitRow: () => null,
+      temporalUnits: {}, columnSettings: {}, unitRow: () => null,
     } as VizControlProps<Record<string, unknown>>));
 
   it("labels the value column Value, not Metric", () => {

@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import type { DatasetColumn, DatasetMetric } from "@/api/datasets";
+import type { ColumnFormat } from "@/components/chart/format-types";
 import { SectionLabel } from "@/components/chart/settings/SectionLabel";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import type { VizControl, VizControlProps, VizDescriptor } from "./viz/types";
@@ -22,6 +23,11 @@ interface Props<Cfg> {
   rows: unknown[][];
   /** The units `rows` were bucketed by — see `VizControlProps.temporalUnits`, which this fills. */
   temporalUnits: Record<string, string>;
+  /** The chart's `column_settings` — see `VizControlProps.columnSettings`, which this fills.
+   *  Required rather than defaulted here: a caller that owns the map and forgets to pass it would
+   *  otherwise get an empty one, and a control silently naming its rows the un-formatted way is
+   *  precisely the defect this seam exists to close. */
+  columnSettings: Record<string, ColumnFormat>;
   unitRow: (col?: string) => ReactNode;
   /**
    * Which panel tab to render. "axes" is not a `section` any control declares — it is the
@@ -44,8 +50,8 @@ interface Props<Cfg> {
  * any specific viz — which is the whole point of the registry.
  */
 export function StudioPanel<Cfg>({
-  descriptor, config, onConfigChange, columns, metrics, resultColumns, rows, temporalUnits, unitRow,
-  tab, hasMoreBelow,
+  descriptor, config, onConfigChange, columns, metrics, resultColumns, rows, temporalUnits,
+  columnSettings, unitRow, tab, hasMoreBelow,
 }: Props<Cfg>) {
   const shown = descriptor.controls.filter((c) => {
     if (tab === "axes") return c.section === "display" && c.group === AXES_GROUP;
@@ -57,7 +63,8 @@ export function StudioPanel<Cfg>({
     return <p className="text-xs text-muted-foreground">No {tab} options for this chart type.</p>;
   }
   const controlProps = {
-    config, onChange: onConfigChange, columns, metrics, resultColumns, rows, temporalUnits, unitRow,
+    config, onChange: onConfigChange, columns, metrics, resultColumns, rows, temporalUnits,
+    columnSettings, unitRow,
   };
   // Inside the Axes TAB the group heading would just repeat the tab's own name, so everything
   // there renders flat — including the advanced ones, which no longer have a group to hide in.

@@ -26,6 +26,7 @@ describe("StudioPanel renders bar's grouped Display controls", () => {
       ["east", 2],
     ],
     temporalUnits: {},
+    columnSettings: {},
     unitRow: () => null,
     tab: "display" as const,
   };
@@ -90,6 +91,7 @@ describe("StudioPanel: per-series line settings are one click from the series' o
       ["east", 2, 2],
     ],
     temporalUnits: {},
+    columnSettings: {},
     unitRow: () => null,
     tab: "display" as const,
   };

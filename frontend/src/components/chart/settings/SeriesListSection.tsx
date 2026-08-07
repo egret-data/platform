@@ -53,6 +53,14 @@ export function SeriesListSection({
   order?: string[];
   hidden?: string[];
   colors?: Record<string, string>;
+  /**
+   * What each row is CALLED, where that differs from the key it is stored under. Two callers, one
+   * meaning: with `renameable` it is the author's stored override (`seriesLabels`) and the input
+   * edits it; without, it is a label the caller COMPUTED — the funnel runs its steps through the
+   * dimension's `column_settings` exactly as `funnelSteps` does — and the row shows it read-only
+   * beside the key. Either way `names`, and everything `onChange` writes, stays keyed on the raw
+   * value; this map only ever decides what a row says.
+   */
   labels?: Record<string, string>;
   /** Combo only: how each series is drawn. Absent for every other kind, whose display is fixed. */
   types?: Record<string, SeriesDisplay>;
@@ -167,8 +175,20 @@ export function SeriesListSection({
           ) : (
             // Boxed like the editable variant, so a row without an input still reads as a row
             // rather than as text floating beside a switch. Metabase frames these the same way.
-            <div className="flex h-7 min-w-0 flex-1 items-center rounded-md border px-3 text-sm" title={name}>
-              <span className="truncate">{name}</span>
+            //
+            // THE LABEL FIRST, THE KEY BESIDE IT — `FormatSection`'s exact shape for a renamed
+            // column (`column_title`, then the real name in muted `text-xs`). The funnel's steps
+            // are drawn through the dimension's own format, so the row has to be able to say
+            // "January 2026" while every control on it still acts on `2026-01-01`; showing only
+            // the label would name a step one thing and edit another, and showing only the key is
+            // the divergence being closed. Suppressed when they are the same string, which is the
+            // common case (a text dimension, or no format set) — a row reading "Paid Paid" would be
+            // noise on every funnel that has no format at all.
+            <div className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md border px-3 text-sm" title={name}>
+              <span className="truncate">{labels?.[name] ?? name}</span>
+              {labels?.[name] != null && labels[name] !== name && (
+                <span className="shrink-0 truncate text-xs text-muted-foreground">{name}</span>
+              )}
             </div>
           )}
           {hasLineSettings?.(name, naturalIndex.get(name) ?? i) && (

@@ -13,6 +13,8 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SERIES_PALETTE } from "@/components/chart/echarts/palette";
 import { pieSliceRows } from "@/components/chart/echarts/options/pie";
+// The funnel's own naming function, imported rather than restated — see `FunnelStepsControl`.
+import { formatDimensionValue } from "@/components/chart/format";
 
 /** Metabase’s `color("accent1")`, the progress bar’s default. */
 const PROGRESS_DEFAULT_COLOR = SERIES_PALETTE[1];
@@ -166,32 +168,44 @@ const progressDisplay: VizControl<Cfg>[] = [{ id: "display", section: "display",
  * The funnel's steps, in order, each hideable — Metabase's `funnel.rows`. Names come from the
  * last result rather than anything precomputed, the same way the cartesian series list works.
  *
- * THE RAW CELL, DELIBERATELY, and it is now the one place a step is named that way. `funnelSteps`
- * draws each step through the dimension's own `column_settings`, so a month-bucketed funnel given a
- * date style reads "January 2026" on the chart and `2026-01-01` in this list. The RAW value is what
- * `stepOrder` and `hiddenSteps` store — matching them against a formatted name would drop a
- * hand-made order the moment anyone chose a format — so what is stated here is the key, and it is
- * at least honest about that.
+ * THE RAW CELL IS THE KEY AND THE FORMATTED CELL IS THE LABEL, which is the whole shape of this
+ * control. `stepOrder` and `hiddenSteps` store the RAW value and `FunnelChart` drills on it, so
+ * `names` — and therefore everything `onChange` writes below — is built by stringifying the column
+ * and nothing else. Matching a stored order against a formatted name would drop a hand-made order
+ * the moment anyone picked a date style, which is the drill-on-display-strings defect four chart
+ * families have now had.
  *
- * SHOWING THE FORMATTED LABEL HERE IS A SHELL CHANGE, NOT A CONTROL ONE, which is why it is not in
- * this PR. `SeriesListSection` already takes a `labels` map, so the display half is three lines;
- * what it needs is the chart's `column_settings`, and `VizControlProps` carries the config, the
- * dataset and the last result but no shell settings at all. Adding one prop for one control would
- * put a shell-owned map into every viz descriptor's signature — the same "shared display sections
- * belong to the SHELL" boundary the studio work drew — so it wants doing once, for every control
- * that could use it, rather than smuggled in here.
+ * WHAT THE ROW SAYS is the other half, and it was missing. #423 gave the dimension its own format:
+ * `funnelSteps` names each step `formatDimensionValue(raw, type, columnSettings[dimension])`, so a
+ * month-bucketed funnel with a Date style drew "January 2026" while this list read `2026-01-01`
+ * with nothing on screen connecting them. `labels` carries the drawn name across, computed HERE
+ * with the builder's own function rather than restated — a second spelling of a formatting rule is
+ * how the panel and the chart diverged in the first place. `SeriesListSection` shows the label with
+ * the key beside it, so the row names the step the way the chart does without hiding what its
+ * switch and its arrows act on.
+ *
+ * `columnSettings` reaches this control through `VizControlProps` — a shell-owned map, threaded the
+ * once for every control that lists dimension VALUES rather than added for this one. The deferral
+ * note this comment replaces argued that adding a prop for a single control would put shell state
+ * into every descriptor's signature; what settled it is that `temporalUnits` is already there for
+ * exactly this reason on the pie's slice list, so the seam existed and only this map was missing
+ * from it.
  */
-function FunnelStepsControl({ config, onChange, resultColumns, rows }: VizControlProps<Cfg>) {
+function FunnelStepsControl({ config, onChange, resultColumns, rows, columnSettings }: VizControlProps<Cfg>) {
   const dim = typeof config.dimension === "string" ? config.dimension : undefined;
   const di = dim ? resultColumns.findIndex((c) => c.name === dim) : -1;
   if (di < 0) return null;
   const names = [...new Set(rows.map((r) => String((r as unknown[])[di] ?? "")))].filter((n) => n !== "");
   if (names.length === 0) return null;
+  const dimType = resultColumns[di]?.type ?? "varchar";
+  const dimFormat = dim ? columnSettings[dim] : undefined;
+  const labels = Object.fromEntries(names.map((n) => [n, formatDimensionValue(n, dimType, dimFormat)]));
   return (
     <div className="space-y-1.5">
       <div className="text-xs text-muted-foreground">Steps</div>
       <SeriesListSection
         names={names}
+        labels={labels}
         order={config.stepOrder as string[] | undefined}
         hidden={config.hiddenSteps as string[] | undefined}
         renameable={false}

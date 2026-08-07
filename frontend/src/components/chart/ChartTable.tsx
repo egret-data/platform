@@ -285,12 +285,32 @@ export function ChartTable({
     ...(paginationEnabled ? { getPaginationRowModel: getPaginationRowModel() } : {}),
   });
 
-  /** `col_<i>` sizing -> widths by column NAME, pruned to columns that still exist. */
+  /**
+   * `col_<i>` sizing -> widths by column NAME, pruned to columns that still exist.
+   *
+   * ROUNDED, because `TableState.columnWidths` is documented "colName -> px" and the pivot's
+   * writer (`ChartExplore`'s `onResizeColumn`) has always rounded — this was the one of the two
+   * that did not. The fraction has exactly one source: the keyboard route starts from
+   * `el.getBoundingClientRect().width` when a column has no stored width, which in Chrome is
+   * something like `398.21875`. Tanstack's drag handler cannot produce one on its own (it adds an
+   * integer `clientX` delta to `header.getSize()`), but it inherits one, because the float this
+   * used to store became that column's `getSize()` from then on.
+   *
+   * HERE AND NOT IN `ResizeHandle`, which would look like the shared place to put it: the flat
+   * table's DRAG does not go through the handle's `onResize` at all (it hands tanstack's
+   * `getResizeHandler` to `dragHandlers`), so a round there would cover the keyboard and miss the
+   * mouse. Rounding belongs to whatever WRITES the store, and this function is it.
+   *
+   * HERE AND NOT AT RENDER, which would have had the creep the round-trip test rules out: every
+   * later gesture starts from the committed number, so rounding once at the commit takes the error
+   * against the DOM a single time and bounds it at half a pixel forever. Rounding only on the way
+   * out, with the float still seeding the next gesture, would re-introduce it on every commit.
+   */
   const commitWidths = (sizing: ColumnSizingState) => {
     const widths: Record<string, number> = {};
     Object.entries(sizing).forEach(([id, px]) => {
       const name = columns[Number(id.slice(4))]?.name;  // "col_3" -> 3
-      if (name) widths[name] = px as number;
+      if (name) widths[name] = Math.round(px as number);
     });
     onTableStateChange?.({ ...tableState, columnWidths: widths });
   };

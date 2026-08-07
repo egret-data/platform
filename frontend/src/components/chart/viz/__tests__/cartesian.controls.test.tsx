@@ -76,6 +76,7 @@ describe("cartesian controls are grouped and per-kind", () => {
     ],
     rows: [["2026-01", 1, 2], ["2026-02", 3, 4]],
     temporalUnits: {},
+    columnSettings: {},
     unitRow: () => null,
   };
 
@@ -197,6 +198,7 @@ describe("cartesian controls are grouped and per-kind", () => {
     ],
     rows: [["2026-01", "North", 1], ["2026-01", "South", 2], ["2026-02", "North", 3]],
     temporalUnits: {},
+    columnSettings: {},
     unitRow: () => null,
   };
 
@@ -223,6 +225,7 @@ describe("cartesian controls are grouped and per-kind", () => {
     resultColumns: [{ name: "price", type: "double" }, { name: "rating", type: "double" }],
     rows: [],
     temporalUnits: {},
+    columnSettings: {},
     unitRow: () => null,
   };
 
@@ -279,7 +282,7 @@ describe("cartesian controls are grouped and per-kind", () => {
       const control = ctrls(kind).find((c) => c.id === "seriesList");
       render(createElement(control!.render, {
         config, onChange: () => {}, columns: [], metrics: [],
-        resultColumns: cols, rows, temporalUnits: {}, unitRow: () => null,
+        resultColumns: cols, rows, temporalUnits: {}, columnSettings: {}, unitRow: () => null,
       } as VizControlProps<CartesianConfig>));
     };
     /** A native `<input type="color">` normalises its value to lower-case (HTML spec), which is also
@@ -394,7 +397,7 @@ describe("cartesian controls are grouped and per-kind", () => {
       const control = ctrls(kind).find((c) => c.id === "seriesOptions");
       render(createElement(control!.render, {
         config, onChange: () => {}, columns: [], metrics: [],
-        resultColumns: cols, rows, temporalUnits: {}, unitRow: () => null,
+        resultColumns: cols, rows, temporalUnits: {}, columnSettings: {}, unitRow: () => null,
       } as VizControlProps<CartesianConfig>));
     };
 
@@ -483,7 +486,7 @@ describe("cartesian controls are grouped and per-kind", () => {
       render(createElement(control!.render, {
         config, onChange: () => {}, columns: [], metrics: [],
         resultColumns: [{ name: "month", type: "varchar" }, { name: "revenue", type: "double" }],
-        rows: [], temporalUnits: {}, unitRow: () => null,
+        rows: [], temporalUnits: {}, columnSettings: {}, unitRow: () => null,
       } as VizControlProps<CartesianConfig>));
     };
 

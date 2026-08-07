@@ -423,6 +423,71 @@ describe("buildCartesianOption — stack totals (Metabase parity 2a-pt2)", () =>
     const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev", "cnt"], stacked: true, showStackTotal: true, showLegend: true }) as any;
     expect(opt.legend.data).toEqual(["rev", "cnt"]);
   });
+
+  /**
+   * TWO BOOLEANS, FOUR STATES, AND METABASE'S THREE-VALUE CONTROL IS THE SAME FOUR — recorded here
+   * because it is the answer to a question that has now been asked twice, and answering it from the
+   * panel alone gets it wrong.
+   *
+   * Metabase spells this as `graph.show_values` (a boolean) plus `graph.show_stack_values`, a
+   * segmented Total | Segments | Both that `getHidden` suppresses unless the chart is stacked, has a
+   * bar, AND `graph.show_values === true` (`lib/settings/graph.ts`). Read as a control list, egret
+   * looks two capabilities short. Read as a STATE SPACE it is not, because Metabase's control has no
+   * "off": `show_values: false` collapses it, so its four reachable states are exactly
+   *
+   *     show_values=false                -> nothing drawn          == showLabels F, showStackTotal F
+   *     show_values=true,  "total"       -> totals only            == showLabels F, showStackTotal T
+   *     show_values=true,  "series"      -> segment labels only    == showLabels T, showStackTotal F
+   *     show_values=true,  "all"         -> both                   == showLabels T, showStackTotal T
+   *
+   * The "totals only" leg is the one that settles it, and it is the leg that reads like a bug from
+   * the panel: `model/series.ts`'s `shouldShowStackedBarSeriesLabels` is `=== "series" || === "all"`,
+   * so Metabase's own "Total" DRAWS NO SEGMENT LABELS. egret's "stack totals on, data labels off" is
+   * that state, not a state Metabase forbids — which is why `showStackTotal` deliberately does NOT
+   * consult `showLabels`. Adding that precondition to match `getHidden` would DELETE a picture both
+   * products can draw, and it would delete the one Metabase makes the DEFAULT.
+   *
+   * WHAT IS GENUINELY DIFFERENT is that default, and it is left alone on purpose.
+   * `getDefaultShowStackValues` returns `"total"`, so Metabase at stacked + labels-on draws totals
+   * and no segment labels where egret draws segment labels and no totals. Matching it needs
+   * `showStackTotal` to distinguish unset from false and needs segment labels suppressed when the
+   * resolved mode is "total" — i.e. the stored shape becomes an enum in all but name, with a
+   * `cartesian-codec` key, a builder-config change and a migration for every chart storing a boolean
+   * today, and it silently repaints every existing stacked chart that has labels on. That is a
+   * larger change than this file's subject and wants its own comparison against a live Metabase.
+   *
+   * These four cases are a CHARACTERIZATION test: they passed the day they were written, because
+   * nothing here is a fix. They exist so the next reading of the panel cannot quietly add the
+   * precondition — mutation-checked by adding `&& cfg.showLabels` to both `resolveStacked(cfg) &&
+   * cfg.showStackTotal` guards, which fails the second case below.
+   */
+  const seriesLabelled = (opt: any) =>
+    opt.series.filter((s: any) => !s.__total && !s.__trend).some((s: any) => s.label?.show);
+  const hasTotal = (opt: any) => opt.series.some((s: any) => s.__total);
+  const build = (showLabels: boolean, showStackTotal: boolean) =>
+    buildCartesianOption(cols, rows, {
+      kind: "bar", xAxis: "region", yMetrics: ["rev", "cnt"], stacked: true, showLabels, showStackTotal,
+    }) as any;
+
+  it("draws nothing with both off — Metabase's show_values: false", () => {
+    const opt = build(false, false);
+    expect([hasTotal(opt), seriesLabelled(opt)]).toEqual([false, false]);
+  });
+
+  it("draws the total with data labels OFF — Metabase's \"Total\", which is its default", () => {
+    const opt = build(false, true);
+    expect([hasTotal(opt), seriesLabelled(opt)]).toEqual([true, false]);
+  });
+
+  it("draws segment labels with stack totals off — Metabase's \"Segments\"", () => {
+    const opt = build(true, false);
+    expect([hasTotal(opt), seriesLabelled(opt)]).toEqual([false, true]);
+  });
+
+  it("draws both with both on — Metabase's \"Both\"", () => {
+    const opt = build(true, true);
+    expect([hasTotal(opt), seriesLabelled(opt)]).toEqual([true, true]);
+  });
 });
 
 describe("buildCartesianOption — per-series color (Metabase parity)", () => {

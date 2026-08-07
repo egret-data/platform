@@ -69,6 +69,11 @@ export function CardVizPanel({ chart, override, columns, rows = [], onChange }: 
     // dashboard has no unit picker (see `unitRow` below), which is exactly why this cannot be
     // derived here: the answer lives in the spec the card's query ran with.
     temporalUnits: eff.params.spec.temporal_units ?? {},
+    // The EFFECTIVE formats — chart settings with this card's override already applied, which is
+    // the same map `SharedDisplaySections` below edits and the same one the card's chart draws
+    // through. A control that lists dimension VALUES (the funnel's steps) names them with it; see
+    // `VizControlProps.columnSettings`.
+    columnSettings,
     unitRow: () => null,
   };
 

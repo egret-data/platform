@@ -142,6 +142,7 @@ describe("fieldDescriptor: the `dimensions` field kind (multi-select, up to `max
         resultColumns={[]}
         rows={[]}
         temporalUnits={{}}
+        columnSettings={{}}
         unitRow={(c) => (c ? <div data-testid={`unit-${c}`}>unit:{c}</div> : null)}
       />,
     );
