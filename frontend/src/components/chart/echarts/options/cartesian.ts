@@ -128,6 +128,54 @@ export interface CartesianBuildConfig {
   markers?: "auto" | "on" | "off";
   /** Per-series overrides of the chart-wide line appearance, keyed by series name. */
   seriesLine?: Record<string, LineSeriesStyle>;
+  /** Dataset metrics fetched for the tooltip and plotted nowhere — see `CartesianConfig` for why
+   *  this is metrics rather than Metabase's columns, and `extraTooltipMetrics` for what this
+   *  builder does and does not accept from it. */
+  tooltipMetrics?: string[];
+}
+
+/** One extra tooltip row: the metric it names and the value at the datum being described. */
+interface TooltipExtra { metric: string; value: unknown }
+
+/**
+ * The tooltip metrics this chart will actually SHOW, from the ones it was asked to show.
+ *
+ * Four things are dropped here, and each one is a row that would otherwise be a lie or a duplicate:
+ *
+ *  - ANY of them, once a breakout names the series. With a `series` column the metric is aggregated
+ *    per (x, band), so there is no single value for the category — and egret's cartesian tooltip is
+ *    `trigger: "axis"`, showing every band at once, so an honest rendering needs one row per band
+ *    with a second name to disambiguate it. Metabase reaches the per-band value because its
+ *    cartesian tooltip is `trigger: "item"` throughout (`echarts/cartesian/option/tooltip.tsx:58`)
+ *    and its extra rows are built from ONE hovered `seriesModel` and its datum
+ *    (`CartesianChart/events.ts:369`). Ours is a different shape, so this is a scope line rather
+ *    than a gap, and `cartesianDescriptor.buildSpec` declines to FETCH them in the same state —
+ *    the two halves have to agree or the chart pays for a column it discards, which is the very
+ *    defect this PR's other half fixes on the scatter.
+ *  - A metric the chart already plots. Metabase's `alreadyIncludedColumns` rule
+ *    (`shared/settings/cartesian-chart.ts:469`): an ADDITIONAL row is one that says something new,
+ *    and a second row repeating the series' own number is worse than the feature's absence. On a
+ *    scatter that set includes the x metric and the bubble metric, both of which the tooltip
+ *    already prints.
+ *  - A metric the RESULT does not carry. A stored key outlives what named it — a dataset drifts, or
+ *    a hand-written dashboard-card override arrives carrying a setting whose spec was never
+ *    re-run (`applyVizOverride`: "the query `spec` is never overridden"). Neither may put the word
+ *    `undefined` in a tooltip.
+ *  - A duplicate, so a name listed twice does not print twice.
+ */
+function extraTooltipMetrics(cfg: CartesianBuildConfig, idx: Record<string, number>): string[] {
+  const asked = cfg.tooltipMetrics;
+  if (asked == null || asked.length === 0) return [];
+  if (cfg.series != null && cfg.series !== "") return [];
+  const plotted = new Set<string>(cfg.yMetrics);
+  if (cfg.xMetric != null) plotted.add(cfg.xMetric);
+  if (cfg.bubbleMetric != null) plotted.add(cfg.bubbleMetric);
+  const out: string[] = [];
+  for (const m of asked) {
+    if (plotted.has(m) || idx[m] == null || out.includes(m)) continue;
+    out.push(m);
+  }
+  return out;
 }
 
 // The series names a cartesian chart will render — its y-metrics, or the distinct
@@ -1051,27 +1099,70 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
   const di = cfg.xAxis != null ? idx[cfg.xAxis] : undefined;
   const xMetric = cfg.xMetric!;
   const xi = idx[xMetric];
-  const yMetric = cfg.yMetrics[0];
-  const yi = idx[yMetric];
   const gi = cfg.series != null ? idx[cfg.series] : undefined;
   const bi = cfg.bubbleMetric != null ? idx[cfg.bubbleMetric] : undefined;
   const gridLine = resolveColor(CHART_THEME.gridLine, COLOR_FALLBACK.gridLine);
   const axisLabelColor = resolveColor(CHART_THEME.axisLabel, COLOR_FALLBACK.axisLabel);
   const fmtM = (m: string, v: unknown) => formatValue(v, cfg.metricTypes?.[m] ?? "double", cfg.columnSettings?.[m]);
 
-  interface Pt { value: number[]; name: string; bubble?: number }
-  const points: (Pt & { group: string })[] = [];
+  /**
+   * EVERY Y METRIC, WHERE THIS FUNCTION USED TO READ `cfg.yMetrics[0]` AND STOP.
+   *
+   * MEASURED: `yMetrics: ["revenue", "orders"]` on a metric-vs-metric scatter came back with
+   * `series.length === 1`. `YAxisControl` is the shared, uncapped `FieldZone` every cartesian kind
+   * uses and `cartesianDescriptor.buildSpec` puts all of `cfg.yMetrics` into `spec.metrics`, so the
+   * second metric was projected, aggregated, transferred and dropped on the floor. The panel had
+   * gone further still: `cartesianSeriesNames` returns `[...yMetrics]` with no breakout, so the
+   * Series list was offering a colour, a rename and a Show switch for a series nothing drew.
+   *
+   * Drawing them is Metabase's own answer — one `type: "scatter"` series per metric, each encoding
+   * the same x key and its own y (`echarts/cartesian/scatter/option/index.ts:40-56`,
+   * `option/series.ts:60-69`), with no cap on the count (`ScatterViz` sets no
+   * `maxMetricsSupported`, so `getMaxMetricsSupported` returns `Infinity`). Capping the CONTROL at
+   * one instead was the obvious alternative and is rejected in `cartesian.scatterMultiMetric.test.ts`
+   * along with the third option, which was to divert the surplus into the tooltip metrics beside it.
+   *
+   * WITH A BREAKOUT, THE FIRST METRIC ONLY, because the bands are the series then and a cross
+   * product would put two clouds on every band. That is Metabase's rule too
+   * (`lib/graph/columns.ts:117-124`) and, more to the point, it is already egret's everywhere else:
+   * `buildCartesianOption`'s breakout branch takes `cfg.yMetrics[0]`, and `SeriesControl` has
+   * always printed "With a series, only the first metric is plotted." under the select. This chart
+   * used to apply that caption unconditionally; now it applies it where the caption applies.
+   */
+  const drawn = gi != null ? cfg.yMetrics.slice(0, 1) : cfg.yMetrics;
+  /** The metric whose format and title the two shared, chart-wide readers take: the value axis's
+   *  number format and — when there is only one — its title. `baseOption` narrows the same way
+   *  ("An axis plotting several metrics has no one name"). */
+  const yMetric = drawn[0];
+  /** The tooltip metrics, resolved once for the whole chart rather than per point: the answer is a
+   *  property of the config and the result's columns, neither of which varies by row. */
+  const extraMetrics = extraTooltipMetrics(cfg, idx);
+
+  interface Pt { value: number[]; name: string; bubble?: number; extra?: TooltipExtra[] }
+  const points: (Pt & { group: string; metric: string })[] = [];
   for (const r of rows) {
     const x = Number(r[xi]);
-    const y = Number(r[yi]);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    if (!Number.isFinite(x)) continue;
     const b = bi != null ? Number(r[bi]) : undefined;
-    points.push({
-      value: [x, y],
-      name: di != null ? String(r[di] ?? "") : "",
-      ...(b != null && Number.isFinite(b) ? { bubble: b } : {}),
-      group: gi != null ? String(r[gi] ?? "") : "",
-    });
+    // THE EXTRA ROWS RIDE ON THE DATUM, where the ordinary path has to key them by category. A
+    // point here IS a row — no grouping, no folding, no `applyXScale` rewriting the array under it
+    // — so the honest place for a row's other values is the row's own item object, exactly as
+    // `bubble` already does. ECharts hands `params.data` back to the formatter untouched.
+    const extra = extraMetrics.length > 0
+      ? extraMetrics.map((m) => ({ metric: m, value: r[idx[m]] }))
+      : undefined;
+    for (const metric of drawn) {
+      const y = Number(r[idx[metric]]);
+      if (!Number.isFinite(y)) continue;
+      points.push({
+        value: [x, y],
+        name: di != null ? String(r[di] ?? "") : "",
+        ...(b != null && Number.isFinite(b) ? { bubble: b } : {}),
+        ...(extra ? { extra } : {}),
+        group: gi != null ? String(r[gi] ?? "") : "",
+        metric,
+      });
+    }
   }
 
   // The bubble extent spans EVERY point, not each series' own — otherwise the same value would
@@ -1087,16 +1178,28 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
   };
 
   const groups = cfg.series != null ? distinct(points.map((p) => p.group)).map(String) : [""];
+  /**
+   * ONE SERIES PER (band, metric) PAIR — but never a cross product, because the two cases are
+   * mutually exclusive by construction: `drawn` is narrowed to one metric the moment a breakout
+   * exists, so this list is the bands OR the metrics and never both.
+   */
+  const pairs = groups.flatMap((g) => drawn.map((metric) => ({ g, metric })));
   // Keyed by GROUP NAME so a breakout value keeps its colour across every card that breaks out by
   // it — and so an explicit `seriesColors` entry consumes its colour rather than shadowing it.
   //
   // An un-broken-out scatter has one group whose name is the empty string, and hashing THAT would
-  // give every such card the same colour whatever it plots. It is keyed by the y-metric instead —
+  // give every such card the same colour whatever it plots. It is keyed by the metric instead —
   // which is also the name the series is labelled with two lines below, and the key
   // `cartesianSeriesNames` hands the settings panel, so a pinned colour now actually finds its
   // series. Keying the lookup on "" meant `cfg.seriesColors` could never match on this path.
-  const groupKey = (g: string) => (g === "" ? yMetric : g);
-  const groupColors = colorsForKeys(groups.map(groupKey), cfg.seriesColors);
+  //
+  // THE METRIC, NOT `yMetric`, and that is what carried this key through the multi-metric change
+  // unaltered: an un-broken-out scatter's series ARE its metrics now, so "the empty group's name is
+  // its y-metric" becomes "each series' name is its own metric" — the same sentence, once there is
+  // more than one of them. `cartesianSeriesNames` already returned `[...yMetrics]` here, so this is
+  // the builder catching up with the key space the panel was always using.
+  const groupKey = (g: string, metric: string) => (g === "" ? metric : g);
+  const groupColors = colorsForKeys(pairs.map((p) => groupKey(p.g, p.metric)), cfg.seriesColors);
   /**
    * THE DATA LABEL, and it is the Y value on purpose. A point here has two numbers and only one of
    * them can be written beside it without the label becoming a second chart; `baseOption`'s own
@@ -1106,23 +1209,28 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
    * THROUGH THE EXACT FORMATTER, not the compact one two lines down. A label sits on the data and
    * an axis tick sits on the scale; the normal path splits them the same way (`fmt` for labels,
    * `fmtFor` for axes), so "Shorten large numbers" shortens an axis and never a value.
+   *
+   * PER SERIES, because each cloud now carries its own metric and therefore its own format — a
+   * shared closure over `yMetric` would have printed the first metric's currency prefix beside the
+   * second metric's count.
    */
-  const pointLabel = cfg.showLabels
+  const pointLabelFor = (metric: string) => (cfg.showLabels
     ? {
       label: {
         show: true, fontSize: CHART_THEME.labelFontSize, fontWeight: CHART_THEME.labelWeight,
         position: "top" as const,
         formatter: (p: { value: unknown }) =>
-          fmtM(yMetric, Array.isArray(p.value) ? p.value[1] : p.value),
+          fmtM(metric, Array.isArray(p.value) ? p.value[1] : p.value),
       },
       // "fit" is the default here too, and a scatter needs it more than a bar chart does: its
       // points overlap by nature, so "all" on a dense plot is a wall of numbers.
       ...(cfg.labelDensity !== "all" ? { labelLayout: { hideOverlap: true } } : {}),
     }
-    : {};
-  const built = groups.map((g) => {
-    const own = points.filter((p) => p.group === g);
-    const color = groupColors[groupKey(g)];
+    : {});
+  const built = pairs.map(({ g, metric }) => {
+    const own = points.filter((p) => p.group === g && p.metric === metric);
+    const key = groupKey(g, metric);
+    const color = groupColors[key];
     return {
       type: "scatter" as const,
       // `groupKey(g)`, NOT the raw `g` — the same key the colour lookup two lines up uses, and for
@@ -1142,20 +1250,20 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
       // out by hand; it is the same value, said once. A breakout band is unaffected either way,
       // `groupKey` being the identity on any non-empty group — which is exactly why a fix that only
       // reached the empty case would look complete and pin nothing.
-      name: cfg.seriesLabels?.[groupKey(g)] ?? groupKey(g),
-      // `groupKey(g)` HERE TOO, and this is the settings key rather than the drill's — see
+      name: cfg.seriesLabels?.[key] ?? key,
+      // `key` HERE TOO, and this is the settings key rather than the drill's — see
       // `settingsKey`, which `applySeriesOrder` below reads it through. The two differ only when
       // `g` is `""`, which happens only without a breakout, and `ChartRenderer` consults
       // `rawSeriesAt` only inside `if (cartesian.series)`. So no drill can observe the difference
       // and the Show switch, which is keyed on what `cartesianSeriesNames` returns, can.
-      __raw: groupKey(g),
+      __raw: key,
       itemStyle: { color, opacity: CHART_THEME.scatterOpacity },
       symbolSize: (_v: unknown, params?: { data?: Pt }) => sizeOf(params?.data),
       // The same lift-and-recede the rest of the family got; a scatter with several bands needs it
       // most, since its points overlap by nature.
       emphasis: { focus: "series" as const },
       blur: { itemStyle: { opacity: CHART_THEME.blurOpacity } },
-      ...pointLabel,
+      ...pointLabelFor(metric),
       data: own,
     };
   });
@@ -1188,17 +1296,26 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
    *
    * The two `show…Label` switches HIDE rather than blank, and the grid gives the 22px back when the
    * bottom title goes: a hidden title that still reserves its gutter is the setting only half done.
+   *
+   * NO Y TITLE ONCE TWO METRICS SHARE THE AXIS, which is `baseOption`'s own `metricTitle` rule ("An
+   * axis plotting several metrics has no one name — the legend names them instead") reaching this
+   * builder with the metrics that reached it. Naming it for `drawn[0]` would label the axis for one
+   * of the two clouds standing on it. An explicit `cfg.yLabel` still wins, as everywhere else: a
+   * reader who has typed a name for the pair has answered the question this rule declines to guess.
    */
   const xTitle = cfg.showXLabel === false ? undefined : (cfg.xLabel || displayTitle(cfg, xMetric));
-  const yTitle = cfg.showYLabel === false ? undefined : (cfg.yLabel || displayTitle(cfg, yMetric));
+  const yTitle = cfg.showYLabel === false
+    ? undefined
+    : (cfg.yLabel || (drawn.length === 1 ? displayTitle(cfg, yMetric) : undefined));
 
   /**
    * THE LEGEND, now an override of the automatic answer rather than the automatic answer alone.
-   * `?? (groups.length > 1)` is the same shape `baseOption` uses (`cfg.showLegend ?? (hasBreakout ||
-   * yMetrics.length > 1)`), and it is read off the GROUPS rather than off the surviving series so
-   * that hiding bands down to one does not silently retract a legend the reader asked for.
+   * `?? (pairs.length > 1)` is the same shape `baseOption` uses (`cfg.showLegend ?? (hasBreakout ||
+   * yMetrics.length > 1)`) — both of its arms, now that both can be true here — and it is read off
+   * the PAIRS rather than off the surviving series so that hiding bands down to one does not
+   * silently retract a legend the reader asked for.
    */
-  const showLegend = cfg.showLegend ?? groups.length > 1;
+  const showLegend = cfg.showLegend ?? pairs.length > 1;
 
   // Goal line — a horizontal reference at goalValue, on the first series' markLine, exactly as
   // `baseOption` draws it. `!= null` and not truthiness: a goal of 0 is a break-even line. Guarded
@@ -1217,12 +1334,30 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
     grid: { ...CHART_THEME.grid, bottom: (CHART_THEME.grid.bottom as number) + (xTitle != null ? 22 : 0) },
     tooltip: {
       trigger: "item", ...tooltipSurface(),
-      formatter: (p: { data: Pt; value: number[] }) => {
+      /**
+       * THE HOVERED POINT'S OWN METRIC, read off the datum rather than closed over. This line used
+       * to name `yMetric` — correct while there was only ever one, and the second cloud on a
+       * two-metric scatter would have reported the first one's name and the first one's format
+       * beside its own number.
+       *
+       * `p.data.metric` and not `p.seriesName`: a renamed series would otherwise be looked up in
+       * `metricTypes` and `columnSettings` under its display label and silently fall back to
+       * `"double"` with no format — the same rename-breaks-the-lookup defect the `__raw`/`name`
+       * split above exists to prevent, one component over.
+       */
+      formatter: (p: { data: Pt & { metric?: string }; value: number[] }) => {
+        const m = p.data.metric ?? yMetric;
         const head = p.data.name ? `${p.data.name}<br/>` : "";
         const bubble = cfg.bubbleMetric != null && p.data.bubble != null
           ? `<br/>${cfg.bubbleMetric}: ${fmtM(cfg.bubbleMetric, p.data.bubble)}`
           : "";
-        return `${head}${cfg.xMetric}: ${fmtM(cfg.xMetric!, p.value[0])}<br/>${yMetric}: ${fmtM(yMetric, p.value[1])}${bubble}`;
+        // The additional tooltip metrics, last and unmarked — see the same block in `baseOption`
+        // for why they sit after everything drawn. They came in on the datum, so the point's own
+        // row is what they describe and no lookup can slide.
+        const extra = (p.data.extra ?? [])
+          .map((e) => `<br/>${displayTitle(cfg, e.metric)}: ${fmtM(e.metric, e.value)}`)
+          .join("");
+        return `${head}${cfg.xMetric}: ${fmtM(cfg.xMetric!, p.value[0])}<br/>${m}: ${fmtM(m, p.value[1])}${bubble}${extra}`;
       },
     },
     ...(showLegend ? { legend: { type: "scroll", bottom: 0, textStyle: { color: axisLabelColor } } } : {}),
@@ -1496,7 +1631,58 @@ export function buildCartesianOption(
   // `__foldedCategory` is not an ECharts key — ECharts ignores what it doesn't know. It rides on
   // the option because the drill needs to recognise the one bar it must refuse, and the option is
   // the only thing both the builder and the click handler hold.
-  return { ...baseOption(cfg, displayCats as (string | number)[], series, size), __foldedCategory: foldedCategory };
+  return {
+    ...baseOption(
+      cfg, displayCats as (string | number)[], series, size,
+      tooltipExtrasByCategory(cfg, idx, rowByCat, categories, displayCats),
+    ),
+    __foldedCategory: foldedCategory,
+  };
+}
+
+/**
+ * The extra tooltip rows for every category on the chart, keyed by the string the FORMATTER will be
+ * handed for that datum.
+ *
+ * KEYED BY CATEGORY AND NOT BY `dataIndex`, which is the one decision in here worth defending.
+ * `applyXScale` FILTERS — a datum whose x will not parse is dropped — so on a value or time x-axis
+ * the series' data array stops being index-aligned with the category list. `ariaPoints` carries the
+ * scar of exactly that mistake, and the note beside it says why it survived so long: a positional
+ * zip "does not read as NaN — it reads as a correct-looking sentence". A category lookup cannot
+ * slide, because both shapes a datum takes carry the category and both surface as `params.name`:
+ * ECharts reports the `xAxis.data` entry on an ordinal axis, and `applyXScale` writes the raw value
+ * into `{value: [x, y], name}` on the other two.
+ *
+ * BOTH SPELLINGS GO IN. A temporal EXTRACTION unit substitutes the categories themselves
+ * (`displayCats`), so the axis says "Wed" where the row holds `3`; registering the display string
+ * beside the raw one costs one Map entry per category and means neither reader has to know which
+ * kind of axis it is looking at. They are the same array — the same object, even — on every chart
+ * that has no extraction unit, and `Map.set` twice with one key is a no-op.
+ *
+ * A FOLDED "Other" GETS NOTHING, deliberately. `foldTail` SUMS the tail into one bucket, which is a
+ * legitimate thing to do to a count and a wrong thing to do to an average or a ratio — and this
+ * function has only the fetched per-category values to work with, not the metric's own aggregate.
+ * "Other" is a bucket the chart invented (`__foldedCategory` exists so the drill can refuse it for
+ * the same reason), so it says nothing rather than something arithmetically false.
+ */
+function tooltipExtrasByCategory(
+  cfg: CartesianBuildConfig,
+  idx: Record<string, number>,
+  rowByCat: Map<string, unknown[]>,
+  categories: unknown[],
+  displayCats: unknown[],
+): Map<string, TooltipExtra[]> | undefined {
+  const names = extraTooltipMetrics(cfg, idx);
+  if (names.length === 0) return undefined;
+  const out = new Map<string, TooltipExtra[]>();
+  categories.forEach((c, i) => {
+    const r = rowByCat.get(String(c));
+    if (r == null) return;
+    const extras = names.map((m) => ({ metric: m, value: r[idx[m]] }));
+    out.set(String(c), extras);
+    out.set(String(displayCats[i]), extras);
+  });
+  return out;
 }
 
 // Shared decoration: type, color, stack, areaStyle, labels, smooth, symbol.
@@ -1674,6 +1860,10 @@ function baseOption(
   series: unknown[],
   /** Absent when the caller has no measurement; see the x-label fit below. */
   size?: EChartsSize,
+  /** The additional tooltip rows for each category, by the key `params.name` will carry — built by
+   *  `tooltipExtrasByCategory`, which is where the keying is argued. Absent on every chart that has
+   *  not asked for any, and on the breakout branch, which cannot answer the question. */
+  tooltipExtras?: Map<string, TooltipExtra[]>,
 ): EChartsCoreOption {
   const horizontal = isHorizontal(cfg);
   const gridLine = resolveColor(CHART_THEME.gridLine, COLOR_FALLBACK.gridLine);
@@ -2406,6 +2596,25 @@ function baseOption(
     // On a value/time x-axis the datum is an [x, y] pair — take y.
     const yOf = (v: unknown) => (Array.isArray(v) ? Number(v[1]) : Number(v));
     const lines = visible.map((p) => `${p.marker ?? ""} ${p.seriesName ?? ""}: <b>${tipFmt(p.seriesName ?? "", yOf(p.value))}</b>`);
+    /**
+     * The additional tooltip metrics, AFTER every plotted series and with no marker of their own —
+     * Metabase renders them `isSecondary: true` (`CartesianChart/events.ts:385`) for the same
+     * reason: a swatch is the reader's link back to something drawn on the chart, and these are the
+     * rows with nothing drawn to link to.
+     *
+     * `p.name` FIRST and `axisValueLabel` only as the fallback, which is the opposite order from
+     * `header` one line up and is deliberate. They agree on an ordinal axis; on a value or time one
+     * `axisValueLabel` is the formatted x COORDINATE while `name` is the datum's own raw category,
+     * which is what this map is keyed on. Reading the header's own answer here would find nothing on
+     * exactly the charts `applyXScale` touches — the silent half of the miss, since a tooltip that
+     * simply omits the rows looks like a chart that was never configured for them.
+     */
+    const extras = tooltipExtras?.get(String(visible[0].name ?? visible[0].axisValueLabel ?? ""));
+    for (const e of extras ?? []) {
+      lines.push(`${displayTitle(cfg, e.metric)}: <b>${
+        formatValue(e.value, cfg.metricTypes?.[e.metric] ?? "double", cfg.columnSettings?.[e.metric])
+      }</b>`);
+    }
     return `${header}<br/>${lines.join("<br/>")}`;
   };
 

@@ -145,6 +145,36 @@ export interface CartesianConfig {
   markers?: "auto" | "on" | "off";
   /** Per-series overrides of the chart-wide line appearance, keyed by series name. */
   seriesLine?: Record<string, LineSeriesStyle>;
+  /**
+   * Dataset METRICS fetched for the tooltip alone — Metabase's "Additional tooltip columns"
+   * (`graph.tooltip_columns`), ported into the one namespace where it can mean something here.
+   *
+   * WHY NOT COLUMNS, WHICH IS WHAT METABASE OFFERS. There, the list is the result's own columns
+   * minus the ones the chart already references (`getAvailableAdditionalColumns`,
+   * `shared/settings/cartesian-chart.ts:458`), and choosing one does not touch the query — measured
+   * by instrumenting `fetch` before opening the sidebar (zero requests) and by the `dataset_query`
+   * staying byte-identical while `visualization_settings` gained the key. That is possible because
+   * Metabase's notebook and its viz settings are SEPARATE: the question may return more than the
+   * chart plots. egret's `buildSpec` derives the query FROM this config, so the two can never
+   * diverge and the option list would be empty on every egret chart that has a tooltip.
+   *
+   * Adding a RAW column instead is not the same feature wearing different clothes. Put in
+   * `dimensions` it joins the `GROUP BY` and makes a different chart; put in `metrics` it does not
+   * resolve at all (`find_metric` matches names against the dataset's stored metrics); wrapped in
+   * `any_value()` server-side it is nondeterministic — "Revenue by Category, also show Product
+   * Name" would show an arbitrary product. Metabase never meets that because its extra column is
+   * itself an aggregation the question's author wrote, which is exactly what a dataset METRIC is.
+   *
+   * HOW IT COSTS ALMOST NOTHING: `spec.metrics` takes a list of metric names and the builder draws
+   * series from `yMetrics`, never from the result columns — so a name here is appended to
+   * `spec.metrics`, aggregated by the engine under the same `GROUP BY`, and drawn nowhere but the
+   * tooltip. See `extraTooltipMetrics` in `echarts/options/cartesian.ts` for what is excluded and
+   * why, and `cartesianDescriptor.buildSpec` for the half that asks for it.
+   *
+   * A QUERY INPUT, therefore, and not a display setting however firmly Metabase files it under
+   * Display — which is why its control lives on the Data tab and is not `cardOverridable`.
+   */
+  tooltipMetrics?: string[];
 }
 export interface PieConfig {
   /** Up to three, drawn as nested rings from the centre out. */
