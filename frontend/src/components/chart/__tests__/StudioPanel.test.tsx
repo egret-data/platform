@@ -32,6 +32,7 @@ const props = {
   onConfigChange: vi.fn(),
   columns: [], metrics: [], resultColumns: [], rows: [],
   temporalUnits: {},
+  columnSettings: {},
   unitRow: () => null,
   tab: "data" as const,
 };
@@ -87,6 +88,7 @@ describe("StudioPanel", () => {
         onConfigChange={vi.fn()}
         columns={[]} metrics={[]} resultColumns={[]} rows={[]}
         temporalUnits={{}}
+        columnSettings={{}}
         unitRow={() => null}
         tab="display"
         hasMoreBelow

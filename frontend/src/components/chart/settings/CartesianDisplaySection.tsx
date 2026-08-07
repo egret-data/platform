@@ -155,7 +155,19 @@ export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionPr
       )}
       {/* Goes with the control it configures: with stacking itself not on offer there is no stack
           for a total to sit on top of. Metabase gates `graph.show_stack_values` on the stack type
-          for the same reason. */}
+          for the same reason.
+
+          AND IT IS NOT ALSO GATED ON `showLabels`, which is the other half of Metabase's `getHidden`
+          (`stackable.stack_type === "stacked" && graph.show_values === true && some series is a
+          bar`). That looks like a missing precondition and is not one. Metabase's control is a
+          three-value Total | Segments | Both with no "off" — `graph.show_values: false` is what
+          turns it off — so its four reachable states are exactly this panel's two booleans, and its
+          "Total" state (`shouldShowStackedBarSeriesLabels` is `"series" || "all"`, so "Total" draws
+          NO segment labels) IS "Stack totals on, Data labels off" here. Copying `getHidden` would
+          hide the control in the one state whose picture Metabase makes the default, and take a
+          reachable chart away with it. The four-state mapping is written out and pinned in
+          `echarts/__tests__/cartesian.test.ts`; the one thing genuinely unmatched is the DEFAULT
+          (Metabase's is "total"), whose cost is recorded there too. */}
       {showStacking && stackModeOf({ kind, stacked: config.stacked, normalized: config.normalized }) === "stacked" && (
         <Toggle id="cz-stacktotal" label="Stack totals" checked={!!config.showStackTotal} onChange={(v) => onChange({ showStackTotal: v })} />
       )}

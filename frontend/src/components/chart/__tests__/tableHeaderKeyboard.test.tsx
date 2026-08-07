@@ -1,9 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
+import { useState } from "react";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ChartTable } from "../ChartTable";
 import { PivotTable } from "../pivot/PivotTable";
 import type { PivotInput } from "../pivot/engine";
+import type { TableState } from "@/api/charts";
 
 /**
  * THE TABLE HEADERS ARE REACHABLE FROM THE KEYBOARD, and every assertion here was written to fail
@@ -101,6 +103,107 @@ describe("ChartTable: the resize separator is operable from the keyboard", () =>
     const th = screen.getByRole("columnheader", { name: /region/ });
     await user.click(within(th).getByRole("separator", { name: "Resize region" }));
     expect(th).toHaveAttribute("aria-sort", "none");
+  });
+});
+
+/**
+ * A PERSISTED COLUMN WIDTH IS A WHOLE NUMBER OF PIXELS, on both tables.
+ *
+ * WHERE THE FRACTION CAME FROM, measured rather than reasoned about. Only ONE of the two resize
+ * routes can produce one. A DRAG goes through tanstack's `getResizeHandler`, whose new size is
+ * `header.getSize() + deltaOffset` — a stored number plus an integer `clientX` difference, so it
+ * is integral as long as what it starts from is. The KEYBOARD route reads
+ * `localSizing[id] ?? el.getBoundingClientRect().width`, and on a column nobody has ever resized
+ * there is no stored value, so the measured rect answers: `398.21875` in Chrome on a table whose
+ * columns share the available width. That float was written straight into `TableState.columnWidths`
+ * and from there into the saved chart, and it then seeded every later drag on that column.
+ *
+ * WHY THIS IS WORTH A LINE OF CODE, given that a quarter-pixel renders identically. The pivot has
+ * ALWAYS rounded (`ChartExplore`'s `onResizeColumn`), the key is documented "colName -> px"
+ * (`api/charts.ts`), and since #422 `table.state` is inside `paramsForSave` and therefore inside
+ * the dirty comparison — so this is the one number in the saved blob whose exact value depends on
+ * the width of the browser window the author happened to have open. Two tables, one control, one
+ * documented unit: the flat table was the odd one out.
+ *
+ * AND THE OBJECTION THAT HAD TO BE ANSWERED FIRST — could rounding make a column CREEP under
+ * repeated resizes, the way an accumulating error does? No, and the second test is the evidence.
+ * Rounding is applied at the COMMIT, and every subsequent gesture starts from the committed value
+ * (`persistedSizing` -> `localSizing` on the keyboard route, `header.getSize()` on the drag route),
+ * never from a fresh measurement. So the error is taken once against the DOM and is bounded at half
+ * a pixel forever after; it cannot compound, because there is no second measurement to compound
+ * with. A `Math.round` applied at RENDER time instead would have had exactly the drift this rules
+ * out, which is why it goes where the value is stored.
+ */
+describe("ChartTable: a persisted width is whole pixels", () => {
+  /** jsdom lays nothing out, so the sub-pixel rect the browser produces has to be supplied. */
+  const FRACTIONAL = 398.21875;
+  function withMeasuredHeaders(run: () => Promise<void>) {
+    const orig = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+      if (this.tagName === "TH") {
+        return { x: 0, y: 0, left: 0, top: 0, right: FRACTIONAL, bottom: 30,
+          width: FRACTIONAL, height: 30, toJSON() {} } as DOMRect;
+      }
+      return orig.call(this);
+    };
+    return run().finally(() => { HTMLElement.prototype.getBoundingClientRect = orig; });
+  }
+
+  it("rounds the measured width a first keyboard resize starts from", async () => {
+    await withMeasuredHeaders(async () => {
+      const user = userEvent.setup();
+      const onTableStateChange = vi.fn();
+      // NO stored width for `region` — that is the whole case. With one stored, the keyboard reads
+      // the stored number and never touches the DOM, which is why the existing test above (200 ->
+      // 216) could not see this.
+      render(<ChartTable columns={COLS} rows={ROWS} onTableStateChange={onTableStateChange} />);
+      const handle = within(screen.getByRole("columnheader", { name: /region/ }))
+        .getByRole("separator", { name: "Resize region" });
+      await tabTo(user, handle);
+      await user.keyboard("{ArrowRight}");
+      // `toStrictEqual` on the whole patch: a width key that is dropped and one that was never
+      // carried are the same object under `toEqual`, and the unit of this key is the point.
+      expect(onTableStateChange.mock.calls[0][0]).toStrictEqual({
+        columnWidths: { region: Math.round(FRACTIONAL) + 16 },
+      });
+    });
+  });
+
+  it("does not creep across repeated resizes once it has rounded", async () => {
+    await withMeasuredHeaders(async () => {
+      const user = userEvent.setup();
+      // CONTROLLED, deliberately: the no-creep claim is about what happens when each commit is fed
+      // BACK in as the next gesture's starting point, and an uncontrolled render never does that.
+      const seen: number[] = [];
+      function Harness() {
+        const [state, setState] = useState<TableState>({});
+        return (
+          <ChartTable
+            columns={COLS}
+            rows={ROWS}
+            tableState={state}
+            onTableStateChange={(next) => {
+              const w = next.columnWidths?.region;
+              if (w != null) seen.push(w);
+              setState(next);
+            }}
+          />
+        );
+      }
+      render(<Harness />);
+      const handle = within(screen.getByRole("columnheader", { name: /region/ }))
+        .getByRole("separator", { name: "Resize region" });
+      await tabTo(user, handle);
+      for (let i = 0; i < 4; i++) await user.keyboard("{ArrowRight}");
+      for (let i = 0; i < 4; i++) await user.keyboard("{ArrowLeft}");
+      expect(seen).toHaveLength(8);
+      // Every value stored is an integer...
+      expect(seen.filter((w) => !Number.isInteger(w))).toEqual([]);
+      // ...and four steps out and four steps back land exactly where the first step did, rather
+      // than half a pixel off it per round trip.
+      expect(seen[7]).toBe(Math.round(FRACTIONAL));
+      expect(seen[3] - seen[0]).toBe(3 * 16);
+    });
   });
 });
 

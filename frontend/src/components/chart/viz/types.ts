@@ -1,6 +1,7 @@
 import type { FC, ReactNode } from "react";
 import type { AnyChartParams, ChartFilter, ChartOrderBy, QuerySpec, VizSettings, VizType } from "@/api/charts";
 import type { ChartTypeMeta } from "@/components/chart/chartTypes";
+import type { ColumnFormat } from "@/components/chart/format-types";
 import type { DatasetColumn, DatasetMetric } from "@/api/datasets";
 
 /** Query state every viz shares; descriptors fold it into the spec they build. */
@@ -55,6 +56,31 @@ export interface VizControlProps<Cfg> {
    * preview renders from.
    */
   temporalUnits: Record<string, string>;
+  /**
+   * The chart's `column_settings`, keyed by result-column name — prefix, suffix, decimals, date
+   * style, `column_title`. SHELL-OWNED: it lives beside `conditional_formatting` in the settings
+   * blob, not inside any descriptor's config, and `SharedDisplaySections` is what edits it.
+   *
+   * WHY A CONTROL NEEDS IT, which is not obvious and was argued the other way first. A control that
+   * lists VALUES of a dimension — the funnel's steps, and the pie's slices after it — is listing
+   * things the chart DRAWS through this map. `funnelSteps` names each step
+   * `formatDimensionValue(raw, type, columnSettings[dimension])`, so without this the panel could
+   * only ever name a step by its raw cell and a month-bucketed funnel read `2026-01-01` in the list
+   * beside "January 2026" on the chart.
+   *
+   * WHAT IT IS NOT FOR: identity. Everything a control STORES — `stepOrder`, `hiddenSteps`,
+   * `sliceOrder`, `hiddenSlices` — keys on the raw value, because a stored curation must survive
+   * someone picking a date style. This map decides what a row SAYS and never what it writes.
+   *
+   * LIVE, not frozen with the result, and deliberately unlike `temporalUnits` above. A unit is a
+   * QUERY input: pairing `rows` with units the author has since changed describes a chart nobody is
+   * looking at. A format is applied at DRAW time to rows already in hand, so the preview restyles
+   * the moment it is typed — a panel lagging one query behind the chart beside it would be the
+   * divergence this prop exists to close, re-created one layer up.
+   *
+   * Empty is the normal case: no column has been given a format.
+   */
+  columnSettings: Record<string, ColumnFormat>;
   /** Renders the shared "Date grouping" row for a temporal dimension, or null. */
   unitRow: (col?: string) => ReactNode;
 }
