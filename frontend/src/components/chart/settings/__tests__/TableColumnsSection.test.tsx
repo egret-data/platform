@@ -536,4 +536,51 @@ describe("TableColumnsSection — the comments, now asserted", () => {
     fireEvent.change(screen.getByLabelText("Freeze first columns"), { target: { value: "-3" } });
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ pinnedLeft: 0 }));
   });
+
+  /**
+   * THE ROW FREEZE, and why it is one number rather than Metabase's toggle + count.
+   *
+   * Metabase spends four settings on the freeze: `table.freeze_columns` (a toggle) with
+   * `table.freeze_columns_count`, and `table.freeze_rows` with `table.freeze_rows_count`, each
+   * count `getHidden` behind its toggle and each `isValid` at `>= 1`. egret's column half already
+   * collapsed its pair into one number, because a count of 0 says everything the toggle-off state
+   * says and says it in one control instead of two. The row half takes the same shape for the same
+   * reason, and for one more that only appears now there are two of them: a panel that spelled
+   * columns as a number and rows as a switch-plus-number would be asking the user to learn the
+   * same idea twice.
+   *
+   * WHAT THE COLLAPSE COSTS, which is a real difference and not a wash: Metabase remembers the
+   * count while the toggle is off, so off-then-on comes back at the number you last used. Zero
+   * does not remember. That was accepted for `pinnedLeft` and is accepted again here — a freeze
+   * count is a single digit the user is looking straight at, not a configuration worth preserving
+   * across a state it is invisible in.
+   *
+   * NO `max` HERE, unlike the column input, and that is not an oversight: this section is handed
+   * `columns` and never the rows, so the bound it would need does not exist at this level. Metabase
+   * has no max on its own rows input either and clamps in the renderer — `Math.min(count,
+   * rows.length)` in TableInteractive.tsx — which is where `ChartTable` clamps it too.
+   */
+  it("emits pinnedTop from the freeze-rows input", () => {
+    const onChange = vi.fn();
+    render(<TableColumnsSection columns={COLS} value={{}} onChange={onChange} />);
+    fireEvent.change(screen.getByLabelText("Freeze first rows"), { target: { value: "3" } });
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ pinnedTop: 3 }));
+  });
+
+  it("clamps a negative row freeze to zero", () => {
+    const onChange = vi.fn();
+    render(<TableColumnsSection columns={COLS} value={{}} onChange={onChange} />);
+    fireEvent.change(screen.getByLabelText("Freeze first rows"), { target: { value: "-3" } });
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ pinnedTop: 0 }));
+  });
+
+  // The two freezes are independent axes and are written to the same object, so each has to leave
+  // the other alone — a handler that spread `value` but dropped a sibling key would pass every
+  // assertion above on its own.
+  it("leaves the column freeze alone when the row freeze changes", () => {
+    const onChange = vi.fn();
+    render(<TableColumnsSection columns={COLS} value={{ pinnedLeft: 2 }} onChange={onChange} />);
+    fireEvent.change(screen.getByLabelText("Freeze first rows"), { target: { value: "1" } });
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ pinnedLeft: 2, pinnedTop: 1 }));
+  });
 });

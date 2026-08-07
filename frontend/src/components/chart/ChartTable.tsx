@@ -1,4 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode, type CSSProperties, type MouseEventHandler } from "react";
+import {
+  useEffect, useLayoutEffect, useMemo, useRef, useState,
+  type ReactNode, type CSSProperties, type MouseEventHandler,
+} from "react";
 import {
   flexRender, getCoreRowModel, getPaginationRowModel, getSortedRowModel, useReactTable,
   type ColumnDef, type ColumnSizingState, type SortingState,
@@ -69,6 +72,31 @@ function SortableHeader({ id, disabled, children, className, style, onClick, lab
 
 /** px width of the "#" gutter — pinned columns start after it, or they slide underneath. */
 const ROW_INDEX_WIDTH = 40;
+
+/**
+ * THE BODY'S STACKING LADDER, which the row freeze turned from a list into a grid.
+ *
+ * A cell can now be sticky on two independent axes: a frozen row's cell is stuck in y and free in
+ * x, a pinned column's cell is stuck in x and free in y. The two are DISJOINT as sets — one lives
+ * only in the non-pinned columns, the other only in the non-frozen rows — so neither of them ever
+ * covers the other and the square where the two freezes cross belongs to neither. Only the cell
+ * that is both can settle that square, and it has to out-rank both single-axis layers to do it.
+ *
+ * WHY `CORNER` STOPS SHORT OF THE HEADER'S 30. `frozenTop` is a MEASURED number (the header's
+ * rendered height), so a sub-pixel result, or a header that reflows between the measurement and
+ * the paint, can leave a frozen row a pixel high. Keeping every body layer under both header
+ * layers makes that a positioning wobble instead of a header disappearing behind a data row —
+ * i.e. it demotes the arithmetic from a correctness problem to a cosmetic one.
+ *
+ * WHY `FROZEN` IS SPELT OUT AT ALL, given that `position: sticky` with `z-index: auto` already
+ * paints above the static cells scrolling underneath it: because "already works" here rests on the
+ * painting order of positioned versus non-positioned boxes, which is not a thing the next reader
+ * of this file should have to reconstruct. `z-0` says the band sits above ordinary rows and below
+ * the header's `z-10`, in the same vocabulary as every other layer here.
+ */
+const CELL_Z = { plain: "", frozen: "z-0", pinned: "z-20", corner: "z-[25]" } as const;
+const cellZ = (pinned: boolean, frozen: boolean) =>
+  pinned && frozen ? CELL_Z.corner : pinned ? CELL_Z.pinned : frozen ? CELL_Z.frozen : CELL_Z.plain;
 
 const fillTemplate = (tpl: string, value: string) => tpl.replace(/\{\{\s*value\s*\}\}/g, value);
 
@@ -286,6 +314,142 @@ export function ChartTable({
   });
 
   /**
+   * FREEZE FIRST ROWS — the other axis of a freeze that `pinnedLeft` only ever had one of.
+   *
+   * WHAT METABASE FREEZES, which had to be read rather than guessed because the two obvious
+   * readings agree on an unsorted single page and differ everywhere else. `table.freeze_rows` /
+   * `table.freeze_rows_count` (Table.tsx) reach `TableInteractive.tsx` as `pinnedTopRowsCount`,
+   * which `use-data-grid-instance.tsx` hands to `useRowPinningByCount` alongside `sortedRows` —
+   * and `sortedRows` is filled from `table.getSortedRowModel().rows` under a comment that states
+   * the intent outright: "For pinning row state we need to work with client-side sorted data".
+   * That is the SORTED model, not the PAGINATED one. The resulting ids go into tanstack's
+   * `rowPinning`, whose `_getPinnedRows` takes the `keepPinnedRows ?? true` branch — the branch
+   * its own source comments as "get all rows that are pinned even if they would not be otherwise
+   * visible … but not pagination or filtering".
+   *
+   * So: the first N rows AFTER SORTING and BEFORE PAGINATION, and those same N rows stay on screen
+   * on every page. Not the first N rows of the result (they stop being at the top the moment
+   * anything is sorted), and not the first N rows of the page you happen to be on (they would
+   * change under the user as they paged, which is the opposite of what a frozen reference row is
+   * for, and is not what freeze panes means in any spreadsheet either).
+   *
+   * IMPLEMENTED WITHOUT tanstack's `rowPinning` FEATURE, deliberately. Its state is a list of row
+   * IDS, and the ids can only be known from the sorted model, which only exists once the table
+   * instance does — Metabase resolves that circularity with a `useState` fed by a `useLayoutEffect`
+   * (`setSortedRows(table.getSortedRowModel().rows)`), which costs a second render pass and a frame
+   * where the freeze is a row behind the sort. Reading the sorted model here, AFTER `useReactTable`
+   * has returned and during the same render, needs no feedback loop at all. What it reproduces is
+   * exactly `getTopRows()` + `getCenterRows()` under `keepPinnedRows: true`: take the frozen rows
+   * off the top of the sorted model, then draw the current page with those rows filtered out so
+   * nothing appears twice.
+   *
+   * NOT PORTED: Metabase's cap that silently unpins rows once header + frozen rows would pass 80%
+   * of the container's height (`useRowPinningByCount`). Two reasons. It renders a different number
+   * of rows from the one the user typed with nothing on screen saying so — the failure mode this
+   * programme keeps writing comments about. And it is measured off a container rect, so in any
+   * layout-free environment `countWithinLimit([HEADER_HEIGHT, 0, 0], 0)` returns 0 and the whole
+   * feature pins nothing, which would put the rule below out of reach of every test that is not a
+   * browser. egret's scroll box is a fixed `max-h-[60vh]`; a user who freezes more rows than fit
+   * gets a table that does not scroll, which is what a spreadsheet does with the same instruction.
+   */
+  /**
+   * BOTH CLAMPS BOUND WORK, NOT OUTPUT, and that is a mutation result rather than a claim. Deleting
+   * either of them leaves every assertion in the suite green, because the two things `frozenCount`
+   * feeds already clamp themselves: `slice(0, n)` stops at the end of the array whatever `n` is,
+   * and every `i < frozenCount` is read against rows that `slice` produced. A stored count of 500
+   * on a 3-row result, or a negative one, renders exactly what a clamped count renders.
+   *
+   * They stay anyway, and the reason is the one loop that is NOT bounded by the data: the offset
+   * measurement below iterates `frozenCount` times, so an unclamped 100000 out of a hand-written
+   * `params.settings` — which the backend accepts, asserting only that the blob is a JSON object
+   * (`chartparams.rs`), as `table-state.ts` records — would spin a hundred thousand times per
+   * layout pass to push a hundred thousand identical numbers. Recorded here rather than left as a
+   * pair of survivors, because "unkillable" and "unnecessary" are not the same finding and the next
+   * person to run a mutant over this line deserves to know which one it is.
+   */
+  const frozenCount = Math.max(0, Math.min(tableState.pinnedTop ?? 0, rows.length));
+  const sortedRows = table.getSortedRowModel().rows;
+  const frozenRows = frozenCount > 0 ? sortedRows.slice(0, frozenCount) : [];
+
+  /**
+   * Sorted position by row id, which is what the "#" gutter now counts.
+   *
+   * It used to count `pageIndex * pageSize + i + 1` — the row's slot among the rows DRAWN. Frozen
+   * rows break that arithmetic: on page 2 the two rows carried over from page 1 would be numbered
+   * 26 and 27, and everything under them shifted by two. Position in the sorted result is the SAME
+   * number wherever nothing is frozen (page p, slot i, is sorted position p*pageSize+i), so this
+   * is a generalisation of the old rule rather than a change to it, and it is the only rule that
+   * stays true once a row can appear on a page it does not belong to.
+   *
+   * Keyed on `r.id` and not on `r.index`: `index` is the row's position in the SOURCE data, which
+   * is the number the old comment on the gutter already explains must not be shown.
+   */
+  const sortedPosition = useMemo(
+    () => new Map(sortedRows.map((r, i) => [r.id, i])),
+    [sortedRows],
+  );
+
+  // Not memoised, and that is the measurement rather than an omission: this is a slice and a filter
+  // over ONE PAGE of rows plus a `Set` of the freeze count, where `sortedPosition` above is a `Map`
+  // over the whole result and so earns its `useMemo`. A memo here could not hit anyway — `frozenRows`
+  // is a fresh `slice` on every render, so every dependency list containing it is a cache miss.
+  const pageRows = table.getRowModel().rows;
+  const frozenIds = new Set(frozenRows.map((r) => r.id));
+  const drawnRows = frozenCount === 0
+    ? pageRows
+    : [...frozenRows, ...pageRows.filter((r) => !frozenIds.has(r.id))];
+
+  /**
+   * A frozen row's `top` is the header's height plus the heights of the frozen rows above it, and
+   * none of those are knowable ahead of layout: the header wraps at narrow widths, a row grows for
+   * an image cell or a wrapped value, and a column resize changes both. So they are measured, and
+   * kept measured by a `ResizeObserver` on the header and on each frozen row.
+   *
+   * CSS CANNOT DO THIS ON ITS OWN. `position: sticky` offsets do not accumulate down a set of
+   * siblings — every frozen row given `top: 0` would stack in the same place and only the last one
+   * drawn would be visible.
+   *
+   * STICKY IS WITHHELD UNTIL THE OFFSET EXISTS (`frozenTops` starts empty), so there is no first
+   * paint in which the band is pinned to the wrong place. `useLayoutEffect` and not `useEffect`
+   * because the measurement has to land before the browser paints, or that first frame is exactly
+   * what the user sees.
+   *
+   * PER-CELL AND NOT PER-`<tr>`: sticky on a table ROW is unevenly supported, while sticky on a
+   * cell is what the header and the pinned columns in this same table already rely on.
+   */
+  const theadRef = useRef<HTMLTableSectionElement>(null);
+  const frozenRowRefs = useRef<(HTMLTableRowElement | null)[]>([]);
+  const [frozenTops, setFrozenTops] = useState<number[]>([]);
+
+  useLayoutEffect(() => {
+    if (frozenCount === 0) {
+      setFrozenTops((prev) => (prev.length === 0 ? prev : []));
+      return;
+    }
+    const measure = () => {
+      let acc = theadRef.current?.getBoundingClientRect().height ?? 0;
+      const next: number[] = [];
+      for (let j = 0; j < frozenCount; j++) {
+        next.push(acc);
+        acc += frozenRowRefs.current[j]?.getBoundingClientRect().height ?? 0;
+      }
+      // Identity-stable when nothing moved. Without it the observer's own callback would re-render
+      // on every fire, and a ResizeObserver that re-renders on every fire is a loop.
+      setFrozenTops((prev) =>
+        prev.length === next.length && prev.every((v, j) => v === next[j]) ? prev : next);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    if (theadRef.current) ro.observe(theadRef.current);
+    for (let j = 0; j < frozenCount; j++) {
+      const el = frozenRowRefs.current[j];
+      if (el) ro.observe(el);
+    }
+    return () => ro.disconnect();
+  }, [frozenCount, rows, localSizing, showRowIndex, sorting, pageIndex]);
+
+  /**
    * `col_<i>` sizing -> widths by column NAME, pruned to columns that still exist.
    *
    * ROUNDED, because `TableState.columnWidths` is documented "colName -> px" and the pivot's
@@ -393,7 +557,7 @@ export function ChartTable({
     <div className="rounded-md border">
       <div className="max-h-[60vh] overflow-auto">
         <table className="w-full border-separate border-spacing-0 text-xs text-foreground/90">
-          <thead className="bg-accent">
+          <thead ref={theadRef} className="bg-accent">
             {table.getHeaderGroups().map((hg) => (
               <tr key={hg.id} className="text-left text-muted-foreground">
                 {showRowIndex && (
@@ -458,18 +622,60 @@ export function ChartTable({
             ))}
           </thead>
           <tbody>
-            {table.getRowModel().rows.map((r, i) => {
+            {drawnRows.map((r, i) => {
               const rowColor = cond.rowBg(r.index);
+              // The frozen rows are drawn first and in order, so a row's slot IS its place in the
+              // band. `frozenTops[j]` is `undefined` until the first measurement lands, and that
+              // absence is what withholds sticky for the frame before it.
+              const frozenTop = i < frozenCount ? frozenTops[i] : undefined;
+              const isFrozen = frozenTop != null;
+              /**
+               * The edge of the band, which without a line of its own is invisible whenever the row
+               * index is off: a frozen row is drawn exactly like the rows scrolling past it, so
+               * "1, 2, 9, 10" reads as a table that has lost some rows rather than as two rows held
+               * in place. Metabase draws the same edge — `.pinnedRowsSection` carries
+               * `border-bottom: 2px solid var(--mb-color-border-subtle)` in DataGrid.module.css,
+               * with a comment noting it is matched against the pinned COLUMNS' 3px `border-right`
+               * so the two axes read as one pair.
+               *
+               * WEIGHT CHOSEN AGAINST EGRET'S OWN COLUMN EDGE, not against Metabase's number. The
+               * pinned column here is separated by `border-r border-border/50` — 1px at half
+               * opacity — so importing a 3px rule onto the row axis alone would make the two halves
+               * of one feature look unrelated. 2px at full opacity is the smallest step that reads
+               * as deliberate beside it. Raising the column's edge to match is a change to shipped
+               * behaviour and belongs to whoever revisits `pinnedLeft`, not here.
+               *
+               * INLINE, NOT A UTILITY CLASS. `border-b border-border/50` on these cells is a
+               * `border-color` SHORTHAND; overriding just the bottom edge with a `border-b-*`
+               * utility puts a longhand and a shorthand of equal specificity in the cascade, where
+               * the winner is decided by the order Tailwind happens to emit them and not by the
+               * order they appear in the class attribute. An inline style has no such argument.
+               */
+              const bandEdge = isFrozen && i === frozenCount - 1
+                ? { borderBottom: "2px solid var(--border)" }
+                : undefined;
               return (
-                <tr key={r.id} className="hover:bg-accent/40" style={rowColor ? { backgroundColor: rowColor } : undefined}>
+                <tr
+                  key={r.id}
+                  ref={(el) => { if (i < frozenCount) frozenRowRefs.current[i] = el; }}
+                  className="hover:bg-accent/40"
+                  style={rowColor ? { backgroundColor: rowColor } : undefined}
+                >
                   {showRowIndex && (
-                    // Position in what is on screen, not `r.index`: after a sort the underlying
-                    // row order is meaningless, and the number has to keep counting across pages.
+                    // Position in the SORTED result, not `r.index` and no longer the row's slot on
+                    // the page: after a sort the underlying row order is meaningless, and a frozen
+                    // row appears on pages it does not belong to. See `sortedPosition`.
                     <td
-                      className="sticky left-0 z-20 border-b border-r border-border/50 px-3 py-1.5 text-right text-muted-foreground tabular-nums"
-                      style={{ backgroundColor: rowColor ?? "var(--background)" }}
+                      className={`sticky left-0 border-b border-r border-border/50 px-3 py-1.5 text-right text-muted-foreground tabular-nums ${
+                        isFrozen ? CELL_Z.corner : CELL_Z.pinned
+                      }`}
+                      style={{
+                        backgroundColor: rowColor ?? "var(--background)",
+                        ...(isFrozen ? { top: frozenTop } : {}),
+                        ...bandEdge,
+                      }}
                     >
-                      {(paginationEnabled ? pageIndex * pageSize : 0) + i + 1}
+                      {(sortedPosition.get(r.id) ?? i) + 1}
                     </td>
                   )}
                   {r.getVisibleCells().map((cell) => {
@@ -478,21 +684,29 @@ export function ChartTable({
                     const bg = cond.bg(cell.getValue(), meta?.name ?? cell.column.id);
                     const sized = localSizing[cell.column.id] != null;
                     const pinned = cell.column.getIsPinned() === "left";
-                    // pinned cells need an opaque base so horizontally-scrolled cells don't bleed
-                    // through; composite any (translucent) conditional/row color over the page bg.
-                    const pinTint = pinned ? (bg ?? rowColor) : null;
+                    // A cell that does not move with what is behind it needs an opaque base, or the
+                    // rows sliding underneath it are legible straight through — an ordinary cell
+                    // carries no background of its own, the row's colour being on the `<tr>`. True
+                    // on BOTH axes, which is the whole of what the row freeze added here: composite
+                    // any (translucent) conditional/row colour over the page bg.
+                    const stuck = pinned || isFrozen;
+                    const tint = stuck ? (bg ?? rowColor) : null;
                     return (
                       <td
                         key={cell.id}
                         style={{
                           ...(sized ? { width: cell.column.getSize() } : {}),
                           ...(pinned ? { left: cell.column.getStart("left") + (showRowIndex ? ROW_INDEX_WIDTH : 0) } : {}),
-                          ...(pinned
-                            ? (pinTint ? { background: `linear-gradient(${pinTint}, ${pinTint}), var(--background)` } : {})
+                          ...(isFrozen ? { top: frozenTop } : {}),
+                          ...(stuck
+                            ? (tint ? { background: `linear-gradient(${tint}, ${tint}), var(--background)` } : {})
                             : (bg ? { backgroundColor: bg } : {})),
+                          ...bandEdge,
                         }}
                         className={`border-b border-border/50 px-3 py-2 ${isNum ? "text-right tabular-nums" : ""} ${
-                          pinned ? `sticky z-20 border-r border-border/50${pinTint ? "" : " bg-background"}` : ""
+                          stuck
+                            ? `sticky ${cellZ(pinned, isFrozen)}${pinned ? " border-r border-border/50" : ""}${tint ? "" : " bg-background"}`
+                            : ""
                         } ${onCellDrill && dimensionColumns?.length ? "cursor-pointer" : ""}`}
                         onClick={onCellDrill && dimensionColumns && dimensionColumns.length > 0
                           ? (e) => onCellDrill(

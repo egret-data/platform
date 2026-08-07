@@ -20,11 +20,13 @@ import type { TableState } from "@/api/charts";
  * what Metabase's `syncTableColumns` does (`querying/viz-settings/utils/sync-viz-settings.ts`),
  * and it is why a column removed and re-added there comes back ENABLED.
  *
- * NOT PRUNED: `pinnedLeft`. It is a COUNT, not a name, so it carries no stale reference to prune —
- * and clamping it down to a shrunken result would silently discard the user's freeze the moment a
- * column was taken out, with no way to tell that apart from a deliberate change. `ChartTable`
- * already clamps it for rendering, which is the right place for a bound that must not be
- * remembered.
+ * NOT PRUNED: `pinnedLeft` and `pinnedTop`. They are COUNTS, not names, so they carry no stale
+ * reference to prune — and clamping either down to a shrunken result would silently discard the
+ * user's freeze the moment a column was taken out (or a filter cut the row count), with no way to
+ * tell that apart from a deliberate change. `ChartTable` already clamps both for rendering, which
+ * is the right place for a bound that must not be remembered. `pinnedTop` has a second reason of
+ * its own: this function is handed the result's COLUMNS and never its rows, so the bound a row
+ * freeze would be pruned against does not reach here at all.
  *
  * Every read here tolerates malformed input. The backend asserts only that `params.settings` is a
  * JSON object (`crates/egret-bi/src/chartparams.rs`) and a test pins that permissiveness, so a row
