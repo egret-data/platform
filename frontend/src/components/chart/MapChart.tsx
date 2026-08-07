@@ -17,6 +17,7 @@ export function MapChart({ columns, rows, params, metricTypes = {}, onValueClick
   onValueClick?: (ctx: DrillContext, x: number, y: number) => void;
 }) {
   const map = vizConfig<MapConfig>("map", params);
+  const isPin = map.type === "pin";
   const { columnSettings } = shellSettings(params);
   const fmt = (v: unknown) =>
     map.metric ? formatValue(v, metricTypes[map.metric] ?? "double", columnSettings[map.metric]) : String(v);
@@ -58,19 +59,50 @@ export function MapChart({ columns, rows, params, metricTypes = {}, onValueClick
       <EChartsRenderer
         option={buildMapOption(columns, rows, {
           echartsName: def.echartsName,
+          type: map.type,
           region: map.region,
           metric: map.metric,
           normalize: normalizeKey,
           format: fmt,
+          // BOTH MODES, and this was briefly written the other way before being corrected.
+          // Suppressing them on a pin map is defensible on presentation grounds — two labelled
+          // dots among the reader's own pins can read as data — and it is not ours to decide:
+          // Hoàng Sa and Trường Sa are on egret's Vietnam map because the map is not correct
+          // without them, and "the reader chose pin mode" is not a reason for a Vietnam basemap to
+          // lose two archipelagos. They stay, drawn by their own series and `silent`.
           annotations: def.annotations,
           color: map.color,
+          latitude: map.latitude,
+          longitude: map.longitude,
+          label: map.label,
         })}
         // Metabase's region map drills; egret's branch passed no handler — the same seam gap the
         // waterfall, box plot and sankey each had. A region is a row, so it filters by the RAW
         // dimension value, not by the normalised key the geojson is matched on: those differ
         // (`us_states` matches on a two-letter code while the column may hold "California"), and
         // filtering by the key would drill to nothing.
-        onPointClick={onValueClick && map.region ? (p) => {
+        onPointClick={onValueClick ? (p) => {
+          if (isPin) {
+            /**
+             * A PIN DRILLS BY ITS OWN ROW'S RAW CELLS, found by the row index the datum carries.
+             *
+             * NOT by matching the clicked coordinates back to a row: that is a float-equality test
+             * against numbers that have been through the option, the renderer and a click event,
+             * and two pins in one city can round to the same pair anyway. `__row` is put on the
+             * datum by `buildPinOption` precisely so this lookup is an index rather than a search.
+             *
+             * The filter names the coordinate COLUMNS because they are what identifies the record
+             * — the label is optional and need not be unique (two orders from one city share it).
+             */
+            const row = rows[(p.data as { __row?: number } | undefined)?.__row ?? -1];
+            if (!row) return;
+            const dims = [map.latitude, map.longitude]
+              .filter((c): c is string => !!c)
+              .map((col) => ({ col, value: String(row[columns.findIndex((c) => c.name === col)]) }));
+            if (dims.length) onValueClick({ dims }, p.x, p.y);
+            return;
+          }
+          if (!map.region) return;
           const ri = columns.findIndex((c) => c.name === map.region);
           if (ri < 0 || p.name == null) return;
           const raw = rows.find((r) => normalizeKey(r[ri]) === p.name)?.[ri];

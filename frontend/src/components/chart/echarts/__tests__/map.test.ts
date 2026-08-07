@@ -62,6 +62,172 @@ describe("buildMapOption", () => {
   });
 });
 
+/**
+ * THE PIN MAP — individual markers at latitude/longitude, Metabase's `map.type: "pin"`.
+ *
+ * These assertions were written before the branch existed and watched to fail. What they are
+ * really pinning is the ONE thing about this feature that is easy to get backwards and impossible
+ * to notice from a screenshot of a symmetric test fixture: an ECharts `geo` coordinate system
+ * takes `[longitude, latitude]`, which is the opposite order from how every human names a
+ * coordinate pair and the opposite order from how the field pickers are read top to bottom. A
+ * fixture whose lat and lon happen to be similar numbers would pass either way, so the rows below
+ * use deliberately un-swappable values (a latitude that is not a legal longitude and vice versa).
+ */
+const pinCols = [
+  { name: "city", type: "varchar" },
+  { name: "lat", type: "double" },
+  { name: "lon", type: "double" },
+];
+// San Francisco and Denver. `lon` is negative and `lat` is not, so a transposed pair is visible.
+const pinRows = [
+  ["San Francisco", 37.7749, -122.4194],
+  ["Denver", 39.7392, -104.9903],
+];
+const pinBase = {
+  echartsName: "us_states",
+  type: "pin" as const,
+  latitude: "lat",
+  longitude: "lon",
+  normalize: (v: unknown) => String(v),
+};
+
+describe("buildMapOption — pin map", () => {
+  it("plots one scatter point per row, as [lon, lat] and not [lat, lon]", () => {
+    const opt = buildMapOption(pinCols, pinRows, pinBase) as any;
+    const scatter = opt.series.find((s: any) => s.type === "scatter");
+    expect(scatter.coordinateSystem).toBe("geo");
+    expect(scatter.data.map((d: any) => d.value)).toEqual([
+      [-122.4194, 37.7749],
+      [-104.9903, 39.7392],
+    ]);
+  });
+
+  /** The choropleth's `geo` exists only to project the archipelago labels, so it is `show: false`
+   *  and un-roamable — the `map` series draws the shapes. A pin map has no `map` series at all, so
+   *  its `geo` IS the drawing, and it has to be roamable or a whole country's worth of pins can
+   *  never be told apart (see the resolution note in options/map.ts). */
+  it("shows the geo component and lets the reader roam it", () => {
+    const opt = buildMapOption(pinCols, pinRows, pinBase) as any;
+    expect(opt.geo.show).toBe(true);
+    expect(opt.geo.roam).toBe(true);
+    expect(opt.geo.map).toBe("us_states");
+  });
+
+  /**
+   * NO `map` SERIES AND NO `visualMap`. Both would be actively wrong rather than merely spare: a
+   * second `map` series would paint region shapes on top of the geo the pins are projected onto,
+   * and a `visualMap` re-colours series by value — pointed at a scatter whose "value" is a
+   * coordinate pair it would tint every pin by its longitude.
+   */
+  it("draws no choropleth series and no value ramp", () => {
+    const opt = buildMapOption(pinCols, pinRows, pinBase) as any;
+    expect(opt.series.some((s: any) => s.type === "map")).toBe(false);
+    expect(opt.visualMap).toBeUndefined();
+  });
+
+  /**
+   * THE (0, 0) TRAP, which the first draft of the pin branch fell into. `Number(null)` is `0` and
+   * `Number("")` is `0` — both finite — so a `Number.isFinite` filter alone passes a row that has
+   * no coordinate at all and plots it in the Gulf of Guinea, where on a world map every incomplete
+   * row piles up as a confident-looking cluster off Ghana. Each empty shape is listed separately
+   * so that a fix covering only `null` still fails here.
+   */
+  it("drops rows whose coordinates are not finite, rather than plotting them at zero", () => {
+    const rowsWithHoles = [
+      ...pinRows,
+      ["null lat", null, -100],
+      ["undefined lon", 40, undefined],
+      ["empty string", "", -100],
+      ["not a number", 40, "n/a"],
+    ];
+    const opt = buildMapOption(pinCols, rowsWithHoles, pinBase) as any;
+    const scatter = opt.series.find((s: any) => s.type === "scatter");
+    expect(scatter.data.map((d: any) => d.__row)).toEqual([0, 1]);
+  });
+
+  /** A genuine zero coordinate is a real place (the Prime Meridian crosses the equator, and it
+   *  crosses plenty of land), so the guard above must reject EMPTY rather than reject zero. */
+  it("still plots a real zero coordinate", () => {
+    const opt = buildMapOption(pinCols, [["Null Island", 0, 0]], pinBase) as any;
+    const scatter = opt.series.find((s: any) => s.type === "scatter");
+    expect(scatter.data.map((d: any) => d.value)).toEqual([[0, 0]]);
+  });
+
+  /**
+   * The datum carries its SOURCE ROW INDEX so a click can drill by the row's own raw cells.
+   * Matching a clicked pin back to a row by comparing coordinates would be a float equality test
+   * against a number that has been through the option, the renderer and a click event.
+   */
+  it("carries each point's source row index for the drill", () => {
+    const opt = buildMapOption(pinCols, [...pinRows], pinBase) as any;
+    const scatter = opt.series.find((s: any) => s.type === "scatter");
+    expect(scatter.data.map((d: any) => d.__row)).toEqual([0, 1]);
+  });
+
+  it("names each pin from the label column when one is chosen", () => {
+    const opt = buildMapOption(pinCols, pinRows, { ...pinBase, label: "city" }) as any;
+    const scatter = opt.series.find((s: any) => s.type === "scatter");
+    expect(scatter.data.map((d: any) => d.name)).toEqual(["San Francisco", "Denver"]);
+  });
+
+  /**
+   * THE ARCHIPELAGOS SURVIVE PIN MODE. This was implemented the other way first — suppressing the
+   * annotations on a pin map, on the presentation argument that two labelled dots among a reader's
+   * own pins read as data — and corrected: egret's Vietnam map carries Hoàng Sa and Trường Sa
+   * because the map is not correct without them, and a reader switching to pin mode is not a
+   * reason for a Vietnam basemap to lose two archipelagos. Asserted so it cannot be re-argued
+   * silently.
+   */
+  it("keeps the archipelago labels on a Vietnam pin map, beside the reader's own pins", () => {
+    const opt = buildMapOption(pinCols, pinRows, {
+      ...pinBase,
+      echartsName: "vietnam",
+      annotations: [{ name: "Hoàng Sa", coord: [112.4, 16.5] }, { name: "Trường Sa", coord: [114.2, 9.5] }],
+    }) as any;
+    const scatters = opt.series.filter((s: any) => s.type === "scatter");
+    expect(scatters).toHaveLength(2);
+    // The reader's pins are series 0 and are NOT silent (they have a tooltip and a drill);
+    // the annotations are silent, so they never intercept a hover meant for a pin.
+    expect(scatters[0].silent).toBeUndefined();
+    expect(scatters[1].silent).toBe(true);
+    expect(scatters[1].data.map((d: any) => d.name)).toEqual(["Hoàng Sa", "Trường Sa"]);
+  });
+
+  it("plots nothing at all when either coordinate field is unchosen", () => {
+    const opt = buildMapOption(pinCols, pinRows, { ...pinBase, longitude: undefined }) as any;
+    const scatter = opt.series.find((s: any) => s.type === "scatter");
+    expect(scatter.data).toEqual([]);
+  });
+});
+
+/**
+ * THE VIETNAM ANNOTATIONS ARE THE PIN BRANCH'S BLAST RADIUS. Hoàng Sa and Trường Sa are drawn by
+ * the SAME geo-projected scatter the pin map now shares, so a pin branch that reorganised this
+ * builder could take both archipelagos off egret's Vietnam map — which is not a cosmetic
+ * regression. Asserted here as a whole rather than as a colour (which the test above already
+ * covers) so that the region branch keeps its hidden geo, its layout and both labels.
+ */
+describe("buildMapOption — the region map keeps its annotations", () => {
+  const annotations = [
+    { name: "Hoàng Sa", coord: [112.4, 16.5] as [number, number] },
+    { name: "Trường Sa", coord: [114.2, 9.5] as [number, number] },
+  ];
+
+  it("still draws both archipelagos on a hidden, un-roamable geo", () => {
+    const opt = buildMapOption(cols, rows, { ...base, echartsName: "vietnam", annotations }) as any;
+    expect(opt.geo.show).toBe(false);
+    expect(opt.geo.roam).toBe(false);
+    const scatter = opt.series.find((s: any) => s.type === "scatter");
+    expect(scatter.coordinateSystem).toBe("geo");
+    expect(scatter.data).toEqual([
+      { name: "Hoàng Sa", value: [112.4, 16.5] },
+      { name: "Trường Sa", value: [114.2, 9.5] },
+    ]);
+    // …and the choropleth is still there beside them, sharing the geo's layout.
+    expect(opt.series.some((s: any) => s.type === "map")).toBe(true);
+  });
+});
+
 describe("choroplethScale", () => {
   /**
    * Metabase's rule, stated independently of the implementation: the light end is the accent taken
