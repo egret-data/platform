@@ -55,6 +55,9 @@ export interface TableState {
   columnWidths?: Record<string, number>;   // colName -> px (manual resizes only)
   hiddenColumns?: string[];                 // colName[] currently hidden
   pinnedLeft?: number;                      // freeze the first N columns (0 = none)
+  /** freeze the first N rows of the SORTED result (0 = none). Those same N rows stay on screen on
+   *  every page — see `ChartTable`'s freeze block for what Metabase does and why this matches it. */
+  pinnedTop?: number;
   pagination?: { enabled: boolean; pageSize: number };  // pageSize in {25, 50, 100}
   columnOrder?: string[];   // table viz only: column names in display order
   rowIndex?: boolean;       // table viz only: prepend a "#" column numbering the visible rows

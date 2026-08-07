@@ -458,3 +458,232 @@ describe("row index", () => {
     expect(body.map((r) => r.cells[2].textContent)).toEqual(["1", "2", "3"]);
   });
 });
+
+/**
+ * FREEZE FIRST ROWS — the second axis of the freeze that `pinnedLeft` only ever had one of.
+ *
+ * WHAT METABASE FREEZES, which is the one thing that had to be read rather than guessed. Its four
+ * keys (`table.freeze_rows` / `table.freeze_rows_count`, Table.tsx) reach `TableInteractive.tsx`
+ * as `pinnedTopRowsCount`, which `use-data-grid-instance.tsx` hands to `useRowPinningByCount`
+ * alongside `sortedRows` — and `sortedRows` is set from `table.getSortedRowModel().rows` under a
+ * comment that says why: "For pinning row state we need to work with client-side sorted data".
+ * That is the SORTED model, not the PAGINATED one. The pinned ids then go into tanstack's
+ * `rowPinning`, whose `_getPinnedRows` takes the `keepPinnedRows ?? true` branch — the branch its
+ * own source comments as "get all rows that are pinned even if they would not be otherwise
+ * visible … but not pagination or filtering".
+ *
+ * So the rule is: the first N of the result AFTER SORTING and BEFORE PAGINATION, and those same N
+ * rows stay on screen on every page. Not the first N result rows (they move the moment you sort),
+ * and not the first N rows of the page you are on (they would change under you as you paged, which
+ * is the opposite of what a frozen reference row is for — and is not what freeze panes means in
+ * any spreadsheet either). These tests pin that rule on both halves, because the two naive
+ * readings each agree with it on an unsorted single page and differ everywhere else.
+ */
+describe("ChartTable — freeze first rows", () => {
+  const body = () => document.querySelector("tbody")!;
+  const bodyRows = () => within(body()).getAllByRole("row") as HTMLTableRowElement[];
+
+  /**
+   * The z-index a cell's utility classes put it on. Written as a number rather than matched as a
+   * literal string on purpose: what these tests are about is the ORDER of the stacking layers, and
+   * an assertion spelled `toContain("z-[25]")` would fail for a re-numbering that kept every layer
+   * in the same relative place, while passing for a swap that inverted two of them.
+   */
+  const z = (el: HTMLElement) => {
+    const m = /(?:^|\s)z-\[?(\d+)\]?(?:\s|$)/.exec(el.className);
+    return m ? Number(m[1]) : 0;
+  };
+
+  /**
+   * A frozen row's `top` is a MEASURED number — the header's height plus the heights of the frozen
+   * rows above it — and jsdom runs no layout, so every rect it hands out is zero and every offset
+   * would come out 0 without this. Stubs a header height and a row height the way a browser would
+   * report them, exactly as the keyboard-reorder test above stubs `<th>` rects for dnd-kit.
+   *
+   * This proves the ARITHMETIC and nothing else. That the browser then paints the row at that
+   * offset, and that the corner cell wins where the two freezes cross, is checked in a real
+   * browser — see the PR body.
+   */
+  const withLayout = (headerH: number, rowH: number, fn: () => void) => {
+    const orig = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+      const h = this.tagName === "THEAD" ? headerH : this.tagName === "TR" ? rowH : null;
+      if (h == null) return orig.call(this);
+      return { x: 0, y: 0, left: 0, top: 0, right: 0, bottom: h, width: 0, height: h, toJSON() {} } as DOMRect;
+    };
+    try { fn(); } finally { HTMLElement.prototype.getBoundingClientRect = orig; }
+  };
+
+  it("sticks the first N rows and leaves the rest scrolling", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(5)} tableState={{ pinnedTop: 2 }} />);
+    const rows = bodyRows();
+    expect(rows[0].cells[0].className).toContain("sticky");
+    expect(rows[1].cells[0].className).toContain("sticky");
+    expect(rows[2].cells[0].className).not.toContain("sticky");
+  });
+
+  it("does not stick anything when pinnedTop is absent or 0 — the count IS the toggle", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(3)} tableState={{ pinnedTop: 0 }} />);
+    expect(bodyRows().every((r) => !r.cells[0].className.includes("sticky"))).toBe(true);
+  });
+
+  // The first naive reading: freeze the first N rows of the RESULT. It agrees with the real rule
+  // until the user sorts, and then it freezes a row that is no longer at the top of the table.
+  it("freezes the first N rows of the SORTED result, not of the raw result", () => {
+    render(<ChartTable columns={COLS} rows={[["a0", 3], ["a1", 1], ["a2", 2]]} tableState={{ pinnedTop: 1 }} />);
+    fireEvent.click(screen.getByRole("columnheader", { name: /^b$/ }));
+    const rows = bodyRows();
+    expect(rows.map((r) => r.cells[0].textContent)).toEqual(["a1", "a2", "a0"]);
+    expect(rows[0].cells[0].className).toContain("sticky");
+    expect(rows[1].cells[0].className).not.toContain("sticky");
+  });
+
+  // The second naive reading: freeze the first N rows of the PAGE. Metabase keeps the same rows
+  // frozen on every page (`keepPinnedRows`), so page 2 carries rows 1-2 above rows 26-30.
+  it("keeps the SAME rows frozen on page 2 rather than freezing that page's first rows", () => {
+    render(
+      <ChartTable
+        columns={COLS}
+        rows={mkRows(30)}
+        tableState={{ pinnedTop: 2, pagination: { enabled: true, pageSize: 25 } }}
+      />,
+    );
+    // page 1: the two frozen rows come out of the page's own 25, so the page still shows 25.
+    expect(bodyRows()).toHaveLength(25);
+    expect(bodyRows().map((r) => r.cells[0].textContent).slice(0, 3)).toEqual(["a0", "a1", "a2"]);
+
+    fireEvent.click(screen.getByText("Next"));
+    const rows = bodyRows();
+    expect(rows.map((r) => r.cells[0].textContent)).toEqual(["a0", "a1", "a25", "a26", "a27", "a28", "a29"]);
+    expect(rows[0].cells[0].className).toContain("sticky");
+    expect(rows[2].cells[0].className).not.toContain("sticky");
+  });
+
+  /**
+   * The `#` gutter counted `pageIndex * pageSize + i + 1` — the row's position among the rows
+   * DRAWN. Frozen rows break that: on page 2 the two rows carried over from page 1 would have been
+   * numbered 26 and 27, and every row under them shifted by two. Numbering by position in the
+   * sorted result is the same arithmetic wherever nothing is frozen (page p, slot i, is sorted
+   * position p*pageSize+i) and is the only thing that stays true when something is.
+   */
+  it("numbers a frozen row by its place in the sorted result, not by its slot on the page", () => {
+    render(
+      <ChartTable
+        columns={COLS}
+        rows={mkRows(30)}
+        tableState={{ rowIndex: true, pinnedTop: 2, pagination: { enabled: true, pageSize: 25 } }}
+      />,
+    );
+    fireEvent.click(screen.getByText("Next"));
+    expect(bodyRows().map((r) => r.cells[0].textContent)).toEqual(["1", "2", "26", "27", "28", "29", "30"]);
+  });
+
+  it("offsets each frozen row past the sticky header and past the frozen rows above it", () => {
+    withLayout(30, 20, () => {
+      render(<ChartTable columns={COLS} rows={mkRows(5)} tableState={{ pinnedTop: 2 }} />);
+      const rows = bodyRows();
+      expect(rows[0].cells[0].style.top).toBe("30px");
+      expect(rows[1].cells[0].style.top).toBe("50px");
+      expect(rows[2].cells[0].style.top).toBe("");
+    });
+  });
+
+  it("clamps the freeze to the rows there are, without leaving a gap in the offsets", () => {
+    withLayout(30, 20, () => {
+      render(<ChartTable columns={COLS} rows={mkRows(2)} tableState={{ pinnedTop: 5 }} />);
+      const rows = bodyRows();
+      expect(rows).toHaveLength(2);
+      expect(rows.map((r) => r.cells[0].style.top)).toEqual(["30px", "50px"]);
+    });
+  });
+
+  /**
+   * THE CORNER, which is where this kind of implementation breaks. A frozen row's cell is sticky in
+   * y and free in x; a pinned column's cell is sticky in x and free in y. Those two sets are
+   * disjoint — one lives in the non-pinned columns, the other in the non-frozen rows — so neither
+   * can settle the square where the two freezes cross. Only the cell that is BOTH can, and it has
+   * to out-rank both of them to do it.
+   */
+  it("paints the frozen-row x pinned-column corner above either freeze alone", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(3)} tableState={{ pinnedTop: 1, pinnedLeft: 1 }} />);
+    const rows = bodyRows();
+    const corner = rows[0].cells[0];
+    const frozenOnly = rows[0].cells[1];
+    const pinnedOnly = rows[1].cells[0];
+    expect(corner.className).toContain("sticky");
+    expect(z(corner)).toBeGreaterThan(z(pinnedOnly));
+    expect(z(corner)).toBeGreaterThan(z(frozenOnly));
+  });
+
+  /**
+   * The header has to survive a mis-measured offset. `frozenTop` is the header's rendered height,
+   * so a sub-pixel error, or a header that reflows between the measurement and the paint, can put
+   * a frozen row a pixel high — and a frozen row that out-ranked the header would then cover it.
+   * Both header layers therefore stay above both of the layers a frozen row can be on, which is
+   * what makes the offset arithmetic a positioning detail rather than a correctness one.
+   */
+  it("keeps both header layers above both frozen-row layers", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(3)} tableState={{ pinnedTop: 1, pinnedLeft: 1 }} />);
+    const headers = within(document.querySelector("thead")!).getAllByRole("columnheader");
+    const rows = bodyRows();
+    expect(z(headers[0])).toBeGreaterThan(z(rows[0].cells[0]));   // pinned header  > corner
+    expect(z(headers[1])).toBeGreaterThan(z(rows[0].cells[1]));   // ordinary header > frozen cell
+  });
+
+  // The `#` gutter is sticky-left outside the tanstack column model, so it is a corner of its own
+  // in a frozen row and needs the same rank as a pinned column's — otherwise the gutter's digit
+  // scrolls out from under the row it belongs to.
+  it("treats the # gutter cell of a frozen row as a corner too", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(3)} tableState={{ pinnedTop: 1, rowIndex: true }} />);
+    const rows = bodyRows();
+    const gutterFrozen = rows[0].cells[0];
+    const gutterOrdinary = rows[1].cells[0];
+    expect(gutterFrozen.className).toContain("left-0");
+    expect(gutterFrozen.style.top).toBe("0px");   // jsdom measures a zero-height header
+    expect(z(gutterFrozen)).toBeGreaterThan(z(gutterOrdinary));
+  });
+
+  /**
+   * An ordinary cell carries no background at all — the row's `hover:` and any conditional colour
+   * sit on the `<tr>`, and the page shows through the rest. That is fine for a cell that scrolls
+   * with everything around it and fatal for one that does not: the rows passing underneath a
+   * frozen row would be legible straight through it. The pinned-column half already solved this
+   * (`pinTint` composites a translucent conditional colour over the page background); a frozen row
+   * needs the identical treatment on the other axis.
+   */
+  it("gives a frozen row's cells an opaque background so scrolled rows cannot show through", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(3)} tableState={{ pinnedTop: 1 }} />);
+    const rows = bodyRows();
+    expect(rows[0].cells[0].className).toContain("bg-background");
+    expect(rows[1].cells[0].className).not.toContain("bg-background");
+  });
+
+  /**
+   * The band needs an edge or it is invisible with the row index off — a frozen row is drawn like
+   * every other row, so "1, 2, 9, 10" reads as a table missing some rows. Metabase draws one:
+   * `.pinnedRowsSection { border-bottom: 2px solid … }` in `DataGrid.module.css`, commented there
+   * as matching the pinned COLUMNS' 3px right edge.
+   */
+  it("closes the band with an edge on the last frozen row and on no other", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(5)} tableState={{ pinnedTop: 2, rowIndex: true }} />);
+    const rows = bodyRows();
+    expect(rows[0].cells[0].style.borderBottom).toBe("");
+    expect(rows[1].cells[0].style.borderBottom).toBe("2px solid var(--border)");
+    expect(rows[1].cells[1].style.borderBottom).toBe("2px solid var(--border)");
+    expect(rows[2].cells[0].style.borderBottom).toBe("");
+  });
+
+  it("composites a translucent conditional colour over the page background in a frozen row", () => {
+    render(
+      <ChartTable
+        columns={COLS}
+        rows={[["a0", 1200], ["a1", 50]]}
+        conditionalFormatting={[{ columns: ["b"], type: "single", operator: ">", value: 1000, color: "#ff0000" }]}
+        tableState={{ pinnedTop: 1 }}
+      />,
+    );
+    const cell = bodyRows()[0].cells[1];
+    expect(cell.style.background).toContain("linear-gradient");
+    expect(cell.className).not.toContain("bg-background");
+  });
+});

@@ -90,6 +90,7 @@ export function TableColumnsSection({
   const [picking, setPicking] = useState(false);
   const hidden = new Set(value.hiddenColumns ?? []);
   const pinnedLeft = value.pinnedLeft ?? 0;
+  const pinnedTop = value.pinnedTop ?? 0;
   const pagination = value.pagination ?? { enabled: false, pageSize: 25 };
 
   // What the user sees for a column. Everything besides this label and the filter match below
@@ -296,6 +297,39 @@ export function TableColumnsSection({
           onChange={(e) => {
             const n = Number(e.target.value);
             onChange({ ...value, pinnedLeft: Number.isNaN(n) ? 0 : Math.max(0, Math.min(n, columns.length)) });
+          }}
+          className="h-8 text-sm"
+        />
+      </div>
+
+      {/*
+        THE OTHER AXIS. Metabase spends four settings on the freeze — `table.freeze_columns` with
+        `table.freeze_columns_count`, `table.freeze_rows` with `table.freeze_rows_count`, each count
+        hidden behind its own toggle (Table.tsx). egret's column half already collapsed its pair
+        into one number, on the grounds that a count of 0 says exactly what the toggle-off state
+        says; the row half takes the same shape, and now that there are two of them the consistency
+        is its own argument. A panel that spelled the same idea as a number on one axis and a
+        switch-plus-number on the other would be teaching it twice.
+
+        WHAT THE COLLAPSE GIVES UP: Metabase keeps the count while the toggle is off, so off-then-on
+        returns to the last number used. Zero does not remember. Accepted here for the same reason
+        it was accepted for `pinnedLeft` — a freeze count is a single digit in plain view, not
+        configuration worth carrying through a state it cannot be seen in.
+
+        NO `max`, unlike its sibling above, and that is a limit of where this control lives rather
+        than an oversight: this section is handed `columns` and never the rows, so the bound does
+        not exist at this level. Metabase's own rows input has no max either — it clamps in the
+        renderer (`Math.min(count, rows.length)`, TableInteractive.tsx), which is where `ChartTable`
+        clamps it too. The `Math.max(0, …)` below is still needed here: PR #398 measured that the
+        `min` attribute only sets `validity.*` flags at form submission and blocks no keystroke.
+      */}
+      <div className="space-y-1">
+        <Label htmlFor="freeze-top" className="text-xs font-medium uppercase text-muted-foreground">Freeze first rows</Label>
+        <Input
+          id="freeze-top" type="number" min={0} value={pinnedTop}
+          onChange={(e) => {
+            const n = Number(e.target.value);
+            onChange({ ...value, pinnedTop: Number.isNaN(n) ? 0 : Math.max(0, n) });
           }}
           className="h-8 text-sm"
         />
