@@ -111,6 +111,32 @@ export function ObjectDetail({
             // the drill would return an empty table and pass for an answer. `tableCellDrill` skips
             // null dims for the same reason. The row still renders — it just isn't a click target.
             const drillable = onFieldClick != null && row[ci] != null && row[ci] !== "";
+            /**
+             * THE FIELD'S LABEL, RENAME INCLUDED — the `<dd>` beside it has honoured the rest of
+             * this same `ColumnFormat` since it was written (currency, decimals, date style, prefix,
+             * suffix, all through `Value`), and the name half went nowhere.
+             *
+             * WHY THREAD IT RATHER THAN WITHDRAW THE CONTROL. `column_title` is not a setting every
+             * Metabase visualization carries: it is absent from `COMMON_COLUMN_SETTINGS` and is
+             * declared by exactly four viz definitions — Table, **Object detail**, List and Pivot
+             * table. This is one of the four (`visualizations/ObjectDetail.tsx:34`), and its renderer
+             * paints it into the label cell of every field
+             * (`components/ObjectDetail/ObjectDetailsTable.tsx:56-57`,
+             * `columnSettings?.["_column_title_full"] || displayNameForColumn(column)`). So the rule
+             * being copied says this cell SHOULD carry the rename — egret's was simply the one of the
+             * four that did not.
+             *
+             * `||`, NOT `??`, matching `rowsToCsv` and `ChartTable`'s header. Settings are not
+             * key-whitelisted server-side, so a hand-edited or legacy `column_title: ""` is
+             * reachable; `??` would accept it and draw a field with no label at all, which in a view
+             * whose entire content is field/value pairs is unreadable rather than merely odd.
+             *
+             * THE DRILL IS DELIBERATELY NOT CHANGED. `onFieldClick` below still receives `c.name`,
+             * because a filter is built against the COLUMN and not against what the column is called
+             * on screen. That is the eighth-time-lucky rule of this programme's raw-vs-display
+             * family, applied in the direction it always points: display renames, predicates do not.
+             */
+            const label = columnSettings[c.name]?.column_title || c.name;
             return (
               <div key={c.name} className="flex gap-3 px-3 py-2">
                 {/* THE FIELD NAME IS INERT, and Metabase's is too — `DetailsTable` renders two
@@ -119,7 +145,7 @@ export function ObjectDetail({
                     `visualizationIsClickable` and does nothing. That is also the right answer on
                     its own terms: a column name is not a value, so there is no predicate to
                     build from it. */}
-                <dt data-object-name className="w-2/5 shrink-0 truncate text-xs font-medium uppercase tracking-wide text-muted-foreground" title={c.name}>{c.name}</dt>
+                <dt data-object-name className="w-2/5 shrink-0 truncate text-xs font-medium uppercase tracking-wide text-muted-foreground" title={label}>{label}</dt>
                 {/* A PLAIN `onClick` ON THE CELL, not a `<button>` — the opposite of the call
                     `BigNumber` and the funnel's step columns make, and for a reason specific to
                     this cell. A value here can render as a `<pre>` (JSON), as an `<img>`, or with

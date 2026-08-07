@@ -4,7 +4,7 @@ import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { DecimalInput } from "./DecimalInput";
 import {
-  echartsTypeOf, resolveXScale, seriesDisplayFor, stackModeOf, stackModePatch,
+  echartsTypeOf, isHorizontal, resolveXScale, seriesDisplayFor, stackModeOf, stackModePatch,
   unpinFromZeroApplies, unpinFromZeroOn, xScaleFitsColumn, type StackMode,
 } from "@/components/chart/echarts/options/cartesian";
 import {
@@ -237,7 +237,14 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope, series
   // the config keys (`xLabel` is the category axis, `yLabel` the value axis) prints them backwards
   // from what the reader sees: "Y min" would govern the horizontal extent. Metabase relabels the
   // same settings by the axis they appear on; so do these.
-  const horiz = kind === "row" || !!config.horizontal;
+  //
+  // ASKED THROUGH THE BUILDER'S OWN FUNCTION, not restated. This read `kind === "row" ||
+  // !!config.horizontal` in three places here, which was the builder's rule until the builder
+  // narrowed `horizontal` to the BAR (see `isHorizontal`). A copy left behind would print "Y label"
+  // over the control that titles a LINE chart's horizontal axis, on any chart still carrying the
+  // flag from before it was a line — a control that lies about the chart beside it, which is the
+  // one thing this panel is not allowed to be.
+  const horiz = isHorizontal({ kind, horizontal: config.horizontal });
   const catAx = horiz ? "Y" : "X";   // the dimension axis
   const valAx = horiz ? "X" : "Y";   // the measure axis
   return (
@@ -279,7 +286,11 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope, series
         `xScale` at all. Offering the select there would store a setting nothing consults — the very
         defect the rotation rows below are greyed out to avoid.
       */}
-      {scoped(scope, "category") && (kind !== "scatter" || config.xMetric == null) && kind !== "row" && !config.horizontal && (
+      {/* `!horiz` where this said `kind !== "row" && !config.horizontal`: same two clauses when the
+          builder honoured the flag on every kind, and no longer the same now that it honours it on
+          the bar alone. `usesXScale` is `!isHorizontal(cfg) && …`, so this row is withheld exactly
+          where the builder would ignore what it stores — asked once, in one place. */}
+      {scoped(scope, "category") && (kind !== "scatter" || config.xMetric == null) && !horiz && (
         <div className="flex items-center justify-between gap-2">
           <Label className="text-sm font-normal">X axis scale</Label>
           {/* The RESOLVED scale, not the stored one. Reading `config.xScale` here would print
@@ -357,7 +368,10 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope, series
           rows here would be a control the builder throws away, which is the one thing this panel is
           not allowed to be. `stackModeOf` is the resolved mode, not `config.stacked`, because an
           area chart is stacked with nothing stored. */}
-      {scoped(scope, "value") && axisNames.length > 1 && !config.horizontal && kind !== "row"
+      {/* `!horiz`, for the reason the X-axis-scale row above takes it: a horizontal chart has one
+          value axis on one edge and no second edge to put another on (`rightAxisSeries`), and the
+          set of horizontal charts is now the builder's answer rather than this file's copy of it. */}
+      {scoped(scope, "value") && axisNames.length > 1 && !horiz
         && stackModeOf({ kind, stacked: config.stacked, normalized: config.normalized }) === "none" && (
         <div className="space-y-1.5 border-t pt-2">
           <div className="text-xs text-muted-foreground">Y axis</div>
@@ -394,7 +408,18 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope, series
   );
 }
 
-/** Horizontal toggle — vertical bar only; row is always horizontal so has nothing to toggle. */
+/**
+ * Horizontal toggle — vertical bar only; a row chart is already horizontal so has nothing to toggle.
+ *
+ * THIS GATE IS UNCHANGED AND IS NOW CORRECT, which it was not before. The builder used to honour
+ * `horizontal` on line, area and combo as well, so a bar turned sideways and then switched to a line
+ * stayed sideways with this switch nowhere in sight. That was closed on the BUILDER's side —
+ * `isHorizontal` narrowed to the bar, following Metabase, which has no orientation setting at all and
+ * models its horizontal bar as a separate display type (`row`) that its cartesian pipeline never
+ * touches. See `isHorizontal` for the whole argument and `echarts/__tests__/horizontalIsBarOnly` for
+ * the measurements. Offering this switch on line/area/combo was the other way to close it and would
+ * have shipped a horizontal line chart, which no reference product has.
+ */
 export function OrientationOption({ kind, config, onChange }: SectionProps) {
   const isBar = kind === "bar";
   return isBar ? (
@@ -415,7 +440,14 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
   // the config keys (`xLabel` is the category axis, `yLabel` the value axis) prints them backwards
   // from what the reader sees: "Y min" would govern the horizontal extent. Metabase relabels the
   // same settings by the axis they appear on; so do these.
-  const horiz = kind === "row" || !!config.horizontal;
+  //
+  // ASKED THROUGH THE BUILDER'S OWN FUNCTION, not restated. This read `kind === "row" ||
+  // !!config.horizontal` in three places here, which was the builder's rule until the builder
+  // narrowed `horizontal` to the BAR (see `isHorizontal`). A copy left behind would print "Y label"
+  // over the control that titles a LINE chart's horizontal axis, on any chart still carrying the
+  // flag from before it was a line — a control that lies about the chart beside it, which is the
+  // one thing this panel is not allowed to be.
+  const horiz = isHorizontal({ kind, horizontal: config.horizontal });
   const catAx = horiz ? "Y" : "X";   // the dimension axis
   const valAx = horiz ? "X" : "Y";   // the measure axis
   // Is the chart's x a VALUE axis rather than the ordinal category one? Follows `usesXScale` in
@@ -734,7 +766,7 @@ export function CartesianAxesTab({ kind, config, onChange, xColumnType, seriesNa
   /** …and straight through to `AxesOptions`, which keys the Y-axis-position rows on it. */
   seriesNames?: string[];
 }) {
-  const horiz = kind === "row" || !!config.horizontal;
+  const horiz = isHorizontal({ kind, horizontal: config.horizontal });
   const catAx = horiz ? "Y" : "X";
   const valAx = horiz ? "X" : "Y";
   const shared = { kind, config, onChange, xColumnType };
