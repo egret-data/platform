@@ -128,7 +128,23 @@ function TrendComparisonsControl({ config, onChange, temporalUnits }: VizControl
   );
 }
 
-const trendData: VizControl<Cfg>[] = [{ id: "comparisons", section: "data", render: TrendComparisonsControl }];
+/**
+ * `cardOverridable` because a comparison is PRESENTATION, however firmly it sits on the Data tab.
+ *
+ * The tab placement is right and is not what changes here: Metabase puts Comparisons on Data, beside
+ * the primary-number picker, and `fields.tsx`'s `data` field records why. What was wrong is that
+ * `CardVizPanel` read `section` as "is this query state", so a trend on a dashboard could not be
+ * re-based at all — no "vs previous month", no custom value, and no hint the control existed.
+ *
+ * The claim this flag makes, checkable against the descriptor immediately below: `buildSpec` reads
+ * `c.dimension` and `c.metric` and derives its own `orderby` from the dimension. `comparisons` is
+ * not in it, and no comparison type issues a second query — `computeTrend` is pure over the series
+ * the card has already fetched (`trend-comparison.ts`). Overriding it restyles a card; it cannot
+ * re-point one.
+ */
+const trendData: VizControl<Cfg>[] = [
+  { id: "comparisons", section: "data", cardOverridable: true, render: TrendComparisonsControl },
+];
 
 /** The progress bar's colour and its goal-from-a-column, both Metabase's. */
 function ProgressDisplayControl({ config, onChange, metrics }: VizControlProps<Cfg>) {
@@ -240,8 +256,23 @@ function FunnelTypeControl({ config, onChange }: VizControlProps<Cfg>) {
 
 // The steps list sits under DATA, beside the column that produces them, and only the funnel type
 // is a display choice — Metabase's own split, checked in its panel.
+//
+// `cardOverridable` on the steps, and Metabase's source settles it rather than a guess: `Funnel.tsx`
+// gives `funnel.dimension`, `funnel.metric` AND `funnel.rows` all `getSection: () => t`Data``, then
+// marks only the first two `dashboard: false` — the flag that hides a setting from dashboard UI
+// (`settings/typed-utils.ts`). So the step list is a Data-tab setting Metabase offers on a dashcard,
+// and egret's could not be reached from one.
+//
+// It passes egret's own test too: `buildSpec` is `h.dimsAndMetrics([c.dimension], [c.metric], s)`,
+// and neither `stepOrder` nor `hiddenSteps` is in it — both are applied when the funnel is drawn.
+// Hiding a step does NOT drop its row from the query; it stops that band being painted, which is why
+// a card may do it and may not choose the column that produced the bands.
+//
+// That Metabase keeps `getSection` and `dashboard` as two INDEPENDENT fields is the clearest
+// statement of why `VizControl.cardOverridable` exists: a tab and an eligibility are different
+// questions, and egret had one field answering both.
 const funnelDisplay: VizControl<Cfg>[] = [
-  { id: "steps", section: "data", render: FunnelStepsControl },
+  { id: "steps", section: "data", cardOverridable: true, render: FunnelStepsControl },
   { id: "type", section: "display", render: FunnelTypeControl },
 ];
 

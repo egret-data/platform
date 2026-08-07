@@ -41,8 +41,18 @@ vi.mock("@/api/generated/charts/charts", () => ({
 
 // The tile itself is stubbed out: it would fire its own copy of the same query and drag ECharts into
 // the test, and nothing here asserts on what it draws. The PANEL is the subject.
+//
+// It does echo back the card's OVERRIDE, though, which is the one thing about the tile these tests
+// care about. `DashboardCardView` reads `card.options.vizOverride` and hands it to
+// `applyVizOverride` before it builds anything (DashboardCardView.tsx:62), so what arrives on this
+// prop is exactly what the card would draw with. That turns "the panel offers the control" into
+// "the control reaches the card", which is the assertion that actually matters for a setting whose
+// whole defect was being unreachable — and it is a claim a panel-only render cannot make.
 vi.mock("@/components/chart/dashboard/DashboardCardView", () => ({
-  DashboardCardView: ({ card }: { card: { id: string } }) => <div data-testid={`disp-${card.id}`} />,
+  DashboardCardView: ({ card }: { card: { id: string; options?: { vizOverride?: unknown } } }) => (
+    <div data-testid={`disp-${card.id}`}
+      data-viz-override={JSON.stringify(card.options?.vizOverride ?? null)} />
+  ),
 }));
 
 let charts: unknown[] = [];
@@ -245,5 +255,215 @@ describe("DashboardView — the card viz panel reads the card's own result", () 
       .filter((s) => s.metrics.includes("rev"));
     expect(cardRuns).toHaveLength(1);
     expect(cardRuns[0].filters).toStrictEqual([{ col: "region", op: "in", value: ["North"] }]);
+  });
+});
+
+/**
+ * DISPLAY SETTINGS THAT WERE FILED ON THE DATA SIDE OF THE CARD PANEL'S LINE.
+ *
+ * `CardVizPanel` deliberately offers presentation overrides and never data overrides — a card may
+ * restyle its chart, but it may not silently re-point the query the dashboard's other cards and
+ * filters are reasoning about. That line is worth keeping. What went wrong is which side two
+ * settings were filed on.
+ *
+ * `StudioPanel`'s only filter is `VizControl.section`, and `section` means WHICH BUILDER TAB — that
+ * is its sole consumer (`ChartExplore.tsx` renders `tab="data" | "display" | "axes"` and the panel
+ * filters each on `section`). The card panel then borrowed the same filter as a proxy for "is this a
+ * data setting", which held only for as long as the two coincided. These two are where they part:
+ *
+ *   - F1, the trend's Comparisons. `smartscalar`'s `buildSpec` reads `dimension` and `metric` and
+ *     nothing else; `computeTrend` is pure over the rows the card already fetched and no comparison
+ *     type issues a second query. It is on the Data TAB because that is where Metabase puts it, and
+ *     that placement is correct — so this is not a reclassification. Moving it to `section:
+ *     "display"` would drag it into the builder's Display tab and break the parity that put it on
+ *     Data in the first place (`fields.tsx` records that decision at the `data` field it declares).
+ *   - F2, the map's region choice. `mapDescriptor.buildSpec` reads `cfg.metric` and `cfg.region`;
+ *     `mapKey` picks which geojson the SAME rows are painted onto. It was excluded because it shared
+ *     one control with region and metric, which genuinely are the query.
+ *
+ * So the fix is an explicit ALLOW-LIST, exactly the shape #427 gave the Axes group: the descriptor
+ * says a data-tab control touches no query input (`cardOverridable`), and the card panel asks for
+ * those by name. Nothing moves in the builder.
+ *
+ * DRIVEN AT THE ROUTE, per #427's lesson: a `CardVizPanel` render with hand-written props is not the
+ * broken seam. And each test carries the override through to the CARD — `data-viz-override` on the
+ * stubbed tile is the prop `applyVizOverride` consumes — so "the control appeared" is never the
+ * whole claim.
+ */
+describe("DashboardView — presentation settings filed under the Data tab still reach the card", () => {
+  /**
+   * F1. Metabase's dashcard modal for its trend has `Data | Display`, and Data holds
+   * "Comparisons — Previous month — Add comparison". egret has the identical control in the builder
+   * and it never reached the card, with nothing on screen hinting it existed — so a trend on a
+   * dashboard could not be re-based at all.
+   *
+   * `temporal_units` is on the fixture because two of the four comparison types are gated on it
+   * (`TrendComparisonsSection` omits them with no unit), and "Previous month" is the option Metabase
+   * shows for this exact shape — so a panel that got the units wrong would offer a different menu.
+   */
+  it("a trend card offers Comparisons, and adding one lands on the card", async () => {
+    const user = userEvent.setup();
+    charts = [{
+      id: "t", name: "Trend", dataset_id: "d", viz_type: "smartscalar",
+      params: {
+        version: 2,
+        spec: {
+          metrics: ["rev"], dimensions: ["order_month"], columns: [], filters: [], orderby: [],
+          row_limit: 100, rollup_groups: [], temporal_units: { order_month: "month" },
+        },
+        settings: { "smartscalar.dimension": "order_month", "smartscalar.metric": "rev" },
+      },
+    }];
+    cards = [chartCard("t")];
+    chartsChRunSpec.mockResolvedValue({
+      data: {
+        columns: [{ name: "order_month", type: "date" }, { name: "rev", type: "double" }],
+        rows: [["2026-01-01", 100], ["2026-02-01", 120]],
+      },
+    });
+
+    renderView();
+    await openVizPanel();
+
+    // Vacuity guard: the trend's own DISPLAY control is present, so the panel really did render this
+    // descriptor and an absent Comparisons is a statement about the filter rather than about a blank
+    // sidebar.
+    expect(screen.getByLabelText("Compact number")).toBeInTheDocument();
+
+    expect(await screen.findByText("Comparisons")).toBeInTheDocument();
+    const add = screen.getByRole("button", { name: /Add comparison/ });
+    expect(add).toBeEnabled();
+
+    // …and it drives the card. One real click — two dispatched in a single tick share a stale
+    // `override` closure, which is a measurement artifact this programme has already been bitten by.
+    await user.click(add);
+
+    await vi.waitFor(() => {
+      const stored = JSON.parse(screen.getByTestId("disp-c1").getAttribute("data-viz-override")!);
+      expect(stored["smartscalar.comparisons"]).toHaveLength(1);
+      // Metabase's default for a month-bucketed trend, which is what "Add comparison" appends.
+      expect(stored["smartscalar.comparisons"][0].type).toBe("previousPeriod");
+    });
+  });
+
+  /**
+   * F2. Metabase's Map dashcard modal offers Map type, Region map, Metric field, Region field and
+   * Color; egret's offered Color alone, so a US-states card could not be shown as World or Vietnam.
+   *
+   * The second half of this test is the half that constrains the fix: region and metric ARE the
+   * query and must stay excluded. A split that dropped all three into the card panel would pass the
+   * first assertion and quietly hand a dashboard the power to re-point its cards' queries.
+   */
+  it("a map card can be switched to another map, and still cannot re-point its query", async () => {
+    const user = userEvent.setup();
+    charts = [{
+      id: "m", name: "Map", dataset_id: "d", viz_type: "map",
+      params: {
+        version: 2,
+        spec: { metrics: ["rev"], dimensions: ["state"], columns: [], filters: [], orderby: [], row_limit: 100, rollup_groups: [] },
+        settings: { "map.key": "us_states", "map.region": "state", "map.metric": "rev" },
+      },
+    }];
+    cards = [chartCard("m")];
+    chartsChRunSpec.mockResolvedValue({
+      data: { columns: [{ name: "state", type: "varchar" }, { name: "rev", type: "double" }], rows: [["CA", 10]] },
+    });
+
+    renderView();
+    await openVizPanel();
+
+    // Vacuity guard: the map's existing display control, the one thing this panel already offered.
+    expect(screen.getByLabelText("Color")).toBeInTheDocument();
+
+    const mapSelect = await screen.findByLabelText("Map");
+    // The two query inputs stay out. Region and metric decide what the card ASKS FOR, and a
+    // dashboard card may restyle its chart without re-pointing it.
+    expect(screen.queryByLabelText("Region")).toBeNull();
+    expect(screen.queryByLabelText("Metric")).toBeNull();
+
+    await user.click(mapSelect);
+    await user.click(await screen.findByRole("option", { name: "Vietnam provinces" }));
+
+    await vi.waitFor(() => {
+      const stored = JSON.parse(screen.getByTestId("disp-c1").getAttribute("data-viz-override")!);
+      expect(stored["map.key"]).toBe("vietnam");
+      /**
+       * REGION AND METRIC RIDE ALONG UNCHANGED, and asserting they were ABSENT here is what this
+       * test tried first — it failed, and the brief's framing ("nothing about the query rode
+       * along") is what was wrong, not the code.
+       *
+       * An override is a full settings SNAPSHOT for the descriptor's prefix, not a diff:
+       * `mergeVizSettings` spreads `descriptor.toSettings(effectiveConfig)` over what was stored,
+       * so every key the viz owns is written on every edit. That predates this change and is
+       * shared with the Display path — touching the map's Color has always stamped `map.region`
+       * and `map.metric` into the override too. Nothing here makes it truer or falser.
+       *
+       * So the invariant worth pinning is not absence but IMMOVABILITY: the values written are the
+       * chart's own, and — with no Region or Metric control on this panel, asserted above — there
+       * is no path by which they could be anything else. `applyVizOverride` is the backstop that
+       * makes this hold for the query rather than merely for the drawing: it destructures `spec`
+       * out of the override and throws it away (`params.ts`), so a card's query spec is not
+       * reachable from an override at all, whatever settings it carries.
+       */
+      expect(stored["map.region"]).toBe("state");
+      expect(stored["map.metric"]).toBe("rev");
+    });
+  });
+
+  /**
+   * F3, THE THIRD INSTANCE — found by sweeping the descriptors while here, and kept because it is
+   * MEASURED rather than merely plausible. Metabase's own source settles it without touching the
+   * parity dashboard: `Funnel.tsx` gives all three of `funnel.dimension`, `funnel.metric` and
+   * `funnel.rows` `getSection: () => t`Data``, and marks only the first two `dashboard: false` —
+   * the flag whose contract is spelled out in `settings/typed-utils.ts` ("Settings with
+   * `dashboard: false` are hidden from dashboard UI"). So Metabase puts the step list on the Data
+   * tab AND offers it on a dashcard, which is exactly the combination egret could not express.
+   *
+   * egret's own test agrees: the funnel's `buildSpec` is `h.dimsAndMetrics([c.dimension],
+   * [c.metric], s)`, and `stepOrder`/`hiddenSteps` appear nowhere in it — the reorder and the hide
+   * are applied when the funnel is drawn.
+   *
+   * THAT METABASE MODELS THIS WITH TWO INDEPENDENT FIELDS IS THE POINT, and it is the strongest
+   * evidence for the mechanism this PR chose: `getSection` and `dashboard` are separate in
+   * Metabase because a tab and an eligibility are separate questions. egret had one field doing
+   * both jobs, which is why all three of these defects exist.
+   */
+  it("a funnel card can reorder and hide its steps, and the change lands on the card", async () => {
+    const user = userEvent.setup();
+    charts = [{
+      id: "f", name: "Funnel", dataset_id: "d", viz_type: "funnel",
+      params: {
+        version: 2,
+        spec: { metrics: ["rev"], dimensions: ["step"], columns: [], filters: [], orderby: [], row_limit: 100, rollup_groups: [] },
+        settings: { "funnel.dimension": "step", "funnel.metric": "rev" },
+      },
+    }];
+    cards = [chartCard("f")];
+    chartsChRunSpec.mockResolvedValue({
+      data: {
+        columns: [{ name: "step", type: "varchar" }, { name: "rev", type: "double" }],
+        rows: [["Visit", 100], ["Cart", 60], ["Buy", 20]],
+      },
+    });
+
+    renderView();
+    await openVizPanel();
+
+    // Vacuity guard: the funnel's DISPLAY control, which this panel already offered.
+    expect(screen.getByLabelText("Funnel type")).toBeInTheDocument();
+
+    expect(await screen.findByLabelText("Show Visit")).toBeInTheDocument();
+    expect(screen.getByLabelText("Show Cart")).toBeInTheDocument();
+    expect(screen.getByLabelText("Show Buy")).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText("Show Cart"));
+
+    await vi.waitFor(() => {
+      const stored = JSON.parse(screen.getByTestId("disp-c1").getAttribute("data-viz-override")!);
+      expect(stored["funnel.hiddenSteps"]).toStrictEqual(["Cart"]);
+    });
+    // The step column itself stays out — it IS the query, exactly as Metabase's `dashboard: false`
+    // on `funnel.dimension` says.
+    expect(screen.queryByLabelText("Stage (dimension)")).toBeNull();
   });
 });

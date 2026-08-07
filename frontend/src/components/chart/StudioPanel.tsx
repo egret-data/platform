@@ -13,6 +13,13 @@ export function hasAxesControls<Cfg>(descriptor: VizDescriptor<Cfg> | undefined)
   return !!descriptor?.controls.some((c) => c.section === "display" && c.group === AXES_GROUP);
 }
 
+/** Whether this viz declares any Data-tab control a dashboard card may override — see
+ *  `VizControl.cardOverridable`. The card panel hides the block otherwise, the same way it hides an
+ *  empty Axes section, so a pie does not grow a heading with nothing under it. */
+export function hasCardDataControls<Cfg>(descriptor: VizDescriptor<Cfg> | undefined): boolean {
+  return !!descriptor?.controls.some((c) => c.section === "data" && c.cardOverridable);
+}
+
 interface Props<Cfg> {
   descriptor: VizDescriptor<Cfg>;
   config: Cfg;
@@ -30,12 +37,21 @@ interface Props<Cfg> {
   columnSettings: Record<string, ColumnFormat>;
   unitRow: (col?: string) => ReactNode;
   /**
-   * Which panel tab to render. "axes" is not a `section` any control declares — it is the
-   * DISPLAY section filtered to the "Axes" group, so a viz says where a control belongs once
-   * (`group: "Axes"`) and the shell decides whether that group is a heading or a tab. Metabase
-   * splits its own panel the same way (Data | Display | Axes).
+   * Which panel tab to render. Only "data" and "display" are `section` values a control declares;
+   * the other two are FILTERED VIEWS the shell composes, so a viz says where a control belongs once
+   * and each surface decides what that means for it:
+   *
+   *   - "axes" is the DISPLAY section narrowed to the "Axes" group, so a group is a heading in the
+   *     card sidebar and a tab of its own in the builder. Metabase splits its panel the same way
+   *     (Data | Display | Axes).
+   *   - "card-data" is the DATA section narrowed to the controls flagged `cardOverridable` — the
+   *     ones that touch no query input. No builder tab renders it; it exists so `CardVizPanel` can
+   *     offer presentation settings that live on the Data tab without also offering the query
+   *     settings beside them. See `VizControl.cardOverridable` for why this is an allow-list.
+   *
+   * Both narrow rather than move: "data" and "display" still return exactly what they always did.
    */
-  tab: "data" | "display" | "axes";
+  tab: "data" | "display" | "axes" | "card-data";
   /**
    * The caller renders more content in this tab after this panel — e.g. the shell-owned
    * `SharedDisplaySections` that always follows the Display tab. A descriptor declaring no
@@ -55,11 +71,14 @@ export function StudioPanel<Cfg>({
 }: Props<Cfg>) {
   const shown = descriptor.controls.filter((c) => {
     if (tab === "axes") return c.section === "display" && c.group === AXES_GROUP;
+    if (tab === "card-data") return c.section === "data" && !!c.cardOverridable;
     if (tab === "display") return c.section === "display" && c.group !== AXES_GROUP;
     return c.section === tab;
   });
   if (shown.length === 0) {
-    if (hasMoreBelow) return null;
+    // "card-data" is not a tab anyone navigated to, so there is no empty state to explain — its
+    // caller guards on `hasCardDataControls` and simply renders nothing.
+    if (hasMoreBelow || tab === "card-data") return null;
     return <p className="text-xs text-muted-foreground">No {tab} options for this chart type.</p>;
   }
   const controlProps = {
@@ -68,7 +87,9 @@ export function StudioPanel<Cfg>({
   };
   // Inside the Axes TAB the group heading would just repeat the tab's own name, so everything
   // there renders flat — including the advanced ones, which no longer have a group to hide in.
-  if (tab === "axes") {
+  // "card-data" renders flat for the adjacent reason: it is a handful of hand-picked controls in a
+  // sidebar that has no tabs, and each already draws its own heading.
+  if (tab === "axes" || tab === "card-data") {
     return (
       <div className="space-y-1.5">
         {shown.map(({ id, render: Control }) => <Control key={id} {...controlProps} />)}
