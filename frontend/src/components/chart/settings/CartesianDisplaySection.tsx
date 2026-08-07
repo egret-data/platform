@@ -4,8 +4,8 @@ import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { DecimalInput } from "./DecimalInput";
 import {
-  echartsTypeOf, isHorizontal, resolveXScale, seriesDisplayFor, stackModeOf, stackModePatch,
-  unpinFromZeroApplies, unpinFromZeroOn, xScaleFitsColumn, type StackMode,
+  echartsTypeOf, isHorizontal, resolveXScale, seriesDisplayFor, splitPanelsApplies, stackModeOf,
+  stackModePatch, unpinFromZeroApplies, unpinFromZeroOn, xScaleFitsColumn, type StackMode,
 } from "@/components/chart/echarts/options/cartesian";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
@@ -99,7 +99,36 @@ export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionPr
   const stackableCount = names.filter(
     (n, i) => STACKABLE_DISPLAYS.has(seriesDisplayFor(kind, n, i, config.seriesTypes)),
   ).length;
-  const showStacking = canStack && (kind === "row" || stackableCount > 1);
+  /**
+   * SPLIT PANELS — Metabase's `graph.split_panels`, labelled "Stack series" there and here.
+   *
+   * ITS GATE IS THE SAME SHAPE AS STACKING'S and one line away from it on purpose: Metabase hides
+   * the toggle at `visibleDisplays.length <= 1` (`SPLIT_PANELS_SETTINGS.getHidden`), which is
+   * "fewer than two series" said in its own vocabulary. `names` is `cartesianSeriesNames` — the
+   * series the chart really draws, which under a breakout is a property of the DATA and not of the
+   * config, so the count has to come from the same place Stacking's does.
+   *
+   * The KIND question is `splitPanelsApplies`', asked of the builder rather than restated: a row
+   * chart and a metric-against-metric scatter are the two shapes that cannot take panels, and the
+   * builder is where that is decided. A second copy here is how the panel comes to offer what the
+   * chart will not draw — the defect #430 and #431 each closed from a different direction.
+   *
+   * WHAT IT DOES NOT ASK: whether the CARD is tall enough. That is measured in a browser, this
+   * component has no measurement, and a control that vanished when a dashboard card was resized
+   * would be worse than one that occasionally has no visible effect — the builder's fallback is the
+   * ordinary chart, which is the chart the reader was already looking at.
+   */
+  const canSplitPanels = splitPanelsApplies({ kind, horizontal: config.horizontal, xMetric: config.xMetric, yMetrics: config.yMetrics });
+  const showSplitPanels = canSplitPanels && names.length > 1;
+  const splitPanels = showSplitPanels && config.splitPanels === true;
+  /**
+   * …AND STACKING GOES AWAY WHILE IT IS ON. Metabase's `stackable.stack_type` returns `true` from
+   * `getHidden` and `null` from `getDefault` under `graph.split_panels` (`lib/settings/graph.ts`) —
+   * hidden AND overridden, not one or the other. The builder clears the value; this hides the
+   * control, so the reader is never offered a state the chart will not enter. A panel holds one
+   * series, and a stack is several series sharing one baseline.
+   */
+  const showStacking = canStack && !splitPanels && (kind === "row" || stackableCount > 1);
   /**
    * WHETHER THE CHART-WIDE LINE CONTROLS ARE ON OFFER — line shape, missing values, markers.
    *
@@ -135,6 +164,13 @@ export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionPr
   const anyLine = displays.some((d) => echartsTypeOf(d) === "line");
   return (
     <div className="space-y-2.5">
+      {/* ABOVE Stacking, which is where Metabase puts it and is also the order the two read in: this
+          one can take the other away, and a control that disappears should do so from below the
+          switch that took it rather than from above it. */}
+      {showSplitPanels && (
+        <Toggle id="cz-split-panels" label="Stack series" checked={config.splitPanels === true}
+          onChange={(v) => onChange({ splitPanels: v ? true : undefined })} />
+      )}
       {/* Three mutually exclusive states, offered as one choice — Metabase's own Stacking control.
           Two switches ("Stacked", then "100% stacked" appearing under it) made the reader discover
           the third state by turning the first one on, and let the panel store `normalized` while
@@ -245,6 +281,13 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope, series
   // of. An empty list withdraws the group, which is also what a breakout whose query has not
   // returned gets (`cartesianSeriesNames` can only name bands from rows).
   const axisNames = seriesNames ?? (config.series ? [] : config.yMetrics);
+  // Whether SPLIT PANELS is actually in force, which two rows below withdraw for. The full gate and
+  // not just the stored flag: a config can carry `splitPanels: true` on a chart whose kind cannot
+  // take panels (the same way `horizontal` survives on a line), and a stale flag must not take the
+  // Y-axis controls away from a chart that is still drawing one shared axis. `axisNames.length > 1`
+  // is the same "fewer than two series" gate the Display tab's own toggle keeps.
+  const splitPanels = config.splitPanels === true && axisNames.length > 1
+    && splitPanelsApplies({ kind, horizontal: config.horizontal, xMetric: config.xMetric, yMetrics: config.yMetrics });
   // On a horizontal chart the CATEGORY axis is the vertical one, so naming these controls after
   // the config keys (`xLabel` is the category axis, `yLabel` the value axis) prints them backwards
   // from what the reader sees: "Y min" would govern the horizontal extent. Metabase relabels the
@@ -383,7 +426,13 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope, series
       {/* `!horiz`, for the reason the X-axis-scale row above takes it: a horizontal chart has one
           value axis on one edge and no second edge to put another on (`rightAxisSeries`), and the
           set of horizontal charts is now the builder's answer rather than this file's copy of it. */}
-      {scoped(scope, "value") && axisNames.length > 1 && !horiz
+      {/* …AND NOT UNDER SPLIT PANELS, which is the third of Metabase's three mutual exclusions and
+          the one it enforces on this very control: `series.axis`'s `getHidden` returns true and its
+          `getDefault` returns "left" while `graph.split_panels` is on (`lib/settings/series.ts`).
+          A right-hand axis and a panel per series are two answers to "these series have different
+          scales", and `buildCartesianOption` clears `rightAxisMetrics` outright rather than trying
+          to honour both — so leaving these selects on offer would store a side the chart discards. */}
+      {scoped(scope, "value") && axisNames.length > 1 && !horiz && !splitPanels
         && stackModeOf({ kind, stacked: config.stacked, normalized: config.normalized }) === "none" && (
         <div className="space-y-1.5 border-t pt-2">
           <div className="text-xs text-muted-foreground">Y axis</div>
@@ -460,6 +509,13 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
   // flag from before it was a line — a control that lies about the chart beside it, which is the
   // one thing this panel is not allowed to be.
   const horiz = isHorizontal({ kind, horizontal: config.horizontal });
+  // Whether SPLIT PANELS is in force, for the "Split y-axis when necessary" row below. The COUNT is
+  // read off `config.yMetrics` and not off a series list because that row is already gated on
+  // `!config.series` — with no breakout the metrics ARE the series, so this is exact rather than the
+  // approximation it would be one gate over. The kind question goes through the builder's own
+  // predicate for the reason every other one in this file does.
+  const splitPanels = config.splitPanels === true && config.yMetrics.length > 1
+    && splitPanelsApplies({ kind, horizontal: config.horizontal, xMetric: config.xMetric, yMetrics: config.yMetrics });
   const catAx = horiz ? "Y" : "X";   // the dimension axis
   const valAx = horiz ? "X" : "Y";   // the measure axis
   // Is the chart's x a VALUE axis rather than the ordinal category one? Follows `usesXScale` in
@@ -631,7 +687,13 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
           into `rightAxisMetrics` and the breakout branch never reads them. A switch whose two
           positions build the same chart is the same defect as a select whose choices do, so it is
           withdrawn in the same breath rather than left for whoever notices second. */}
-      {scoped(scope, "value") && kind !== "scatter" && config.yMetrics.length > 1 && !config.series && (
+      {/* `!splitPanels` for the same reason the selects above take it, and Metabase gates this exact
+          control the same way — `graph.y_axis.auto_split`'s `getHidden` is
+          `series.length < 2 || vizSettings["graph.split_panels"] === true` (`lib/settings/graph.ts`).
+          The automatic split is the per-metric version of the answer panels give per series; running
+          both means the split is computed into `rightAxisMetrics` and then emptied, which is a
+          switch whose two positions build the same chart. */}
+      {scoped(scope, "value") && kind !== "scatter" && config.yMetrics.length > 1 && !config.series && !splitPanels && (
         <Toggle id="cz-autosplit" label="Split y-axis when necessary" checked={config.autoSplitY !== false}
           onChange={(v) => onChange({ autoSplitY: v ? undefined : false })} />
       )}

@@ -91,6 +91,14 @@ describe("cartesianFromParams", () => {
     expect(cartesianFromParams({ version: 2, spec: EMPTY_SPEC, settings: cartesianToSettings(cfg) })).toEqual(cfg);
   });
 
+  it("round-trips splitPanels", () => {
+    // The one thing the `satisfies` on `KEYS` cannot catch — see the note above. A `splitPanels`
+    // left out of that list would draw its panels, save the chart, and open it unsplit.
+    const cfg: CartesianConfig = { yMetrics: ["rev", "cost"], splitPanels: true };
+    expect(cartesianToSettings(cfg)["cartesian.splitPanels"]).toBe(true);
+    expect(cartesianFromParams({ version: 2, spec: EMPTY_SPEC, settings: cartesianToSettings(cfg) })).toEqual(cfg);
+  });
+
   it("round-trips labelDensity", () => {
     const cfg: CartesianConfig = { yMetrics: ["total_revenue"], labelDensity: "all" };
     expect(cartesianFromParams({ version: 2, spec: EMPTY_SPEC, settings: cartesianToSettings(cfg) })).toEqual(cfg);

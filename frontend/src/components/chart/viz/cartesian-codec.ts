@@ -14,7 +14,7 @@ const KEYS = [
   "seriesOrder", "hiddenSeries", "labelDensity",
   "xAxisTicks", "xLabelRotation", "xLabelCompact", "unpinFromZero",
   "yAxisTicks", "yTickCount", "autoSplitY", "showXLabel", "showYLabel", "bubbleMetric",
-  "lineShape", "missing", "markers", "seriesLine", "tooltipMetrics",
+  "lineShape", "missing", "markers", "seriesLine", "tooltipMetrics", "splitPanels",
 ] as const satisfies readonly (keyof CartesianConfig)[];
 
 /** The `cartesian.*` slice of a v2 settings map. Undefined values are dropped, not stored as null. */

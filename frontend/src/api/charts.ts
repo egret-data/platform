@@ -97,6 +97,20 @@ export interface CartesianConfig {
   logScale?: boolean;            // value axis uses a log scale
   bubbleMetric?: string;         // scatter only: the metric whose value sizes each bubble
   autoSplitY?: boolean;          // Metabase "Split y-axis when necessary". Unset = on.
+  /**
+   * Metabase's `graph.split_panels`, which its Display tab labels "Stack series": draw each series
+   * in a panel of its own, stacked down the card over one shared category axis, each with a value
+   * axis scaled to its own data.
+   *
+   * It OVERRIDES three other stored keys rather than coexisting with them — `stacked`/`normalized`,
+   * `rightAxisMetrics` and `autoSplitY` — and the panel hides all three while it is on, which is
+   * what Metabase does (`lib/settings/graph.ts`, `lib/settings/series.ts`). Nothing is erased from
+   * storage: turn it off and the chart stacks again, the way `horizontal` already behaves on a line.
+   *
+   * `splitPanelsApplies` in `echarts/options/cartesian.ts` decides where it is offered at all, and
+   * the builder falls back to the ordinary chart on a card too short to draw the panels legibly.
+   */
+  splitPanels?: boolean;
   showXLabel?: boolean;          // Metabase "Show label" (x), separate from the label text.
   showYLabel?: boolean;          // …and the same for y.
   xAxisTicks?: boolean;          // Metabase "Show lines and tick marks" (x). Unset = shown.
