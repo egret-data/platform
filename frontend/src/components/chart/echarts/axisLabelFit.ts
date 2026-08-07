@@ -109,7 +109,7 @@ export const HORIZONTAL_TICKS_GAP = 6;
  *  Not a constant of this module's invention — it is read here because a LEFT axis's name has to be
  *  placed past labels that sit that far out (`nameGapClearOf`), and because `nameGap` is measured
  *  from the axis line rather than from the labels. */
-const AXIS_LABEL_MARGIN = 8;
+export const AXIS_LABEL_MARGIN = 8;
 /** ECharts' own default `splitNumber` on a value axis. It is a HINT — the axis still rounds to a
  *  human interval — so this is a ceiling to stay under and never a count to assert. Above it there
  *  is nothing to say, which is why `intervalThatFits` answers `undefined` there rather than
@@ -497,7 +497,7 @@ export function intervalThatFits({
  * combo card alone (its ticks sit 18.3px apart) and thinning an axis nobody reported. The criterion
  * the live audit applied was that no two label BOXES intersect, and that is the criterion here.
  */
-const VALUE_LABEL_BOX_RATIO = 15 / 13;
+export const VALUE_LABEL_BOX_RATIO = 15 / 13;
 
 /**
  * The vertical band the CATEGORY labels take out of the card below the plot, given the rotation the
@@ -592,6 +592,110 @@ export function plotHeightLessLabels({
   fontSize?: number;
 }): number {
   return size.height - grid.top - grid.bottom - AXIS_LABEL_MARGIN - band - fontSize / 2;
+}
+
+/**
+ * The band above each panel that its TITLE occupies. egret's split panels put a title where Metabase
+ * puts nothing; see `splitPanelLayout` for why the title is what replaced the legend.
+ *
+ * IT HAS TO CLEAR THE TOPMOST VALUE LABEL of the panel it sits above, which is centred on that
+ * panel's first tick and so overhangs the grid rect UPWARDS by `fontSize / 2` — the same half line
+ * `plotHeightLessLabels` charges at the top of a single-grid chart, 7.5px at the 15px line box a
+ * browser draws 13px labels in. A 12px title draws a 14px box. So the title occupies
+ * `[top - band, top - band + 14]`, the label `[top - 7.5, top + 7.5]`, and they are disjoint while
+ * `band >= 21.5`. 24 leaves 2.5px.
+ *
+ * IT WAS 20, AND THE BROWSER SAID NO. Measured on the live 540x561 chart: panel 0's top at y=36 put
+ * the title's box at 20-34 and the "40K" label's at 28.5-43.5 — overlapping by 5.5px, and saved only
+ * by the two being far apart HORIZONTALLY (title at x 56.8, label at x 18.9-43.8). That horizontal
+ * separation is real and structural — the title is anchored at the grid's left edge and the value
+ * labels sit in the gutter outside it — but resting the layout on it makes the band depend on how
+ * wide a number happens to be, which is exactly the kind of accident this module exists to remove.
+ * Two of the 4px came from ECharts' `title.padding`, which defaults to 5 and which the builder now
+ * sets to 0 so this arithmetic is the arithmetic.
+ */
+export const PANEL_TITLE_BAND = 24;
+/** The panel title's own font size, one rung under the axis labels — it names the panel rather than
+ *  competing with the numbers in it. Exported so the builder draws at the size this band was sized
+ *  for; the two drifting apart is what puts a title through the label above it. */
+export const PANEL_TITLE_FONT = 12;
+/** The clear space between one panel's plot and the next panel's title, on top of the title band. */
+const PANEL_GAP = 6;
+/**
+ * The shortest panel worth drawing, and the reason this function can answer `undefined`.
+ *
+ * MEASURED IN A BROWSER on the harness's 166x184 dashboard card, because the question is entirely
+ * about pixels and jsdom has none. A panel has to hold its two end labels — 15px of line box each at
+ * the 13px this family draws at, which is `VALUE_LABEL_BOX_RATIO`'s own reckoning — plus enough plot
+ * between them for the series to have a shape. Below ~44px the two labels touch and the line drawn
+ * between them is a few pixels of noise; the chart says less than the unsplit one it replaced.
+ *
+ * WHY REFUSING BEATS DRAWING IT ANYWAY, which is what Metabase does (`computeSplitPanelLayout` has
+ * no minimum at all and simply divides). The fallback is not a broken chart or an empty one: it is
+ * the ORDINARY chart, which is legible, and which the reader was already looking at. Four slivers
+ * are not. This is the same direction every other measured decision in this module takes — the
+ * category ladder's `hide` rung, `nameGapClearOf`'s decline, `verticalValueAxisFit`'s ceiling — and
+ * it is the one place this feature deliberately diverges from Metabase rather than porting it.
+ *
+ * It is a floor on the panel and NOT a cap on the count: the same four panels that are refused at
+ * 166x184 are drawn on a 600x500 card, which is what stops the refusal being "split panels never
+ * runs" wearing a threshold.
+ */
+export const MIN_PANEL_HEIGHT = 44;
+
+/**
+ * Where each panel's grid rect goes on a split-panel chart, or `undefined` where the card cannot
+ * carry them — Metabase's `computeSplitPanelLayout`, with a title band and a floor added.
+ *
+ * `containLabel` IS OFF ON THESE GRIDS and that is what makes the arithmetic this function's rather
+ * than ECharts'. With it on, every grid expands by its OWN labels, so a panel whose axis reads "4"
+ * and one whose axis reads "4000" would start their plots at different x — and the whole promise of
+ * this mode is that the panels share one category axis, which they cannot do while the same
+ * category sits at two different pixels. Metabase reaches the same conclusion by the same route: it
+ * takes `Math.max` of the panels' tick widths and lays the grid out explicitly.
+ *
+ * That is deliberately NOT the change `estimatePlotWidth`'s doc warns against ("do not improve this
+ * by turning containLabel off and computing the grid explicitly … it moves the margins of every
+ * cartesian chart in the product"). Nothing here touches a single-grid chart: this arm is reachable
+ * only with `splitPanels` on, which no stored chart carries.
+ *
+ * THE GAP HOLDS THE NEXT PANEL'S TITLE, which is why it is a constant here rather than Metabase's
+ * `panelHeight / 2.2` capped at 48. Theirs is proportional because it has nothing to hold — it is
+ * pure separation, and a taller panel can afford more of it. Ours has a fixed job, and growing it
+ * with the panel height would spend on whitespace exactly the pixels a small card needs for plot.
+ */
+export function splitPanelLayout({
+  size,
+  count,
+  inset,
+  titleBand = PANEL_TITLE_BAND,
+  minHeight = MIN_PANEL_HEIGHT,
+}: {
+  size: EChartsSize;
+  /** One panel per VISIBLE series. Below two there is nothing to separate. */
+  count: number;
+  /** The builder's own resolved insets — `top` above the first panel's title, `bottom` below the
+   *  last panel's category labels. Passed in for the reason `plotHeightLessLabels` takes them:
+   *  they are conditional on a title and the caller is the only one that knows. */
+  inset: { top: number; bottom: number };
+  titleBand?: number;
+  minHeight?: number;
+}): { top: number; height: number; titleTop: number }[] | undefined {
+  if (count < 2) return undefined;
+  const gap = titleBand + PANEL_GAP;
+  const first = inset.top + titleBand;
+  const available = size.height - first - inset.bottom;
+  const height = (available - (count - 1) * gap) / count;
+  // `!(x >= min)` rather than `x < min` so a NaN — from an unmeasured card that slipped past the
+  // caller's guard — is DECLINED rather than laid out. The same guard `verticalValueAxisFit` states.
+  if (!(height >= minHeight)) return undefined;
+  // `titleTop` is returned rather than left to the caller to subtract, so the one place that knows
+  // the band is the one place that uses it. A caller re-deriving it is how a title ends up in the
+  // gap of the panel below the one it names.
+  return Array.from({ length: count }, (_, i) => {
+    const top = first + i * (height + gap);
+    return { top, height, titleTop: top - titleBand };
+  });
 }
 
 /**

@@ -5,8 +5,13 @@ import { SVGRenderer } from "echarts/renderers";
 // registered-but-unused chart type is dead bundle weight that also hides a regression: a stray
 // `type: "pie"` would silently keep working instead of failing loudly.
 import { BarChart, LineChart, ScatterChart, SunburstChart, GaugeChart, FunnelChart, BoxplotChart, SankeyChart, MapChart } from "echarts/charts";
+// TitleComponent is here for the CARTESIAN SPLIT PANELS and nothing else (`options/cartesian.ts`,
+// `panelTitles`): each panel is named above itself, which is what egret has where Metabase renders a
+// React legend over the canvas. No chart writes a chart-level `title` — the card's own heading does
+// that job — so a `title` key in an option is always a panel's.
 import {
   GridComponent, TooltipComponent, LegendComponent, DatasetComponent, GraphicComponent, MarkLineComponent, VisualMapComponent,
+  TitleComponent,
 } from "echarts/components";
 // The aria component is not re-exported from "echarts/components", and this deep entry
 // self-registers on import. Without it every `aria` option — the screen-reader description
@@ -34,6 +39,7 @@ export function registerEChartsModules() {
     SVGRenderer,
     BarChart, LineChart, ScatterChart, SunburstChart, GaugeChart, FunnelChart, BoxplotChart, SankeyChart, MapChart,
     GridComponent, TooltipComponent, LegendComponent, DatasetComponent, GraphicComponent, MarkLineComponent, VisualMapComponent,
+    TitleComponent,
     LabelLayout,
   ]);
   registered = true;

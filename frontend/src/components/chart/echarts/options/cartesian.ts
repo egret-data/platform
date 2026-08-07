@@ -11,8 +11,9 @@ import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units"
 import { boundarySteps, namesAPeriod, periodName } from "@/components/chart/temporal-period";
 import { foldTail, OTHER_LABEL } from "../fold";
 import {
-  bottomNameGapClearOf, categoryLabelBand, estimatePlotWidth, fitXLabels, intervalThatFits,
-  nameGapClearOf, plotHeightLessLabels, plotWidthLessGutter, verticalValueAxisFit, widestLabelWidth,
+  AXIS_LABEL_MARGIN, bottomNameGapClearOf, categoryLabelBand, estimatePlotWidth, fitXLabels,
+  intervalThatFits, nameGapClearOf, PANEL_TITLE_FONT, plotHeightLessLabels, plotWidthLessGutter,
+  splitPanelLayout, verticalValueAxisFit, widestLabelWidth,
   type XLabelFit,
 } from "../axisLabelFit";
 
@@ -41,6 +42,15 @@ export interface CartesianBuildConfig {
   /** Scatter only: the metric whose value sizes each bubble. */
   bubbleMetric?: string;
   autoSplitY?: boolean;
+  /**
+   * Metabase's `graph.split_panels` ("Stack series"): draw each series in a panel of its own,
+   * stacked down the card, sharing one category axis and each with its own value scale.
+   *
+   * `splitPanelsApplies` decides where it is OFFERED and `splitPanelLayout` whether the card can
+   * carry it; both are asked by this builder and by the settings panel, so neither can offer what
+   * the other will not draw.
+   */
+  splitPanels?: boolean;
   /** Metabase's "Show label", one per axis, separate from the label TEXT. Unset means shown. Kept
    *  apart from the text so hiding a title does not make the user retype it to bring it back. */
   showXLabel?: boolean;
@@ -217,7 +227,17 @@ interface SeriesLike { name?: string; data: (number | null)[]; yAxisIndex?: numb
   /** The series' RAW column value, behind the display label `name` carries. Set by `decorateSeries`
    *  on every series it builds; absent on the overlays built after it (trend, stack total), which
    *  are never matched against a stored setting. See `settingsKey`. */
-  __raw?: string; __metric?: string; __markers?: "auto" | "on" | "off" }
+  __raw?: string; __metric?: string; __markers?: "auto" | "on" | "off";
+  /** The NAME of the series this overlay was fitted to, on a trend line. Set by `trendSeries`, and
+   *  read only by the split-panel layout, which has to put a trend line in its source's panel.
+   *
+   *  RECORDED RATHER THAN RE-DERIVED. The name is `${source} trend`, so the source could be
+   *  recovered by stripping that suffix — and the tooltip formatter already does exactly that
+   *  (`p.seriesName.endsWith(" trend")`). It is a bad basis for an INDEX lookup: a series genuinely
+   *  named "orders trend" would claim the panel of one named "orders", and a rename through
+   *  `seriesLabels` moves `name` while the suffix rule keeps pointing at the old string. Metabase
+   *  carries the same link explicitly, as `sourceDataKey` (`remapTrendLinesToPanels`). */
+  __of?: string }
 
 /**
  * Markers stop reading as points and start reading as a lumpy line once they touch. Applied after
@@ -284,6 +304,9 @@ function trendSeries(series: SeriesLike[]): SeriesLike[] {
       data: fit,
       yAxisIndex: s.yAxisIndex ?? 0,
       __trend: true,
+      // See `__of`. The split-panel layout re-binds both axis indices from this; every other mode
+      // ignores it.
+      __of: s.name,
       ...{ type: "line", symbol: "none", smooth: false, silent: true, legendHoverLink: false, z: 3,
         lineStyle: { type: "dashed", width: 1.5, color: s.itemStyle?.color },
         tooltip: { show: false } },
@@ -636,6 +659,40 @@ export function computeAxisSplit(metrics: string[], extents: Record<string, Exte
  */
 export const isHorizontal = (cfg: Pick<CartesianBuildConfig, "kind" | "horizontal">) =>
   cfg.kind === "row" || (!!cfg.horizontal && cfg.kind === "bar");
+
+/**
+ * Whether SPLIT PANELS is a thing this chart can be — the question of KIND and SHAPE, asked before
+ * the data is known. How many panels there would be, and whether the card can carry them, are two
+ * further questions the builder asks later (`splitPanelLayout`); the panel asks the first of those
+ * itself, from the series names, exactly as it does for Stacking.
+ *
+ * TWO REFUSALS, and Metabase makes the first of them too:
+ *
+ *   - A ROW CHART. `SPLIT_PANELS_SETTINGS` is spread into `CartesianChart` and `ScatterPlot` and
+ *     not into `RowChart` (`visualizations/visualizations/*`). The reason is geometric rather than
+ *     a gap: a row chart already runs its CATEGORIES down the card, so a stack of panels would be
+ *     competing for the one axis it has, and its value axis — the horizontal one — is not the axis
+ *     panels give each series its own copy of.
+ *   - A METRIC-AGAINST-METRIC SCATTER, which is egret's own refusal and not Metabase's. That chart
+ *     leaves `buildCartesianOption` through `scatterXY` on its opening line, and `scatterXY`
+ *     composes its whole option itself — two value axes it built, one grid it built, none of the
+ *     arithmetic below. Offering panels there would store a key that changes nothing, which is the
+ *     defect this programme keeps closing. A scatter over a DIMENSION arrives at `baseOption` like
+ *     every other kind and is offered them.
+ *
+ * Deliberately NOT among the refusals: a breakout. One panel per BAND is the same rule as one panel
+ * per metric — Metabase counts `seriesModels` and so does this — and it is the case where the
+ * feature earns the most, since a breakout is where a chart most often ends up with six series.
+ */
+export function splitPanelsApplies(
+  cfg: Pick<CartesianBuildConfig, "kind" | "horizontal" | "xMetric" | "yMetrics">,
+): boolean {
+  if (isHorizontal(cfg)) return false;
+  // The exact condition `buildCartesianOption`'s first line diverts on, asked here rather than
+  // restated — a second spelling of it is how the panel comes to offer what the builder discards.
+  if (cfg.kind === "scatter" && cfg.xMetric && (cfg.yMetrics ?? []).length > 0) return false;
+  return true;
+}
 
 // A non-ordinal x-scale (linear/timeseries) positions points by their real x value
 // instead of evenly-spaced categories — only on a vertical chart.
@@ -1469,7 +1526,49 @@ export function buildCartesianOption(
   // categories.
   const xColumn = cfg0.xAxis != null ? columns.find((c) => c.name === cfg0.xAxis) : undefined;
   const xScale = resolveXScale(cfg0.kind, cfg0.xScale, xColumn?.type);
-  const cfgX: CartesianBuildConfig = xScale === cfg0.xScale ? cfg0 : { ...cfg0, xScale };
+  const cfgScale: CartesianBuildConfig = xScale === cfg0.xScale ? cfg0 : { ...cfg0, xScale };
+  /**
+   * SPLIT PANELS' MUTUAL EXCLUSIONS, resolved here so the whole builder downstream sees a config
+   * that already agrees with itself.
+   *
+   * Metabase enforces all three, and it enforces each of them TWICE — the control is hidden
+   * (`getHidden` returns true under `graph.split_panels`) AND the value is overridden
+   * (`stackable.stack_type`'s `getDefault` returns null, `series.axis`'s returns "left"). A recon
+   * that wrote the settings straight into `visualization_settings` saw only the second half and
+   * concluded these were silent overrides rather than hidden controls; the source
+   * (`lib/settings/graph.ts:340-370`, `lib/settings/series.ts:205-212`, `graph.ts:888`) says both.
+   * egret does both too — `CartesianDisplaySection` hides the same three rows — because either one
+   * alone leaves a way for the reader to reach a state the chart will not draw.
+   *
+   *   - STACKING. A stack is several series measured from ONE baseline; a panel holds one series,
+   *     so there is nothing to stack it against.
+   *   - AN EXPLICIT RIGHT-HAND AXIS. Two axes on one plot is the OTHER answer to "these two series
+   *     have different scales", and a panel is this one; running both leaves a chart with panels
+   *     whose axes are on different edges.
+   *   - THE AUTOMATIC SPLIT, which is the same answer arrived at without being asked. It is cleared
+   *     BEFORE the `shouldAutoSplitY` block below rather than after, so the split is never computed
+   *     — clearing `rightAxisMetrics` afterwards would work too, but it would leave a live call
+   *     whose result is thrown away, which is how a later reader restores the bug by "simplifying".
+   *
+   * `normalized` AND `showStackTotal` ARE DELIBERATELY NOT RESTATED HERE, and an earlier draft of
+   * this line did restate them. The mutation run is what caught it: removing either one changed
+   * nothing any test could see, because BOTH already hang off stacking —
+   * `isNormalized` is `!!cfg.normalized && resolveStacked(cfg)` and the stack total is written under
+   * `if (resolveStacked(cfg) && cfg.showStackTotal …)`. `stacked: false` therefore switches off all
+   * three, and writing the other two would have been two inert assignments dressed as safety. What
+   * keeps that honest is a test rather than this paragraph: `cartesian.splitPanels.test.ts` asserts
+   * a config carrying `normalized: true` gets no 0-100 axis, so if `isNormalized` is ever loosened
+   * to read the flag alone, it fails here rather than showing up as flat panels.
+   *
+   * Read off `splitPanels` and `splitPanelsApplies` only — NOT off whether the layout will succeed.
+   * Whether the card is tall enough is decided in `baseOption`, after the series exist and a count
+   * is known, and a chart that falls back there falls back to a chart with its stacking still off
+   * and its axes still merged. That is the same answer in both directions and the alternative is
+   * worse: a stack, or a second y-axis, that appears and disappears as a dashboard card is resized.
+   */
+  const cfgX: CartesianBuildConfig = cfgScale.splitPanels && splitPanelsApplies(cfgScale)
+    ? { ...cfgScale, stacked: false, rightAxisMetrics: [], autoSplitY: false }
+    : cfgScale;
   // Resolve the automatic axis split ONCE, here, and hand the rest of the builder a config that
   // already names the right-axis metrics. Every downstream reader — `isDualAxis`, the per-series
   // `yAxisIndex`, the axis titles — then goes on asking the same question it always did, and a
@@ -2269,12 +2368,131 @@ function baseOption(
   // builder really emits is what stops that arithmetic drifting from the grid it describes.
   const bottomTitle = horizontal ? yTitle : xTitle;
   const leftTitle = horizontal ? xTitle : yTitle;
+
+  /**
+   * SPLIT PANELS — Metabase's `graph.split_panels`, which its panel labels "Stack series".
+   *
+   * ONE GRID PER PLOTTED SERIES, stacked down the card, all sharing one category axis that is drawn
+   * once under the last of them, and each with a value axis scaled to ITS OWN data. That last part
+   * is the feature: `Count` against `Sum of Tax` on one axis is a line at the top and a line flat
+   * along the bottom, and on two axes it is two readable lines.
+   *
+   * WHAT `plotted` ALREADY GUARANTEES, and the reason this needs no filtering of its own: it is the
+   * series that survived `hiddenSeries` and `seriesOrder`, minus the trend and stack-total overlays.
+   * So "one panel per VISIBLE series" is the list, in the order the reader sees, and a series the
+   * author curated away never gets a panel.
+   *
+   * …AND WHY THERE IS NO LEGEND HERE. Metabase renders its legend as React DOM above the canvas;
+   * egret's IS an ECharts component, and clicking it hides a series WITHOUT the option being
+   * rebuilt. Under panels that would have to change the panel COUNT and re-lay-out the rest — which
+   * a merge `setOption` cannot express, and merge patches are exactly what `__ariaFor` and
+   * `__axisNamesFor` exist to send (#412, #417). A TITLE PER PANEL is what replaced it, and it is
+   * not a compromise: Metabase has no per-panel titles at all and leaves the reader colour-matching
+   * against a legend. Naming the panel says the same thing in the place it is about, and it removes
+   * the toggle that could not have been honoured.
+   */
+  const panelSeries = cfg.splitPanels && splitPanelsApplies(cfg) ? plotted : [];
+  /**
+   * The widest value label ANY panel would draw, measured once for all of them.
+   *
+   * Every panel's plot must start at the same x or the shared category axis is a fiction — the same
+   * date would sit at a different pixel in each panel. That is why these grids run with
+   * `containLabel: false` (see `splitPanelLayout`), and switching it off means this builder owes
+   * ECharts the left inset it would otherwise have computed. Metabase owes it the same debt and
+   * pays it the same way: `Math.max` over the panels' tick widths (`computeSplitPanelLayout`).
+   *
+   * THE TWO ENDS ARE THE CANDIDATES, not every tick: a value axis's labels are round numbers
+   * between its extremes, so the widest of them is at one end or the other. `axisExtent` and
+   * `fmtFor` are asked PER PANEL, which is the whole point — panel 1 formats `4` and panel 2 formats
+   * `4000` as "4K", and charging every panel the widest chart-wide label would indent them all by
+   * the biggest number on the card.
+   *
+   * Zero where there is no canvas (jsdom), exactly as `categoryGutter` is: the inset then reserves
+   * only the title band, which is wrong for a chart nobody is drawing and right for one nobody can
+   * measure. Nothing renders there.
+   */
+  const panelGutter = panelSeries.length > 1
+    ? widestLabelWidth(panelSeries.flatMap((s) => {
+        const e = axisExtent([s]);
+        const f = fmtFor([s]);
+        return [f(e.lo), f(e.hi)];
+      }))
+    : 0;
+  /**
+   * The band the category labels occupy below the plot, hoisted above the grid it is measured
+   * against — the split layout needs it to know where the LAST panel has to stop, and the
+   * single-grid `verticalPlot` below needs it for the same subtraction it always did.
+   *
+   * A HIDDEN axis draws nothing below the plot, so it reserves nothing — and a value/time x-axis is
+   * excluded outright: its bottom labels are ECharts' own round ticks rather than these strings, so
+   * the band would be measured off labels the axis does not draw. Declining is the safe direction,
+   * and it leaves every scale-x chart's option untouched.
+   */
+  const categoryBand = categoryGutter != null && fit?.kind !== "hide"
+    ? categoryLabelBand({ rotate, widestLabel: categoryGutter })
+    : 0;
+  /**
+   * Where the panels go, or `undefined` where the card cannot carry them.
+   *
+   * THE INSETS ARE THE SPLIT CHART'S OWN and not the `grid` below, which is the ordering this block
+   * forced: `grid.top` reserves 24px for a legend, and a split chart has none, so reading it here
+   * would charge the panels for a component that is not drawn. The bottom is the reverse — a split
+   * chart owes the category labels an explicit reservation where a `containLabel` grid gets it free.
+   * `Math.max(band, axisFontSize)` because an unmeasured band is 0 and even an unmeasured axis draws
+   * one line of text.
+   *
+   * MEASURED, OR NOT AT ALL. `measurable` is the same guard `fit` and `verticalPlot` keep: a zero
+   * size is an UNMEASURED card, not a small one, and a panel boundary derived from it is the guess
+   * this builder does not make. An unmeasured build keeps the chart it always drew.
+   */
+  const panels = panelSeries.length > 1 && measurable && size
+    ? splitPanelLayout({
+        size,
+        count: panelSeries.length,
+        inset: {
+          top: CHART_THEME.grid.top as number,
+          bottom: (CHART_THEME.grid.bottom as number) + (bottomTitle ? 22 : 0)
+            + Math.max(ordinalX ? categoryBand : 0, CHART_THEME.axisFontSize) + AXIS_LABEL_MARGIN,
+        },
+      })
+    : undefined;
+  /** Whether the panels are actually being drawn — the layout's answer, not the config's. */
+  const splitting = panels != null;
+  /**
+   * …so the LEGEND survives the fallback. A card too short for panels falls back to the ordinary
+   * chart, and an ordinary multi-series chart without a legend is a chart whose lines are unnamed.
+   * The stacking overrides deliberately do NOT follow this switch — see `buildCartesianOption`,
+   * which argues why a stack that appears and disappears with a card's height is the worse answer.
+   */
+  const drawLegend = showLegend && !splitting;
+
+  // Metabase puts the legend along the top; reserve room there for it. The category axis
+  // sits at the bottom normally and on the left when horizontal — the value axis is the
+  // other one — so reserve room on whichever edge each title actually renders on.
+  //
+  // HOISTED ABOVE THE AXES rather than left beside the option it goes into: the vertical fit below
+  // subtracts these two insets from the card to find its plot, and taking them from the object the
+  // builder really emits is what stops that arithmetic drifting from the grid it describes.
   const grid = {
     ...CHART_THEME.grid,
-    top: (CHART_THEME.grid.top as number) + (showLegend ? 24 : 0),
+    top: (CHART_THEME.grid.top as number) + (drawLegend ? 24 : 0),
     bottom: (CHART_THEME.grid.bottom as number) + (bottomTitle ? 22 : 0),
     left: (CHART_THEME.grid.left as number) + (leftTitle ? 26 : 0),
   };
+  /**
+   * The panels' grid rects. One left inset for all of them, computed rather than contained — see
+   * `panelGutter`. `right` is `CHART_THEME`'s own: what overhangs on that edge is half of the last
+   * category label, and it overhangs on a single-grid chart too, where `containLabel` pulls the plot
+   * in. Left as the plain inset here rather than guessed at, and recorded as the one term of this
+   * layout that is Metabase's (`firstXTickWidth`/`lastXTickWidth`) and not yet egret's.
+   */
+  const panelGrids = panels?.map((p) => ({
+    left: (CHART_THEME.grid.left as number) + (leftTitle ? 26 : 0) + panelGutter + AXIS_LABEL_MARGIN,
+    right: CHART_THEME.grid.right as number,
+    top: p.top,
+    height: p.height,
+    containLabel: false,
+  }));
 
   /**
    * …AND A VERTICAL CHART'S LEFT-HAND VALUE AXIS HAS THE SAME DEFECT ON THE OTHER DIMENSION, which
@@ -2297,19 +2515,35 @@ function baseOption(
    * rule the row chart's fit keeps, reached from the other side. The band at 90° IS the measurement,
    * and the rotation that selects the arm came from `fitXLabels`, which measured too; deciding a
    * tick count from a jsdom's zero would be the guess this builder does not make.
+   *
+   * (`categoryBand` itself is now computed further up, beside the split-panel layout that also needs
+   * it. Nothing about the arithmetic moved — only the line.)
    */
-  const categoryBand = categoryGutter != null && fit?.kind !== "hide"
-    ? categoryLabelBand({ rotate, widestLabel: categoryGutter })
-    : 0;
   // A HIDDEN axis draws nothing below the plot, so it reserves nothing — and a value/time x-axis is
   // excluded outright: its bottom labels are ECharts' own round ticks rather than these strings, so
   // the band would be measured off labels the axis does not draw. Declining is the safe direction,
   // and it leaves every scale-x chart's option untouched.
   // (`ordinalX` is `!horizontal && !usesXScale(cfg)`, so a row chart is already out — writing
   // `!horizontal` again here would read as a second condition and mutate to nothing.)
-  const verticalPlot = ordinalX && categoryGutter != null && size && !cfg.logScale
-    ? plotHeightLessLabels({ size, band: categoryBand, grid })
-    : undefined;
+  //
+  // A SPLIT PANEL'S PLOT HEIGHT IS THE PANEL, EXACTLY, and it is read straight off the layout rather
+  // than through `plotHeightLessLabels`. That function subtracts the card's insets and the category
+  // band from the CARD to find the one plot on it; with panels there is no such subtraction to make
+  // — the layout already did it once for all of them, `containLabel` is off so nothing expands, and
+  // every panel is the same height by construction, so panel 0's is every panel's. Reaching for the
+  // card-wide function here would have charged each panel the whole chart's bottom labels.
+  //
+  // `ordinalX` is NOT required on that arm, and that is the one condition this branch drops rather
+  // than inherits: it guards the `band` term, which this arm does not use. A timeseries chart —
+  // where two metrics of different magnitude are most often plotted together, and so the commonest
+  // reason to reach for panels at all — therefore gets its per-panel fit instead of being silently
+  // excluded from it. The log exclusion stays: a log axis's ticks are powers, and a linear interval
+  // means something else entirely on one.
+  const verticalPlot = panels && !cfg.logScale
+    ? panels[0].height
+    : ordinalX && categoryGutter != null && size && !cfg.logScale
+      ? plotHeightLessLabels({ size, band: categoryBand, grid })
+      : undefined;
   /** The scale a VERTICAL value axis needs, per axis — `mkValueAxis` is called twice on a dual
    *  chart and the two carry different series, so the extent is asked for the series that axis
    *  actually shows rather than for the chart. A NORMALISED axis is 0-100 by construction and
@@ -2548,7 +2782,66 @@ function baseOption(
 
   let xAxis: unknown;
   let yAxis: unknown;
-  if (horizontal) {
+  if (panels) {
+    /**
+     * ONE CATEGORY AXIS, DRAWN ONCE. Every panel gets an x-axis — it is the coordinate system its
+     * series is plotted in, and a grid without one has nothing to position against — but only the
+     * LAST of them draws labels, ticks or a title. Metabase's `buildPerPanelXAxes` suppresses the
+     * same three fields on the same axes, and for the same reason: the panels are stacked over one
+     * shared domain, so drawing it four times says the same thing four times and spends three
+     * panels' worth of card doing it.
+     *
+     * THE AXIS LINE STAYS ON ALL OF THEM (Metabase even darkens it there). It is not a label — it is
+     * the baseline each panel's series is measured from, and a panel drawn without one floats.
+     * `axisLine` is therefore left exactly as `xCategory` built it rather than suppressed alongside
+     * the labels.
+     *
+     * `nameGap: 0` GOES WITH `name: undefined`. A category axis's `nameGap` is computed above to
+     * clear a band of rotated labels this axis is not drawing; leaving it behind on an axis with no
+     * name is harmless today and is a reserved gap waiting for the next person who gives these axes
+     * a name back.
+     */
+    xAxis = panels.map((_, i) =>
+      i === panels.length - 1
+        ? { ...xCategory, gridIndex: i }
+        : {
+            ...xCategory,
+            gridIndex: i,
+            name: undefined,
+            nameGap: 0,
+            axisLabel: { ...(xCategory as { axisLabel?: object }).axisLabel, show: false },
+            axisTick: { show: false },
+          });
+    /**
+     * …AND A VALUE AXIS PER PANEL, each sized to the one series in it. `mkValueAxis` is handed a
+     * single-series list, so its extent, its number format and its vertical fit are all that
+     * series' — which is the whole feature and not a detail of it.
+     *
+     * A DISTINCT `id` PER AXIS, and this is the trap the merge patch sets. `mkValueAxis` stamps
+     * `VALUE_AXIS_ID` ("yValue") on the left axis so `axisNamesFor` can re-title it by id; N panels
+     * would mean N components wearing one id, which is ECharts' `mappingToExists` being asked to
+     * resolve an ambiguity it resolves by position anyway. Overwritten here rather than parameterised
+     * into `mkValueAxis`, because the ONLY reader of that id is a patch this mode does not send —
+     * see `axisNamesFor`, which returns nothing at all here.
+     *
+     * `position` IS LEFT UNSET, which is what puts every panel's axis on the left. Metabase forces
+     * `series.axis` to "left" under panels and hides the control; egret cleared `rightAxisMetrics`
+     * in `buildCartesianOption`, so no series ever reached `yAxisIndex: 1` and `dual` is false here.
+     * Two axes on one plot and a panel per series are two answers to the same question, and running
+     * both leaves panels whose axes are on different edges.
+     *
+     * `name: undefined` ON EVERY ONE OF THEM, and the title is drawn once instead — see
+     * `valueAxisName` below. It is not dropped: four axes each carrying `mkValueAxis`'s `yTitle` is
+     * what the first version did, and the live 760x560 breakout drew the word "orders" down the left
+     * of the card FOUR TIMES. One measure, named once.
+     */
+    yAxis = panelSeries.map((s, i) => ({
+      ...mkValueAxis([s]),
+      id: `${VALUE_AXIS_ID}Panel${i}`,
+      gridIndex: i,
+      name: undefined,
+    }));
+  } else if (horizontal) {
     xAxis = mkValueAxis(leftSeries);
     yAxis = categoryAxis;
   } else if (dual) {
@@ -2559,21 +2852,119 @@ function baseOption(
     yAxis = mkValueAxis(leftSeries);
   }
 
-  // Goal line — a horizontal reference at goalValue, drawn via the first series' markLine.
+  /**
+   * EVERY SERIES INTO ITS PANEL. Both indices, because a panel is a grid and a grid is addressed by
+   * the pair — binding only `yAxisIndex` would scale the series against the right axis and draw it
+   * across the first panel's x.
+   *
+   * A TREND LINE FOLLOWS ITS SOURCE, through `__of` and never through its own name. `trendSeries`
+   * hard-codes `yAxisIndex: s.yAxisIndex ?? 0`, which was right while there was one axis per SIDE
+   * and is wrong the moment there is one per series: every trend line would have been drawn in the
+   * first panel, against a scale that is not its own. Metabase carries the same link explicitly
+   * (`remapTrendLinesToPanels`, keyed on `sourceDataKey`).
+   *
+   * Anything this map cannot place is LEFT ALONE rather than defaulted to panel 0 — a stack total
+   * cannot occur here (stacking is cleared upstream), and a series that somehow escaped `plotted`
+   * has no panel to be right about.
+   */
+  if (panels) {
+    const panelOf = new Map<string, number>();
+    panelSeries.forEach((s, i) => { if (s.name != null) panelOf.set(s.name, i); });
+    for (const s of series as SeriesLike[]) {
+      const key = s.__trend ? s.__of : s.name;
+      const i = key != null ? panelOf.get(key) : undefined;
+      if (i == null) continue;
+      (s as unknown as Record<string, unknown>).xAxisIndex = i;
+      (s as unknown as Record<string, unknown>).yAxisIndex = i;
+    }
+  }
+
+  // Goal line — a horizontal reference at goalValue, drawn via a series' markLine.
+  //
+  // ONE PER PANEL when the chart is split, which is Metabase's own shape (`buildSplitPanelGoalSeries`
+  // duplicates the goal into every grid). It is not decoration: each panel has its own value scale,
+  // so a goal of 2 sits near the top of a 0-4 panel and on the floor of a 0-4000 one, and a reader
+  // shown it in the first panel only would take the second panel's silence for "no goal here".
+  // Attached to each PANEL'S OWN series rather than emitted as extra series, because a markLine is
+  // already drawn in its host series' coordinate system — the binding above has put each of those in
+  // the right grid, so the goal lands there for free.
   if (cfg.goalValue != null && series.length > 0) {
-    (series[0] as Record<string, unknown>).markLine = {
+    const markLine = () => ({
       silent: true,
       symbol: "none",
       data: [{ yAxis: cfg.goalValue }],
       label: { formatter: cfg.goalLabel ?? "Goal", position: "insideEndTop", color: axisLabelColor },
       lineStyle: { color: axisLabelColor, type: "dashed" },
-    };
+    });
+    for (const host of panels ? panelSeries : [series[0] as SeriesLike]) {
+      (host as unknown as Record<string, unknown>).markLine = markLine();
+    }
   }
 
   // Trend series stay out of the legend.
   const legendNames = series.filter((s) => !(s as SeriesLike).__trend && !(s as SeriesLike).__total).map((s) => (s as SeriesLike).name);
-  const legend = showLegend
+  const legend = drawLegend
     ? { top: 0, left: "center" as const, type: "scroll" as const, ...(legendNames.length !== series.length ? { data: legendNames } : {}) }
+    : undefined;
+  /**
+   * THE PANEL TITLES, which are what egret has instead of a legend here — see the `panelSeries` note
+   * for why the legend had to go rather than merely being unnecessary.
+   *
+   * The series' DISPLAY name, so a rename through `seriesLabels` reaches the title exactly as it
+   * reaches the tooltip and the aria description; `decorateSeries` has already resolved it into
+   * `name`, so this asks nothing of its own.
+   *
+   * ANCHORED AT THE PANEL'S OWN LEFT EDGE rather than centred, and left-aligned with the plot below
+   * it: a centred title over a panel whose left inset is a column of numbers reads as belonging to
+   * the card rather than to the panel. `titleTop` comes from the layout, which owns the band it sits
+   * in — deriving it here from `top` would be a second copy of `PANEL_TITLE_BAND`.
+   */
+  const panelTitles = panels?.map((p, i) => ({
+    text: panelSeries[i]?.name ?? "",
+    top: p.titleTop,
+    left: panelGrids?.[i].left,
+    // ECharts' `title.padding` DEFAULTS TO 5, which is 5px `PANEL_TITLE_BAND` did not budget for and
+    // which put the first title's box through the "40K" label beside it on the live 540x561 chart.
+    // Zeroed so the band's arithmetic is the arithmetic — see `PANEL_TITLE_BAND` for the measurement.
+    padding: 0,
+    textStyle: { fontSize: PANEL_TITLE_FONT, fontWeight: CHART_THEME.labelWeight, color: axisLabelColor },
+  }));
+  /**
+   * THE VALUE AXIS'S NAME, DRAWN ONCE for the whole stack of panels — Metabase's
+   * `buildSplitPanelYAxisLabel`, which is a rotated `graphic` text at the vertical centre of every
+   * panel, and this is that.
+   *
+   * WHY NOT THE AXES' OWN `name`. Every panel HAS a value axis, so every one of them would carry the
+   * title, and the live 760x560 four-band breakout drew "orders" down the left of the card four
+   * times. The measure is the same measure in all four panels; what differs between them is the
+   * series, and that is what the panel TITLES say. Metabase reaches the same split — its per-panel
+   * axis models are built with `showLabel: false` for exactly this reason (`model/axis.ts`).
+   *
+   * IT SITS IN THE 26px BAND `panelGrids` ALREADY RESERVES for a value-axis title, centred in it, so
+   * nothing about the left inset moves. `rotation: PI/2` is ECharts' counter-clockwise radian, which
+   * reads bottom-to-top — the direction an ECharts axis `name` is drawn in, so a chart that has
+   * panels and one that does not read the same way round.
+   *
+   * `graphic` IS NOT A MERGE HAZARD HERE even though it accumulates under a merge `setOption`:
+   * `EChartsRenderer` applies the built option with `notMerge: true`, and the only merge patches in
+   * the product are the pie's centre overlay and `__axisNamesFor`'s — neither of which this chart
+   * sends (`axisNamesFor` returns `{}` under panels).
+   */
+  const valueAxisName = panels && yTitle
+    ? [{
+        type: "text" as const,
+        left: (CHART_THEME.grid.left as number) + 13,
+        top: (panels[0].top + panels[panels.length - 1].top + panels[panels.length - 1].height) / 2,
+        rotation: Math.PI / 2,
+        style: {
+          text: yTitle,
+          fill: axisLabelColor,
+          fontSize: CHART_THEME.axisFontSize,
+          fontWeight: CHART_THEME.labelWeight,
+          align: "center" as const,
+          verticalAlign: "middle" as const,
+        },
+      }]
     : undefined;
 
   // Formatted tooltip — one row per (non-trend) series, value via its metric's format.
@@ -2728,6 +3119,25 @@ function baseOption(
    * for an axis nobody named, so "clear it" and "it was never set" end in the same state.
    */
   const axisNamesFor = (selected?: Record<string, boolean>) => {
+    /**
+     * NOTHING TO SAY UNDER SPLIT PANELS, and returning `{}` rather than a patch is load-bearing in
+     * two directions even though no legend event can fire in that mode.
+     *
+     * There is no component wearing `VALUE_AXIS_ID` there — every panel axis carries
+     * `yValuePanel<i>` instead — and `mkValueAxis` records what a patch naming an id nothing wears
+     * actually does: ECharts CREATES that component. Measured on the dual-axis combo as a phantom
+     * third y-axis carrying the new title while the real axis kept the stale one. So the failure
+     * mode of getting this wrong is not "the title does not update", it is a spurious axis on the
+     * card.
+     *
+     * And the answer would be wrong even if the id matched: `yTitleFor` narrows to a single metric's
+     * name over the whole chart, which is a question about ONE shared axis. With a panel per series
+     * the axes do not share a title to narrow.
+     *
+     * `EChartsRenderer` merges this into the patch it is building, so an empty object simply adds
+     * nothing and the aria update it already holds still goes out.
+     */
+    if (splitting) return {};
     const axis = { id: VALUE_AXIS_ID, name: yTitleFor(selected) ?? "" };
     return horizontal ? { xAxis: axis } : { yAxis: axis };
   };
@@ -2743,9 +3153,17 @@ function baseOption(
     // The product's own typeface, at the option root — this is the one builder that composes its
     // whole option itself rather than spreading base.ts's `baseOption()`, so it has to say so.
     textStyle: baseTextStyle(),
-    grid,
+    grid: panelGrids ?? grid,
     tooltip: { trigger: cfg.kind === "scatter" ? "item" : "axis", ...tooltipSurface(), formatter: tooltipFormatter },
+    // The crosshair spans every panel, so hovering one reads the same category in all of them —
+    // which is the point of stacking panels over one shared domain rather than drawing four charts.
+    // Only written when there are panels to link; on every other chart it is absent as it always was.
+    ...(panels ? { axisPointer: { link: [{ xAxisIndex: "all" }] } } : {}),
     legend,
+    // Absent, not empty, off a split chart — `TitleComponent` is registered for these and an empty
+    // array would still ask ECharts to walk it on every chart in the product.
+    ...(panelTitles ? { title: panelTitles } : {}),
+    ...(valueAxisName ? { graphic: valueAxisName } : {}),
     xAxis,
     yAxis,
     series,
