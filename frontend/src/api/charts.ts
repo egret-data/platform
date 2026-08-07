@@ -359,12 +359,50 @@ export interface SankeyConfig {
   /** Metabase's `sankey.label_value_formatting`, only meaningful with edge labels on. */
   labelFormatting?: "auto" | "compact" | "full";
 }
+/** Metabase's `map.type`. "grid" is deliberately absent — see `MapConfig.type`. */
+export type MapType = "region" | "pin";
+
 export interface MapConfig {
-  /** Metabase's `map.colors` — the one accent the choropleth ramp derives from. */
+  /** Metabase's `map.colors` — the accent the choropleth ramp derives from, and the pin colour. */
   color?: string;
   mapKey: string;      // registry key: "us_states" | "world" | "vietnam"
-  region?: string;     // dimension column holding the region code/name
-  metric?: string;
+  /**
+   * WHAT THE ROWS BECOME: shaded regions, or one marker per row at a coordinate.
+   *
+   * The two branches ask the backend for genuinely different things — a region map aggregates a
+   * metric by a dimension, a pin map asks for raw records — so this is the field `buildSpec`
+   * switches on, and it is why the panel hides the other branch's fields rather than greying them.
+   *
+   * OPTIONAL, AND UNDEFINED MEANS "region". Every map chart saved before pin mode existed has no
+   * `map.type` at all, and all of them are region maps; reading a missing value as anything else
+   * would silently re-point them at a query they cannot run. `fromParams` resolves it, so config
+   * in hand always has it — only STORED params can lack it.
+   *
+   * Metabase's third option, "grid", is NOT here and is not an oversight. A grid map bins the
+   * coordinates in SQL, which egret's `QuerySpec` has no way to express (it would need binning,
+   * dual-dialect SQL for Trino and StarRocks, and a bin-width channel to carry the chosen width
+   * back to the renderer). It was judged not worth building at all: the thing a grid map is for —
+   * density over an area — is what egret's choropleth already does better whenever the data has a
+   * region column, without binning anything.
+   */
+  type?: MapType;
+  region?: string;     // dimension column holding the region code/name — region maps only
+  metric?: string;     // region maps only
+  /** Metabase's `map.latitude_column` — pin maps only. Numeric. */
+  latitude?: string;
+  /** Metabase's `map.longitude_column` — pin maps only. Numeric. */
+  longitude?: string;
+  /**
+   * The column a pin is NAMED by in its tooltip. Pin maps only, and optional.
+   *
+   * NO METABASE COUNTERPART, because the difference is in the query rather than the display:
+   * Metabase's pin map gets the whole row back and puts every column in the marker's popup, while
+   * egret's raw-records mode selects exactly the columns `buildSpec` names. With only `latitude`
+   * and `longitude` selected there is literally nothing else to show, so a pin could only ever
+   * identify itself as its own coordinates. Naming one column adds it to the SELECT and to the
+   * tooltip. A full column picker is the fuller answer and is not built here.
+   */
+  label?: string;
 }
 
 export interface ChartParams {

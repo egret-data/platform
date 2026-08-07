@@ -40,5 +40,8 @@ export const CHART_TYPES: ChartTypeMeta[] = [
   { key: "boxplot", name: "Box plot", description: "The distribution of a value (min/quartiles/max) per category.", icon: Box },
   { key: "sankey", name: "Sankey", description: "Flows between source and target categories, weighted by a metric.", icon: Workflow },
   { key: "object", name: "Object detail", description: "Inspect one record as field/value pairs, paging through results.", icon: FileText },
-  { key: "map", name: "Map", description: "Shade regions of a map by a metric (US states, world, Vietnam).", icon: Map },
+  // Both map types are named here because the gallery card is the only place a reader is told
+  // what a chart type can do BEFORE picking it. Describing only the choropleth is how someone
+  // looking for a way to plot coordinates concludes egret has none and stops looking.
+  { key: "map", name: "Map", description: "Shade regions by a metric, or pin each row at a latitude and longitude (US states, world, Vietnam).", icon: Map },
 ];
