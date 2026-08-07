@@ -1320,3 +1320,98 @@ describe("CartesianDisplaySection — the axis controls under a breakout", () =>
     expect(screen.queryByLabelText("axis L")).toBeNull();
   });
 });
+
+/**
+ * THE TREND-LINE SWITCH ON A SCATTER, which the builder has been honouring for as long as the
+ * switch has existed and this panel never offered.
+ *
+ * `TrendOption` read `kind !== "scatter"` and nothing else, so the row was withheld from BOTH
+ * scatter flavours at once. Only one of them justifies it. `buildCartesianOption` early-returns
+ * into `scatterXY` for `kind === "scatter" && cfg.xMetric && cfg.yMetrics.length > 0`; a scatter
+ * with a dimension on x falls through to the ordinary path, where `if (cfg.trendLine)
+ * series.push(...trendSeries(series))` stands at both call sites. `cartesian.scatterPanelParity`
+ * pins that half — the fit is drawn, exactly, on the very fixture this file's kind names.
+ *
+ * So this is #428's sweep run in the other direction. That PR looked for keys the panel offered and
+ * the builder discarded and found eleven; this is a key the BUILDER honours and the panel did not
+ * offer, which is the same disagreement with the arrow reversed and is not, as
+ * `cartesian.scatterPanelParity`'s header used to say, "a builder feature".
+ *
+ * WHY THE METRIC-VS-METRIC FLAVOUR STAYS EXCLUDED is the distinction `AxisRangeOptions` already
+ * draws in this file between the x-scale select (hidden on a metric x, because a metric x has no
+ * scale to choose) and the Y-axis group (not hidden, because a whole group appearing and vanishing
+ * as a Data-tab select changed reads as a glitch). Trend line is on the x-scale side of that line,
+ * and the reason is what egret's trend line MEANS: `trendData` solves `y = m·i + b` over the datum
+ * INDEX, before `applyXScale` maps the points onto real coordinates. It is a fit against series
+ * position. A metric-vs-metric scatter has no series position — its points are a cloud in whatever
+ * order the engine returned — so the switch would have no referent there rather than merely no
+ * implementation. Fitting y on x instead would put a different statistic under the same switch on
+ * one chart type, which is worse than withholding it.
+ *
+ * Metabase lands in the same place from the other end, measured live at localhost:3033 rather than
+ * read off the source: `MB · Scatter` (numeric x) offers "Goal line / Additional tooltip columns"
+ * and no Trend line; the same question redisplayed as a scatter over `CREATED_AT: Quarter` offers
+ * "Goal line / Trend line / Stack series / Additional tooltip columns" and draws the fits. Its gate
+ * is `graph.show_trendline.getHidden` — no server-side `insights`, no row — and `insights` exist
+ * only for a result with exactly one datetime column.
+ */
+describe("CartesianDisplaySection — the trend-line switch on a scatter", () => {
+  /** Vacuity guard first: the row is on offer for the kinds it always was, so an absent row below
+   *  is a statement about the scatter arm and not about the section failing to render. */
+  it("still offers it on a bar", () => {
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"] }} onChange={() => {}} />);
+    expect(screen.getByLabelText("Trend line")).toBeInTheDocument();
+  });
+
+  it("offers it on a scatter with a dimension on x, which is the flavour that draws it", () => {
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xAxis: "order_month" }} onChange={() => {}} />);
+    expect(screen.getByLabelText("Trend line")).toBeInTheDocument();
+  });
+
+  /** The lever, not just the row: a switch that appears and stores nothing is the same defect one
+   *  step later. */
+  it("stores the switch from that scatter", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xAxis: "order_month" }} onChange={onChange} />);
+    await user.click(screen.getByLabelText("Trend line"));
+    expect(onChange).toHaveBeenCalledWith({ trendLine: true });
+  });
+
+  it("reflects a stored true rather than always drawing unchecked", () => {
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xAxis: "order_month", trendLine: true }} onChange={() => {}} />);
+    expect(screen.getByLabelText("Trend line")).toBeChecked();
+  });
+
+  it("withholds it on a metric-vs-metric scatter, which has no series position to fit against", () => {
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xAxis: "d", xMetric: "spend" }} onChange={() => {}} />);
+    expect(screen.queryByLabelText("Trend line")).toBeNull();
+  });
+
+  /** `xMetric` alone is what `buildCartesianOption` branches on together with `yMetrics.length`, and
+   *  a scatter always has a y metric by the time it draws — so the gate is `xMetric != null` and an
+   *  `xAxis` sitting beside it changes nothing. Pinned because a gate written as
+   *  `xAxis == null` would pass every assertion above and be wrong on precisely this chart. */
+  it("withholds it on a metric-vs-metric scatter with no dimension at all", () => {
+    render(<CartesianDisplaySection kind="scatter" config={{ yMetrics: ["rev"], xMetric: "spend" }} onChange={() => {}} />);
+    expect(screen.queryByLabelText("Trend line")).toBeNull();
+  });
+
+  /**
+   * BOTH HALVES OF THE GATE ARE LOAD-BEARING, and this is the half a mutation run surfaced: with
+   * the `kind` test dropped the guard becomes `config.xMetric != null`, and every assertion above
+   * still passed, because nothing else in this suite sets `xMetric` on a non-scatter.
+   *
+   * A bar CAN carry one. `CARTESIAN_PREFIX` is the settings namespace shared by every cartesian
+   * kind — the codec's own docstring says so, "so bar→line keeps its config" — and
+   * `cartesianToSettings` writes every defined key, `xMetric` included. So a scatter with an X
+   * metric switched to a bar arrives here as `{ kind: "bar", xMetric: "spend" }` with the leftover
+   * still in `cartesian.xMetric`, and under that mutant its Trend line switch would silently
+   * disappear on a chart that draws the fit. The `kind` test is what stops a stale key from one
+   * chart type governing a control on another.
+   */
+  it("keeps it on a bar that still carries an xMetric left over from being a scatter", () => {
+    render(<CartesianDisplaySection kind="bar" config={{ yMetrics: ["rev"], xAxis: "d", xMetric: "spend" }} onChange={() => {}} />);
+    expect(screen.getByLabelText("Trend line")).toBeInTheDocument();
+  });
+});

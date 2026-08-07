@@ -880,11 +880,56 @@ export function GoalOptions({ config, onChange }: SectionProps) {
   );
 }
 
-/** Least-squares trend line overlay — not offered on scatter (no series to fit along an axis). */
+/**
+ * Least-squares trend line overlay.
+ *
+ * WITHHELD ON THE METRIC-VS-METRIC SCATTER ONLY, where this used to read `kind !== "scatter"` and
+ * so withheld it from both scatter flavours at once. Only one of them earns it.
+ *
+ * `buildCartesianOption` early-returns into `scatterXY` for `kind === "scatter" && cfg.xMetric &&
+ * cfg.yMetrics.length > 0`. A scatter with a DIMENSION on x takes neither branch of that guard and
+ * falls through to the ordinary path, where `if (cfg.trendLine) series.push(...trendSeries(series))`
+ * has stood at both call sites for as long as the trend line has existed. So on that flavour the
+ * builder has been drawing the fit all along and this function was the only thing withholding the
+ * switch — a panel/builder disagreement of exactly the kind #428 swept for, with the arrow
+ * reversed. `cartesian.scatterPanelParity.test.ts` pins the drawn half; the header of that file
+ * used to call closing this "a builder feature", and this is the correction.
+ *
+ * `config.xMetric != null` AND NOT `config.xAxis == null`, because that is the condition the
+ * builder actually branches on — a metric-vs-metric scatter usually has a dimension too (it names
+ * the points) and gating on the dimension would show the row on the very chart that ignores it.
+ * `yMetrics.length > 0` is the guard's other half and is not restated: a scatter with no y metric
+ * draws nothing at all, and `requiredFields` already refuses to run it.
+ *
+ * WHY THIS IS A HIDE AND NOT A GREY-OUT, unlike the x-label rotations one section down. The
+ * distinction `AxisRangeOptions` draws is between a control that is MEANINGLESS on a flavour (the
+ * x-scale select: a metric x has no scale to choose — hidden) and one that is merely unhonoured
+ * (the Y-axis group, which would otherwise appear and vanish as a Data-tab select changed — kept,
+ * and the builder taught to read it). Trend line is on the first side, and the reason is what
+ * egret's trend line MEANS: `trendData` solves `y = m·i + b` over the datum INDEX, and it runs
+ * before `applyXScale` re-keys the points onto real coordinates, so even on a time axis the fit is
+ * against series POSITION rather than against the x value. A metric-vs-metric scatter has no series
+ * position — its points are a cloud in whatever order the engine returned — so the switch would
+ * have no referent there, not merely no implementation. Fitting y on x instead would put a
+ * different statistic under the same switch on one chart type out of seven, which is a worse
+ * outcome than withholding the row.
+ *
+ * MEASURED IN METABASE, which draws the same line from the other end. `ScatterPlot.tsx` spreads
+ * `GRAPH_TREND_SETTINGS`, but `graph.show_trendline.getHidden` is `!insights ||
+ * insights.length === 0 || graphDimensions.length > 1`, and `insights` is produced server-side only
+ * for a `timeseries?` result — one datetime column and at least one number
+ * (`analyze/fingerprint/insights.clj`). Driven live: `MB · Scatter` (a numeric x) offers "Goal line
+ * / Additional tooltip columns" and no Trend line; the same question redisplayed as a scatter over
+ * `CREATED_AT: Quarter` offers "Goal line / Trend line / Stack series / Additional tooltip columns"
+ * and draws two dashed fits.
+ *
+ * A CHART CARRYING `trendLine: true` INTO A METRIC X keeps the stored key and draws nothing, which
+ * is inert rather than wrong and comes back the moment the X metric is cleared. That is what
+ * `xScale` already does on the same flavour for the same reason.
+ */
 export function TrendOption({ kind, config, onChange }: SectionProps) {
-  return kind !== "scatter" ? (
-    <Toggle id="cz-trend" label="Trend line" checked={!!config.trendLine} onChange={(v) => onChange({ trendLine: v })} />
-  ) : null;
+  if (kind === "scatter" && config.xMetric != null) return null;
+  return <Toggle id="cz-trend" label="Trend line" checked={!!config.trendLine} onChange={(v) => onChange({ trendLine: v })} />;
 }
 
 export function CartesianDisplaySection({

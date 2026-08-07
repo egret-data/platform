@@ -1019,10 +1019,29 @@ export function bubbleDiameter(value: number, lo: number, hi: number): number {
  *
  * WHAT IS STILL DELIBERATELY ABSENT, so the next sweep does not report it a third time:
  * `maxCategories` (the control is not declared for any scatter — there is no category axis to fold),
- * `trendLine` (`TrendOption` renders nothing on a scatter, so no row is offered), and
- * `xLabelRotation` / `xLabelCompact` (offered on every cartesian kind but visibly greyed here, with
- * a caption, because both axes are value axes whose ticks ECharts generates). All three are the
- * panel keeping its half; none of them is a key saved and dropped.
+ * `trendLine` (see below), and `xLabelRotation` / `xLabelCompact` (offered on every cartesian kind
+ * but visibly greyed here, with a caption, because both axes are value axes whose ticks ECharts
+ * generates). All three are the panel keeping its half; none of them is a key saved and dropped.
+ *
+ * `trendLine`'S ENTRY IN THAT LIST USED TO READ "`TrendOption` renders nothing on a scatter, so no
+ * row is offered", AND IT WAS TRUE OF THE WRONG SET. `TrendOption` tested `kind !== "scatter"` and
+ * therefore withheld the switch from BOTH scatter flavours, including the one whose trend line this
+ * builder has always drawn: a scatter with a dimension on x misses the early return above and falls
+ * through to the ordinary path, where `if (cfg.trendLine) series.push(...trendSeries(series))`
+ * stands at both call sites. So the sentence recorded a fact about `TrendOption` as though it were
+ * a fact about scatters, and hid a live panel/builder disagreement pointing the OTHER way from the
+ * eleven this comment is otherwise about — builder honours, panel does not offer. `TrendOption` now
+ * gates on `config.xMetric != null`, which is this function's own entry condition, and the switch
+ * is on offer wherever the fit is drawn.
+ *
+ * THIS FUNCTION STILL DRAWS NO TREND, and that is the meaningfulness half rather than an unhonoured
+ * key. `trendData` solves `y = m·i + b` over the datum INDEX — a fit against series POSITION, run
+ * before `applyXScale` maps points onto real coordinates — which has no referent on a cloud of
+ * points in whatever order the engine returned. Fitting y on x instead would be a different
+ * statistic under the same switch on one chart type; Metabase declines it too, its scatter's
+ * `graph.show_trendline` being gated on server-side `insights` that exist only for a result with
+ * one datetime column. A chart that carries `trendLine: true` in here keeps the key and draws
+ * nothing, exactly as `xScale` does.
  *
  * NO X-AXIS SCALE OR X BOUNDS EITHER, unchanged: Metabase's keys are `graph.y_axis.scale`/`.min`/
  * `.max` with no x twin, so those would be settings with no parity, no control and no way to undo.
