@@ -87,6 +87,62 @@ function YAxisControl({ config, onChange, metrics }: VizControlProps<CartesianCo
   );
 }
 
+/**
+ * Metabase's "Additional tooltip columns", in the one namespace where egret can mean it: dataset
+ * METRICS fetched for the tooltip and plotted nowhere. `CartesianConfig.tooltipMetrics` carries the
+ * argument for why it is metrics rather than columns; this control is the picking half.
+ *
+ * THE OPTION LIST IS THE COMPLEMENT OF WHAT THE CHART PLOTS — Metabase's own
+ * `getAvailableAdditionalColumns`, which subtracts the columns the chart already references
+ * (`shared/settings/cartesian-chart.ts:458-476`). A metric already on the Y-axis is not an
+ * ADDITIONAL one, and a row repeating a series' own number is worse than the feature's absence.
+ * On a scatter the x metric and the bubble metric come out too, for the same reason and because the
+ * tooltip already prints both. `FieldZone` subtracts the chosen ones itself.
+ *
+ * HIDDEN WHEN THERE IS NOTHING TO OFFER **AND** NOTHING TO SHOW, which is Metabase's
+ * `getHidden: (rawSeries, vizSettings) => getAvailableAdditionalColumns(...).length === 0`
+ * (`lib/settings/graph.ts:431`) plus the guarantee that makes it safe to port.
+ *
+ * PR #431 objected to controls that vanish as a neighbouring select changes, and the objection is
+ * right about the case it names — a control disappearing WITH A VALUE IN IT, leaving a setting that
+ * paints and cannot be unset. Metabase never meets that case, and not by luck: its widget reads
+ * `getValue: getComputedAdditionalColumnsValue`, which filters the stored list down to what is
+ * still available before anything sees it (`cartesian-chart.ts:494-498`), so a value it hides is a
+ * value it has already dropped. egret does NOT filter the stored value — a chart's settings are
+ * stored JSON and quietly rewriting one at render time is how a user's config loses things without
+ * saying so — which leaves the second clause as the way to keep the rule honest here. The two
+ * arrive at the same behaviour by different routes, and "always present, sometimes empty" would
+ * have been the egret divergence rather than the parity.
+ *
+ * The threshold is reached only on a one-metric dataset, or on a chart already plotting every
+ * metric it has; both are states in which the row could say nothing at all.
+ *
+ * UNDER A BREAKOUT IT SAYS SO RATHER THAN DISAPPEARING, and that is the same distinction one more
+ * time. The builder cannot draw these rows with a `series` column (see `extraTooltipMetrics`) and
+ * `buildSpec` declines to fetch them, so the honest thing is a sentence — the shape `SeriesControl`
+ * eight lines down already uses for its own "only the first metric is plotted". The chips stay
+ * removable, which is exactly what hiding the control would have taken away.
+ */
+function TooltipMetricsControl({ config, onChange, metrics }: VizControlProps<CartesianConfig>) {
+  const plotted = new Set<string>(config.yMetrics);
+  if (config.xMetric) plotted.add(config.xMetric);
+  if (config.bubbleMetric) plotted.add(config.bubbleMetric);
+  const selected = config.tooltipMetrics ?? [];
+  const options = metrics.map((m) => m.metric_name).filter((m) => !plotted.has(m));
+  if (options.length === 0 && selected.length === 0) return null;
+  return (
+    <div className="space-y-1">
+      <FieldZone label="Tooltip metrics" selected={selected} onChange={(v) => onChange({ tooltipMetrics: v })}
+        labels={labelMap(metrics, (m: { metric_name: string }) => m.metric_name)}
+        options={options} />
+      {config.series
+        ? <p className="text-xs text-muted-foreground">Not shown while the chart has a breakout — each
+          value would belong to one series, not to the category.</p>
+        : <p className="text-xs text-muted-foreground">Fetched and shown in the tooltip only.</p>}
+    </div>
+  );
+}
+
 function SeriesControl({ config, onChange, columns }: VizControlProps<CartesianConfig>) {
   return (
     <div className="space-y-1">
@@ -322,6 +378,26 @@ export function cartesianDescriptor(kind: CartesianViz): VizDescriptor<Cartesian
     ] : []),
     { id: "y", section: "data", render: YAxisControl },
     { id: "series", section: "data", render: SeriesControl },
+    /**
+     * ON THE DATA TAB, WHERE METABASE FILES ITS TWIN UNDER DISPLAY, and the divergence is the whole
+     * shape of the port rather than a slip. `graph.tooltip_columns` is `getSection: () => t`Display``
+     * (`lib/settings/graph.ts:421`) and belongs there: it picks among columns the result ALREADY
+     * has and does not touch the query — measured by instrumenting `fetch`/`XHR` before opening the
+     * sidebar (zero requests on selection) and by the `dataset_query` staying byte-identical while
+     * `visualization_settings` gained the key. egret's picks a metric the QUERY MUST BE CHANGED TO
+     * FETCH, which makes it a query input; query inputs live here, beside the Y-axis zone whose
+     * list this one is the complement of.
+     *
+     * IT IS ALSO WHAT KEEPS A DASHBOARD CARD OUT OF IT, and that is not a side effect worth losing.
+     * `applyVizOverride` merges a card's override into `settings` and states outright that "the
+     * query `spec` is never overridden" — so a card able to set this would store a metric its own
+     * stored spec never fetched and paint nothing, which is the save-and-do-not-paint defect this
+     * programme has closed eight times, reached through a surface nobody would think to check.
+     * `CardVizPanel` renders the Display section whole and narrows the Data section to the controls
+     * flagged `cardOverridable`; declaring this one on Data and leaving that flag off is what makes
+     * the card panel decline it — by the existing rule, not by a special case.
+     */
+    { id: "tooltipMetrics", section: "data", render: TooltipMetricsControl },
     // Scatter's x-axis is a metric, not a category to fold into "Other" — nothing to bind
     // maxCategories to there, and the fold code is never reached for a metric-vs-metric plot.
     ...(kind !== "scatter" ? [{ id: "maxCategories", section: "data" as const, render: MaxCategoriesControl }] : []),
@@ -343,11 +419,53 @@ export function cartesianDescriptor(kind: CartesianViz): VizDescriptor<Cartesian
     },
     buildSpec: (cfg, shared: SharedQueryState): QuerySpec => {
       const dims = [cfg.xAxis, cfg.series].filter((d): d is string => !!d);
-      const mets = kind === "scatter" && cfg.xMetric
-        ? [cfg.xMetric, ...cfg.yMetrics, ...(cfg.bubbleMetric ? [cfg.bubbleMetric] : [])]
-        : cfg.yMetrics;
+      /**
+       * `?? []` AND NOT `cfg.yMetrics`, which is not the belt-and-braces it looks like. The type
+       * says `yMetrics: string[]` and every path through the studio honours it, but the harness
+       * generator hands `buildSpec` a deliberately degenerate `{}` to prove the guard that refuses
+       * a chart with no `cartesian.*` settings still fires (`scripts/harness/params.test.ts`,
+       * "refuses to emit a chart with no settings in its own namespace"). The old line read
+       * `metrics: mets` and passed the `undefined` straight through — a type lie that survived only
+       * because nothing ever spread it. Appending the tooltip metrics does spread it, so the
+       * degenerate config started throwing `plotted is not iterable` HERE, before the harness could
+       * reach its own error, and the test that asserts the message matches /cartesian\./ failed
+       * against a TypeError. Defaulting keeps that guard reachable and makes the returned spec
+       * match its own type for the first time.
+       */
+      const ys = cfg.yMetrics ?? [];
+      const plotted = kind === "scatter" && cfg.xMetric
+        ? [cfg.xMetric, ...ys, ...(cfg.bubbleMetric ? [cfg.bubbleMetric] : [])]
+        : ys;
+      /**
+       * THE TOOLTIP METRICS, APPENDED — the whole cost of the feature, and the reason it is a day
+       * rather than a week. `spec.metrics` is a list of DATASET METRIC NAMES: the engine resolves
+       * each through `find_metric` and emits one `<expression> AS <name>` per entry
+       * (`chartquery.rs:529`), taking the grouping from `spec.dimensions` alone. So a name added
+       * here is another aggregate over the SAME groups — one more column in the result, the same
+       * number of rows, the same chart. The builder then draws series from `cfg.yMetrics` and never
+       * from the result's columns, so a metric that is in this list and not in that one is fetched
+       * and drawn nowhere. That is the hook; the tooltip is what reads it.
+       *
+       * AFTER the plotted ones, so a chart's stored spec keeps the column order it had and any
+       * reader indexing the result positionally is unaffected.
+       *
+       * DEDUPED against everything already asked for. A metric can reach both keys — pick it as a
+       * tooltip metric, then add it to the Y-axis — and the same name twice would be SELECTed twice
+       * under one alias, which is an engine error from a state the picker can reach.
+       *
+       * NOT FETCHED AT ALL UNDER A BREAKOUT, which is the half that keeps this honest. With a
+       * `series` column the builder cannot draw these rows (`extraTooltipMetrics` says why: the
+       * value is per (x, band) and egret's cartesian tooltip is `trigger: "axis"`), and fetching a
+       * column in order to discard it is precisely the defect this PR's other half fixes on the
+       * scatter. The two decisions are one decision and have to be spelled the same way in both
+       * places.
+       */
+      const extras = cfg.series
+        ? []
+        : (cfg.tooltipMetrics ?? []).filter((m, i, all) =>
+          !plotted.includes(m) && all.indexOf(m) === i);
       return {
-        metrics: mets, dimensions: dims, columns: [], filters: shared.filters,
+        metrics: [...plotted, ...extras], dimensions: dims, columns: [], filters: shared.filters,
         // The query asks for the order the chart draws in, so the ROWS are deterministic — not
         // just the axis. Without it the engine returns the groups in whatever order it likes, and
         // tooltips, drills, exports and whichever rows survive `row_limit` all disagree between
