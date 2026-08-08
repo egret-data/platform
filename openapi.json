@@ -23453,7 +23453,18 @@
           },
           "semantic_type": {
             "type": "string",
-            "description": "Semantic role (category/country/currency/email/url/image/…); '' = none."
+            "description": "Semantic role driving smart rendering and chart defaults; \"\" = none. Rejected with 400 if not one of the listed values.",
+            "enum": [
+              "",
+              "category",
+              "country",
+              "currency",
+              "email",
+              "url",
+              "image",
+              "latitude",
+              "longitude"
+            ]
           }
         }
       },
@@ -27461,6 +27472,19 @@
             "type": [
               "string",
               "null"
+            ],
+            "description": "Semantic role driving smart rendering and chart defaults; \"\" = none. Rejected with 400 if not one of the listed values.",
+            "enum": [
+              "",
+              "category",
+              "country",
+              "currency",
+              "email",
+              "url",
+              "image",
+              "latitude",
+              "longitude",
+              null
             ]
           }
         }

@@ -99,6 +99,39 @@ test("ColumnsTab: '+ Calculated column' button renders", () => {
   expect(screen.getByRole("button", { name: "+ Calculated column" })).toBeInTheDocument();
 });
 
+/**
+ * THE ROLE SELECT'S VOCABULARY, PINNED.
+ *
+ * `semantic_type` is now validated server-side against `SEMANTIC_TYPES` in `egret-analytics-api`,
+ * which answers 400 for anything else. That makes this `<select>` and that Rust constant two halves
+ * of one contract, and the failure mode of them drifting is specific and bad: add an `<option>`
+ * here without adding it there and the control offers a choice the API refuses, so the user picks a
+ * role and gets an error toast from a dropdown that suggested it.
+ *
+ * The Rust side has its own test pinning the constant. That one CANNOT see this file — it compares
+ * the constant against a written-down copy of this list — so it catches the constant changing alone.
+ * This test is the other direction, and the two together are what make the pair hard to break: this
+ * one fails the moment an option is added, removed or respelled here, and its message says where
+ * the matching change belongs. Neither test alone is enough, which is why the Rust comment now
+ * points at both.
+ *
+ * The values, not the labels: the API compares the `value`, and every reader (`map.tsx`,
+ * `PreviewTab`) compares it with `===`. A label may be re-worded freely.
+ */
+test("ColumnsTab: the Role select offers exactly the server's semantic_type vocabulary", () => {
+  renderWithProviders(
+    <ColumnsTab ws="eng" datasetId="ds1" columns={[physicalColumn]} />,
+  );
+  const select = screen.getByLabelText(`Role ${physicalColumn.column_name}`) as HTMLSelectElement;
+  const offered = Array.from(select.options).map((o) => o.value);
+  expect(offered).toStrictEqual([
+    "", "category", "country", "currency", "email", "url", "image", "latitude", "longitude",
+  ]);
+  // If this failed, update `SEMANTIC_TYPES` in crates/egret-analytics-api/src/bi.rs, the literal in
+  // its `the_allow_list_is_exactly_the_editor_vocabulary` test, and migration 0104's CHECK — all
+  // three, or the new value is a 400 the moment someone picks it.
+});
+
 test("MetricsTab: metric row renders with correct metric_name", () => {
   renderWithProviders(
     <MetricsTab ws="eng" datasetId="ds1" metrics={[sampleMetric]} />,

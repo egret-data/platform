@@ -139,7 +139,16 @@ pub struct DatasetColumnDto {
     pub filterable: bool,
     /// Display format (ColumnFormat JSON); empty = default.
     pub format: String,
-    /// Semantic role (category/country/currency/email/url/image/…); '' = none.
+    /// Semantic role; '' = none. See [`SEMANTIC_TYPES`] for the full vocabulary.
+    ///
+    /// TYPED `String` AND NOT AN ENUM, ON PURPOSE — this is the READ side, and it must stay total.
+    /// A value stored before migration 0104's constraint (or by any future writer that bypasses
+    /// `validate_semantic_type`) has to be serialisable, because this DTO is built one-per-column
+    /// by `load_detail` and a decode failure on a single column would take the whole dataset detail
+    /// response down with it. The `…` this doc comment used to end in is also gone: it predated
+    /// `latitude`/`longitude` (#438) and silently under-described the field, which is the same
+    /// class of drift the enum-free vocabulary caused in the first place.
+    #[schema(schema_with = semantic_type_schema)]
     pub semantic_type: String,
 }
 
@@ -253,7 +262,11 @@ pub struct UpdateColumnBody {
     pub is_temporal: Option<bool>,
     #[serde(default)]
     pub format: Option<String>,
+    /// Semantic role to set; omit to leave unchanged. Validated against [`SEMANTIC_TYPES`];
+    /// anything else is a 400. Still `Option<String>` rather than an `Option<enum>` so the
+    /// rejection is that 400 and not axum's generic 422 — see [`validate_semantic_type`].
     #[serde(default)]
+    #[schema(schema_with = semantic_type_update_schema)]
     pub semantic_type: Option<String>,
 }
 
@@ -417,9 +430,261 @@ pub struct UpdateDashboard {
     pub cards: Vec<CardInput>,
 }
 
+/// The complete vocabulary of `dataset_columns.semantic_type`. `""` means "no role".
+///
+/// THIS IS THE WHOLE LIST, AND IT IS THE `<select>`'s LIST. The vocabulary was never written down
+/// anywhere until now: migration 0098 created the column as `text NOT NULL DEFAULT ''` with no
+/// CHECK, Rust typed it `String`, utoipa emitted a bare `type: string`, and the only enumeration in
+/// the entire codebase was nine `<option value="…">` elements in `ColumnsTab.tsx`. `PUT
+/// semantic_type: "banana"` therefore persisted, which is what #438 measured.
+///
+/// WHY ALL NINE AND NOT THE SIX THAT ARE READ. Six of these drive behaviour today —
+/// `currency`/`email`/`url`/`image` are read by `PreviewTab` and `ChartExplore` to default a
+/// column's display format, and `latitude`/`longitude` are read by the pin map's coordinate pickers
+/// (#438). The other two, `category` and `country`, are WRITE-ONLY: the editor offers them, the API
+/// stores them, and nothing anywhere reads them. #438 flagged that as a warning, and the warning
+/// cuts the opposite way from how it first reads. A list built from "what does something read?"
+/// would have dropped both — and the live deployment's `analytics.dataset_columns` was queried
+/// before this list was written: 72 rows, 71 at `''` and ONE AT `category`. A reader-derived
+/// allow-list would have rejected a row that exists in production and failed its own migration on
+/// deploy. Write-only means "no consumer yet", not "illegitimate"; a semantic role that a future
+/// chart type will read is exactly the kind of thing an author annotates in advance.
+///
+/// CASE- AND FORM-SENSITIVE, deliberately. Every reader compares with `===` against a lowercase
+/// bare word, so `"Latitude"` and Metabase's own `"type/Latitude"` spelling are not near-misses to
+/// be helpfully coerced — they are values that would store cleanly and then produce a picker that
+/// never fills, with no error at any layer. Rejecting them is the point. Note this is a divergence
+/// from Metabase, which namespaces its semantic types (`type/Latitude`, `type/Email`); egret chose
+/// bare lowercase words in 0098 and the readers were written against them, so the vocabulary is
+/// what egret's own code reads, not what Metabase's does. Changing to Metabase's spelling would be
+/// a data migration plus three reader changes, and is not this.
+pub const SEMANTIC_TYPES: [&str; 9] = [
+    "",
+    "category",
+    "country",
+    "currency",
+    "email",
+    "url",
+    "image",
+    "latitude",
+    "longitude",
+];
+
+/// Reject a `semantic_type` outside [`SEMANTIC_TYPES`]. `Err` carries a message for a 400.
+///
+/// WHY VALIDATION SITS ON THE WRITE PATH AND NOT IN THE TYPE. The obvious shape is
+/// `enum SemanticType` with serde, and it was tried and rejected for a specific failure mode: the
+/// row struct `DatasetColumn` is `sqlx::FromRow`, so an enum there makes DECODING a stored value
+/// fallible. One legacy row holding anything unexpected — and rows predating any constraint are
+/// precisely what we cannot rule out on every deployment — would then fail to decode, and it would
+/// not fail narrowly: `load_detail` selects all of a dataset's columns at once, so a single bad row
+/// takes out the whole dataset detail page with a 500. Strictness on read converts a cosmetic data
+/// problem into an outage. Reads therefore stay `String` and stay total; only writes are narrowed.
+///
+/// A SERDE ENUM ON `UpdateColumnBody` ALONE WAS ALSO REJECTED, more narrowly. It would reject
+/// unknown values at deserialisation, which is the right moment, but the failure surfaces as axum's
+/// generic 422 for a malformed body — "unknown variant `banana`", with no statement of what the
+/// permitted values are and no distinction from a genuinely malformed request. The handler already
+/// answers a comparable mistake with a plain 400 that says what is wrong ("cannot set an expression
+/// on a physical column"), so this matches that.
+///
+/// WHAT HAPPENS TO A VALUE ALREADY STORED THAT IS NOT IN THE LIST. Nothing, at read time — it is
+/// served verbatim, the editor's `<select>` matches no option and renders blank, and every reader's
+/// `===` misses, which is the same do-nothing behaviour an unknown value has always had. It cannot
+/// be re-saved as itself: the next edit through the API must choose a permitted value. Migration
+/// 0104 additionally normalises any such value to `''` before adding its CHECK, so after deploy
+/// there are none; see that migration for why it normalises rather than failing.
+/// The OpenAPI schema for a `semantic_type` field, BUILT FROM [`SEMANTIC_TYPES`] rather than
+/// restating it.
+///
+/// The root cause #438 identified was that the vocabulary existed in exactly one place and that
+/// place was a `<select>` in a React component — so the API's own contract could not tell you what
+/// the field accepted, and the generated client typed it `string`. Emitting an `enum` fixes that,
+/// but the obvious way to emit one (a `#[derive(ToSchema)]` enum beside the const) would create a
+/// THIRD copy of the vocabulary and a third thing to forget to update. `schema_with` takes the
+/// values straight from the constant the validator uses, so the documented contract and the
+/// enforced contract cannot disagree — there is nothing to keep in step.
+pub fn semantic_type_schema() -> utoipa::openapi::schema::Object {
+    utoipa::openapi::ObjectBuilder::new()
+        .schema_type(utoipa::openapi::schema::Type::String)
+        .enum_values(Some(SEMANTIC_TYPES))
+        .description(Some(SEMANTIC_TYPE_DESC))
+        .build()
+}
+
+const SEMANTIC_TYPE_DESC: &str = "Semantic role driving smart rendering and chart defaults; \
+     \"\" = none. Rejected with 400 if not one of the listed values.";
+
+/// [`semantic_type_schema`] for the UPDATE body, where the field is `Option<String>`.
+///
+/// NULL IS PERMITTED HERE AND ONLY HERE, and it is not the same thing as `""`. On
+/// `UpdateColumnBody` every field is an `Option` meaning "leave this one alone", so `null` is the
+/// documented no-op and `""` is the documented "clear the role" — two different requests. Emitting
+/// the plain non-nullable schema on both sides would have narrowed this field's contract relative to
+/// its own siblings (`format`, `verbose_name` and the rest all publish `["string","null"]`), which
+/// is a change nobody asked for and would have shipped as a side effect of adding the enum. `null`
+/// has to appear in the `enum` as well as in the type: JSON Schema applies `enum` to the value
+/// regardless of type, so a null that is not listed is rejected by the very keyword added to make
+/// the field clearer.
+pub fn semantic_type_update_schema() -> utoipa::openapi::schema::Object {
+    let mut values: Vec<serde_json::Value> = SEMANTIC_TYPES.iter().map(|s| (*s).into()).collect();
+    values.push(serde_json::Value::Null);
+    utoipa::openapi::ObjectBuilder::new()
+        .schema_type(utoipa::openapi::schema::SchemaType::from_iter([
+            utoipa::openapi::schema::Type::String,
+            utoipa::openapi::schema::Type::Null,
+        ]))
+        .enum_values(Some(values))
+        .description(Some(SEMANTIC_TYPE_DESC))
+        .build()
+}
+
+pub fn validate_semantic_type(value: &str) -> Result<(), String> {
+    if SEMANTIC_TYPES.contains(&value) {
+        return Ok(());
+    }
+    // The permitted values are listed in the error because an allow-list whose rejection does not
+    // say what IS allowed just relocates the guesswork to the caller. `''` is rendered as `""` so
+    // that "no role" is visibly one of the choices rather than looking like a formatting slip.
+    let allowed = SEMANTIC_TYPES
+        .iter()
+        .map(|s| format!("{s:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "unknown semantic_type {value:?}; expected one of {allowed}"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every value the dataset column editor's Role `<select>` can produce. Kept here as a literal
+    /// rather than read from the constant so that this list and the constant have to be changed
+    /// together and neither can silently drift from the other.
+    const UI_VOCABULARY: [&str; 9] = [
+        "",
+        "category",
+        "country",
+        "currency",
+        "email",
+        "url",
+        "image",
+        "latitude",
+        "longitude",
+    ];
+
+    #[test]
+    fn accepts_every_value_the_column_editor_can_produce() {
+        for v in UI_VOCABULARY {
+            assert!(
+                validate_semantic_type(v).is_ok(),
+                "the Role select offers {v:?} and the API must accept it"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_category_which_the_live_deployment_already_stores() {
+        // MEASURED, not assumed. The kind deployment's `analytics.dataset_columns` holds 72 rows:
+        // 71 at '' and one at 'category'. `category` is one of the two values #438 correctly
+        // identified as WRITE-ONLY — nothing reads it — and it is exactly the value a
+        // "only allow what something reads" list would have dropped, which would have rejected a
+        // row that exists in production and failed the migration on deploy. Write-only is not the
+        // same as illegitimate.
+        assert!(validate_semantic_type("category").is_ok());
+        assert!(validate_semantic_type("country").is_ok());
+    }
+
+    #[test]
+    fn rejects_a_value_that_is_not_in_the_vocabulary() {
+        // The defect #438 measured: `PUT semantic_type: "banana"` persisted.
+        assert!(validate_semantic_type("banana").is_err());
+    }
+
+    #[test]
+    fn rejects_a_near_miss_that_would_silently_not_fill_the_pin_map() {
+        // The whole reason this stopped being harmless. `map.tsx` compares `c.semantic_type ===
+        // "latitude"` exactly, so any of these stores cleanly and then produces a lat/lon picker
+        // that does not fill — a typo with no error anywhere, which is the worst shape of bug.
+        for v in [
+            "Latitude",
+            "LATITUDE",
+            "lat",
+            " latitude",
+            "latitude ",
+            "type/Latitude",
+        ] {
+            assert!(
+                validate_semantic_type(v).is_err(),
+                "{v:?} is not what the pin map reads and must not be storable"
+            );
+        }
+    }
+
+    #[test]
+    fn the_error_names_the_offending_value_and_the_permitted_ones() {
+        // An allow-list whose rejection does not say what IS allowed just moves the guesswork.
+        let e = validate_semantic_type("banana").unwrap_err();
+        assert!(
+            e.contains("banana"),
+            "error should quote the rejected value: {e}"
+        );
+        assert!(
+            e.contains("latitude"),
+            "error should list the permitted values: {e}"
+        );
+    }
+
+    #[test]
+    fn the_allow_list_is_exactly_the_editor_vocabulary() {
+        // Guards the drift in both directions: an option added to the `<select>` without being
+        // added here would 400 in the UI, and a value added here without an option would be dead.
+        let mut allowed = SEMANTIC_TYPES.to_vec();
+        let mut ui = UI_VOCABULARY.to_vec();
+        allowed.sort_unstable();
+        ui.sort_unstable();
+        assert_eq!(allowed, ui);
+    }
+
+    #[test]
+    fn the_openapi_schema_publishes_the_same_vocabulary_the_validator_enforces() {
+        // The point of `schema_with`: what the API documents and what it enforces are one list.
+        // Asserted on the emitted JSON rather than on the builder call so that a utoipa upgrade
+        // that changed how `enum_values` renders would be caught rather than assumed away.
+        let v = serde_json::to_value(semantic_type_schema()).unwrap();
+        let published = v["enum"]
+            .as_array()
+            .expect("the schema must publish an enum, not a bare string")
+            .iter()
+            .map(|x| x.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(published, SEMANTIC_TYPES.to_vec());
+        assert!(
+            published.iter().any(|s| s.is_empty()),
+            "'' is a real value (no role) and must be documented as one"
+        );
+    }
+
+    #[test]
+    fn the_update_schema_keeps_null_alongside_the_vocabulary() {
+        // `null` = leave unchanged, `""` = clear the role. Both must survive adding the enum, and
+        // `null` has to be in the enum too or the keyword rejects the value its own type allows.
+        let v = serde_json::to_value(semantic_type_update_schema()).unwrap();
+        let ty = v["type"]
+            .as_array()
+            .expect("nullable field keeps a type array");
+        assert!(ty.iter().any(|t| t == "null"), "lost nullability: {ty:?}");
+        let e = v["enum"].as_array().unwrap();
+        assert!(
+            e.contains(&serde_json::Value::Null),
+            "null must be permitted: {e:?}"
+        );
+        assert!(e.contains(&serde_json::Value::from("latitude")));
+        assert_eq!(e.len(), SEMANTIC_TYPES.len() + 1);
+    }
+
     #[test]
     fn schema_node_serializes() {
         let c = SchemaColumn {
