@@ -25,11 +25,23 @@ export function VizSwitcher({ viz, onChange }: { viz: VizType; onChange: (v: Viz
         </Button>
       </div>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Change visualization</DialogTitle></DialogHeader>
-          <div className="py-2">
-            <ChartTypeGallery selected={viz} onSelect={(k) => { onChange(k); setOpen(false); }} />
-          </div>
+        {/* THE DIALOG HAS TO BE TOLD HOW TALL IT MAY BE. `DialogContent` is a centred
+            `position: fixed` grid with no maximum height, so it grows to its content and centres
+            the OVERFLOW as well — half above the viewport, half below, with nothing to scroll
+            because Radix sets `overflow: hidden` on `body` while it is open. Measured at 1440×900
+            before this line: 1246px tall at `top: -173px`, so the title, the close button and the
+            first row of chart types were off-screen and unreachable by mouse or keyboard.
+
+            `flex flex-col` (overriding the primitive's `grid`) so the header keeps its height and
+            the gallery takes what is left; `min-h-0` on the gallery inside is what actually lets it
+            shrink and scroll — without it a flex child refuses to go below its content height and
+            the overflow comes straight back.
+
+            `dvh`, not `vh`: on mobile Safari `vh` is the LARGEST viewport, which is the one behind
+            the browser chrome, so a `vh` cap still overflows by the height of the toolbar. */}
+        <DialogContent className="flex max-h-[calc(100dvh-4rem)] flex-col">
+          <DialogHeader className="shrink-0"><DialogTitle>Change visualization</DialogTitle></DialogHeader>
+          <ChartTypeGallery selected={viz} onSelect={(k) => { onChange(k); setOpen(false); }} />
         </DialogContent>
       </Dialog>
     </>

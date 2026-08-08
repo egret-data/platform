@@ -179,7 +179,7 @@ export function ColumnFormatFields({
             <Field label="Number style">
               <Select value={fmt.number_style ?? "decimal"}
                 onValueChange={(v) => patch({ number_style: v as ColumnFormat["number_style"] })}>
-                <SelectTrigger aria-label="Number style" className="h-8"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="Number style" className="h-8 w-full"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="decimal">Normal</SelectItem>
                   <SelectItem value="percent">Percent</SelectItem>
@@ -211,7 +211,7 @@ export function ColumnFormatFields({
                 <Field label="Display">
                   <Select value={fmt.currency_style ?? "symbol"}
                     onValueChange={(v) => patch({ currency_style: v as ColumnFormat["currency_style"] })}>
-                    <SelectTrigger aria-label="Currency display" className="h-8"><SelectValue /></SelectTrigger>
+                    <SelectTrigger aria-label="Currency display" className="h-8 w-full"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="symbol">$</SelectItem>
                       <SelectItem value="code">USD</SelectItem>
@@ -261,7 +261,7 @@ export function ColumnFormatFields({
             <Field label="Separator style">
               <Select value={fmt.number_separators ?? ".,"}
                 onValueChange={(v) => patch({ number_separators: v })}>
-                <SelectTrigger aria-label="Separator style" className="h-8"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="Separator style" className="h-8 w-full"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value=".,">100,000.00</SelectItem>
                   <SelectItem value=", ">100 000,00</SelectItem>
@@ -313,7 +313,7 @@ export function ColumnFormatFields({
           <div className="space-y-3">
             <Field label="Date style">
               <Select value={fmt.date_style ?? "MMMM D, YYYY"} onValueChange={(v) => patch({ date_style: v })}>
-                <SelectTrigger aria-label="Date style" className="h-8"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="Date style" className="h-8 w-full"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="MMMM D, YYYY">January 31, 2024</SelectItem>
                   <SelectItem value="M/D/YYYY">1/31/2024</SelectItem>
@@ -342,7 +342,7 @@ export function ColumnFormatFields({
               <Field label="Date separator">
                 <Select value={fmt.date_separator ?? "/"}
                   onValueChange={(v) => patch({ date_separator: v as ColumnFormat["date_separator"] })}>
-                  <SelectTrigger aria-label="Date separator" className="h-8"><SelectValue /></SelectTrigger>
+                  <SelectTrigger aria-label="Date separator" className="h-8 w-full"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="/">2024/01/31</SelectItem>
                     <SelectItem value="-">2024-01-31</SelectItem>
@@ -363,7 +363,7 @@ export function ColumnFormatFields({
             <Field label="Show the time">
               <Select value={fmt.time_enabled ?? "off"}
                 onValueChange={(v) => patch({ time_enabled: v === "off" ? null : (v as ColumnFormat["time_enabled"]) })}>
-                <SelectTrigger aria-label="Show the time" className="h-8"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="Show the time" className="h-8 w-full"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="off">Off</SelectItem>
                   <SelectItem value="minutes">HH:MM</SelectItem>
@@ -380,7 +380,7 @@ export function ColumnFormatFields({
               <Field label="Time style">
                 <Select value={fmt.time_style ?? "h:mm A"}
                   onValueChange={(v) => patch({ time_style: v as ColumnFormat["time_style"] })}>
-                  <SelectTrigger aria-label="Time style" className="h-8"><SelectValue /></SelectTrigger>
+                  <SelectTrigger aria-label="Time style" className="h-8 w-full"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="h:mm A">5:24 PM (12-hour clock)</SelectItem>
                     <SelectItem value="HH:mm">17:24 (24-hour clock)</SelectItem>
@@ -396,7 +396,7 @@ export function ColumnFormatFields({
             <Field label="Display as">
               <Select value={fmt.view_as ?? "auto"}
                 onValueChange={(v) => patch({ view_as: v as ColumnFormat["view_as"] })}>
-                <SelectTrigger aria-label="Display as" className="h-8"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="Display as" className="h-8 w-full"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="auto">Automatic</SelectItem>
                   <SelectItem value="text">Text</SelectItem>

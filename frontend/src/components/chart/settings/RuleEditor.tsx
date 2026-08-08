@@ -10,6 +10,7 @@ import { ChevronsUpDown } from "lucide-react";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
+import { GROUP_LABEL } from "./FieldLabel";
 
 interface ResultColumn { name: string; type: string }
 
@@ -208,7 +209,7 @@ export function RuleEditor({
       <div className="space-y-1" key={which}>
         <span className="text-xs text-muted-foreground">{label}</span>
         <Select value={type ?? "each"} onValueChange={(v) => setEndpointType(which, v)}>
-          <SelectTrigger aria-label={label} className="h-8"><SelectValue /></SelectTrigger>
+          <SelectTrigger aria-label={label} className="h-8 w-full"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="each">{extreme} value in {many ? "each column" : "this column"}</SelectItem>
             {/* Only with something to compare ACROSS. Over one column this computes the same number
@@ -233,7 +234,7 @@ export function RuleEditor({
   return (
     <div className="space-y-3 text-sm">
       <div className="space-y-1">
-        <div className="text-xs font-medium uppercase text-muted-foreground">Columns</div>
+        <div className={GROUP_LABEL}>Columns</div>
         {/* A dropdown, not one standing checkbox per column: the list is as long as the result
             is wide, and on a table twenty columns of rows pushed the operator, value and colour
             off the panel. Closed, the trigger reads like a select and states the choice; open, it
@@ -288,7 +289,7 @@ export function RuleEditor({
         <label className="block space-y-1">
           <span className="text-xs text-muted-foreground">Formatting</span>
           <Select value={draft.type} onValueChange={(v) => setType(v as "single" | "range")}>
-            <SelectTrigger aria-label="Rule type" className="h-8"><SelectValue /></SelectTrigger>
+            <SelectTrigger aria-label="Rule type" className="h-8 w-full"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="single">Single color</SelectItem>
               <SelectItem value="range">Color range</SelectItem>
@@ -302,7 +303,7 @@ export function RuleEditor({
           <label className="block space-y-1">
             <span className="text-xs text-muted-foreground">When a value is</span>
             <Select value={operator} onValueChange={(v) => setDraft((d) => ({ ...(d as SingleColorRule), operator: v as FormattingOperator }))}>
-              <SelectTrigger aria-label="Operator" className="h-8"><SelectValue /></SelectTrigger>
+              <SelectTrigger aria-label="Operator" className="h-8 w-full"><SelectValue /></SelectTrigger>
               <SelectContent>
                 {ops.map((op) => <SelectItem key={op} value={op}>{OPERATOR_LABELS[op]}</SelectItem>)}
               </SelectContent>

@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/select";
 import { colIcon, colKind } from "./FormatSection";
 import { ColumnSettingsPopover } from "./ColumnSettingsPopover";
+import { FIELD_LABEL, GROUP_LABEL } from "./FieldLabel";
 
 interface ResultColumn { name: string; type: string }
 
@@ -168,7 +169,7 @@ export function TableColumnsSection({
           <div className="space-y-3 rounded-md border p-2">
             {queryFields.map((g, gi) => (
               <div key={g.label} className="space-y-1">
-                <div className="truncate text-xs font-medium uppercase text-muted-foreground" title={g.label}>{g.label}</div>
+                <div className={`truncate ${GROUP_LABEL}`} title={g.label}>{g.label}</div>
                 {g.options.length === 0 && (
                   <p className="text-xs italic text-muted-foreground">Nothing to pick from.</p>
                 )}
@@ -291,7 +292,7 @@ export function TableColumnsSection({
       </div>
 
       <div className="space-y-1">
-        <Label htmlFor="freeze-left" className="text-xs font-medium uppercase text-muted-foreground">Freeze first columns</Label>
+        <Label htmlFor="freeze-left" className={FIELD_LABEL}>Freeze first columns</Label>
         <Input
           id="freeze-left" type="number" min={0} max={columns.length} value={pinnedLeft}
           onChange={(e) => {
@@ -324,7 +325,7 @@ export function TableColumnsSection({
         `min` attribute only sets `validity.*` flags at form submission and blocks no keystroke.
       */}
       <div className="space-y-1">
-        <Label htmlFor="freeze-top" className="text-xs font-medium uppercase text-muted-foreground">Freeze first rows</Label>
+        <Label htmlFor="freeze-top" className={FIELD_LABEL}>Freeze first rows</Label>
         <Input
           id="freeze-top" type="number" min={0} value={pinnedTop}
           onChange={(e) => {
@@ -342,7 +343,7 @@ export function TableColumnsSection({
       </div>
 
       <div className="space-y-2">
-        <div className="text-xs font-medium uppercase text-muted-foreground">Pagination</div>
+        <div className={GROUP_LABEL}>Pagination</div>
         <div className="flex items-center justify-between">
           <Label htmlFor="paginate" className="text-sm font-normal">Paginate</Label>
           <Switch id="paginate" checked={pagination.enabled}
@@ -350,9 +351,9 @@ export function TableColumnsSection({
         </div>
         {pagination.enabled && (
           <div className="space-y-1">
-            <Label className="text-xs font-medium uppercase text-muted-foreground">Page size</Label>
+            <Label className={FIELD_LABEL}>Page size</Label>
             <Select value={String(pagination.pageSize)} onValueChange={(v) => onChange({ ...value, pagination: { ...pagination, pageSize: Number(v) } })}>
-              <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
               <SelectContent>
                 {PAGE_SIZES.map((s) => <SelectItem key={s} value={String(s)}>{s}</SelectItem>)}
               </SelectContent>
