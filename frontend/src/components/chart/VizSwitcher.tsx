@@ -25,21 +25,19 @@ export function VizSwitcher({ viz, onChange }: { viz: VizType; onChange: (v: Viz
         </Button>
       </div>
       <Dialog open={open} onOpenChange={setOpen}>
-        {/* THE DIALOG HAS TO BE TOLD HOW TALL IT MAY BE. `DialogContent` is a centred
-            `position: fixed` grid with no maximum height, so it grows to its content and centres
-            the OVERFLOW as well — half above the viewport, half below, with nothing to scroll
-            because Radix sets `overflow: hidden` on `body` while it is open. Measured at 1440×900
-            before this line: 1246px tall at `top: -173px`, so the title, the close button and the
-            first row of chart types were off-screen and unreachable by mouse or keyboard.
+        {/* THE HEIGHT CAP MOVED TO THE PRIMITIVE. `DialogContent` used to have no maximum height
+            at all, so it grew to its content and centred the OVERFLOW with it — measured at
+            1440×900, 1246px tall at `top: -173px`, with the title, the close button and the first
+            row of chart types off-screen and unreachable by mouse or keyboard. #441 capped this one
+            dialog; the cap now lives in `dialog.tsx`, which is why the `max-h`/`flex-col` that used
+            to be spelled out here is gone. Nothing about this dialog's geometry changed.
 
-            `flex flex-col` (overriding the primitive's `grid`) so the header keeps its height and
-            the gallery takes what is left; `min-h-0` on the gallery inside is what actually lets it
-            shrink and scroll — without it a flex child refuses to go below its content height and
-            the overflow comes straight back.
-
-            `dvh`, not `vh`: on mobile Safari `vh` is the LARGEST viewport, which is the one behind
-            the browser chrome, so a `vh` cap still overflows by the height of the toolbar. */}
-        <DialogContent className="flex max-h-[calc(100dvh-4rem)] flex-col">
+            What is still local is WHERE the scroll goes. The primitive scrolls the whole body,
+            which is right for a form; here it would scroll the search field away with the cards.
+            `bodyClassName="flex flex-col"` makes the body a column of definite height instead, so
+            the header and the search field keep theirs and the grid inside the gallery — which
+            already carries `min-h-0 flex-1 overflow-y-auto` — is what actually scrolls. */}
+        <DialogContent bodyClassName="flex flex-col">
           <DialogHeader className="shrink-0"><DialogTitle>Change visualization</DialogTitle></DialogHeader>
           <ChartTypeGallery selected={viz} onSelect={(k) => { onChange(k); setOpen(false); }} />
         </DialogContent>

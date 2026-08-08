@@ -338,7 +338,9 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
           if (!o) setSelectedQid(null);
         }}
       >
-        <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
+        {/* Height cap and scrolling now come from the primitive, which scrolls an inner
+            body rather than the content — the close button no longer scrolls away. */}
+        <DialogContent className="max-w-3xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <span className="font-mono text-sm">{selectedQid}</span>

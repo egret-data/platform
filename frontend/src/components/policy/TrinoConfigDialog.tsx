@@ -34,7 +34,11 @@ export function TrinoConfigDialog({ open, service, onOpenChange }: Props) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+      {/* The `max-h-[85vh] overflow-y-auto` that used to be here is now in the primitive,
+          and better: scrolling the CONTENT took the close button with it, since the close
+          button is absolutely positioned inside. The primitive scrolls an inner body and
+          leaves the close button pinned. */}
+      <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>Trino config — {service}</DialogTitle>
           <DialogDescription>

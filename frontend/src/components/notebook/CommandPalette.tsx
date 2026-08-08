@@ -67,7 +67,12 @@ export function CommandPalette({ open, onOpenChange, actions }: CommandPalettePr
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="max-w-lg gap-0 p-0"
+        className="max-w-lg p-0"
+        /* The gap moved off the content and onto the scrolling body when the
+           height cap landed in the primitive, so the override has to follow it:
+           this dialog is a search field sitting flush on its result list, and a
+           16px gap between them would read as two unrelated controls. */
+        bodyClassName="gap-0"
         onOpenAutoFocus={(e) => {
           e.preventDefault();
           inputRef.current?.focus();

@@ -106,7 +106,9 @@ export default function PodLogsDialog({
 
   return (
     <Dialog open={pod != null} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
+      {/* Height cap and scrolling now come from the primitive, which scrolls an inner
+          body rather than the content — the close button no longer scrolls away. */}
+      <DialogContent className="max-w-3xl">
         <DialogHeader>
           <DialogTitle className="font-mono text-sm">{pod}</DialogTitle>
           <DialogDescription>Container logs for this pod.</DialogDescription>
