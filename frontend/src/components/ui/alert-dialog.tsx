@@ -30,10 +30,23 @@ const AlertDialogContent = React.forwardRef<
 >(({ className, ...props }, ref) => (
     <AlertDialogPortal>
         <AlertDialogOverlay />
+        {/* THE SAME LATENT TRAP AS `DialogContent`, CAPPED THE SIMPLER WAY.
+            This is the identical centred `position: fixed` box with no maximum height, so
+            it would centre its own overflow off-screen exactly as `DialogContent` did — and
+            with `body { overflow: hidden }` under it, nothing would scroll it back.
+            None of the eight call sites is tall today (they are confirmations: a title, a
+            sentence, two buttons, and one of them a "type the name to confirm" field), which
+            is why this was never seen; the cap is here so it stays that way when someone
+            passes a long description or a list of what is about to be deleted.
+
+            No inner scrolling body here, unlike `DialogContent`: an alert dialog has no close
+            button to keep pinned — dismissal is Cancel, in the footer, which the reader has to
+            scroll to anyway — so scrolling the content itself loses nothing and keeps this
+            primitive a single element. */}
         <AlertDialogPrimitive.Content
             ref={ref}
             className={cn(
-                "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg",
+                "fixed left-[50%] top-[50%] z-50 grid max-h-[calc(100dvh-4rem)] w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg",
                 className
             )}
             {...props}
