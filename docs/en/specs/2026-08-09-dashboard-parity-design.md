@@ -343,6 +343,25 @@ Metabase can move a filter off the top bar and into a heading or question card
 (`MoveParameterMenu.tsx:67-134`, `supportsInlineParameters`), with a collapse-to-"Show filters"
 behaviour when the card is too narrow (`CollapsibleDashboardParameterList.tsx:40-86`).
 
+⚠️ **The ownership field cannot live on the parameter.** The obvious shape — a `cardId` on
+`DashboardParameter` — dangles on the first save. `serializeLayout` (`tabs.ts:34-48`) sends
+cards **without ids** and `replace_layout` (`crates/egret-bi/src/dashboard.rs:344-376`) does a
+`DELETE` then per-card `INSERT`, so **every card id churns on every save**. Ownership therefore
+lives on the card as `options.inlineParameters: string[]` — which is also Metabase's shape,
+reached here for a stronger reason. No backend change: `CardInput.options` is unvalidated
+`serde_json::Value` bound straight into the jsonb column, the same argument `options.hideEmpty`
+already made.
+
+⚠️ **Inline placement changes which cards a filter applies to: none.** Metabase's
+`getDashboardHeaderParameters` (`selectors.ts:447-454`) subtracts inline parameters from the
+**header list alone**; the list feeding values and mappings is untouched. So the filtered array
+must reach exactly two call sites — the filter bar and the edit chips. Anywhere else and a card
+quietly stops being filtered with no error.
+
+⚠️ **W6's reorder callback becomes destructive under W7.** Once the top bar is a subset,
+writing the reordered subset back as the whole draft deletes every inline parameter. The merge
+must be explicit.
+
 This is the tail of the programme. It depends on W6's reordering model and is the one
 workstream that can be cut without leaving anything half-built.
 
