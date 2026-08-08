@@ -93,7 +93,7 @@ export function ColumnsTab({ ws, datasetId, columns }: Props) {
             <tr>
               <th className="px-3 py-2 font-medium">Column</th>
               <th className="px-2 py-2 font-medium">Type</th>
-              <th className="px-2 py-2 font-medium"><HeaderHint label="Role" hint="Semantic role — Country enables maps, Email/URL/Image render specially, Currency formats as money." /></th>
+              <th className="px-2 py-2 font-medium"><HeaderHint label="Role" hint="Semantic role — Latitude/Longitude fill a pin map's coordinate pickers, Email/URL/Image render specially, Currency formats as money." /></th>
               <th className="px-2 py-2 text-center font-medium"><HeaderHint center label="Dimension" hint="Group charts by this column — a category like Country or Product." /></th>
               <th className="px-2 py-2 text-center font-medium"><HeaderHint center label="Filter" hint="Let viewers filter charts by this column." /></th>
               <th className="px-2 py-2 text-center font-medium"><HeaderHint center label="Time" hint="This column is a date/time — turn on to enable time-based charts." /></th>
@@ -120,7 +120,10 @@ export function ColumnsTab({ ws, datasetId, columns }: Props) {
                 </td>
                 <td className="px-2 py-1.5 font-mono text-xs text-muted-foreground">{c.data_type}</td>
                 <td className="px-2 py-1.5">
-                  <select className="h-7 w-24 rounded border bg-background px-1 text-xs" value={c.semantic_type}
+                  {/* w-28, not the w-24 this was: "Longitude" is the longest option in the list and
+                      did not fit, and a select that clips its own selected value is how a reader
+                      cannot tell Latitude from Longitude at a glance. */}
+                  <select className="h-7 w-28 rounded border bg-background px-1 text-xs" value={c.semantic_type}
                     aria-label={`Role ${c.column_name}`}
                     onChange={(e) => save(c.column_name, { semantic_type: e.target.value })}>
                     <option value="">—</option>
@@ -130,6 +133,15 @@ export function ColumnsTab({ ws, datasetId, columns }: Props) {
                     <option value="email">Email</option>
                     <option value="url">URL</option>
                     <option value="image">Image</option>
+                    {/* Metabase's `type/Latitude` and `type/Longitude`. The pin map's two coordinate
+                        pickers default from these, which is the ONLY reason they exist — #434
+                        refused to infer a coordinate column from its name ("a wrong guess plots
+                        confidently in the wrong hemisphere"), and this is the difference between a
+                        guess and a statement someone made here on purpose. Nothing about the value
+                        is validated server-side: `semantic_type` is `text NOT NULL DEFAULT ''` with
+                        no CHECK and no Rust enum, so these two options ARE the vocabulary. */}
+                    <option value="latitude">Latitude</option>
+                    <option value="longitude">Longitude</option>
                   </select>
                 </td>
                 <td className="px-2 py-1.5 text-center"><Switch checked={c.groupby} onCheckedChange={(v) => save(c.column_name, { groupby: v })} aria-label={`Dimension ${c.column_name}`} /></td>

@@ -4,8 +4,12 @@ import type { AnyChartParams, MapConfig } from "@/api/charts";
 import { vizConfig, shellSettings } from "@/components/chart/viz/renderConfig";
 import { formatValue } from "@/components/chart/format";
 import { EChartsRenderer } from "@/components/chart/echarts/EChartsRenderer";
-import { buildMapOption } from "@/components/chart/echarts/options/map";
-import { MAPS, indexRegionNames, resolveRegion } from "@/components/chart/echarts/maps/registry";
+import {
+  buildMapOption, pinCoverage, pinNote, pinProblem, type MapBuildConfig,
+} from "@/components/chart/echarts/options/map";
+import {
+  MAPS, indexRegionExtent, indexRegionNames, regionExtent, resolveRegion,
+} from "@/components/chart/echarts/maps/registry";
 import type { ResultColumn } from "@/components/chart/ChartTable";
 import type { DrillContext } from "@/components/chart/drill";
 
@@ -40,6 +44,10 @@ export function MapChart({ columns, rows, params, metricTypes = {}, onValueClick
         // Index the names BEFORE registering: the render that follows resolves every region cell
         // through this, and an unindexed map silently matches nothing.
         indexRegionNames(def.key, geojson);
+        // And the bounding box, for the same reason and at the same moment: the pin map's "is this
+        // coordinate anywhere near this map" test reads it on the very next render. Both derive
+        // from the geojson already in hand, so neither costs a byte over the wire.
+        indexRegionExtent(def.key, geojson);
         registerMap(def.echartsName, geojson as never);
         registered.add(def.echartsName);
         forceUpdate();
@@ -54,28 +62,74 @@ export function MapChart({ columns, rows, params, metricTypes = {}, onValueClick
   if (!ready) return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading map…</div>;
   if (rows.length === 0) return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>;
 
+  const cfg: MapBuildConfig = {
+    echartsName: def.echartsName,
+    type: map.type,
+    region: map.region,
+    metric: map.metric,
+    normalize: normalizeKey,
+    format: fmt,
+    // BOTH MODES, and this was briefly written the other way before being corrected.
+    // Suppressing them on a pin map is defensible on presentation grounds — two labelled
+    // dots among the reader's own pins can read as data — and it is not ours to decide:
+    // Hoàng Sa and Trường Sa are on egret's Vietnam map because the map is not correct
+    // without them, and "the reader chose pin mode" is not a reason for a Vietnam basemap to
+    // lose two archipelagos. They stay, drawn by their own series and `silent`.
+    annotations: def.annotations,
+    color: map.color,
+    latitude: map.latitude,
+    longitude: map.longitude,
+    label: map.label,
+    // Undefined until the geojson has been indexed, which is a state this render CAN be in on a
+    // cached map; every reader treats undefined as "no opinion" rather than "outside".
+    extent: isPin ? regionExtent(def.key) : undefined,
+    tooltipColumns: map.tooltipColumns,
+    // The extra columns print through the dataset's own column formats — the same `formatValue`
+    // the table and every other tooltip use, keyed on the RESULT column's type rather than a
+    // metric type, because a raw-records query returns columns and no metrics at all.
+    formatColumn: (col, v) =>
+      formatValue(v, columns.find((c) => c.name === col)?.type ?? "varchar", columnSettings[col]),
+    // The shell's own per-column title, which every other chart's axes and tooltips already honour
+    // — not a second naming mechanism. Absent falls back to the machine name inside the builder.
+    columnLabels: Object.fromEntries(
+      Object.entries(columnSettings)
+        .map(([col, s]) => [col, s.column_title ?? ""])
+        .filter(([, title]) => title !== ""),
+    ),
+  };
+  /**
+   * WHAT THE CARD CAN AND CANNOT SHOW, decided BEFORE the chart is built — Metabase's
+   * `checkRenderable`, and the same seam `ChartRenderer` puts `sankeyProblem` on.
+   *
+   * TWO PRESENTATIONS BECAUSE THERE ARE TWO SITUATIONS, and neither is a new one for this file.
+   * A card that cannot draw anything is REPLACED by a sentence — which is exactly what the three
+   * early returns directly above already do for "Couldn't load the map", "Loading map…" and
+   * "No data", so `pinProblem` joins that list rather than inventing a presentation. A card that
+   * draws but is not showing every row keeps its pins and gains a line underneath, because
+   * replacing it would throw away the pins that are right in order to complain about the ones
+   * that are not. `pinProblem` and `pinNote` are mutually exclusive by construction, so the card
+   * can never say both.
+   */
+  const coverage = isPin ? pinCoverage(columns, rows, cfg) : undefined;
+  const problem = coverage && pinProblem(coverage, def.label);
+  const note = coverage && pinNote(coverage, def.label);
+  if (problem) {
+    return (
+      <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
+        {problem}
+      </div>
+    );
+  }
+
   return (
-    <div className="h-full w-full">
+    // `flex-col` + `min-h-0 flex-1` rather than the plain `h-full` this used to be: the note is a
+    // sibling of the chart, and a chart sized `h-full` beside it would total more than the card.
+    // `min-h-0` is load-bearing — a flex item's default `min-height: auto` refuses to shrink below
+    // its content, which is how a chart in a flex column overflows instead of fitting.
+    <div className="flex h-full w-full flex-col">
+      <div className="min-h-0 w-full flex-1">
       <EChartsRenderer
-        option={buildMapOption(columns, rows, {
-          echartsName: def.echartsName,
-          type: map.type,
-          region: map.region,
-          metric: map.metric,
-          normalize: normalizeKey,
-          format: fmt,
-          // BOTH MODES, and this was briefly written the other way before being corrected.
-          // Suppressing them on a pin map is defensible on presentation grounds — two labelled
-          // dots among the reader's own pins can read as data — and it is not ours to decide:
-          // Hoàng Sa and Trường Sa are on egret's Vietnam map because the map is not correct
-          // without them, and "the reader chose pin mode" is not a reason for a Vietnam basemap to
-          // lose two archipelagos. They stay, drawn by their own series and `silent`.
-          annotations: def.annotations,
-          color: map.color,
-          latitude: map.latitude,
-          longitude: map.longitude,
-          label: map.label,
-        })}
+        option={buildMapOption(columns, rows, cfg)}
         // Metabase's region map drills; egret's branch passed no handler — the same seam gap the
         // waterfall, box plot and sankey each had. A region is a row, so it filters by the RAW
         // dimension value, not by the normalised key the geojson is matched on: those differ
@@ -110,6 +164,11 @@ export function MapChart({ columns, rows, params, metricTypes = {}, onValueClick
           onValueClick({ dims: [{ col: map.region as string, value: String(raw) }] }, p.x, p.y);
         } : undefined}
       />
+      </div>
+      {/* Plain text, not an alert: nothing is broken, the card is simply accounting for its own
+          rows. `shrink-0` so it keeps its line when the card is short — the chart gives way, not
+          the sentence explaining it. */}
+      {note && <p className="shrink-0 px-2 pt-1 text-center text-xs text-muted-foreground">{note}</p>}
     </div>
   );
 }

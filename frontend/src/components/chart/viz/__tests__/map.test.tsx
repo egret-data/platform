@@ -175,3 +175,169 @@ describe("mapDescriptor — the panel offers only the fields its map type uses",
     expect(screen.getAllByRole("option").map((o) => o.textContent)).toContain("city");
   });
 });
+
+/**
+ * ADDITIONAL TOOLTIP COLUMNS — the one chart family where Metabase's original feature ports as
+ * itself. #433 established that it cannot exist on the cartesian charts, because those specs
+ * GROUP BY the dimension and a raw column has no single value per drawn point; it substituted
+ * dataset METRICS for that reason. A pin map takes `chartquery.rs`'s raw-records branch — no
+ * GROUP BY at all — so a column's value on a pin is that pin's own row's cell, unambiguously.
+ * These tests assert that the query actually asks for them, which is what makes the feature real
+ * rather than a control that saves and does not paint.
+ */
+describe("mapDescriptor — additional tooltip columns", () => {
+  const pin = { mapKey: "us_states", type: "pin" as const, latitude: "lat", longitude: "lon" };
+
+  it("adds them to the SELECT, after the columns the map itself needs", () => {
+    const spec = d.buildSpec({ ...pin, label: "city", tooltipColumns: ["rev", "orders"] }, SHARED);
+    expect(spec.columns).toEqual(["lat", "lon", "city", "rev", "orders"]);
+    // Still the raw-records branch: a stray metric would send it down the aggregate path and
+    // collapse every pin sharing a coordinate into one.
+    expect(spec.metrics).toEqual([]);
+    expect(spec.dimensions).toEqual([]);
+  });
+
+  /** A duplicate name would emit `<col> AS <col>` twice in the SELECT, which the engine rejects
+   *  outright — so the card would go from showing a column twice to showing nothing at all. */
+  it("never selects a column twice", () => {
+    const spec = d.buildSpec(
+      { ...pin, label: "city", tooltipColumns: ["lat", "city", "rev", "rev"] }, SHARED,
+    );
+    expect(spec.columns).toEqual(["lat", "lon", "city", "rev"]);
+  });
+
+  it("round-trips through settings under Metabase's own key", () => {
+    const cfg = { ...pin, tooltipColumns: ["rev"] };
+    expect(d.toSettings(cfg)["map.tooltip_columns"]).toEqual(["rev"]);
+    expect(d.fromParams({ version: 2, spec: EMPTY_SPEC, settings: d.toSettings(cfg) })).toEqual(cfg);
+  });
+
+  /** Stored params are JSON that egret does not control the history of, and this is the only map
+   *  key holding an ARRAY. A scalar where a list is expected would reach `buildSpec` and throw on
+   *  `.filter`, taking the whole card down rather than the one setting. */
+  it("ignores a stored value that is not a list of names", () => {
+    const settings = { "map.key": "us_states", "map.type": "pin", "map.tooltip_columns": "rev" };
+    expect(d.fromParams({ version: 2, spec: EMPTY_SPEC, settings }).tooltipColumns).toBeUndefined();
+    const mixed = { ...settings, "map.tooltip_columns": ["rev", 7, null] };
+    expect(d.fromParams({ version: 2, spec: EMPTY_SPEC, settings: mixed }).tooltipColumns).toEqual(["rev"]);
+  });
+
+  it("is offered in pin mode and not in region mode", () => {
+    // No label chosen, so `city` is still on offer and the control has something to say.
+    const { unmount } = renderPanel(pin);
+    expect(screen.getByLabelText("add tooltip columns")).toBeTruthy();
+    unmount();
+    renderPanel({ mapKey: "us_states", type: "region", region: "state", metric: "rev" });
+    expect(screen.queryByLabelText("add tooltip columns")).toBeNull();
+  });
+
+  /** The coordinate and label columns are already on screen — the tooltip prints the pair on its
+   *  own line and the label is its heading — so offering them would let a reader add a duplicate
+   *  of something the pin already says. */
+  it("does not offer a column the pin map already selects", async () => {
+    renderPanel(pin);
+    await userEvent.click(screen.getByLabelText("add tooltip columns"));
+    expect(screen.getAllByRole("button").map((b) => b.textContent)).toContain("city");
+    expect(screen.getAllByRole("button").map((b) => b.textContent)).not.toContain("lat");
+  });
+
+  /**
+   * HIDDEN ONLY WHEN THERE IS NOTHING TO OFFER **AND** NOTHING STORED — #433's rule. The second
+   * clause is not belt-and-braces: egret never filters a stored setting at render time, so a
+   * control hidden on availability alone would strand a value that still paints and still cannot
+   * be removed. Both halves are asserted, because a fix for either alone passes the other test.
+   */
+  it("hides itself only when it has nothing to offer and nothing stored", () => {
+    // Every column used by the map, nothing stored: nothing to say.
+    const { unmount } = renderPanel({ ...pin, label: "city" });
+    expect(screen.queryByLabelText("add tooltip columns")).toBeNull();
+    expect(screen.queryByText("Tooltip columns")).toBeNull();
+    unmount();
+    // Every column used, but a stored value survives from before one of them was chosen — the
+    // control must stay so the chip can be removed.
+    renderPanel({ ...pin, label: "city", tooltipColumns: ["rev"] });
+    expect(screen.getByText("Tooltip columns")).toBeTruthy();
+    expect(screen.getByLabelText("remove rev")).toBeTruthy();
+  });
+});
+
+/**
+ * THE COORDINATE PICKERS DEFAULT FROM A DECLARED SEMANTIC TYPE — Metabase's own mechanism, which
+ * #434 could not use and gave a reason for that turned out to be wrong. The reason on record was
+ * that egret's `semantic_type` is "a backend enum plus the dataset column editor"; it is neither.
+ * The migration adds `semantic_type text NOT NULL DEFAULT ''` with no CHECK, the Rust side types
+ * it `String`, `ds_update_column` validates nothing, and `DatasetColumn` already carried it into
+ * `VizControlProps.columns`. The whole change was two `<option>` elements and this default.
+ *
+ * IT IS NOT THE NAME-GUESS #434 REJECTED, and that distinction is what makes it safe to ship: a
+ * heuristic on the column name is a guess about the data, and a semantic type is a statement
+ * someone made about the data on purpose, in the same select that says a column is a URL.
+ */
+describe("mapDescriptor — the pin map's pickers default from the declared semantic type", () => {
+  const declared = [
+    col("city", "string"),
+    { ...col("y", "numeric"), semantic_type: "latitude" },
+    { ...col("x", "numeric"), semantic_type: "longitude" },
+  ];
+  /** Renders just the Map type select against a given column list, and reports what it patches. */
+  function switchToPin(config: MapConfig, columns = declared) {
+    const patches: Partial<MapConfig>[] = [];
+    const ctl = d.controls.find((c) => c.id === "mapType")!;
+    render(
+      <ctl.render
+        config={config} onChange={(p) => patches.push(p)} columns={columns} metrics={METRICS}
+        resultColumns={[]} rows={[]} temporalUnits={{}} columnSettings={{}} unitRow={() => null}
+      />,
+    );
+    return patches;
+  }
+
+  it("fills both coordinate fields when the dataset declares them", async () => {
+    const patches = switchToPin({ mapKey: "us_states", type: "region" });
+    await userEvent.click(screen.getByLabelText("Map type"));
+    await userEvent.click(screen.getByRole("option", { name: "Pin map" }));
+    expect(patches).toEqual([{ type: "pin", latitude: "y", longitude: "x" }]);
+  });
+
+  /** BOTH OR NEITHER. One coordinate is not a location, and pairing a declared column with one the
+   *  user picked for something else is the confident-wrong-hemisphere failure by another route. */
+  it("fills neither when only one is declared", async () => {
+    const patches = switchToPin({ mapKey: "us_states", type: "region" }, [declared[0], declared[1]]);
+    await userEvent.click(screen.getByLabelText("Map type"));
+    await userEvent.click(screen.getByRole("option", { name: "Pin map" }));
+    expect(patches).toEqual([{ type: "pin" }]);
+  });
+
+  /** A declaration cannot overwrite a choice — the user's own pick wins, in either slot. */
+  it("leaves an existing choice alone", async () => {
+    const patches = switchToPin({ mapKey: "us_states", type: "region", latitude: "mine" });
+    await userEvent.click(screen.getByLabelText("Map type"));
+    await userEvent.click(screen.getByRole("option", { name: "Pin map" }));
+    expect(patches).toEqual([{ type: "pin" }]);
+  });
+
+  /** A text column that calls itself a latitude is still a text column, and `PinControls` would
+   *  not offer it — defaulting to it would put a value in a picker that is not in its own list. */
+  it("ignores a declared column that is not numeric", async () => {
+    const text = [{ ...col("lat_name", "string"), semantic_type: "latitude" }, declared[2]];
+    const patches = switchToPin({ mapKey: "us_states", type: "region" }, text);
+    await userEvent.click(screen.getByLabelText("Map type"));
+    await userEvent.click(screen.getByRole("option", { name: "Pin map" }));
+    expect(patches).toEqual([{ type: "pin" }]);
+  });
+
+  /**
+   * SWITCHING BACK IS NOT A DEFAULTING MOMENT — it must patch nothing but the type, or a region map
+   * would carry coordinate columns it never uses into its stored settings.
+   *
+   * The config here has NO coordinates, which is what makes the assertion bite: a mutation that
+   * applied the defaults on both branches survived the earlier version of this test, because that
+   * one started from a config whose latitude was already set and so had nothing to default anyway.
+   */
+  it("writes nothing extra when switching back to a region map", async () => {
+    const patches = switchToPin({ mapKey: "us_states", type: "pin" });
+    await userEvent.click(screen.getByLabelText("Map type"));
+    await userEvent.click(screen.getByRole("option", { name: "Region map" }));
+    expect(patches).toStrictEqual([{ type: "region" }]);
+  });
+});

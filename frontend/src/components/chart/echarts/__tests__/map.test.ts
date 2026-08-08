@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { buildMapOption } from "../options/map";
-import { MAPS, indexRegionNames, resolveRegion } from "../maps/registry";
+import { buildMapOption, pinCoverage, pinProblem, pinNote } from "../options/map";
+import { MAPS, indexRegionNames, indexRegionExtent, regionExtent, resolveRegion } from "../maps/registry";
 import { SERIES_PALETTE, choroplethScale, setLightness, saturateColor, scaleLightness } from "../palette";
 
 const cols = [{ name: "state", type: "varchar" }, { name: "rev", type: "double" }];
@@ -291,5 +291,340 @@ describe("resolveRegion", () => {
   // A chart renders before the geojson finishes loading; that first pass must not throw.
   it("falls back cleanly when the map has not been indexed", () => {
     expect(resolveRegion(MAPS.vietnam, "An Giang")).toBe("An Giang");
+  });
+});
+
+/**
+ * WHAT ACTUALLY HAPPENS TO A PIN OUTSIDE THE MAP'S EXTENT, MEASURED — the fact this whole block
+ * exists to surface, recorded here because it is the opposite of what a reader (and this file's
+ * first draft) assumes.
+ *
+ * ECharts does NOT drop it and does NOT clip it: it emits the symbol at its projected pixel, which
+ * for an out-of-extent coordinate is simply off the canvas. Measured by SSR-rendering the real pin
+ * option against the real us-states geojson at 540x561 (the size #434 measured live) and reading
+ * the `<path>` transforms straight out of the SVG:
+ *
+ *     San Francisco (-122.4194,  37.7749) -> matrix(...,  289.5, 317.4)   on canvas
+ *     New York      ( -74.0060,  40.7128) -> matrix(...,  484.6, 301.6)   on canvas
+ *     Paris         (   2.3522,  48.8566) -> matrix(...,  792.4, 257.8)   252px past the right edge
+ *     Tokyo         ( 139.6917,  35.6895) -> matrix(..., 1345.9, 328.6)   806px past
+ *     Cape Town     (  18.4241, -33.9249) -> matrix(...,  857.2, 702.7)   past right AND bottom
+ *
+ * All seven elements were in the SVG; none carried any marker of being out of bounds, and ECharts
+ * logged nothing. `ScatterView` DOES ask for a clip rect — `createCoordSysClipAreaSimply` — but it
+ * is gated on `coordSys.shouldClip()`, and a `geo` built by `geoCreator` returns `undefined` there
+ * unless the option sets `geo.clip`, so `SymbolDraw`'s `symbolNeedsDraw` never rejects anything.
+ * A pin therefore vanishes by being painted somewhere nobody is looking.
+ *
+ * TWO CONSEQUENCES THAT DECIDE THIS DESIGN. First, the pin is not lost: `roam: true` means zooming
+ * out or panning genuinely brings it back, so the honest thing is to keep drawing it and SAY it is
+ * out there — dropping it would be the silent loss this exists to fix. Second, `ariaDescription`
+ * already lists every point, so before this change a screen reader heard seven pins on a map that
+ * showed five, and nothing reconciled the two.
+ *
+ * THE EXTENT IS THE RIGHT TEST, and that is also measured rather than assumed: the geo's own view
+ * rect came back as x in [21.5, 518.5], y in [136.9, 424.1] — the geojson's bounding box projected
+ * into `layoutSize: "92%"` — so "inside the bounding box" and "inside the drawn map area" are the
+ * same predicate, and the bounding box can be computed with no layout at all. The us-states box
+ * used below is that geojson's real one, lon [-188.900, -65.630] lat [17.930, 71.350]; it reaches
+ * to -188.9 because the Aleutians wrap past the antimeridian, which is why Vancouver and Mexico
+ * City are INSIDE it and do draw, in the blank margin beyond the outlines.
+ */
+describe("pinCoverage — every row lands in exactly one bucket", () => {
+  const US = { minLon: -188.9, maxLon: -65.63, minLat: 17.93, maxLat: 71.35 };
+  const cov = (rows: unknown[][], extra: Record<string, unknown> = {}) =>
+    pinCoverage(pinCols, rows, { ...pinBase, extent: US, ...extra });
+
+  it("counts a coordinate outside the map's extent as off-map, not as plotted", () => {
+    // Paris on a map of the United States.
+    const rows = [...pinRows, ["Paris", 48.8566, 2.3522]];
+    expect(cov(rows)).toStrictEqual({ total: 3, plotted: 2, offMap: 1, outOfRange: 0, missing: 0 });
+  });
+
+  it("counts a row with no usable coordinate as missing rather than off-map", () => {
+    const rows = [...pinRows, ["no fix", null, ""], ["not a number", 40, "n/a"]];
+    expect(cov(rows)).toStrictEqual({ total: 4, plotted: 2, offMap: 0, outOfRange: 0, missing: 2 });
+  });
+
+  /**
+   * THE FAILURE #434 WAS MOST WORRIED ABOUT, and the one a range check can actually catch. A
+   * transposed pair puts a longitude in the latitude column, and -122.4194 is not a latitude on
+   * any planet — so this needs no guess about which column is which to say the pair is wrong.
+   * Note the asymmetry that makes latitude the load-bearing half: the matching 37.7749 IS a legal
+   * longitude, so checking longitude alone would have caught nothing here.
+   */
+  it("counts a transposed pair as out of range, not as off-map", () => {
+    const rows = pinRows.map(([city, lat, lon]) => [city, lon, lat]);
+    expect(cov(rows)).toStrictEqual({ total: 2, plotted: 0, offMap: 0, outOfRange: 2, missing: 0 });
+  });
+
+  /** BOTH LIMITS, AND BOTH ARE BOUNDARIES. A mutation run found `MAX_LAT = 90 -> 91` surviving:
+   *  every fixture was either legal or wildly illegal, so nothing pinned where the edge actually
+   *  is. 90.5 and 180.5 are the values that can only pass if the limit is the right one. */
+  it("counts a latitude past the pole as out of range", () => {
+    expect(cov([["bad lat", 90.5, -100]])).toStrictEqual(
+      { total: 1, plotted: 0, offMap: 0, outOfRange: 1, missing: 0 },
+    );
+    expect(cov([["bad lat", -90.5, -100]])).toStrictEqual(
+      { total: 1, plotted: 0, offMap: 0, outOfRange: 1, missing: 0 },
+    );
+  });
+
+  it("counts a longitude past the antimeridian as out of range", () => {
+    expect(cov([["bad lon", 40, 180.5]])).toStrictEqual(
+      { total: 1, plotted: 0, offMap: 0, outOfRange: 1, missing: 0 },
+    );
+    expect(cov([["bad lon", 40, -180.5]])).toStrictEqual(
+      { total: 1, plotted: 0, offMap: 0, outOfRange: 1, missing: 0 },
+    );
+  });
+
+  /**
+   * OFF-MAP BY LATITUDE ALONE. Another mutation survivor: every off-map fixture here was Paris,
+   * Tokyo or Cape Town, all of them outside by LONGITUDE, so dropping the two latitude clauses from
+   * the extent test changed nothing that was asserted. This row sits at a thoroughly American
+   * longitude and a Central American latitude — inside the box on one axis, outside on the other.
+   */
+  it("counts a row outside the extent's latitude band, at an on-map longitude", () => {
+    expect(cov([["Panama", 8.98, -79.52]])).toStrictEqual(
+      { total: 1, plotted: 0, offMap: 1, outOfRange: 0, missing: 0 },
+    );
+    // And past the northern edge too, so a fix covering only one direction still fails here.
+    expect(cov([["North Pole-ish", 80, -100]])).toStrictEqual(
+      { total: 1, plotted: 0, offMap: 1, outOfRange: 0, missing: 0 },
+    );
+  });
+
+  /** The buckets PARTITION the rows — no row counted twice, none uncounted. Asserted as an
+   *  identity so that a future bucket cannot be added without keeping the sum honest. */
+  it("partitions the rows, so the counts always sum to the total", () => {
+    const rows = [
+      ...pinRows, ["Paris", 48.8566, 2.3522], ["no fix", null, null],
+      ["backwards", -122.4194, 37.7749], ["Null Island", 0, 0],
+    ];
+    const c = cov(rows);
+    expect(c.plotted + c.offMap + c.outOfRange + c.missing).toBe(c.total);
+    expect(c.total).toBe(rows.length);
+  });
+
+  /** The geojson is loaded asynchronously, so the first render has no extent to judge against.
+   *  Nothing may be called off-map on the strength of an extent nobody supplied. */
+  it("calls nothing off-map before the geojson has been indexed", () => {
+    const rows = [...pinRows, ["Paris", 48.8566, 2.3522]];
+    expect(pinCoverage(pinCols, rows, pinBase)).toStrictEqual(
+      { total: 3, plotted: 3, offMap: 0, outOfRange: 0, missing: 0 },
+    );
+  });
+
+  it("counts nothing at all when a coordinate field is unchosen", () => {
+    expect(cov(pinRows, { longitude: undefined })).toStrictEqual(
+      { total: 2, plotted: 0, offMap: 0, outOfRange: 0, missing: 2 },
+    );
+  });
+});
+
+describe("buildMapOption — pin map, what is drawn and what is not", () => {
+  const US = { minLon: -188.9, maxLon: -65.63, minLat: 17.93, maxLat: 71.35 };
+
+  /**
+   * AN OFF-MAP PIN IS STILL DRAWN. It is reachable — `roam: true`, and the measurement above shows
+   * it lands 252px past the right edge of a 540px canvas, which zooming out brings back. Dropping
+   * it would be the silent loss of a row, which is the defect, not the fix. The message says it is
+   * out there; the series keeps it.
+   */
+  it("keeps an off-map pin in the series, because zooming out can reach it", () => {
+    const rows = [...pinRows, ["Paris", 48.8566, 2.3522]];
+    const opt = buildMapOption(pinCols, rows, { ...pinBase, extent: US }) as any;
+    const scatter = opt.series.find((s: any) => s.type === "scatter");
+    expect(scatter.data.map((d: any) => d.__row)).toEqual([0, 1, 2]);
+  });
+
+  /**
+   * A COORDINATE THAT IS NOT A COORDINATE IS NOT DRAWN, unlike an off-map one. There is nowhere
+   * on the globe a latitude of -122.4194 could be reached by roaming, so plotting it is the
+   * "silently draw it in the wrong place" half of the failure rather than the "silently drop it"
+   * half. It is dropped AND counted — `pinCoverage.outOfRange` is what stops that being silent.
+   */
+  it("drops a latitude that is not a latitude, rather than projecting it anyway", () => {
+    const rows = [...pinRows, ["backwards", -122.4194, 37.7749]];
+    const opt = buildMapOption(pinCols, rows, { ...pinBase, extent: US }) as any;
+    const scatter = opt.series.find((s: any) => s.type === "scatter");
+    expect(scatter.data.map((d: any) => d.__row)).toEqual([0, 1]);
+  });
+
+  /** The poles and the antimeridian are real places; the guard rejects what is BEYOND them. */
+  it("still plots the extremes of the legal range", () => {
+    const opt = buildMapOption(pinCols, [["pole", 90, -180], ["anti", -90, 180]], pinBase) as any;
+    const scatter = opt.series.find((s: any) => s.type === "scatter");
+    expect(scatter.data.map((d: any) => d.value)).toEqual([[-180, 90], [180, -90]]);
+  });
+});
+
+/**
+ * THE WORDS, and where they go. Two presentations because there are two situations, and the split
+ * follows what `MapChart` and `sankeyProblem` already do rather than inventing a third thing:
+ * a chart that cannot be drawn at all is REPLACED by a sentence (`MapChart` already does this for
+ * "Couldn't load the map" and "No data"), and a chart that draws but is not showing everything
+ * keeps its pins and gains a line underneath.
+ */
+describe("pinProblem and pinNote", () => {
+  const all = (n: number) => ({ total: n, plotted: n, offMap: 0, outOfRange: 0, missing: 0 });
+
+  it("says nothing when every row is plotted", () => {
+    expect(pinProblem(all(21), "US states")).toBeUndefined();
+    expect(pinNote(all(21), "US states")).toBeUndefined();
+  });
+
+  it("says nothing at all about an empty result, which is the empty state's job", () => {
+    const none = { total: 0, plotted: 0, offMap: 0, outOfRange: 0, missing: 0 };
+    expect(pinProblem(none, "US states")).toBeUndefined();
+    expect(pinNote(none, "US states")).toBeUndefined();
+  });
+
+  /** #434's own live check found 21 rows in and 20 pins out. This is that number, said out loud. */
+  it("counts the plotted rows against the total, and names the reason", () => {
+    const note = pinNote({ total: 21, plotted: 20, offMap: 0, outOfRange: 0, missing: 1 }, "US states");
+    expect(note).toContain("20 of 21");
+    expect(note).toMatch(/latitude/i);
+    // A partial map is still a map — it is not replaced.
+    expect(pinProblem({ total: 21, plotted: 20, offMap: 0, outOfRange: 0, missing: 1 }, "US states"))
+      .toBeUndefined();
+  });
+
+  it("names the map a row fell outside of, and how to reach it", () => {
+    const note = pinNote({ total: 21, plotted: 10, offMap: 11, outOfRange: 0, missing: 0 }, "US states");
+    expect(note).toContain("10 of 21");
+    expect(note).toContain("US states");
+    expect(note).toMatch(/zoom out/i);
+  });
+
+  it("names every reason at once when there is more than one", () => {
+    const note = pinNote({ total: 10, plotted: 4, offMap: 3, outOfRange: 2, missing: 1 }, "World countries");
+    // THE WHOLE SENTENCE, not three separate substrings. Asserting the clauses individually let a
+    // mutation that joined them with ", " instead of "… and …" survive — every clause was present
+    // and the sentence was still not English. Singular/plural agreement is pinned here too, so a
+    // card can never say "1 rows have no…" and read as a bug in the card rather than a fact.
+    expect(note).toBe(
+      "Showing 4 of 10 rows: 3 are outside the World countries map, "
+      + "2 have a latitude or longitude out of range and 1 has no latitude or longitude."
+      + " Zoom out or pan the map to reach them.",
+    );
+  });
+
+  it("replaces the chart when not one row can be plotted", () => {
+    const problem = pinProblem({ total: 21, plotted: 0, offMap: 21, outOfRange: 0, missing: 0 }, "US states");
+    expect(problem).toMatch(/none/i);
+    expect(problem).toContain("US states");
+    // and the note stands down, so the card never says both things.
+    expect(pinNote({ total: 21, plotted: 0, offMap: 21, outOfRange: 0, missing: 0 }, "US states"))
+      .toBeUndefined();
+  });
+
+  /** The one message that can name a FIX rather than a fact, which is the whole value of a range
+   *  check: it cannot pick the column, but it can say the pair is the wrong way round. */
+  it("suggests the transposition when the coordinates are out of range", () => {
+    const problem = pinProblem({ total: 21, plotted: 0, offMap: 0, outOfRange: 21, missing: 0 }, "US states");
+    expect(problem).toMatch(/latitude/i);
+    expect(problem).toMatch(/longitude/i);
+    expect(problem).toMatch(/other way round|swapped|reversed/i);
+  });
+});
+
+describe("regionExtent", () => {
+  /** A ring, a polygon-with-hole and a multipolygon — the three shapes the three bundled geojsons
+   *  actually use, so the walk cannot be right for one nesting depth only. */
+  const geo = {
+    features: [
+      { properties: { key: "A" }, geometry: { type: "Polygon", coordinates: [[[-10, 5], [-8, 5], [-8, 7], [-10, 7]]] } },
+      { properties: { key: "B" }, geometry: { type: "MultiPolygon", coordinates: [[[[20, -30], [22, -30], [22, -28]]]] } },
+    ],
+  };
+
+  it("derives the bounding box from the geometry, at any nesting depth", () => {
+    indexRegionExtent("test_map", geo);
+    expect(regionExtent("test_map")).toStrictEqual({ minLon: -10, maxLon: 22, minLat: -30, maxLat: 7 });
+  });
+
+  /**
+   * A POSITION IS TWO NUMBERS, and the walk checks BOTH before treating an array as one. Found by a
+   * surviving mutant: dropping the second check changed nothing that was asserted, because no
+   * fixture contained a malformed position. A geojson is a checked-in file that a human can edit,
+   * and a stray one-number entry read as a position would widen the box on one axis only — which
+   * would then report perfectly ordinary rows as off-map, the confident-wrong-message failure this
+   * whole change exists to avoid.
+   */
+  it("ignores an array that is not a position", () => {
+    indexRegionExtent("ragged_map", {
+      features: [
+        { geometry: { type: "Polygon", coordinates: [[[-10, 5], [-8, 7]]] } },
+        // A single number where a pair belongs, far outside the real box on both axes.
+        { geometry: { type: "Polygon", coordinates: [[[-999], [888]]] } },
+      ],
+    });
+    expect(regionExtent("ragged_map")).toStrictEqual({ minLon: -10, maxLon: -8, minLat: 5, maxLat: 7 });
+  });
+
+  it("is undefined for a map that has not been indexed", () => {
+    expect(regionExtent("never_loaded")).toBeUndefined();
+  });
+
+  /** A geojson with no usable geometry must yield NO extent rather than an inside-out one made of
+   *  Infinities, which would call every row on earth off-map. */
+  it("is undefined when the geojson carries no coordinates", () => {
+    indexRegionExtent("empty_map", { features: [] });
+    expect(regionExtent("empty_map")).toBeUndefined();
+  });
+});
+
+/**
+ * ADDITIONAL TOOLTIP COLUMNS on the pin map — Metabase's `graph.tooltip_columns`. See
+ * `MapConfig.tooltipColumns`: this is the one chart family in egret where the feature is
+ * well-posed, because a raw-records query has no GROUP BY for a column's value to be ambiguous
+ * under. The tooltip is a string, so it is asserted as one.
+ */
+describe("buildMapOption — pin map tooltip columns", () => {
+  const cols = [
+    { name: "city", type: "varchar" }, { name: "lat", type: "double" },
+    { name: "lon", type: "double" }, { name: "rev", type: "double" },
+  ];
+  const rows = [["San Francisco", 37.7749, -122.4194, 1234.5]];
+  const cfg = { ...pinBase, label: "city", tooltipColumns: ["rev"] };
+  const tip = (c: Record<string, unknown>, r = rows) => {
+    const opt = buildMapOption(cols, r, { ...cfg, ...c }) as any;
+    const scatter = opt.series.find((s: any) => s.type === "scatter");
+    const d = scatter.data[0];
+    // ECharts hands an item tooltip the datum on `params.data`, alongside `name` and `value`. The
+    // extras are read from there rather than from a closure over the rows, so that a tooltip can
+    // never bind to a row the option no longer holds — which is what this shape is asserting.
+    return opt.tooltip.formatter({ name: d.name, value: d.value, data: d });
+  };
+
+  it("prints each extra column under the name and the coordinate", () => {
+    // Name first, then where, then what the reader asked about it — the coordinate identifies the
+    // pin and the columns describe it, so reversing the order would bury the identity.
+    expect(tip({})).toBe("San Francisco<br/>37.7749, -122.4194<br/>rev: 1234.5");
+  });
+
+  it("formats an extra column through the dataset's own column format", () => {
+    expect(tip({ formatColumn: (col: string, v: unknown) => `$${Number(v).toFixed(2)} (${col})` }))
+      .toContain("rev: $1234.50 (rev)");
+  });
+
+  it("uses the column's display title when the shell has one", () => {
+    expect(tip({ columnLabels: { rev: "Revenue" } })).toContain("Revenue: 1234.5");
+    // A blank title is not a title — it falls back to the machine name rather than printing ": ".
+    expect(tip({ columnLabels: { rev: "  " } })).toContain("rev: 1234.5");
+  });
+
+  /** The spec and the result can disagree for one render after a field changes. A name the result
+   *  does not carry is skipped, not printed as an empty row that looks like a null in the data. */
+  it("skips a column the result does not carry", () => {
+    expect(tip({ tooltipColumns: ["rev", "not_selected"] })).toBe(
+      "San Francisco<br/>37.7749, -122.4194<br/>rev: 1234.5",
+    );
+  });
+
+  it("is unchanged when no extra column is asked for", () => {
+    expect(tip({ tooltipColumns: undefined })).toBe("San Francisco<br/>37.7749, -122.4194");
   });
 });
