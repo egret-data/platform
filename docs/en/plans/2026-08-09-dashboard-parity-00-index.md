@@ -56,7 +56,7 @@ Locking this in before task decomposition, so two workstreams do not both grow t
 | `frontend/src/components/chart/export-xlsx.ts` | Lazy `.xlsx` writer, kept out of the main bundle. (W5) |
 | `frontend/src/components/chart/dashboard/autoConnect.ts` | Pure "which other cards have a column of this name" resolution + the patch it produces. (W6) |
 | `frontend/src/components/chart/dashboard/DefaultValueField.tsx` | Typed default-value widget dispatching on parameter type. (W6) |
-| `migrations/0105_dashboard_revisions.sql` | Revisions table. (W8) |
+| `migrations/0106_dashboard_revisions.sql` | Revisions table. (W8 — **0105 is taken by W3**; 0104 is the highest on `main`, and W3's column-default migration claims 0105. If W3 is dropped, W8 renumbers down.) |
 | `frontend/src/components/chart/dashboard/IFrameCard.tsx` | iframe card + URL allow-list. (W9) |
 
 ### Modified files, and by whom
@@ -113,6 +113,8 @@ opinion. `just deploy-kind` rebuilds and redeploys to `localhost:30080`
 (admin@egret.local / Admin12345!). The harness dashboard is
 `/explore/demo/dashboards/8a196343-ad93-4968-8040-67598d29c3cb`; Metabase's twin is
 `localhost:3033/dashboard/2`. Record the number the check produced in the PR body.
+
+**Migrations.** The dashboard tables live in the `analytics` schema — `0067_analytics_kernel_schema.sql:14` moved them, so a migration written against bare `dashboards` fails outright; qualify it as `analytics.dashboards`. After adding a migration, touch `crates/egret-metastore/src/lib.rs` to force the migrations to be re-embedded (the convention is documented in that file's header).
 
 **Do not disturb the harness.** 22 cards per side on byte-identical data. Fixing a harness chart
 means opening it and pressing Save — never hand-writing its JSON. See

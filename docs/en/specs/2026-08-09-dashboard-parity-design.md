@@ -119,7 +119,9 @@ comma.
 ### 3.1 Fixed vs full width
 
 The column exists (`migrations/0018_dashboard_width.sql`), the DTO carries it
-(`egret-analytics-api/src/bi.rs:369`), the PUT validates it (`routes.rs:2702-2706`), and the
+(`crates/egret-analytics-api/src/bi.rs:368`), the PUT validates it
+(`crates/egret-bi/src/routes.rs:2702-2706` — note the crate: `egret-analytics-api` has no
+`routes.rs`), and the
 frontend *renders* it — `DashboardView.tsx:178,462` applies `max-w-[1200px]` when
 `width === "fixed"`. But **no control anywhere sets it**, and both save paths echo the stored
 value back unchanged (`DashboardView.tsx:390,404`). Every dashboard is pinned to the server
@@ -219,14 +221,25 @@ guard.
 ### W5 — Card-level parity
 
 - **Download formats.** Today CSV and PNG only (`ChartExportMenu.tsx:40-56`). Add `.xlsx` and
-  `.json`, plus Metabase's "Keep the data formatted" toggle (default on, matching today's
-  unconditional behaviour) and its row-limit note. PNG stays conditional on the card rendering
-  an `<svg>`.
+  `.json`, plus Metabase's "Keep the data formatted" toggle and its row-limit note. PNG stays
+  conditional on the card rendering an `<svg>`.
+
+  ⚠️ **The toggle's default is a behaviour change, not a no-op — this spec originally said
+  otherwise and was wrong.** `rowsToCsv` (`export-chart.ts:18-34`) renames the *header* via
+  `column_title` but writes every *cell* with a bare `String(v)`, calling `formatValue` nowhere.
+  Today's CSV is a hybrid that Metabase has no equivalent of, so **neither** setting of the
+  toggle reproduces it: ON formats the cells (a `1234` becomes `1,234`, since `formatNumber`
+  builds with `useGrouping: true`, `format.ts:105`), OFF drops the renamed headers.
+  **Decision: match Metabase — default ON.** The toggle exists precisely so that anyone
+  consuming these files by machine can turn it off, and parity is this programme's whole
+  premise. The PR must call this out as a user-visible change to an existing export.
+
   egret's export is entirely client-side (`export-chart.ts`), so `.json` is free but `.xlsx`
-  needs a writer. Use a single small dependency (`xlsx`-class, lazily imported so it stays out
-  of the main bundle) rather than hand-rolling the format or adding a backend endpoint —
-  the chart programme already established that per-card export belongs on the client, where the
-  card's effective column formatting lives.
+  needs a writer, lazily imported so it stays out of the main bundle. **Not npm's `xlsx`** —
+  it is stale at 0.18.5 with known advisories. Use `write-excel-file`: pure ESM,
+  `sideEffects: false`, one transitive dependency. Note its v4 API is
+  `writeXlsxFile(sheetData).toBlob()`, not the v3 `{ fileName }` shape most documentation
+  still shows.
 - **"Edit question"** menu item, and the card title becomes a link to the chart, matching
   `getDashcardHref` (`dashboard/selectors.ts:228-248`). Suppressed when the title override is
   `""` (header hidden) and while editing.
