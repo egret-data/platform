@@ -330,12 +330,35 @@ workstream that can be cut without leaving anything half-built.
 
 ### W8 — Info sidebar and revision history
 
+⚠️ **This spec originally called revision history "the only item needing backend work". All
+three items need it**, and W8 needs **two** migrations rather than the one the plan index
+reserved.
+
 - **Owner.** `DashboardView.tsx:691` passes `dash.created_by` raw. Resolve it to a display name
   and show both created and last-edited, as Metabase does ("August 1, 2026 by Ref User").
-- **"Saved in"** folder link.
-- **Revision history.** The only item in this programme needing backend work: a revisions
-  table, capture on dashboard PUT, plus list and revert endpoints, then Metabase's History tab
-  with a timeline and revert (`DashboardInfoSidebar.tsx:225-265`, `actions/revisions.ts:11-35`).
+  Backend work, for two reasons. `analytics.dashboards` has **no `created_at` and no
+  `updated_by`** — nothing has been added since migrations 0015/0021 — so "created … by / edited
+  … by" cannot be answered from the current row at all. And **there is no frontend
+  user-id→name lookup to use**: `/api/control-plane/users` needs `user:read`,
+  `/ws/{ws}/members` needs `workspace:manage_members`, and `/api/control-plane/principals`
+  carries no `id`, so a `ws_editor` opening the sidebar on their own dashboard would 403.
+  Follow what this repo already does in five places (`MemberDto.principal_name`,
+  `ObjectGrantDto.principal_name`, the grant rollup, who-can-access, effective access): resolve
+  the name **server-side with a LEFT JOIN** and add `created_by_name`/`updated_by_name` to the
+  DTO, rendering `?? raw_id` as `ShareDialog.tsx:316` does.
+  ⚠️ `ADD COLUMN created_at timestamptz DEFAULT now()` **backfills every existing row** on
+  Postgres 11+, stamping every dashboard in the deployment with the migration's timestamp. Add
+  the column bare, then `SET DEFAULT` in a second statement, and leave pre-existing rows NULL.
+- **"Saved in"** folder link. Also backend: `DashboardSummaryDto` carries `folder_id` but
+  `DashboardDetailDto` does not, so the dashboard page cannot know its own folder.
+  ⚠️ **Folders have no route.** `App.tsx` has no folder path; a folder on the list page is a
+  collapsible `<tbody>` header with its collapse state in `localStorage`. So this cannot link to
+  a folder page — link to `/explore/{ws}/dashboards?folder=<id>` and teach the list page's
+  collapse state to expand the linked section on arrival. Without that second half the link
+  lands on a page where the dashboard you came from is invisible.
+- **Revision history.** A revisions table, capture on dashboard PUT, plus list and revert
+  endpoints, then Metabase's History tab with a timeline and revert
+  (`DashboardInfoSidebar.tsx:225-265`, `actions/revisions.ts:11-35`).
 
 Ordered last so it can be cut without stranding W1–W7.
 

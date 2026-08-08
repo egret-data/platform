@@ -27,7 +27,7 @@ Postgres.
 | `…-05-card-level.md` | W5 download formats, edit-question link, description, background | — | no |
 | `…-06-filters.md` | W6 single/multi, reorder, auto-connect, auto-apply, linked panel, `location` fix | — | no |
 | `…-07-inline-parameters.md` | W7 move a filter into a heading/question card | W6 | no |
-| `…-08-info-and-revisions.md` | W8 owner name, folder link, revision history | — | yes (new table + endpoints) |
+| `…-08-info-and-revisions.md` | W8 owner name, folder link, revision history | — | yes (**two** migrations + endpoints — all three items need backend, not just revisions) |
 | `…-09-iframe-card.md` | W9 iframe card type | — | no |
 
 **Ordering constraints, and only these.** W1 before W2 (both edit `DashboardGridLayout.tsx`).
@@ -56,7 +56,8 @@ Locking this in before task decomposition, so two workstreams do not both grow t
 | `frontend/src/components/chart/export-xlsx.ts` | Lazy `.xlsx` writer, kept out of the main bundle. (W5) |
 | `frontend/src/components/chart/dashboard/autoConnect.ts` | Pure "which other cards have a column of this name" resolution + the patch it produces. (W6) |
 | `frontend/src/components/chart/dashboard/DefaultValueField.tsx` | Typed default-value widget dispatching on parameter type. (W6) |
-| `migrations/0106_dashboard_revisions.sql` | Revisions table. (W8 — **0105 is taken by W3**; 0104 is the highest on `main`, and W3's column-default migration claims 0105. If W3 is dropped, W8 renumbers down.) |
+| `migrations/0106_dashboard_attribution.sql` | `created_at` + `updated_by` on `analytics.dashboards`. (W8 — needed by items 1 and 2, not only by revisions.) |
+| `migrations/0107_dashboard_revisions.sql` | Revisions table. (W8 — **0105 is taken by W3**; 0104 is the highest on `main`. If W3 is dropped, W8 renumbers down.) |
 | `frontend/src/components/chart/dashboard/IFrameCard.tsx` | iframe card + URL allow-list. (W9) |
 
 ### Modified files, and by whom
