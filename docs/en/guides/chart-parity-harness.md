@@ -239,12 +239,121 @@ Fix your viewport, measure before and after in the same one, and say which you u
   ORDER comparison must therefore be made on the QUESTION view (`/question/59`), or on the dashboard
   by colour and stack position. Left alone: resizing the Metabase cards would break the geometry the
   earlier measurements were taken at.
-- **The 19 original Metabase cards name their columns in lowercase** (`{"graph.dimensions":
-  ["category"]}` on card 42, `pivot_table.column_split` on card 41) while the results really are
-  `CATEGORY` / `ORDER_MONTH` / `REVENUE`. They render correctly, which means they are rendering from
-  Metabase's DEFAULT rather than from the stored setting — the settings happen to coincide with the
-  default for these result shapes. Not touched, because correcting them would change nineteen
-  baseline cards to fix nothing visible; the three new cards use uppercase, which is the honest key.
+- **`MB · Pivot` has no Metabase rendering at all, and never had one.** Card 41 draws
+  *"Pivot tables are only supported for questions built in the query builder"* — on the dashboard as
+  well as on `/question/41` — because the harness's cards are native SQL. Uppercasing its settings
+  (below) did not change this and could not have: the card never reaches the point of reading them.
+  This was already recorded in `2026-08-02-chart-parity-05-label-room.md`; it is repeated here
+  because it is easy to mistake for the case bug and it is not one. **The pivot's target still has to
+  be argued on its own terms.** Its *data* is still trustworthy — egret's `VALUES` literal was
+  materialised from the result this very card runs, and the query runs fine; it is only the *pivot
+  rendering* Metabase declines.
+
+## The inert-settings bug, and what it cost (2026-08-08)
+
+This guide used to say the original Metabase cards' lowercase column names were harmless — *"They
+render correctly … the settings happen to coincide with the default for these result shapes."*
+**That was wrong for four of them**, and the four were not visible from the settings alone. They are
+fixed now; this section is the record, because the same trap has now bitten this harness twice (the
+funnel, then these).
+
+### The mechanism, exactly
+
+H2 upper-cases unquoted identifiers, so every result column really is `CATEGORY` / `ORDER_MONTH` /
+`REVENUE`. Metabase resolves a column-name setting with `columnsAreValid`
+(`visualizations/lib/utils.ts:35`), which is a **case-sensitive object lookup** —
+`colsByName[name]`, plus a strict `col.name === columnName` at render time
+(`lib/graph/columns.ts:16`). A name that does not resolve fails the setting's `isValid`, and
+`getComputedSetting` (`lib/settings.ts:118`) then falls through to `getDefault`. **The card renders
+from Metabase's default and the stored setting is never read.** It does not warn, and it does not
+render blank — which is exactly why this survived.
+
+Two consequences worth knowing:
+
+- `graph.dimensions` and `graph.metrics` are validated **together** by
+  `getAreDimensionsAndMetricsValid`, so one bad name discards both.
+- `pivot_table.column_split` is the exception: it uses `getValue`, not `isValid`/`getDefault`, so its
+  stored value is always processed and case-mismatched names are dropped from their partition rather
+  than the whole setting falling back.
+
+### The real count: 12, not 19
+
+"Nineteen" counted the original cards wholesale. Card by card, only **12 carried a lowercase column
+reference at all**, and of those only **4 rendered differently from what their settings say**:
+
+| | cards | |
+|---|---|---|
+| lowercase **and visibly wrong** | **46, 47, 56, 58** | scatter, combo, sankey, map |
+| lowercase but the default coincided | 42, 43, 44, 45, 48, 53, 55 | bar, row, line, area, pie, waterfall, box plot — all `[dimension, metric]` result shapes, where the default *is* the stored intent |
+| lowercase, but inert for a different reason | 41 | pivot — never renders (see "Known drift") |
+| no column-naming settings to be inert | 40, 49, 54, 57 | `visualization_settings: {}` |
+| settings that name no column | 50, 51 | `progress.goal`, `gauge.range`/`segments` — numbers, always effective |
+| already uppercase | 52, 59, 60, 61 | funnel (fixed earlier) + the three breakout cards |
+
+### What the four were actually drawing
+
+Measured at 1600×1000 on `/dashboard/2` and the question views, before and after:
+
+| card | stored settings say | was drawing | now |
+|---|---|---|---|
+| 47 `MB · Combo` | 2 metrics; `REVENUE` a **line** on the right axis | **3** series (`ORDERS`, `REVENUE`, `AVG_TOTAL`) with `REVENUE` a **bar** — `getDefaultMetrics` takes every numeric column | 2 series, `REVENUE` a line |
+| 58 `MB · Map` | shade by `REVENUE` | shaded by **`ORDERS`** — `map.metric`'s default is `cols.find(isMetric)`, the *first* numeric. Legend read `21 – 206 … 1,342 +`, which is ORDERS' exact min/max; REVENUE's range is `1,358.69 – 108,466.6` | legend `1.4k – 12.4k … 108.5k +` |
+| 46 `MB · Scatter` | bubbles sized by `ORDERS` | **uniform** bubbles — `getDefaultScatterColumns` returns `bubble: null` | bubbles sized |
+| 56 `MB · Sankey` | `SOURCE → CATEGORY` | **`CATEGORY → SOURCE`**, i.e. reversed — `findSensibleSankeyColumns` picked its own | `SOURCE → CATEGORY` |
+
+The other eight cards are byte-identical on screen before and after; only `visualization_settings`
+changed on any card, and dashboard 2 still has its 22 dashcards at `8×6` with no dashcard-level
+overrides.
+
+### Did this move an egret-side finding? No — and that is the point
+
+**No write-up anywhere in `docs/`, `scripts/harness/` or commits #407–#438 ever called egret
+divergent on combo series, scatter bubbles, sankey direction or the map metric.** The harness's only
+chart-by-chart comparison table (`2026-08-02-chart-parity-04-colour-assignment.md`) does not cover
+combo or map at all, and covers scatter and sankey only for colour and label geometry. So no
+recorded conclusion has to be withdrawn.
+
+That is a lucky escape rather than a good outcome. In all four cases **egret was already storing what
+Metabase's settings intended** (`scripts/harness/charts.ts:99-122`), so anyone who *had* compared
+them would have found egret "wrong" and been comparing against an unconfigured card.
+
+One older measurement is worth flagging as unexplained. `2026-08-02-chart-parity-05-label-room.md:45`
+records Metabase's longest right-hand sankey label as **`Doohickey`** — a CATEGORY value, i.e.
+`SOURCE → CATEGORY`, the orientation the settings intend and the opposite of what card 56 was drawing
+on 2026-08-08. Either the default flipped under it (a stale `result_metadata` refresh would do it) or
+the label was mis-attributed. It is not worth chasing now, because the uppercase fix removes the
+dependence on Metabase's default-detection entirely — **which is the real argument for fixing an
+inert setting even where the default happens to agree: a default can drift, a stored setting cannot.**
+
+### Reproducing it
+
+There is still no script for Metabase's side. The corrected settings are listed here so they can be
+re-applied by hand or by any future tool, each via `PUT /api/card/{id}` with just
+`{"visualization_settings": …}`:
+
+```json
+41 {"pivot_table.column_split": {"rows": ["ORDER_MONTH"], "columns": ["CATEGORY"], "values": ["REVENUE"]}}
+42 {"graph.dimensions": ["CATEGORY"],    "graph.metrics": ["REVENUE"]}
+43 {"graph.dimensions": ["CATEGORY"],    "graph.metrics": ["REVENUE"]}
+44 {"graph.dimensions": ["ORDER_MONTH"], "graph.metrics": ["REVENUE"]}
+45 {"graph.dimensions": ["ORDER_MONTH"], "graph.metrics": ["REVENUE"]}
+46 {"graph.dimensions": ["PRICE"],       "graph.metrics": ["RATING"], "scatter.bubble": "ORDERS"}
+47 {"graph.dimensions": ["ORDER_MONTH"], "graph.metrics": ["ORDERS", "REVENUE"],
+    "series_settings": {"REVENUE": {"axis": "right", "display": "line"}}}
+48 {"pie.dimension": "CATEGORY", "pie.metric": "REVENUE"}
+53 {"graph.dimensions": ["ORDER_MONTH"], "graph.metrics": ["REVENUE"]}
+55 {"graph.dimensions": ["CATEGORY"],    "graph.metrics": ["PRICE"]}
+56 {"sankey.source": "SOURCE", "sankey.target": "CATEGORY", "sankey.value": "ORDERS"}
+58 {"map.dimension": "STATE", "map.metric": "REVENUE", "map.region": "us_states", "map.type": "region"}
+```
+
+`series_settings` is keyed by the **metric column name** for a single-card chart
+(`getSeriesVizSettingsKey`), so it needs uppercasing too — a lowercase key silently matches nothing
+and the series keeps its default colour and display.
+
+**How to tell whether a setting is live, without reading Metabase's source.** Do not check that the
+card "looks right" — that is precisely the check that failed here for a year of PRs. Change the
+setting to something *wrong* and reload: if the picture does not change, the setting is inert.
 
 ## Environment notes
 
