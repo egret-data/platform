@@ -20,6 +20,7 @@ import { formatDimensionValue } from "@/components/chart/format";
 const PROGRESS_DEFAULT_COLOR = SERIES_PALETTE[1];
 import { Switch } from "@/components/ui/switch";
 import { SeriesListSection } from "@/components/chart/settings/SeriesListSection";
+import { displayName, fieldTitle, metricLabels } from "@/components/chart/config/field-names";
 import { fieldDescriptor } from "./fields";
 import type { VizControl, VizControlProps, VizDescriptor } from "./types";
 
@@ -149,6 +150,7 @@ const trendData: VizControl<Cfg>[] = [
 /** The progress bar's colour and its goal-from-a-column, both Metabase's. */
 function ProgressDisplayControl({ config, onChange, metrics }: VizControlProps<Cfg>) {
   const color = (config.color as string | undefined) ?? PROGRESS_DEFAULT_COLOR;
+  const labels = metricLabels(metrics);
   return (
     <div className="space-y-2.5">
       <div className="flex items-center justify-between gap-2">
@@ -167,9 +169,17 @@ function ProgressDisplayControl({ config, onChange, metrics }: VizControlProps<C
           onValueChange={(v) => onChange({ goalColumn: v === "__none" ? undefined : v } as Partial<Cfg>)}
         >
           <SelectTrigger aria-label="Goal from a metric" className="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
+          {/* The tightest version of the naming split there is: the METRIC field two rows above
+              this one is drawn by `fields.tsx`, which has read `verbose_name` all along, so a
+              renamed metric appeared as "Doanh thu" up there and `total_revenue` down here — the
+              same field, the same panel, ten pixels apart. `field-names.ts` supplies both now. */}
           <SelectContent>
             <SelectItem value="__none">None — use the fixed goal</SelectItem>
-            {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+            {metrics.map((m) => (
+              <SelectItem key={m.metric_name} value={m.metric_name} title={fieldTitle(m.metric_name, labels)}>
+                {displayName(m.metric_name, labels)}
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
         <p className="text-xs text-muted-foreground">A metric whose value is the target, instead of a number typed once.</p>

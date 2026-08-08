@@ -92,7 +92,10 @@ vi.mock("@/api/datasets", () => ({
     data: {
       id: "d1", name: "Demo Sales",
       columns: [
-        { column_name: "id", data_type: "bigint", is_temporal: false },
+        // `id` is the one column no other assertion in this file queries by name, which is why it
+        // carries the rename: `Add or remove columns` has to SAY "Mã" while every stored list keeps
+        // keying on `id`. See the last test in this file.
+        { column_name: "id", data_type: "bigint", is_temporal: false, verbose_name: "Mã" },
         { column_name: "state", data_type: "varchar", is_temporal: false },
         { column_name: "vendor", data_type: "varchar", is_temporal: false },
       ],
@@ -267,6 +270,32 @@ describe("Add or remove columns, from the Display tab", () => {
 
     // Aggregating turns the raw columns into dimensions and adds the metric to the result.
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor", "revenue"]), { timeout: 3000 });
+  }, 30000);
+
+  /**
+   * THE LABELS ARE WIRED, and only this file can say so.
+   *
+   * `TableColumnsSection` renders whatever `QueryFieldGroup.labels` holds — its own tests prove
+   * that. The map itself is built HERE, in `ChartExplore`, out of the same `columns` array the Data
+   * tab's list reads, and a `labels` prop that is never passed is a green unit test over dead
+   * wiring — the failure this file's opening comment says the programme has shipped twice.
+   *
+   * Live, before this: the Data tab said "Khu vực" and this picker said `region`, one click apart.
+   * `Mã` here is the same shape on the fixture.
+   *
+   * The last two lines are the half that matters most. The row SAYS the friendly name and the
+   * checkbox is still found under the machine name — `getByRole("checkbox", { name: "id" })` would
+   * throw if the accessible name had become the display string, which is how a picker that had
+   * started storing the wrong thing would first show itself.
+   */
+  it("names a renamed column the way the dataset does, and still keys on the raw name", async () => {
+    await mountTable();
+    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
+    await userEvent.click(screen.getByRole("button", { name: /add or remove columns/i }));
+    expect(screen.getByText("Mã")).toBeInTheDocument();
+    expect(within(screen.getByText("Mã")).queryByText("id")).toBeNull();
+    expect(screen.getByText("Mã")).toHaveAttribute("title", "Mã (id)");
+    expect(dataColumn("Mã")).toBeChecked();
   }, 30000);
 });
 

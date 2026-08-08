@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { isNumericType, isTemporalType, type ColumnFormat } from "@/components/chart/format-types";
@@ -154,9 +155,19 @@ export function FormatPicker({ value, onChange, type = "", className }: {
                   {p.label}
                 </button>
               ))}
-              <label className="flex items-center gap-2 px-2 pt-1.5 text-sm">
-                <input type="checkbox" checked={!!draft.time_enabled}
-                  onChange={(e) => patch({ time_enabled: e.target.checked ? "minutes" : null })} />
+              {/* Inside a Popover, so the primitive's `focus-visible:ring-2 ring-ring` is the only
+                  focus treatment that can be seen: a `ring-offset` would paint a band of
+                  `--background` against the popover's own `--popover` surface. The primitive
+                  already carries the right one, which is a reason to use it rather than to restyle
+                  a raw input here.
+                  DENSITY, measured on the kind deployment with the `order_date` popover open: the
+                  last date preset is a 32px button whose bottom edge sits 8px clear of this
+                  checkbox's 24×24 target, so the 4px bleed collides with nothing. The row itself is
+                  26px (`pt-1.5`) and toggling it does NOT dismiss the popover — verified, because a
+                  `<button>` inside `PopoverContent` is exactly the shape that could have. */}
+              <label htmlFor="fp-time-enabled" className="flex cursor-pointer items-center gap-2 px-2 pt-1.5 text-sm">
+                <Checkbox id="fp-time-enabled" checked={!!draft.time_enabled}
+                  onCheckedChange={(v) => patch({ time_enabled: v === true ? "minutes" : null })} />
                 Show time
               </label>
             </>
