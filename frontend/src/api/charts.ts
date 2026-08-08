@@ -414,9 +414,32 @@ export interface MapConfig {
    * egret's raw-records mode selects exactly the columns `buildSpec` names. With only `latitude`
    * and `longitude` selected there is literally nothing else to show, so a pin could only ever
    * identify itself as its own coordinates. Naming one column adds it to the SELECT and to the
-   * tooltip. A full column picker is the fuller answer and is not built here.
+   * tooltip. A full column picker is the fuller answer, and is `tooltipColumns` below.
    */
   label?: string;
+  /**
+   * ADDITIONAL TOOLTIP COLUMNS — Metabase's `graph.tooltip_columns`, ported as itself rather than
+   * by analogy, and this is the one chart family in egret where that is possible.
+   *
+   * #433 wanted this feature for the cartesian charts and could not have it: those specs GROUP BY
+   * the dimension, so a raw column has no single value per drawn point, and reaching for
+   * `any_value()` would print one of N rows' cells at random under a heading that claims to
+   * describe the point. It substituted dataset METRICS — aggregates the dataset's author wrote —
+   * because an aggregate is the thing a grouped query can honestly return.
+   *
+   * That objection is entirely about aggregation, and a PIN MAP HAS NONE. `buildSpec` takes
+   * `chartquery.rs`'s raw-records branch (`metrics: []`, `columns` non-empty), which emits
+   * `SELECT <col> AS <col> FROM … WHERE … ORDER BY … LIMIT` with no GROUP BY at all — one result
+   * row per marker. A column's value on a pin is that pin's own row's cell, and there is nothing
+   * for it to be ambiguous between. So Metabase's original feature is well-posed here and only
+   * here.
+   *
+   * NOT FREE, but cheap and safe: these names are appended to `spec.columns`, so the query does
+   * change. Adding a projection to a query with no GROUP BY cannot change which rows come back or
+   * what any other column holds, which is the property that makes appending them uncontroversial
+   * — the same change on a grouped query could alter the grouping itself.
+   */
+  tooltipColumns?: string[];
 }
 
 export interface ChartParams {

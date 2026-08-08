@@ -2,6 +2,7 @@ import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { MAPS } from "@/components/chart/echarts/maps/registry";
 import { Label } from "@/components/ui/label";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import { FieldZone } from "@/components/chart/config/FieldZone";
 import { isParamsV2 } from "@/api/charts";
 import type { MapConfig, MapType, QuerySpec } from "@/api/charts";
 import type { SharedQueryState, VizControlProps, VizDescriptor } from "./types";
@@ -53,11 +54,16 @@ function MapTypeControl({ config, onChange }: VizControlProps<MapConfig>) {
  * override could not even render. `mapKey` is overridable precisely because it does the opposite:
  * it paints the SAME rows onto different outlines.
  */
-function MapTypeSelect({ config, onChange }: VizControlProps<MapConfig>) {
+function MapTypeSelect({ config, onChange, columns }: VizControlProps<MapConfig>) {
   return (
     <div className="space-y-1">
       <Label className={LABEL_CLASS}>Map type</Label>
-      <Select value={config.type ?? "region"} onValueChange={(v) => onChange({ type: v as MapType })}>
+      <Select
+        value={config.type ?? "region"}
+        onValueChange={(v) => onChange(
+          v === "pin" ? { type: "pin", ...defaultCoordinates(config, columns) } : { type: v as MapType },
+        )}
+      >
         <SelectTrigger aria-label="Map type" className="h-8 text-sm"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value="region">Region map</SelectItem>
@@ -66,6 +72,43 @@ function MapTypeSelect({ config, onChange }: VizControlProps<MapConfig>) {
       </Select>
     </div>
   );
+}
+
+/**
+ * THE PICKERS' DEFAULTS, from the dataset's own declared semantic types — Metabase's
+ * `getDefaultDimensionAndMetric`-style default for `map.latitude_column`, which it derives from a
+ * column whose `semantic_type` is `type/Latitude`.
+ *
+ * THIS IS NOT THE GUESS #434 REJECTED, and the distinction is the whole point. #434 refused to
+ * infer a coordinate column from its NAME, because "lat" in a column name is a coincidence a
+ * heuristic cannot tell from a fact, and a wrong guess plots confidently in the wrong hemisphere.
+ * A semantic type is not a guess about the data: it is a statement someone made about the data, in
+ * the dataset's own Columns tab, exactly as they would state that a column is a currency or a URL.
+ * If it is wrong, a person wrote it down wrongly, and the Columns tab is where they fix it.
+ *
+ * WRITTEN ON THE USER'S ACTION, NOT IN AN EFFECT. It would be tidier to resolve these at render
+ * time so that any route into pin mode gets them — but a `useEffect` that patches config on mount
+ * is precisely how #421's phantom unsaved-changes prompt happened: a chart nobody edited comes up
+ * dirty, and the user is asked to save something they did not do. Switching the Map type IS an
+ * edit the user just made, so a default written there is part of that edit and dirties nothing
+ * extra. That also makes it visible: the two pickers below fill in as the select changes, rather
+ * than the chart quietly querying columns the panel never showed.
+ *
+ * ONLY WHEN BOTH ARE UNSET, so it can never overwrite a choice. A half-configured chart is left
+ * alone too: filling only the missing half would pair a declared column with a chosen one behind
+ * the user's back, which is the confident-wrong-hemisphere failure by another route.
+ */
+function defaultCoordinates(config: MapConfig, columns: VizControlProps<MapConfig>["columns"]) {
+  if (config.latitude || config.longitude) return {};
+  // Numeric as well as declared: a column typed as text cannot be a coordinate whatever it says
+  // about itself, and `PinControls` would not offer it, so defaulting to it would produce a picker
+  // holding a value that is not in its own list.
+  const declared = (role: string) =>
+    columns.find((c) => c.semantic_type === role && c.type_generic === "numeric")?.column_name;
+  const latitude = declared("latitude");
+  const longitude = declared("longitude");
+  // BOTH OR NEITHER, for the same reason as above: one coordinate is not a location.
+  return latitude && longitude ? { latitude, longitude } : {};
 }
 
 /** The two fields that ARE a REGION map's query — `buildSpec` reads exactly these — so they stay
@@ -108,14 +151,17 @@ function MapControls({ config, onChange, columns, metrics }: VizControlProps<Map
  * pins and no error message, which is the silent-empty-map failure the region picker already had
  * once (see `resolveRegion`).
  *
- * WHAT EGRET CANNOT COPY FROM METABASE HERE, stated because it looks like an omission: Metabase
- * DEFAULTS these two fields, by finding the column whose semantic type is `type/Latitude`. egret's
- * `semantic_type` vocabulary has no latitude or longitude in it (ColumnsTab offers category,
- * country, currency, email, url, image), so there is nothing to search for and the fields start
- * empty. Guessing from column NAMES was considered and rejected: a heuristic that silently picks
- * the wrong column plots a map that is confidently in the wrong hemisphere, which is worse than an
- * empty picker that asks. The real fix is a latitude/longitude semantic type, which is a backend
- * enum plus the dataset column editor — a different change from this one.
+ * THESE FIELDS NOW DEFAULT, and the note that used to stand here was wrong about why they could
+ * not. It said egret's `semantic_type` "is a backend enum plus the dataset column editor — a
+ * different change from this one". It is not an enum: `migrations/0098_dataset_semantic_types_
+ * certification.sql` adds `semantic_type text NOT NULL DEFAULT ''` with no CHECK constraint, the
+ * Rust side types it `String` on both the row struct and both DTOs, `ds_update_column` performs no
+ * allow-list validation, and the OpenAPI schema types it as a bare string with no `enum`. The
+ * vocabulary lived entirely in one `<select>` in `ColumnsTab`. Adding latitude and longitude to it
+ * therefore needed no migration, no Rust change and no generated-type change — and `DatasetColumn`
+ * already carried `semantic_type` all the way into `VizControlProps.columns`, so this file could
+ * have read it on the line below the numeric filter at any point since #434. See
+ * `defaultCoordinates` for why a declared type is not the name-guess #434 rejected.
  */
 function PinControls({ config, onChange, columns }: VizControlProps<MapConfig>) {
   if (config.type !== "pin") return null;
@@ -143,6 +189,52 @@ function PinControls({ config, onChange, columns }: VizControlProps<MapConfig>) 
           names a reader wants ("San Francisco") are exactly the non-numeric ones. */}
       {field("Label", config.label, columns, (v) => onChange({ label: v }))}
     </>
+  );
+}
+
+/**
+ * ADDITIONAL TOOLTIP COLUMNS — Metabase's `graph.tooltip_columns`, and the one place in egret where
+ * that feature ports as itself rather than as an analogy. See `MapConfig.tooltipColumns` for the
+ * argument; the short form is that #433's objection was about aggregation and a pin map has none.
+ *
+ * ON THE DATA TAB, NOT DISPLAY, and with no `cardOverridable`, because unlike Metabase's this one
+ * CHANGES THE QUERY: egret derives the SELECT list from the viz config, so a column that is not
+ * asked for is not fetched and there is no "already in the result" set to choose from. #433's
+ * control sits in exactly the same place for exactly the same reason. A dashboard card's spec is
+ * never overridden, so letting a card add one would be a control that saves and does not paint.
+ *
+ * WHAT IS ON OFFER is every dataset column except the three the pin map already selects. Latitude
+ * and longitude are excluded because the tooltip prints the coordinate on its own second line
+ * regardless, and the label because it is the tooltip's heading — offering any of them would let a
+ * reader add a duplicate of something already on screen.
+ *
+ * HIDDEN ONLY WHEN THERE IS NOTHING TO OFFER **AND** NOTHING STORED — #433's rule, and it carries
+ * the same caveat that makes it safe: egret does not filter a stored setting at render time (a
+ * chart's settings are stored JSON, and quietly rewriting one is how a config loses things without
+ * saying so), so the second clause is what stops a hidden control from stranding a value that
+ * still paints.
+ */
+function PinTooltipColumns({ config, onChange, columns }: VizControlProps<MapConfig>) {
+  if (config.type !== "pin") return null;
+  const used = new Set([config.latitude, config.longitude, config.label].filter((c): c is string => !!c));
+  const selected = config.tooltipColumns ?? [];
+  const options = columns.map((c) => c.column_name).filter((c) => !used.has(c));
+  if (options.length === 0 && selected.length === 0) return null;
+  const labels: Record<string, string> = {};
+  for (const c of columns) {
+    const v = c.verbose_name?.trim();
+    if (v) labels[c.column_name] = v;
+  }
+  return (
+    <div className="space-y-1">
+      <FieldZone
+        label="Tooltip columns" selected={selected} options={options} labels={labels}
+        onChange={(v) => onChange({ tooltipColumns: v })}
+      />
+      <p className="text-xs text-muted-foreground">
+        Fetched with each row and shown in the pin's tooltip only.
+      </p>
+    </div>
   );
 }
 
@@ -184,6 +276,12 @@ export function mapDescriptor(): VizDescriptor<MapConfig> {
           latitude: p.settings["map.latitude_column"] as string | undefined,
           longitude: p.settings["map.longitude_column"] as string | undefined,
           label: p.settings["map.label_column"] as string | undefined,
+          // Metabase's own key name. Read defensively rather than cast blind: this one is an ARRAY
+          // in stored JSON, and every other key here is a scalar, so a params blob that is wrong
+          // about it would hand `buildSpec` a non-iterable and take the whole card down.
+          tooltipColumns: Array.isArray(p.settings["map.tooltip_columns"])
+            ? (p.settings["map.tooltip_columns"] as unknown[]).filter((c): c is string => typeof c === "string")
+            : undefined,
         };
       }
       // v1 params predate pin mode entirely, so the nested blob can only describe a region map.
@@ -200,6 +298,7 @@ export function mapDescriptor(): VizDescriptor<MapConfig> {
       if (cfg.latitude !== undefined) out["map.latitude_column"] = cfg.latitude;
       if (cfg.longitude !== undefined) out["map.longitude_column"] = cfg.longitude;
       if (cfg.label !== undefined) out["map.label_column"] = cfg.label;
+      if (cfg.tooltipColumns !== undefined) out["map.tooltip_columns"] = cfg.tooltipColumns;
       return out;
     },
     // Each branch names ONLY its own fields. A pin map that still demanded a region and a metric
@@ -225,8 +324,17 @@ export function mapDescriptor(): VizDescriptor<MapConfig> {
         // `SELECT <col> AS <col> FROM … WHERE … ORDER BY … LIMIT` — which is exactly a pin map's
         // shape, one row per marker. Both halves matter: a stray metric here would send it back
         // down the aggregate branch and collapse every pin sharing a coordinate into one.
-        const columns = [cfg.latitude, cfg.longitude, cfg.label].filter((c): c is string => !!c);
-        return { metrics: [], dimensions: [], columns, ...base };
+        //
+        // The tooltip columns are appended LAST and deduped against what is already selected and
+        // against themselves. Appending is safe here in a way it would not be on an aggregate
+        // query: with no GROUP BY, an extra projection cannot change which rows come back or what
+        // any other column holds. A duplicate name would be a duplicate `<col> AS <col>` in the
+        // SELECT, which the engine would reject outright.
+        const chosen = [cfg.latitude, cfg.longitude, cfg.label].filter((c): c is string => !!c);
+        const extra = (cfg.tooltipColumns ?? []).filter(
+          (c, i, all) => !chosen.includes(c) && all.indexOf(c) === i,
+        );
+        return { metrics: [], dimensions: [], columns: [...chosen, ...extra], ...base };
       }
       return {
         metrics: cfg.metric ? [cfg.metric] : [],
@@ -241,6 +349,7 @@ export function mapDescriptor(): VizDescriptor<MapConfig> {
       { id: "mapType", section: "data", render: MapTypeSelect },
       { id: "map", section: "data", render: MapControls },
       { id: "pin", section: "data", render: PinControls },
+      { id: "pinTooltip", section: "data", render: PinTooltipColumns },
       { id: "color", section: "display", render: MapColorControl },
     ],
   };
