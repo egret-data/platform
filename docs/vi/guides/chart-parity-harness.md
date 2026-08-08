@@ -1,12 +1,105 @@
 # Harness đối chiếu chart
 
-Một dashboard tên **ZZ Chart Parity** mang 19 loại chart trên dữ liệu giống hệt Metabase, để mọi khác
-biệt hình ảnh giữa hai sản phẩm chỉ có thể do bộ render chart gây ra. Đây là thứ mà PR 01–07 của
-chương trình parity đã đo dựa vào.
+Một dashboard tên **ZZ Chart Parity** mang 19 loại chart — và, từ `#437`, thêm ba card có breakout —
+trên dữ liệu giống hệt Metabase, để mọi khác biệt hình ảnh giữa hai sản phẩm chỉ có thể do bộ render
+chart gây ra. Đây là thứ mà PR 01–07 của chương trình parity đã đo dựa vào, và là thứ ba mươi mốt PR
+sau đó đã so sánh với.
 
 `scripts/harness/` dựng lại phía egret của nó.
 
 > **Bản tiếng Việt để tham chiếu.** Bản tiếng Anh tại `docs/en/guides/chart-parity-harness.md` là bản chuẩn.
+
+## Mốc hiện tại
+
+Bất cứ thứ gì không nằm trong bảng này đều là trôi lệch; hãy đối chiếu bảng này trước khi tin một báo
+cáo cũ.
+
+| | |
+|---|---|
+| dashboard egret | `8a196343-ad93-4968-8040-67598d29c3cb` trong `demo`, `width: "full"` |
+| số card | **22** (19 loại viz + 3 card breakout), tất cả `4×5` trên lưới 12 cột |
+| `options` của card | **`vizOverride` = 0** — mọi card vẽ theo settings đã lưu của chính chart |
+| `updated_at` | **2026-08-08T01:03:49.111686Z** (trước đó là `2026-08-04T08:48:00.790962Z` với 19 card) |
+| dashboard Metabase | id `2`, 22 dashcard, tất cả `8×6` trên lưới 24 cột |
+| card Metabase | 40–58 là 19 card cũ; **59 `MB · Bar Breakout`, 60 `MB · Area Breakout`, 61 `MB · Bar Breakout Desc`** |
+
+**Đừng lưu hay sửa những chart này hoặc hai dashboard này.** Chúng là mốc mà mọi so sánh về sau đo dựa
+vào. Ba card breakout được **THÊM**, không card cũ nào bị đụng tới: 18 trong 19 chart egret có `params`
+lưu trữ giống hệt từng byte sau khi seed lại, cả 19 dashcard Metabase giữ nguyên hình học và settings.
+Card thứ mười chín được ghi ở mục "Trôi lệch đã biết" bên dưới.
+
+## Ba card breakout, và điểm mù chúng khép lại
+
+Suốt ba mươi mốt PR, mọi card đều để trống `cartesian.series`, nên **không có chart nào có breakout
+trong toàn bộ công cụ đo**. Đó là lý do lỗi của `#436` — cùng một card vẽ
+`Doohickey / Gadget / Gizmo / Widget` ở lần tải này và `Gizmo / Widget / Gadget / Doohickey` ở lần sau
+— sống sót qua ba mươi PR đối chiếu cạnh nhau. Không ai nhìn mà bỏ sót; đơn giản là không có gì để nhìn.
+
+Cả ba đều breakout theo **`category` của `MB Month x Category`**: bốn band, giống hệt nhau ở hai phía
+(literal `VALUES` của egret được vật chất hoá từ chính kết quả Metabase của truy vấn mà `MB · Pivot`
+đang chạy), và bốn chuỗi ASCII ngắn sắp xếp như nhau trong Trino, H2 và JavaScript — nên khác biệt
+trên màn hình là do renderer chứ không bao giờ do collation. `state` (hơn 40 giá trị) và `vendor` bị
+loại vì không đọc nổi; `order_month` thì đã là trục x.
+
+| card | thứ chỉ nó bao phủ |
+|---|---|
+| `MB · Bar Breakout` | bar nhóm, không có sort của tác giả — đúng hình dạng `#436` đã đo |
+| `MB · Area Breakout` | **stacked**, nên thứ tự band là vị trí dọc chứ không chỉ là thứ tự legend |
+| `MB · Bar Breakout Desc` | `ORDER BY category DESC`, điều kiện duy nhất mà `preserveSeriesOrder` chấp nhận |
+
+**Card thứ ba không phải bản sao của card thứ nhất, và lý do chính là toàn bộ thiết kế.** Metabase
+KHÔNG sắp xếp band của nó: `getBreakoutDistinctValues` là `Array.from(new Set(rows.map(...)))` — thứ
+tự đến thuần tuý (`echarts/cartesian/model/series.ts:123`), được làm tất định bởi truy vấn chứ không
+bởi renderer. Vậy nên với card tăng dần, một renderer LUÔN sắp xếp cũng sẽ trùng khớp Metabase một
+cách tình cờ, và harness không phân biệt được "egret sắp xếp" với "egret tôn trọng truy vấn". Chỉ card
+nào có thứ tự engine khác thứ tự đã sắp mới phân biệt được, và đó là việc của card Desc. Cả hai đều
+đáng có; chỉ một cái là nửa công cụ đo.
+
+**Cố ý bỏ ra ngoài.** COMBO có breakout: mặc định hiển thị theo từng series của egret dưới breakout là
+theo vị trí (`seriesDisplayFor`: `index === 0 ? "line" : "bar"`) còn Metabase thì không, nên một card
+combo không ghim sẵn sẽ so hai mặc định khác nhau và dạy một bài học sai — mà ghim hiển thị cho từng
+band ở cả hai phía lại làm card mù trước thứ tự band, tức là mất luôn lý do tồn tại. SPLIT PANELS
+(`#435`): layout của nó dùng chỉ số band nên đúng là một nơi đọc thứ tự này, nhưng bốn panel trong một
+card `4×5` cho mỗi band khoảng một phần năm của ~250px, và phép so sẽ là về độ dễ đọc chứ không phải
+thứ tự — mà card không thể đổi kích thước, vì hình học `4×5` đồng nhất chính là thứ mọi phép đo của PR
+01–06 đã dựa vào.
+
+### Đã kiểm chứng thế nào
+
+egret ở **1600×1000**, bundle `dist` mới build phục vụ qua proxy tại `127.0.0.1:5175` (bundle của cụm
+kind đã cũ — xem "Ghi chú môi trường"), **sáu lần tải trang** dashboard: 6/6
+`Doohickey / Gadget / Gizmo / Widget` ở bar và area, 6/6 `Widget / Gizmo / Gadget / Doohickey` ở card
+Desc. Ba question view của Metabase khớp từng band.
+
+Việc card này **sẽ BẮT ĐƯỢC** `#436` được chứng minh chứ không khẳng định suông, theo hai nửa:
+
+- **Nửa dữ liệu, chạy thật.** Spec trước `#436` của card này (chỉ `ORDER BY order_month`, vì
+  `withImplicitBreakoutOrder` khi đó chỉ lấy trục x) trả về **ba thứ tự band khác nhau trong mười lần
+  chạy** trên Trino. Spec đã seed, có cả hai breakout, trả về một thứ tự 10/10.
+- **Nửa render, chạy thật, trên đúng mã trước `#436`.** Cụm kind vẫn phục vụ bundle trước `#433`, và
+  STUDIO dựng lại spec từ config chứ không đọc spec đã lưu — nên mở `MB · Bar Breakout` ở đó chính là
+  trải nghiệm trước `#436`. Sáu lần tải vẽ `Doohickey / Gizmo / Widget / Gadget` ba lần và
+  `Gadget / Gizmo / Doohickey / Widget` ba lần. Không cái nào là thứ tự đã sắp.
+
+`scripts/harness/charts.breakout.test.ts` giữ chứng minh đó chạy lại được mà không cần stack sống: nó
+đưa chính config của card hai thứ tự đến khác nhau và khẳng định hôm nay chúng vẽ giống nhau, còn dưới
+`preserveSeriesOrder: true` thì khác nhau — đây không phải mô phỏng gần đúng, vì `sortBands` bắt đầu
+bằng `if (preserve) return bands`, đúng nguyên văn biểu thức trước `#436`.
+
+### Khoá settings mà ba card này phụ thuộc
+
+Cả hai phía, vì một card lưu khoá hơi khác sẽ dạy một bài học sai:
+
+| | egret | Metabase |
+|---|---|---|
+| breakout | `cartesian.series: "category"` | `graph.dimensions: ["ORDER_MONTH", "CATEGORY"]` (phần tử thứ hai) |
+| metric | `cartesian.yMetrics: ["revenue"]` | `graph.metrics: ["REVENUE"]` |
+| stacking | `cartesian.stacked: true` | `stackable.stack_type: "stacked"` |
+| thứ tự band | `orderby` trong spec | `ORDER BY` trong SQL của chính card |
+
+**VIẾT HOA ở phía Metabase**, vì H2 viết hoa mọi định danh không trích dẫn và cột kết quả thật sự là
+`ORDER_MONTH` / `CATEGORY` / `REVENUE`. Đây chính là cái bẫy từng khiến `MB · Funnel` hiện "Which
+fields do you want to use?".
 
 ## Chạy
 
@@ -62,8 +155,19 @@ Bẫy 2 là cái kháng lại: mặc định `month` cho dimension thời gian n
 
 ## Script KHÔNG bao gồm gì
 
-**Phía Metabase.** 19 card và H2 Sample Database của nó là kho riêng, reset Postgres của egret không
+**Phía Metabase.** 22 card và H2 Sample Database của nó là kho riêng, reset Postgres của egret không
 đụng tới. Dựng lại chúng cần API card và mô hình dashboard riêng của Metabase.
+
+Vì vậy ba card breakout được **dựng bằng tay** qua API đó, giống hệt cách 19 card kia ra đời. Ghi lại
+hình dạng vì trong repo này không có gì mã hoá nó:
+
+- `POST /api/card` với `dataset_query` theo dạng MBQL5 mà các card cũ đang dùng —
+  `{"lib/type": "mbql/query", "database": 1, "stages": [{"lib/type": "mbql.stage/native", "native": "<SQL>"}]}`.
+- `PUT /api/dashboard/2` với **toàn bộ** danh sách `dashcards`. Các mục cũ được gửi lại nguyên vẹn với
+  `id`, hình học và `visualization_settings` của chúng; mục mới mang **`id` ÂM**, đó là cách báo cho
+  Metabase tạo mới. Lưới 24 cột nhận card `8×6`, ba card mỗi hàng.
+- `updated_at` của dashboard **KHÔNG đổi** khi chỉ dashcard thay đổi, nên không thể dùng nó để biết đã
+  thêm card hay chưa. Hãy đếm số dashcard.
 
 Thứ **có** bao gồm là **dữ liệu**: chín dataset là literal `VALUES` của Trino, vật chất hoá từ kết quả
 truy vấn kéo qua `/api/dataset` của Metabase, commit trong `datasets.ts` dưới dạng dữ liệu — nên script
@@ -112,7 +216,26 @@ của Gizmo. Giờ cả ba đọc tổng toàn tập **1.510.621,69** với ngư
 
 **Nếu bạn dựng lại một bảng mốc, nhớ ghi viewport.** Con số svg `166×184` trong các PR parity được đo ở
 một viewport không ai ghi lại; ở 1600×1000 cùng những card đó đo ra `193×214`. Cố định viewport, đo
-trước và sau trong cùng một viewport, và nói rõ bạn dùng cái nào.
+trước và sau trong cùng một viewport, và nói rõ bạn dùng cái nào. (Đã xác nhận lại `193×214` trên các
+card breakout mới ở 1600×1000.)
+
+## Trôi lệch đã biết, thấy nhưng không sửa
+
+- **`MB · Map` có thêm `map.type: "region"`** ở lần seed lại ngày 2026-08-08. Không phải ai đó sửa
+  card: `#434` thêm một khoá phân biệt pin/region vào descriptor map, và `fromParams` của nó mặc định
+  khoá vắng mặt thành `"region"` — nên seed giờ **GHI RA** đúng cái mặc định mà renderer vốn đã ngầm
+  hiểu. Trung tính về hành vi, và không tránh được nếu không bỏ hẳn card đó — toàn bộ thiết kế của
+  harness là nó ghi đúng thứ app ghi. Bất kỳ lần seed lại nào sau `#434` cũng sẽ như vậy.
+- **Metabase không vẽ legend series trên dashcard `8×6`.** Cả ba card breakout vẽ band trên dashboard
+  mà không có legend nào, trong khi egret vẫn vẽ legend trong card `4×5`. Vì thế phép so THỨ TỰ band
+  phải làm ở question view (`/question/59`), hoặc trên dashboard bằng màu và vị trí stack. Để nguyên:
+  đổi kích thước card Metabase sẽ phá hình học mà các phép đo trước đã dựa vào.
+- **19 card Metabase gốc ghi tên cột bằng chữ thường** (`{"graph.dimensions": ["category"]}` ở card
+  42, `pivot_table.column_split` ở card 41) trong khi kết quả thật là `CATEGORY` / `ORDER_MONTH` /
+  `REVENUE`. Chúng vẫn vẽ đúng, nghĩa là chúng đang vẽ theo **MẶC ĐỊNH** của Metabase chứ không theo
+  settings đã lưu — settings tình cờ trùng với mặc định cho các hình dạng kết quả này. Không đụng tới,
+  vì sửa chúng là đổi mười chín card mốc để không sửa được gì nhìn thấy được; ba card mới dùng chữ
+  hoa, tức là khoá trung thực.
 
 ## Ghi chú môi trường
 
@@ -124,3 +247,25 @@ bảo vệ bạn**: nó bind IPv6 `::1` trong khi server Python giữ IPv4 `127.
 `127.0.0.1:5174` âm thầm vẫn tới cái kia. **Kiểm hash bundle** với `ls -t frontend/dist/assets/index-*.js`
 trước khi tin bất kỳ phép đo nào — trình duyệt cache `index.html`, và bundle cũ đã gây kết luận sai
 hơn một lần.
+
+**Bundle mà kind phục vụ không phải bundle bạn vừa build, và nó cũ hơn nhiều so với vẻ ngoài.** Đo
+ngày 2026-08-08: `:30080` phục vụ `index-BWjx3fdn.js`, không chứa `unpinFromZero`, `tooltipMetrics`
+hay `splitPanels` — tức là cũ hơn `#433`, thua `main` mười một PR đã merge. Mọi "kiểm tra thật" bằng
+cách mở `:30080` đều là kiểm tra bản build đó. Xác định niên đại bằng cách grep JS được phục vụ với
+các mục trong `KEYS` của `cartesian-codec.ts`: chúng là **chuỗi ký tự** nên sống sót qua minify (tên
+thuộc tính như `preserveSeriesOrder` cũng vậy, nhưng một khoá settings như `cartesian.yMetrics` thì
+KHÔNG — codec ghép chuỗi để tạo ra nó, nên grep luôn trả về 0 và chẳng chứng minh điều gì).
+
+Một static server thuần không thay thế được, vì app cùng origin với API của nó, còn proxy của dev
+server trỏ vào `:8080` của stack docker chứ không phải `:30080` của kind. Cách chạy được gói trong
+khoảng 60 dòng: phục vụ `frontend/dist` và reverse-proxy `/api` sang `127.0.0.1:30080` trên một cổng
+riêng, bind rõ ràng vào `127.0.0.1`.
+
+Hai điều nữa từng tốn thời gian trong trình duyệt:
+
+- **Cookie phiên của egret không phân biệt theo cổng**, nên một lần đăng nhập ở `127.0.0.1:5175` cũng
+  là đăng nhập ở `127.0.0.1:30080`. Rất hữu ích với giới hạn 5 lần / 5 phút.
+- Mở một chart trong STUDIO sẽ bật hộp thoại `beforeunload` ở lần điều hướng kế tiếp, vì effect mặc
+  định gộp theo tháng đánh dấu nó "bẩn" ngay khi mở. Nó chặn công cụ snapshot và evaluate của
+  Playwright và không phải lúc nào cũng tự tắt; mở **tab mới** cho mỗi lần tải đáng tin hơn là reload,
+  và dù sao cũng không có gì bị lưu.
