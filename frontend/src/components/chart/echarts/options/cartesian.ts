@@ -1107,11 +1107,93 @@ const distinct = (vals: unknown[]) => {
  * categories must sort exactly as a bar chart's do, including the temporal and numeric branches.
  */
 export function sortCategories(cats: unknown[], type: string, preserve?: boolean): unknown[] {
-  if (isTemporalType(type)) return [...cats].sort((a, b) => Date.parse(String(a)) - Date.parse(String(b)));
-  if (isNumericType(type)) return [...cats].sort((a, b) => Number(a) - Number(b));
+  if (isTemporalType(type)) return [...cats].sort(byDerivedKey((v) => Date.parse(String(v))));
+  if (isNumericType(type)) return [...cats].sort(byDerivedKey(Number));
   if (preserve) return cats;
-  return [...cats].sort((a, b) => String(a).localeCompare(String(b)));
+  // The nominal branch derives no number, so it tie-breaks directly rather than through
+  // `byDerivedKey`. `localeCompare` returning 0 is the tie — see `byRawString` for what makes the
+  // fallback total, and why it is code units here and not a second `localeCompare`.
+  return [...cats].sort((a, b) => String(a).localeCompare(String(b)) || byRawString(a, b));
 }
+
+/**
+ * THE LAST RESORT OF EVERY ORDERING IN THIS FILE: the raw value's own string, compared by code unit.
+ *
+ * WHY IT IS NEEDED AT ALL. Each branch of `sortCategories` compares on a key DERIVED from the value
+ * — `Number(v)`, `Date.parse(v)`, the collation `localeCompare` uses. Deriving is lossy, so two
+ * values that are genuinely different can land on one key: `Number(null)`, `Number("")` and
+ * `Number(0)` are all 0; `"2026-01-01T00:00:00Z"` and `"2026-01-01T00:00:00.000Z"` are one instant;
+ * `"Café"` in NFC and `"Café"` in NFD are one piece of text that `localeCompare` — correctly —
+ * calls equal. `distinct` deduplicates on `String(v)`, not on the derived key, so it keeps both
+ * members of every such pair and hands them to the comparator. A comparator returning 0 tells a
+ * stable sort to leave them as it found them, and as it found them IS ARRIVAL ORDER, which is the
+ * engine's row order, which is the precise nondeterminism #394 and #436 were written to delete.
+ * Both PRs replaced arrival order in the general case and left it in the tied case. This closes it.
+ *
+ * WHY IT ALWAYS SETTLES, rather than merely making a tie less likely — which is the only property
+ * worth having, since "usually deterministic" is what we already had. Everything reaching these
+ * comparators has been through `distinct`, and `distinct`'s dedup key is exactly `String(v)`. So
+ * within any one list the raw strings are pairwise DISTINCT by construction and this can never
+ * itself return 0. The result is a TOTAL order, and total is what makes the output a function of
+ * the input set rather than of the input sequence.
+ *
+ * WHY CODE UNITS AND NOT `localeCompare`. On the nominal branch `localeCompare` is the comparison
+ * that just tied; asking it again gets the same 0 and settles nothing. `<` on strings is a raw
+ * code-unit comparison with no collation, no locale and no equivalence classes, so it separates
+ * anything `distinct` kept apart. It is deliberately NOT the human-readable order — it is the
+ * arbitrary-but-fixed order that runs underneath the human-readable one, and it is only ever
+ * consulted for values the readable order could not separate.
+ *
+ * REJECTED: sorting the ORIGINAL index in as the secondary key, i.e. a Schwartzian transform that
+ * makes the existing stable-sort behaviour explicit. It is the smaller diff and it is exactly wrong
+ * — it would PIN arrival order rather than replace it, encoding today's engine output as the
+ * intended answer and making the nondeterminism permanent instead of fixing it. That is the same
+ * trap #436 recorded when reusing `preserveSeriesOrder` on the band path would have pinned a wrong
+ * order.
+ */
+const byRawString = (a: unknown, b: unknown): number => {
+  const x = String(a);
+  const y = String(b);
+  return x < y ? -1 : x > y ? 1 : 0;
+};
+
+/**
+ * A comparator over a NUMERIC derived key, with two guarantees the bare subtraction it replaces did
+ * not have: ties fall to `byRawString`, and a key that is not a number cannot corrupt the result.
+ *
+ * THE NaN CASE IS THE BIGGER HALF, and it is not a tie — it is an INCONSISTENT COMPARATOR. Both old
+ * comparators were subtractions, and `Number("n/a")` and `Date.parse(String(null))` are NaN, so the
+ * subtraction returned NaN: not negative, not zero, not positive. The spec makes the entire sort
+ * implementation-defined at that point, and V8 does not merely misplace the offending element — it
+ * stops sorting the elements AROUND it. Measured on Node 22, twelve months with one NULL among them:
+ * `Jan Feb Mar Apr May Jul Sep null Jun Aug Oct Nov`. June and August drawn to the right of
+ * September, chronology broken across the whole axis, from one null in a date column. That is not a
+ * hypothetical column either — the row filter upstream (`rows.filter((r) => r[xi] != null)`) drops
+ * nulls from the CATEGORY column only, and the BAND column is never null-filtered at all;
+ * `cartesianSeriesNames` folds a null band to `(empty)` AFTER this sort, by design.
+ *
+ * UNPARSEABLE VALUES SORT LAST, ordered among themselves by `byRawString`. Last rather than first
+ * because a value with no position on the axis is not a value at the axis's beginning, and a reader
+ * scanning for a missing or malformed entry looks at the end. It also agrees with where the engine
+ * would have put them had the query carried the sort this client-side pass exists to substitute
+ * for: Trino's `ORDER BY … ASC` defaults to NULLS LAST, as does Postgres. So a chart whose author
+ * later adds an explicit ascending sort — which sets `preserveCategoryOrder` and takes the engine's
+ * ordering verbatim — does not see its missing values jump from one end to the other. Whichever end
+ * was chosen the point is that it is a FIXED one; the previous behaviour placed them nowhere in
+ * particular and moved the real values around them.
+ */
+const byDerivedKey =
+  (key: (v: unknown) => number) =>
+  (a: unknown, b: unknown): number => {
+    const ka = key(a);
+    const kb = key(b);
+    const aBad = Number.isNaN(ka);
+    const bBad = Number.isNaN(kb);
+    if (aBad || bBad) return aBad && bBad ? byRawString(a, b) : aBad ? 1 : -1;
+    // `===` before subtraction so that equal infinities (Infinity - Infinity is NaN) reach the
+    // tie-break rather than re-introducing the NaN this function exists to keep out.
+    return ka === kb ? byRawString(a, b) : ka - kb;
+  };
 
 /**
  * The same order, applied to the OTHER axis of the chart: the bands a breakout draws.
@@ -1164,6 +1246,20 @@ export function sortCategories(cats: unknown[], type: string, preserve?: boolean
  * layer, so "months, newest first" is an ordinary thing for an author to ask for and there is
  * nothing about the drawing that contradicts it. `preserve` therefore short-circuits every type
  * here, which is why this is a function and not a bare `sortCategories` call at each site.
+ *
+ * THE TIE-BREAK IS INHERITED, NOT RESTATED, and that is this wrapper's design paying for itself. A
+ * band list could tie for exactly the reasons a category list can — and more often, because the
+ * band column is the one that is never null-filtered (`buildCartesianOption` drops null CATEGORIES
+ * only) so `Number(null) === Number(0)` and `Date.parse(String(null))` being NaN are live here in a
+ * way they are not on the x axis. Because this delegates rather than re-sorting, `byRawString` and
+ * `byDerivedKey` reached both axes the moment they were added to `sortCategories`, with no second
+ * edit and no chance of the two axes settling the same tie two different ways. Had this been a
+ * copied comparator the fix would have landed on one axis and the drift would have been invisible.
+ *
+ * THE `preserve` SHORT-CIRCUIT IS ABOVE ALL OF IT AND STAYS THERE. Tie-breaking is part of deciding
+ * an order; `preserve` is the arm that declines to decide one. A tie cannot arise where nothing is
+ * compared, so the guard needs no tie logic and must not acquire any — reaching past it to
+ * "stabilise" a preserved list would pin the arrival order this file spent two PRs removing.
  */
 function sortBands(bands: unknown[], type: string, preserve?: boolean): unknown[] {
   if (preserve) return bands;
