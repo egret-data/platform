@@ -174,17 +174,51 @@ export function ariaDescription(d: {
   kind: string;
   metric?: string;
   dimension?: string;
-  points: { name: string; value: unknown }[];
+  /**
+   * `detail` is anything the number alone does not say — the box plot's quartiles and whiskers,
+   * where the bare value is a MEDIAN and nothing in the sentence used to admit it. Rendered in
+   * parentheses after the formatted value, and absent on every caller that does not supply one, so
+   * the charts that were swept clean keep the sentence they had.
+   */
+  points: { name: string; value: unknown; detail?: string }[];
   format: (v: unknown) => string;
   /** More than one plotted series; the points then belong to the first. */
   seriesCount?: number;
+  /**
+   * WHICH of those series the points belong to, when its name is not already the subject.
+   *
+   * A multi-series description enumerates the FIRST series and counts the rest, and until a
+   * breakout arrived that was unambiguous: on a combo of `orders` and `revenue` the subject named
+   * by `metric` IS the series being read, so saying it twice would be noise. Under a breakout the
+   * subject is the metric every band shares (`revenue`) and the enumerated numbers are one band's
+   * (`Doohickey`) — with nothing here to say so, a reader heard a chart-wide subject followed by
+   * numbers that are not chart-wide.
+   *
+   * OMITTED IS THE DEFAULT, and that is load-bearing rather than tidy: every caller that does not
+   * pass it — the sankey, the waterfall, both maps, the pie, the box plot, and every non-breakout
+   * cartesian chart — produces the exact sentence it produced before this field existed. The
+   * nineteen swept-clean cards are unmoved by construction, not by nineteen assertions.
+   */
+  seriesName?: string;
+  /**
+   * WHAT THE ENUMERATED NUMBERS ARE, when "values" is not specific enough to be true.
+   *
+   * Defaults to "values", which is what every caller but the box plot means. A box is five numbers
+   * and the description reads out one of them, so "4 values: Doohickey 50.06" invited a reader to
+   * take 50.06 for the category's value when it is its median — the count was right, the noun was
+   * not, and nothing in the sentence carried the difference.
+   */
+  noun?: string;
 }) {
   const of = d.metric ? ` of ${d.metric}` : "";
   const by = d.dimension ? ` by ${d.dimension}` : "";
-  const series = d.seriesCount && d.seriesCount > 1 ? ` ${d.seriesCount} series;` : "";
+  const showing = d.seriesName ? `, showing ${d.seriesName}` : "";
+  const series = d.seriesCount && d.seriesCount > 1 ? ` ${d.seriesCount} series${showing};` : "";
   const shown = d.points.slice(0, 20);
-  const items = shown.map((p) => `${p.name} ${d.format(p.value)}`).join(", ");
+  const items = shown
+    .map((p) => `${p.name} ${d.format(p.value)}${p.detail ? ` (${p.detail})` : ""}`)
+    .join(", ");
   const more = d.points.length > shown.length ? `, and ${d.points.length - shown.length} more` : "";
-  const body = d.points.length ? `${d.points.length} values:${series} ${items}${more}.` : "No data.";
+  const body = d.points.length ? `${d.points.length} ${d.noun ?? "values"}:${series} ${items}${more}.` : "No data.";
   return { ...ARIA_A11Y, label: { description: `${d.kind}${of}${by}. ${body}` } };
 }

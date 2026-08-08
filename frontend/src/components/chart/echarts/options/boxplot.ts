@@ -467,10 +467,37 @@ export function buildBoxplotOption(
 
   return {
     ...baseOption(),
-    // A box is five numbers; the median is the one worth reading aloud per category.
+    /**
+     * A BOX IS FIVE NUMBERS, AND THE DESCRIPTION USED TO READ OUT ONE OF THEM WITHOUT SAYING WHICH.
+     *
+     * It announced "Box plot of price by category. 4 values: Doohickey 50.06, …" — four bare
+     * numbers. They are MEDIANS, which nothing in the sentence said, so a screen-reader user was
+     * invited to take 50.06 for the category's value; and the spread, which is the entire reason to
+     * choose a box plot over a bar chart, was not described at all. A sighted reader gets the
+     * quartiles and the whiskers from the shape and all five numbers from the tooltip below.
+     *
+     * `noun: "boxes"` fixes the count's claim and the parenthetical carries the rest, in the box's
+     * own order — the same five statistics the tooltip prints, formatted through the same `fmt`, so
+     * the two readings of this chart cannot drift apart. Both fields are optional on
+     * `ariaDescription` and no other caller passes either, so this is the only description in the
+     * product that moves.
+     */
     aria: ariaDescription({
       kind: "Box plot", metric: cfg.value, dimension: cfg.category, format: (v) => fmt(v),
-      points: drawnCategories.map((c, i) => ({ name: c, value: stats[i]?.box?.[2] })),
+      noun: "boxes",
+      points: drawnCategories.map((c, i) => {
+        // `[min, q1, median, q3, max]` — index 2 is the median, and the four it sits between are
+        // what the parenthetical adds. A category with no box (a group that produced no rows)
+        // keeps the `undefined` value the description already handled and gains no detail.
+        const box = stats[i]?.box;
+        return {
+          name: c,
+          value: box?.[2],
+          detail: box
+            ? `median; min ${fmt(box[0])}, Q1 ${fmt(box[1])}, Q3 ${fmt(box[3])}, max ${fmt(box[4])}`
+            : undefined,
+        };
+      }),
     }),
     grid,
     // The series-level `tooltip: { trigger: "item" }` entries below only make the point series

@@ -329,13 +329,35 @@ export function SmartScalarChart({
           const good = switchPositiveNegative ? l.down : l.up;
           const bad = switchPositiveNegative ? l.up : l.down;
           return (
-            <div key={l.id} className="flex items-center gap-1.5 text-sm">
+            /* `flex-wrap` + `justify-center`, because at 209px this row does not fit and `nowrap`
+               made it fail in the worst available way. MEASURED on the harness's trend card: the
+               two spans were squeezed until each wrapped INTERNALLY, which put "▲" on the first
+               line beside "vs previous month:" and "9.54%" on the second beside "22,577.58" — the
+               arrow reading as punctuation on the caption rather than as the direction of its own
+               number. Both halves were correct and correctly coloured; only the line breaks were
+               wrong. Wrapping between the spans instead moves the whole comparison down as a unit,
+               and at 309px, where it already fitted, `flex-wrap` changes nothing. */
+            <div key={l.id} className="flex flex-wrap items-center justify-center gap-1.5 text-sm">
               <span data-trend className="flex items-center gap-1 font-medium"
                 style={{ color: l.has ? (good ? UP : bad ? DOWN : undefined) : undefined }}>
                 {l.has ? (
                   <>
-                    {l.up ? "▲" : l.down ? "▼" : "•"}{" "}
-                    {Number.isFinite(l.pct) ? `${(Math.abs(l.pct) * 100).toFixed(2)}%` : fmt(Math.abs(l.change))}
+                    {/* ONE TEXT NODE, and that is the whole of the fix.
+                        This was three JSX expressions — the glyph, a NO-BREAK SPACE, the number —
+                        which React renders as three adjacent DOM Text nodes. Inside a
+                        `display: flex` span that is not one run of text: CSS Flexbox wraps
+                        contiguous text runs in anonymous flex items and then DISCARDS any anonymous
+                        item that is only white space, so the nbsp put there to hold the two
+                        together was dropped and the glyph and the number became separate items.
+                        MEASURED at 209px on the harness's trend card: "▲" at y=1398 and "9.54%"
+                        at y=1418, twenty pixels apart on two lines, with the nbsp reporting ZERO
+                        client rects — the arrow sitting beside "vs previous month:" and reading as
+                        that caption's punctuation rather than as its own number's direction.
+                        Interpolating one string leaves one text node, one flex item, and a no-break
+                        space that is now interior to a run instead of a run of its own. */}
+                    {`${l.up ? "▲" : l.down ? "▼" : "•"}\u00A0${
+                      Number.isFinite(l.pct) ? `${(Math.abs(l.pct) * 100).toFixed(2)}%` : fmt(Math.abs(l.change))
+                    }`}
                   </>
                 ) : NO_CHANGE_STR}
               </span>

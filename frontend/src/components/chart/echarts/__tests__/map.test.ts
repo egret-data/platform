@@ -511,13 +511,46 @@ describe("pinProblem and pinNote", () => {
     );
   });
 
+  /**
+   * MOVED, and the fixture is exactly why: 21 rows, ALL of them off-map, NONE of them refused.
+   *
+   * This asserted that such a result replaces the chart with "None of these 21 rows can be shown".
+   * Every one of those 21 pins is DRAWN — `bucketOf` puts a coordinate outside the extent in
+   * `offMap` rather than refusing it precisely because the geo component roams and panning reaches
+   * it (#438), and `PinCoverage`'s own field comment says so: "Drawn, outside the extent. Reachable
+   * by zooming out; invisible until you do." So the old sentence was false of every row it counted,
+   * and it removed the map that made the claim recoverable.
+   *
+   * The refusal itself has not gone soft — the case below, where nothing is drawn at all, still
+   * gets it. What moved is which results reach it.
+   */
+  it("keeps the chart when every pin is drawn but none is in view, and says so", () => {
+    const cov = { total: 21, plotted: 0, offMap: 21, outOfRange: 0, missing: 0 };
+    expect(pinProblem(cov, "US states")).toBeUndefined();
+    expect(pinNote(cov, "US states")).toBe(
+      "Showing 0 of 21 rows: 21 are outside the US states map."
+      + " Zoom out or pan the map to reach them.",
+    );
+  });
+
   it("replaces the chart when not one row can be plotted", () => {
-    const problem = pinProblem({ total: 21, plotted: 0, offMap: 21, outOfRange: 0, missing: 0 }, "US states");
+    // Nothing DRAWN, which after the change above means nothing off-map either: these 21 are out of
+    // range, and out of range is the bucket that is not recoverable by any amount of roaming.
+    const cov = { total: 21, plotted: 0, offMap: 0, outOfRange: 21, missing: 0 };
+    const problem = pinProblem(cov, "US states");
     expect(problem).toMatch(/none/i);
-    expect(problem).toContain("US states");
+    expect(problem).toContain("21");
+    /**
+     * AND IT NO LONGER NAMES THE MAP, which is a consequence worth stating rather than an omission.
+     * The map's label appears in exactly one clause — "N are outside the <map> map" — and a refusal
+     * can no longer carry that clause, because a refusal now means nothing was drawn and an off-map
+     * pin IS drawn. Naming "US states" over a set of rows whose coordinates are not coordinates
+     * would point the reader at the map when the map is not the problem; that misdirection is
+     * precisely what the old wording did to the ten off-map rows on the live card.
+     */
+    expect(problem).not.toContain("US states");
     // and the note stands down, so the card never says both things.
-    expect(pinNote({ total: 21, plotted: 0, offMap: 21, outOfRange: 0, missing: 0 }, "US states"))
-      .toBeUndefined();
+    expect(pinNote(cov, "US states")).toBeUndefined();
   });
 
   /** The one message that can name a FIX rather than a fact, which is the whole value of a range

@@ -220,15 +220,46 @@ function reasons(cov: PinCoverage, mapLabel: string): string[] {
  * not; `pinNote` carries that case. The two are mutually exclusive by construction so a card can
  * never say both things.
  */
+/**
+ * HOW MANY PINS THE BUILDER ACTUALLY DRAWS. `plotted` and `offMap` are BOTH drawn — that is the
+ * distinction the two buckets exist to make, and `bucketOf`/#438 chose it deliberately: a pin
+ * outside the map's extent is still emitted, because the geo component roams and panning reaches
+ * it. Only `outOfRange` and `missing` are refused, and they are refused permanently.
+ */
+const drawnPins = (cov: PinCoverage) => cov.plotted + cov.offMap;
+
 export function pinProblem(cov: PinCoverage, mapLabel: string): string | undefined {
   // An empty result is the empty state's job, and it already has better words for it.
-  if (cov.total === 0 || cov.plotted > 0) return undefined;
-  // The one message that can name a fix rather than a fact — see `bucketOf`.
+  if (cov.total === 0) return undefined;
+  /**
+   * NOTHING DRAWN, not "nothing in view" — and the gap between those two readings is the whole of
+   * this fix.
+   *
+   * This asked `cov.plotted > 0`, which counts only the pins inside the extent, so a result of 10
+   * off-map rows and 38 out-of-range ones was replaced outright by "None of these 48 rows can be
+   * shown: 10 are outside the US states map and 38 have a latitude or longitude out of range."
+   * Every count in that sentence reconciled and its grammar was right, and it was still false of
+   * ten of the rows: they were drawable, the builder had deliberately kept them, and roaming would
+   * have found them — except that the card had been replaced by the sentence, so there was no map
+   * left to roam. The message refuted itself by existing.
+   *
+   * #438 designed out-of-map as RECOVERABLE and out-of-range as not. Reading `plotted` here
+   * collapsed the two into one bucket labelled "cannot be shown"; reading what is DRAWN restores
+   * them, and `pinNote` — which now guards on the same number — picks up the case this drops.
+   */
+  if (drawnPins(cov) > 0) return undefined;
+  /**
+   * ONE HINT, because after the guard above there can only be one situation left. Nothing is drawn,
+   * so `offMap` is zero, so every refused row is out of range or missing — and "Try a map that
+   * covers them" (which used to be appended here whenever `offMap > 0`) is now unreachable by
+   * construction rather than merely unlikely. It has gone with the branch that produced it. That
+   * pairing is what made the card offer two remedies at once, pointing at different problems, one
+   * of which was about rows this sentence should never have been describing.
+   */
   const swap = cov.outOfRange > 0
     ? " Check whether the Latitude and Longitude columns are the other way round."
     : "";
-  const elsewhere = cov.offMap > 0 ? " Try a map that covers them." : "";
-  return `None of these ${cov.total} rows can be shown: ${listOut(reasons(cov, mapLabel))}.${swap}${elsewhere}`;
+  return `None of these ${cov.total} rows can be shown: ${listOut(reasons(cov, mapLabel))}.${swap}`;
 }
 
 /**
@@ -240,7 +271,17 @@ export function pinProblem(cov: PinCoverage, mapLabel: string): string | undefin
  * themselves are unchanged.
  */
 export function pinNote(cov: PinCoverage, mapLabel: string): string | undefined {
-  if (cov.total === 0 || cov.plotted === 0 || cov.plotted === cov.total) return undefined;
+  /**
+   * GUARDED ON WHAT IS DRAWN, which is `pinProblem`'s guard read the other way round, so the two
+   * still partition every result between them and a card can still never say both things.
+   *
+   * The change is which results reach this line at all. `cov.plotted === 0` used to send a map
+   * whose every pin was off the extent to `pinProblem` — the case that produced a total refusal
+   * over rows that were drawn. Those results land here now, and the sentence they get is true:
+   * "Showing 0 of 48 rows" says nothing is IN VIEW, which is exactly the situation, while the map
+   * stays on the card and the hint below says how to reach what is on it.
+   */
+  if (cov.total === 0 || drawnPins(cov) === 0 || cov.plotted === cov.total) return undefined;
   // Only the off-map rows are reachable this way, so the hint is only offered when there are some.
   const reach = cov.offMap > 0 ? " Zoom out or pan the map to reach them." : "";
   return `Showing ${cov.plotted} of ${cov.total} rows: ${listOut(reasons(cov, mapLabel))}.${reach}`;

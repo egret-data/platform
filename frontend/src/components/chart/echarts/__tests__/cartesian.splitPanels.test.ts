@@ -408,14 +408,37 @@ describe("split panels: where it declines", () => {
     // way back — a chart whose shape depends on its width, which is worse than either outcome.
     const o = build(
       { kind: "bar", stacked: true, rightAxisMetrics: ["w"], autoSplitY: true },
-      CARD,
+      { width: 250, height: 184 },
     );
     expect(Array.isArray(o.grid)).toBe(false);
     expect(Array.isArray(o.yAxis)).toBe(false);
     expect(o.series.map((s) => s.stack)).toEqual([undefined, undefined]);
     expect(o.series.map((s) => s.yAxisIndex ?? 0)).toEqual([0, 0]);
-    // …and it DOES get its legend back, which the split chart does not have. An unsplit two-series
-    // chart with no legend is a chart whose lines are unnamed.
+    /**
+     * …and it DOES get its legend back, which the split chart does not have. An unsplit two-series
+     * chart with no legend is a chart whose lines are unnamed.
+     *
+     * MOVED FROM `CARD` (166x184) TO A CARD 250px WIDE, because a second and entirely independent
+     * rule now also decides this key: a legend needs 100px per entry, and two entries do not fit
+     * across 166px, so at that width the legend is refused for a reason that has nothing to do with
+     * panels (Metabase's `LegendLayout`, ported in `legendFitsAcross`). Asserting `toBeDefined()`
+     * there would have been asserting that BOTH rules pass, and would have started failing the day
+     * either changed — while the claim this test exists to make is only about the first one.
+     *
+     * 250x184 still falls back (every assertion above is unchanged and still measured on it), and
+     * it has the width two entries need — so the legend's presence here isolates "splitting no
+     * longer suppresses it", which is the subject. The width rule gets its own line below.
+     */
     expect(o.legend).toBeDefined();
+  });
+
+  it("…but a fallback onto a card too narrow for the entries still has no legend", () => {
+    // The other half of the pair above, stated so the interaction is recorded rather than
+    // discovered. On the 166px dashboard card the fallback happens exactly as before and the legend
+    // is still absent — not because the chart split, but because two entries need 200px. Metabase
+    // hides its own legend on the same card for the same reason.
+    const o = build({ kind: "bar", stacked: true, rightAxisMetrics: ["w"], autoSplitY: true }, CARD);
+    expect(Array.isArray(o.grid)).toBe(false);
+    expect(o.legend).toBeUndefined();
   });
 });
