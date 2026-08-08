@@ -96,8 +96,20 @@ differ only in stroke colour. Composited against each side's own canvas and meas
 
 | | stroke | canvas | contrast |
 |---|---|---|---|
-| egret (dark) | `oklch(0.992857 0 0 / 0.28)` → `#4d4d4d` | `#090909` | **2.36 : 1** |
+| egret (dark) | `oklch(0.992857 0 0 / 0.28)` → `#4d4d4d` | `bg-dashboard` `#0d0d0d` | **2.42 : 1** |
+| egret (light) | same token, light theme | `bg-dashboard`, light | **1.77 : 1** |
 | Metabase | `hsla(195, 6%, 87%)` → `#dcdfe0` | `#f9f9fa` | **1.27 : 1** |
+
+⚠️ The first measurement of this taken for the spec read **2.36:1**, against `--background`
+`#090909`. That is the wrong surface: the guide grid paints on `bg-dashboard`, `#0d0d0d`. The
+conclusion is unchanged but the number is 2.42, and a live check told to expect 2.36 would look
+like a miss.
+
+⚠️ **The pixel-readback technique used to take these numbers cannot run in the unit suite.**
+The test environment is jsdom with no `canvas` dependency, so `getContext("2d")` returns `null`
+and a readback there measures nothing at all. Unit tests must use the house method already in
+`src/__tests__/focusIndicatorContrast.test.ts` — parse `index.css`, convert OKLCH to sRGB, compute
+WCAG luminance — and the real readback belongs in the live check, where there is a compositor.
 
 `DashboardGridLayout.tsx:28` documents the choice: `--border` was judged "nearly invisible", so
 the stroke is blended toward `--foreground` via `color-mix`. But Metabase's guide *is* nearly
@@ -207,8 +219,25 @@ guard.
   dashboard canvas in both themes, verified by computing the composited value — not by eye.
 - **Mapping control.** The filter→card overlay select spans the card width and carries the
   Metabase header text for its card kind. Cards that cannot accept the current filter render
-  the reason instead of an empty select — at minimum "The selected filter is on another tab."
-  and the text/heading/link card hints.
+  the reason instead of an empty select.
+
+  ⚠️ **"The selected filter is on another tab." has no reachable precondition in egret**, and
+  this spec was wrong to list it as a minimum. Metabase's trigger is its *inline-parameter*
+  model — a parameter owned by a dashcard on a different tab
+  (`DashCardCardParameterMapperContent.tsx:86-92`). egret's `DashboardParameter`
+  (`api/dashboards.ts:54-65`) has no owning card and no tab; every filter is dashboard-level.
+  And `visibleCards` is already tab-filtered (`DashboardView.tsx:188-192`), so a card from
+  another tab is never mounted to be told anything. Build the branch, unit-test it, and leave it
+  inert behind an explicit flag — W7 is what activates it. Do **not** invent a tab field on the
+  parameter to make the string reachable.
+
+  ⚠️ **Metabase's link-card hint would be false here.** `LinkCard.tsx:8,18` uses the raw `url`
+  and `label` with no `interpolateParams` call, so "you can connect widgets to {{variables}} in
+  link cards" would document a feature egret does not have. The reverse also holds: egret's
+  **heading** card does interpolate (`DashboardCardView.tsx:104`) where Metabase's map gives
+  `heading: ""`, so egret earns a hint Metabase has no reason to show. Write both strings from
+  egret's behaviour, not Metabase's table. "Variable to map to" — Metabase's native-SQL template
+  variables — has no egret analogue at all and is not ported.
 
 ### W3 — Fixed / full width control
 
