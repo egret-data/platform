@@ -106,11 +106,27 @@ theme the empty grid reads as the loudest element on the canvas.
 
 ### 2.5 A multi-value `location` filter does not survive the URL
 
-`useDashboardParams.ts:9` lists `ARRAY_TYPES` used to decide JSON encoding. `location` is
-multi-select (`FilterPill.tsx:87`) but is absent from that list, so at `:32` a multi-value
-location is written with `String(value)` — a comma-join that cannot be parsed back into an
-array. Reloading the page loses every value after the first, or corrupts values containing a
-comma.
+`useDashboardParams.ts:9` lists `ARRAY_TYPES`, and `location` is multi-select
+(`FilterPill.tsx:87`) but absent from it.
+
+**The break is on the read side, not the write side.** An earlier draft of this spec said the
+value is written with `String(value)` as a comma-join; that is wrong. Line `:32` reads
+`typeof value === "object" ? JSON.stringify(value) : String(value)`, and `typeof [] === "object"`,
+so a multi-value location is **already written as correct JSON**. What fails is `:21`: because
+`location` is not in `ARRAY_TYPES`, the value comes back as the JSON *string* rather than an
+array, `paramToFilters` emits `in ['["Hanoi","Da Nang"]']`, and the card returns **zero rows**.
+The symptom is an empty card, not a truncated filter. The one-line fix is unchanged.
+
+**A second defect in the same function, found while planning this.** `category` *is* in
+`ARRAY_TYPES`, so every scalar category value is handed to `JSON.parse`: `?tags=42` reads back
+as the **number** `42`. This is reachable today — both the drill "Filter by" path
+(`DashboardView.tsx:754`) and the crossfilter click behaviour (`:236`) call `setValue` with a
+scalar. The decode must be gated on the raw actually looking like an array.
+
+**A third, latent, in the same hook.** `setValue` called in a loop drops all but the last write,
+because each call reads the same location. Nothing does that today, but applying a batch of
+draft filter values is exactly that shape, so W6's auto-apply work needs a batched setter before
+it can be correct.
 
 ---
 
