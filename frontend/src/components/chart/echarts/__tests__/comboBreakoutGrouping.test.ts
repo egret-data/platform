@@ -93,6 +93,13 @@ describe("a broken-out combo sizes its bars from the bands it actually draws", (
    * is `line` at index 0 and `bar` everywhere else — so a miss on any LATER band lands on `bar`
    * anyway and the count comes out right by accident. Only a miss at index 0 changes the answer,
    * which makes this the one arrangement that can see the bug.
+   *
+   * `preserveSeriesOrder` IS WHAT KEEPS IT FIRST, and it is the reason this test carries a flag its
+   * siblings do not. The builder sorts the bands by their raw value now (`sortBands`), and a raw
+   * `null` stringifies to `"null"`, which sorts AFTER `"Gadget"` — so the fix for the band-order
+   * defect would have quietly moved the null band to index 1 and re-blinded this test, leaving it
+   * green against the very bug it is named for. The flag asks for arrival order, which is exactly
+   * the arrangement the paragraph above requires; nothing else about the assertion changes.
    */
   it("counts an (empty) band through the same name the panel and the palette use", () => {
     const emptyRows = [
@@ -100,7 +107,7 @@ describe("a broken-out combo sizes its bars from the bands it actually draws", (
       ["Feb", null, 8], ["Feb", "Gadget", 6],
     ];
     const series = seriesOf(
-      { ...base, seriesTypes: { "(empty)": "bar", Gadget: "bar" } },
+      { ...base, seriesTypes: { "(empty)": "bar", Gadget: "bar" }, preserveSeriesOrder: true },
       columns,
       emptyRows,
     );

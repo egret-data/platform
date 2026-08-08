@@ -190,12 +190,20 @@ describe("scatterXY — goal line", () => {
 describe("scatterXY — hidden and reordered bands", () => {
   const names = (o: Opt) => o.series.map((s) => s.name);
 
-  it("emits the bands in first-seen order by default", () => {
-    expect(names(build({ series: "g" }))).toEqual(["west", "north", "east"]);
+  /**
+   * ASCENDING BY THE RAW BAND VALUE, where this used to assert first-seen order and NAME it as the
+   * intended behaviour. First-seen order is the defect: the rows come back from the engine under a
+   * spec that mostly sorts on nothing, so "first seen" was measured redrawing the same card in a
+   * different order between two page loads — a different legend, a different stacking order and,
+   * through `colorsForKeys`' collision walk, potentially a different colour per band. The fixture's
+   * rows are deliberately left in `west, north, east` so this fails against arrival order.
+   */
+  it("emits the bands in ascending order of their raw value by default", () => {
+    expect(names(build({ series: "g" }))).toEqual(["east", "north", "west"]);
   });
 
   it("drops a hidden band", () => {
-    expect(names(build({ series: "g", hiddenSeries: ["north"] }))).toEqual(["west", "east"]);
+    expect(names(build({ series: "g", hiddenSeries: ["north"] }))).toEqual(["east", "west"]);
   });
 
   it("reorders the bands", () => {
@@ -204,8 +212,12 @@ describe("scatterXY — hidden and reordered bands", () => {
   });
 
   it("keeps a band the stored order does not mention, after the ones it does", () => {
+    // "Natural order" for the unmentioned two is now the sorted one, not the arrival one — which is
+    // the point of sorting BEFORE `applySeriesOrder` rather than after it: the stored order still
+    // wins outright for the band it names, and what it leaves alone is deterministic instead of
+    // being whatever the engine returned.
     expect(names(build({ series: "g", seriesOrder: ["east"] })))
-      .toEqual(["east", "west", "north"]);
+      .toEqual(["east", "north", "west"]);
   });
 
   /**
@@ -218,7 +230,7 @@ describe("scatterXY — hidden and reordered bands", () => {
    */
   it("hides a RENAMED band by its raw name", () => {
     const o = build({ series: "g", seriesLabels: { north: "Northern" }, hiddenSeries: ["north"] });
-    expect(names(o)).toEqual(["west", "east"]);
+    expect(names(o)).toEqual(["east", "west"]);
   });
 
   it("reorders a RENAMED band by its raw name", () => {

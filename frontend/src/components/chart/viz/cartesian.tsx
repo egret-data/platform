@@ -362,11 +362,29 @@ function displayControls(kind: CartesianViz): VizControl<CartesianConfig>[] {
  *
  * With no authored sort this returns exactly what PR #394 emitted — ascending by the x-axis, or
  * nothing at all when there is no x-axis.
+ *
+ * EVERY BREAKOUT, NOT JUST THE X AXIS, and that is the third detail taken from the implementation
+ * rather than the docstring. `add-implicit-breakout-order-by` REDUCES over `(lib/breakouts query)` —
+ * all of them — so a question grouped by category AND by product line comes out of the middleware
+ * with `ORDER BY category ASC, product_line ASC`, and `add-order-bys-for-breakouts-test` pins it.
+ * This took only the x-axis, which is why a chart's BANDS came back in engine order however many
+ * times PR #394's fix ran: the rows were deterministic in the category and arbitrary within it.
+ *
+ * The reduce order is the breakout order (x, then series), which matters: the FIRST clause decides
+ * the drawn order and the rest break its ties. That is what makes the x axis still the primary key
+ * on a chart the author has not sorted, and what `preserveSeriesOrder` in `ChartRenderer` reads when
+ * an author moves the breakout column to the front.
+ *
+ * This is the data-level half only. It reaches charts saved AFTER it and no others — a dashboard
+ * deserialises the STORED spec verbatim — so `sortBands` in the renderer is the half that reaches
+ * everything already saved. Both halves, for the same reason PR #394 needed both.
  */
-function withImplicitBreakoutOrder(authored: ChartOrderBy[], breakout: string | undefined): ChartOrderBy[] {
-  if (!breakout) return authored;
-  if (authored.some((o) => o.field === breakout)) return authored;
-  return [...authored, { field: breakout, desc: false }];
+function withImplicitBreakoutOrder(authored: ChartOrderBy[], breakouts: (string | undefined)[]): ChartOrderBy[] {
+  return breakouts.reduce<ChartOrderBy[]>((acc, breakout) => {
+    if (!breakout) return acc;
+    if (acc.some((o) => o.field === breakout)) return acc;
+    return [...acc, { field: breakout, desc: false }];
+  }, authored);
 }
 
 export function cartesianDescriptor(kind: CartesianViz): VizDescriptor<CartesianConfig> {
@@ -484,7 +502,10 @@ export function cartesianDescriptor(kind: CartesianViz): VizDescriptor<Cartesian
         // `preserveCategoryOrder` in `echarts/options/cartesian.ts`.
         orderby: withImplicitBreakoutOrder(
           shared.orderby,
-          typeof cfg.xAxis === "string" && cfg.xAxis ? cfg.xAxis : undefined,
+          // `dims` itself, which is already "the breakouts, in breakout order" and already filtered
+          // to the strings — deriving the list twice is how the two come to disagree about which
+          // fields the query groups by.
+          dims,
         ),
         row_limit: shared.rowLimit, rollup_groups: [],
         temporal_units: pruneUnits(shared.temporalUnits, dims),

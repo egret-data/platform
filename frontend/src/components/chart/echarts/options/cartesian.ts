@@ -82,6 +82,33 @@ export interface CartesianBuildConfig {
    * happened to return, which is exactly the defect PR #394 fixed. See `sortCategories`.
    */
   preserveCategoryOrder?: boolean;
+  /**
+   * The same bargain as `preserveCategoryOrder`, for the BANDS a breakout draws — and a narrower
+   * question than the one above, deliberately, because the two are not the same question.
+   *
+   * `preserveCategoryOrder` is "the stored spec carries ANY sort". That is sound for the x axis: the
+   * categories come out of one column, so any `ORDER BY` at all puts the rows in an order the axis
+   * can be read off. It is NOT sound for the bands, and the counter-example is ordinary. A spec
+   * sorted `ORDER BY category ASC, band ASC` returns its rows grouped by category; the bands' order
+   * of FIRST APPEARANCE is then whichever bands the first category happens to contain, then the new
+   * ones the second introduces, and so on. Bands `C` at category 1 and `A, B` at category 2 arrive
+   * `C, A, B` from a query that sorted ascending by band. Trusting arrival order there would pin a
+   * wrong order rather than an arbitrary one, which is worse: it looks intentional.
+   *
+   * So this flag says something stronger and provable: THE BREAKOUT COLUMN IS THE PRIMARY SORT KEY.
+   * When it is, every row of one band precedes every row of the next, so first-seen order IS the
+   * engine's order over that column exactly — including a DESC the author asked for, which is the
+   * case worth protecting. `ChartRenderer` derives it that way (`orderby[0].field === series`) and
+   * nowhere else, so a sort on some other column leaves this false and the renderer sorts.
+   *
+   * KNOWN AND ACCEPTED ASYMMETRY: the settings panel's own band list (`cartesianSeriesNames`) has no
+   * access to the spec's `orderby` — `VizControlProps` carries the last result, not the query — so
+   * under this flag the panel lists the bands sorted while the chart draws them in the author's
+   * order. Threading the sort through the shell to close a cosmetic gap in the one case where the
+   * author sorted BY the breakout column, and where the first click of a reorder arrow stores an
+   * explicit `seriesOrder` that wins on both sides anyway, is not worth a shell change.
+   */
+  preserveSeriesOrder?: boolean;
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
   /**
@@ -201,7 +228,16 @@ export function cartesianSeriesNames(
     const gi = idx[cfg.series];
     const xi = cfg.xAxis != null ? idx[cfg.xAxis] : undefined;
     const valid = xi == null ? rows : rows.filter((r) => r[xi] != null);
-    return distinct(valid.map((r) => r[gi])).map((sv) => (sv == null || sv === "" ? "(empty)" : String(sv)));
+    // THE SAME ORDER THE CHART DRAWS, through the same function — this list is what the Series
+    // section renders, and its order is what the reorder arrows write back as `seriesOrder`. A panel
+    // listing the bands in arrival order beside a chart drawing them sorted makes every arrow look
+    // broken, and the first click would store an order the user never composed.
+    //
+    // SORTED BEFORE `(empty)` IS SUBSTITUTED, on the raw value, for the reason `sortBands` states at
+    // length: the label is not the key. (`(empty)` would sort among the E's; the raw `null` it
+    // stands for does not.)
+    return sortBands(distinct(valid.map((r) => r[gi])), columns[gi].type)
+      .map((sv) => (sv == null || sv === "" ? "(empty)" : String(sv)));
   }
   return [...cfg.yMetrics];
 }
@@ -1077,6 +1113,63 @@ export function sortCategories(cats: unknown[], type: string, preserve?: boolean
   return [...cats].sort((a, b) => String(a).localeCompare(String(b)));
 }
 
+/**
+ * The same order, applied to the OTHER axis of the chart: the bands a breakout draws.
+ *
+ * THE DEFECT. The bands came from `distinct(xrows.map(...))`, which is ARRIVAL ORDER, from a spec
+ * that mostly carries no sort on the breakout column at all. Measured on the demo dataset: one card
+ * drew `Doohickey / Gadget / Gizmo / Widget` on one page load and `Gizmo / Widget / Gadget /
+ * Doohickey` on the next, from identical data and identical settings. Pre-existing and independent
+ * of split panels — the un-panelled card on the same load was equally arbitrary; panels only put
+ * two orderings side by side where one could see them.
+ *
+ * NOT COSMETIC, which is why it is worth a sort rather than a note. Band order is the LEGEND order,
+ * the STACKING order (a stack is drawn bottom-up in series order) and the DRAW order. It also feeds
+ * three things that read the band's INDEX rather than its name: `seriesDisplayFor`'s positional
+ * default on a combo (`index === 0 ? "line" : "bar"`), `colorsForKeys`' collision walk (a pinned
+ * colour consumes a slot and the band that would have hashed onto it moves along — which band moves
+ * depends on the order they are offered in), and the split-panel layout. So arrival order did not
+ * merely shuffle the legend: it could hand the same band a different colour and a different mark
+ * between two loads.
+ *
+ * A THIN WRAPPER OVER `sortCategories` AND NOT A SECOND SORT, for the reason that function's own
+ * comment gives about the box plot: two copies of an ordering rule is how two axes come to disagree
+ * about what "ascending" means. The temporal and numeric branches matter here exactly as much as
+ * they do there — a breakout by month must band chronologically and not `2026-01, 2026-02, 2026-10`
+ * by luck of the string, and a breakout by an integer id must band `1, 2, 10` and not `1, 10, 2`.
+ * It exists as a named function rather than a bare call so that the WHY above has a home and so both
+ * the builder and the settings panel are visibly asking the same question.
+ *
+ * WHERE IT SITS IN THE PIPELINE — at the point the bands are DERIVED, before `decorateSeries`, and
+ * therefore before `applySeriesOrder`. Both halves of that are load-bearing:
+ *
+ *  - BEFORE `decorateSeries`, so it sorts the RAW column value. `decorateSeries` replaces `name`
+ *    with the display label (a `seriesLabels` rename, the period a temporal bucket covers, the
+ *    column's own number format), and sorting on that would put a band renamed "AAA" first and
+ *    re-order the whole chart on a cosmetic edit. This codebase has had eight defects from keying on
+ *    a display string; `settingsKey` and `__raw` exist because of the last of them.
+ *  - BEFORE `applySeriesOrder`, so an explicit `seriesOrder` LOSES NOTHING. That function sorts the
+ *    built series by the user's stored rank afterwards, so this only decides the order of the bands
+ *    it does not mention — which is exactly the "natural order" its own comment promises. Sorting
+ *    after it would have overwritten the user's arrangement; sorting before it also means the
+ *    positional readers listed above (the combo default, the colour walk) see the deterministic
+ *    order rather than the arbitrary one, which sorting afterwards could never have fixed.
+ *    It does not interact with `hiddenSeries` either: dropping members of a sorted list leaves it
+ *    sorted.
+ *
+ * ONE DIVERGENCE FROM `sortCategories`, AND IT IS THE `preserve` ARM. There, `preserve` is honoured
+ * on the nominal branch only: a temporal or numeric CATEGORY axis is sorted whatever the query
+ * asked for, because an axis that runs left to right through time backwards is not a preference,
+ * it is a misread waiting to happen. A BAND has no such geometry. It is a legend entry and a stack
+ * layer, so "months, newest first" is an ordinary thing for an author to ask for and there is
+ * nothing about the drawing that contradicts it. `preserve` therefore short-circuits every type
+ * here, which is why this is a function and not a bare `sortCategories` call at each site.
+ */
+function sortBands(bands: unknown[], type: string, preserve?: boolean): unknown[] {
+  if (preserve) return bands;
+  return sortCategories(bands, type);
+}
+
 // Metric-vs-metric scatter (Metabase's true scatter): each dimension row is a point
 // at (xMetric, yMetric) on two value axes.
 // Metabase's bubble scale (scatter/option/series.ts), verbatim including its rationale: the size
@@ -1234,7 +1327,13 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
     return bi == null || v == null ? CHART_THEME.scatterSymbolSize : bubbleDiameter(v, bLo, bHi);
   };
 
-  const groups = cfg.series != null ? distinct(points.map((p) => p.group)).map(String) : [""];
+  // The scatter's bands, ordered by the same rule the bar/line breakout uses (`sortBands`) — this
+  // chart derived them from arrival order too, and its clouds carry the same legend, the same
+  // colours and the same per-band panel as any other breakout. `gi` is non-null exactly when
+  // `cfg.series` is, since both are read off the same lookup.
+  const groups = cfg.series != null && gi != null
+    ? sortBands(distinct(points.map((p) => p.group)), columns[gi].type, cfg.preserveSeriesOrder).map(String)
+    : [""];
   /**
    * ONE SERIES PER (band, metric) PAIR — but never a cross product, because the two cases are
    * mutually exclusive by construction: `drawn` is narrowed to one metric the moment a breakout
@@ -1605,7 +1704,12 @@ export function buildCartesianOption(
     const gi = idx[cfg.series];
     const metric = cfg.yMetrics[0];
     const mi = idx[metric];
-    const seriesValues = distinct(xrows.map((r) => r[gi]));
+    // ORDERED, not arrival order — see `sortBands` for what arrival order was measured doing and
+    // for why this sits here rather than beside `applySeriesOrder` below. The column's own type
+    // comes from the RESULT rather than from `cfg.seriesType`: they are the same string (
+    // `ChartRenderer` fills that field by looking this very column up) and reading the result means
+    // the builder cannot be handed rows and a type that disagree.
+    const seriesValues = sortBands(distinct(xrows.map((r) => r[gi])), columns[gi].type, cfg.preserveSeriesOrder);
     const cell = new Map(xrows.map((r) => [`${catKey(r[xi])} ${catKey(r[gi])}`, r[mi] as number | null]));
     // Metabase parity: null / empty-string breakout values render as "(empty)".
     //

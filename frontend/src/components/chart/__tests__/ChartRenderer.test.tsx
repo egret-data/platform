@@ -1591,7 +1591,12 @@ describe("cartesian drill — the breakout series", () => {
         onValueClick={onValueClick}
       />,
     );
-    mockClickPayload = { name: "EU", seriesName: "Widgets (renamed)", seriesIndex: 0, value: 10, x: 1, y: 2 };
+    // `seriesIndex: 1` because the bands are drawn in ascending order of their RAW value now
+    // (`sortBands`), so Gadgets is series 0 and Widgets is series 1 — the rows arrive Widgets-first
+    // and no longer decide. The index is the whole point of the assertion: the drill reads
+    // `__raw` off the series AT THAT INDEX, so pointing it at the renamed band is what makes a
+    // regression to `p.seriesName` fail here.
+    mockClickPayload = { name: "EU", seriesName: "Widgets (renamed)", seriesIndex: 1, value: 10, x: 1, y: 2 };
     fireEvent.click(screen.getByTestId("echarts"));
     const { dims } = onValueClick.mock.calls[0][0];
     expect(dims).toContainEqual({ col: "category", value: "Widgets" });
@@ -1796,6 +1801,73 @@ describe("a sort the query already applied is not applied again before drawing",
       // The deltas follow their categories, so the cumulative sum is the sorted one.
       expect(unsorted.series[1].data.slice(0, -1).map((d) => d.value)).toEqual([10, 30, 20, 40]);
     }
+  });
+});
+
+/**
+ * THE SAME QUESTION FOR THE BANDS, and a different answer to it — `preserveSeriesOrder`.
+ *
+ * The band order was arrival order, measured drawing `Doohickey / Gadget / Gizmo / Widget` on one
+ * page load and `Gizmo / Widget / Gadget / Doohickey` on the next; `sortBands` sorts it. What this
+ * describe pins is the WIRING, which is the half that cannot be seen from the builder: which stored
+ * specs are allowed to switch that sort off.
+ *
+ * `preserveCategoryOrder`'s test — "the spec carries ANY sort" — is the WRONG test for the bands and
+ * these fixtures are what say so. `ORDER BY revenue DESC, category ASC` is an ordinary spec, it is
+ * non-empty, and it puts the bands in no order at all: the rows are grouped by revenue, so the bands
+ * appear as their categories happen to introduce them. Only a spec whose FIRST clause is the
+ * breakout column makes arrival order mean anything, because only then does every row of one band
+ * precede every row of the next.
+ *
+ * THE FIXTURE IS DELIBERATELY REVERSE-ALPHABETICAL so that "sorted" and "as it arrived" are never
+ * the same list, in either direction.
+ */
+describe("a breakout's band order, and the one sort that switches it off", () => {
+  const COLS = [
+    { name: "category", type: "varchar" },
+    { name: "band", type: "varchar" },
+    { name: "revenue", type: "double" },
+  ];
+  const ROWS = [
+    ["Q1", "Widget", 40], ["Q1", "Gizmo", 30], ["Q1", "Gadget", 20], ["Q1", "Doohickey", 10],
+  ];
+  const ARRIVAL = ["Widget", "Gizmo", "Gadget", "Doohickey"];
+  const SORTED = ["Doohickey", "Gadget", "Gizmo", "Widget"];
+
+  const bandsFor = (orderby: { field: string; desc: boolean }[]) => {
+    render(
+      <ChartRenderer
+        vizType="bar"
+        params={params({
+          cartesian: { xAxis: "category", yMetrics: ["revenue"], series: "band" },
+          spec: {
+            metrics: ["revenue"], dimensions: ["category", "band"], columns: [], filters: [],
+            orderby, row_limit: 1000, rollup_groups: [],
+          },
+        })}
+        columns={COLS}
+        rows={ROWS}
+      />,
+    );
+    return (mockLastOption as (s: { width: number; height: number }) => {
+      series: { name: string }[];
+    })({ width: 640, height: 400 }).series.map((s) => s.name);
+  };
+
+  it("sorts the bands of an already-saved chart, whose spec asked for nothing", () => {
+    expect(bandsFor([])).toEqual(SORTED);
+  });
+
+  it("still sorts them when the spec sorts by the CATEGORY, which says nothing about the bands", () => {
+    expect(bandsFor([{ field: "category", desc: false }, { field: "band", desc: false }])).toEqual(SORTED);
+  });
+
+  it("still sorts them when the breakout is only a tie-break", () => {
+    expect(bandsFor([{ field: "revenue", desc: true }, { field: "band", desc: false }])).toEqual(SORTED);
+  });
+
+  it("leaves them as they arrived when the breakout column is the PRIMARY sort key", () => {
+    expect(bandsFor([{ field: "band", desc: true }, { field: "category", desc: false }])).toEqual(ARRIVAL);
   });
 });
 

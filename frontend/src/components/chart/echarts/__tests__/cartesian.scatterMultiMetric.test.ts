@@ -153,8 +153,11 @@ describe("a metric-vs-metric scatter draws every Y metric", () => {
    */
   it("falls back to the first metric alone once a breakout names the series", () => {
     const o = build({ series: "band" });
-    expect(o.series.map((s) => s.name)).toStrictEqual(["W", "G"]);
-    expect(o.series[0].data.map((d) => d.value)).toStrictEqual([[1, 10], [3, 30]]);
+    // `["G", "W"]` and not the rows' own `["W", "G"]`: the bands are sorted by their raw value
+    // (`sortBands`), on this chart as on every other breakout. `data` follows the band it belongs
+    // to, so series 0 is now G's single point rather than W's two.
+    expect(o.series.map((s) => s.name)).toStrictEqual(["G", "W"]);
+    expect(o.series[0].data.map((d) => d.value)).toStrictEqual([[2, 20]]);
   });
 
   it("leaves the single-metric scatter exactly as it was", () => {
