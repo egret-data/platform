@@ -14,14 +14,23 @@
 import { CHARTS, DASHBOARD, chartByName, chartParams, metricUses } from "./charts";
 import { DATASETS, assertMetricsDeclared } from "./datasets";
 
-describe("the 19 charts", () => {
-  it("is 19 charts, one per viz type", () => {
-    expect(CHARTS).toHaveLength(19);
+/**
+ * WHY THIS SAYS 22 AND NOT 19. The dashboard was nineteen cards, one per viz type, and that second
+ * clause was the invariant this block asserted. It is no longer true and could not be kept: the
+ * three breakout cards added for PR #436's blind spot are a `bar`, an `area` and a second `bar`,
+ * because a breakout is a property of a chart's QUERY rather than a viz type of its own and there
+ * is no twentieth type to give it. What survives, and is asserted below instead, is the direction
+ * that actually mattered — EVERY VIZ TYPE STILL APPEARS. A type dropped from the harness is a hole
+ * in the instrument; a type appearing twice is deliberate coverage.
+ */
+describe("the 22 charts", () => {
+  it("covers all 19 viz types, and no card is on a type the harness dropped", () => {
+    expect(CHARTS).toHaveLength(22);
     expect(new Set(CHARTS.map((c) => c.viz)).size).toBe(19);
   });
 
   it("has unique names", () => {
-    expect(new Set(CHARTS.map((c) => c.name)).size).toBe(19);
+    expect(new Set(CHARTS.map((c) => c.name)).size).toBe(CHARTS.length);
   });
 
   it("only names datasets that exist", () => {
@@ -161,7 +170,10 @@ describe("the seed asks for the order each chart draws in", () => {
     });
   }
 
-  it("every cartesian chart orders by its own x-axis", () => {
+  it("every un-broken-out cartesian chart orders by its own x-axis, and by nothing else", () => {
+    // The single-clause shape is the point: with one breakout there is one implicit order-by. The
+    // broken-out cards have two, which is `add-implicit-breakout-order-by` reducing over every
+    // breakout — asserted in `charts.breakout.test.ts` rather than here.
     const expected: Record<string, string> = {
       "MB · Bar": "category", "MB · Row": "category", "MB · Line": "order_month",
       "MB · Area": "order_month", "MB · Combo": "order_month", "MB · Scatter": "price",
@@ -187,7 +199,7 @@ describe("the seed asks for the order each chart draws in", () => {
 describe("metricUses feeds the undeclared-metric invariant", () => {
   it("derives the metric list from the same buildSpec that writes the saved spec", () => {
     const uses = metricUses();
-    expect(uses).toHaveLength(19);
+    expect(uses).toHaveLength(CHARTS.length);
     const combo = uses.find((u) => u.chart === "MB · Combo")!;
     expect(combo.metrics).toEqual(["orders", "revenue"]);
     // The table and object charts aggregate nothing, and MB Raw Orders declares no metrics.

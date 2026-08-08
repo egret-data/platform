@@ -1,5 +1,13 @@
 /**
- * The 19 charts of the "ZZ Chart Parity" dashboard, and where each sits on the grid.
+ * The 22 charts of the "ZZ Chart Parity" dashboard, and where each sits on the grid.
+ *
+ * NINETEEN VIZ TYPES, then THREE BREAKOUT CARDS added afterwards and appended rather than folded
+ * in. The nineteen are the baseline every parity comparison since PR 01 has been measured against,
+ * so they keep their names, their configs, their geometry and their order in this list; a report
+ * written against the old dashboard still lines up card for card. The three at the end are the
+ * blind spot PR #436 found — every one of the nineteen leaves `cartesian.series` unset, so the
+ * instrument contained no broken-out chart at all. Their block comment below is where that choice
+ * is argued.
  *
  * Each entry carries a DESCRIPTOR CONFIG — the shape that viz's `defaultConfig` describes — and
  * never a settings map or a spec. Those are outputs; `harnessParams` derives them by calling the
@@ -34,7 +42,7 @@
  *   renders correctly today and regenerating it is behaviourally neutral: the generated
  *   `table.columns` is exactly what that fallback computes. It stops depending on the fallback.
  */
-import type { VizType } from "@/api/charts";
+import type { ChartOrderBy, VizType } from "@/api/charts";
 import { harnessParams, type HarnessChart } from "./params";
 import { datasetByName, type MetricUse } from "./datasets";
 
@@ -47,6 +55,18 @@ export interface HarnessChartEntry {
   config: unknown;
   /** Defaults to 1000, matching a new chart in the studio. */
   rowLimit?: number;
+  /**
+   * The sort the card's author asked for, if any — the studio's own `SharedQueryState.orderby`,
+   * which PR #395 put behind a control. SHARED QUERY STATE AND NOT CONFIG, for the same reason
+   * `HarnessChart` keeps it beside `filters` and `rowLimit`: a sort is a question about the query,
+   * not about the drawing, and the descriptors are deliberately unable to express one.
+   *
+   * Almost every card leaves this unset, which is a new chart in the studio and is what makes the
+   * cards comparable — `buildSpec` then derives the implicit ascending breakout order Metabase's
+   * query processor adds. The one card that sets it (`MB · Bar Breakout Desc`) exists precisely to
+   * cover the other branch; see its entry.
+   */
+  orderby?: ChartOrderBy[];
   /** Grid geometry. The card sizes every PR 01–06 measurement was taken at. */
   col: number;
   row: number;
@@ -54,10 +74,10 @@ export interface HarnessChartEntry {
   sizeY: number;
 }
 
-/** The dashboard the 19 cards live on. `width: "full"` recovered with the rest. */
+/** The dashboard the 22 cards live on. `width: "full"` recovered with the rest. */
 export const DASHBOARD = {
   name: "ZZ Chart Parity",
-  description: "19 chart types on Metabase-matched data",
+  description: "19 chart types on Metabase-matched data, three of them broken out by category",
   width: "full",
 } as const;
 
@@ -125,6 +145,69 @@ export const CHARTS: HarnessChartEntry[] = [
   { name: "MB · Object", dataset: "MB Raw Orders", viz: "object", col: 0, row: 30, sizeX: 4, sizeY: 5,
     rowLimit: 60,
     config: { columns: rawOrderColumns() } },
+
+  // --- THE BREAKOUT CARDS, added because the instrument had no eyes for this case -------------
+  //
+  // The nineteen above all leave `cartesian.series` unset. There was therefore no broken-out chart
+  // anywhere in the harness, and that is why PR #436's defect — the same card drawing
+  // `Doohickey / Gadget / Gizmo / Widget` on one page load and `Gizmo / Widget / Gadget / Doohickey`
+  // on the next — survived thirty PRs of side-by-side comparison against Metabase. Nobody missed it;
+  // there was nothing on either dashboard that could show it.
+  //
+  // `category` OFF `MB Month x Category` IS THE BREAKOUT COLUMN, and the choice is the whole reason
+  // these cards are comparable rather than merely present:
+  //
+  //   - FOUR bands, so a legend fits in a 4×5 card and a wrong order is visible at a glance rather
+  //     than buried in a scrolling legend. `state` (40+) and `vendor` are unusable for that reason.
+  //   - The SAME four on both sides, byte for byte: egret's dataset is a `VALUES` literal
+  //     materialised from Metabase's own result for this very query, and Metabase's new cards run
+  //     the identical SQL that `MB · Pivot` (card 41) already runs against H2.
+  //   - NOT engine-dependent. Four short ASCII strings sort and compare the same way in Trino, in
+  //     H2 and in JavaScript, so a difference on screen is the renderer and never the collation.
+  //   - Not `order_month`: it is already the x axis, and a chart broken out by its own category is
+  //     a different question.
+  //
+  // WHY THREE AND NOT ONE. Band order is the legend order, the STACK order and the DRAW order, and
+  // the three cards separate what a single card would confound:
+  //
+  //   - `MB · Bar Breakout` is the ordinary case: grouped bars, no authored sort, bands sorted by
+  //     the renderer. This is the exact shape #436 was measured on.
+  //   - `MB · Area Breakout` stacks, which turns band order into VERTICAL POSITION. A legend can be
+  //     misread; a stack in the wrong order is a different picture of the same numbers.
+  //   - `MB · Bar Breakout Desc` is the same card as the first with one thing changed — an authored
+  //     `ORDER BY category DESC` — and it is what makes the first card's agreement mean anything.
+  //     Metabase does NOT sort its bands: `getBreakoutDistinctValues` is
+  //     `Array.from(new Set(rows.map(...)))` (`echarts/cartesian/model/series.ts:123`), pure arrival
+  //     order, made deterministic by the query rather than by the renderer. So on an ascending card
+  //     a renderer that ALWAYS sorted would agree with Metabase by coincidence, and the harness
+  //     could not tell "egret sorts" from "egret honours the query". Only a card whose engine order
+  //     is not the sorted order can, and this is that card: it is the one that exercises
+  //     `preserveSeriesOrder`, which fires only when the breakout is the PRIMARY orderby key.
+  //
+  // LEFT OUT DELIBERATELY, both named in this PR's brief:
+  //
+  //   - A COMBO WITH A BREAKOUT. egret's per-series default under a breakout is positional
+  //     (`seriesDisplayFor`: `index === 0 ? "line" : "bar"`) and Metabase's is not, so an unpinned
+  //     combo card would compare two different defaults and teach a false lesson. Pinning the
+  //     display per band on both sides would fix that and simultaneously make the card blind to
+  //     band order, which was its only reason to exist. `comboBreakoutGrouping.test.ts` covers the
+  //     positional reader instead.
+  //   - SPLIT PANELS (#435). Its layout keys on the band's index, so it is a real reader of this
+  //     order — but a panel per band inside a 4×5 card gives each of four bands roughly a fifth of
+  //     ~250px, and the comparison would be about legibility rather than order. Resizing the card
+  //     is not available either: the uniform 4×5 geometry is what every PR 01–06 measurement was
+  //     taken at. Covered by `cartesian.scatterPanelParity.test.ts` instead.
+  { name: "MB · Bar Breakout", dataset: "MB Month x Category", viz: "bar", col: 4, row: 30, sizeX: 4, sizeY: 5,
+    config: { xAxis: "order_month", series: "category", yMetrics: ["revenue"] } },
+  { name: "MB · Area Breakout", dataset: "MB Month x Category", viz: "area", col: 8, row: 30, sizeX: 4, sizeY: 5,
+    config: { xAxis: "order_month", series: "category", yMetrics: ["revenue"], stacked: true } },
+  { name: "MB · Bar Breakout Desc", dataset: "MB Month x Category", viz: "bar", col: 0, row: 35, sizeX: 4, sizeY: 5,
+    // The ONLY difference from `MB · Bar Breakout`, so anything that differs on screen is
+    // attributable to the sort alone. `withImplicitBreakoutOrder` appends the month behind it, so
+    // the stored spec is `ORDER BY category DESC, order_month ASC` — the breakout PRIMARY, which is
+    // the one condition `preserveSeriesOrder` accepts.
+    orderby: [{ field: "category", desc: true }],
+    config: { xAxis: "order_month", series: "category", yMetrics: ["revenue"] } },
 ];
 
 /**
@@ -155,6 +238,7 @@ export function chartParams(entry: HarnessChartEntry) {
     config: entry.config,
     columns: ds.columns,
     rowLimit: entry.rowLimit,
+    orderby: entry.orderby,
   };
   return harnessParams(chart);
 }
