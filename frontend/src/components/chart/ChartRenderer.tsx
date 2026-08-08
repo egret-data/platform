@@ -554,6 +554,19 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
    * the pre-PR-#394 charts in the wild are exactly the ones that must fall through to sorting.
    */
   const preserveCategoryOrder = (params.spec.orderby?.length ?? 0) > 0;
+  /**
+   * The same question for the BREAKOUT BANDS, and a strictly stronger test than the line above —
+   * `preserveSeriesOrder` in `echarts/options/cartesian.ts` argues why at length. In one sentence:
+   * "the spec carries some sort" tells you nothing about the bands, because a spec sorted by the
+   * CATEGORY still hands the builder its bands in whatever order the categories happened to
+   * introduce them. Only when the breakout column is the PRIMARY key does every row of one band
+   * precede every row of the next, and only then is first-seen order the engine's band order.
+   *
+   * `[0]` and not `.some(...)`: `SortRows` documents that "the array's order is the sort precedence"
+   * (it is Metabase's `SortStep`, whose reorder arrows exist for exactly that), so a clause in
+   * second place sorts within the first one's ties and does not decide which band appears first.
+   */
+  const preserveSeriesOrder = !!cartesian.series && params.spec.orderby?.[0]?.field === cartesian.series;
 
   if (vizType === "object") {
     return (
@@ -635,6 +648,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
       ...cartesian,
       kind: vizType,
       preserveCategoryOrder,
+      preserveSeriesOrder,
       columnSettings,
       metricTypes,
       xAxisUnit: params.spec.temporal_units?.[cartesian.xAxis ?? ""],

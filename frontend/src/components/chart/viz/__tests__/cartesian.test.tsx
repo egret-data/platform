@@ -108,12 +108,47 @@ describe("a cartesian spec carries the order it draws in", () => {
     expect(spec.orderby).toEqual([{ field: "order_date", desc: false }]);
   });
 
-  it("orders by the x-axis, never by the breakout series", () => {
+  /**
+   * BY EVERY BREAKOUT, X AXIS FIRST — where this used to assert "never by the breakout series" and
+   * pin the x-axis alone.
+   *
+   * That assertion contradicted the Metabase source quoted at the top of this describe. The rule is
+   * "Fields specified in `breakout`", plural, and `add-implicit-breakout-order-by` REDUCES
+   * `lib/order-by` over all of them; `add-order-bys-for-breakouts-test` pins two breakouts
+   * producing two clauses. Emitting one of the two left the rows deterministic in the CATEGORY and
+   * arbitrary within it, which is precisely how the same card came to draw
+   * `Doohickey / Gadget / Gizmo / Widget` on one page load and `Gizmo / Widget / Gadget / Doohickey`
+   * on the next.
+   *
+   * The x-axis stays FIRST because the array is the sort precedence: the drawn axis still decides
+   * the row order and the breakout only breaks its ties.
+   */
+  it("orders by every breakout, the x-axis first and the series after it", () => {
     const spec = cartesianDescriptor("bar").buildSpec(
       { xAxis: "category", series: "state", yMetrics: ["revenue"] }, SHARED,
     );
-    expect(spec.orderby).toEqual([{ field: "category", desc: false }]);
+    expect(spec.orderby).toEqual([
+      { field: "category", desc: false },
+      { field: "state", desc: false },
+    ]);
     expect(spec.dimensions).toEqual(["category", "state"]);
+  });
+
+  /**
+   * An author's clause REPLACES the implicit one on the same field rather than being appended to,
+   * in either direction — `lib/order-by` compares on the expression alone, so a DESC on the
+   * breakout is not defeated by an implicit ASC. This is the input `ChartRenderer` turns into
+   * `preserveSeriesOrder`, so the two halves have to agree about what a stored spec can say.
+   */
+  it("lets an author's sort on the breakout stand instead of adding a second clause", () => {
+    const spec = cartesianDescriptor("bar").buildSpec(
+      { xAxis: "category", series: "state", yMetrics: ["revenue"] },
+      { ...SHARED, orderby: [{ field: "state", desc: true }] },
+    );
+    expect(spec.orderby).toEqual([
+      { field: "state", desc: true },
+      { field: "category", desc: false },
+    ]);
   });
 
   it("leaves a chart with no x-axis unordered", () => {

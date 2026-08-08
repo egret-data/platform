@@ -266,9 +266,13 @@ describe("cartesian controls are grouped and per-kind", () => {
       { name: "revenue", type: "double" },
       { name: "orders", type: "bigint" },
     ];
-    /** Breakout order is first-seen and deliberately NOT alphabetical — `colorsForKeys` assigns in
-     *  sorted key order, so a pre-sorted fixture cannot tell a by-name lookup from a by-position one.
-     *  "Gadget" and "Widget" also hash onto one slot, so this walks the collision path. */
+    /** The drawn band order must be deliberately NOT alphabetical — `colorsForKeys` assigns in
+     *  sorted key order, so a chart whose bands come out sorted cannot tell a by-name lookup from a
+     *  by-position one. It used to fall out of these rows; the builder now sorts the bands by their
+     *  raw value (`sortBands`, which fixed the same card drawing a different legend on two page
+     *  loads), so the breakout cases below ask for this order through `seriesOrder` instead — the
+     *  panel's own control, which outranks the default sort. "Gadget" and "Widget" also hash onto
+     *  one slot, so this walks the collision path. */
     const rows: unknown[][] = [
       ["2026-01", "Widget", 10, 1], ["2026-01", "Doohickey", 20, 2],
       ["2026-01", "Gizmo", 30, 3], ["2026-01", "Gadget", 40, 4],
@@ -319,7 +323,7 @@ describe("cartesian controls are grouped and per-kind", () => {
     });
 
     it("shows every breakout band the colour the chart draws it in", () => {
-      expectAgreement({ yMetrics: ["revenue"], xAxis: "month", series: "category" }, GROUPS);
+      expectAgreement({ yMetrics: ["revenue"], xAxis: "month", series: "category", seriesOrder: GROUPS }, GROUPS);
     });
 
     /**
@@ -333,14 +337,16 @@ describe("cartesian controls are grouped and per-kind", () => {
     });
 
     it("agrees on a scatter broken out into bands", () => {
-      expectAgreement({ yMetrics: ["revenue"], xMetric: "orders", series: "category" }, GROUPS, "scatter");
+      expectAgreement(
+        { yMetrics: ["revenue"], xMetric: "orders", series: "category", seriesOrder: GROUPS }, GROUPS, "scatter",
+      );
     });
 
     it("hands the pinned colours over too, so an override moves the band it displaced", () => {
       // `revenue`'s own ink pinned onto a band instead: `colorsForKeys` CONSUMES it, so whichever
       // band would have hashed onto that slot moves along — in the chart, and so in this panel.
       expectAgreement(
-        { yMetrics: ["revenue"], xAxis: "month", series: "category", seriesColors: { Gizmo: "#f2a86f" } },
+        { yMetrics: ["revenue"], xAxis: "month", series: "category", seriesColors: { Gizmo: "#f2a86f" }, seriesOrder: GROUPS },
         GROUPS,
       );
       expect(new Set(GROUPS.map(swatch)).size).toBe(4); // nobody was handed the pinned ink twice

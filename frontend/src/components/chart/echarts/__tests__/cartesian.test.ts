@@ -605,7 +605,11 @@ describe("cartesianSeriesNames helper", () => {
     expect(cartesianSeriesNames(cols, rows, { yMetrics: ["rev", "cnt"] })).toEqual(["rev", "cnt"]);
   });
   it("returns distinct breakout values, mapping null/empty to (empty)", () => {
-    expect(cartesianSeriesNames(cols, rows, { yMetrics: ["rev"], series: "yr" })).toEqual(["2023", "(empty)"]);
+    // `(empty)` FIRST, and that is the sort landing on the RAW value rather than on the label it
+    // is shown under: the raw value here is `""`, which sorts before `"2023"`. Sorting the labels
+    // instead would file it under E. The list is sorted at all so that the panel's Series section
+    // lists the bands in the order the chart draws them — see `sortBands`.
+    expect(cartesianSeriesNames(cols, rows, { yMetrics: ["rev"], series: "yr" })).toEqual(["(empty)", "2023"]);
   });
 });
 

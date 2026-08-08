@@ -32,16 +32,23 @@ const cols = [
 ];
 
 /**
- * The four Sample-Database product categories, in the order the breakout emits them (first seen).
- * Two of them — "Gadget" and "Widget" — hash onto the SAME palette slot, so this data also
- * exercises `colorsForKeys`' collision walk rather than only its happy path.
+ * The four Sample-Database product categories. Two of them — "Gadget" and "Widget" — hash onto the
+ * SAME palette slot, so this data also exercises `colorsForKeys`' collision walk rather than only
+ * its happy path.
  *
- * THE ORDER IS LOAD-BEARING AND MUST NOT BE ALPHABETICAL. `hashMapping` assigns in sorted key
- * order, so its returned Record is ALSO in sorted order — and a fixture whose breakout values are
- * already sorted makes a by-name lookup and a by-position one produce the identical sequence. The
- * two breakout tests below were written against `Doohickey, Gadget, Gizmo, Widget` and both passed
- * with `colors[s.name]` mutated to `Object.values(colors)[colorIdx]`: the exact bug this file
- * exists to pin, surviving the tests named for it. Sorting these four re-blinds them.
+ * THE EMITTED ORDER IS LOAD-BEARING AND MUST NOT BE ALPHABETICAL. `hashMapping` assigns in sorted
+ * key order, so its returned Record is ALSO in sorted order — and a chart whose bands come out
+ * sorted makes a by-name lookup and a by-position one produce the identical sequence. The two
+ * breakout tests below were written against `Doohickey, Gadget, Gizmo, Widget` and both passed with
+ * `colors[s.name]` mutated to `Object.values(colors)[colorIdx]`: the exact bug this file exists to
+ * pin, surviving the tests named for it.
+ *
+ * IT USED TO COME FOR FREE FROM THE ROW ORDER, and no longer does: the builder now emits the bands
+ * in ascending order of their raw value (`sortBands`), because first-seen order was the same card
+ * drawing a different legend on two page loads. That fix would have re-blinded both tests silently
+ * — sorted emission, sorted Record, identical sequences — so each states the non-alphabetical order
+ * it needs through `seriesOrder`, which is the panel's own control and outranks the default sort.
+ * The rows below stay unsorted anyway, so a regression to arrival order still shows up elsewhere.
  */
 const rows: unknown[][] = [
   ["2026-01", "Widget", 10, 1],
@@ -53,9 +60,9 @@ const rows: unknown[][] = [
   ["2026-02", "Gizmo", 70, 7],
   ["2026-02", "Gadget", 80, 8],
 ];
-/** First-seen order, which is the order the builder emits the bands in — deliberately not sorted;
- *  see `rows`. `colorsForKeys` sorts internally, so the EXPECTED colours are unaffected by this
- *  order, which is precisely what makes the comparison meaningful. */
+/** Deliberately NOT sorted; see `rows` for why, and for why the tests using it must ask for it
+ *  through `seriesOrder`. `colorsForKeys` sorts internally, so the EXPECTED colours are unaffected
+ *  by this order, which is precisely what makes the comparison meaningful. */
 const GROUPS = ["Widget", "Doohickey", "Gizmo", "Gadget"];
 
 const baseCfg = { kind: "bar" as const, xAxis: "month", yMetrics: ["revenue"] };
@@ -91,7 +98,7 @@ describe("cartesian series colours", () => {
   });
 
   it("colours a breakout by its group name", () => {
-    const opt = buildCartesian({ ...baseCfg, series: "category" });
+    const opt = buildCartesian({ ...baseCfg, series: "category", seriesOrder: GROUPS });
     expect(seriesOf(opt).map((s) => s.name)).toEqual(GROUPS); // the emission order this pins against
     expect(seriesColorsOf(opt)).toEqual(GROUPS.map((g) => colorsForKeys(GROUPS)[g]));
   });
@@ -117,7 +124,9 @@ describe("cartesian series colours", () => {
   });
 
   it("colours a scatter's breakout bands by their group names", () => {
-    const opt = buildCartesian({ kind: "scatter", xMetric: "orders", yMetrics: ["revenue"], series: "category" });
+    const opt = buildCartesian({
+      kind: "scatter", xMetric: "orders", yMetrics: ["revenue"], series: "category", seriesOrder: GROUPS,
+    });
     expect(seriesOf(opt).map((s) => s.name)).toEqual(GROUPS);
     expect(seriesColorsOf(opt)).toEqual(GROUPS.map((g) => colorsForKeys(GROUPS)[g]));
   });
@@ -184,7 +193,9 @@ describe("cartesian series renames", () => {
       kind: "scatter", xMetric: "orders", yMetrics: ["revenue"], series: "category",
       seriesLabels: { Doohickey: "Doohickeys" },
     });
-    expect(seriesOf(opt).map((s) => s.name)).toEqual(["Widget", "Doohickeys", "Gizmo", "Gadget"]);
+    // Ascending by the RAW band value, so the renamed one stays where `Doohickey` belongs rather
+    // than moving to where `Doohickeys` would sort — the rename is a label, not a key.
+    expect(seriesOf(opt).map((s) => s.name)).toEqual(["Doohickeys", "Gadget", "Gizmo", "Widget"]);
   });
 
   it("a renamed scatter band keeps the colour its RAW name hashes to", () => {
