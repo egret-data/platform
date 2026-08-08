@@ -39,6 +39,18 @@ export type ChartFilter =
   | { col: string; op: ValueFilterOp; value: unknown };
 export interface ChartOrderBy { field: string; desc: boolean }
 
+/**
+ * The most rows a chart query will ever return, mirroring `MAX_CHART_ROWS` in
+ * `crates/egret-bi/src/chartquery.rs`, which applies it as `row_limit.clamp(1, MAX_CHART_ROWS)`.
+ *
+ * MIRRORED, NOT FETCHED, and the cost is stated rather than hidden: the number is served — the
+ * chart-run response carries `max_rows` (`routes.rs`) — but only AFTER a query has run, and the
+ * point of having it here is to tell the author the ceiling BEFORE they type past it. Two copies
+ * of one number is the price; the Rust side is the authority and this comment names it so the
+ * next reader knows which one to change first.
+ */
+export const MAX_CHART_ROWS = 10_000;
+
 export interface QuerySpec {
   metrics: string[];
   dimensions: string[];

@@ -5,7 +5,7 @@ import { useDatasets, useDataset } from "@/api/datasets";
 import {
   useBuildChartData, useChart, useChartMutations,
   type QuerySpec, type VizType, type ChartParams, type TableState, type ChartFilter, type ChartOrderBy,
-  type AnyChartParams, type VizSettings, isParamsV2,
+  type AnyChartParams, type VizSettings, isParamsV2, MAX_CHART_ROWS,
 } from "@/api/charts";
 import { useSpecData } from "@/api/useSpecData";
 import { FilterChips } from "@/components/chart/FilterChips";
@@ -43,6 +43,7 @@ import { tableDescriptor } from "@/components/chart/viz/table";
 import type { VizDescriptor } from "@/components/chart/viz/types";
 import { shellSettings, mergeVizSettings } from "@/components/chart/viz/renderConfig";
 import { StudioPanel, hasAxesControls } from "@/components/chart/StudioPanel";
+import { FIELD_LABEL } from "@/components/chart/settings/FieldLabel";
 import { PreviewPane } from "@/components/chart/PreviewPane";
 import { VizSwitcher } from "@/components/chart/VizSwitcher";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
@@ -177,12 +178,18 @@ export default function ChartExplore() {
     // The label names the field. It used to read a bare "Unit", which is unambiguous with one date
     // dimension and useless with two — a pivot with a date on both axes showed two identical rows.
     const shown = c?.verbose_name?.trim() || col;
+    // AND IT USED TO READ "UNIT · ORDER_MONTH". Three things were wrong with that and only the
+    // third is cosmetic: "Unit" is the name of an internal concept (`temporal_units`) rather than
+    // of anything the reader is doing, "·" is a separator standing in for a preposition nobody can
+    // guess, and the uppercase turned the column's own name into a shouted constant — so a row
+    // that says "group this column by month" read as a system string. It is a sentence now, and
+    // the column name inside it is left in its own case (`ORDER_MONTH` was the CSS, not the data).
     return c?.is_temporal ? (
       <div className="flex items-center gap-2 pl-2">
-        <span className="truncate text-[11px] uppercase tracking-wide text-muted-foreground" title={col}>
-          Unit · {shown}
+        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={col}>
+          Group {shown} by
         </span>
-        <TemporalUnitSelect value={temporalUnits[col!]} onChange={(u) => setUnit(col!, u)} />
+        <TemporalUnitSelect label={`Group ${shown} by`} value={temporalUnits[col!]} onChange={(u) => setUnit(col!, u)} />
       </div>
     ) : null;
   };
@@ -658,9 +665,9 @@ export default function ChartExplore() {
           {/* ── DATA TAB ── */}
           <TabsContent value="data" className="space-y-4">
             <div className="space-y-1">
-              <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Dataset</Label>
+              <Label className={FIELD_LABEL}>Dataset</Label>
               <Select value={datasetId ?? ""} onValueChange={(v) => { setDatasetId(v || null); resetControls(); }}>
-                <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dataset…" /></SelectTrigger>
+                <SelectTrigger className="h-8 w-full text-sm"><SelectValue placeholder="Pick a dataset…" /></SelectTrigger>
                 <SelectContent>
                   {(datasets.data ?? []).map((d) => (
                     <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>
@@ -695,11 +702,29 @@ export default function ChartExplore() {
               <SortRows fields={sortableFields(specForRun())} value={orderby} onChange={setOrderby} />
             )}
 
+            {/* THE CEILING IS NOW ON SCREEN. `max={10000}` mirrors the backend's `MAX_CHART_ROWS`
+                and did all its work invisibly: measured live, typing 99999 is accepted by the
+                control (`min`/`max` on a number input set `validity.rangeOverflow` and block no
+                keystroke), the query runs, the backend caps the result at 10,000 and the author is
+                shown ten thousand rows having asked for a hundred thousand — with nothing anywhere
+                saying a limit exists, let alone that it was applied.
+
+                NOT CLAMPED, deliberately. Rewriting 99999 to 10000 under the cursor would change a
+                value the author typed, and this pass is presentation only; the number stays theirs
+                and the panel now says what will happen to it. The clamp is worth its own change,
+                and is written up as such. */}
             <div className="space-y-1">
-              <Label htmlFor="row-limit" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Row limit</Label>
-              <Input id="row-limit" type="number" min={1} max={10000} value={rowLimit}
+              <Label htmlFor="row-limit" className={FIELD_LABEL}>Row limit</Label>
+              <Input id="row-limit" type="number" min={1} max={MAX_CHART_ROWS} value={rowLimit}
+                aria-describedby="row-limit-hint"
+                aria-invalid={rowLimit > MAX_CHART_ROWS || undefined}
                 onChange={(e) => { const n = Number(e.target.value); setRowLimit(Number.isNaN(n) ? 0 : n); }}
-                className="h-8 text-sm" />
+                className="h-8 w-full text-sm" />
+              <p id="row-limit-hint" className="text-xs text-muted-foreground">
+                {rowLimit > MAX_CHART_ROWS
+                  ? `Over the maximum — only ${MAX_CHART_ROWS.toLocaleString()} rows will be returned.`
+                  : `Up to ${MAX_CHART_ROWS.toLocaleString()} rows.`}
+              </p>
             </div>
           </TabsContent>
 

@@ -1,6 +1,9 @@
+import { useState } from "react";
 import { pruneUnits } from "@/components/chart/temporal-units";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
+import { FIELD_LABEL as LABEL_CLASS } from "@/components/chart/settings/FieldLabel";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { isParamsV2 } from "@/api/charts";
 import type { QuerySpec } from "@/api/charts";
@@ -9,21 +12,99 @@ import type { SharedQueryState, VizControlProps, VizDescriptor } from "./types";
 export interface TableConfig { columns: string[]; metrics: string[] }
 export interface ObjectConfig { columns: string[] }
 
-const LABEL_CLASS = "text-xs font-medium uppercase tracking-wide text-muted-foreground";
+/** Above this many options the list gets its own filter box and stops being scannable by eye. */
+const FILTER_THRESHOLD = 8;
 
-/** A checkbox list — the shape both of these viz types configure with. */
-function CheckList({ idPrefix, empty, options, selected, onToggle }: {
-  idPrefix: string; empty: string; options: string[]; selected: string[]; onToggle: (name: string) => void;
+/**
+ * A checkbox list — the shape both of these viz types configure with.
+ *
+ * WHY THIS IS STILL A CHECKBOX LIST AND NOT THE PIVOT'S DRAG ZONES. The two sit one screen apart on
+ * the same tab and both answer "which fields does this chart use", which is a fair thing to call
+ * inconsistent — but Metabase draws the same two shapes for the same two jobs, and for a reason
+ * that survives being copied. Its notebook Data step is a checkbox list with a tri-state "Select
+ * all" (`querying/notebook/components/FieldPicker/FieldPicker.tsx`); its pivot settings are drag
+ * zones. A table's columns are a SET chosen out of many, where the common act is "not that one";
+ * a pivot's rows/columns/values are three small ORDERED lists where the common act is "this one,
+ * here". Ticking twenty boxes to build a set is right; dragging twenty chips to build one is not.
+ *
+ * So the gap that mattered was never the widget — it was that this one had none of the widget's
+ * affordances. It had no count, no select-all, no filter, no bounded height (ten rows on a
+ * ten-column dataset, fifty on a fifty-column one), and each row's only target was a 16×16
+ * checkbox with a label beside it — measured live at 16×16 and 11×20 for the column named "id",
+ * against the 24×24 minimum in WCAG 2.2 SC 2.5.8, in a row 255px wide of which 235px did nothing.
+ * Metabase's own row is a full-width `<label>` at `min-height: 2.25rem` with a hover background,
+ * which is what this is now.
+ *
+ * MAKING IT REORDERABLE IS NOT PART OF THIS. The table already has a reorder — on the Display tab,
+ * over the RESULT columns (`TableColumnsSection`, backed by `tableState`) — so adding a second one
+ * here would give one chart two column orders, stored in two places, with nothing on screen saying
+ * which wins. That is a design decision about what a table's column order means, not a matter of
+ * presentation, and it is written up rather than made here.
+ */
+function CheckList({ idPrefix, empty, options, selected, onToggle, onSetAll }: {
+  idPrefix: string;
+  empty: string;
+  options: string[];
+  selected: string[];
+  onToggle: (name: string) => void;
+  /** Replaces the whole selection — the same `string[]` the toggles produce, never a new shape. */
+  onSetAll: (next: string[]) => void;
 }) {
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
+  const shown = q ? options.filter((o) => o.toLowerCase().includes(q)) : options;
+  const chosen = options.filter((o) => selected.includes(o));
+  const allOn = options.length > 0 && chosen.length === options.length;
+
+  if (options.length === 0) return <p className="text-xs italic text-muted-foreground">{empty}</p>;
+
   return (
     <div className="space-y-1 pt-1">
-      {options.length === 0 && <p className="text-xs italic text-muted-foreground">{empty}</p>}
-      {options.map((name) => (
-        <div key={name} className="flex items-center gap-2">
-          <Checkbox id={`${idPrefix}-${name}`} checked={selected.includes(name)} onCheckedChange={() => onToggle(name)} />
-          <Label htmlFor={`${idPrefix}-${name}`} className="cursor-pointer text-sm font-normal">{name}</Label>
-        </div>
-      ))}
+      {options.length > FILTER_THRESHOLD && (
+        <Input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={`Filter ${options.length} fields…`}
+          aria-label="Filter fields"
+          className="h-8 w-full text-sm"
+        />
+      )}
+      {/* Select-all is INDETERMINATE at a partial selection rather than showing an empty box that
+          would tick everything — that is Metabase's `indeterminate={!isAll && !isNone}` and it is
+          the only way the control can state the list's state as well as offer an action. It also
+          carries the count, which is the one fact a scrolled list hides. */}
+      <label className="flex min-h-8 cursor-pointer items-center gap-2 rounded-md border-b px-1 hover:bg-muted/50">
+        <Checkbox
+          checked={allOn ? true : chosen.length === 0 ? false : "indeterminate"}
+          aria-label="Select all fields"
+          onCheckedChange={() => onSetAll(allOn ? [] : options)}
+        />
+        <span className="text-sm text-muted-foreground">
+          {chosen.length} of {options.length} selected
+        </span>
+      </label>
+      {/* Bounded, and the bound is why: without it the panel's own scrollbar was the only one, so
+          on a wide table the Row limit below this list was several screens down and the author had
+          to scroll past every column to reach it. `max-h-64` is eight rows — past the point where
+          the filter above is the faster way in. */}
+      <div className="max-h-64 space-y-0.5 overflow-y-auto [scrollbar-gutter:stable]">
+        {shown.length === 0 && (
+          <p className="px-1 py-2 text-xs text-muted-foreground">No field matches “{query.trim()}”.</p>
+        )}
+        {shown.map((name) => (
+          // The whole row is the target: a `<label>` wrapping the checkbox, so the 235px that used
+          // to do nothing now toggles it, and the row is at least 32px tall in both axes.
+          <label
+            key={name}
+            htmlFor={`${idPrefix}-${name}`}
+            className="flex min-h-8 cursor-pointer items-center gap-2 rounded-md px-1 hover:bg-muted/50"
+          >
+            <Checkbox id={`${idPrefix}-${name}`} checked={selected.includes(name)} onCheckedChange={() => onToggle(name)} />
+            <span className="min-w-0 flex-1 truncate text-sm" title={name}>{name}</span>
+          </label>
+        ))}
+      </div>
     </div>
   );
 }
@@ -35,10 +116,17 @@ function TableMetricsControl({ config, onChange, metrics }: VizControlProps<Tabl
   return (
     <div className="space-y-1">
       <Label className={LABEL_CLASS}>Metrics</Label>
-      <p className="text-xs text-muted-foreground">Pick metrics for an aggregated table, or just columns for raw rows.</p>
+      {/* ONE LINE, NOT THREE. This block used to open with a two-line instruction and then, on the
+          common case of a dataset that defines no metrics, an italic "No metrics on this dataset."
+          — four lines of prose before the reader reached anything they could act on, at the very
+          top of the tab. The sentence still has to be said (a table with a metric aggregates and
+          one without does not, and nothing else on screen says so), so it is said once and short;
+          `CheckList` owns the empty case, which is where it belongs. */}
+      <p className="text-xs text-muted-foreground">With none, the table lists raw rows.</p>
       <CheckList idPrefix="metric" empty="No metrics on this dataset."
         options={metrics.map((m) => m.metric_name)} selected={config.metrics}
-        onToggle={(n) => onChange({ metrics: toggle(config.metrics, n) })} />
+        onToggle={(n) => onChange({ metrics: toggle(config.metrics, n) })}
+        onSetAll={(next) => onChange({ metrics: next })} />
     </div>
   );
 }
@@ -50,7 +138,8 @@ function TableColumnsControl({ config, onChange, columns, unitRow }: VizControlP
         <Label className={LABEL_CLASS}>Columns</Label>
         <CheckList idPrefix="col" empty="Select a dataset to see columns."
           options={columns.map((c) => c.column_name)} selected={config.columns}
-          onToggle={(n) => onChange({ columns: toggle(config.columns, n) })} />
+          onToggle={(n) => onChange({ columns: toggle(config.columns, n) })}
+          onSetAll={(next) => onChange({ columns: next })} />
       </div>
       {config.metrics.length > 0 && config.columns.map((c) => <div key={c}>{unitRow(c)}</div>)}
     </>
@@ -63,7 +152,8 @@ function ObjectFieldsControl({ config, onChange, columns }: VizControlProps<Obje
       <Label className={LABEL_CLASS}>Fields</Label>
       <CheckList idPrefix="obj" empty="Select a dataset to see columns."
         options={columns.map((c) => c.column_name)} selected={config.columns}
-        onToggle={(n) => onChange({ columns: toggle(config.columns, n) })} />
+        onToggle={(n) => onChange({ columns: toggle(config.columns, n) })}
+        onSetAll={(next) => onChange({ columns: next })} />
     </div>
   );
 }

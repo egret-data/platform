@@ -166,7 +166,7 @@ function ProgressDisplayControl({ config, onChange, metrics }: VizControlProps<C
           value={(config.goalColumn as string | undefined) ?? "__none"}
           onValueChange={(v) => onChange({ goalColumn: v === "__none" ? undefined : v } as Partial<Cfg>)}
         >
-          <SelectTrigger aria-label="Goal from a metric" className="h-8 text-sm"><SelectValue /></SelectTrigger>
+          <SelectTrigger aria-label="Goal from a metric" className="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="__none">None — use the fixed goal</SelectItem>
             {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
@@ -244,7 +244,7 @@ function FunnelTypeControl({ config, onChange }: VizControlProps<Cfg>) {
       <Label className="text-sm font-normal">Funnel type</Label>
       <Select value={(config.type as string | undefined) ?? "funnel"}
         onValueChange={(v) => onChange({ type: v === "funnel" ? undefined : v } as Partial<Cfg>)}>
-        <SelectTrigger aria-label="Funnel type" className="h-8 text-sm"><SelectValue /></SelectTrigger>
+        <SelectTrigger aria-label="Funnel type" className="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value="funnel">Funnel — one narrowing band</SelectItem>
           <SelectItem value="bar">Bar — a column per step</SelectItem>

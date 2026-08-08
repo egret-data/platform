@@ -8,7 +8,7 @@ import type { MapConfig, MapType, QuerySpec } from "@/api/charts";
 import type { SharedQueryState, VizControlProps, VizDescriptor } from "./types";
 import { SERIES_PALETTE } from "@/components/chart/echarts/palette";
 
-const LABEL_CLASS = "text-xs font-medium uppercase tracking-wide text-muted-foreground";
+import { FIELD_LABEL as LABEL_CLASS } from "@/components/chart/settings/FieldLabel";
 
 /**
  * WHICH MAP the rows are painted onto — Metabase's "Region map".
@@ -31,7 +31,7 @@ function MapTypeControl({ config, onChange }: VizControlProps<MapConfig>) {
     <div className="space-y-1">
       <Label className={LABEL_CLASS}>Map</Label>
       <Select value={config.mapKey} onValueChange={(v) => onChange({ mapKey: v })}>
-        <SelectTrigger aria-label="Map" className="h-8 text-sm"><SelectValue /></SelectTrigger>
+        <SelectTrigger aria-label="Map" className="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
         <SelectContent>
           {Object.values(MAPS).map((m) => <SelectItem key={m.key} value={m.key}>{m.label}</SelectItem>)}
         </SelectContent>
@@ -64,7 +64,7 @@ function MapTypeSelect({ config, onChange, columns }: VizControlProps<MapConfig>
           v === "pin" ? { type: "pin", ...defaultCoordinates(config, columns) } : { type: v as MapType },
         )}
       >
-        <SelectTrigger aria-label="Map type" className="h-8 text-sm"><SelectValue /></SelectTrigger>
+        <SelectTrigger aria-label="Map type" className="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value="region">Region map</SelectItem>
           <SelectItem value="pin">Pin map</SelectItem>
@@ -124,7 +124,7 @@ function MapControls({ config, onChange, columns, metrics }: VizControlProps<Map
       <div className="space-y-1">
         <Label className={LABEL_CLASS}>Region</Label>
         <Select value={config.region ?? ""} onValueChange={(v) => onChange({ region: v || undefined })}>
-          <SelectTrigger aria-label="Region" className="h-8 text-sm"><SelectValue placeholder="Pick a region column…" /></SelectTrigger>
+          <SelectTrigger aria-label="Region" className="h-8 w-full text-sm"><SelectValue placeholder="Pick a region column…" /></SelectTrigger>
           <SelectContent>
             {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
           </SelectContent>
@@ -133,7 +133,7 @@ function MapControls({ config, onChange, columns, metrics }: VizControlProps<Map
       <div className="space-y-1">
         <Label className={LABEL_CLASS}>Metric</Label>
         <Select value={config.metric ?? ""} onValueChange={(v) => onChange({ metric: v || undefined })}>
-          <SelectTrigger aria-label="Metric" className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
+          <SelectTrigger aria-label="Metric" className="h-8 w-full text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
           <SelectContent>
             {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
           </SelectContent>
@@ -172,7 +172,7 @@ function PinControls({ config, onChange, columns }: VizControlProps<MapConfig>) 
     <div className="space-y-1">
       <Label className={LABEL_CLASS}>{label}</Label>
       <Select value={value ?? ""} onValueChange={(v) => onPick(v || undefined)}>
-        <SelectTrigger aria-label={label} className="h-8 text-sm">
+        <SelectTrigger aria-label={label} className="h-8 w-full text-sm">
           <SelectValue placeholder={`Pick a ${label.toLowerCase()} column…`} />
         </SelectTrigger>
         <SelectContent>

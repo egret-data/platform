@@ -10,7 +10,7 @@ import { isParamsV2 } from "@/api/charts";
 import type { AnyChartParams, QuerySpec, VizSettings, VizType } from "@/api/charts";
 import type { SharedQueryState, VizControl, VizControlProps, VizDescriptor } from "./types";
 
-const LABEL_CLASS = "text-xs font-medium uppercase tracking-wide text-muted-foreground";
+import { FIELD_LABEL as LABEL_CLASS } from "@/components/chart/settings/FieldLabel";
 
 type Cfg = Record<string, unknown>;
 
@@ -151,7 +151,7 @@ function FieldControl({ field, config, onChange, columns, metrics, unitRow }: {
       <div className="space-y-1">
         <Label className={LABEL_CLASS}>{field.label}</Label>
         <Select value={(config[field.id] as string) ?? ""} onValueChange={(v) => set(v || undefined)}>
-          <SelectTrigger className="h-8 text-sm">
+          <SelectTrigger className="h-8 w-full text-sm">
             <SelectValue placeholder={field.placeholder ?? (field.kind === "metric" ? "Pick a metric…" : "Pick a dimension…")} />
           </SelectTrigger>
           <SelectContent>
@@ -196,7 +196,7 @@ function DimensionsControl({ field, config, options, labelOf, onChange, unitRow 
         return (
           <div key={i} className="flex items-center gap-1">
             <Select value={value ?? ""} onValueChange={(v) => { if (v) { const next = [...chosen]; next[i] = v; emit(next); } }}>
-              <SelectTrigger className="h-8 text-sm">
+              <SelectTrigger className="h-8 w-full text-sm">
                 <SelectValue placeholder={value === undefined ? "Add a dimension…" : (field.placeholder ?? "Pick a dimension…")} />
               </SelectTrigger>
               <SelectContent>

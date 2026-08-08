@@ -32,6 +32,45 @@ describe("FieldZone display names", () => {
   });
 });
 
+/**
+ * The zone's own controls, measured live in the pivot's 255px panel before this:
+ *   drag grip  14 × 14
+ *   remove ×    8 × 20
+ *   "Add rows…" 255 × 26
+ * against WCAG 2.2 SC 2.5.8's 24 × 24 minimum, in a chip with ~200px of inert space between the
+ * two. jsdom measures nothing, so what is pinned here is the sizing class each control carries —
+ * `size-6` is 24×24, `min-h-8` is 32 tall — and the browser numbers are in the PR body.
+ */
+describe("FieldZone controls are big enough to hit", () => {
+  const zone = () => render(<FieldZone label="Rows" selected={["region"]} options={["region", "state"]}
+    labels={{ region: "Region" }} onChange={vi.fn()} />);
+
+  it("gives the drag grip and the remove button a 24px target around their icons", () => {
+    zone();
+    expect(screen.getByRole("button", { name: "reorder Region" }).className).toContain("size-6");
+    expect(screen.getByRole("button", { name: "remove Region" }).className).toContain("size-6");
+  });
+
+  it("gives the add affordance a full row", () => {
+    zone();
+    expect(screen.getByRole("button", { name: "add rows" }).className).toContain("min-h-8");
+  });
+
+  /** A zone with nothing selected and nothing left to offer used to draw its heading over blank
+   *  space — live, the pivot's Values zone on a dataset that defines no metrics. */
+  it("explains an empty zone rather than heading blank space", () => {
+    render(<FieldZone label="Values" selected={[]} options={[]} onChange={vi.fn()} />);
+    expect(screen.getByText(/Nothing available for values/i)).toBeInTheDocument();
+  });
+
+  /** The heading is the zone's accessible name, so the chips inside it are announced as belonging
+   *  somewhere. It was a bare `<div>` tied to nothing. */
+  it("names the group its chips belong to", () => {
+    zone();
+    expect(screen.getByRole("group", { name: "Rows" })).toBeInTheDocument();
+  });
+});
+
 describe("FieldZone labels reach the cartesian zones too", () => {
   it("a metric's verbose name shows in a Y-axis zone", () => {
     render(<FieldZone label="Y-axis" selected={["total_revenue"]} options={["total_revenue"]}

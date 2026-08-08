@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { pruneUnits } from "@/components/chart/temporal-units";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { FieldZone } from "@/components/chart/config/FieldZone";
@@ -78,11 +79,34 @@ function metricLabels(metrics: { metric_name: string; verbose_name?: string }[])
   return out;
 }
 
-function RowsControl({ config, onChange, columns }: VizControlProps<PivotConfig>) {
+/**
+ * A zone's grouping controls sit UNDER THAT ZONE.
+ *
+ * Both zones' unit rows used to be emitted together at the bottom of `ColsControl`, so a temporal
+ * field dropped in ROWS got its grouping control rendered after the whole COLUMNS zone — seen live
+ * on the kind deployment, where a pivot with `order_month` in Rows read:
+ *
+ *     ROWS      order_month ×          COLUMNS   Add columns…
+ *               Add rows…              UNIT · ORDER_MONTH   [Month]
+ *                                      VALUES    Add values…
+ *
+ * — the control two headings away from the only field it configures. The comment that put them
+ * there was solving the right problem (two date dimensions produced two identical "UNIT" rows) with
+ * the wrong half of the fix: naming the field was necessary, batching them was not, and the batch
+ * is what moved the control away from its field. Naming stays; the batch goes.
+ */
+function unitRowsFor(fields: string[], unitRow: (col?: string) => ReactNode) {
+  return fields.map((c) => <div key={c}>{unitRow(c)}</div>);
+}
+
+function RowsControl({ config, onChange, columns, unitRow }: VizControlProps<PivotConfig>) {
   return (
-    <FieldZone label="Rows" selected={config.rows} onChange={(v) => onChange({ rows: v })}
-      labels={columnLabels(columns)}
-      options={columns.map((c) => c.column_name).filter((n) => !config.cols.includes(n))} />
+    <>
+      <FieldZone label="Rows" selected={config.rows} onChange={(v) => onChange({ rows: v })}
+        labels={columnLabels(columns)}
+        options={columns.map((c) => c.column_name).filter((n) => !config.cols.includes(n))} />
+      {unitRowsFor(config.rows, unitRow)}
+    </>
   );
 }
 
@@ -92,10 +116,7 @@ function ColsControl({ config, onChange, columns, unitRow }: VizControlProps<Piv
       <FieldZone label="Columns" selected={config.cols} onChange={(v) => onChange({ cols: v })}
         labels={columnLabels(columns)}
         options={columns.map((c) => c.column_name).filter((n) => !config.rows.includes(n))} />
-      {/* One unit row per temporal field across BOTH zones. `unitRow` names the field it belongs
-          to — with two date dimensions there were two identical "UNIT" rows and no way to tell
-          which was which. */}
-      {[...config.rows, ...config.cols].map((c) => <div key={c}>{unitRow(c)}</div>)}
+      {unitRowsFor(config.cols, unitRow)}
     </>
   );
 }

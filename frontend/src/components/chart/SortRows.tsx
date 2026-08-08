@@ -6,7 +6,7 @@ import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
 
-const LABEL_CLASS = "text-xs font-medium uppercase tracking-wide text-muted-foreground";
+import { FIELD_LABEL as LABEL_CLASS } from "@/components/chart/settings/FieldLabel";
 const ICON_BUTTON = "rounded p-0.5 hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent";
 
 /**
@@ -108,7 +108,7 @@ export function SortRows({ fields, value, onChange }: {
         {/* Gone once every field is sorted on — there is nothing left it could add. */}
         {unused.length > 0 && (
           <Select value="" onValueChange={(v) => { if (v) onChange([...value, { field: v, desc: false }]); }}>
-            <SelectTrigger aria-label="add a sort" className="h-8 text-sm">
+            <SelectTrigger aria-label="add a sort" className="h-8 w-full text-sm">
               <SelectValue placeholder="Add a sort…" />
             </SelectTrigger>
             <SelectContent>
