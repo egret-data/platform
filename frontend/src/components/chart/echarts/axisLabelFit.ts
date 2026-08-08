@@ -803,6 +803,36 @@ export function verticalValueAxisFit({
  * The threshold is stated in the card's own terms — the insets, the labels, their margin and the
  * plot that has to survive — because that is the arithmetic ECharts is doing when it decides to
  * spill. `26` is the title band `plotWidthLessGutter` also charges, kept in step with it.
+ *
+ * ── THE SUB-PIXEL "TOUCHES" ARE NOT TOUCHES. MEASURED, AND DELIBERATELY NOT FIXED. ──────────────
+ * #442 filed two residues under "found, not fixed": `MB · Bar Breakout`'s `revenue` title touching
+ * `2,000`/`4,000`/`6,000` by 0.4–0.5px, and a pre-existing 8.1×0.6px touch between the value axis's
+ * `0` and the first category label, on every cartesian card. Both are real numbers and neither is
+ * visible, at any device pixel ratio or zoom, and the reason is that BOTH WERE MEASURED ON LAYOUT
+ * BOXES rather than on ink.
+ *
+ * An SVG `<text>`'s client rect is its line box: full ascent-to-descent vertically, and horizontally
+ * the glyphs' advance widths including their side bearings. The painted ink is strictly inside it.
+ * Re-measured on the parity dashboard at 1440×900 with `canvas.measureText`'s
+ * `actualBoundingBox{Left,Right,Ascent,Descent}` — real ink extents — transformed through each
+ * element's own `getScreenCTM` so the rotated title is handled as rotated rather than as a wide
+ * horizontal box, every one of the thirteen box-overlapping pairs on the dashboard has ZERO ink
+ * overlap:
+ *
+ *   Bar Breakout / Bar Breakout Desc   `revenue` × `2,000`   boxes 1.87×2.54px   ink 6.47px APART
+ *   Line, Area, Combo, Area Breakout   `0` × `January 2026`  boxes 8.44×0.55px   ink 4.86px APART
+ *   Scatter                            `20`×`40`, `40`×`60`, `60`×`80`
+ *                                                            boxes ~0.3-0.5×15px ink ~1.8px APART
+ *
+ * A gap is in CSS pixels and scales with zoom, so it stays a gap at every zoom level; at DPR 2 the
+ * smallest of them is 3.6 device pixels of clear space, against antialiasing that spreads ink by at
+ * most about one. Nothing is drawn over anything.
+ *
+ * SO THE ANSWER IS TO DO NOTHING, and the record is here so the next sweep does not re-file it. The
+ * fix would have been to widen a gap that is already clear, which costs plot width on the narrowest
+ * cards this module spends most of its length protecting. What SHOULD be taken from this is the
+ * instrument: any future overlap claim about axis text has to be made on ink, because a box-overlap
+ * number will report a collision between two labels that a reader can see daylight between.
  */
 export function nameGapClearOf(labelWidth: number, size: EChartsSize): number | undefined {
   const g = CHART_THEME.grid;

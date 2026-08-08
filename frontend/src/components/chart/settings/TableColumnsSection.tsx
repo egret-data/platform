@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
+import { displayName, fieldTitle, type FieldLabels } from "@/components/chart/config/field-names";
 import { colIcon, colKind } from "./FormatSection";
 import { ColumnSettingsPopover } from "./ColumnSettingsPopover";
 import { FIELD_LABEL, GROUP_LABEL } from "./FieldLabel";
@@ -29,6 +30,10 @@ export interface QueryFieldGroup {
   label: string;
   options: string[];
   selected: string[];
+  /** Machine name -> what the dataset calls the field. Optional because a caller that has no
+   *  `DatasetColumn[]` to hand (a dashboard card's per-card panel) has nothing to supply; absent
+   *  simply falls through to the machine name, which is `displayName`'s own contract. */
+  labels?: FieldLabels;
   onChange: (next: string[]) => void;
 }
 
@@ -173,8 +178,24 @@ export function TableColumnsSection({
                 {g.options.length === 0 && (
                   <p className="text-xs italic text-muted-foreground">Nothing to pick from.</p>
                 )}
+                {/* THE ROW IS THE TARGET, AND THE NAME IS THE DATASET'S.
+                    This is the Data tab's field list reached from the Display tab — the same
+                    fields, built by `ChartExplore` out of the same `columns.map(c => c.column_name)`
+                    — and it got neither of the two things that list got. #441 measured the Data
+                    tab's version at a 16×16 box beside an 11×20 label in a row of which 235px did
+                    nothing, and made its rows full-width 32px `<label>`s with hover; #444 taught it
+                    to read `verbose_name`. Measured here on the kind deployment before this change:
+                    a `<div>` 237px wide and 20px tall, of which `region`'s box-plus-label spanned
+                    62px, saying `region` while the Data tab one click away said "Khu vực".
+                    Both fixes are now literally the same markup and the same helper as `table.tsx`'s
+                    `CheckList`, which is the point — the defect was two lists of one thing
+                    disagreeing, so a third spelling of the row would have been the same bug again. */}
                 {g.options.map((name) => (
-                  <div key={name} className="flex items-center gap-2">
+                  <label
+                    key={name}
+                    htmlFor={`qf-${gi}-${name}`}
+                    className="flex min-h-8 cursor-pointer items-center gap-2 rounded-md px-1 hover:bg-muted/50"
+                  >
                     <Checkbox
                       id={`qf-${gi}-${name}`}
                       checked={g.selected.includes(name)}
@@ -186,8 +207,13 @@ export function TableColumnsSection({
                         )
                       }
                     />
-                    <Label htmlFor={`qf-${gi}-${name}`} className="cursor-pointer text-sm font-normal">{name}</Label>
-                  </div>
+                    {/* The friendly name with the machine name on hover — `CheckList`'s anatomy,
+                        for the reason it gives: a second LINE doubles the height of renamed rows
+                        only, and a list with three renames in it goes ragged. */}
+                    <span className="min-w-0 flex-1 truncate text-sm" title={fieldTitle(name, g.labels)}>
+                      {displayName(name, g.labels)}
+                    </span>
+                  </label>
                 ))}
               </div>
             ))}

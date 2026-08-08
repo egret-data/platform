@@ -20,6 +20,7 @@ import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Dialog,
@@ -482,15 +483,34 @@ export function AddStorageDialog({
               )}
             </div>
 
+            {/* THREE OF THIS CONTROL'S FOUR CLASSES WERE DEAD, which is worse than them being
+                wrong. It carried `h-4 w-4 rounded border-border accent-primary`, and measured on
+                the kind deployment against `main`'s bundle, `getComputedStyle` returned
+                `appearance: auto`, `border-width: 0px`, `border-radius: 0px`. Nothing ever reset
+                `appearance`, so the UA painted the whole control itself and `rounded` and
+                `border-border` produced no pixels at all — only `accent-color` got through, and
+                only to tint the tick. What was on screen was the PLATFORM's checkbox: its shape,
+                its tick, its focus ring, different on macOS, Windows and Linux, beside an app that
+                draws everything else itself.
+
+                So this was never a case of #443's radius fix being overridden — it is a case of it
+                never applying, along with the transparent 24×24 pointer target SC 2.5.8 asks for
+                (measured: 16×16 before, 24×24 after) and the indeterminate mark, which a native
+                input cannot draw from JSX at all.
+
+                The row is `gap-3` with the label 12px to the right and nothing within 16px above or
+                below, so the 4px bleed of the hit area collides with nothing — measured. Clicking
+                the label toggles the control: verified live, twice, as two separate interactions
+                rather than one tick, and note the default here is `useState(true)`, which is what
+                made the first check look like a failure. */}
             <div className="flex items-center gap-3">
-              <input
-                type="checkbox"
+              <Checkbox
                 id="cps-path-style"
                 checked={pathStyle}
-                onChange={(e) => setPathStyle(e.target.checked)}
-                className="h-4 w-4 rounded border-border accent-primary cursor-pointer"
+                onCheckedChange={(v) => setPathStyle(v === true)}
+                className="cursor-pointer"
               />
-              <Label htmlFor="cps-path-style">
+              <Label htmlFor="cps-path-style" className="cursor-pointer">
                 Force path-style URL (s3.region.amazonaws.com/bucket)
               </Label>
             </div>

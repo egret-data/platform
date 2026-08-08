@@ -1,3 +1,4 @@
+import { Checkbox } from "@/components/ui/checkbox";
 import type { DashboardParameter, ParamType, ParamOperator, ParamWidget } from "@/api/dashboards";
 import { OPERATORS } from "./ParameterEditor";
 
@@ -107,16 +108,29 @@ export function FilterSettingsPanel({ param, allParameters, cardColumns = [], on
         <div className="flex flex-col gap-1">
           <div className="text-xs text-muted-foreground">Linked filters</div>
           <p className="text-xs text-muted-foreground/70">Limit this filter's choices to values that match the selected filters.</p>
+          {/* THE DENSEST LIST THIS CHANGE TOUCHES, and the one worth measuring rather than
+              assuming. #443 sized the primitive's transparent hit area at 24×24 against the
+              permission picker's 26px pitch, which leaves 2px between neighbouring targets.
+              These rows are `text-sm` (a 20px line box) in a `gap-1` column: a 24px pitch, so
+              the 24px targets ABUT exactly — 0px between, and still no overlap, so no click
+              can land on the wrong filter. Measured in the browser at 24.00px pitch with
+              neighbouring target boxes sharing an edge and never crossing it.
+
+              `min-h-8` was considered and NOT applied. It would give a 36px pitch and a
+              comfortable gap, but it also grows a list that is already one of several stacked
+              in a 255px side panel, and #441's argument for 32px rows was that THE ROW BECOMES
+              THE TARGET — which it already is here, because the `<label>` wraps the control and
+              spans the row. Height would buy nothing this list does not have. */}
           {others.map((o) => (
-            <label key={o.id} className="flex items-center gap-2 text-sm">
-              <input type="checkbox" aria-label={`link ${o.name}`} checked={linked.includes(o.id)} onChange={() => toggleLink(o.id)} /> {o.name}
+            <label key={o.id} htmlFor={`fsp-link-${o.id}`} className="flex cursor-pointer items-center gap-2 text-sm">
+              <Checkbox id={`fsp-link-${o.id}`} aria-label={`link ${o.name}`} checked={linked.includes(o.id)} onCheckedChange={() => toggleLink(o.id)} /> {o.name}
             </label>
           ))}
         </div>
       )}
 
-      <label className="flex items-center gap-2 text-sm">
-        <input type="checkbox" aria-label="parameter required" checked={!!param.required} onChange={(e) => onChange({ ...param, required: e.target.checked })} /> Required
+      <label htmlFor={`fsp-required-${param.id}`} className="flex cursor-pointer items-center gap-2 text-sm">
+        <Checkbox id={`fsp-required-${param.id}`} aria-label="parameter required" checked={!!param.required} onCheckedChange={(v) => onChange({ ...param, required: v === true })} /> Required
       </label>
       <button type="button" aria-label="delete filter" className="self-start text-sm text-destructive hover:underline" onClick={onDelete}>Delete filter</button>
     </div>

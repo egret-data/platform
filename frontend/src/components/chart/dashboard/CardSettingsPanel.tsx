@@ -1,3 +1,4 @@
+import { Checkbox } from "@/components/ui/checkbox";
 import type { Chart } from "@/api/charts";
 import type { DashboardParameter } from "@/api/dashboards";
 import type { ClickBehavior } from "./click-behavior";
@@ -25,9 +26,16 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
   ) : null;
   const eligibleChart = card.card_type === "chart" && (chart?.viz_type === "table" || chart?.viz_type === "pivot_table");
   const eligible = card.card_type === "text" || card.card_type === "heading" || card.card_type === "link" || eligibleChart;
+  // THE PRIMITIVE, NOT `<input type="checkbox">`, and the `htmlFor` is not decoration.
+  // #443 gave `Checkbox` a 4px radius (a 16px box at the old 6px read as a radio, and shape
+  // is how a reader tells "choose one" from "choose many") and a transparent 24×24 hit area
+  // for WCAG 2.2 SC 2.5.8. A raw input in this file got neither. Radix renders the control as
+  // a `<button role="checkbox">`; a button IS labelable, so the wrapping `<label>` keeps
+  // forwarding clicks from the row's whole width, but the explicit id/htmlFor pair is what
+  // `table.tsx` settled on after #441 and matching it costs nothing.
   const autoHeightRow = eligible ? (
-    <label className="flex items-center justify-between gap-2 text-sm"><span>Auto height</span>
-      <input type="checkbox" aria-label="auto height" checked={!!card.options.autoHeight} onChange={(e) => onUpdateOptions({ autoHeight: e.target.checked })} />
+    <label htmlFor={`cs-auto-height-${card.id}`} className="flex items-center justify-between gap-2 text-sm"><span>Auto height</span>
+      <Checkbox id={`cs-auto-height-${card.id}`} aria-label="auto height" checked={!!card.options.autoHeight} onCheckedChange={(v) => onUpdateOptions({ autoHeight: v === true })} />
     </label>
   ) : null;
   // Metabase's wording, verbatim, because this panel is measured against its dashcard
@@ -35,8 +43,8 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
   // never be empty, which is the same line Metabase draws
   // (`getHidden: ([{ card }]) => isVirtualDashCard(card)`).
   const hideEmptyRow = card.card_type === "chart" ? (
-    <label className="flex items-center justify-between gap-2 text-sm"><span>Hide this card if there are no results</span>
-      <input type="checkbox" aria-label="hide when empty" checked={!!card.options.hideEmpty} onChange={(e) => onUpdateOptions({ hideEmpty: e.target.checked })} />
+    <label htmlFor={`cs-hide-empty-${card.id}`} className="flex items-center justify-between gap-2 text-sm"><span>Hide this card if there are no results</span>
+      <Checkbox id={`cs-hide-empty-${card.id}`} aria-label="hide when empty" checked={!!card.options.hideEmpty} onCheckedChange={(v) => onUpdateOptions({ hideEmpty: v === true })} />
     </label>
   ) : null;
   if (card.card_type === "text" || card.card_type === "heading") {

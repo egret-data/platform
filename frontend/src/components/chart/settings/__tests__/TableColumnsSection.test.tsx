@@ -404,6 +404,64 @@ describe("TableColumnsSection — Add or remove columns", () => {
     await user.click(screen.getByLabelText("vendor"));
     expect(groups[0].onChange).toHaveBeenCalledWith(["id", "total_revenue", "state", "vendor"]);
   });
+
+  /**
+   * THE AFFORDANCES ITS TWIN GOT AND THIS ONE DID NOT.
+   *
+   * #441 measured the Data tab's checkbox list — a 16×16 box beside an 11×20 label in a 255px row
+   * of which 235px did nothing — and gave it full-width 32px `<label>` rows with a hover
+   * background, which is Metabase's own `min-height: 2.25rem` field row. THIS picker is the same
+   * list of the same fields, reached from the Display tab, and it kept the old shape: measured on
+   * the kind deployment against the seeded `Demo Sales`, a `<div>` row 237px wide and **20px**
+   * tall, of which the checkbox plus the label spanned 62px for `region` — **175px inert**.
+   *
+   * WCAG 2.2 SC 2.5.8 is met for the box itself by #443's transparent `::before` (24×24, and at
+   * the 24px row pitch here the neighbouring targets abut without overlapping — measured). What is
+   * missing is that the ROW is not the target, which #441 argues is the better fix wherever a row
+   * CAN be one. It can be here.
+   *
+   * jsdom lays nothing out, so this pins the markup that produces the 32px — the element being a
+   * `<label>` bound to the box, and `min-h-8` on it. The pixels are in the PR body.
+   */
+  it("gives each pickable field a full-width 32px label row, not a 20px div", async () => {
+    const user = userEvent.setup();
+    render(<TableColumnsSection columns={THREE} value={{}} onChange={() => {}} queryFields={queryFields()} />);
+    await user.click(screen.getByRole("button", { name: /add or remove columns/i }));
+    for (const name of ["id", "total_revenue", "state", "vendor", "revenue"]) {
+      const box = screen.getByLabelText(name);
+      const row = box.closest("label");
+      expect(row, `${name}'s row is not a <label>, so only the box and the text are clickable`)
+        .not.toBeNull();
+      expect(row!.className, `${name}'s row does not state a row height`).toMatch(/\bmin-h-8\b/);
+      expect(row!.getAttribute("for")).toBe(box.id);
+    }
+  });
+
+  /**
+   * AND THE NAME. `ChartExplore` builds this picker's options from the very same
+   * `columns.map(c => c.column_name)` the Data tab's list uses — which #444 taught to read
+   * `verbose_name`. It did not reach here, because the options arrive as bare strings. Live, that
+   * put "Khu vực" on the Data tab and `region` on the Display tab, one click apart.
+   *
+   * Identity is untouched: the emitted value is still the machine name, asserted below rather
+   * than assumed, because a picker that started storing the display name would look identical.
+   */
+  it("says what the dataset calls a field, and still stores the machine name", async () => {
+    const user = userEvent.setup();
+    const groups = [{
+      label: "Demo Sales",
+      options: ["region", "category"],
+      selected: [],
+      labels: { region: "Khu vực" },
+      onChange: vi.fn(),
+    }];
+    render(<TableColumnsSection columns={THREE} value={{}} onChange={() => {}} queryFields={groups} />);
+    await user.click(screen.getByRole("button", { name: /add or remove columns/i }));
+    expect(screen.getByText("Khu vực")).toBeInTheDocument();
+    expect(screen.queryByText("region")).toBeNull();
+    await user.click(screen.getByText("Khu vực"));
+    expect(groups[0].onChange).toHaveBeenCalledWith(["region"]);
+  });
 });
 
 /**

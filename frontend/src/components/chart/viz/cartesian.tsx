@@ -1,6 +1,7 @@
 import { pruneUnits } from "@/components/chart/temporal-units";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { FieldZone } from "@/components/chart/config/FieldZone";
+import { columnLabels, displayName, fieldTitle, metricLabels } from "@/components/chart/config/field-names";
 import {
   SeriesOptions, CartesianAxesTab, OrientationOption, FormatOptions, GoalOptions, TrendOption,
 } from "@/components/chart/settings/CartesianDisplaySection";
@@ -19,7 +20,27 @@ import type { SharedQueryState, VizControl, VizControlProps, VizDescriptor } fro
 
 import { FIELD_LABEL as LABEL_CLASS } from "@/components/chart/settings/FieldLabel";
 
+/**
+ * WHAT A FIELD IS CALLED, ON EVERY `<Select>` IN THIS FILE.
+ *
+ * `displayName`/`fieldTitle` come from `config/field-names.ts` — the same two functions the
+ * `FieldZone` beside these controls has used since #444, which is the whole point. Before this,
+ * the Y-axis zone offered "Khu vực" and the X-axis select offered `region`, and they sit in the
+ * same 255px column: the state #444 identified as the defect, in a file it did not touch.
+ *
+ * THE VALUE IS ALWAYS THE MACHINE NAME. `value={c.column_name}` is untouched and always will be
+ * — a chart's stored config keys on the column the query returns, so renaming a column in the
+ * dataset must never rewrite a saved chart. `displayName` changes only the child text, and
+ * Radix's `SelectValue` renders that same child into the trigger, so the closed control reads
+ * the friendly name for free.
+ *
+ * `title` carries `Khu vực (region)` on hover, matching the chip in `FieldZone` and the row in
+ * the table's `CheckList`. A SECOND LINE was rejected here even though those two use one: a
+ * `SelectItem` is a fixed-height row inside a scrolled popover, and doubling the height of the
+ * renamed rows only would make the list go ragged where the zone's popover can afford it.
+ */
 function XAxisControl({ config, onChange, columns, unitRow }: VizControlProps<CartesianConfig>) {
+  const labels = columnLabels(columns);
   return (
     <>
       <div className="space-y-1">
@@ -27,7 +48,11 @@ function XAxisControl({ config, onChange, columns, unitRow }: VizControlProps<Ca
         <Select value={config.xAxis ?? ""} onValueChange={(v) => onChange({ xAxis: v || undefined })}>
           <SelectTrigger className="h-8 w-full text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
           <SelectContent>
-            {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+            {columns.map((c) => (
+              <SelectItem key={c.column_name} value={c.column_name} title={fieldTitle(c.column_name, labels)}>
+                {displayName(c.column_name, labels)}
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
       </div>
@@ -37,6 +62,7 @@ function XAxisControl({ config, onChange, columns, unitRow }: VizControlProps<Ca
 }
 
 function XMetricControl({ config, onChange, metrics }: VizControlProps<CartesianConfig>) {
+  const labels = metricLabels(metrics);
   return (
     <div className="space-y-1">
       <Label className={LABEL_CLASS}>X metric (optional)</Label>
@@ -44,7 +70,11 @@ function XMetricControl({ config, onChange, metrics }: VizControlProps<Cartesian
         <SelectTrigger className="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value="__none">None — use the dimension</SelectItem>
-          {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+          {metrics.map((m) => (
+            <SelectItem key={m.metric_name} value={m.metric_name} title={fieldTitle(m.metric_name, labels)}>
+              {displayName(m.metric_name, labels)}
+            </SelectItem>
+          ))}
         </SelectContent>
       </Select>
     </div>
@@ -54,6 +84,7 @@ function XMetricControl({ config, onChange, metrics }: VizControlProps<Cartesian
 /** Metabase's "Bubble size": a third metric sizing each point. Only meaningful on a true
  *  metric-vs-metric scatter, so it hides until an x metric is chosen. */
 function BubbleMetricControl({ config, onChange, metrics }: VizControlProps<CartesianConfig>) {
+  const labels = metricLabels(metrics);
   if (!config.xMetric) return null;
   return (
     <div className="space-y-1">
@@ -62,27 +93,21 @@ function BubbleMetricControl({ config, onChange, metrics }: VizControlProps<Cart
         <SelectTrigger aria-label="Bubble size" className="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value="__none">None — every point the same size</SelectItem>
-          {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+          {metrics.map((m) => (
+            <SelectItem key={m.metric_name} value={m.metric_name} title={fieldTitle(m.metric_name, labels)}>
+              {displayName(m.metric_name, labels)}
+            </SelectItem>
+          ))}
         </SelectContent>
       </Select>
     </div>
   );
 }
 
-/** Machine name -> display name, from the dataset's own `verbose_name`. */
-function labelMap(items: { verbose_name?: string }[], nameOf: (i: never) => string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const i of items) {
-    const v = i.verbose_name?.trim();
-    if (v) out[nameOf(i as never)] = v;
-  }
-  return out;
-}
-
 function YAxisControl({ config, onChange, metrics }: VizControlProps<CartesianConfig>) {
   return (
     <FieldZone label="Y-axis" selected={config.yMetrics} onChange={(v) => onChange({ yMetrics: v })}
-      labels={labelMap(metrics, (m: { metric_name: string }) => m.metric_name)}
+      labels={metricLabels(metrics)}
       options={metrics.map((m) => m.metric_name)} />
   );
 }
@@ -133,7 +158,7 @@ function TooltipMetricsControl({ config, onChange, metrics }: VizControlProps<Ca
   return (
     <div className="space-y-1">
       <FieldZone label="Tooltip metrics" selected={selected} onChange={(v) => onChange({ tooltipMetrics: v })}
-        labels={labelMap(metrics, (m: { metric_name: string }) => m.metric_name)}
+        labels={metricLabels(metrics)}
         options={options} />
       {config.series
         ? <p className="text-xs text-muted-foreground">Not shown while the chart has a breakout — each
@@ -144,6 +169,7 @@ function TooltipMetricsControl({ config, onChange, metrics }: VizControlProps<Ca
 }
 
 function SeriesControl({ config, onChange, columns }: VizControlProps<CartesianConfig>) {
+  const labels = columnLabels(columns);
   return (
     <div className="space-y-1">
       <Label className={LABEL_CLASS}>Series</Label>
@@ -152,7 +178,11 @@ function SeriesControl({ config, onChange, columns }: VizControlProps<CartesianC
         <SelectContent>
           <SelectItem value="__none">None</SelectItem>
           {columns.filter((c) => c.column_name !== config.xAxis)
-            .map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+            .map((c) => (
+              <SelectItem key={c.column_name} value={c.column_name} title={fieldTitle(c.column_name, labels)}>
+                {displayName(c.column_name, labels)}
+              </SelectItem>
+            ))}
         </SelectContent>
       </Select>
       {config.series && config.yMetrics.length > 1 && (

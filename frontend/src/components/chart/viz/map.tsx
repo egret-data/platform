@@ -3,6 +3,7 @@ import { MAPS } from "@/components/chart/echarts/maps/registry";
 import { Label } from "@/components/ui/label";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 import { FieldZone } from "@/components/chart/config/FieldZone";
+import { columnLabels, displayName, fieldTitle, metricLabels } from "@/components/chart/config/field-names";
 import { isParamsV2 } from "@/api/charts";
 import type { MapConfig, MapType, QuerySpec } from "@/api/charts";
 import type { SharedQueryState, VizControlProps, VizDescriptor } from "./types";
@@ -117,7 +118,19 @@ function defaultCoordinates(config: MapConfig, columns: VizControlProps<MapConfi
  *  Renders NOTHING in pin mode, rather than rendering disabled: Metabase hides these behind
  *  `getHidden: vizSettings["map.type"] !== "region"` for the same reason, and a Region picker on a
  *  pin map is a control that saves and does not paint. */
+/**
+ * WHAT A FIELD IS CALLED, ON EVERY `<Select>` IN THIS FILE — `displayName`/`fieldTitle` from
+ * `config/field-names.ts`, the same two functions `PinTooltipColumns`' `FieldZone` below already
+ * uses. This file was where the split was WORST and where it was measured: on the pin map's Data
+ * tab, the `Label` select offered `region` while `Add tooltip columns…` — 78px lower, on the same
+ * panel, both openable at once — offered `Khu vực`. One column, one tab, two names.
+ *
+ * The value stays `c.column_name` at every site: a saved map keys on the column the query returns,
+ * so renaming a column in the dataset must not rewrite the chart. See `field-names.ts`.
+ */
 function MapControls({ config, onChange, columns, metrics }: VizControlProps<MapConfig>) {
+  const colLabels = columnLabels(columns);
+  const mLabels = metricLabels(metrics);
   if ((config.type ?? "region") !== "region") return null;
   return (
     <>
@@ -126,7 +139,11 @@ function MapControls({ config, onChange, columns, metrics }: VizControlProps<Map
         <Select value={config.region ?? ""} onValueChange={(v) => onChange({ region: v || undefined })}>
           <SelectTrigger aria-label="Region" className="h-8 w-full text-sm"><SelectValue placeholder="Pick a region column…" /></SelectTrigger>
           <SelectContent>
-            {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+            {columns.map((c) => (
+              <SelectItem key={c.column_name} value={c.column_name} title={fieldTitle(c.column_name, colLabels)}>
+                {displayName(c.column_name, colLabels)}
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
       </div>
@@ -135,7 +152,11 @@ function MapControls({ config, onChange, columns, metrics }: VizControlProps<Map
         <Select value={config.metric ?? ""} onValueChange={(v) => onChange({ metric: v || undefined })}>
           <SelectTrigger aria-label="Metric" className="h-8 w-full text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
           <SelectContent>
-            {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+            {metrics.map((m) => (
+              <SelectItem key={m.metric_name} value={m.metric_name} title={fieldTitle(m.metric_name, mLabels)}>
+                {displayName(m.metric_name, mLabels)}
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
       </div>
@@ -164,6 +185,7 @@ function MapControls({ config, onChange, columns, metrics }: VizControlProps<Map
  * `defaultCoordinates` for why a declared type is not the name-guess #434 rejected.
  */
 function PinControls({ config, onChange, columns }: VizControlProps<MapConfig>) {
+  const labels = columnLabels(columns);
   if (config.type !== "pin") return null;
   const numeric = columns.filter((c) => c.type_generic === "numeric");
   const field = (
@@ -176,7 +198,11 @@ function PinControls({ config, onChange, columns }: VizControlProps<MapConfig>) 
           <SelectValue placeholder={`Pick a ${label.toLowerCase()} column…`} />
         </SelectTrigger>
         <SelectContent>
-          {opts.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+          {opts.map((c) => (
+            <SelectItem key={c.column_name} value={c.column_name} title={fieldTitle(c.column_name, labels)}>
+              {displayName(c.column_name, labels)}
+            </SelectItem>
+          ))}
         </SelectContent>
       </Select>
     </div>
@@ -220,11 +246,7 @@ function PinTooltipColumns({ config, onChange, columns }: VizControlProps<MapCon
   const selected = config.tooltipColumns ?? [];
   const options = columns.map((c) => c.column_name).filter((c) => !used.has(c));
   if (options.length === 0 && selected.length === 0) return null;
-  const labels: Record<string, string> = {};
-  for (const c of columns) {
-    const v = c.verbose_name?.trim();
-    if (v) labels[c.column_name] = v;
-  }
+  const labels = columnLabels(columns);
   return (
     <div className="space-y-1">
       <FieldZone

@@ -5,6 +5,7 @@ import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { Label } from "@/components/ui/label";
 import { DecimalInput } from "@/components/chart/settings/DecimalInput";
 import { Checkbox } from "@/components/ui/checkbox";
+import { columnLabels, metricLabels, displayName } from "@/components/chart/config/field-names";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 import { isParamsV2 } from "@/api/charts";
 import type { AnyChartParams, QuerySpec, VizSettings, VizType } from "@/api/charts";
@@ -139,10 +140,18 @@ function FieldControl({ field, config, onChange, columns, metrics, unitRow }: {
   // Datasets have carried `verbose_name` for a long time and offer a UI to set it, but every field
   // picker read the machine name, so naming a column "Total Sales" changed nothing here. Value
   // stays the machine name — only the label changes.
-  const labelOf = (n: string) =>
-    (field.kind === "metric"
-      ? metrics.find((m) => m.metric_name === n)?.verbose_name
-      : columns.find((c) => c.column_name === n)?.verbose_name)?.trim() || n;
+  //
+  // THIS WAS A HAND-ROLLED `displayName`, and #444 filed it as one of three "genuinely different
+  // shapes" needing their own refactor. It is not different: it is a lookup by name against the
+  // one map `columnLabels`/`metricLabels` build, with the identical blank-and-whitespace guard
+  // (`?.trim() || n`) spelled out longhand. Folding it in needed no flags and no options object,
+  // which is the test this codebase applies to a share — the recorded failure is a shared function
+  // that grew a parameter per caller, not one that absorbed a duplicate unchanged.
+  //
+  // Two `find`s per option became one map for the list, which is incidental but real: the pie's
+  // dimension picker builds this once for up to three slots over every column in the dataset.
+  const labels = field.kind === "metric" ? metricLabels(metrics) : columnLabels(columns);
+  const labelOf = (n: string) => displayName(n, labels);
   if (field.kind === "dimensions") {
     return <DimensionsControl field={field} config={config} options={options} labelOf={labelOf} onChange={onChange} unitRow={unitRow} />;
   }

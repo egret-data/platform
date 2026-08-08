@@ -13,6 +13,7 @@ import { DrillMenu } from "@/components/chart/DrillMenu";
 import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
 import type { DrillContext } from "@/components/chart/drill";
 import { ChartTypeGallery } from "@/components/chart/ChartTypeGallery";
+import { columnLabels, metricLabels } from "@/components/chart/config/field-names";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { SharedDisplaySections, styleColumnsFor, ruleColumnsFor } from "@/components/chart/settings/SharedDisplaySections";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
@@ -293,6 +294,10 @@ export default function ChartExplore() {
         label: detail.data?.name ?? "Columns",
         options: columns.map((c) => c.column_name),
         selected: cfg.columns ?? [],
+        // The Data tab's list is built from this exact array and has read `verbose_name` since
+        // #444. The options here are bare strings, so the naming has to travel beside them or the
+        // two lists — the same fields, one click apart — go back to disagreeing.
+        labels: columnLabels(columns),
         onChange: (next: string[]) => patchDescConfig({ columns: next } as never),
       },
       ...(metrics.length
@@ -300,6 +305,7 @@ export default function ChartExplore() {
             label: "Metrics",
             options: metrics.map((m) => m.metric_name),
             selected: cfg.metrics ?? [],
+            labels: metricLabels(metrics),
             onChange: (next: string[]) => patchDescConfig({ metrics: next } as never),
           }]
         : []),
