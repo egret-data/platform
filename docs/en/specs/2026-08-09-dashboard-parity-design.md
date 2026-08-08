@@ -165,11 +165,22 @@ so nothing already built changes appearance.
 
 ### 3.2 Dashboard-level actions reachable only from the list page
 
-`duplicate`, `trash`, `delete`, and `folder` mutations all exist in `api/dashboards.ts:121-136`
-and are fully implemented server-side (`crates/egret-bi/src/dashboard.rs`), but `DashboardView`
-imports none of them (`DashboardView.tsx:61` destructures only `update, restore, addBookmark,
-removeBookmark`). To duplicate the dashboard you are looking at, you must navigate away to the
-list.
+`remove`, `duplicate`, `trash`, `restore` and the bookmark mutations exist in
+`api/dashboards.ts:121-136`; **the folder mutations are not there** — they are `useSetFolder` /
+`useFolders` / `useFolderMutations` in `api/folders.ts`, dispatching to the generated
+`dashboardsDbSetFolder`. All are fully implemented server-side
+(`crates/egret-bi/src/dashboard.rs`), but `DashboardView` imports none of them
+(`DashboardView.tsx:61` destructures only `update, restore, addBookmark, removeBookmark`). To
+duplicate the dashboard you are looking at, you must navigate away to the list.
+
+⚠️ **Two things this makes harder than "just wiring".** First, `DashboardDetailDto`
+(`bi.rs:360-372`) carries **no `folder_id`** — only `DashboardSummary` does — so the dashboard
+page cannot learn its own folder from its own query. Second, `useDashboardParams` has no reset
+and **cannot get one by looping**: react-router hands each functional `setSearchParams` updater
+the current location, so N synchronous `setValue` calls all read the same `prev` and only the
+last survives. "Reset all filters" must be a single write. (Two independent readings of this
+code found that same defect; see also §2.5's third item, which is the identical hazard reached
+from the auto-apply side.)
 
 Metabase's "…" menu on the dashboard page itself: Reset all filters, Subscriptions, Enter
 fullscreen, Edit settings, Move, Duplicate, Move to trash
@@ -257,6 +268,13 @@ guard.
   (`RefreshWidgetTarget.tsx:33-54`).
 - **"…" actions menu** on the dashboard page: Duplicate, Move to folder, Move to trash, Edit
   settings, Reset all filters. All mutations already exist (§3.2).
+  ⚠️ **No confirm dialogs.** An earlier draft called this "wiring plus confirm dialogs, matching
+  what the list page already does". The list page confirms **nothing** for Duplicate, Move or
+  Move to Trash — `Dashboards.tsx:112-121` shows `onTrash` as a bare mutation followed by a
+  toast. Its only `ConfirmDeleteDialog` guards "Delete permanently", which is not on Metabase's
+  dashboard-page menu and is out of scope here. Matching the list page therefore means **no**
+  dialog on any of these rows; the sole dialog is `FolderNameDialog` for "Move to new folder…".
+  Assert the absence, so a later well-meaning addition has to argue with a test.
 - **Keyboard shortcuts.** Port the subset that maps onto features egret has:
   `e` edit / cancel edit, `s` save, `o` bookmark, `]` info sidebar, `f` add filter,
   `a` add card, `1`–`9` select tab. Not ported: `q`/`n` (new question from dashboard — egret
