@@ -5,7 +5,7 @@ import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue, specifiesDateRendering } from "../../format";
 import { ariaDescription, baseTextStyle, tooltipSurface } from "../base";
-import { CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, symbolShape } from "../palette";
+import { CHART_THEME, COLOR_FALLBACK, lineType, mixColor, resolveColor, symbolShape } from "../palette";
 import { colorsForKeys } from "../keyColors";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
 import { boundarySteps, namesAPeriod, periodName } from "@/components/chart/temporal-period";
@@ -2153,6 +2153,75 @@ function decorateSeries(
   return out;
 }
 
+/**
+ * A LEGEND NEEDS 100px PER ENTRY, AND A CARD UNDER 400px THAT CANNOT GIVE IT THAT GETS NO LEGEND.
+ *
+ * Metabase's rule, copied from `visualizations/components/legend/LegendLayout.tsx` rather than
+ * invented here — the whole of it is four lines:
+ *
+ *     const maxXItems  = Math.floor(width / MIN_ITEM_WIDTH);   // MIN_ITEM_WIDTH   = 100
+ *     const isNarrow   = width < MIN_LEGEND_WIDTH;             // MIN_LEGEND_WIDTH = 400
+ *     const isVertical = maxXItems < items.length;
+ *     const isVisible  = hasLegend && !(isVertical && isNarrow);
+ *
+ * Past 400px Metabase turns the legend VERTICAL and puts it beside the plot, which is why the
+ * `isNarrow` half exists at all; egret's legend is an ECharts component along the top and has no
+ * vertical mode, so what it takes from the rule is the refusal and not the reflow. Below 400px the
+ * two products then agree exactly, which is the range every measurement behind this was taken in.
+ *
+ * WHAT IT REPLACES. Measured at 209px on all three breakout cards in both themes: four entries were
+ * laid out across ~307px inside a 193px plot, and ECharts' scroll legend clips MID-ITEM — so the
+ * card drew one named entry, one coloured chip with no name beside it, two entries gone entirely,
+ * and a "1/4" pager offering four pages for four series. Verified against Metabase at :3033 with
+ * the same four-band card at 170, 214, 258 and 345px: its series legend is absent at every one of
+ * them, and the only "legend" nodes in its DOM are the card's own title caption.
+ *
+ * That is the better answer, and not merely the compatible one. The pager was never the defect —
+ * two of four series unnamed and two invisible is not a legend at any pager position — and the
+ * 24px band it costs at the top of a 262px card is worth more to the plot than to a control the
+ * reader cannot read. The series are still named on hover, which is where a narrow card's reader
+ * was already getting them.
+ *
+ * AN UNMEASURED CARD KEEPS ITS LEGEND. `size` absent means "not laid out yet" — a hidden container,
+ * a first paint, jsdom — never "tiny", which is the same reading `measurable` and the funnel's
+ * `useMeasuredSize` already take. Refusing here would strip the legend from every chart in the
+ * test suite and from the first frame of every chart in the product.
+ */
+export function legendFitsAcross(size: EChartsSize | undefined, items: number): boolean {
+  if (size == null || size.width <= 0) return true;
+  const card = size.width + CARD_INSET_PX;
+  if (card >= LEGEND_MIN_WIDTH) return true;
+  return items <= Math.floor(card / LEGEND_MIN_ITEM_WIDTH);
+}
+/** Metabase's `MIN_ITEM_WIDTH` — the width one legend entry is assumed to need. */
+const LEGEND_MIN_ITEM_WIDTH = 100;
+/** Metabase's `MIN_LEGEND_WIDTH` — above this it reflows rather than refusing, so egret stops asking. */
+const LEGEND_MIN_WIDTH = 400;
+/**
+ * THE CARD'S PADDING, added back because Metabase asks this question of the CARD and egret only
+ * measures the plot inside it.
+ *
+ * `EChartsRenderer` observes the ECharts HOST, which sits inside the dashboard card's padding:
+ * measured across eight cards on the parity dashboard, every one of them is a 209px card with a
+ * 193px host — a flat 16px, 8px a side. Metabase's `LegendLayout` is handed its visualization's own
+ * width, which is the card's content box (measured: a 214px card gives it 212, a 170px card 168).
+ *
+ * WITHOUT THIS TERM THE RULE MISCLASSIFIES egret's most common card, and its own two measurements
+ * say so. On a 209px card the four-band breakout legend is unusable (four entries laid out across
+ * ~307px, clipped mid-item) and the two-metric combo legend is fine (`orders` and `revenue` occupy
+ * ~128px of the 193 available, no pager). `floor(193/100) = 1` is below both counts and hides both
+ * — it would have taken a working legend off "MB · Combo", which this sweep found clean. `floor(209
+ * / 100) = 2` separates them exactly, and agrees with Metabase's own boundary: it draws this same
+ * two-series legend at a 214px card and drops it at 170px.
+ *
+ * So the term is not a fudge toward a desired answer; it is the difference between measuring the
+ * plot and measuring the card, and the card is what the rule was written about. A chart outside a
+ * dashboard card has less chrome than this and is over-credited by up to 16px, which can only ever
+ * admit one extra entry at a boundary — the harmless direction, and the same direction every other
+ * "declined to refuse" default in this builder errs in.
+ */
+const CARD_INSET_PX = 16;
+
 function baseOption(
   cfg: CartesianBuildConfig,
   categories: (string | number)[],
@@ -2237,15 +2306,63 @@ function baseOption(
   const yTitle = yTitleFor();
   // OVER A SERIES LIST, not over metric names — see `onAxis`. It used to skip a series whose
   // `__metric` was absent from the list, which cannot tell one breakout band from another.
+  /**
+   * THE BIGGEST NUMBER THE VALUE AXIS HAS TO DRAW — which on a stack is the PILE'S, not any one
+   * datum's, and getting that wrong is what put uncompacted labels under a rotated axis title.
+   *
+   * MEASURED, at 209px and again at 309px so it is not a fit decision a wider card would undo. The
+   * harness's "MB · Area" and "MB · Area Breakout" plot the same metric over the same twelve months
+   * to the same ~24.7K maximum with the same settings shape. "MB · Area" drew `0/5K/10K/15K/20K/25K`;
+   * the breakout drew `0/5,000/…/25,000`, and those six-character labels ran under the rotated
+   * "revenue" title by 6.2x15px on "10,000" and 6.1x15px on "15,000".
+   *
+   * THE CAUSE WAS TWO FUNCTIONS DESCRIBING ONE AXIS AND DISAGREEING. `axisExtent` sums a stack per
+   * category — it has since the row chart's interval fit needed it, and its own note argues why —
+   * while this took the largest single DATUM. On a GROUPED chart the two agree by construction:
+   * unstacked bands sit side by side from one baseline, so the axis really does stop at the tallest
+   * band, and "MB · Bar Breakout" drawing `0/2,000/…/8,000` at a 6K band maximum is correct and
+   * matches Metabase. On a STACK they cannot agree: each band peaks near 6K and the axis is drawn
+   * to the 24K pile, so the 10,000 threshold below was being asked about a number the axis never
+   * draws. The arithmetic here is now `axisExtent`'s own, asked of the same `resolveStacked`
+   * predicate `decorateSeries` consults when it writes `stack: "total"`.
+   *
+   * NORMALISATION NEEDS NOTHING FROM THIS, deliberately. A normalised stack is 0-100 by
+   * construction: `isNormalized` short-circuits both `axisExtent` and `fmtFor` before either
+   * reaches here, so teaching this function about it as well would be a second copy of a rule that
+   * already holds. THE STACK TOTAL LABELS NEED NOTHING EITHER, and for a different reason: they are
+   * DATA labels, and `showValues` states one line up that a label sitting on the data is formatted
+   * through the exact formatter rather than the compact one. `stackTotalSeries` already does that,
+   * so a pile labelled "24,724.86" over an axis reading "25K" is this builder's existing and
+   * deliberate split between what the axis says and what a datum says — not a gap this opens.
+   *
+   * ONE SERIES IN, ONE SERIES OUT: `panelGutter` asks this per panel via `fmtFor([s])`, and summing
+   * a single series per index is that series' own values, so the split-panel path is unmoved
+   * whatever `cfg.stacked` says.
+   */
   const widestOf = (list: SeriesLike[]) => {
+    const stacked = resolveStacked(cfg);
     let widest = 0;
+    // Positives and negatives kept apart, as `axisExtent` keeps them: ECharts stacks them into two
+    // piles growing in opposite directions from the baseline, and a net figure is shorter than both.
+    const up: number[] = [], down: number[] = [];
     for (const s of list) {
-      for (const d of (s.data ?? []) as unknown[]) {
+      const data = (s.data ?? []) as unknown[];
+      for (let i = 0; i < data.length; i++) {
         // On a value/time x-axis the datum is a `{value: [x, y], name}` item — the y is what the
         // axis shows. `datumY` unwraps both that and the bare `[x, y]` pair it replaced.
-        const n = Math.abs(Number(datumY(d)));
-        if (Number.isFinite(n) && n > widest) widest = n;
+        const y = Number(datumY(data[i]));
+        if (!Number.isFinite(y)) continue;
+        if (!stacked) {
+          const n = Math.abs(y);
+          if (n > widest) widest = n;
+        } else if (y >= 0) up[i] = (up[i] ?? 0) + y;
+        else down[i] = (down[i] ?? 0) + y;
       }
+    }
+    // `filter` skips the holes a sparse index leaves, exactly as `axisExtent` does — a category
+    // every series is null at must not contribute an `undefined` and turn this into NaN.
+    for (const v of [...up, ...down].filter((n) => Number.isFinite(n))) {
+      if (Math.abs(v) > widest) widest = Math.abs(v);
     }
     return widest;
   };
@@ -2664,7 +2781,7 @@ function baseOption(
    * The stacking overrides deliberately do NOT follow this switch — see `buildCartesianOption`,
    * which argues why a stack that appears and disappears with a card's height is the worse answer.
    */
-  const drawLegend = showLegend && !splitting;
+  const drawLegend = showLegend && !splitting && legendFitsAcross(size, plotted.length);
 
   // Metabase puts the legend along the top; reserve room there for it. The category axis
   // sits at the bottom normally and on the left when horizontal — the value axis is the
@@ -3103,8 +3220,49 @@ function baseOption(
 
   // Trend series stay out of the legend.
   const legendNames = series.filter((s) => !(s as SeriesLike).__trend && !(s as SeriesLike).__total).map((s) => (s as SeriesLike).name);
+  /**
+   * THE LEGEND, IN THE THEME'S OWN INK — which it had never been, on any cartesian chart in the
+   * product.
+   *
+   * MEASURED in a browser on the deployed bundle, at both card sizes and in BOTH THEMES: every
+   * legend label rendered at the literal `#54555a` and the scroll pager at `#6d6e73`, byte for byte
+   * the same in light and dark, while every axis label and title an inch away resolved
+   * `var(--muted-foreground)` properly — `oklch(0.49 0.07 270.49)` in light, `oklch(0.71 0.01
+   * 286.09)` in dark. Against the dark card surface (`oklch(0.21 0.01 285.93)`) that constant sits
+   * near 2.4:1. A legend label is TEXT, not a non-text indicator, so its bar is 4.5:1 and it was
+   * failing by a wide margin in one of the two themes the product ships.
+   *
+   * WHY IT WAS A CONSTANT AT ALL. It is ECharts' own default, reached because this option named no
+   * `textStyle` — `base.ts` records that the shared `bottomLegend`/`sideLegend` builders which used
+   * to carry a theme were deleted when the pie stopped being the only caller, and no cartesian
+   * legend ever had one of its own. Nothing was overridden; the question was never asked.
+   *
+   * ECHARTS CANNOT READ A CSS CUSTOM PROPERTY — it paints into a canvas/SVG it owns, and `oklch(...)`
+   * only ever reaches it as a resolved string. `axisLabelColor` is that resolution, computed once at
+   * the top of this builder and already handed to every axis label, every axis name, the panel
+   * titles, the split chart's rotated `graphic` and the goal line. This joins that list rather than
+   * opening a second route to the same token; `scatterXY`'s own legend has carried it since it was
+   * written, which is the precedent being followed.
+   *
+   * ALL FOUR KEYS, because the pager is three separate colours and only the first is the label:
+   * `pageTextStyle` is the "1/4", `pageIconColor` the arrow that can still be clicked and
+   * `pageIconInactiveColor` the one at the end of the run. Leaving any of them would have themed
+   * the legend and left the control beside it stranded on the constant this removes.
+   */
   const legend = drawLegend
-    ? { top: 0, left: "center" as const, type: "scroll" as const, ...(legendNames.length !== series.length ? { data: legendNames } : {}) }
+    ? {
+        top: 0,
+        left: "center" as const,
+        type: "scroll" as const,
+        textStyle: { color: axisLabelColor },
+        pageTextStyle: { color: axisLabelColor },
+        pageIconColor: axisLabelColor,
+        // The disabled arrow, mixed toward the surface so it reads as unavailable in EITHER theme —
+        // a second hand-picked token would have to be re-checked per theme, which is the trap the
+        // tooltip's ink ramp already documents at length in `base.ts`.
+        pageIconInactiveColor: mixColor(axisLabelColor, resolveColor("var(--card)", COLOR_FALLBACK.card), 0.4),
+        ...(legendNames.length !== series.length ? { data: legendNames } : {}),
+      }
     : undefined;
   /**
    * THE PANEL TITLES, which are what egret has instead of a legend here — see the `panelSeries` note
@@ -3237,14 +3395,50 @@ function baseOption(
       ? described
       : described.filter((s) => s.name == null || selected[s.name] !== false);
     const first = shown[0];
+    /**
+     * WHAT THE CHART IS OF — the metric under a breakout, the first series otherwise.
+     *
+     * MEASURED on all three breakout cards, at both sizes and in both themes: "MB · Bar Breakout"
+     * announced "Bar chart of DOOHICKEY by order_month. 12 values: 4 series; …" and then read
+     * Doohickey's twelve numbers, while the chart drew revenue broken out by category — four bands
+     * and forty-eight points. "MB · Bar Breakout Desc", whose bands sort the other way, said "of
+     * Widget". Whichever band happened to sort first was being announced as the chart's subject.
+     *
+     * `first?.name` IS STILL RIGHT WITHOUT A BREAKOUT, which is why this is a branch and not a
+     * replacement: on the combo card the first series IS a metric (`orders`), the legend says so,
+     * and the values enumerated below are its own. The nineteen non-breakout cards were swept clean
+     * and none of them moves.
+     *
+     * UNDER A BREAKOUT THE ANSWER ALREADY EXISTED and was never asked for: every band carries the
+     * same `__metric`, so `metricsOf` returns exactly one column and `metricTitle` resolves it
+     * through the same rename ladder that titles the value axis — which is why this card's own axis
+     * was correctly labelled "revenue" the whole time the description said "Doohickey".
+     *
+     * #400's principle is that a description must describe what is DRAWN. A recent sweep found the
+     * pie naming slices it was not drawing and fixed it by asking the same question of the drawn
+     * arcs (`rootSlices`); this is that generalisation reaching the family one over — ask the
+     * option what it is showing rather than taking the first thing in a list.
+     *
+     * No fallback to `cfg.yMetrics[0]` on either arm: with every series hidden there is no metric
+     * being described, and naming one would tell a screen reader about a chart nobody can see.
+     */
+    const subject = hasBreakout ? (metricTitle(metricsOf(shown)) ?? first?.name) : first?.name;
     return ariaDescription({
-      kind: `${cfg.kind === "line" ? "Line" : cfg.kind === "area" ? "Area" : cfg.kind === "scatter" ? "Scatter" : cfg.kind === "combo" ? "Combo" : "Bar"} chart`,
-      // No fallback to cfg.yMetrics[0]: with every series hidden there is no metric being
-      // described, and naming one would tell a screen reader about a chart nobody can see.
-      //
-      // The series' DISPLAY name, which is what the legend shows — so this arm needs nothing of its
-      // own, and a breakout band named for its period (`seriesDisplayName`) is heard as one here too.
-      metric: first?.name,
+      kind: `${cfg.kind === "line" ? "Line" : cfg.kind === "area" ? "Area" : cfg.kind === "row" ? "Row" : cfg.kind === "scatter" ? "Scatter" : cfg.kind === "combo" ? "Combo" : "Bar"} chart`,
+      metric: subject,
+      /**
+       * WHICH SERIES THE NUMBERS BELOW BELONG TO, stated only when it is not already the subject.
+       *
+       * Naming the metric alone would have traded a wrong subject for an unattributed enumeration:
+       * a reader would hear "Bar chart of revenue … 4 series" and then twelve numbers with nothing
+       * saying they are Doohickey's rather than the chart's. So the band is stated instead of
+       * dropped.
+       *
+       * The condition is what keeps this off the swept cards by construction rather than by a
+       * second `hasBreakout` test: on a combo the subject IS the first series' name, the two agree,
+       * and `ariaDescription` emits the sentence it emitted before this change, byte for byte.
+       */
+      seriesName: first?.name !== subject ? first?.name : undefined,
       // The dimension AS THE AXIS TITLE NAMES IT, not the raw column name. `titleOf` is the same
       // rename ladder `xTitle` is built from — but read past `showXLabel`, because hiding the title
       // takes a label off the card and should not take the dimension out of the description with it:

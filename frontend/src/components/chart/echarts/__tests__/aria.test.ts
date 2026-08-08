@@ -126,8 +126,15 @@ describe("a bucketed temporal axis is described the way it is drawn", () => {
   });
 
   it("names a breakout's bands the way the legend does", () => {
-    // The legend and the aria's metric are ONE string — `first.name`, the series' display name —
-    // so a band named for the raw bucket is heard as one too. Both ends pinned.
+    // The legend and the aria name a band with ONE string — the series' display name — so a band
+    // named for the raw bucket is heard as one too. That is this test's subject and it is unchanged.
+    //
+    // MOVED: the last line asserted `of January 2026 by region`, which was the aria taking the
+    // FIRST BAND for the chart's subject. Measured on three breakout cards, that is how "MB · Bar
+    // Breakout" came to announce itself as a chart "of Doohickey" and its DESC twin as one "of
+    // Widget" — the same chart, described by whichever band happened to sort first. The subject is
+    // the metric the bands share; the band now qualifies the numbers being read instead of
+    // replacing the subject, which is what this test was really pinning and what it still pins.
     const o = buildCartesianOption(
       [{ name: "region", type: "varchar" }, { name: "order_date", type: "date" }, { name: "rev", type: "double" }],
       [["EU", "2026-01-01", 10], ["EU", "2026-02-01", 4]],
@@ -136,7 +143,10 @@ describe("a bucketed temporal axis is described the way it is drawn", () => {
     expect(o.series.map((s) => s.name)).toEqual(["January 2026", "February 2026"]);
     // …and the raw value still rides along, because that is what a drill filters by.
     expect(o.series.map((s) => s.__raw)).toEqual(["2026-01-01", "2026-02-01"]);
-    expect(o.aria.label.description).toContain("of January 2026 by region");
+    expect(o.aria.label.description).toContain("of rev by region");
+    // The band, in the legend's own formatting and never as `2026-01-01` — the original point.
+    expect(o.aria.label.description).toContain("showing January 2026");
+    expect(o.aria.label.description).not.toContain("2026-01-01");
   });
 
   it("names the period the bucket covers, on the waterfall", () => {

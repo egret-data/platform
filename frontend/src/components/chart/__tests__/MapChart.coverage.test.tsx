@@ -107,16 +107,25 @@ describe("MapChart — a pin map accounts for its own rows", () => {
   });
 
   /**
-   * NOT ONE ROW LANDS, so the sentence REPLACES the card — the same treatment "Couldn't load the
-   * map" and "No data" already get in this component, rather than a third presentation.
+   * MOVED. Paris and Tokyo on the US states map are both OFF-MAP, and off-map pins are drawn.
+   *
+   * This asserted that the card is replaced by "None of these 2 rows can be shown … Try a map that
+   * covers them" — a sentence that told the reader another map would cover these rows while
+   * removing the map on which they had, in fact, already been plotted. Both pins exist in the
+   * option; only the extent was elsewhere. So the card keeps its chart, and the note underneath
+   * says what is true: nothing is in view, and here is how to reach it.
+   *
+   * The replacement presentation is unchanged and still tested — see the transposition case below,
+   * where the coordinates are not coordinates and no roaming will ever find them.
    */
-  it("replaces the chart when nothing can be shown, and offers another map", async () => {
+  it("keeps the chart when every pin is off the map, and says nothing is in view", async () => {
     const { container } = await draw([PARIS, ["Tokyo", 35.6895, 139.6917]]);
-    expect(container.querySelector('[data-testid="echarts"]')).toBeNull();
-    expect(container.textContent).toContain("None of these 2 rows can be shown");
-    expect(container.textContent).toContain("Try a map that covers them");
+    expect(container.querySelector('[data-testid="echarts"]')).not.toBeNull();
+    expect(container.textContent).toContain("Showing 0 of 2 rows");
+    expect(container.textContent).toContain("2 are outside the US states map");
+    expect(container.textContent).toContain("Zoom out or pan the map to reach them");
     // Never both messages on one card.
-    expect(container.textContent).not.toContain("Showing");
+    expect(container.textContent).not.toContain("None of these");
   });
 
   /**
