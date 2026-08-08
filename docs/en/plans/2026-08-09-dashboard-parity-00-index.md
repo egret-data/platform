@@ -84,6 +84,27 @@ adds net lines to `DashboardView.tsx` should be reviewed for a missing extractio
 
 ---
 
+## Addendum: one spec requirement no workstream claimed
+
+Found by the plan-set self-review, 2026-08-09. Design §3.3 records that
+`CreateDashboard.description` exists on the backend (`crates/egret-analytics-api/src/bi.rs:376-382`)
+but the create dialog sends `{name}` only (`routes/explore/Dashboards.tsx:73`,
+`api/dashboards.ts:113-116`). No workstream picked it up.
+
+**Assigned to W8**, which already owns the description's other end (it is edited from the info
+sidebar today, and W8 rewrites that sidebar). Land it as W8's Task 0, before the attribution
+migration, because it needs neither.
+
+- **Files:** `frontend/src/routes/explore/Dashboards.tsx` (the create dialog, `:161-170`),
+  `frontend/src/api/dashboards.ts` (`:113-116`), and the dialog's existing test file.
+- **Change:** add an optional `<textarea aria-label="description">` to the create dialog and pass
+  its trimmed value through the create mutation. Omit the field entirely when blank rather than
+  sending `""` — the column is nullable and a blank string would make the info sidebar render an
+  empty description block instead of its placeholder.
+- **Test:** create with a description → the mutation receives it; create with the field left
+  blank → the mutation body has no `description` key at all. Mutation proof: make the blank case
+  send `""` and watch the second assertion go red.
+
 ## Conventions every workstream follows
 
 **Branch.** One branch per workstream, named `feat/dashboard-parity-NN-<slug>`, branched from
