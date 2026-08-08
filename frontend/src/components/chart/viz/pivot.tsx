@@ -2,6 +2,9 @@ import type { ReactNode } from "react";
 import { pruneUnits } from "@/components/chart/temporal-units";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { FieldZone } from "@/components/chart/config/FieldZone";
+// These two built the label map here and nowhere else until the table's Data-tab list needed the
+// SAME map to stop naming a column differently one screen away; they moved rather than being copied.
+import { columnLabels, metricLabels } from "@/components/chart/config/field-names";
 import { SectionLabel } from "@/components/chart/settings/SectionLabel";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -63,20 +66,6 @@ export function pivotFromParams(params: AnyChartParams): PivotConfig {
     collapsedRows: params.collapsedRows ?? [],
     sort: params.pivotSort ?? {},
   };
-}
-
-/** Machine name -> display name, from the dataset's own `verbose_name`. Datasets have offered
- * these for a long time and the chart studio ignored them, so a column named "Total Sales" still
- * showed as `total_revenue` everywhere a field is picked. */
-function columnLabels(columns: { column_name: string; verbose_name?: string }[]): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const c of columns) if (c.verbose_name) out[c.column_name] = c.verbose_name;
-  return out;
-}
-function metricLabels(metrics: { metric_name: string; verbose_name?: string }[]): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const m of metrics) if (m.verbose_name) out[m.metric_name] = m.verbose_name;
-  return out;
 }
 
 /**
