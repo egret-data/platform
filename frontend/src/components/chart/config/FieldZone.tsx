@@ -6,10 +6,15 @@ import {
   SortableContext, verticalListSortingStrategy, useSortable, arrayMove,
   sortableKeyboardCoordinates,
 } from "@dnd-kit/sortable";
+import { useState } from "react";
 import { CSS } from "@dnd-kit/utilities";
 import { GripVertical, Plus, X } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { GROUP_LABEL } from "@/components/chart/settings/FieldLabel";
+import {
+  FIELD_FILTER_THRESHOLD, displayName, matchesField, type FieldLabels,
+} from "@/components/chart/config/field-names";
 
 function Chip({ id, label, onRemove }: { id: string; label: string; onRemove: () => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
@@ -46,6 +51,66 @@ function Chip({ id, label, onRemove }: { id: string; label: string; onRemove: ()
   );
 }
 
+/**
+ * The zone's PICKER, and why it is its own component rather than markup inside the popover.
+ *
+ * It owns the filter query, so the query dies with the popover — Radix unmounts `PopoverContent`
+ * when it closes, and state hoisted into `FieldZone` would instead survive: open the picker, type
+ * "tot", pick a field, reopen, and the list would still be filtered to a search the user finished
+ * with. That is the shape of bug where a control looks broken because it is remembering.
+ *
+ * THE AFFORDANCES ARE THE TABLE'S, ON PURPOSE. #441 gave the table's Data-tab list a filter past
+ * eight fields and a bounded height and left this picker — over the very same dataset columns —
+ * with neither. Measured on the kind deployment against the seeded `MB Raw Orders`: ten options,
+ * no filter box, `max-height: none`, 330px tall. The comparison the sweep ran in one direction
+ * runs in this one too.
+ */
+function FieldPicker({ remaining, labels, onPick }: {
+  remaining: string[];
+  labels?: FieldLabels;
+  /** The filter's accessible name is "Filter fields" verbatim, the same string the table's list
+   *  uses, rather than one naming the zone — only one popover is ever open, and two spellings of
+   *  one control is the divergence this whole change is about. */
+  onPick: (name: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const shown = remaining.filter((o) => matchesField(o, query, labels));
+  return (
+    <>
+      {remaining.length > FIELD_FILTER_THRESHOLD && (
+        <Input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={`Filter ${remaining.length} fields…`}
+          aria-label="Filter fields"
+          className="mb-1 h-8 w-full text-sm"
+        />
+      )}
+      {/* Bounded for the reason #443 capped `DialogContent`: a `PopoverContent` sets no maximum
+          height, so a long list grows past the viewport with nothing able to scroll it back. This
+          one is NOT currently breached — the widest seeded dataset is ten columns and the popover
+          measures 330px — so the bound is a guard rather than a fix, and `max-h-64` is the same
+          eight rows the table's list stops at, past which the filter above is the faster way in. */}
+      <div className="flex max-h-64 flex-col overflow-y-auto [scrollbar-gutter:stable]">
+        {shown.length === 0 && (
+          <p className="px-2 py-2 text-xs text-muted-foreground">No field matches “{query.trim()}”.</p>
+        )}
+        {shown.map((o) => (
+          <button key={o} type="button"
+            className="flex min-h-8 flex-col justify-center rounded px-2 py-1 text-left text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+            onClick={() => onPick(o)}>
+            <span className="block truncate">{displayName(o, labels)}</span>
+            {displayName(o, labels) !== o && (
+              <span className="block truncate text-xs text-muted-foreground">{o}</span>
+            )}
+          </button>
+        ))}
+      </div>
+    </>
+  );
+}
+
 export function FieldZone({
   label, selected, options, onChange, labels,
 }: {
@@ -56,10 +121,11 @@ export function FieldZone({
   /** Machine name -> display name (a dataset column's `verbose_name`, or a metric's). Datasets
    * have carried these for a long time and offer a UI to set them, but the chart studio read only
    * the machine name, so naming a column "Total Sales" changed nothing here. Absent or blank falls
-   * back to the machine name. */
-  labels?: Record<string, string>;
+   * back to the machine name. See `field-names.ts` — the table's Data-tab list now reads the same
+   * map through the same helpers, which is what stopped the two naming one column two ways. */
+  labels?: FieldLabels;
 }) {
-  const nameOf = (n: string) => labels?.[n]?.trim() || n;
+  const nameOf = (n: string) => displayName(n, labels);
   const remaining = options.filter((o) => !selected.includes(o));
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -113,16 +179,8 @@ export function FieldZone({
             </button>
           </PopoverTrigger>
           <PopoverContent align="start" className="w-56 p-1">
-            <div className="flex flex-col">
-              {remaining.map((o) => (
-                <button key={o} type="button"
-                  className="flex min-h-8 flex-col justify-center rounded px-2 py-1 text-left text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
-                  onClick={() => onChange([...selected, o])}>
-                  <span className="block truncate">{nameOf(o)}</span>
-                  {nameOf(o) !== o && <span className="block truncate text-xs text-muted-foreground">{o}</span>}
-                </button>
-              ))}
-            </div>
+            <FieldPicker remaining={remaining} labels={labels}
+              onPick={(o) => onChange([...selected, o])} />
           </PopoverContent>
         </Popover>
       )}

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, within, cleanup } from "@testing-library/react";
 import { createElement } from "react";
-import { tableDescriptor, type TableConfig } from "../table";
+import { objectDescriptor, tableDescriptor, type ObjectConfig, type TableConfig } from "../table";
 import type { VizControlProps } from "../types";
 
 const d = tableDescriptor();
@@ -114,6 +114,118 @@ describe("the table's column list", () => {
     const onChange = renderColumns({ columns: ["id"] });
     fireEvent.click(screen.getByLabelText("vendor"));
     expect(onChange).toHaveBeenCalledWith({ columns: ["id", "vendor"] });
+  });
+
+  /**
+   * THE SAME FIELD, NAMED TWO WAYS, ONE SCREEN APART. `VizControlProps.columns` is
+   * `DatasetColumn[]` and has always carried `verbose_name`; this list read `column_name` and
+   * nothing else, while the pivot's zones one screen down have read `verbose_name` since #438.
+   * Measured on the kind deployment against the seeded `Demo Sales`, whose `region` column is named
+   * "Khu vực": the pivot's "Add rows…" popover offered `Khu vực`, the table's Data-tab COLUMNS list
+   * offered `region`. That divergence — not the widget's shape — is what is left of "the table's
+   * list looks ugly next to the pivot's field zones" after #441.
+   */
+  it("shows a column's verbose name, the way the pivot's zones do", () => {
+    render(createElement(columnsControl.render, {
+      config: { columns: [], metrics: [] },
+      onChange: vi.fn(),
+      columns: [{ column_name: "region", type: "text", verbose_name: "Khu vực" },
+        { column_name: "category", type: "text" }],
+      metrics: [], resultColumns: [], rows: [],
+      temporalUnits: {}, columnSettings: {}, unitRow: () => null,
+    } as unknown as VizControlProps<TableConfig>));
+    expect(screen.getByText("Khu vực")).toBeInTheDocument();
+    expect(screen.queryByText("region")).not.toBeInTheDocument();
+    // Unnamed columns are untouched — the fallback is the machine name, as everywhere else.
+    expect(screen.getByText("category")).toBeInTheDocument();
+  });
+
+  /**
+   * IDENTITY STAYS RAW. The row may SAY "Khu vực" but what it toggles is `region` — the same rule
+   * #410 pinned for the Display tab's merged rows, and the one that keeps a rename from rewriting
+   * a chart's stored projection.
+   */
+  it("still toggles the raw column name behind a renamed row", () => {
+    const onChange = vi.fn();
+    render(createElement(columnsControl.render, {
+      config: { columns: [], metrics: [] },
+      onChange,
+      columns: [{ column_name: "region", type: "text", verbose_name: "Khu vực" }],
+      metrics: [], resultColumns: [], rows: [],
+      temporalUnits: {}, columnSettings: {}, unitRow: () => null,
+    } as unknown as VizControlProps<TableConfig>));
+    fireEvent.click(screen.getByText("Khu vực"));
+    expect(onChange).toHaveBeenCalledWith({ columns: ["region"] });
+  });
+
+  /**
+   * The real column stays REACHABLE, not just stored. A row that reads only "Khu vực" hides the
+   * name the query will use; `FieldZone`'s chip has carried it in the `title` since #438 and this
+   * row now says it the same way. An unrenamed column gets its own name, not `region (region)`.
+   */
+  it("keeps the machine name on hover behind the displayed one", () => {
+    render(createElement(columnsControl.render, {
+      config: { columns: [], metrics: [] },
+      onChange: vi.fn(),
+      columns: [{ column_name: "region", type: "text", verbose_name: "Khu vực" },
+        { column_name: "category", type: "text" }],
+      metrics: [], resultColumns: [], rows: [],
+      temporalUnits: {}, columnSettings: {}, unitRow: () => null,
+    } as unknown as VizControlProps<TableConfig>));
+    expect(screen.getByText("Khu vực")).toHaveAttribute("title", "Khu vực (region)");
+    expect(screen.getByText("category")).toHaveAttribute("title", "category");
+  });
+
+  /** The METRICS list above it is the same widget over the same kind of names, and a dataset may
+   *  rename a metric exactly as it renames a column. It was the second call site, not a second
+   *  decision. */
+  it("shows a metric's verbose name too", () => {
+    const metricsControl = d.controls.find((c) => c.id === "metrics")!;
+    render(createElement(metricsControl.render, {
+      config: { columns: [], metrics: [] },
+      onChange: vi.fn(),
+      columns: [],
+      metrics: [{ metric_name: "total_revenue", verbose_name: "Tổng doanh thu" }],
+      resultColumns: [], rows: [],
+      temporalUnits: {}, columnSettings: {}, unitRow: () => null,
+    } as unknown as VizControlProps<TableConfig>));
+    expect(screen.getByText("Tổng doanh thu")).toBeInTheDocument();
+    expect(screen.queryByText("total_revenue")).not.toBeInTheDocument();
+  });
+
+  /**
+   * A SQL-facing user types the column they know. Filtering only the displayed name would make a
+   * renamed column unreachable by its real name in the very list that decides the projection.
+   */
+  it("filters on the machine name as well as the displayed one", () => {
+    render(createElement(columnsControl.render, {
+      config: { columns: [], metrics: [] },
+      onChange: vi.fn(),
+      columns: [...COLS.map((column_name) => ({ column_name, type: "text" })),
+        { column_name: "region", type: "text", verbose_name: "Khu vực" }],
+      metrics: [], resultColumns: [], rows: [],
+      temporalUnits: {}, columnSettings: {}, unitRow: () => null,
+    } as unknown as VizControlProps<TableConfig>));
+    fireEvent.change(screen.getByLabelText("Filter fields"), { target: { value: "region" } });
+    expect(screen.getByText("Khu vực")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Filter fields"), { target: { value: "khu" } });
+    expect(screen.getByText("Khu vực")).toBeInTheDocument();
+  });
+
+  /** Object detail picks from the same dataset columns through the same widget. Pinned separately
+   *  because it is its own call site: the table's list could be named correctly while this one was
+   *  left reading raw, which is precisely how the divergence with the pivot arose in the first
+   *  place — one component learning something the one beside it did not. */
+  it("names object-detail fields the same way", () => {
+    const objControl = objectDescriptor().controls.find((c) => c.id === "fields")!;
+    render(createElement(objControl.render, {
+      config: { columns: [] },
+      onChange: vi.fn(),
+      columns: [{ column_name: "region", type: "text", verbose_name: "Khu vực" }],
+      metrics: [], resultColumns: [], rows: [],
+      temporalUnits: {}, columnSettings: {}, unitRow: () => null,
+    } as unknown as VizControlProps<ObjectConfig>));
+    expect(screen.getByText("Khu vực")).toBeInTheDocument();
   });
 
   // Under the threshold the filter would be more chrome than help — Metabase's own picker has none.

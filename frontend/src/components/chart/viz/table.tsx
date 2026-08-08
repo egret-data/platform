@@ -7,13 +7,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { isParamsV2 } from "@/api/charts";
 import type { QuerySpec } from "@/api/charts";
+import {
+  FIELD_FILTER_THRESHOLD, columnLabels, displayName, fieldTitle, matchesField, metricLabels,
+  type FieldLabels,
+} from "@/components/chart/config/field-names";
 import type { SharedQueryState, VizControlProps, VizDescriptor } from "./types";
 
 export interface TableConfig { columns: string[]; metrics: string[] }
 export interface ObjectConfig { columns: string[] }
-
-/** Above this many options the list gets its own filter box and stops being scannable by eye. */
-const FILTER_THRESHOLD = 8;
 
 /**
  * A checkbox list — the shape both of these viz types configure with.
@@ -35,13 +36,27 @@ const FILTER_THRESHOLD = 8;
  * Metabase's own row is a full-width `<label>` at `min-height: 2.25rem` with a hover background,
  * which is what this is now.
  *
- * MAKING IT REORDERABLE IS NOT PART OF THIS. The table already has a reorder — on the Display tab,
- * over the RESULT columns (`TableColumnsSection`, backed by `tableState`) — so adding a second one
- * here would give one chart two column orders, stored in two places, with nothing on screen saying
- * which wins. That is a design decision about what a table's column order means, not a matter of
- * presentation, and it is written up rather than made here.
+ * MAKING IT REORDERABLE IS NOT PART OF THIS, AND IS NOW SETTLED RATHER THAN DEFERRED. #441 left
+ * this open on the grounds that a second order needed a rule; the rule is that THIS LIST NEVER
+ * REORDERS, and the reason is stronger than "two places to store it". The Data tab's list is the
+ * QUERY'S PROJECTION and the Display tab's is the order the table DRAWS in — `TableColumnsSection`,
+ * backed by `tableState.columnOrder`, which #410 made the list the table actually renders from.
+ * A drag added here would therefore be a control with NO VISIBLE EFFECT: whatever order it wrote,
+ * the Display tab's `columnOrder` would still decide what appears on screen. A control that looks
+ * like it works and does nothing is worse than an absent one.
+ *
+ * The two alternatives, both rejected. Making Display FOLLOW Data would discard an author's
+ * explicit column order every time they ticked a box one tab over — the same silent-loss failure
+ * `reconcileTableState` exists to prevent. Making Data follow Display cannot be built: this is a
+ * checkbox list with no drag to follow it with. And a single shared order is what #410 ALREADY
+ * SHIPPED, on the Display tab; re-siting it here would undo that PR's projection-versus-presentation
+ * distinction, which is the one thing its body asks the next reader not to do.
+ *
+ * WHAT WAS ACTUALLY LEFT was that this list and the pivot's zones NAMED THE SAME COLUMN DIFFERENTLY
+ * — see `field-names.ts`. That is the real residue of "it looks ugly next to the field zones", and
+ * it is a naming fix, not a widget change.
  */
-function CheckList({ idPrefix, empty, options, selected, onToggle, onSetAll }: {
+function CheckList({ idPrefix, empty, options, selected, onToggle, onSetAll, labels }: {
   idPrefix: string;
   empty: string;
   options: string[];
@@ -49,10 +64,11 @@ function CheckList({ idPrefix, empty, options, selected, onToggle, onSetAll }: {
   onToggle: (name: string) => void;
   /** Replaces the whole selection — the same `string[]` the toggles produce, never a new shape. */
   onSetAll: (next: string[]) => void;
+  /** Machine name -> display name. Identity stays raw; this only changes what a row SAYS. */
+  labels?: FieldLabels;
 }) {
   const [query, setQuery] = useState("");
-  const q = query.trim().toLowerCase();
-  const shown = q ? options.filter((o) => o.toLowerCase().includes(q)) : options;
+  const shown = options.filter((o) => matchesField(o, query, labels));
   const chosen = options.filter((o) => selected.includes(o));
   const allOn = options.length > 0 && chosen.length === options.length;
 
@@ -60,7 +76,7 @@ function CheckList({ idPrefix, empty, options, selected, onToggle, onSetAll }: {
 
   return (
     <div className="space-y-1 pt-1">
-      {options.length > FILTER_THRESHOLD && (
+      {options.length > FIELD_FILTER_THRESHOLD && (
         <Input
           type="search"
           value={query}
@@ -101,7 +117,14 @@ function CheckList({ idPrefix, empty, options, selected, onToggle, onSetAll }: {
             className="flex min-h-8 cursor-pointer items-center gap-2 rounded-md px-1 hover:bg-muted/50"
           >
             <Checkbox id={`${idPrefix}-${name}`} checked={selected.includes(name)} onCheckedChange={() => onToggle(name)} />
-            <span className="min-w-0 flex-1 truncate text-sm" title={name}>{name}</span>
+            {/* The friendly name, with the machine name on hover — the chip in `FieldZone` has said
+                it exactly this way since #438, and matching it is the point of the change. A second
+                LINE showing the raw name (which the zone's own popover uses) was tried and dropped:
+                it doubles the height of renamed rows only, so a list with three renames in it goes
+                ragged, and this list is bounded and scrolled where that popover is neither. */}
+            <span className="min-w-0 flex-1 truncate text-sm" title={fieldTitle(name, labels)}>
+              {displayName(name, labels)}
+            </span>
           </label>
         ))}
       </div>
@@ -125,6 +148,7 @@ function TableMetricsControl({ config, onChange, metrics }: VizControlProps<Tabl
       <p className="text-xs text-muted-foreground">With none, the table lists raw rows.</p>
       <CheckList idPrefix="metric" empty="No metrics on this dataset."
         options={metrics.map((m) => m.metric_name)} selected={config.metrics}
+        labels={metricLabels(metrics)}
         onToggle={(n) => onChange({ metrics: toggle(config.metrics, n) })}
         onSetAll={(next) => onChange({ metrics: next })} />
     </div>
@@ -138,6 +162,7 @@ function TableColumnsControl({ config, onChange, columns, unitRow }: VizControlP
         <Label className={LABEL_CLASS}>Columns</Label>
         <CheckList idPrefix="col" empty="Select a dataset to see columns."
           options={columns.map((c) => c.column_name)} selected={config.columns}
+          labels={columnLabels(columns)}
           onToggle={(n) => onChange({ columns: toggle(config.columns, n) })}
           onSetAll={(next) => onChange({ columns: next })} />
       </div>
@@ -150,8 +175,11 @@ function ObjectFieldsControl({ config, onChange, columns }: VizControlProps<Obje
   return (
     <div className="space-y-1">
       <Label className={LABEL_CLASS}>Fields</Label>
+      {/* The object-detail viz picks from the same dataset columns through the same widget, so it
+          gets the same names — it was never a separate decision, only a separate call site. */}
       <CheckList idPrefix="obj" empty="Select a dataset to see columns."
         options={columns.map((c) => c.column_name)} selected={config.columns}
+        labels={columnLabels(columns)}
         onToggle={(n) => onChange({ columns: toggle(config.columns, n) })}
         onSetAll={(next) => onChange({ columns: next })} />
     </div>

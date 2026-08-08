@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { FieldZone } from "../FieldZone";
 
 describe("FieldZone display names", () => {
@@ -68,6 +68,63 @@ describe("FieldZone controls are big enough to hit", () => {
   it("names the group its chips belong to", () => {
     zone();
     expect(screen.getByRole("group", { name: "Rows" })).toBeInTheDocument();
+  });
+});
+
+/**
+ * THE COMPARISON RUNS BOTH WAYS. #441 gave the table's Data-tab list a filter past eight fields and
+ * a bounded height, on the reasoning that a longer list stops being scannable by eye. The pivot's
+ * "Add …" popover picks from exactly the same field set and got neither — measured on the kind
+ * deployment against the seeded `MB Raw Orders` (ten columns): the table's list drew its "Filter 10
+ * fields…" box and the pivot's popover, over the identical ten, drew none and ran to 330px with
+ * `max-height: none`.
+ *
+ * The threshold is now one constant serving both, rather than the byte-for-byte second copy #441
+ * spent a section removing from five files.
+ */
+describe("FieldZone's picker gets the affordances the table's list got", () => {
+  const many = ["id", "created_at", "title", "category", "vendor", "subtotal", "discount", "total", "quantity", "state"];
+  const openPicker = (options: string[], labels?: Record<string, string>) => {
+    render(<FieldZone label="Rows" selected={[]} options={options} labels={labels} onChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "add rows" }));
+  };
+
+  it("filters the picker past the same threshold the table's list uses", () => {
+    openPicker(many);
+    fireEvent.change(screen.getByLabelText("Filter fields"), { target: { value: "tot" } });
+    expect(screen.getByRole("button", { name: /^subtotal$/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^total$/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^vendor$/ })).not.toBeInTheDocument();
+  });
+
+  it("finds a renamed field by its machine name as well as its displayed one", () => {
+    openPicker([...many, "region"], { region: "Khu vực" });
+    fireEvent.change(screen.getByLabelText("Filter fields"), { target: { value: "region" } });
+    expect(screen.getByText("Khu vực")).toBeInTheDocument();
+  });
+
+  it("says nothing matched rather than showing an empty picker", () => {
+    openPicker(many);
+    fireEvent.change(screen.getByLabelText("Filter fields"), { target: { value: "zzz" } });
+    expect(screen.getByText(/No field matches/)).toBeInTheDocument();
+  });
+
+  it("offers no filter on a short picker", () => {
+    openPicker(["a", "b"]);
+    expect(screen.queryByLabelText("Filter fields")).not.toBeInTheDocument();
+  });
+
+  /**
+   * jsdom runs no layout, so what is pinned is the CLASS that bounds the list — the browser numbers
+   * are in the PR body. The bound is a guard, not a fix for anything seen: the widest seeded dataset
+   * is ten columns and the popover fits at 330px. A `PopoverContent` sets `max-height: none`, so at
+   * thirty fields it would grow past the viewport exactly as #443's `DialogContent` did.
+   */
+  it("bounds the picker's list so a long one scrolls rather than growing", () => {
+    openPicker(many);
+    const list = screen.getByRole("button", { name: /^vendor$/ }).parentElement!;
+    expect(list.className).toContain("overflow-y-auto");
+    expect(list.className).toContain("max-h-64");
   });
 });
 
