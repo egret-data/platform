@@ -30,6 +30,15 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
       <input type="checkbox" aria-label="auto height" checked={!!card.options.autoHeight} onChange={(e) => onUpdateOptions({ autoHeight: e.target.checked })} />
     </label>
   ) : null;
+  // Metabase's wording, verbatim, because this panel is measured against its dashcard
+  // modal. Only a chart card gets it: a text/heading/link card runs no query and so can
+  // never be empty, which is the same line Metabase draws
+  // (`getHidden: ([{ card }]) => isVirtualDashCard(card)`).
+  const hideEmptyRow = card.card_type === "chart" ? (
+    <label className="flex items-center justify-between gap-2 text-sm"><span>Hide this card if there are no results</span>
+      <input type="checkbox" aria-label="hide when empty" checked={!!card.options.hideEmpty} onChange={(e) => onUpdateOptions({ hideEmpty: e.target.checked })} />
+    </label>
+  ) : null;
   if (card.card_type === "text" || card.card_type === "heading") {
     const slugs = parameters.map((p) => p.slug);
     return (
@@ -96,6 +105,7 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
       </div>
 
       {autoHeightRow}
+      {hideEmptyRow}
       {moveToTab}
     </div>
   );

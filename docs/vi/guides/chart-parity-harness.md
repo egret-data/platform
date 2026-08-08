@@ -230,12 +230,101 @@ card breakout mới ở 1600×1000.)
   mà không có legend nào, trong khi egret vẫn vẽ legend trong card `4×5`. Vì thế phép so THỨ TỰ band
   phải làm ở question view (`/question/59`), hoặc trên dashboard bằng màu và vị trí stack. Để nguyên:
   đổi kích thước card Metabase sẽ phá hình học mà các phép đo trước đã dựa vào.
-- **19 card Metabase gốc ghi tên cột bằng chữ thường** (`{"graph.dimensions": ["category"]}` ở card
-  42, `pivot_table.column_split` ở card 41) trong khi kết quả thật là `CATEGORY` / `ORDER_MONTH` /
-  `REVENUE`. Chúng vẫn vẽ đúng, nghĩa là chúng đang vẽ theo **MẶC ĐỊNH** của Metabase chứ không theo
-  settings đã lưu — settings tình cờ trùng với mặc định cho các hình dạng kết quả này. Không đụng tới,
-  vì sửa chúng là đổi mười chín card mốc để không sửa được gì nhìn thấy được; ba card mới dùng chữ
-  hoa, tức là khoá trung thực.
+- **`MB · Pivot` hoàn toàn không có bản vẽ Metabase nào, và chưa từng có.** Card 41 hiện
+  *"Pivot tables are only supported for questions built in the query builder"* — cả trên dashboard lẫn
+  trên `/question/41` — vì các card của harness là SQL thuần. Việc viết hoa settings (xem bên dưới)
+  không đổi được điều này và cũng không thể: card không bao giờ chạy đến chỗ đọc chúng. Điều này đã
+  được ghi ở `2026-08-02-chart-parity-05-label-room.md`; nhắc lại ở đây vì nó rất dễ bị nhầm với lỗi
+  chữ hoa/thường, mà nó không phải. **Mục tiêu của pivot vẫn phải lập luận trên cơ sở riêng của nó.**
+  *Dữ liệu* của nó vẫn đáng tin — literal `VALUES` của egret được vật chất hoá từ chính kết quả card
+  này chạy, và truy vấn chạy tốt; Metabase chỉ từ chối phần *render pivot*.
+
+## Lỗi settings bị vô hiệu, và cái giá của nó (2026-08-08)
+
+Tài liệu này từng nói tên cột chữ thường trên các card Metabase gốc là vô hại — *"Chúng vẫn vẽ đúng …
+settings tình cờ trùng với mặc định cho các hình dạng kết quả này."* **Điều đó SAI với bốn card**, và
+bốn card đó không thể nhìn ra chỉ từ settings. Nay đã sửa; mục này là biên bản, vì cái bẫy này đã cắn
+harness hai lần rồi (funnel, rồi đến nhóm này).
+
+### Cơ chế, chính xác
+
+H2 viết hoa các định danh không trích dẫn, nên mọi cột kết quả thật sự là `CATEGORY` / `ORDER_MONTH` /
+`REVENUE`. Metabase phân giải một setting tên cột bằng `columnsAreValid`
+(`visualizations/lib/utils.ts:35`), vốn là **tra cứu khoá object phân biệt hoa thường** —
+`colsByName[name]`, cộng với `col.name === columnName` nghiêm ngặt lúc render
+(`lib/graph/columns.ts:16`). Tên không phân giải được sẽ trượt `isValid`, và `getComputedSetting`
+(`lib/settings.ts:118`) rơi xuống `getDefault`. **Card vẽ theo mặc định của Metabase và setting đã lưu
+không bao giờ được đọc.** Nó không cảnh báo, cũng không vẽ trắng — chính vì thế lỗi này sống sót.
+
+Hai hệ quả đáng biết:
+
+- `graph.dimensions` và `graph.metrics` được kiểm **cùng nhau** bởi `getAreDimensionsAndMetricsValid`,
+  nên một tên sai làm hỏng cả hai.
+- `pivot_table.column_split` là ngoại lệ: nó dùng `getValue` chứ không `isValid`/`getDefault`, nên giá
+  trị lưu luôn được xử lý và tên sai hoa thường bị loại khỏi phân vùng của nó thay vì cả setting rơi
+  về mặc định.
+
+### Con số thật: 12, không phải 19
+
+"Mười chín" là đếm gộp toàn bộ card gốc. Xét từng card, chỉ **12 card thực sự có tham chiếu cột chữ
+thường**, và trong đó chỉ **4 card vẽ khác với điều settings nói**:
+
+| | card | |
+|---|---|---|
+| chữ thường **và sai nhìn thấy được** | **46, 47, 56, 58** | scatter, combo, sankey, map |
+| chữ thường nhưng mặc định trùng khớp | 42, 43, 44, 45, 48, 53, 55 | bar, row, line, area, pie, waterfall, box plot — đều là dạng kết quả `[dimension, metric]`, nơi mặc định *chính là* ý định đã lưu |
+| chữ thường, nhưng vô hiệu vì lý do khác | 41 | pivot — không bao giờ render (xem "Trôi dạt đã biết") |
+| không có setting nào đặt tên cột | 40, 49, 54, 57 | `visualization_settings: {}` |
+| settings không đặt tên cột nào | 50, 51 | `progress.goal`, `gauge.range`/`segments` — là số, luôn có hiệu lực |
+| vốn đã chữ hoa | 52, 59, 60, 61 | funnel (đã sửa trước đó) + ba card breakout |
+
+### Bốn card đó thực sự đang vẽ gì
+
+Đo ở 1600×1000 trên `/dashboard/2` và các question view, trước và sau:
+
+| card | settings nói | đang vẽ | nay |
+|---|---|---|---|
+| 47 `MB · Combo` | 2 metric; `REVENUE` là **line** ở trục phải | **3** series (`ORDERS`, `REVENUE`, `AVG_TOTAL`), `REVENUE` là **bar** — `getDefaultMetrics` lấy mọi cột số | 2 series, `REVENUE` là line |
+| 58 `MB · Map` | tô theo `REVENUE` | tô theo **`ORDERS`** — mặc định của `map.metric` là `cols.find(isMetric)`, tức cột số *đầu tiên*. Legend đọc `21 – 206 … 1,342 +`, đúng min/max của ORDERS; REVENUE trải `1.358,69 – 108.466,6` | legend `1.4k – 12.4k … 108.5k +` |
+| 46 `MB · Scatter` | bubble theo `ORDERS` | bubble **đồng đều** — `getDefaultScatterColumns` trả `bubble: null` | bubble có kích thước |
+| 56 `MB · Sankey` | `SOURCE → CATEGORY` | **`CATEGORY → SOURCE`**, tức ngược chiều — `findSensibleSankeyColumns` tự chọn | `SOURCE → CATEGORY` |
+
+Tám card còn lại giống hệt từng điểm ảnh trước và sau; chỉ `visualization_settings` thay đổi trên mọi
+card, và dashboard 2 vẫn đủ 22 dashcard ở `8×6`, không có override ở cấp dashcard.
+
+### Điều này có làm lay chuyển kết luận nào phía egret không? Không — và đó mới là điểm chính
+
+**Không có bài viết nào trong `docs/`, `scripts/harness/` hay các commit #407–#438 từng nói egret lệch
+về số series của combo, bubble của scatter, chiều của sankey hay metric của map.** Bảng so sánh từng
+chart duy nhất của harness (`2026-08-02-chart-parity-04-colour-assignment.md`) không hề bao gồm combo
+hay map, và chỉ bao gồm scatter và sankey ở khía cạnh màu và hình học nhãn. Nên không kết luận đã ghi
+nào phải rút lại.
+
+Đó là may mắn chứ không phải kết quả tốt. Cả bốn trường hợp, **egret vốn đã lưu đúng điều settings của
+Metabase định nói** (`scripts/harness/charts.ts:99-122`), nên ai *đã* so chúng thì sẽ thấy egret "sai"
+trong khi thực chất đang so với một card chưa được cấu hình.
+
+Một phép đo cũ đáng đánh dấu là chưa giải thích được. `2026-08-02-chart-parity-05-label-room.md:45`
+ghi nhãn phải dài nhất của sankey Metabase là **`Doohickey`** — một giá trị CATEGORY, tức
+`SOURCE → CATEGORY`, đúng chiều settings định nói và ngược với điều card 56 đang vẽ ngày 2026-08-08.
+Hoặc mặc định đã đổi dưới chân nó (một lần làm mới `result_metadata` cũ đủ gây ra điều đó), hoặc nhãn
+bị gán nhầm. Không đáng truy bây giờ, vì bản sửa chữ hoa loại bỏ hoàn toàn sự phụ thuộc vào cơ chế dò
+mặc định của Metabase — **và đó mới là lý do thật để sửa một setting vô hiệu ngay cả khi mặc định tình
+cờ trùng: mặc định có thể trôi, setting đã lưu thì không.**
+
+### Tái lập
+
+Phía Metabase vẫn chưa có script. Settings đã sửa được liệt kê ở đây để có thể áp lại bằng tay hoặc
+bằng bất kỳ công cụ nào sau này, mỗi cái qua `PUT /api/card/{id}` chỉ với
+`{"visualization_settings": …}` — xem bảng JSON trong bản tiếng Anh (bản chuẩn).
+
+`series_settings` được đánh khoá theo **tên cột metric** với chart một card
+(`getSeriesVizSettingsKey`), nên cũng phải viết hoa — khoá chữ thường lặng lẽ không khớp gì cả và
+series giữ nguyên màu lẫn kiểu hiển thị mặc định.
+
+**Làm sao biết một setting có hiệu lực, mà không cần đọc mã nguồn Metabase.** Đừng kiểm tra rằng card
+"trông đúng" — đó chính là phép kiểm đã thất bại ở đây suốt cả loạt PR. Hãy đổi setting thành một giá
+trị *sai* rồi tải lại: nếu hình không đổi, setting đang vô hiệu.
 
 ## Ghi chú môi trường
 

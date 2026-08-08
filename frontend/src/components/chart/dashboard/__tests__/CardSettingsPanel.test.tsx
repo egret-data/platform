@@ -32,6 +32,27 @@ describe("CardSettingsPanel (chart card)", () => {
     fireEvent.change(screen.getByLabelText("move card to tab"), { target: { value: "tb" } });
     expect(onMoveToTab).toHaveBeenCalledWith("tb");
   });
+  it("turns on hide-when-empty and writes only that key", () => {
+    const onUpdateOptions = vi.fn();
+    render(<CardSettingsPanel card={card()} chart={chart} parameters={[param]} tabs={tabs} onUpdateOptions={onUpdateOptions} onMoveToTab={vi.fn()} />);
+    fireEvent.click(screen.getByLabelText("hide when empty"));
+    // toStrictEqual, not toEqual: the point of this assertion is that the patch carries
+    // NOTHING but hideEmpty, and toEqual/toHaveBeenCalledWith would pass on a patch that
+    // also set an undefined sibling key.
+    expect(onUpdateOptions).toHaveBeenCalledTimes(1);
+    expect(onUpdateOptions.mock.calls[0][0]).toStrictEqual({ hideEmpty: true });
+  });
+  it("shows hide-when-empty already on, and turns it back off", () => {
+    const onUpdateOptions = vi.fn();
+    render(<CardSettingsPanel card={card({ hideEmpty: true })} chart={chart} parameters={[param]} tabs={tabs} onUpdateOptions={onUpdateOptions} onMoveToTab={vi.fn()} />);
+    expect(screen.getByLabelText("hide when empty")).toBeChecked();
+    fireEvent.click(screen.getByLabelText("hide when empty"));
+    expect(onUpdateOptions.mock.calls[0][0]).toStrictEqual({ hideEmpty: false });
+  });
+  it("uses Metabase's exact wording, since this panel is measured against its modal", () => {
+    render(<CardSettingsPanel card={card()} chart={chart} parameters={[param]} tabs={tabs} onUpdateOptions={vi.fn()} onMoveToTab={vi.fn()} />);
+    expect(screen.getByText("Hide this card if there are no results")).toBeInTheDocument();
+  });
 });
 
 describe("CardSettingsPanel (text card)", () => {
@@ -40,5 +61,11 @@ describe("CardSettingsPanel (text card)", () => {
     render(<CardSettingsPanel card={c} chart={undefined} parameters={[param]} tabs={[]} onUpdateOptions={vi.fn()} onMoveToTab={vi.fn()} />);
     expect(screen.getByText(/Insert a filter value/i)).toBeInTheDocument();
     expect(screen.getByText("{{region}}")).toBeInTheDocument();
+  });
+  it("offers no hide-when-empty toggle, because a text card runs no query", () => {
+    // Metabase draws the same line: getHidden: ([{ card }]) => isVirtualDashCard(card).
+    const c: DraftCard = { id: "t1", chart_id: null, card_type: "text", grid_col: 0, grid_row: 0, size_x: 6, size_y: 2, options: { text: "" }, tab_id: null, tabKey: null };
+    render(<CardSettingsPanel card={c} chart={undefined} parameters={[param]} tabs={[]} onUpdateOptions={vi.fn()} onMoveToTab={vi.fn()} />);
+    expect(screen.queryByLabelText("hide when empty")).toBeNull();
   });
 });

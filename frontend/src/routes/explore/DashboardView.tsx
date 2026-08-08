@@ -9,6 +9,8 @@ import { useChartData } from "@/api/useChartData";
 import { useDataset } from "@/api/datasets";
 import { resolveClick, type ClickBehavior } from "@/components/chart/dashboard/click-behavior";
 import { resolveValuesSource } from "@/components/chart/dashboard/valuesSource";
+import { hiddenEmptyCardIds } from "@/components/chart/dashboard/hide-empty";
+import { CardEmptinessProbe } from "@/components/chart/dashboard/CardEmptinessProbe";
 import { DrillMenu } from "@/components/chart/DrillMenu";
 import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
 import { type DrillContext } from "@/components/chart/drill";
@@ -69,6 +71,15 @@ export default function DashboardView() {
   useUnsavedChangesWarning(editing);
   const cardSeqRef = useRef(0);
   const interactingRef = useRef(false);
+  // "Hide this card if there are no results": id -> did that card's query return no rows.
+  // Filled by CardEmptinessProbe, which runs the query OUTSIDE the grid so that hiding a
+  // card does not unmount the only hook that could ever un-hide it. Absent = not yet
+  // known, which hide-empty.ts reads as hidden.
+  const [cardEmptiness, setCardEmptiness] = useState<Record<string, boolean>>({});
+  const reportCardEmpty = useCallback((cardId: string, empty: boolean) => {
+    // Bail on an unchanged value so a re-render of the probe cannot loop the parent.
+    setCardEmptiness((prev) => (prev[cardId] === empty ? prev : { ...prev, [cardId]: empty }));
+  }, []);
   const chartById = useMemo(() => new Map((charts ?? []).map((c) => [c.id, c])), [charts]);
   const view = useDashboardViewControls();
   // Hook must run before the early return — use `dash?` since dash may be undefined while loading.
@@ -174,7 +185,7 @@ export default function DashboardView() {
     ? (draftTabs ?? [])
     : (dashboard.tabs ?? []).map((t, i) => ({ key: t.id, name: t.name, position: i }));
   const activeTab = tabs[activeTabPos] ?? null;
-  const visibleCards = tabs.length === 0
+  const tabCards = tabs.length === 0
     ? cards
     : cards.filter((c) =>
         editing ? (c as DraftCard).tabKey === activeTab?.key : c.tab_id === activeTab?.key,
@@ -183,6 +194,39 @@ export default function DashboardView() {
     const v = paramsState.values[p.slug];
     return p.required && (Array.isArray(v) ? v.filter((x) => !isBlank(x)).length === 0 : isBlank(v));
   });
+  // Drop the cards that asked to hide when empty and came back with nothing. This has to
+  // bite on the SAME list that feeds both the RGL `layout` array and the grid's children,
+  // or the two disagree and RGL renders a ghost slot.
+  const hiddenIds = hiddenEmptyCardIds(tabCards, cardEmptiness, editing, requiredUnset);
+  const visibleCards = hiddenIds.size === 0 ? tabCards : tabCards.filter((c) => !hiddenIds.has(c.id));
+  // Cards to keep querying regardless of whether their tile is on screen. The predicate
+  // MUST agree with hide-empty.ts's, or a card can be hidden with nothing left running to
+  // un-hide it. Only the opted-in ones, so an ordinary board issues not one extra hook.
+  const probeCards = editing ? [] : tabCards.filter((c) => c.card_type === "chart" && !!c.chart_id && !!c.options.hideEmpty);
+  // A board whose every card hid itself is not the same as an empty board, and saying
+  // "No cards yet. Click Edit to add charts." there would be a lie.
+  const allHiddenByEmpty = !editing && tabCards.length > 0 && visibleCards.length === 0;
+
+  /**
+   * The arguments a card's data query is keyed on. The tile and its emptiness probe MUST
+   * pass identical values or react-query treats them as two different queries and the
+   * board issues the request twice — so both callers read them from here rather than
+   * computing their own.
+   */
+  function cardQueryArgs(c: Card) {
+    const baseChart = chartById.get(c.chart_id ?? "");
+    const mappings = (c.options.paramMappings as Record<string, string>) ?? {};
+    return {
+      baseChart,
+      mappings,
+      // Resolved dashboard-param filters for this card — sent to the view-mode
+      // card-data endpoint so filtering is applied server-side (validated).
+      paramFilters: baseChart ? paramFiltersForCard(parameters, paramsState.values, mappings) : [],
+      // Resolved temporal-unit overrides for this card — sent to the view-mode
+      // card-data endpoint so a "Time grouping" param re-grids server-side.
+      paramTemporal: baseChart ? temporalOverridesForCard(parameters, paramsState.values, mappings, baseChart.params.spec) : {},
+    };
+  }
 
   function onCardValueClick(card: Card, ctx: DrillContext, x: number, y: number) {
     const cb = card.options.clickBehavior as ClickBehavior | undefined;
@@ -518,9 +562,24 @@ export default function DashboardView() {
       {editing
         ? <EditFilterChips parameters={parameters} activeId={editPanel?.kind === "filter" ? editPanel.paramId : null} onSelect={(id) => openPanel({ kind: "filter", paramId: id })} />
         : <DashboardFilterBar parameters={parameters} values={paramsState.values} onChange={paramsState.setValue} optionsBySlug={optionsBySlug} />}
+      {/* Outside the grid on purpose: these must keep running for a card whose tile is
+          hidden, which is the whole reason a hidden card can ever come back. */}
+      {probeCards.map((c) => {
+        const { baseChart, paramFilters, paramTemporal } = cardQueryArgs(c);
+        return (
+          <CardEmptinessProbe key={c.id} ws={ws} dashboardId={dashboard.id} cardId={c.id}
+            refreshNonce={view.refreshNonce} enabled={!requiredUnset && !!baseChart}
+            paramFilters={paramFilters} paramTemporal={paramTemporal} onEmpty={reportCardEmpty} />
+        );
+      })}
       <div className={editing || showInfo ? "flex gap-4" : ""}>
         <div className={editing ? "min-w-0 flex-1 pb-24" : showInfo ? "min-w-0 flex-1" : ""}>
-      {(cards.length === 0 || (tabs.length > 0 && visibleCards.length === 0)) && editing ? (
+      {allHiddenByEmpty ? (
+        <div className="flex flex-col items-center gap-2 py-20 text-center text-muted-foreground">
+          <LayoutDashboard className="h-8 w-8 text-muted-foreground/40" aria-hidden />
+          <p className="text-sm">No results, so every card on this dashboard is hidden.</p>
+        </div>
+      ) : (cards.length === 0 || (tabs.length > 0 && visibleCards.length === 0)) && editing ? (
         <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed py-20 text-center">
           <Pencil className="h-8 w-8 text-muted-foreground/40" />
           <p className="text-sm text-muted-foreground">{cards.length === 0 ? "This dashboard is empty." : "No cards on this tab."}</p>
@@ -549,15 +608,8 @@ export default function DashboardView() {
           onDragStop={() => { interactingRef.current = false; }}
         >
           {(rowHeight) => visibleCards.map((c) => {
-            const baseChart = chartById.get(c.chart_id ?? "");
-            const mappings = (c.options.paramMappings as Record<string, string>) ?? {};
+            const { baseChart, mappings, paramFilters, paramTemporal } = cardQueryArgs(c);
             const injected = baseChart ? applyParamsToChart(baseChart, parameters, paramsState.values, mappings) : undefined;
-            // Resolved dashboard-param filters for this card — sent to the view-mode
-            // card-data endpoint so filtering is applied server-side (validated).
-            const paramFilters = baseChart ? paramFiltersForCard(parameters, paramsState.values, mappings) : [];
-            // Resolved temporal-unit overrides for this card — sent to the view-mode
-            // card-data endpoint so a "Time grouping" param re-grids server-side.
-            const paramTemporal = baseChart ? temporalOverridesForCard(parameters, paramsState.values, mappings, baseChart.params.spec) : {};
             return (
             <div key={c.id} className="group relative h-full">
               {editing && (
