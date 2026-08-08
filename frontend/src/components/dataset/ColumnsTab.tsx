@@ -133,13 +133,25 @@ export function ColumnsTab({ ws, datasetId, columns }: Props) {
                     <option value="email">Email</option>
                     <option value="url">URL</option>
                     <option value="image">Image</option>
-                    {/* Metabase's `type/Latitude` and `type/Longitude`. The pin map's two coordinate
-                        pickers default from these, which is the ONLY reason they exist — #434
-                        refused to infer a coordinate column from its name ("a wrong guess plots
+                    {/* Metabase's `type/Latitude` and `type/Longitude`, spelled as bare lowercase
+                        words because that is what egret's readers compare against. The pin map's two
+                        coordinate pickers default from these, which is the ONLY reason they exist —
+                        #434 refused to infer a coordinate column from its name ("a wrong guess plots
                         confidently in the wrong hemisphere"), and this is the difference between a
-                        guess and a statement someone made here on purpose. Nothing about the value
-                        is validated server-side: `semantic_type` is `text NOT NULL DEFAULT ''` with
-                        no CHECK and no Rust enum, so these two options ARE the vocabulary. */}
+                        guess and a statement someone made here on purpose.
+
+                        THIS LIST IS NO LONGER THE ONLY COPY OF THE VOCABULARY, and the comment that
+                        used to say so was true when it was written and is now the opposite of true.
+                        It read "nothing about the value is validated server-side … so these two
+                        options ARE the vocabulary" — which was exactly the defect: `PUT
+                        semantic_type: "banana"` persisted, and a typo produced a picker that
+                        silently never filled. The vocabulary now lives in `SEMANTIC_TYPES`
+                        (egret-analytics-api), is enforced on write with a 400, is a CHECK constraint
+                        in migration 0104, and is published as an OpenAPI `enum`. Adding an option
+                        here without adding it there now gets a 400 the moment a user picks it, so
+                        the two are pinned from BOTH sides: a test in `DatasetTabs.test.tsx` asserts
+                        this select's option values, and a Rust test asserts the constant. Neither
+                        can see the other's file, which is why it takes two. */}
                     <option value="latitude">Latitude</option>
                     <option value="longitude">Longitude</option>
                   </select>

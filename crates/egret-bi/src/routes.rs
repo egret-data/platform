@@ -1516,6 +1516,24 @@ async fn ds_update_column(
     egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
+    // THE ONLY HTTP WRITER OF `semantic_type`, which is why one check here is enough to close it.
+    // Every other path into the column takes the DB default `''`: the three INSERTs in `dataset.rs`
+    // (source sync, calculated column, dataset creation) never name the field, and the sync's
+    // `ON CONFLICT … DO UPDATE` deliberately leaves it alone so a refresh preserves an author's
+    // annotation. Until now nothing validated it anywhere — `PUT semantic_type: "banana"` persisted.
+    //
+    // AFTER AUTHZ, ON PURPOSE. A caller who may not manage the dataset should learn that first;
+    // being told which semantic types are valid is harmless, but ordering the checks so that
+    // authorisation always answers before the body is inspected is the property worth keeping
+    // uniform across handlers.
+    //
+    // BEFORE the expression validation below rather than after, because that branch makes a round
+    // trip to the engine to type-check an expression. Rejecting a bad `semantic_type` first means a
+    // request that was going to fail anyway does not spend an engine query to find out.
+    if let Some(stype) = b.semantic_type.as_deref() {
+        egret_analytics_api::bi::validate_semantic_type(stype)
+            .map_err(|m| BiApiError::from(crate::BiError::BadRequest(m)))?;
+    }
     let expr_update = if let Some(expr) = b.expression.as_deref() {
         match st
             .datasets
