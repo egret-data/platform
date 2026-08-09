@@ -28,6 +28,7 @@ import { EditSidebar, type EditPanel } from "@/components/chart/dashboard/EditSi
 import { EditFilterChips } from "@/components/chart/dashboard/EditFilterChips";
 import { CardEditToolbar } from "@/components/chart/dashboard/CardEditToolbar";
 import { DashboardEditToolbar } from "@/components/chart/dashboard/DashboardEditToolbar";
+import { dashboardWidthClass } from "@/components/chart/dashboard/DashboardActionsMenu.view";
 import type { SectionLayout } from "@/components/chart/dashboard/dashboard-sections";
 import { dropPlaceholders } from "@/components/chart/dashboard/dashboard-sections";
 import { PlaceholderCard } from "@/components/chart/dashboard/PlaceholderCard";
@@ -65,6 +66,7 @@ export default function DashboardView() {
   const [draftParameters, setDraftParameters] = useState<DashboardParameter[] | null>(null);
   const [draftTabs, setDraftTabs] = useState<DraftTab[] | null>(null);
   const [draftName, setDraftName] = useState("");
+  const [draftWidth, setDraftWidth] = useState<"fixed" | "full">("full");
   const serverTabCount = dash?.tabs?.length ?? 0;
   const { activeTabPos, setActiveTabPos } = useDashboardTabs(editing ? (draftTabs?.length ?? 0) : serverTabCount);
   // beforeunload guard: warn on refresh/close while the dashboard editor is open (unsaved draft).
@@ -175,7 +177,7 @@ export default function DashboardView() {
   if (isLoading || !dash) return <div className="p-4 text-muted-foreground">Loading…</div>;
 
   const dashboard = dash;
-  const effectiveWidth = dashboard.width;
+  const effectiveWidth = editing ? draftWidth : dashboard.width;
   const cards = editing && draftCards ? draftCards : dashboard.cards;
   // Fallback DraftCard[] for the draft setters (each runs only while editing, so draftCards is
   // non-null and this is effectively dead — but it keeps the setters typed as DraftCard[]).
@@ -243,6 +245,7 @@ export default function DashboardView() {
     setDraftParameters((dashboard.parameters ?? []).map((p) => ({ ...p })));
     setDraftTabs(dt);
     setDraftName(dashboard.name);
+    setDraftWidth(dashboard.width);
     setEditing(true);
     setEditPanel(null);
   }
@@ -387,7 +390,7 @@ export default function DashboardView() {
     const persistCards = dropPlaceholders(cards as DraftCard[]);
     const { tabs: tabPayload, cards: cardPayload } = serializeLayout(draftTabs ?? [], persistCards);
     try {
-      await update.mutateAsync({ id: dashboard.id, name: draftName.trim() || dashboard.name, description: dashboard.description, parameters, tabs: tabPayload, width: dashboard.width, cards: cardPayload });
+      await update.mutateAsync({ id: dashboard.id, name: draftName.trim() || dashboard.name, description: dashboard.description, parameters, tabs: tabPayload, width: draftWidth, cards: cardPayload });
       setEditing(false); setDraftCards(null); setDraftTabs(null); setEditPanel(null); setDraftName(""); setNewCardId(null);
       toast.success("Saved");
     } catch (e) { toast.error(String(e)); }
@@ -459,7 +462,7 @@ export default function DashboardView() {
           </span>
         </div>
       )}
-<div className={effectiveWidth === "fixed" ? "mx-auto w-full max-w-[1200px]" : ""}>
+<div className={dashboardWidthClass(effectiveWidth)}>
       {dash.deleted_at && (
         <div className="mb-3 flex items-center justify-between rounded-md border border-highlight/40 bg-highlight/10 px-3 py-2 text-sm">
           <span>This dashboard is in the trash.</span>
@@ -515,6 +518,8 @@ export default function DashboardView() {
               onAddLink={() => addVirtualCard("link", { url: "", label: "" })}
               onAddSection={addSection}
               onAddFilter={addFilter}
+              width={draftWidth}
+              onChangeWidth={setDraftWidth}
             />
           ) : (
             <Button size="sm" variant="outline" onClick={startEdit}>Edit</Button>
