@@ -1,5 +1,6 @@
 import type { ResultColumn } from "@/components/chart/ChartTable";
 import type { ColumnFormat } from "@/components/chart/format-types";
+import { formatValue } from "@/components/chart/format";
 
 function csvCell(v: unknown): string {
   if (v === null || v === undefined) return "";
@@ -8,27 +9,73 @@ function csvCell(v: unknown): string {
 }
 
 /**
- * RFC-4180 CSV: a header row of column names, then one row per data row (CRLF-separated).
- * The header follows the same rename the table shows (`column_title`), so a downloaded
- * file reads the same as the screen it came from — the machine name is still one click
- * away via "View SQL". `||`, not `??`: settings are never key-whitelisted server-side, so
- * a legacy/hand-edited `column_title: ""` is reachable, and `??` would emit a blank header
- * cell instead of falling back to the real name.
+ * A RESULT, SHAPED FOR A FILE — the one place pivot rollup markers die and the one place a header
+ * is resolved. Three writers share it (`csv`, `json`, `xlsx`).
+ *
+ * A rollup result carries one `__grp_N` marker per dimension and, interleaved with the data, a row
+ * for every subtotal and the grand total. Those are how the pivot builds its bands — they are not
+ * columns or rows anyone asked for. Exported raw, the file opened with `__grp_0,__grp_1,__grp_2` in
+ * the header and a first row of `,,,116269,1,1,1`: a total, indistinguishable from data unless the
+ * reader knows to decode the markers. When this lived inside `rowsToCsv` the strip was a property
+ * of the CSV writer; the moment a second writer existed it had to become a property of the export.
+ *
+ * `formatted` is Metabase's "Keep the data formatted" (`ExportSettingsWidget.tsx:99`). On, the file
+ * reads like the screen — the rename the table shows, and `formatValue`'d cells. Off, it reads like
+ * the database — machine column names and raw values. egret's CSV used to be neither: renamed
+ * headers over raw cells. That hybrid is gone.
+ *
+ * `||`, not `??`, on the rename: settings are never key-whitelisted server-side, so a
+ * legacy/hand-edited `column_title: ""` is reachable, and `??` would emit a blank header cell
+ * instead of falling back to the real name.
  */
-export function rowsToCsv(columns: ResultColumn[], rows: unknown[][], columnSettings?: Record<string, ColumnFormat>): string {
-  // A rollup result carries one `__grp_N` marker per dimension and, interleaved with the data, a
-  // row for every subtotal and the grand total. Those are how the pivot builds its bands — they
-  // are not columns or rows anyone asked for. Exported raw, the file opened with `__grp_0,__grp_1,
-  // __grp_2` in the header and a first row of `,,,116269,1,1,1`: a total, indistinguishable from
-  // data unless the reader knows to decode the markers. Drop both.
+export interface ExportTable {
+  /** The header as it should be written, one entry per kept column. */
+  header: string[];
+  /** The kept columns themselves — a writer needs `type` to format or to type a cell. */
+  columns: ResultColumn[];
+  /** Data rows, markers and rollup rows removed, cells still raw. */
+  rows: unknown[][];
+}
+
+export function tableForExport(
+  columns: ResultColumn[],
+  rows: unknown[][],
+  columnSettings?: Record<string, ColumnFormat>,
+  formatted = true,
+): ExportTable {
   const markerIdx = columns.map((c, i) => (/^__grp_\d+$/.test(c.name) ? i : -1)).filter((i) => i >= 0);
   const keep = columns.map((_, i) => i).filter((i) => !markerIdx.includes(i));
   const isRollupRow = (r: unknown[]) => markerIdx.some((i) => Number(r[i]) === 1);
+  const kept = keep.map((i) => columns[i]);
+  return {
+    header: formatted ? kept.map((c) => columnSettings?.[c.name]?.column_title || c.name) : kept.map((c) => c.name),
+    columns: kept,
+    rows: rows.filter((r) => !isRollupRow(r)).map((r) => keep.map((i) => r[i])),
+  };
+}
 
-  const header = keep.map((i) => csvCell(columnSettings?.[columns[i].name]?.column_title || columns[i].name)).join(",");
-  const body = rows
-    .filter((r) => !isRollupRow(r))
-    .map((r) => keep.map((i) => csvCell(r[i])).join(","))
+/** One cell as the file should carry it: the string the screen shows when formatted, the raw value
+ *  otherwise. Only `.xlsx` keeps the raw type — `.csv` stringifies and `.json` re-serialises. */
+export function exportCell(
+  value: unknown,
+  column: ResultColumn,
+  columnSettings: Record<string, ColumnFormat> | undefined,
+  formatted: boolean,
+): unknown {
+  return formatted ? formatValue(value, column.type, columnSettings?.[column.name] ?? {}) : value;
+}
+
+/** RFC-4180 CSV: a header row, then one row per data row, CRLF-separated. */
+export function rowsToCsv(
+  columns: ResultColumn[],
+  rows: unknown[][],
+  columnSettings?: Record<string, ColumnFormat>,
+  formatted = true,
+): string {
+  const t = tableForExport(columns, rows, columnSettings, formatted);
+  const header = t.header.map(csvCell).join(",");
+  const body = t.rows
+    .map((r) => r.map((v, i) => csvCell(exportCell(v, t.columns[i], columnSettings, formatted))).join(","))
     .join("\r\n");
   return body ? `${header}\r\n${body}` : header;
 }
@@ -51,8 +98,8 @@ export function downloadBlob(filename: string, blob: Blob): void {
   URL.revokeObjectURL(url);
 }
 
-export function downloadCsv(title: string | undefined, columns: ResultColumn[], rows: unknown[][], columnSettings?: Record<string, ColumnFormat>): void {
-  downloadBlob(exportFilename(title, "csv"), new Blob([rowsToCsv(columns, rows, columnSettings)], { type: "text/csv;charset=utf-8" }));
+export function downloadCsv(title: string | undefined, columns: ResultColumn[], rows: unknown[][], columnSettings?: Record<string, ColumnFormat>, formatted = true): void {
+  downloadBlob(exportFilename(title, "csv"), new Blob([rowsToCsv(columns, rows, columnSettings, formatted)], { type: "text/csv;charset=utf-8" }));
 }
 
 /** Rasterise an <svg> element to a PNG Blob via Image → canvas. ECharts SVG has no foreignObject, so no taint. */
@@ -84,4 +131,23 @@ export function svgToPngBlob(svg: SVGElement, scale = 2): Promise<Blob> {
 
 export async function downloadPng(title: string | undefined, svg: SVGElement): Promise<void> {
   downloadBlob(exportFilename(title, "png"), await svgToPngBlob(svg));
+}
+
+/**
+ * One JSON object per row, keyed by the resolved header — the shape Metabase's `.json` export has.
+ *
+ * TWO COLUMNS THAT RESOLVE TO THE SAME HEADER COLLIDE, and the last one wins. Reachable only by
+ * renaming two columns to the same title, which is also true of Metabase's export, and the
+ * alternative (suffixing duplicates) invents a key the reader never typed.
+ */
+export function rowsToJson(columns: ResultColumn[], rows: unknown[][], columnSettings?: Record<string, ColumnFormat>, formatted = true): string {
+  const t = tableForExport(columns, rows, columnSettings, formatted);
+  const objects = t.rows.map((r) =>
+    Object.fromEntries(r.map((v, i) => [t.header[i], exportCell(v, t.columns[i], columnSettings, formatted)])),
+  );
+  return JSON.stringify(objects, null, 2);
+}
+
+export function downloadJson(title: string | undefined, columns: ResultColumn[], rows: unknown[][], columnSettings?: Record<string, ColumnFormat>, formatted = true): void {
+  downloadBlob(exportFilename(title, "json"), new Blob([rowsToJson(columns, rows, columnSettings, formatted)], { type: "application/json;charset=utf-8" }));
 }
