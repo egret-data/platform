@@ -888,7 +888,9 @@ export default function DashboardView() {
           <DashboardInfoSidebar
             name={dash.name}
             description={dash.description}
-            ownerLabel={dash.created_by}
+            ownerLabel={dash.created_by_name ?? dash.created_by}
+            createdAt={dash.created_at ?? null}
+            editorLabel={dash.updated_by_name ?? dash.updated_by}
             updatedAt={dash.updated_at}
             onClose={() => setShowInfo(false)}
             onSaveDescription={saveDescription}
