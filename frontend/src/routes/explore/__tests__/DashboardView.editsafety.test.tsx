@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { render, screen, fireEvent, within, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import DashboardView from "../DashboardView";
 
 vi.mock("sonner", () => ({ toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }) }));
+import { toast } from "sonner";
 vi.mock("@/components/chart/dashboard/DashboardCardView", () => ({
   DashboardCardView: ({ card }: { card: { id: string } }) => <div data-testid={`card-${card.id}`} />,
 }));
@@ -106,5 +107,37 @@ describe("DashboardView discard confirmation", () => {
     await user.click(await screen.findByRole("switch", { name: "Full width" }));
     fireEvent.click(bannerCancel());
     expect(screen.getByRole("alertdialog")).toBeTruthy();
+  });
+});
+
+const toastCalls = () => (toast as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+
+describe("DashboardView undo toasts", () => {
+  const undoLastToast = () => {
+    const [, cfg] = toastCalls().at(-1)!;
+    (cfg as { action: { onClick: () => void } }).action.onClick();
+  };
+
+  it("removing a card offers an Undo that puts it back", () => {
+    renderView();
+    enterEdit();
+    expect(screen.getByTestId("card-c1")).toBeTruthy();
+    fireEvent.click(screen.getAllByLabelText("remove card")[0]);
+    expect(screen.queryByTestId("card-c1")).toBeNull();
+    const [message] = toastCalls().at(-1)!;
+    expect(message).toBe("Removed card");
+    act(() => undoLastToast());
+    expect(screen.getByTestId("card-c1")).toBeTruthy();
+  });
+
+  it("removing a card and undoing leaves the draft clean, so Cancel does not prompt", () => {
+    // The strongest statement this suite can make about undo: it restores the draft so exactly
+    // that the dirtiness check from Task 1 cannot tell the round trip happened.
+    renderView();
+    enterEdit();
+    fireEvent.click(screen.getAllByLabelText("remove card")[0]);
+    act(() => undoLastToast());
+    fireEvent.click(bannerCancel());
+    expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 });

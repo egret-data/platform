@@ -26,6 +26,7 @@ import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardVie
 import { DashboardInfoSidebar } from "@/components/chart/dashboard/DashboardInfoSidebar";
 import { CardFilterMapOverlay } from "@/components/chart/dashboard/CardFilterMapOverlay";
 import { isDraftDirty, type DashboardDraft } from "@/components/chart/dashboard/edit-draft";
+import { REMOVED_CARD, REPLACED_CARD, deletedTab, undoableDraftEdit } from "@/components/chart/dashboard/draft-undo";
 import { DiscardChangesDialog } from "@/components/chart/dashboard/DiscardChangesDialog";
 import { DashboardFilterBar } from "@/components/chart/dashboard/DashboardFilterBar";
 import { EditSidebar, type EditPanel } from "@/components/chart/dashboard/EditSidebar";
@@ -316,7 +317,9 @@ export default function DashboardView() {
     setDraftCards([...(cards as DraftCard[]), newCard]);
   }
   function removeCard(cardId: string) {
-    setDraftCards((cards as DraftCard[]).filter((c) => c.id !== cardId));
+    const previous = cards as DraftCard[];
+    setDraftCards(previous.filter((c) => c.id !== cardId));
+    undoableDraftEdit(REMOVED_CARD, previous, setDraftCards);
   }
 
   function duplicateCard(cardId: string) {
@@ -329,8 +332,28 @@ export default function DashboardView() {
     });
   }
   function replaceCard(cardId: string, chart: Chart) {
-    setDraftCards((prev) => (prev ?? cardsAsDraft()).map((c) => (c.id === cardId ? { ...c, chart_id: chart.id, options: {} } : c)));
+    // Resetting `options` is correct and is NOT the divergence — Metabase discards more than this
+    // (cards-typed.ts:245-284). What was missing is the way back, which is the toast.
+    const previous = cards as DraftCard[];
+    setDraftCards(previous.map((c) => (c.id === cardId ? { ...c, chart_id: chart.id, options: {} } : c)));
     setReplacingId(null);
+    undoableDraftEdit(REPLACED_CARD, previous, setDraftCards);
+  }
+
+  /** Delete a tab from the draft and offer an Undo, as Metabase does (use-dashboard-tabs.ts:43-61).
+   *  All three delete paths — the no-cards fast path and the dialog's two buttons — funnel through
+   *  here so the snapshot is taken in exactly one place; three inline copies were three chances to
+   *  snapshot the state after the edit instead of before it. */
+  function deleteTabWithUndo(key: string, opts: { mode: "reassign"; toKey: string } | { mode: "delete" }) {
+    const previous = { tabs: draftTabs ?? [], cards: cards as DraftCard[], activeTabPos };
+    const name = previous.tabs.find((t) => t.key === key)?.name ?? "";
+    const r = deleteTab(previous.tabs, previous.cards, key, opts);
+    setDraftTabs(r.draftTabs);
+    setDraftCards(r.draftCards);
+    setActiveTabPos(Math.min(activeTabPos, r.draftTabs.length - 1));
+    undoableDraftEdit(deletedTab(name), previous, (p) => {
+      setDraftTabs(p.tabs); setDraftCards(p.cards); setActiveTabPos(p.activeTabPos);
+    });
   }
 
   function fillPlaceholder(cardId: string, chart: Chart) {
@@ -622,15 +645,10 @@ export default function DashboardView() {
           onReorder={(from, to) => setDraftTabs(reorderTab(draftTabs ?? [], from, to))}
           onDelete={(key) => {
             const hasCards = (cards as DraftCard[]).some((c) => c.tabKey === key);
-            if (!hasCards) {
-              const r = deleteTab(draftTabs ?? [], (cards as DraftCard[]), key, { mode: "delete" });
-              setDraftTabs(r.draftTabs); setDraftCards(r.draftCards);
-              setActiveTabPos(Math.min(activeTabPos, r.draftTabs.length - 1));
-            } else {
-              const firstOther = (draftTabs ?? []).find((t) => t.key !== key) ?? null;
-              setReassignTo(firstOther ? firstOther.key : null);
-              setDeletingTabKey(key);
-            }
+            if (!hasCards) { deleteTabWithUndo(key, { mode: "delete" }); return; }
+            const firstOther = (draftTabs ?? []).find((t) => t.key !== key) ?? null;
+            setReassignTo(firstOther ? firstOther.key : null);
+            setDeletingTabKey(key);
           }}
           onDuplicate={(key) => { const r = duplicateTab(draftTabs ?? [], (cards as DraftCard[]), key); setDraftTabs(r.draftTabs); setDraftCards(r.draftCards); setActiveTabPos(r.activeTabPos); }}
         />
@@ -794,17 +812,13 @@ export default function DashboardView() {
               <Button size="sm" variant="outline" aria-label="reassign and delete"
                 onClick={() => {
                   if (!deletingTabKey || !reassignTo) return;
-                  const r = deleteTab(draftTabs ?? [], (cards as DraftCard[]), deletingTabKey, { mode: "reassign", toKey: reassignTo });
-                  setDraftTabs(r.draftTabs); setDraftCards(r.draftCards);
-                  setActiveTabPos(Math.min(activeTabPos, r.draftTabs.length - 1));
+                  deleteTabWithUndo(deletingTabKey, { mode: "reassign", toKey: reassignTo });
                   setDeletingTabKey(null); setReassignTo(null);
                 }}>reassign and delete</Button>
               <Button size="sm" variant="ghost" className="text-destructive" aria-label="delete cards too"
                 onClick={() => {
                   if (!deletingTabKey) return;
-                  const r = deleteTab(draftTabs ?? [], (cards as DraftCard[]), deletingTabKey, { mode: "delete" });
-                  setDraftTabs(r.draftTabs); setDraftCards(r.draftCards);
-                  setActiveTabPos(Math.min(activeTabPos, r.draftTabs.length - 1));
+                  deleteTabWithUndo(deletingTabKey, { mode: "delete" });
                   setDeletingTabKey(null); setReassignTo(null);
                 }}>delete cards too</Button>
             </div>
