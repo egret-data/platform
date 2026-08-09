@@ -364,7 +364,21 @@ pub struct DashboardDetailDto {
     pub description: String,
     pub parameters: serde_json::Value,
     pub created_by: Option<String>,
+    /// Display name for `created_by` — the profile name, else the email. Resolved server-side:
+    /// the endpoints that can turn a user id into a name are admin-gated, so the browser cannot
+    /// do it for an ordinary workspace editor. Same shape and same reason as
+    /// `MemberDto.principal_name`.
+    pub created_by_name: Option<String>,
+    /// NULL for dashboards predating migration 0106, which does not invent a creation date.
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub updated_by: Option<String>,
+    /// Display name for `updated_by`, resolved the same way as `created_by_name`.
+    pub updated_by_name: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// The folder this dashboard is filed under; NULL = Uncategorized. Present on
+    /// `DashboardSummaryDto` since folders shipped, and absent here until now, which is why the
+    /// info sidebar had no folder to name.
+    pub folder_id: Option<String>,
     pub width: String,
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
     pub bookmarked: bool,

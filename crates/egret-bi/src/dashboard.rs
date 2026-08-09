@@ -24,6 +24,12 @@ pub struct Dashboard {
     pub created_by: Option<Uuid>,
     pub folder_id: Option<Uuid>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// NULL for every dashboard that predates migration 0106 — see that file for why it is not
+    /// backfilled. The UI renders the "Added" line only when this is present.
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Who last saved this dashboard. NULL until the first save after 0106, and NULL again if
+    /// that user is hard-deleted (0093's ON DELETE SET NULL treatment).
+    pub updated_by: Option<Uuid>,
     pub width: String,
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -73,6 +79,14 @@ struct DashboardWithCountBm {
     bookmarked: bool,
 }
 
+/// Private struct for attribution_names — sqlx tuple FromRow is version-sensitive, same reason
+/// DashboardWithCount exists.
+#[derive(sqlx::FromRow)]
+struct AttributionNames {
+    created_by_name: Option<String>,
+    updated_by_name: Option<String>,
+}
+
 /// A card as supplied by the client when saving a layout (no server id yet).
 #[derive(Debug, Clone)]
 pub struct NewCard {
@@ -88,7 +102,7 @@ pub struct NewCard {
 }
 
 const COLS: &str =
-    "id, workspace_id, name, description, parameters, created_by, folder_id, updated_at, width, deleted_at";
+    "id, workspace_id, name, description, parameters, created_by, folder_id, updated_at, created_at, updated_by, width, deleted_at";
 const CARD_COLS: &str =
     "id, dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal, tab_id";
 
@@ -175,8 +189,8 @@ impl DashboardRepo {
         Ok(())
     }
 
-    /// Update dashboard metadata only (name/description). Card layout goes through
-    /// `replace_layout`; callers that change both run them together.
+    /// Update dashboard metadata only (name/description/parameters/width) and stamp the editor.
+    /// Card layout goes through `replace_layout`; callers that change both run them together.
     pub async fn update(
         &self,
         id: Uuid,
@@ -184,15 +198,17 @@ impl DashboardRepo {
         description: &str,
         parameters: &serde_json::Value,
         width: &str,
+        updated_by: Option<Uuid>,
     ) -> Result<(), BiError> {
         sqlx::query(
-            "UPDATE analytics.dashboards SET name=$2, description=$3, parameters=$4, width=$5, updated_at=now() WHERE id=$1",
+            "UPDATE analytics.dashboards SET name=$2, description=$3, parameters=$4, width=$5, updated_by=$6, updated_at=now() WHERE id=$1",
         )
         .bind(id)
         .bind(name)
         .bind(description)
         .bind(parameters)
         .bind(width)
+        .bind(updated_by)
         .execute(&self.db.pool)
         .await
         .map_err(map_conflict_err)?;
@@ -396,6 +412,39 @@ impl DashboardRepo {
         .fetch_optional(&self.db.pool)
         .await?
         .flatten())
+    }
+
+    /// Display names for a dashboard's creator and last editor, resolved in ONE query.
+    ///
+    /// `COALESCE(NULLIF(u.name, ''), u.email::text)` is the label rule the principal picker
+    /// already uses: the profile name when it is set, the email otherwise. It is resolved here
+    /// rather than in the browser because the only endpoints that can turn a user id into a name
+    /// are admin-gated — /api/control-plane/users needs `user:read` and /ws/{ws}/members needs
+    /// `workspace:manage_members` — so a ws_editor opening the info sidebar on their own dashboard
+    /// would get a 403 from both. Five other DTOs in this repo (MemberDto.principal_name and
+    /// friends) resolve names the same way.
+    ///
+    /// `(None, None)` for a dashboard that does not exist, which callers already treat as 404 via
+    /// `get`.
+    pub async fn attribution_names(
+        &self,
+        id: Uuid,
+    ) -> Result<(Option<String>, Option<String>), BiError> {
+        let row = sqlx::query_as::<_, AttributionNames>(
+            "SELECT COALESCE(NULLIF(cu.name, ''), cu.email::text) AS created_by_name, \
+                    COALESCE(NULLIF(eu.name, ''), eu.email::text) AS updated_by_name \
+             FROM analytics.dashboards d \
+             LEFT JOIN users cu ON cu.id = d.created_by \
+             LEFT JOIN users eu ON eu.id = d.updated_by \
+             WHERE d.id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.db.pool)
+        .await?;
+        Ok(match row {
+            Some(r) => (r.created_by_name, r.updated_by_name),
+            None => (None, None),
+        })
     }
 
     /// Deep-copy a dashboard (row + tabs + cards) under a new owner, in one transaction.

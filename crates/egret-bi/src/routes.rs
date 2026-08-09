@@ -2708,7 +2708,14 @@ async fn db_update(
         );
     }
     st.dashboards
-        .update(id, &b.name, &b.description, &b.parameters, &b.width)
+        .update(
+            id,
+            &b.name,
+            &b.description,
+            &b.parameters,
+            &b.width,
+            Some(ctx.principal.user_id.0),
+        )
         .await
         .map_err(BiApiError::from)?;
     let tabs: Vec<crate::dashboard::NewTab> = b.tabs.into_iter().map(Into::into).collect();
@@ -2936,8 +2943,13 @@ async fn load_dashboard(
         .is_bookmarked(user, id)
         .await
         .map_err(BiApiError::from)?;
+    let names = st
+        .dashboards
+        .attribution_names(id)
+        .await
+        .map_err(BiApiError::from)?;
     Ok(crate::model::dashboard_detail_dto(
-        d, tabs, cards, bookmarked,
+        d, tabs, cards, bookmarked, names,
     ))
 }
 

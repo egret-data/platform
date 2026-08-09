@@ -270,11 +270,14 @@ pub fn dashboard_card_dto(c: DashboardCard) -> DashboardCardDto {
     }
 }
 
+/// `names` is `(created_by_name, updated_by_name)` from `DashboardRepo::attribution_names` —
+/// passed in rather than fetched here so this stays a pure domain→wire conversion.
 pub fn dashboard_detail_dto(
     d: Dashboard,
     tabs: Vec<crate::dashboard::DashboardTab>,
     cards: Vec<DashboardCard>,
     bookmarked: bool,
+    names: (Option<String>, Option<String>),
 ) -> DashboardDetailDto {
     DashboardDetailDto {
         id: d.id.to_string(),
@@ -282,7 +285,12 @@ pub fn dashboard_detail_dto(
         description: d.description,
         parameters: d.parameters,
         created_by: d.created_by.map(|u| u.to_string()),
+        created_by_name: names.0,
+        created_at: d.created_at,
+        updated_by: d.updated_by.map(|u| u.to_string()),
+        updated_by_name: names.1,
         updated_at: d.updated_at,
+        folder_id: d.folder_id.map(|u| u.to_string()),
         width: d.width,
         deleted_at: d.deleted_at,
         bookmarked,

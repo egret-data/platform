@@ -23117,9 +23117,44 @@
               "null"
             ]
           },
+          "created_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Display name for `created_by` — the profile name, else the email. Resolved server-side:\nthe endpoints that can turn a user id into a name are admin-gated, so the browser cannot\ndo it for an ordinary workspace editor. Same shape and same reason as\n`MemberDto.principal_name`."
+          },
+          "created_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "NULL for dashboards predating migration 0106, which does not invent a creation date."
+          },
+          "updated_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Display name for `updated_by`, resolved the same way as `created_by_name`."
+          },
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "folder_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The folder this dashboard is filed under; NULL = Uncategorized. Present on\n`DashboardSummaryDto` since folders shipped, and absent here until now, which is why the\ninfo sidebar had no folder to name."
           },
           "width": {
             "type": "string"
