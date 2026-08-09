@@ -3,6 +3,7 @@ import type { DashboardParameter } from "@/api/dashboards";
 import type { DraftCard, DraftTab } from "./tabs";
 import type { MoveDestination } from "./inlineParameters";
 import { AddPanel } from "./AddPanel";
+import type { FieldLabels } from "@/components/chart/config/field-names";
 import { CardSettingsPanel } from "./CardSettingsPanel";
 import { FilterSettingsPanel } from "./FilterSettingsPanel";
 import { CardVizPanel } from "./CardVizPanel";
@@ -24,6 +25,9 @@ interface Props {
   chartForCard: Chart | undefined;
   paramForPanel: DashboardParameter | undefined;
   cardColumns?: { cardId: string; label: string; columns: string[] }[];
+  /** verbose_name map for the card whose settings are open, and for the value-source card. */
+  panelLabels?: FieldLabels;
+  valuesSourceLabels?: FieldLabels;
   /** The open filter's loaded option list, so its DEFAULT is picked with the filter's own widget. */
   defaultOptions?: string[];
   /** W7: where the open filter may be moved to, where it is now, and how to move it. */
@@ -54,7 +58,7 @@ export function EditSidebar(props: Props) {
       </div>
       {panel?.kind === "add" && <AddPanel charts={props.charts} onAddChart={props.onAddChart} />}
       {panel?.kind === "card" && props.cardForPanel && (
-        <CardSettingsPanel card={props.cardForPanel} chart={props.chartForCard} parameters={props.parameters} tabs={props.tabs}
+        <CardSettingsPanel card={props.cardForPanel} chart={props.chartForCard} parameters={props.parameters} tabs={props.tabs} labels={props.panelLabels}
           onUpdateOptions={props.onUpdateCardOptions} onMoveToTab={props.onMoveCardToTab} />
       )}
       {panel?.kind === "viz" && props.vizForPanel && props.onChangeVizOverride && (
@@ -63,7 +67,7 @@ export function EditSidebar(props: Props) {
       )}
       {panel?.kind === "filter" && props.paramForPanel && (
         <FilterSettingsPanel param={props.paramForPanel} allParameters={props.parameters}
-          cardColumns={props.cardColumns ?? []} defaultOptions={props.defaultOptions ?? []}
+          cardColumns={props.cardColumns ?? []} defaultOptions={props.defaultOptions ?? []} valuesSourceLabels={props.valuesSourceLabels}
           moveDestinations={props.moveDestinations ?? []} hostCardId={props.hostCardId ?? null}
           onMove={props.onMoveParam}
           onChange={props.onChangeParam} onDelete={props.onDeleteParam} />

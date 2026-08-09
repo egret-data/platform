@@ -1,5 +1,6 @@
 import { Checkbox } from "@/components/ui/checkbox";
 import type { DashboardParameter, ParamType, ParamOperator, ParamWidget } from "@/api/dashboards";
+import { displayName, fieldTitle, type FieldLabels } from "@/components/chart/config/field-names";
 import { OPERATORS } from "./ParameterEditor";
 import { canRenderMultiValue, isMultiValue, isSingleOrMultiSelectable } from "./multiSelect";
 import { linkedFilterState } from "./linkedFilters";
@@ -11,6 +12,8 @@ interface Props {
   param: DashboardParameter;
   allParameters: DashboardParameter[];
   cardColumns?: { cardId: string; label: string; columns: string[] }[];
+  /** verbose_name per column for the SELECTED value-source card. */
+  valuesSourceLabels?: FieldLabels;
   /** The parameter's loaded option list, so a category/location default is picked, not typed. */
   defaultOptions?: string[];
   /** Every heading/question card the filter could be moved to, grouped by tab. Empty on a
@@ -29,7 +32,7 @@ const WIDGETS: { v: ParamWidget; label: string }[] = [
   { v: "input", label: "Input box" },
 ];
 
-export function FilterSettingsPanel({ param, allParameters, cardColumns = [], defaultOptions = [], moveDestinations = [], hostCardId = null, onMove, onChange, onDelete }: Props) {
+export function FilterSettingsPanel({ param, allParameters, cardColumns = [], valuesSourceLabels, defaultOptions = [], moveDestinations = [], hostCardId = null, onMove, onChange, onDelete }: Props) {
   const cls = "h-8 w-full rounded border bg-background px-2 text-sm";
   const showOp = param.type === "text" || param.type === "number" || param.type === "date";
   const showWidget = param.type === "category" || param.type === "id" || param.type === "location" || param.type === "text";
@@ -104,7 +107,7 @@ export function FilterSettingsPanel({ param, allParameters, cardColumns = [], de
               <select aria-label="values column" className={cls} value={param.valuesSource.column ?? ""}
                 onChange={(e) => onChange({ ...param, valuesSource: { type: "card", cardId: param.valuesSource?.cardId, column: e.target.value } })}>
                 <option value="">column…</option>
-                {(cardColumns.find((c) => c.cardId === param.valuesSource?.cardId)?.columns ?? []).map((col) => <option key={col} value={col}>{col}</option>)}
+                {(cardColumns.find((c) => c.cardId === param.valuesSource?.cardId)?.columns ?? []).map((col) => <option key={col} value={col} title={fieldTitle(col, valuesSourceLabels)}>{displayName(col, valuesSourceLabels)}</option>)}
               </select>
             </div>
           )}
