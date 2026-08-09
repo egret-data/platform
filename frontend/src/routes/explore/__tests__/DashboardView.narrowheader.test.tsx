@@ -65,7 +65,9 @@ describe("the dashboard header row on a narrow viewport", () => {
     // The title takes its own line so the actions get the full width beneath it.
     expect(screen.getByRole("heading", { name: "ZZ Chart Parity" }).className).toContain("basis-full");
     // Wrapping, not hiding: all four view-mode controls are present.
-    for (const label of ["add bookmark", "auto-refresh", "fullscreen", "dashboard info"]) {
+    // "Auto Refresh" is the popover trigger that replaced the native <select> (W4); the
+    // <select>'s label was "auto-refresh".
+    for (const label of ["add bookmark", "Auto Refresh", "fullscreen", "dashboard info"]) {
       expect(screen.getByLabelText(label)).toBeInTheDocument();
     }
   });

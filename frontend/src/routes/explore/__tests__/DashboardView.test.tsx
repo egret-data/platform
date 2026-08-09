@@ -25,6 +25,9 @@ const { updateSpy, dashState } = vi.hoisted(() => {
 vi.mock("@/api/dashboards", () => ({
   useDashboard: () => dashState.current,
   useDashboardMutations: () => ({ update: { mutateAsync: updateSpy, isPending: false } }),
+  // The view-mode "…" menu reads the dashboard's folder from the LIST query, because the detail
+  // DTO carries no folder_id (bi.rs:360-372). An empty list leaves it folderless.
+  useDashboards: () => ({ data: [] }),
 }));
 
 beforeEach(() => { dashState.current = dashState.loaded; });
@@ -171,7 +174,8 @@ describe("DashboardView (Phase B — duplicate/replace)", () => {
 describe("DashboardView (Phase B — view controls)", () => {
   it("shows an auto-refresh control and a fullscreen toggle in view mode", () => {
     renderAt();
-    expect(screen.getByLabelText(/auto-refresh/i)).toBeInTheDocument();
+    // W4 replaced the native <select aria-label="auto-refresh"> with a popover trigger.
+    expect(screen.getByRole("button", { name: "Auto Refresh" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /fullscreen/i })).toBeInTheDocument();
   });
 });
