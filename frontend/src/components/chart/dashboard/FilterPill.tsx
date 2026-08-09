@@ -73,7 +73,10 @@ export function FilterPill({ param, value, options, onChange }: Props) {
   );
 }
 
-function FilterControl({ param, value, options, onChange }: Props) {
+/** The value control for one parameter, dispatching on type and operator. Exported because the
+ *  DEFAULT value is a parameter value too, and the settings panel must offer the same widget the
+ *  viewer will use — the structure Metabase gets from sharing `ParameterValueWidget`. */
+export function FilterControl({ param, value, options, onChange }: Props) {
   const [search, setSearch] = useState("");
   const [qy, setQy] = useState(() => {
     const [y = "", q = ""] = String(value ?? "").split("-");

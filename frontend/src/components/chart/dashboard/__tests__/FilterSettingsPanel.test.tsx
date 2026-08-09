@@ -24,15 +24,17 @@ describe("FilterSettingsPanel tier2d", () => {
 
   it("default control writes param.default", () => {
     const onChange = vi.fn();
-    render(<FilterSettingsPanel param={p({})} allParameters={[p({})]} onChange={onChange} onDelete={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText("default value"), { target: { value: "West" } });
-    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ default: "West" }));
+    render(<FilterSettingsPanel param={p({})} allParameters={[p({})]} defaultOptions={["West"]}
+      onChange={onChange} onDelete={vi.fn()} />);
+    fireEvent.click(screen.getByLabelText("option West"));
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ default: ["West"] }));
   });
 
   it("clearing the default writes undefined", () => {
     const onChange = vi.fn();
-    render(<FilterSettingsPanel param={p({ default: "West" })} allParameters={[p({})]} onChange={onChange} onDelete={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText("default value"), { target: { value: "" } });
+    render(<FilterSettingsPanel param={p({ default: ["West"] })} allParameters={[p({})]} defaultOptions={["West"]}
+      onChange={onChange} onDelete={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "clear default value" }));
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ default: undefined }));
   });
 

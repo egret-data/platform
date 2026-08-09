@@ -3,11 +3,14 @@ import type { DashboardParameter, ParamType, ParamOperator, ParamWidget } from "
 import { OPERATORS } from "./ParameterEditor";
 import { canRenderMultiValue, isMultiValue, isSingleOrMultiSelectable } from "./multiSelect";
 import { linkedFilterState } from "./linkedFilters";
+import { DefaultValueField } from "./DefaultValueField";
 
 interface Props {
   param: DashboardParameter;
   allParameters: DashboardParameter[];
   cardColumns?: { cardId: string; label: string; columns: string[] }[];
+  /** The parameter's loaded option list, so a category/location default is picked, not typed. */
+  defaultOptions?: string[];
   onChange: (next: DashboardParameter) => void;
   onDelete: () => void;
 }
@@ -18,7 +21,7 @@ const WIDGETS: { v: ParamWidget; label: string }[] = [
   { v: "input", label: "Input box" },
 ];
 
-export function FilterSettingsPanel({ param, allParameters, cardColumns = [], onChange, onDelete }: Props) {
+export function FilterSettingsPanel({ param, allParameters, cardColumns = [], defaultOptions = [], onChange, onDelete }: Props) {
   const cls = "h-8 w-full rounded border bg-background px-2 text-sm";
   const showOp = param.type === "text" || param.type === "number" || param.type === "date";
   const showWidget = param.type === "category" || param.type === "id" || param.type === "location" || param.type === "text";
@@ -118,12 +121,8 @@ export function FilterSettingsPanel({ param, allParameters, cardColumns = [], on
         </div>
       )}
 
-      {/* MVP: default is entered as plain text; multi-value/range defaults aren't round-tripped. */}
-      <label className="flex flex-col gap-1 text-xs text-muted-foreground">Default value
-        <input aria-label="default value" className={cls}
-          value={Array.isArray(param.default) ? (param.default as unknown[]).join(", ") : String(param.default ?? "")}
-          onChange={(e) => onChange({ ...param, default: e.target.value === "" ? undefined : e.target.value })} />
-      </label>
+      <DefaultValueField param={param} options={defaultOptions}
+        onChange={(d) => onChange({ ...param, default: d })} />
 
       {/* Metabase's framing, verbatim (ParameterLinkedFilters.tsx:52,93-103,120-127,143-160). The
           three non-list states used to render as NOTHING AT ALL, because the whole section sat
