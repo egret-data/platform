@@ -97,3 +97,54 @@ describe("CardSettingsPanel (text card)", () => {
     expect(screen.getByLabelText("show background")).not.toBeChecked();
   });
 });
+
+describe("CardSettingsPanel (iframe card)", () => {
+  const iframeCard = (opts: Record<string, unknown> = {}): DraftCard => ({
+    id: "if1", chart_id: null, card_type: "iframe", grid_col: 0, grid_row: 0,
+    size_x: 12, size_y: 8, options: opts, tab_id: null, tabKey: null,
+  });
+
+  it("edits the single free-text embed setting and writes only that key", () => {
+    const onUpdateOptions = vi.fn();
+    render(<CardSettingsPanel card={iframeCard()} chart={undefined} parameters={[param]} tabs={[]} onUpdateOptions={onUpdateOptions} onMoveToTab={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("iframe url or embed code"), {
+      target: { value: "https://www.loom.com/share/abc" },
+    });
+    // toStrictEqual, not toEqual: the point is that the patch carries NOTHING else.
+    expect(onUpdateOptions.mock.calls[0][0]).toStrictEqual({ iframe: "https://www.loom.com/share/abc" });
+  });
+
+  it("shows the stored value", () => {
+    render(<CardSettingsPanel card={iframeCard({ iframe: "https://figma.com/embed?x=1" })} chart={undefined} parameters={[]} tabs={[]} onUpdateOptions={vi.fn()} onMoveToTab={vi.fn()} />);
+    expect(screen.getByLabelText("iframe url or embed code")).toHaveValue("https://figma.com/embed?x=1");
+  });
+
+  it("offers no auto-height toggle, because a cross-origin frame cannot be measured", () => {
+    render(<CardSettingsPanel card={iframeCard()} chart={undefined} parameters={[]} tabs={[]} onUpdateOptions={vi.fn()} onMoveToTab={vi.fn()} />);
+    expect(screen.queryByLabelText("auto height")).toBeNull();
+  });
+
+  it("offers no hide-when-empty toggle, because an iframe card runs no query", () => {
+    render(<CardSettingsPanel card={iframeCard()} chart={undefined} parameters={[]} tabs={[]} onUpdateOptions={vi.fn()} onMoveToTab={vi.fn()} />);
+    expect(screen.queryByLabelText("hide when empty")).toBeNull();
+  });
+
+  it("DOES offer the background toggle, on by default", () => {
+    // W5 generalised "Show background" to every card type, and its own comment names iframe as
+    // one of the four Metabase offers it on. `showsCardBackground` defaults anything that is not
+    // a heading or a placeholder to true, so an iframe card must read checked — the branch added
+    // here has to carry the shared row, not quietly drop it.
+    const onUpdateOptions = vi.fn();
+    render(<CardSettingsPanel card={iframeCard()} chart={undefined} parameters={[]} tabs={[]} onUpdateOptions={onUpdateOptions} onMoveToTab={vi.fn()} />);
+    expect(screen.getByLabelText("show background")).toBeChecked();
+    fireEvent.click(screen.getByLabelText("show background"));
+    expect(onUpdateOptions.mock.calls[0][0]).toStrictEqual({ background: false });
+  });
+
+  it("does NOT fall through to the chart-card panel", () => {
+    // Without its own branch, an iframe card lands on the default return at the bottom of the
+    // file and gets a Title field and an On-click select, neither of which applies.
+    render(<CardSettingsPanel card={iframeCard()} chart={undefined} parameters={[]} tabs={[]} onUpdateOptions={vi.fn()} onMoveToTab={vi.fn()} />);
+    expect(screen.queryByLabelText("on click")).toBeNull();
+  });
+});

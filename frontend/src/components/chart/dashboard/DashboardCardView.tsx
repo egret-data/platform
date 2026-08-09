@@ -14,6 +14,7 @@ import type { DrillContext } from "@/components/chart/drill";
 import { TextCard } from "./TextCard";
 import { HeadingCard } from "./HeadingCard";
 import { LinkCard } from "./LinkCard";
+import { IFrameCard } from "./IFrameCard";
 import { applyVizOverride, interpolateParams } from "./params";
 import { AutoHeightMeasure } from "./AutoHeightMeasure";
 import { DashboardCardHeader } from "./DashboardCardHeader";
@@ -203,6 +204,13 @@ export function DashboardCardView({ ws, dashboardId, card, chart, refreshNonce, 
     return wrap(<HeadingCardHost text={display} editing={editing} autoFocus={autoFocusText} onChange={onEditText} inline={inline} />);
   }
   if (card.card_type === "link") return wrap(<LinkCard url={asString(card.options.url)} label={asString(card.options.label)} editing={editing} />);
+  // NOT wrapped in `wrap`/AutoHeightMeasure: a cross-origin frame's content height is unreadable
+  // from the parent, so the measurement would only report back the height the grid already set.
+  // The settings panel withholds the auto-height toggle for the same reason.
+  //
+  // No `inline` either: W7 hosts inline parameters on heading and question cards, and an iframe
+  // is neither — a filter drawn on it would have no query to reach.
+  if (card.card_type === "iframe") return <IFrameCard iframe={asString(card.options.iframe)} editing={editing} />;
   const tileProps = { ws, dashboardId, card, chart, refreshNonce, paramFilters, paramTemporal, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight, inline };
   // View mode reads through the object-scoped card-data endpoint; edit mode runs
   // the live draft spec directly so unsaved draft cards + param injection still render.

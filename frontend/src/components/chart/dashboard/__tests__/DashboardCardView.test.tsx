@@ -91,6 +91,22 @@ describe("DashboardCardView", () => {
     expect(screen.getByRole("link", { name: "X" })).toHaveAttribute("href", "https://x.com");
     expect(useDashboardCardData).not.toHaveBeenCalled();
   });
+  it("routes an iframe card and does NOT fetch data", () => {
+    const { container } = renderCard(
+      <DashboardCardView ws="eng" dashboardId="d1" chart={undefined}
+        card={card({ card_type: "iframe", options: { iframe: "https://www.loom.com/share/abc" } })} />,
+    );
+    expect(container.querySelector("iframe")).toHaveAttribute("src", "https://www.loom.com/embed/abc");
+    expect(useDashboardCardData).not.toHaveBeenCalled();
+  });
+  it("routes an iframe card with a forbidden host to the refusal, still without fetching", () => {
+    const { container } = renderCard(
+      <DashboardCardView ws="eng" dashboardId="d1" chart={undefined}
+        card={card({ card_type: "iframe", options: { iframe: "https://example.com" } })} />,
+    );
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(useDashboardCardData).not.toHaveBeenCalled();
+  });
   it("threads onValueClick to a chart card", () => {
     const onValueClick = vi.fn();
     renderCard(<DashboardCardView ws="eng" dashboardId="d1" card={card({ chart_id: "c1" })} chart={chart} onValueClick={onValueClick} />);
