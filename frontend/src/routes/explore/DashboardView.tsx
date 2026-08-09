@@ -28,6 +28,7 @@ import { cardChromeClass } from "@/components/chart/dashboard/card-chrome";
 import { DashboardInfoSidebar } from "@/components/chart/dashboard/DashboardInfoSidebar";
 import { CardFilterMapOverlay } from "@/components/chart/dashboard/CardFilterMapOverlay";
 import { cardMapState, columnsForParam } from "@/components/chart/dashboard/card-map-state";
+import { findHostCardId, hostTabKey, inlineParametersFor, keepInlineParameters, mergeTopBarOrder, moveDestinations, moveParameterToCard, removeCardAndHostedParameters, topBarParameters, withoutInlineParameters } from "@/components/chart/dashboard/inlineParameters";
 import { isDraftDirty, type DashboardDraft } from "@/components/chart/dashboard/edit-draft";
 import { REMOVED_CARD, REPLACED_CARD, deletedTab, undoableDraftEdit } from "@/components/chart/dashboard/draft-undo";
 import { DiscardChangesDialog } from "@/components/chart/dashboard/DiscardChangesDialog";
@@ -325,9 +326,14 @@ export default function DashboardView() {
     setDraftCards([...(cards as DraftCard[]), newCard]);
   }
   function removeCard(cardId: string) {
-    const previous = cards as DraftCard[];
-    setDraftCards(previous.filter((c) => c.id !== cardId));
-    undoableDraftEdit(REMOVED_CARD, previous, setDraftCards);
+    // A card's inline filters are deleted WITH the card, matching Metabase. The undo snapshot is
+    // therefore BOTH slices: W2's toast restoring only the cards would bring back a card holding
+    // parameter ids that no longer name anything — a half-undo that looks like it worked.
+    const previous = { cards: cards as DraftCard[], parameters };
+    const next = removeCardAndHostedParameters(previous.cards, previous.parameters, cardId);
+    setDraftCards(next.cards);
+    if (next.parameters !== previous.parameters) setDraftParameters(next.parameters);
+    undoableDraftEdit(REMOVED_CARD, previous, (p) => { setDraftCards(p.cards); setDraftParameters(p.parameters); });
   }
 
   function duplicateCard(cardId: string) {
@@ -336,14 +342,23 @@ export default function DashboardView() {
       const src = base.find((c) => c.id === cardId);
       if (!src) return base;
       const maxY = base.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
-      return [...base, { ...src, id: `new-dup-${cardSeqRef.current++}`, grid_row: maxY, options: { ...src.options } }];
+      // The clone gets NO inline filters. egret's clone is a shallow spread, so without the strip
+      // two cards would claim one parameter id, `findHostCardId` would pick the first, and the
+      // clone would draw nothing. Deliberate divergence from Metabase, which duplicates the
+      // parameters themselves (cards-typed.ts:416-441) — see inlineParameters.ts.
+      return [...base, { ...src, id: `new-dup-${cardSeqRef.current++}`, grid_row: maxY, options: withoutInlineParameters({ ...src.options }) }];
     });
   }
   function replaceCard(cardId: string, chart: Chart) {
     // Resetting `options` is correct and is NOT the divergence — Metabase discards more than this
     // (cards-typed.ts:245-284). What was missing is the way back, which is the toast.
+    //
+    // `inlineParameters` is the ONE key that survives the reset: the filter list is a PLACEMENT,
+    // not a property of the chart, and Metabase's own replaceCard leaves `inline_parameters` alone
+    // (cards-typed.ts:262-270). Without this, "Replace chart" silently teleports the card's filter
+    // back to the top bar.
     const previous = cards as DraftCard[];
-    setDraftCards(previous.map((c) => (c.id === cardId ? { ...c, chart_id: chart.id, options: {} } : c)));
+    setDraftCards(previous.map((c) => (c.id === cardId ? { ...c, chart_id: chart.id, options: keepInlineParameters(c.options) } : c)));
     setReplacingId(null);
     undoableDraftEdit(REPLACED_CARD, previous, setDraftCards);
   }
@@ -519,6 +534,14 @@ export default function DashboardView() {
   }
 
   const activeParamId = editing && editPanel?.kind === "filter" ? editPanel.paramId : null;
+  // Only the TWO widget lists get the split. `cardQueryArgs`, `applyParamsToChart`,
+  // `interpolateParams`, `resolveValuesSource`, `computeLinkedFilters` and the required-filter
+  // check keep reading the full `parameters` array, because moving a filter onto a card changes
+  // where its widget is DRAWN and nothing about what it filters (Metabase subtracts inline
+  // parameters from the header list alone — selectors.ts:447-454). Feeding this anywhere else
+  // silently un-applies the filter, and the symptom is a card that quietly stops being filtered
+  // rather than an error.
+  const topBar = topBarParameters(parameters, cards);
   const activeParam = activeParamId ? parameters.find((p) => p.id === activeParamId) : undefined;
   // Per-card column lists for the filter value-source "card" picker (label + selectable columns).
   const cardColumns = cards
@@ -685,11 +708,15 @@ export default function DashboardView() {
           onDuplicate={(key) => { const r = duplicateTab(draftTabs ?? [], (cards as DraftCard[]), key); setDraftTabs(r.draftTabs); setDraftCards(r.draftCards); setActiveTabPos(r.activeTabPos); }}
         />
       )}
+      {/* THE TWO — and only two — call sites the split list reaches. */}
       {editing
-        ? <EditFilterChips parameters={parameters} activeId={editPanel?.kind === "filter" ? editPanel.paramId : null}
+        ? <EditFilterChips parameters={topBar} activeId={editPanel?.kind === "filter" ? editPanel.paramId : null}
             onSelect={(id) => openPanel({ kind: "filter", paramId: id })}
-            onReorder={setDraftParameters} />
-        : <DashboardFilterBar parameters={parameters} values={filterDrafts.editorValues}
+            /* `mergeTopBarOrder`, NOT `setDraftParameters`. W6's reorder writes back the whole
+               list it was handed; now that the list is a SUBSET, writing it back unmerged would
+               delete every filter an author had moved onto a card. */
+            onReorder={(next) => setDraftParameters(mergeTopBarOrder(parameters, next))} />
+        : <DashboardFilterBar parameters={topBar} values={filterDrafts.editorValues}
             onChange={filterDrafts.setValue} optionsBySlug={optionsBySlug}
             autoApply={filterDrafts.autoApply} onAutoApplyChange={filterDrafts.setAutoApply}
             changedCount={filterDrafts.changedCount} onApply={filterDrafts.apply} onCancel={filterDrafts.cancel} />}
@@ -775,7 +802,17 @@ export default function DashboardView() {
                     onAutoHeight={editing ? (rows) => applyAutoHeight(c.id, rows) : undefined}
                     onValueClick={editing ? undefined : (ctx, x, y) => onCardValueClick(c, ctx, x, y)}
                     onEditText={editing && (c.card_type === "text" || c.card_type === "heading") ? (t) => { updateCardOptions(c.id, { text: t }); if (newCardId === c.id) setNewCardId(null); } : undefined}
-                    autoFocusText={c.id === newCardId} />
+                    autoFocusText={c.id === newCardId}
+                    /* The filters THIS card hosts. `CardInlineFilters` returns null for an empty
+                       list, so a card that hosts nothing renders exactly as it does today. The
+                       values are W6's EDITOR values, so a card-hosted filter behaves identically
+                       to a top-bar one under the draft/Apply mode. */
+                    inline={{
+                      parameters: inlineParametersFor(c, parameters),
+                      values: filterDrafts.editorValues, optionsBySlug, onChange: filterDrafts.setValue,
+                      onSelect: editing ? (paramId: string) => openPanel({ kind: "filter", paramId }) : undefined,
+                      activeId: activeParamId,
+                    }} />
                 )}
                 {activeParamId && activeParam && (
                   <CardFilterMapOverlay
@@ -789,8 +826,15 @@ export default function DashboardView() {
                       columns: baseChart ? columnsForParam(baseChart.params.spec, activeParam.type) : [],
                       rows: c.size_y,
                       chartMissing: c.card_type === "chart" && !baseChart,
-                      // egret filters are dashboard-level and have no owning tab; W7 supplies this.
-                      filterTabKey: undefined,
+                      // W2 BUILT THIS BRANCH AND LEFT IT INERT; THIS IS THE LINE THAT TURNS IT ON.
+                      // "The selected filter is on another tab." had no reachable precondition
+                      // while every filter was dashboard-level (card-map-state.ts:54-63). An
+                      // inline parameter finally gives a filter an owning card, and therefore a
+                      // tab. `hostTabKey` returns `undefined` for a top-bar filter and `null` for
+                      // a host on a tabless dashboard, and `cardMapState` guards with `!= null`,
+                      // so both keep the hint exactly as inert as it is today.
+                      filterTabKey: hostTabKey(activeParamId, cards),
+                      cardTabKey: (c as DraftCard).tabKey,
                     })}
                     value={mappings[activeParamId] ?? ""}
                     onChange={(col) => {
@@ -821,6 +865,12 @@ export default function DashboardView() {
             defaultOptions={editPanel?.kind === "filter"
               ? (optionsBySlug[parameters.find((p) => p.id === editPanel.paramId)?.slug ?? ""] ?? [])
               : []}
+            moveDestinations={moveDestinations({
+              cards: cards as DraftCard[], tabs,
+              chartNameOf: (cardId) => chartById.get((cards as DraftCard[]).find((x) => x.id === cardId)?.chart_id ?? "")?.name,
+            })}
+            hostCardId={editPanel?.kind === "filter" ? findHostCardId(editPanel.paramId, cards) : null}
+            onMoveParam={(cardId) => { if (editPanel?.kind === "filter") setDraftCards(moveParameterToCard(cards as DraftCard[], editPanel.paramId, cardId)); }}
             onAddChart={(c) => addCard(c)}
             onUpdateCardOptions={(patch) => { if (editPanel?.kind === "card") updateCardOptions(editPanel.cardId, patch); }}
             onMoveCardToTab={(tabKey) => { if (editPanel?.kind === "card") setDraftCards(moveCardToTab((cards as DraftCard[]), editPanel.cardId, tabKey)); }}

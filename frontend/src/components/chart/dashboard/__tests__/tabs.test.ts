@@ -120,3 +120,34 @@ describe("moveCardToTab", () => {
     expect(moved.grid_row).toBe(4);
   });
 });
+
+describe("duplicateTab and a card's inline filters", () => {
+  it("does not let a clone claim the original's filters", () => {
+    // Two cards holding the same parameter id is not a state the model can render:
+    // findHostCardId picks the first, the clone draws nothing, and the dashboard carries an
+    // invisible inconsistency. Metabase duplicates the PARAMETERS instead (cards-typed.ts:416-441);
+    // that forks the URL contract with a fresh slug and is deliberately out of scope here.
+    const tabs: DraftTab[] = [{ key: "t1", name: "Tab 1", position: 0 }];
+    const cards: DraftCard[] = [
+      { id: "a", chart_id: "c", card_type: "chart", grid_col: 0, grid_row: 0, size_x: 12, size_y: 6,
+        options: { title: "Revenue", inlineParameters: ["p1"] }, tab_id: null, tabKey: "t1" },
+    ];
+    const r = duplicateTab(tabs, cards, "t1");
+    const clone = r.draftCards.find((c) => c.id !== "a")!;
+    expect(clone.options).toEqual({ title: "Revenue" });
+    expect(r.draftCards.find((c) => c.id === "a")!.options).toEqual({ title: "Revenue", inlineParameters: ["p1"] });
+  });
+
+  it("leaves a card that hosts nothing byte-for-byte alone", () => {
+    // `withoutInlineParameters` returns the SAME object when the key is absent, so a tab of
+    // ordinary cards is cloned exactly as it was before this change.
+    const tabs: DraftTab[] = [{ key: "t1", name: "Tab 1", position: 0 }];
+    const options = { title: "Revenue", hideEmpty: true };
+    const cards: DraftCard[] = [
+      { id: "a", chart_id: "c", card_type: "chart", grid_col: 0, grid_row: 0, size_x: 12, size_y: 6,
+        options, tab_id: null, tabKey: "t1" },
+    ];
+    const r = duplicateTab(tabs, cards, "t1");
+    expect(r.draftCards.find((c) => c.id !== "a")!.options).toBe(options);
+  });
+});

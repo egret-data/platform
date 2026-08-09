@@ -1,6 +1,7 @@
 import type { Chart } from "@/api/charts";
 import type { DashboardParameter } from "@/api/dashboards";
 import type { DraftCard, DraftTab } from "./tabs";
+import type { MoveDestination } from "./inlineParameters";
 import { AddPanel } from "./AddPanel";
 import { CardSettingsPanel } from "./CardSettingsPanel";
 import { FilterSettingsPanel } from "./FilterSettingsPanel";
@@ -25,6 +26,10 @@ interface Props {
   cardColumns?: { cardId: string; label: string; columns: string[] }[];
   /** The open filter's loaded option list, so its DEFAULT is picked with the filter's own widget. */
   defaultOptions?: string[];
+  /** W7: where the open filter may be moved to, where it is now, and how to move it. */
+  moveDestinations?: MoveDestination[];
+  hostCardId?: string | null;
+  onMoveParam?: (cardId: string | null) => void;
   vizForPanel?: { chart: Chart; override: Record<string, unknown> | undefined; columns: { name: string; type: string }[]; rows?: unknown[][] };
   onChangeVizOverride?: (next: Record<string, unknown> | undefined) => void;
   onAddChart: (c: Chart) => void;
@@ -59,6 +64,8 @@ export function EditSidebar(props: Props) {
       {panel?.kind === "filter" && props.paramForPanel && (
         <FilterSettingsPanel param={props.paramForPanel} allParameters={props.parameters}
           cardColumns={props.cardColumns ?? []} defaultOptions={props.defaultOptions ?? []}
+          moveDestinations={props.moveDestinations ?? []} hostCardId={props.hostCardId ?? null}
+          onMove={props.onMoveParam}
           onChange={props.onChangeParam} onDelete={props.onDeleteParam} />
       )}
     </aside>
