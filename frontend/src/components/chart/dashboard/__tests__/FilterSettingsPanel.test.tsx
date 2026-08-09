@@ -95,4 +95,25 @@ describe("FilterSettingsPanel base", () => {
     render(<FilterSettingsPanel param={p({ widget: "input" })} allParameters={[]} onChange={vi.fn()} onDelete={vi.fn()} />);
     expect(screen.queryByLabelText("people can pick multiple")).toBeNull();
   });
+
+  it("uses Metabase's heading and explains an empty linked-filters list", () => {
+    render(<FilterSettingsPanel param={p({})} allParameters={[p({})]} onChange={vi.fn()} onDelete={vi.fn()} />);
+    expect(screen.getByText("Limit this filter's choices")).toBeTruthy();
+    expect(screen.getByText(/So first, add another dashboard filter/)).toBeTruthy();
+  });
+
+  it("says why a custom-sourced filter cannot be linked, instead of showing an empty list", () => {
+    const other = p({ id: "2", name: "City", slug: "city" });
+    render(<FilterSettingsPanel param={p({ valuesSource: { type: "static", static: ["EU"] } })}
+      allParameters={[p({}), other]} onChange={vi.fn()} onDelete={vi.fn()} />);
+    expect(screen.getByText(/can't be limited by another dashboard filter/)).toBeTruthy();
+    expect(screen.queryByLabelText("link City")).toBeNull();
+  });
+
+  it("says why an input-box filter cannot be linked", () => {
+    const other = p({ id: "2", name: "City", slug: "city" });
+    render(<FilterSettingsPanel param={p({ widget: "input" })} allParameters={[p({}), other]}
+      onChange={vi.fn()} onDelete={vi.fn()} />);
+    expect(screen.getByText(/its widget type is an input box/)).toBeTruthy();
+  });
 });
