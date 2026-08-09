@@ -7,6 +7,7 @@ import { useDashboard, useDashboardMutations, useDashboardRevisions, type Dashbo
 import { useCharts, type Chart, type ChartFilter } from "@/api/charts";
 import { useChartData } from "@/api/useChartData";
 import { useDataset } from "@/api/datasets";
+import { columnLabels } from "@/components/chart/config/field-names";
 import { useFolders } from "@/api/folders";
 import { resolveClick, type ClickBehavior } from "@/components/chart/dashboard/click-behavior";
 import { resolveValuesSource } from "@/components/chart/dashboard/valuesSource";
@@ -149,6 +150,42 @@ export default function DashboardView() {
   const [records, setRecords] = useState<{ filters: ChartFilter[]; datasetId: string | null } | null>(null);
   // Load the drilled dataset's columns so the records dialog can SELECT them (no-op while records is null).
   const recordsDataset = useDataset(ws, records?.datasetId ?? null);
+
+  // ── WHAT A COLUMN IS CALLED IN THE EDIT PANELS ──────────────────────────────────────────────
+  //
+  // A chart's spec carries column NAMES only (`string[]`), so a picker built from it shows
+  // `region` where the rest of the product shows "Khu vực". The friendly name lives on
+  // `DatasetColumn.verbose_name`, which means loading the dataset behind the card.
+  //
+  // Both panels below show one card's columns at a time, so this is ONE dataset each, and each
+  // query is inert until its panel is open. The filter→card MAPPING overlay is deliberately not
+  // fixed here: it draws on every card at once, so it would need one dataset per distinct card —
+  // see the note at its call site.
+  const panelChartDatasetId = (() => {
+    if (editPanel?.kind !== "card") return null;
+    const c = dash?.cards.find((x) => x.id === editPanel.cardId);
+    return chartById.get(c?.chart_id ?? "")?.dataset_id ?? null;
+  })();
+  const panelDataset = useDataset(ws, panelChartDatasetId);
+  const panelLabels = useMemo(
+    () => columnLabels(panelDataset.data?.columns ?? []),
+    [panelDataset.data],
+  );
+
+  // The value-source picker names a card first, then one of ITS columns — so the labels follow
+  // the card the user picked, not the card whose settings are open.
+  const valuesSourceDatasetId = (() => {
+    if (editPanel?.kind !== "filter") return null;
+    const p = (dash?.parameters ?? []).find((x) => x.id === editPanel.paramId);
+    const srcCardId = p?.valuesSource?.type === "card" ? p.valuesSource.cardId : null;
+    const c = dash?.cards.find((x) => x.id === srcCardId);
+    return chartById.get(c?.chart_id ?? "")?.dataset_id ?? null;
+  })();
+  const valuesSourceDataset = useDataset(ws, valuesSourceDatasetId);
+  const valuesSourceLabels = useMemo(
+    () => columnLabels(valuesSourceDataset.data?.columns ?? []),
+    [valuesSourceDataset.data],
+  );
 
   // ── THE CARD SETTINGS PANEL'S VIEW OF ITS OWN CARD'S RESULT ─────────────────────────────────
   //
@@ -868,6 +905,8 @@ export default function DashboardView() {
             charts={charts ?? []}
             parameters={parameters}
             cardColumns={cardColumns}
+            panelLabels={panelLabels}
+            valuesSourceLabels={valuesSourceLabels}
             vizForPanel={vizForPanel}
             onChangeVizOverride={(next) => { if (editPanel?.kind === "viz") updateCardOptions(editPanel.cardId, { vizOverride: next }); }}
             tabs={tabs}

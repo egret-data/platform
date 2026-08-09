@@ -1,5 +1,6 @@
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
+import { displayName, fieldTitle, type FieldLabels } from "@/components/chart/config/field-names";
 import { showsCardBackground } from "./card-chrome";
 import type { Chart } from "@/api/charts";
 import type { DashboardParameter } from "@/api/dashboards";
@@ -13,12 +14,14 @@ interface Props {
   tabs: DraftTab[];
   onUpdateOptions: (patch: Record<string, unknown>) => void;
   onMoveToTab: (tabKey: string) => void;
+  /** verbose_name per column, so this list names a field the way the rest of the product does. */
+  labels?: FieldLabels;
 }
 
 const inp = "h-8 w-full rounded border bg-background px-2 text-sm";
 const sel = "h-8 rounded border bg-background px-1 text-sm";
 
-export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptions, onMoveToTab }: Props) {
+export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptions, onMoveToTab, labels }: Props) {
   const moveToTab = tabs.length >= 2 ? (
     <label className="flex items-center justify-between gap-2 text-sm"><span>Move to tab</span>
       <select aria-label="move card to tab" className={sel} value={card.tabKey ?? ""} onChange={(e) => onMoveToTab(e.target.value)}>
@@ -149,7 +152,7 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
               <select aria-label={`crossfilter ${p.name}`} className={sel} value={m[p.id] ?? ""}
                 onChange={(e) => onUpdateOptions({ clickBehavior: { type: "crossfilter", parameterMapping: { ...m, [p.id]: e.target.value } } })}>
                 <option value="">none</option>
-                {cols.map((col) => <option key={col} value={col}>{col}</option>)}
+                {cols.map((col) => <option key={col} value={col} title={fieldTitle(col, labels)}>{displayName(col, labels)}</option>)}
               </select>
             </label>
           );
