@@ -67,10 +67,19 @@ export function DashboardGridLayout({
     if (mixed) setStroke(mixed);          // preferred: border blended toward foreground (visible)
     else if (border) setStroke(border);   // fallback: plain --border if color-mix is unavailable
     if (typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => setWidth(el.clientWidth));
+    const ro = new ResizeObserver(() => {
+      const w = el.clientWidth;
+      // Report the breakpoint from inside the observer, not only from the effect below. The
+      // effect cannot run until React has re-rendered, and a card's own ResizeObserver (for
+      // auto-height) fires in the SAME delivery batch as this one — so a route that learned
+      // the breakpoint only from a re-render would still believe it was on desktop while a
+      // card measured itself at a phone width.
+      onBreakpointChange(breakpointFor(w));
+      setWidth(w);
+    });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [editing]);
+  }, [editing, onBreakpointChange]);
 
   const breakpoint = breakpointFor(width);
   const isMobile = breakpoint === "mobile";
@@ -80,6 +89,17 @@ export function DashboardGridLayout({
   useEffect(() => {
     onBreakpointChange(breakpoint);
   }, [breakpoint, onBreakpointChange]);
+
+  // THE guard. react-grid-layout emits `onLayoutChange` with the derived one-column layout the
+  // moment it commits a mobile render — measured against RGL 1.5.3, the very first emission of a
+  // fresh mount is `[{i:"a",x:0,w:1},{i:"b",x:0,w:1}]` even on a 1136px container, because the
+  // container has not been measured yet. Anything downstream that decides via React state is one
+  // commit too late (RGL's componentDidUpdate runs before this component's effects), so the
+  // refusal has to happen here, in the same closure that produced the layout being emitted.
+  const handleLayoutChange = (next: Layout[]) => {
+    if (isMobile) return;
+    onLayoutChange(next);
+  };
 
   const cols = GRID_COLUMNS[breakpoint];
   const margin = GRID_MARGIN_BY_BREAKPOINT[breakpoint];
@@ -108,7 +128,7 @@ export function DashboardGridLayout({
         draggableHandle=".dash-draghandle"
         draggableCancel=".dash-nodrag"
         layout={effectiveLayout}
-        onLayoutChange={onLayoutChange}
+        onLayoutChange={handleLayoutChange}
         onResizeStart={onResizeStart}
         onResizeStop={onResizeStop}
         onDragStart={onDragStart}

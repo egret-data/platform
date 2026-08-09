@@ -142,6 +142,63 @@ describe("DashboardGridLayout breakpoint", () => {
     expect(xs[1]).not.toBe("0");
   });
 
+  it("never forwards a layout change while it is rendering one column", () => {
+    // Measured against react-grid-layout 1.5.3: RGL emits onLayoutChange for the layout it
+    // synchronised with its children, and at a mobile width that layout is the one-column
+    // projection — [["a",0,1],["b",0,1]]. Forwarding it lets the route write x:0 w:1 into every
+    // card. The refusal must live here, in the same closure that produced the layout, because
+    // RGL's componentDidUpdate runs a whole commit before this component's effects.
+    withContainerWidth(390);
+    const onLayoutChange = vi.fn();
+    render(
+      <DashboardGridLayout
+        editing
+        layout={layout}
+        kindOf={() => "bar"}
+        onBreakpointChange={() => {}}
+        onLayoutChange={onLayoutChange}
+        onResizeStart={() => {}}
+        onResizeStop={() => {}}
+        onDragStart={() => {}}
+        onDragStop={() => {}}
+      >
+        {() => [<div key="a" data-testid="card-a" />, <div key="b" data-testid="card-b" />]}
+      </DashboardGridLayout>,
+    );
+    expect(onLayoutChange).not.toHaveBeenCalled();
+  });
+
+  it("forwards the desktop layout once the container has been measured", () => {
+    // The mirror of the test above: the guard must not become a blanket refusal. The first
+    // emission of any mount is still the width-0 one-column projection and is dropped; what
+    // arrives is the 24-column layout.
+    withContainerWidth(1136);
+    const onLayoutChange = vi.fn();
+    render(
+      <DashboardGridLayout
+        editing
+        layout={layout}
+        kindOf={() => "bar"}
+        onBreakpointChange={() => {}}
+        onLayoutChange={onLayoutChange}
+        onResizeStart={() => {}}
+        onResizeStop={() => {}}
+        onDragStart={() => {}}
+        onDragStop={() => {}}
+      >
+        {() => [<div key="a" data-testid="card-a" />, <div key="b" data-testid="card-b" />]}
+      </DashboardGridLayout>,
+    );
+    expect(onLayoutChange).toHaveBeenCalled();
+    for (const call of onLayoutChange.mock.calls) {
+      const emitted = call[0] as { i: string; x: number; w: number }[];
+      expect(emitted.map((l) => [l.i, l.x, l.w])).toEqual([
+        ["a", 0, 12],
+        ["b", 12, 12],
+      ]);
+    }
+  });
+
   it("disables drag and resize on mobile even while editing", () => {
     // react-grid-layout 1.5.3 always MOUNTS the resize handle and only marks it
     // `react-resizable-hide` when isResizable is false (GridItem.js:451-453), and only adds

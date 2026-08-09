@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { sizeForViz, getPositionForNewDashCard } from "@/components/chart/dashboard-grid";
 import { DashboardGridLayout } from "@/components/chart/dashboard/DashboardGridLayout";
+import { mayPersistLayout, type GridBreakpoint } from "@/components/chart/dashboard/grid-breakpoints";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
 import { DashboardInfoSidebar } from "@/components/chart/dashboard/DashboardInfoSidebar";
 import { CardFilterMapOverlay } from "@/components/chart/dashboard/CardFilterMapOverlay";
@@ -67,6 +68,21 @@ export default function DashboardView() {
   const [draftTabs, setDraftTabs] = useState<DraftTab[] | null>(null);
   const [draftName, setDraftName] = useState("");
   const [draftWidth, setDraftWidth] = useState<"fixed" | "full">("full");
+  // A ref, not state, and it starts at "mobile" — both are load-bearing.
+  //
+  // A ref because the two writers it guards are called from ResizeObserver callbacks, which all
+  // fire in one batch before React re-renders: state read from a render closure would still say
+  // "desktop" while the card being measured is already phone-width. `DashboardGridLayout`
+  // updates this from inside its own observer, in that same batch.
+  //
+  // "mobile" because the grid measures its container in an effect, so its FIRST render is always
+  // width 0 → the one-column projection, and RGL emits that collapsed layout before any effect
+  // can report the real breakpoint. Defaulting to "desktop" would let a fresh mount inside edit
+  // mode (empty dashboard → add a card) flatten everything to x:0 w:1.
+  const gridBreakpointRef = useRef<GridBreakpoint>("mobile");
+  const onGridBreakpointChange = useCallback((bp: GridBreakpoint) => {
+    gridBreakpointRef.current = bp;
+  }, []);
   const serverTabCount = dash?.tabs?.length ?? 0;
   const { activeTabPos, setActiveTabPos } = useDashboardTabs(editing ? (draftTabs?.length ?? 0) : serverTabCount);
   // beforeunload guard: warn on refresh/close while the dashboard editor is open (unsaved draft).
@@ -356,6 +372,9 @@ export default function DashboardView() {
 
   function applyAutoHeight(cardId: string, rows: number) {
     if (interactingRef.current) return;            // never fight an active drag/resize
+    // A mobile card is a different width, so its measured content height belongs to a layout
+    // we are not editing. Writing it back would corrupt the desktop rows.
+    if (!mayPersistLayout(editing, gridBreakpointRef.current)) return;
     setDraftCards((prev) => {
       const base = prev ?? cardsAsDraft();
       let changed = false;
@@ -369,7 +388,7 @@ export default function DashboardView() {
   }
 
   function onLayoutChange(next: Layout[]) {
-    if (!editing) return;
+    if (!mayPersistLayout(editing, gridBreakpointRef.current)) return;
     setDraftCards((prev) => {
       const base = prev ?? cardsAsDraft();
       let changed = false;
@@ -606,6 +625,11 @@ export default function DashboardView() {
         <DashboardGridLayout
           editing={editing}
           layout={layout}
+          kindOf={(id) => {
+            const c = (cards as DraftCard[]).find((x) => x.id === id);
+            return c ? vizKeyOf(c) : "";
+          }}
+          onBreakpointChange={onGridBreakpointChange}
           onLayoutChange={onLayoutChange}
           onResizeStart={() => { interactingRef.current = true; }}
           onResizeStop={() => { interactingRef.current = false; }}

@@ -58,3 +58,13 @@ export function toMobileLayout(layout: Layout[], kindOf: (id: string) => string)
     return next;
   });
 }
+
+/** May a layout or auto-height change be written into the draft?
+ *
+ *  Both halves are load-bearing. `editing` alone is not enough: react-grid-layout emits an
+ *  onLayoutChange for the DERIVED one-column layout as soon as it mounts on a narrow screen,
+ *  so an editing user on a phone would silently rewrite every card to x:0 w:1 and a Save would
+ *  destroy the desktop layout. */
+export function mayPersistLayout(editing: boolean, breakpoint: GridBreakpoint): boolean {
+  return editing && breakpoint === "desktop";
+}
