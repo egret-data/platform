@@ -1,6 +1,13 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
+
+// DashboardCardView renders react-router <Link>s (the card title and the Edit-question
+// affordance), which throw outside a Router.
+function renderCard(ui: React.ReactElement) {
+  return render(<MemoryRouter>{ui}</MemoryRouter>);
+}
 
 // Mock ChartRenderer faithfully: chart viz renders an <svg> (ECharts), table renders an HTML
 // table (no <svg>). This lets us assert the PNG item only appears when the *chart* svg exists —
@@ -25,38 +32,75 @@ const card = { id: "k", card_type: "chart", chart_id: "c", options: {} } as neve
 describe("DashboardCardView export affordance", () => {
   it("shows the export button for a loaded chart card in view mode", () => {
     useChartData.mockReturnValue({ columns: [{ name: "a", type: "x" }], rows: [["1"]], isLoading: false, error: null });
-    render(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} parameters={[]} paramValues={{}} />);
+    renderCard(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} parameters={[]} paramValues={{}} />);
     expect(screen.getByRole("button", { name: /export chart/i })).toBeTruthy();
   });
   it("hides the export button while loading", () => {
     useChartData.mockReturnValue({ columns: [], rows: [], isLoading: true, error: null });
-    render(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} parameters={[]} paramValues={{}} />);
+    renderCard(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} parameters={[]} paramValues={{}} />);
     expect(screen.queryByRole("button", { name: /export chart/i })).toBeNull();
   });
   it("hides the export button in edit mode", () => {
     useChartData.mockReturnValue({ columns: [{ name: "a", type: "x" }], rows: [["1"]], isLoading: false, error: null });
-    render(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} parameters={[]} paramValues={{}} editing />);
+    renderCard(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} parameters={[]} paramValues={{}} editing />);
     expect(screen.queryByRole("button", { name: /export chart/i })).toBeNull();
   });
 
-  it("offers Download PNG for a chart card (chart svg present in the render container)", async () => {
+  it("offers .png for a chart card (chart svg present in the render container)", async () => {
     const user = userEvent.setup();
     useChartData.mockReturnValue({ columns: [{ name: "a", type: "x" }], rows: [["1"]], isLoading: false, error: null });
-    render(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} parameters={[]} paramValues={{}} />);
+    renderCard(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} parameters={[]} paramValues={{}} />);
     await user.click(screen.getByRole("button", { name: /export chart/i }));
-    expect(await screen.findByText("Download CSV")).toBeTruthy();
-    expect(screen.getByText("Download PNG")).toBeTruthy();
+    expect(await screen.findByRole("radio", { name: ".csv" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: ".png" })).toBeInTheDocument();
   });
 
-  // Regression: the export menu must read the render-only container, not the whole tile. The tile's
-  // affordance contains a Download icon <svg>; if the menu pointed at the tile, a table card (which
-  // has no chart svg) would still find that icon and wrongly offer PNG — exporting a 32×32 icon.
-  it("does NOT offer Download PNG for a table card (no chart svg)", async () => {
+  // Regression: the export popover must read the render-only container, not the whole tile. The
+  // tile's hover cluster now holds TWO icons — a Download and an Edit-question pencil — and if the
+  // popover pointed at the tile, a table card would find one of them and wrongly offer .png,
+  // exporting a 16×16 icon.
+  it("does NOT offer .png for a table card (no chart svg), despite the pencil in the hover cluster", async () => {
     const user = userEvent.setup();
     useChartData.mockReturnValue({ columns: [{ name: "a", type: "x" }], rows: [["1"]], isLoading: false, error: null });
-    render(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={tableChart} parameters={[]} paramValues={{}} />);
+    renderCard(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={tableChart} parameters={[]} paramValues={{}} />);
     await user.click(screen.getByRole("button", { name: /export chart/i }));
-    expect(await screen.findByText("Download CSV")).toBeTruthy();
-    expect(screen.queryByText("Download PNG")).toBeNull();
+    expect(await screen.findByRole("radio", { name: ".csv" })).toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: ".png" })).toBeNull();
+  });
+});
+
+describe("DashboardCardView chart link", () => {
+  it("titles the card with a link to its chart", () => {
+    useChartData.mockReturnValue({ columns: [{ name: "a", type: "x" }], rows: [["1"]], isLoading: false, error: null });
+    renderCard(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} parameters={[]} paramValues={{}} />);
+    expect(screen.getByRole("link", { name: "C" })).toHaveAttribute("href", "/explore/eng/charts/c");
+  });
+
+  it("offers Edit question beside the export trigger", () => {
+    useChartData.mockReturnValue({ columns: [{ name: "a", type: "x" }], rows: [["1"]], isLoading: false, error: null });
+    renderCard(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} parameters={[]} paramValues={{}} />);
+    expect(screen.getByRole("link", { name: "Edit question" })).toHaveAttribute("href", "/explore/eng/charts/c");
+  });
+
+  it("offers neither while editing", () => {
+    useChartData.mockReturnValue({ columns: [{ name: "a", type: "x" }], rows: [["1"]], isLoading: false, error: null });
+    renderCard(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} parameters={[]} paramValues={{}} editing />);
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("offers neither when the title override hides the header", () => {
+    const hidden = { ...(card as object), options: { title: "" } } as never;
+    useChartData.mockReturnValue({ columns: [{ name: "a", type: "x" }], rows: [["1"]], isLoading: false, error: null });
+    renderCard(<DashboardCardView ws="eng" dashboardId="d1" card={hidden} chart={chart} parameters={[]} paramValues={{}} />);
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("shows options.description behind the card's info affordance", async () => {
+    const user = userEvent.setup();
+    const described = { ...(card as object), options: { description: "Net of refunds." } } as never;
+    useChartData.mockReturnValue({ columns: [{ name: "a", type: "x" }], rows: [["1"]], isLoading: false, error: null });
+    renderCard(<DashboardCardView ws="eng" dashboardId="d1" card={described} chart={chart} parameters={[]} paramValues={{}} />);
+    await user.click(screen.getByRole("button", { name: "Card description" }));
+    expect(await screen.findByText("Net of refunds.")).toBeInTheDocument();
   });
 });

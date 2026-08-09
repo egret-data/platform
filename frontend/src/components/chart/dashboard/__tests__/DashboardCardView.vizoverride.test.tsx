@@ -1,5 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
 import { render } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
+
+// DashboardCardView renders react-router <Link>s (the card title and the Edit-question
+// affordance), which throw outside a Router.
+function renderCard(ui: React.ReactElement) {
+  return render(<MemoryRouter>{ui}</MemoryRouter>);
+}
 
 const seen: { vizType?: string; params?: unknown } = {};
 vi.mock("@/components/chart/ChartRenderer", () => ({
@@ -34,7 +41,7 @@ const card = {
 
 describe("DashboardCardView vizOverride", () => {
   it("renders ChartRenderer with the overridden viz_type + merged display, spec intact", () => {
-    render(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} refreshNonce={0} parameters={[]} paramValues={{}} />);
+    renderCard(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} refreshNonce={0} parameters={[]} paramValues={{}} />);
     expect(seen.vizType).toBe("line");
     expect((seen.params as { settings: Record<string, unknown> }).settings["cartesian.stacked"]).toBe(true);
     expect((seen.params as { spec: unknown }).spec).toEqual((chart as { params: { spec: unknown } }).params.spec);
