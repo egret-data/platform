@@ -28,7 +28,7 @@ import { cardChromeClass } from "@/components/chart/dashboard/card-chrome";
 import { DashboardInfoSidebar } from "@/components/chart/dashboard/DashboardInfoSidebar";
 import { CardFilterMapOverlay } from "@/components/chart/dashboard/CardFilterMapOverlay";
 import { cardMapState, columnsForParam } from "@/components/chart/dashboard/card-map-state";
-import { findHostCardId, hostTabKey, inlineParametersFor, mergeTopBarOrder, moveDestinations, moveParameterToCard, topBarParameters } from "@/components/chart/dashboard/inlineParameters";
+import { findHostCardId, hostTabKey, inlineParametersFor, keepInlineParameters, mergeTopBarOrder, moveDestinations, moveParameterToCard, removeCardAndHostedParameters, topBarParameters, withoutInlineParameters } from "@/components/chart/dashboard/inlineParameters";
 import { isDraftDirty, type DashboardDraft } from "@/components/chart/dashboard/edit-draft";
 import { REMOVED_CARD, REPLACED_CARD, deletedTab, undoableDraftEdit } from "@/components/chart/dashboard/draft-undo";
 import { DiscardChangesDialog } from "@/components/chart/dashboard/DiscardChangesDialog";
@@ -326,9 +326,14 @@ export default function DashboardView() {
     setDraftCards([...(cards as DraftCard[]), newCard]);
   }
   function removeCard(cardId: string) {
-    const previous = cards as DraftCard[];
-    setDraftCards(previous.filter((c) => c.id !== cardId));
-    undoableDraftEdit(REMOVED_CARD, previous, setDraftCards);
+    // A card's inline filters are deleted WITH the card, matching Metabase. The undo snapshot is
+    // therefore BOTH slices: W2's toast restoring only the cards would bring back a card holding
+    // parameter ids that no longer name anything — a half-undo that looks like it worked.
+    const previous = { cards: cards as DraftCard[], parameters };
+    const next = removeCardAndHostedParameters(previous.cards, previous.parameters, cardId);
+    setDraftCards(next.cards);
+    if (next.parameters !== previous.parameters) setDraftParameters(next.parameters);
+    undoableDraftEdit(REMOVED_CARD, previous, (p) => { setDraftCards(p.cards); setDraftParameters(p.parameters); });
   }
 
   function duplicateCard(cardId: string) {
@@ -337,14 +342,23 @@ export default function DashboardView() {
       const src = base.find((c) => c.id === cardId);
       if (!src) return base;
       const maxY = base.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
-      return [...base, { ...src, id: `new-dup-${cardSeqRef.current++}`, grid_row: maxY, options: { ...src.options } }];
+      // The clone gets NO inline filters. egret's clone is a shallow spread, so without the strip
+      // two cards would claim one parameter id, `findHostCardId` would pick the first, and the
+      // clone would draw nothing. Deliberate divergence from Metabase, which duplicates the
+      // parameters themselves (cards-typed.ts:416-441) — see inlineParameters.ts.
+      return [...base, { ...src, id: `new-dup-${cardSeqRef.current++}`, grid_row: maxY, options: withoutInlineParameters({ ...src.options }) }];
     });
   }
   function replaceCard(cardId: string, chart: Chart) {
     // Resetting `options` is correct and is NOT the divergence — Metabase discards more than this
     // (cards-typed.ts:245-284). What was missing is the way back, which is the toast.
+    //
+    // `inlineParameters` is the ONE key that survives the reset: the filter list is a PLACEMENT,
+    // not a property of the chart, and Metabase's own replaceCard leaves `inline_parameters` alone
+    // (cards-typed.ts:262-270). Without this, "Replace chart" silently teleports the card's filter
+    // back to the top bar.
     const previous = cards as DraftCard[];
-    setDraftCards(previous.map((c) => (c.id === cardId ? { ...c, chart_id: chart.id, options: {} } : c)));
+    setDraftCards(previous.map((c) => (c.id === cardId ? { ...c, chart_id: chart.id, options: keepInlineParameters(c.options) } : c)));
     setReplacingId(null);
     undoableDraftEdit(REPLACED_CARD, previous, setDraftCards);
   }

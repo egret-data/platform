@@ -15,6 +15,7 @@ import {
   mergeTopBarOrder,
   moveDestinations,
   moveParameterToCard,
+  removeCardAndHostedParameters,
   shouldCollapseParameterList,
   supportsInlineParameters,
   topBarParameters,
@@ -193,6 +194,33 @@ describe("dropParameters", () => {
   });
 });
 
+describe("removeCardAndHostedParameters", () => {
+  it("deletes the card's filters WITH the card, and every reference to them", () => {
+    // Metabase does exactly this (cards-typed.ts:490-495 calls removeParameterAndReferences per
+    // inline parameter). Returning them to the top bar instead would make filters materialise out
+    // of a DELETE, which is the surprise that behaviour exists to avoid.
+    const linked = [...params, p({ id: "p4", filteringParameters: ["p1"] })];
+    const r = removeCardAndHostedParameters(cards, linked, "bar");
+    expect(r.cards.map((c) => c.id)).toEqual(["head", "far", "note"]);
+    expect(r.parameters.map((x) => x.id)).toEqual(["p2", "p3", "p4"]);
+    expect(r.parameters.find((x) => x.id === "p4")!.filteringParameters).toEqual([]);
+  });
+
+  it("leaves the parameter array BY REFERENCE when the card hosted none", () => {
+    // The caller writes no parameter draft in that case, so removing an ordinary card cannot
+    // touch the filters at all — and `undoableDraftEdit`'s snapshot stays meaningful.
+    const r = removeCardAndHostedParameters(cards, params, "note");
+    expect(r.parameters).toBe(params);
+    expect(r.cards.map((c) => c.id)).toEqual(["head", "bar", "far"]);
+  });
+
+  it("is a no-op on a card id that is not there", () => {
+    const r = removeCardAndHostedParameters(cards, params, "ghost");
+    expect(r.cards).toHaveLength(4);
+    expect(r.parameters).toBe(params);
+  });
+});
+
 describe("keepInlineParameters / withoutInlineParameters", () => {
   it("keep preserves only the placement across a Replace chart", () => {
     expect(keepInlineParameters({ title: "T", inlineParameters: ["p1"] })).toEqual({ inlineParameters: ["p1"] });
@@ -202,6 +230,15 @@ describe("keepInlineParameters / withoutInlineParameters", () => {
   it("without strips the placement for a clone", () => {
     expect(withoutInlineParameters({ title: "T", inlineParameters: ["p1"] })).toEqual({ title: "T" });
     expect(withoutInlineParameters({ title: "T" })).toEqual({ title: "T" });
+  });
+
+  it("without returns the SAME options object when there is nothing to strip", () => {
+    // Reference identity, not deep equality. `duplicateTab` and `duplicateCard` both run this over
+    // every clone; rebuilding an untouched bag would churn `options` on every ordinary card and
+    // make `isDraftDirty` (edit-draft.ts) report a dirty draft nobody edited — which is what pops
+    // W2's discard confirmation on a Cancel that should have exited straight away.
+    const options = { title: "T", hideEmpty: true };
+    expect(withoutInlineParameters(options)).toBe(options);
   });
 });
 

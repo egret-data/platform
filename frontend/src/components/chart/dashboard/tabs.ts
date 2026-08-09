@@ -1,4 +1,5 @@
 import type { CardInput, DashboardCard, DashboardTab } from "@/api/dashboards";
+import { withoutInlineParameters } from "./inlineParameters";
 
 /** A tab in the edit-mode draft. `key` is a client-only id (server ids churn on save). */
 export interface DraftTab { key: string; name: string; position: number }
@@ -129,7 +130,9 @@ export function duplicateTab(
     .map((t, i) => ({ ...t, position: i }));
   const clones = draftCards
     .filter((c) => c.tabKey === key)
-    .map((c) => ({ ...c, id: `new-dup-${seq++}`, tabKey: newKey }));
+    // A clone must not claim the original's inline filters — two cards holding one parameter id
+    // is not a state the model can render. See inlineParameters.ts.
+    .map((c) => ({ ...c, id: `new-dup-${seq++}`, tabKey: newKey, options: withoutInlineParameters(c.options) }));
   return { draftTabs: next, draftCards: [...draftCards, ...clones], activeTabPos: srcPos + 1 };
 }
 

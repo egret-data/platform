@@ -154,6 +154,35 @@ export function dropParameters(
     );
 }
 
+/**
+ * Remove a card, and the filters it hosted, in one transform.
+ *
+ * Metabase deletes a dashcard's inline parameters WITH the card (`cards-typed.ts:490-495` calls
+ * `removeParameterAndReferences` per inline parameter) rather than returning them to the top bar:
+ * a filter that materialised at the top of the page out of a DELETE is the surprise that behaviour
+ * exists to avoid.
+ *
+ * This lives here, and not inline in the route, for a reason W2 created. `removeCard` is wrapped in
+ * an undo toast (`draft-undo.ts`), and an undo that restored the cards but not the parameters would
+ * be a half-undo that LOOKS like it worked — the card comes back holding ids that no longer name
+ * anything, and the filters are gone for good. Returning both slices from one function is what lets
+ * the caller snapshot both.
+ *
+ * `parameters` comes back BY REFERENCE when the card hosted none, so removing an ordinary card
+ * writes no parameter draft at all.
+ */
+export function removeCardAndHostedParameters<T extends InlineHostCard>(
+  cards: readonly T[],
+  parameters: readonly DashboardParameter[],
+  cardId: string,
+): { cards: T[]; parameters: DashboardParameter[] } {
+  const doomed = new Set(inlineParameterIds(cards.find((c) => c.id === cardId) ?? { options: {} }));
+  return {
+    cards: cards.filter((c) => c.id !== cardId),
+    parameters: dropParameters(parameters, doomed),
+  };
+}
+
 /** The only key of a replaced card's `options` that survives. `replaceCard` resets `options` to
  *  `{}` and §9 of the design records that as NOT a divergence — but the filter list is a
  *  PLACEMENT, not a property of the chart, and Metabase's own replaceCard leaves
