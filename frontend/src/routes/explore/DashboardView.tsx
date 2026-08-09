@@ -69,6 +69,9 @@ export default function DashboardView() {
   const [draftTabs, setDraftTabs] = useState<DraftTab[] | null>(null);
   const [draftName, setDraftName] = useState("");
   const [draftWidth, setDraftWidth] = useState<"fixed" | "full">("full");
+  // The header row's rule keys off the VIEWPORT (same hook as the app shell), not off the grid's
+  // measured container — the two answer different questions and must not be collapsed.
+  const narrowViewport = useIsNarrowViewport();
   // A ref, not state, and it starts at "mobile" — both are load-bearing.
   //
   // A ref because the two writers it guards are called from ResizeObserver callbacks, which all
@@ -80,9 +83,6 @@ export default function DashboardView() {
   // width 0 → the one-column projection, and RGL emits that collapsed layout before any effect
   // can report the real breakpoint. Defaulting to "desktop" would let a fresh mount inside edit
   // mode (empty dashboard → add a card) flatten everything to x:0 w:1.
-  // The header row's rule keys off the VIEWPORT (same hook as the app shell), not off the grid's
-  // measured container — the two answer different questions and must not be collapsed.
-  const narrowViewport = useIsNarrowViewport();
   const gridBreakpointRef = useRef<GridBreakpoint>("mobile");
   const onGridBreakpointChange = useCallback((bp: GridBreakpoint) => {
     gridBreakpointRef.current = bp;
