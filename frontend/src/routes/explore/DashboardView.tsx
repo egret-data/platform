@@ -25,6 +25,8 @@ import { useIsNarrowViewport } from "@/lib/useIsNarrowViewport";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
 import { DashboardInfoSidebar } from "@/components/chart/dashboard/DashboardInfoSidebar";
 import { CardFilterMapOverlay } from "@/components/chart/dashboard/CardFilterMapOverlay";
+import { isDraftDirty, type DashboardDraft } from "@/components/chart/dashboard/edit-draft";
+import { DiscardChangesDialog } from "@/components/chart/dashboard/DiscardChangesDialog";
 import { DashboardFilterBar } from "@/components/chart/dashboard/DashboardFilterBar";
 import { EditSidebar, type EditPanel } from "@/components/chart/dashboard/EditSidebar";
 import { EditFilterChips } from "@/components/chart/dashboard/EditFilterChips";
@@ -95,6 +97,11 @@ export default function DashboardView() {
   useUnsavedChangesWarning(editing);
   const cardSeqRef = useRef(0);
   const interactingRef = useRef(false);
+  // What the draft looked like when Edit was pressed. Cancel compares against this, and a null
+  // baseline means "not editing" — never "clean", so a missing snapshot cannot silently disarm
+  // the confirmation.
+  const editBaselineRef = useRef<DashboardDraft | null>(null);
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   // "Hide this card if there are no results": id -> did that card's query return no rows.
   // Filled by CardEmptinessProbe, which runs the query OUTSIDE the grid so that hiding a
   // card does not unmount the only hook that could ever un-hide it. Absent = not yet
@@ -180,6 +187,8 @@ export default function DashboardView() {
     setDraftTabs(null);
     setDraftName("");
     setNewCardId(null);
+    editBaselineRef.current = null;
+    setConfirmingDiscard(false);
   }, [id]);
 
   if (isError) {
@@ -263,15 +272,38 @@ export default function DashboardView() {
 
   function startEdit() {
     const { draftTabs: dt, draftCards: dc } = startTabsDraft(dashboard.tabs ?? [], dashboard.cards);
+    const dp = (dashboard.parameters ?? []).map((p) => ({ ...p }));
     setDraftCards(dc);
-    setDraftParameters((dashboard.parameters ?? []).map((p) => ({ ...p })));
+    setDraftParameters(dp);
     setDraftTabs(dt);
     setDraftName(dashboard.name);
     setDraftWidth(dashboard.width);
     setEditing(true);
     setEditPanel(null);
+    // The snapshot Cancel compares against. Taken from the DRAFT, not the server payload:
+    // startTabsDraft mints fresh client tab keys, so the two are not the same shape.
+    editBaselineRef.current = { name: dashboard.name, width: dashboard.width, cards: dc, parameters: dp, tabs: dt };
   }
-  function cancelEdit() { setEditing(false); setDraftCards(null); setDraftParameters(null); setDraftTabs(null); setEditPanel(null); setDraftName(""); setNewCardId(null); }
+
+  /** Leave edit mode and drop the draft. This is the destructive half — reachable only from a
+   *  clean draft, or through the confirmation. */
+  function discardEdit() {
+    setEditing(false); setDraftCards(null); setDraftParameters(null); setDraftTabs(null);
+    setEditPanel(null); setDraftName(""); setNewCardId(null);
+    editBaselineRef.current = null;
+    setConfirmingDiscard(false);
+  }
+
+  /** What the Cancel button calls. Metabase routes Cancel through its leave confirmation whenever
+   *  the dashboard is dirty (DashboardHeader.tsx:69-87) and exits straight away when it is not. */
+  function requestCancelEdit() {
+    const baseline = editBaselineRef.current;
+    const current: DashboardDraft = {
+      name: draftName, width: draftWidth, cards: (cards as DraftCard[]), parameters, tabs: draftTabs ?? [],
+    };
+    if (baseline && isDraftDirty(baseline, current)) { setConfirmingDiscard(true); return; }
+    discardEdit();
+  }
 
   function addCard(chart: Chart) {
     const { w, h } = sizeForViz(chart.viz_type).default;
@@ -417,6 +449,7 @@ export default function DashboardView() {
     try {
       await update.mutateAsync({ id: dashboard.id, name: draftName.trim() || dashboard.name, description: dashboard.description, parameters, tabs: tabPayload, width: draftWidth, cards: cardPayload });
       setEditing(false); setDraftCards(null); setDraftTabs(null); setEditPanel(null); setDraftName(""); setNewCardId(null);
+      editBaselineRef.current = null;
       toast.success("Saved");
     } catch (e) { toast.error(String(e)); }
   }
@@ -494,7 +527,7 @@ export default function DashboardView() {
         <div className="-mx-4 -mt-4 mb-4 flex items-center justify-between gap-2 bg-primary/90 px-4 py-2 text-sm font-medium text-primary-foreground">
           <span className="flex items-center gap-2"><Pencil className="h-4 w-4" /> You're editing this dashboard</span>
           <span className="flex items-center gap-2">
-            <Button size="sm" variant="ghost" className="text-primary-foreground hover:bg-primary-foreground/15 hover:text-primary-foreground" onClick={cancelEdit}>Cancel</Button>
+            <Button size="sm" variant="ghost" className="text-primary-foreground hover:bg-primary-foreground/15 hover:text-primary-foreground" onClick={requestCancelEdit}>Cancel</Button>
             <Button size="sm" variant="secondary" onClick={onSave} disabled={update.isPending}>Save</Button>
           </span>
         </div>
@@ -784,6 +817,11 @@ export default function DashboardView() {
           <ChartPickerList charts={charts ?? []} onPick={(ch) => replaceCard(replacingId!, ch)} autoFocus />
         </DialogContent>
       </Dialog>
+      <DiscardChangesDialog
+        open={confirmingDiscard}
+        onOpenChange={(o) => { if (!o) setConfirmingDiscard(false); }}
+        onDiscard={discardEdit}
+      />
       <Dialog open={fillingPlaceholderId !== null} onOpenChange={(o) => { if (!o) setFillingPlaceholderId(null); }}>
         <DialogContent>
           <DialogHeader><DialogTitle>Add a chart</DialogTitle></DialogHeader>

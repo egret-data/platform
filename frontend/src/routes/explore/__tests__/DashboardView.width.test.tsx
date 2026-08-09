@@ -95,6 +95,11 @@ describe("DashboardView width", () => {
     const { container } = renderView();
     await toggleFullWidth(user);
     await user.click(screen.getByRole("button", { name: "Cancel" }));
+    // W2 put a discard confirmation in front of Cancel, and flipping this switch is a real unsaved
+    // change — so the width edit now has to be discarded THROUGH the dialog. Confirming it is the
+    // fix; weakening `isDraftDirty` so that a width flip reads as clean would put the silent
+    // data-loss hole back, from the other side.
+    await user.click(screen.getByRole("button", { name: "Discard changes" }));
     expect(container.querySelector(FIXED)).toBeTruthy();
   });
 
