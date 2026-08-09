@@ -25,6 +25,10 @@ import { useIsNarrowViewport } from "@/lib/useIsNarrowViewport";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
 import { DashboardInfoSidebar } from "@/components/chart/dashboard/DashboardInfoSidebar";
 import { CardFilterMapOverlay } from "@/components/chart/dashboard/CardFilterMapOverlay";
+import { cardMapState, columnsForParam } from "@/components/chart/dashboard/card-map-state";
+import { isDraftDirty, type DashboardDraft } from "@/components/chart/dashboard/edit-draft";
+import { REMOVED_CARD, REPLACED_CARD, deletedTab, undoableDraftEdit } from "@/components/chart/dashboard/draft-undo";
+import { DiscardChangesDialog } from "@/components/chart/dashboard/DiscardChangesDialog";
 import { DashboardFilterBar } from "@/components/chart/dashboard/DashboardFilterBar";
 import { EditSidebar, type EditPanel } from "@/components/chart/dashboard/EditSidebar";
 import { EditFilterChips } from "@/components/chart/dashboard/EditFilterChips";
@@ -95,6 +99,11 @@ export default function DashboardView() {
   useUnsavedChangesWarning(editing);
   const cardSeqRef = useRef(0);
   const interactingRef = useRef(false);
+  // What the draft looked like when Edit was pressed. Cancel compares against this, and a null
+  // baseline means "not editing" — never "clean", so a missing snapshot cannot silently disarm
+  // the confirmation.
+  const editBaselineRef = useRef<DashboardDraft | null>(null);
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   // "Hide this card if there are no results": id -> did that card's query return no rows.
   // Filled by CardEmptinessProbe, which runs the query OUTSIDE the grid so that hiding a
   // card does not unmount the only hook that could ever un-hide it. Absent = not yet
@@ -180,6 +189,8 @@ export default function DashboardView() {
     setDraftTabs(null);
     setDraftName("");
     setNewCardId(null);
+    editBaselineRef.current = null;
+    setConfirmingDiscard(false);
   }, [id]);
 
   if (isError) {
@@ -263,15 +274,38 @@ export default function DashboardView() {
 
   function startEdit() {
     const { draftTabs: dt, draftCards: dc } = startTabsDraft(dashboard.tabs ?? [], dashboard.cards);
+    const dp = (dashboard.parameters ?? []).map((p) => ({ ...p }));
     setDraftCards(dc);
-    setDraftParameters((dashboard.parameters ?? []).map((p) => ({ ...p })));
+    setDraftParameters(dp);
     setDraftTabs(dt);
     setDraftName(dashboard.name);
     setDraftWidth(dashboard.width);
     setEditing(true);
     setEditPanel(null);
+    // The snapshot Cancel compares against. Taken from the DRAFT, not the server payload:
+    // startTabsDraft mints fresh client tab keys, so the two are not the same shape.
+    editBaselineRef.current = { name: dashboard.name, width: dashboard.width, cards: dc, parameters: dp, tabs: dt };
   }
-  function cancelEdit() { setEditing(false); setDraftCards(null); setDraftParameters(null); setDraftTabs(null); setEditPanel(null); setDraftName(""); setNewCardId(null); }
+
+  /** Leave edit mode and drop the draft. This is the destructive half — reachable only from a
+   *  clean draft, or through the confirmation. */
+  function discardEdit() {
+    setEditing(false); setDraftCards(null); setDraftParameters(null); setDraftTabs(null);
+    setEditPanel(null); setDraftName(""); setNewCardId(null);
+    editBaselineRef.current = null;
+    setConfirmingDiscard(false);
+  }
+
+  /** What the Cancel button calls. Metabase routes Cancel through its leave confirmation whenever
+   *  the dashboard is dirty (DashboardHeader.tsx:69-87) and exits straight away when it is not. */
+  function requestCancelEdit() {
+    const baseline = editBaselineRef.current;
+    const current: DashboardDraft = {
+      name: draftName, width: draftWidth, cards: (cards as DraftCard[]), parameters, tabs: draftTabs ?? [],
+    };
+    if (baseline && isDraftDirty(baseline, current)) { setConfirmingDiscard(true); return; }
+    discardEdit();
+  }
 
   function addCard(chart: Chart) {
     const { w, h } = sizeForViz(chart.viz_type).default;
@@ -284,7 +318,9 @@ export default function DashboardView() {
     setDraftCards([...(cards as DraftCard[]), newCard]);
   }
   function removeCard(cardId: string) {
-    setDraftCards((cards as DraftCard[]).filter((c) => c.id !== cardId));
+    const previous = cards as DraftCard[];
+    setDraftCards(previous.filter((c) => c.id !== cardId));
+    undoableDraftEdit(REMOVED_CARD, previous, setDraftCards);
   }
 
   function duplicateCard(cardId: string) {
@@ -297,8 +333,28 @@ export default function DashboardView() {
     });
   }
   function replaceCard(cardId: string, chart: Chart) {
-    setDraftCards((prev) => (prev ?? cardsAsDraft()).map((c) => (c.id === cardId ? { ...c, chart_id: chart.id, options: {} } : c)));
+    // Resetting `options` is correct and is NOT the divergence — Metabase discards more than this
+    // (cards-typed.ts:245-284). What was missing is the way back, which is the toast.
+    const previous = cards as DraftCard[];
+    setDraftCards(previous.map((c) => (c.id === cardId ? { ...c, chart_id: chart.id, options: {} } : c)));
     setReplacingId(null);
+    undoableDraftEdit(REPLACED_CARD, previous, setDraftCards);
+  }
+
+  /** Delete a tab from the draft and offer an Undo, as Metabase does (use-dashboard-tabs.ts:43-61).
+   *  All three delete paths — the no-cards fast path and the dialog's two buttons — funnel through
+   *  here so the snapshot is taken in exactly one place; three inline copies were three chances to
+   *  snapshot the state after the edit instead of before it. */
+  function deleteTabWithUndo(key: string, opts: { mode: "reassign"; toKey: string } | { mode: "delete" }) {
+    const previous = { tabs: draftTabs ?? [], cards: cards as DraftCard[], activeTabPos };
+    const name = previous.tabs.find((t) => t.key === key)?.name ?? "";
+    const r = deleteTab(previous.tabs, previous.cards, key, opts);
+    setDraftTabs(r.draftTabs);
+    setDraftCards(r.draftCards);
+    setActiveTabPos(Math.min(activeTabPos, r.draftTabs.length - 1));
+    undoableDraftEdit(deletedTab(name), previous, (p) => {
+      setDraftTabs(p.tabs); setDraftCards(p.cards); setActiveTabPos(p.activeTabPos);
+    });
   }
 
   function fillPlaceholder(cardId: string, chart: Chart) {
@@ -417,6 +473,7 @@ export default function DashboardView() {
     try {
       await update.mutateAsync({ id: dashboard.id, name: draftName.trim() || dashboard.name, description: dashboard.description, parameters, tabs: tabPayload, width: draftWidth, cards: cardPayload });
       setEditing(false); setDraftCards(null); setDraftTabs(null); setEditPanel(null); setDraftName(""); setNewCardId(null);
+      editBaselineRef.current = null;
       toast.success("Saved");
     } catch (e) { toast.error(String(e)); }
   }
@@ -435,6 +492,7 @@ export default function DashboardView() {
   }
 
   const activeParamId = editing && editPanel?.kind === "filter" ? editPanel.paramId : null;
+  const activeParam = activeParamId ? parameters.find((p) => p.id === activeParamId) : undefined;
   // Per-card column lists for the filter value-source "card" picker (label + selectable columns).
   const cardColumns = cards
     .filter((c) => c.card_type === "chart")
@@ -478,11 +536,14 @@ export default function DashboardView() {
 
   return (
     <div className={view.isFullscreen ? "fixed inset-0 z-50 overflow-auto bg-dashboard p-4" : "min-h-full bg-dashboard p-4"}>
+      {/* `requestCancelEdit`, NOT `discardEdit`: the `e` shortcut must take the same path as the
+          Cancel button — through the discard confirmation — or a keystroke silently destroys a
+          dirty draft, which is the exact loss that confirmation exists to prevent. */}
       <DashboardShortcuts
         editing={editing}
         tabCount={tabs.length}
         onEdit={startEdit}
-        onCancelEdit={cancelEdit}
+        onCancelEdit={requestCancelEdit}
         onSave={onSave}
         onToggleBookmark={() => { (dash.bookmarked ? removeBookmark : addBookmark).mutateAsync(dash.id).catch((e) => toast.error(String(e))); }}
         onToggleInfo={() => setShowInfo((v) => !v)}
@@ -494,7 +555,7 @@ export default function DashboardView() {
         <div className="-mx-4 -mt-4 mb-4 flex items-center justify-between gap-2 bg-primary/90 px-4 py-2 text-sm font-medium text-primary-foreground">
           <span className="flex items-center gap-2"><Pencil className="h-4 w-4" /> You're editing this dashboard</span>
           <span className="flex items-center gap-2">
-            <Button size="sm" variant="ghost" className="text-primary-foreground hover:bg-primary-foreground/15 hover:text-primary-foreground" onClick={cancelEdit}>Cancel</Button>
+            <Button size="sm" variant="ghost" className="text-primary-foreground hover:bg-primary-foreground/15 hover:text-primary-foreground" onClick={requestCancelEdit}>Cancel</Button>
             <Button size="sm" variant="secondary" onClick={onSave} disabled={update.isPending}>Save</Button>
           </span>
         </div>
@@ -589,15 +650,10 @@ export default function DashboardView() {
           onReorder={(from, to) => setDraftTabs(reorderTab(draftTabs ?? [], from, to))}
           onDelete={(key) => {
             const hasCards = (cards as DraftCard[]).some((c) => c.tabKey === key);
-            if (!hasCards) {
-              const r = deleteTab(draftTabs ?? [], (cards as DraftCard[]), key, { mode: "delete" });
-              setDraftTabs(r.draftTabs); setDraftCards(r.draftCards);
-              setActiveTabPos(Math.min(activeTabPos, r.draftTabs.length - 1));
-            } else {
-              const firstOther = (draftTabs ?? []).find((t) => t.key !== key) ?? null;
-              setReassignTo(firstOther ? firstOther.key : null);
-              setDeletingTabKey(key);
-            }
+            if (!hasCards) { deleteTabWithUndo(key, { mode: "delete" }); return; }
+            const firstOther = (draftTabs ?? []).find((t) => t.key !== key) ?? null;
+            setReassignTo(firstOther ? firstOther.key : null);
+            setDeletingTabKey(key);
           }}
           onDuplicate={(key) => { const r = duplicateTab(draftTabs ?? [], (cards as DraftCard[]), key); setDraftTabs(r.draftTabs); setDraftCards(r.draftCards); setActiveTabPos(r.activeTabPos); }}
         />
@@ -693,13 +749,17 @@ export default function DashboardView() {
                     onEditText={editing && (c.card_type === "text" || c.card_type === "heading") ? (t) => { updateCardOptions(c.id, { text: t }); if (newCardId === c.id) setNewCardId(null); } : undefined}
                     autoFocusText={c.id === newCardId} />
                 )}
-                {activeParamId && c.card_type === "chart" && baseChart && (
+                {activeParamId && activeParam && (
                   <CardFilterMapOverlay
-                    columns={
-                      parameters.find((pp) => pp.id === activeParamId)?.type === "temporal_unit"
-                        ? Object.keys(baseChart.params.spec.temporal_units ?? {})
-                        : [...baseChart.params.spec.dimensions, ...baseChart.params.spec.columns]
-                    }
+                    state={cardMapState({
+                      cardType: c.card_type,
+                      paramType: activeParam.type,
+                      columns: baseChart ? columnsForParam(baseChart.params.spec, activeParam.type) : [],
+                      rows: c.size_y,
+                      chartMissing: c.card_type === "chart" && !baseChart,
+                      // egret filters are dashboard-level and have no owning tab; W7 supplies this.
+                      filterTabKey: undefined,
+                    })}
                     value={mappings[activeParamId] ?? ""}
                     onChange={(col) => updateCardOptions(c.id, { paramMappings: { ...mappings, [activeParamId]: col } })}
                   />
@@ -761,17 +821,13 @@ export default function DashboardView() {
               <Button size="sm" variant="outline" aria-label="reassign and delete"
                 onClick={() => {
                   if (!deletingTabKey || !reassignTo) return;
-                  const r = deleteTab(draftTabs ?? [], (cards as DraftCard[]), deletingTabKey, { mode: "reassign", toKey: reassignTo });
-                  setDraftTabs(r.draftTabs); setDraftCards(r.draftCards);
-                  setActiveTabPos(Math.min(activeTabPos, r.draftTabs.length - 1));
+                  deleteTabWithUndo(deletingTabKey, { mode: "reassign", toKey: reassignTo });
                   setDeletingTabKey(null); setReassignTo(null);
                 }}>reassign and delete</Button>
               <Button size="sm" variant="ghost" className="text-destructive" aria-label="delete cards too"
                 onClick={() => {
                   if (!deletingTabKey) return;
-                  const r = deleteTab(draftTabs ?? [], (cards as DraftCard[]), deletingTabKey, { mode: "delete" });
-                  setDraftTabs(r.draftTabs); setDraftCards(r.draftCards);
-                  setActiveTabPos(Math.min(activeTabPos, r.draftTabs.length - 1));
+                  deleteTabWithUndo(deletingTabKey, { mode: "delete" });
                   setDeletingTabKey(null); setReassignTo(null);
                 }}>delete cards too</Button>
             </div>
@@ -784,6 +840,11 @@ export default function DashboardView() {
           <ChartPickerList charts={charts ?? []} onPick={(ch) => replaceCard(replacingId!, ch)} autoFocus />
         </DialogContent>
       </Dialog>
+      <DiscardChangesDialog
+        open={confirmingDiscard}
+        onOpenChange={(o) => { if (!o) setConfirmingDiscard(false); }}
+        onDiscard={discardEdit}
+      />
       <Dialog open={fillingPlaceholderId !== null} onOpenChange={(o) => { if (!o) setFillingPlaceholderId(null); }}>
         <DialogContent>
           <DialogHeader><DialogTitle>Add a chart</DialogTitle></DialogHeader>
