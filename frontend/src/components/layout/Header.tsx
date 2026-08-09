@@ -14,6 +14,7 @@ import {
 import { useTheme } from "@/components/theme-provider";
 import { useAuth } from "@/auth/useAuth";
 import { useLogout } from "@/api/hooks";
+import { useIsNarrowViewport } from "@/lib/useIsNarrowViewport";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
 const LAST_WORKSPACE_KEY = "egret:last-workspace";
@@ -34,6 +35,10 @@ export function Header() {
   const navigate = useNavigate();
   const { workspace } = useParams<{ workspace?: string }>();
   const isAdmin = location.pathname.startsWith("/control-plane");
+  // Same source of truth as the sidebar rule — one viewport breakpoint for the whole shell.
+  // At 390px the row below is 441px of fixed-width children, which is what puts a horizontal
+  // scrollbar on the document no matter how narrow the dashboard grid itself gets.
+  const narrow = useIsNarrowViewport();
   // The Control Plane entry shows for platform_admin OR anyone holding a
   // control-plane permission (so scoped roles can reach the sections they're
   // allowed — matching RequireControlPlaneAccess). Empty for everyone else.
@@ -63,23 +68,32 @@ export function Header() {
   }
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-card px-4">
-      <Link to="/" className="flex items-center gap-2">
+    <header
+      data-testid="app-header"
+      className={`flex h-14 shrink-0 items-center border-b border-border bg-card ${
+        narrow ? "gap-2 px-2" : "gap-3 px-4"
+      }`}
+    >
+      <Link to="/" className="flex shrink-0 items-center gap-2">
         <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
           <Feather className="h-4 w-4" />
         </span>
-        <span className="text-base font-semibold tracking-tight">Egret</span>
+        {/* The mark alone still identifies the app; the wordmark is the cheapest 55px to give
+            back, and it is the only element here with no function of its own. */}
+        {!narrow && <span className="text-base font-semibold tracking-tight">Egret</span>}
       </Link>
 
-      {!isAdmin && <WorkspaceSwitcher />}
+      {/* `min-w-0 flex-1` lets the workspace name truncate instead of forcing the row wider
+          than the viewport — a fixed w-56 trigger cannot shrink and pushes everything right. */}
+      {!isAdmin && <WorkspaceSwitcher className={narrow ? "w-auto min-w-0 flex-1" : undefined} />}
 
       <div className="flex-1" />
 
       {canAdmin && !isAdmin && (
-        <Button asChild variant="ghost" size="sm" className="gap-2">
-          <Link to="/control-plane">
+        <Button asChild variant="ghost" size={narrow ? "icon" : "sm"} className={narrow ? undefined : "gap-2"}>
+          <Link to="/control-plane" aria-label="Control Plane">
             <Settings className="h-4 w-4" />
-            Control Plane
+            {!narrow && "Control Plane"}
           </Link>
         </Button>
       )}
@@ -87,12 +101,13 @@ export function Header() {
       {isAdmin && (
         <Button
           variant="default"
-          size="sm"
-          className="gap-2"
+          size={narrow ? "icon" : "sm"}
+          className={narrow ? undefined : "gap-2"}
+          aria-label="Explorer"
           onClick={handleExplorer}
         >
           <Compass className="h-4 w-4" />
-          Explorer
+          {!narrow && "Explorer"}
         </Button>
       )}
 

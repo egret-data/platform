@@ -21,6 +21,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { sizeForViz, getPositionForNewDashCard } from "@/components/chart/dashboard-grid";
 import { DashboardGridLayout } from "@/components/chart/dashboard/DashboardGridLayout";
 import { mayPersistLayout, type GridBreakpoint } from "@/components/chart/dashboard/grid-breakpoints";
+import { useIsNarrowViewport } from "@/lib/useIsNarrowViewport";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
 import { DashboardInfoSidebar } from "@/components/chart/dashboard/DashboardInfoSidebar";
 import { CardFilterMapOverlay } from "@/components/chart/dashboard/CardFilterMapOverlay";
@@ -79,6 +80,9 @@ export default function DashboardView() {
   // width 0 → the one-column projection, and RGL emits that collapsed layout before any effect
   // can report the real breakpoint. Defaulting to "desktop" would let a fresh mount inside edit
   // mode (empty dashboard → add a card) flatten everything to x:0 w:1.
+  // The header row's rule keys off the VIEWPORT (same hook as the app shell), not off the grid's
+  // measured container — the two answer different questions and must not be collapsed.
+  const narrowViewport = useIsNarrowViewport();
   const gridBreakpointRef = useRef<GridBreakpoint>("mobile");
   const onGridBreakpointChange = useCallback((bp: GridBreakpoint) => {
     gridBreakpointRef.current = bp;
@@ -488,14 +492,17 @@ export default function DashboardView() {
           <Button size="sm" variant="outline" onClick={async () => { try { await restoreMut.mutateAsync(dash.id); } catch (e) { toast.error(String(e)); } }}>Restore</Button>
         </div>
       )}
-      <div className="mb-3 flex items-center justify-between border-b pb-3">
+      {/* Narrow viewports wrap this row rather than clipping it. Clipping is what made the
+          Fullscreen control unreachable at 390px: it sat past the right edge inside an ancestor
+          that hid the overflow, so it could be neither seen nor scrolled to. */}
+      <div className={`mb-3 flex items-center justify-between border-b pb-3 ${narrowViewport ? "flex-wrap gap-y-2" : ""}`}>
         {editing ? (
           <input aria-label="dashboard name" value={draftName} onChange={(e) => setDraftName(e.target.value)}
             className="min-w-0 flex-1 rounded border border-transparent bg-transparent text-xl font-bold focus:bg-background focus:px-2 focus-visible:border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
         ) : (
-          <h1 className="text-xl font-bold">{dash.name}</h1>
+          <h1 className={`text-xl font-bold ${narrowViewport ? "min-w-0 basis-full" : ""}`}>{dash.name}</h1>
         )}
-        <div className="flex items-center gap-2">
+        <div className={`flex items-center gap-2 ${narrowViewport ? "min-w-0 flex-wrap gap-y-2" : ""}`}>
           {!editing && (
             <>
               <Button size="sm" variant="ghost" aria-label={dash.bookmarked ? "remove bookmark" : "add bookmark"}
