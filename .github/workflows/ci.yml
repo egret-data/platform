@@ -83,3 +83,7 @@ jobs:
       # for the right reason is right here, against the artefact the step above just built. The
       # script's header explains which symbols survive minification and why.
       - run: npm run test:bundle
+      # Asserts the .xlsx writer is still in its own chunk and still in some chunk. Same reason as
+      # the step above: vitest does not code-split, so this can only fail for the right reason
+      # against the artefact `npm run build` just produced.
+      - run: npm run test:bundle:xlsx

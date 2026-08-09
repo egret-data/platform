@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:bundle": "node scripts/assert-label-layout-bundled.mjs",
+    "test:bundle:xlsx": "node scripts/assert-xlsx-lazy.mjs",
     "gen:api": "orval && node scripts/encode-path-params.mjs",
     "lint": "eslint .",
     "lint:harness": "cd .. && frontend/node_modules/.bin/eslint --config frontend/eslint.config.js scripts/harness",

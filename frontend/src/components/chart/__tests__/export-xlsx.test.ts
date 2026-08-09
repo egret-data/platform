@@ -3,7 +3,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // The real writer zips through fflate, which reaches for a Worker. jsdom has none, and this file
 // is not testing fflate — it is testing what WE hand the writer and what we do with its Blob.
 const toBlob = vi.fn(() => Promise.resolve(new Blob(["xlsx"], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })));
-const writeXlsxFile = vi.fn(() => ({ toBlob }));
+// The rest parameter is not decoration: the mock is forwarded to with a spread, and a zero-arg
+// `vi.fn(() => …)` makes `tsc` reject that spread (TS2556) while vitest happily runs it.
+const writeXlsxFile = vi.fn((..._a: unknown[]) => ({ toBlob }));
 vi.mock("write-excel-file/browser", () => ({ default: (...a: unknown[]) => writeXlsxFile(...a) }));
 
 const downloadBlob = vi.fn();
