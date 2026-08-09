@@ -135,10 +135,17 @@ as the **number** `42`. This is reachable today — both the drill "Filter by" p
 (`DashboardView.tsx:754`) and the crossfilter click behaviour (`:236`) call `setValue` with a
 scalar. The decode must be gated on the raw actually looking like an array.
 
-**A third, latent, in the same hook.** `setValue` called in a loop drops all but the last write,
-because each call reads the same location. Nothing does that today, but applying a batch of
-draft filter values is exactly that shape, so W6's auto-apply work needs a batched setter before
-it can be correct.
+**A third in the same hook, and it is NOT latent.** `setValue` called in a loop drops all but the
+last write, because each call reads the same location.
+
+⚠️ This spec said "nothing does that today". **That is wrong** — the crossfilter click path does
+exactly that: `DashboardView.tsx:236` is `for (const s of r.sets) paramsState.setValue(...)`. So a
+crossfilter click that sets more than one parameter already loses all but the last, today, in
+shipped code. W6 (#448) preserved that behaviour deliberately rather than widening its scope;
+fixing it needs `setValues` plumbed through the drafts hook plus a test. **It is still open.**
+
+The same shape reappears wherever a batch of parameter values is written at once — W4's "Reset all
+filters" and W6's Apply both had to be single writes for this reason.
 
 ---
 
