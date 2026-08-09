@@ -1,9 +1,15 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { attributionLine } from "./attribution";
 
 interface Props {
   name: string;
   description: string;
+  /** Folder name, or null for Uncategorized. */
+  folderName: string | null;
+  /** Where "Saved in" points. There is no folder route in this app — this is the dashboards list
+   *  scoped with ?folder=<id>, which the list uses to expand that section. */
+  folderHref: string | null;
   /** Display name for the creator, already resolved by the API (`created_by_name`); falls back
    *  to the raw id, exactly as ShareDialog.tsx does for a grant's principal. */
   ownerLabel: string | null;
@@ -15,7 +21,8 @@ interface Props {
 }
 
 export function DashboardInfoSidebar({
-  name, description, ownerLabel, createdAt, editorLabel, updatedAt, onSaveDescription, onClose,
+  name, description, folderName, folderHref, ownerLabel, createdAt, editorLabel, updatedAt,
+  onSaveDescription, onClose,
 }: Props) {
   const [draft, setDraft] = useState(description);
   // Re-sync if the description changes underneath us (e.g. a concurrent edit refetch);
@@ -38,6 +45,14 @@ export function DashboardInfoSidebar({
           onBlur={() => { if (draft !== description) onSaveDescription(draft); }} />
       </label>
       <dl className="flex flex-col gap-1 text-xs">
+        <div className="flex justify-between gap-2">
+          <dt className="shrink-0 text-muted-foreground">Saved in</dt>
+          <dd className="truncate text-right">
+            {folderName && folderHref
+              ? <Link className="hover:underline" to={folderHref}>{folderName}</Link>
+              : "Uncategorized"}
+          </dd>
+        </div>
         {added && (
           <div className="flex justify-between gap-2"><dt className="shrink-0 text-muted-foreground">Added</dt><dd className="text-right">{added}</dd></div>
         )}

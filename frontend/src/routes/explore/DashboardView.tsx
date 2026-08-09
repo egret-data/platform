@@ -7,6 +7,7 @@ import { useDashboard, useDashboardMutations, type DashboardCard as Card, type D
 import { useCharts, type Chart, type ChartFilter } from "@/api/charts";
 import { useChartData } from "@/api/useChartData";
 import { useDataset } from "@/api/datasets";
+import { useFolders } from "@/api/folders";
 import { resolveClick, type ClickBehavior } from "@/components/chart/dashboard/click-behavior";
 import { resolveValuesSource } from "@/components/chart/dashboard/valuesSource";
 import { hiddenEmptyCardIds } from "@/components/chart/dashboard/hide-empty";
@@ -71,6 +72,7 @@ export default function DashboardView() {
   const { workspace: ws, id } = useParams() as { workspace: string; id: string };
   const { data: dash, isLoading, isError } = useDashboard(ws, id);
   const { data: charts } = useCharts(ws);
+  const { data: dashboardFolders = [] } = useFolders(ws, "dashboards");
   const { update, restore: restoreMut, addBookmark, removeBookmark } = useDashboardMutations(ws);
   const [editing, setEditing] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
@@ -888,6 +890,8 @@ export default function DashboardView() {
           <DashboardInfoSidebar
             name={dash.name}
             description={dash.description}
+            folderName={dashboardFolders.find((f) => f.id === dash.folder_id)?.name ?? null}
+            folderHref={dash.folder_id ? `/explore/${ws}/dashboards?folder=${dash.folder_id}` : null}
             ownerLabel={dash.created_by_name ?? dash.created_by}
             createdAt={dash.created_at ?? null}
             editorLabel={dash.updated_by_name ?? dash.updated_by}

@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Search, Star, Trash2, FolderPlus, ListChecks } from "lucide-react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { useDashboards, useDashboardMutations, type DashboardSummary } from "@/api/dashboards";
 import { Button } from "@/components/ui/button";
@@ -34,6 +34,11 @@ export default function Dashboards() {
   const setFolder = useSetFolder(ws, "dashboards");
   const { create: createFolder, rename: renameFolder, remove: removeFolder } = useFolderMutations(ws, "dashboards");
   const collapse = useCollapsed(`folders:${ws}:dashboards`);
+  const [searchParams] = useSearchParams();
+  const focusFolder = searchParams.get("folder");
+  // The info sidebar's "Saved in" link lands here. Reveal that section once on arrival; the
+  // visitor's own collapse choices afterwards are theirs and are not re-applied.
+  useEffect(() => { if (focusFolder) collapse.expand(focusFolder); }, [focusFolder, collapse]);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");

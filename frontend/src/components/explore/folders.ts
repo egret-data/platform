@@ -46,5 +46,17 @@ export function useCollapsed(storageKey: string) {
       return n;
     });
   }, [storageKey]);
-  return { isCollapsed, toggle };
+  /** Force one key open, idempotently. Used by the "Saved in" deep link: arriving at
+   *  ?folder=<id> must reveal that section even when the visitor last left it collapsed.
+   *  Returns the same Set reference when nothing changes, so it cannot loop a caller's effect. */
+  const expand = useCallback((key: string) => {
+    setSet((s) => {
+      if (!s.has(key)) return s;
+      const n = new Set(s);
+      n.delete(key);
+      try { localStorage.setItem(storageKey, JSON.stringify([...n])); } catch { /* ignore */ }
+      return n;
+    });
+  }, [storageKey]);
+  return { isCollapsed, toggle, expand };
 }
