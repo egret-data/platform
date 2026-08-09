@@ -31,7 +31,7 @@ import { EditFilterChips } from "@/components/chart/dashboard/EditFilterChips";
 import { CardEditToolbar } from "@/components/chart/dashboard/CardEditToolbar";
 import { DashboardEditToolbar } from "@/components/chart/dashboard/DashboardEditToolbar";
 import { RefreshMenu } from "@/components/chart/dashboard/RefreshMenu";
-import { dashboardWidthClass } from "@/components/chart/dashboard/DashboardActionsMenu.view";
+import { DashboardViewActionRows, dashboardWidthClass } from "@/components/chart/dashboard/DashboardActionsMenu.view";
 import type { SectionLayout } from "@/components/chart/dashboard/dashboard-sections";
 import { dropPlaceholders } from "@/components/chart/dashboard/dashboard-sections";
 import { PlaceholderCard } from "@/components/chart/dashboard/PlaceholderCard";
@@ -527,6 +527,12 @@ export default function DashboardView() {
                 {view.isFullscreen ? "Exit fullscreen" : "Fullscreen"}
               </Button>
               <Button size="sm" variant="ghost" aria-label="dashboard info" onClick={() => setShowInfo((v) => !v)}><Info className="h-4 w-4" /></Button>
+              <DashboardViewActionRows
+                ws={ws}
+                dashboardId={dashboard.id}
+                canResetFilters={view.hasAnyParam(parameters.map((p) => p.slug))}
+                onResetFilters={() => view.resetParams(parameters.map((p) => p.slug))}
+              />
             </>
           )}
           {editing ? (
