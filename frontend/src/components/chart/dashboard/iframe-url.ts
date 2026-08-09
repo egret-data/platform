@@ -58,6 +58,30 @@ export const ALLOWED_IFRAME_HOSTS = [
   "x.com",
 ] as const;
 
+/**
+ * The `frame-src` sources that correspond to `ALLOWED_IFRAME_HOSTS`, so the browser enforces the
+ * same list the client guard does.
+ *
+ * WHY BOTH FORMS PER HOST. The client matcher is `host === d || host.endsWith("." + d)`, i.e. the
+ * apex AND its subdomains. CSP's `https://*.youtube.com` does NOT match the bare `youtube.com`,
+ * so a single wildcard source would be narrower than the guard and would block an embed the card
+ * had already accepted — the two layers must agree or the second one is a bug, not a defence.
+ *
+ * `'self'` is deliberately absent: `resolveIframeSrc` rejects a same-origin `src` outright,
+ * because `allow-same-origin` plus `allow-scripts` on a same-origin frame lets the embed reach
+ * `window.parent`. Granting it here would re-open exactly what that rejection closes.
+ */
+export function frameSrcSources(): string[] {
+  return ALLOWED_IFRAME_HOSTS.flatMap((d) => [`https://${d}`, `https://*.${d}`]);
+}
+
+/** The full directive, as it must appear in `frontend/nginx-prod.conf`. A test pins the two
+ *  together, so adding a host here and forgetting nginx fails the suite rather than silently
+ *  leaving the browser layer behind the client one. */
+export function cspFrameSrcDirective(): string {
+  return `frame-src ${frameSrcSources().join(" ")};`;
+}
+
 /** Permissions-Policy features an embed may request through its `allow` attribute.
  *
  *  TIGHTENING 2 vs Metabase: `iframe.ts:111-118` copies the pasted snippet's `allow` verbatim,
