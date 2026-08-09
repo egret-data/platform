@@ -33,7 +33,7 @@ import { findHostCardId, hostTabKey, inlineParametersFor, keepInlineParameters, 
 import { isDraftDirty, type DashboardDraft } from "@/components/chart/dashboard/edit-draft";
 import { REMOVED_CARD, REPLACED_CARD, deletedTab, undoableDraftEdit } from "@/components/chart/dashboard/draft-undo";
 import { DiscardChangesDialog } from "@/components/chart/dashboard/DiscardChangesDialog";
-import { applyAutoConnect, findAutoConnectTargets, mappableColumns, offerAutoConnect, revertAutoConnect } from "@/components/chart/dashboard/autoConnect";
+import { applyAutoConnect, findAutoConnectTargets, offerAutoConnect, revertAutoConnect } from "@/components/chart/dashboard/autoConnect";
 import { DashboardFilterBar } from "@/components/chart/dashboard/DashboardFilterBar";
 import { EditSidebar, type EditPanel } from "@/components/chart/dashboard/EditSidebar";
 import { EditFilterChips } from "@/components/chart/dashboard/EditFilterChips";
@@ -451,10 +451,10 @@ export default function DashboardView() {
    *  of the same name. Resolution, the patch, its inverse and both toasts live in autoConnect.ts;
    *  this is the wiring that gives them the draft. */
   function offerAutoConnectFor(sourceCardId: string, paramId: string, column: string) {
-    const isTemporal = parameters.find((p) => p.id === paramId)?.type === "temporal_unit";
+    const paramType = parameters.find((p) => p.id === paramId)?.type ?? "text";
     const columnsOf = (cardId: string) => {
       const chart = chartById.get((cards as DraftCard[]).find((x) => x.id === cardId)?.chart_id ?? "");
-      return chart ? mappableColumns(chart.params.spec, isTemporal) : [];
+      return chart ? columnsForParam(chart.params.spec, paramType) : [];
     };
     const targets = findAutoConnectTargets({
       cards: cards as DraftCard[], columnsOf, paramId, column, sourceCardId,
@@ -829,10 +829,9 @@ export default function DashboardView() {
                     state={cardMapState({
                       cardType: c.card_type,
                       paramType: activeParam.type,
-                      // `columnsForParam` is `cardMapState`'s own pair, so the overlay keeps one
-                      // contract. NOTE: it and `autoConnect.ts`'s `mappableColumns` are currently
-                      // identical implementations arrived at independently by two workstreams —
-                      // worth collapsing into one, but not during a conflict resolution.
+                      // One column rule for the whole dashboard: the overlay and auto-connect both
+                      // call this, so a card can never offer a column that auto-connect would not
+                      // also match.
                       columns: baseChart ? columnsForParam(baseChart.params.spec, activeParam.type) : [],
                       rows: c.size_y,
                       chartMissing: c.card_type === "chart" && !baseChart,

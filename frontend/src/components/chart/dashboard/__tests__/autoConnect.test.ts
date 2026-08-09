@@ -7,7 +7,6 @@ import {
   autoConnectDoneMessage,
   autoConnectPrompt,
   findAutoConnectTargets,
-  mappableColumns,
   offerAutoConnect,
   revertAutoConnect,
   type AutoConnectCard,
@@ -76,14 +75,9 @@ describe("applyAutoConnect / revertAutoConnect", () => {
   });
 });
 
-describe("mappableColumns", () => {
-  const spec = { dimensions: ["region"], columns: ["city"], temporal_units: { created_at: "month" } };
-  it("offers dimensions and columns, or the temporally grouped columns for a time-grouping filter", () => {
-    expect(mappableColumns(spec, false)).toEqual(["region", "city"]);
-    expect(mappableColumns(spec, true)).toEqual(["created_at"]);
-    expect(mappableColumns({ dimensions: [], columns: [] }, true)).toEqual([]);
-  });
-});
+// The column rule this module used to duplicate now lives only in card-map-state.ts, and is
+// covered by `columnsForParam` in card-map-state.test.ts — same three cases, split across two
+// assertions there. Auto-connect receives the list through `columnsOf` instead of computing it.
 
 describe("the toast copy", () => {
   it("matches Metabase's wording and timeouts", () => {
