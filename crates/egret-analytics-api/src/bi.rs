@@ -394,7 +394,7 @@ pub struct CreateDashboard {
 }
 
 /// Card as supplied by the client when saving a layout.
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CardInput {
     #[serde(default)]
     pub chart_id: Option<Uuid>,
@@ -410,7 +410,7 @@ pub struct CardInput {
     pub tab_index: Option<usize>,
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct NewTabInput {
     pub name: String,
     pub position: i32,
@@ -432,7 +432,11 @@ fn default_width() -> String {
     "fixed".into()
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+/// The dashboard PUT body — and, byte for byte, one stored revision (migration 0107).
+/// `Serialize` is derived alongside `Deserialize` so the snapshot is produced from this exact
+/// type rather than hand-built JSON that could drift from it; a compile error is how a new field
+/// announces that revisions must carry it too.
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct UpdateDashboard {
     pub name: String,
     #[serde(default)]
@@ -728,5 +732,29 @@ mod tests {
             serde_json::to_value(&c).unwrap(),
             serde_json::json!({"name":"id","type":"bigint"})
         );
+    }
+
+    #[test]
+    fn update_dashboard_round_trips_through_json_unchanged() {
+        // A revision is stored by serialising this DTO and restored by deserialising it. If the
+        // two directions disagree about ANY field, a revert silently restores a different
+        // dashboard than the one the user picked — with no error at any layer.
+        let body = serde_json::json!({
+            "name": "Ops",
+            "description": "d",
+            "parameters": [{ "id": "p1", "name": "Cat", "slug": "cat", "type": "category" }],
+            "width": "fixed",
+            "tabs": [{ "name": "A", "position": 0 }],
+            "cards": [{
+                "chart_id": "6f9619ff-8b86-d011-b42d-00c04fc964ff",
+                "card_type": "chart",
+                "grid_col": 3, "grid_row": 1, "size_x": 6, "size_y": 4,
+                "options": { "vizOverride": { "cartesian.stack": true } },
+                "tab_index": 0
+            }]
+        });
+        let dto: super::UpdateDashboard =
+            serde_json::from_value(body.clone()).expect("deserialises");
+        assert_eq!(serde_json::to_value(&dto).unwrap(), body);
     }
 }

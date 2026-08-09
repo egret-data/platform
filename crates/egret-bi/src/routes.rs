@@ -2672,6 +2672,108 @@ async fn db_get(
     ))
 }
 
+/// Best-effort revision write. A failure here must NOT fail the request: the dashboard has already
+/// been updated, so a 500 would tell the client the save was lost when it was not. Same stance as
+/// the audit sink — log and continue.
+async fn capture_revision(
+    st: &BiState,
+    id: Uuid,
+    actor: Option<Uuid>,
+    kind: &str,
+    snapshot: &serde_json::Value,
+    at: Option<chrono::DateTime<chrono::Utc>>,
+) {
+    if let Err(e) = st
+        .dashboards
+        .insert_revision(id, actor, kind, snapshot, at)
+        .await
+    {
+        tracing::warn!(dashboard = %id, kind, error = %e, "failed to record dashboard revision");
+    }
+}
+
+/// The state a dashboard is about to leave, for dashboards that have no history yet.
+///
+/// READS ONLY. The value is held in memory and inserted by `apply_dashboard_update` after the
+/// write lands: snapshotting afterwards would capture the NEW state, and inserting beforehand
+/// would leave a restore point for an edit that then got rejected. Without this, the first edit
+/// after this feature ships is the one edit that cannot be undone — which is the edit a user is
+/// most likely to want back.
+///
+/// Attributed to whoever last touched the dashboard and stamped with that moment, not with now(),
+/// because that is when the state being captured was actually written.
+async fn pending_baseline(
+    st: &BiState,
+    id: Uuid,
+) -> Option<(
+    serde_json::Value,
+    Option<Uuid>,
+    chrono::DateTime<chrono::Utc>,
+)> {
+    if st.dashboards.revision_count(id).await.ok()? != 0 {
+        return None;
+    }
+    let d = st.dashboards.get(id).await.ok()??;
+    let snap = st.dashboards.snapshot_current(id).await.ok()??;
+    Some((snap, d.updated_by.or(d.created_by), d.updated_at))
+}
+
+/// The one write path a dashboard layout takes. `db_update` and `db_revision_revert` both go
+/// through it, so a revert can never take a different validation path than the save it undoes.
+///
+/// Authorization is the CALLER's job — the two handlers require different permissions on different
+/// objects and both resolve the share before calling here.
+async fn apply_dashboard_update(
+    st: &BiState,
+    ctx: &egret_core::context::WorkspaceContext,
+    id: Uuid,
+    b: UpdateDashboard,
+    kind: &str,
+) -> Result<DashboardDetailDto, BiApiError> {
+    require_cards_in_ws(st, ctx, &b.cards).await?;
+    crate::model::validate_layout(&b.tabs, &b.cards).map_err(BiApiError::from)?;
+    if b.width != "fixed" && b.width != "full" {
+        return Err(
+            egret_core::Error::InvalidInput("width must be 'fixed' or 'full'".into()).into(),
+        );
+    }
+    // Held, not written — see pending_baseline.
+    let baseline = pending_baseline(st, id).await;
+    // `UpdateDashboard` is a plain struct of owned values, so this cannot fail; on the impossible
+    // branch we keep the save working and lose one history entry rather than 500-ing.
+    let snapshot = serde_json::to_value(&b).ok();
+
+    st.dashboards
+        .update(
+            id,
+            &b.name,
+            &b.description,
+            &b.parameters,
+            &b.width,
+            Some(ctx.principal.user_id.0),
+        )
+        .await
+        .map_err(BiApiError::from)?;
+    let tabs: Vec<crate::dashboard::NewTab> = b.tabs.into_iter().map(Into::into).collect();
+    let cards: Vec<crate::dashboard::NewCard> = b.cards.into_iter().map(Into::into).collect();
+    st.dashboards
+        .replace_layout(id, &tabs, &cards)
+        .await
+        .map_err(BiApiError::from)?;
+
+    // EVERYTHING THAT CAN REJECT THIS REQUEST HAS NOW RUN. Capturing any earlier would record an
+    // edit that never happened — a 403 from the caller's authz, a 404 from require_cards_in_ws, a
+    // 400 from validate_layout or the width check, or a failed replace_layout. From here the only
+    // failure is a crash, which loses one entry: under-recording, the safe direction.
+    if let Some((snap, actor, at)) = baseline {
+        capture_revision(st, id, actor, "baseline", &snap, Some(at)).await;
+    }
+    if let Some(snap) = snapshot {
+        capture_revision(st, id, Some(ctx.principal.user_id.0), kind, &snap, None).await;
+    }
+    load_dashboard(st, id, ctx.principal.user_id.0).await
+}
+
 #[utoipa::path(
     put,
     path = "/api/ws/{workspace}/dashboards/{id}",
@@ -2700,32 +2802,8 @@ async fn db_update(
     egret_core::authz::require_object(&*st.pdp, &ctx, DB_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_cards_in_ws(&st, &ctx, &b.cards).await?;
-    crate::model::validate_layout(&b.tabs, &b.cards).map_err(BiApiError::from)?;
-    if b.width != "fixed" && b.width != "full" {
-        return Err(
-            egret_core::Error::InvalidInput("width must be 'fixed' or 'full'".into()).into(),
-        );
-    }
-    st.dashboards
-        .update(
-            id,
-            &b.name,
-            &b.description,
-            &b.parameters,
-            &b.width,
-            Some(ctx.principal.user_id.0),
-        )
-        .await
-        .map_err(BiApiError::from)?;
-    let tabs: Vec<crate::dashboard::NewTab> = b.tabs.into_iter().map(Into::into).collect();
-    let cards: Vec<crate::dashboard::NewCard> = b.cards.into_iter().map(Into::into).collect();
-    st.dashboards
-        .replace_layout(id, &tabs, &cards)
-        .await
-        .map_err(BiApiError::from)?;
     Ok(Json(
-        load_dashboard(&st, id, ctx.principal.user_id.0).await?,
+        apply_dashboard_update(&st, &ctx, id, b, "edit").await?,
     ))
 }
 

@@ -27526,6 +27526,7 @@
       },
       "UpdateDashboard": {
         "type": "object",
+        "description": "The dashboard PUT body — and, byte for byte, one stored revision (migration 0107).\n`Serialize` is derived alongside `Deserialize` so the snapshot is produced from this exact\ntype rather than hand-built JSON that could drift from it; a compile error is how a new field\nannounces that revisions must carry it too.",
         "required": [
           "name"
         ],

@@ -158,3 +158,49 @@ async fn revisions_cascade_when_the_dashboard_is_deleted() {
     repo.delete(d.id).await.unwrap();
     assert_eq!(repo.revision_count(d.id).await.unwrap(), 0);
 }
+
+#[tokio::test]
+async fn a_baseline_captures_the_state_the_first_edit_overwrites() {
+    // The repo-level half of the capture rule: `pending_baseline` reads the CURRENT state, and
+    // that state must survive being overwritten. (The routing half — that nothing is written when
+    // the PUT is rejected — is asserted by the route test, because it needs a real 400.)
+    let Some((repo, ws, uid)) = setup().await else {
+        eprintln!("skip");
+        return;
+    };
+    let d = repo.create(ws, "Base", "before", Some(uid)).await.unwrap();
+    repo.replace_layout(d.id, &[], &[card(None, 0), card(None, 6)])
+        .await
+        .unwrap();
+
+    let before = repo.snapshot_current(d.id).await.unwrap().unwrap();
+    repo.update(
+        d.id,
+        "Base",
+        "after",
+        &serde_json::json!([]),
+        "full",
+        Some(uid),
+    )
+    .await
+    .unwrap();
+    repo.replace_layout(d.id, &[], &[card(None, 0)])
+        .await
+        .unwrap();
+    repo.insert_revision(d.id, Some(uid), "baseline", &before, None)
+        .await
+        .unwrap();
+
+    let revs = repo.list_revisions(d.id, 10).await.unwrap();
+    assert_eq!(revs.len(), 1);
+    assert_eq!(revs[0].kind, "baseline");
+    assert_eq!(revs[0].snapshot["description"], "before");
+    assert_eq!(revs[0].snapshot["width"], "fixed");
+    assert_eq!(revs[0].snapshot["cards"].as_array().unwrap().len(), 2);
+    // And the live dashboard has genuinely moved on, so the assertions above are about the
+    // snapshot rather than about a dashboard that never changed.
+    let now = repo.snapshot_current(d.id).await.unwrap().unwrap();
+    assert_eq!(now["description"], "after");
+    assert_eq!(now["width"], "full");
+    assert_eq!(now["cards"].as_array().unwrap().len(), 1);
+}
