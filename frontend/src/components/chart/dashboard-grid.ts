@@ -75,6 +75,7 @@ export const CARD_SIZES_BY_VIZ: Record<string, CardSize> = {
   text:        { default: { w: 12, h: 3 }, min: { w: 1, h: 1 } },
   heading:     { default: { w: 24, h: 1 }, min: { w: 1, h: 1 } },
   link:        { default: { w: 8, h: 1 }, min: { w: 1, h: 1 } },
+  iframe:      { default: { w: 12, h: 8 }, min: { w: 4, h: 3 } },
   placeholder: { default: { w: 6, h: 3 }, min: { w: 1, h: 1 } },
 };
 

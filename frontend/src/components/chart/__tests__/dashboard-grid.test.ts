@@ -58,4 +58,11 @@ describe("sizeForViz", () => {
     expect(sizeForViz("boxplot")).toEqual({ default: { w: 12, h: 6 }, min: { w: 4, h: 3 } });
     expect(sizeForViz("totally-unknown")).toEqual({ default: { w: 12, h: 6 }, min: { w: 4, h: 3 } });
   });
+  it("sizes an iframe card 12x8, min 4x3", () => {
+    // Metabase dashboards/constants.cljc:26 — :iframe {:min {:width 4 :height 3}
+    // :default {:width 12 :height 8}}. Asserted as the whole object so a change to either
+    // dimension is caught; the generic-chart fallback is 12x6/4x3, so a missing entry would
+    // pass a `min`-only assertion.
+    expect(sizeForViz("iframe")).toEqual({ default: { w: 12, h: 8 }, min: { w: 4, h: 3 } });
+  });
 });
