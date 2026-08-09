@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { attributionLine } from "../attribution";
+import { attributionLine, revisionSummary } from "../attribution";
 
 describe("attributionLine", () => {
   // 12:00 UTC on purpose: the local calendar day for that instant is Aug 1 or Aug 2 in every
@@ -28,5 +28,26 @@ describe("attributionLine", () => {
 
   it("renders nothing for an unparseable date", () => {
     expect(attributionLine("not-a-date", "Ref User")).toBeNull();
+  });
+});
+
+describe("revisionSummary", () => {
+  it("uses Metabase's three phrasings, keyed on the RAW kind", () => {
+    // Keyed on the raw enum from the API, never on a display string. Three of the six
+    // stubbed-assertion defects in the chart programme were tests that read a display string
+    // where the code keyed on a raw one.
+    expect(revisionSummary("baseline", "Ref User")).toBe("Ref User created this");
+    expect(revisionSummary("edit", "Ref User")).toBe("Ref User edited this");
+    expect(revisionSummary("revert", "Ref User")).toBe("Ref User reverted to an earlier version");
+  });
+
+  it("says 'Someone' rather than dropping the sentence when the author is gone", () => {
+    // created_by is NULL after a hard delete (0093's ON DELETE SET NULL), and a timeline row with
+    // no subject reads as a bug.
+    expect(revisionSummary("edit", null)).toBe("Someone edited this");
+  });
+
+  it("degrades to a neutral phrasing for a kind it does not know", () => {
+    expect(revisionSummary("something-new", "Ref User")).toBe("Ref User changed this");
   });
 });

@@ -15,6 +15,11 @@ describe("DashboardInfoSidebar", () => {
     updatedAt: "2026-08-05T12:00:00Z",
     folderName: "Ops",
     folderHref: "/explore/demo/dashboards?folder=f1",
+    revisions: [],
+    revisionsLoading: false,
+    onRevert: () => {},
+    reverting: false,
+    onOpenHistory: () => {},
   };
   it("shows both attribution lines by name and renders the description", () => {
     wrap(<DashboardInfoSidebar {...base} onSaveDescription={vi.fn()} onClose={vi.fn()} />);

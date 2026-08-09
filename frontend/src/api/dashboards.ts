@@ -8,12 +8,15 @@ import {
   dashboardsDbDuplicate,
   dashboardsDbRemove,
   dashboardsDbRestore,
+  dashboardsDbRevisionRevert,
   dashboardsDbTrash,
   dashboardsDbUpdate,
   getDashboardsDbGetQueryKey,
   getDashboardsDbListQueryKey,
+  getDashboardsDbRevisionsQueryKey,
   useDashboardsDbGet,
   useDashboardsDbList,
+  useDashboardsDbRevisions,
 } from "./generated/dashboards/dashboards";
 
 export interface DashboardCard {
@@ -155,5 +158,31 @@ export function useDashboardMutations(ws: string) {
     mutationFn: async (id) => { await dashboardsDbBookmarkRemove(ws, id); },
     onSuccess: () => invalidate(),
   });
-  return { create, update, remove, duplicate, trash, restore, addBookmark, removeBookmark };
+  const revert = useMutation<DashboardDetail, ApiError, { id: string; revisionId: string }>({
+    mutationFn: async ({ id, revisionId }) =>
+      (await dashboardsDbRevisionRevert(ws, id, revisionId)).data as DashboardDetail,
+    // A revert changes the dashboard AND appends to its history, so both caches are stale.
+    onSuccess: (d) => {
+      invalidate(d.id);
+      qc.invalidateQueries({ queryKey: getDashboardsDbRevisionsQueryKey(ws, d.id) });
+    },
+  });
+  return { create, update, remove, duplicate, trash, restore, addBookmark, removeBookmark, revert };
+}
+
+export interface DashboardRevision {
+  id: string;
+  kind: "baseline" | "edit" | "revert";
+  created_at: string;
+  created_by: string | null;
+  created_by_name: string | null;
+  is_current: boolean;
+}
+
+/** A dashboard's history, newest first. `enabled` is false until the History tab is open, so an
+ *  info sidebar opened on Overview costs nothing. */
+export function useDashboardRevisions(ws: string, id: string | null, enabled: boolean) {
+  return useDashboardsDbRevisions<DashboardRevision[], ApiError>(ws, id ?? "", {
+    query: { enabled: enabled && !!id, select: (r) => r.data as DashboardRevision[] },
+  });
 }

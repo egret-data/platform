@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import type { DashboardRevision } from "@/api/dashboards";
 import { attributionLine } from "./attribution";
+import { DashboardHistoryTab } from "./DashboardHistoryTab";
 
 interface Props {
   name: string;
@@ -16,12 +19,19 @@ interface Props {
   createdAt: string | null;
   editorLabel: string | null;
   updatedAt: string;
+  revisions: DashboardRevision[];
+  revisionsLoading: boolean;
+  onRevert: (revisionId: string) => void;
+  reverting: boolean;
+  /** Fires when the History tab is first selected, so the route can enable its query. */
+  onOpenHistory: () => void;
   onSaveDescription: (next: string) => void;
   onClose: () => void;
 }
 
 export function DashboardInfoSidebar({
   name, description, folderName, folderHref, ownerLabel, createdAt, editorLabel, updatedAt,
+  revisions, revisionsLoading, onRevert, reverting, onOpenHistory,
   onSaveDescription, onClose,
 }: Props) {
   const [draft, setDraft] = useState(description);
@@ -39,27 +49,39 @@ export function DashboardInfoSidebar({
         <div className="font-medium">{name}</div>
         <button type="button" aria-label="close info" className="text-muted-foreground hover:text-foreground" onClick={onClose}>✕</button>
       </div>
-      <label className="mb-3 flex flex-col gap-1 text-xs text-muted-foreground">Description
-        <textarea aria-label="description" className="h-24 w-full rounded border bg-background px-2 py-1 text-sm"
-          value={draft} onChange={(e) => setDraft(e.target.value)}
-          onBlur={() => { if (draft !== description) onSaveDescription(draft); }} />
-      </label>
-      <dl className="flex flex-col gap-1 text-xs">
-        <div className="flex justify-between gap-2">
-          <dt className="shrink-0 text-muted-foreground">Saved in</dt>
-          <dd className="truncate text-right">
-            {folderName && folderHref
-              ? <Link className="hover:underline" to={folderHref}>{folderName}</Link>
-              : "Uncategorized"}
-          </dd>
-        </div>
-        {added && (
-          <div className="flex justify-between gap-2"><dt className="shrink-0 text-muted-foreground">Added</dt><dd className="text-right">{added}</dd></div>
-        )}
-        {edited && (
-          <div className="flex justify-between gap-2"><dt className="shrink-0 text-muted-foreground">Last edited</dt><dd className="text-right">{edited}</dd></div>
-        )}
-      </dl>
+      <Tabs defaultValue="overview" onValueChange={(v) => { if (v === "history") onOpenHistory(); }}>
+        <TabsList className="mb-2">
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="history">History</TabsTrigger>
+        </TabsList>
+        <TabsContent value="overview">
+          <label className="mb-3 flex flex-col gap-1 text-xs text-muted-foreground">Description
+            <textarea aria-label="description" className="h-24 w-full rounded border bg-background px-2 py-1 text-sm"
+              value={draft} onChange={(e) => setDraft(e.target.value)}
+              onBlur={() => { if (draft !== description) onSaveDescription(draft); }} />
+          </label>
+          <dl className="flex flex-col gap-1 text-xs">
+            <div className="flex justify-between gap-2">
+              <dt className="shrink-0 text-muted-foreground">Saved in</dt>
+              <dd className="truncate text-right">
+                {folderName && folderHref
+                  ? <Link className="hover:underline" to={folderHref}>{folderName}</Link>
+                  : "Uncategorized"}
+              </dd>
+            </div>
+            {added && (
+              <div className="flex justify-between gap-2"><dt className="shrink-0 text-muted-foreground">Added</dt><dd className="text-right">{added}</dd></div>
+            )}
+            {edited && (
+              <div className="flex justify-between gap-2"><dt className="shrink-0 text-muted-foreground">Last edited</dt><dd className="text-right">{edited}</dd></div>
+            )}
+          </dl>
+        </TabsContent>
+        <TabsContent value="history">
+          <DashboardHistoryTab revisions={revisions} isLoading={revisionsLoading}
+            onRevert={onRevert} reverting={reverting} />
+        </TabsContent>
+      </Tabs>
     </aside>
   );
 }

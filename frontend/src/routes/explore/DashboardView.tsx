@@ -3,7 +3,7 @@ import { Info, LayoutDashboard, Pencil, Star } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { type Layout } from "react-grid-layout";
-import { useDashboard, useDashboardMutations, type DashboardCard as Card, type DashboardParameter } from "@/api/dashboards";
+import { useDashboard, useDashboardMutations, useDashboardRevisions, type DashboardCard as Card, type DashboardParameter } from "@/api/dashboards";
 import { useCharts, type Chart, type ChartFilter } from "@/api/charts";
 import { useChartData } from "@/api/useChartData";
 import { useDataset } from "@/api/datasets";
@@ -73,9 +73,13 @@ export default function DashboardView() {
   const { data: dash, isLoading, isError } = useDashboard(ws, id);
   const { data: charts } = useCharts(ws);
   const { data: dashboardFolders = [] } = useFolders(ws, "dashboards");
-  const { update, restore: restoreMut, addBookmark, removeBookmark } = useDashboardMutations(ws);
+  const { update, restore: restoreMut, addBookmark, removeBookmark, revert } = useDashboardMutations(ws);
   const [editing, setEditing] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
+  // The history query stays disabled until the History tab is opened, so an info sidebar opened
+  // on Overview costs nothing.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const revisionsQ = useDashboardRevisions(ws, id, showInfo && historyOpen);
   const [draftCards, setDraftCards] = useState<DraftCard[] | null>(null);
   const [draftParameters, setDraftParameters] = useState<DashboardParameter[] | null>(null);
   const [draftTabs, setDraftTabs] = useState<DraftTab[] | null>(null);
@@ -896,6 +900,14 @@ export default function DashboardView() {
             createdAt={dash.created_at ?? null}
             editorLabel={dash.updated_by_name ?? dash.updated_by}
             updatedAt={dash.updated_at}
+            revisions={revisionsQ.data ?? []}
+            revisionsLoading={revisionsQ.isLoading}
+            reverting={revert.isPending}
+            onOpenHistory={() => setHistoryOpen(true)}
+            onRevert={async (revisionId) => {
+              try { await revert.mutateAsync({ id: dash.id, revisionId }); toast.success("Reverted"); }
+              catch (e) { toast.error(String(e)); }
+            }}
             onClose={() => setShowInfo(false)}
             onSaveDescription={saveDescription}
           />

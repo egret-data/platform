@@ -14,3 +14,19 @@ export function attributionLine(iso: string | null, name: string | null): string
   const date = d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
   return name ? `${date} by ${name}` : date;
 }
+
+/** One timeline sentence, in Metabase's wording. `kind` is the RAW value from the API
+ *  (`baseline` | `edit` | `revert`, migration 0107), never a rendered label. */
+export function revisionSummary(kind: string, name: string | null): string {
+  const who = name ?? "Someone";
+  switch (kind) {
+    case "baseline":
+      return `${who} created this`;
+    case "edit":
+      return `${who} edited this`;
+    case "revert":
+      return `${who} reverted to an earlier version`;
+    default:
+      return `${who} changed this`;
+  }
+}

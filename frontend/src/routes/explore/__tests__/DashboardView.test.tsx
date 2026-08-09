@@ -24,9 +24,13 @@ const { updateSpy, dashState } = vi.hoisted(() => {
 
 vi.mock("@/api/dashboards", () => ({
   useDashboard: () => dashState.current,
-  useDashboardMutations: () => ({ update: { mutateAsync: updateSpy, isPending: false } }),
-  // The view-mode "…" menu reads the dashboard's folder from the LIST query, because the detail
-  // DTO carries no folder_id (bi.rs:360-372). An empty list leaves it folderless.
+  useDashboardMutations: () => ({ update: { mutateAsync: updateSpy, isPending: false }, revert: { mutateAsync: vi.fn(), isPending: false } }),
+  // The info sidebar's History tab query; disabled until the tab is opened, so an empty result is
+  // the right stub for every test that never opens it.
+  useDashboardRevisions: () => ({ data: [], isLoading: false }),
+  // The view-mode "…" menu reads the dashboard's folder from the LIST query. (W8 added folder_id
+  // to the detail DTO for the info sidebar's "Saved in" row, but the menu still reads the list.)
+  // An empty list leaves it folderless.
   useDashboards: () => ({ data: [] }),
 }));
 
