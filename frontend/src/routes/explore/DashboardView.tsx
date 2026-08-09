@@ -30,6 +30,7 @@ import { EditSidebar, type EditPanel } from "@/components/chart/dashboard/EditSi
 import { EditFilterChips } from "@/components/chart/dashboard/EditFilterChips";
 import { CardEditToolbar } from "@/components/chart/dashboard/CardEditToolbar";
 import { DashboardEditToolbar } from "@/components/chart/dashboard/DashboardEditToolbar";
+import { RefreshMenu } from "@/components/chart/dashboard/RefreshMenu";
 import { dashboardWidthClass } from "@/components/chart/dashboard/DashboardActionsMenu.view";
 import type { SectionLayout } from "@/components/chart/dashboard/dashboard-sections";
 import { dropPlaceholders } from "@/components/chart/dashboard/dashboard-sections";
@@ -509,20 +510,12 @@ export default function DashboardView() {
                 onClick={async () => { try { await (dash.bookmarked ? removeBookmark : addBookmark).mutateAsync(dash.id); } catch (e) { toast.error(String(e)); } }}>
                 <Star className={`h-4 w-4 ${dash.bookmarked ? "fill-highlight text-highlight" : ""}`} />
               </Button>
-              <label className="flex items-center gap-1 text-xs text-muted-foreground">
-                <span className="sr-only">Auto-refresh</span>
-                <select aria-label="auto-refresh" className="h-8 rounded border bg-background px-1 text-xs"
-                  value={view.refreshSeconds ?? 0}
-                  onChange={(e) => view.setRefreshSeconds(Number(e.target.value) || null)}>
-                  <option value={0}>No refresh</option>
-                  <option value={60}>1 min</option>
-                  <option value={300}>5 min</option>
-                  <option value={600}>10 min</option>
-                  <option value={900}>15 min</option>
-                  <option value={1800}>30 min</option>
-                  <option value={3600}>60 min</option>
-                </select>
-              </label>
+              <RefreshMenu
+                refreshSeconds={view.refreshSeconds}
+                onChangeRefreshSeconds={view.setRefreshSeconds}
+                refreshedAt={view.refreshedAt}
+                onRefreshNow={view.refreshNow}
+              />
               <Button size="sm" variant="outline" aria-label="fullscreen"
                 onClick={() => {
                   const next = !view.isFullscreen;

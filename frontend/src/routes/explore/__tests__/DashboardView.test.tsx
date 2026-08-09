@@ -171,7 +171,8 @@ describe("DashboardView (Phase B — duplicate/replace)", () => {
 describe("DashboardView (Phase B — view controls)", () => {
   it("shows an auto-refresh control and a fullscreen toggle in view mode", () => {
     renderAt();
-    expect(screen.getByLabelText(/auto-refresh/i)).toBeInTheDocument();
+    // W4 replaced the native <select aria-label="auto-refresh"> with a popover trigger.
+    expect(screen.getByRole("button", { name: "Auto Refresh" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /fullscreen/i })).toBeInTheDocument();
   });
 });
