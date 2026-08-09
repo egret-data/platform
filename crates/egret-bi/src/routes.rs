@@ -25,8 +25,8 @@ use crate::model::{
     CreateChart, CreateDashboard, CreateDataset, CreateFolder, CreateSource, DashboardCardDto,
     DashboardDetailDto, DashboardRevisionDto, DashboardSummaryDto, DashboardTabDto,
     DatasetColumnDto, DatasetDetailDto, DatasetSummaryDto, FolderDto, MetricBody, MetricDto,
-    NewTabInput, RenameFolder, SaveQuery, SavedQueryDto, SchemaColumn, SetFolder, UpdateChart,
-    UpdateColumnBody, UpdateDashboard, UpdateDataset,
+    NewTabInput, RenameFolder, SaveQuery, SavedQueryDto, SchemaColumn, SetDashboardCertification,
+    SetFolder, UpdateChart, UpdateColumnBody, UpdateDashboard, UpdateDataset,
 };
 use crate::saved::SavedQueryRepo;
 use crate::schema::SchemaService;
@@ -77,6 +77,8 @@ const CH_READ: &str = "chart:read";
 const CH_MANAGE: &str = "chart:manage";
 const DB_READ: &str = "dashboard:read";
 const DB_MANAGE: &str = "dashboard:manage";
+/// Platform-scoped: certifying is a stewardship act, not an editing one. See rbac.rs.
+const DB_CERTIFY: &str = "dashboard:certify";
 
 pub fn sqllab_router() -> Router<BiState> {
     Router::new()
@@ -2367,6 +2369,10 @@ pub fn dashboard_router() -> Router<BiState> {
             "/ws/{workspace}/dashboards/{id}/revisions/{revision_id}/revert",
             post(db_revision_revert),
         )
+        .route(
+            "/ws/{workspace}/dashboards/{id}/certification",
+            put(db_set_certification),
+        )
 }
 
 /// Optional body for the card-data endpoint: resolved dashboard-parameter filters
@@ -2675,6 +2681,66 @@ async fn db_get(
     egret_core::authz::require_object(&*st.pdp, &ctx, DB_READ, obj)
         .await
         .map_err(BiApiError::from)?;
+    Ok(Json(
+        load_dashboard(&st, id, ctx.principal.user_id.0).await?,
+    ))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/dashboards/{id}/certification",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    request_body = SetDashboardCertification,
+    responses(
+        (status = 200, description = "Updated dashboard", body = DashboardDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:certify permission", body = ErrorBody),
+        (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn db_set_certification(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    Json(b): Json<SetDashboardCertification>,
+) -> Result<Json<DashboardDetailDto>, BiApiError> {
+    // `require`, not `require_object`: `dashboard:certify` is PLATFORM-scoped, so holding
+    // `dashboard:manage` on this dashboard — or owning it — grants nothing here. That asymmetry
+    // is the feature: the badge means a steward vouched for it, not that its author did.
+    //
+    // The object is still resolved first, so a caller without the perm cannot use the 403/404
+    // difference to learn whether a dashboard id exists in a workspace they cannot see.
+    let _obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require(&*st.pdp, &ctx, DB_CERTIFY)
+        .await
+        .map_err(BiApiError::from)?;
+
+    // The certifier's email, not their uuid: this string is READ by whoever sees the badge, and
+    // a uuid tells them nothing. No join needed, unlike created_by_name.
+    let who = ctx.principal.email.clone();
+    st.dashboards
+        .set_certification(id, b.certified, &who, &b.details)
+        .await
+        .map_err(BiApiError::from)?;
+
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        if b.certified {
+            "dashboard:certify"
+        } else {
+            "dashboard:uncertify"
+        },
+        "dashboard",
+        Some(id.to_string()),
+        serde_json::json!({ "certified": b.certified, "details": b.details }),
+    ));
+
     Ok(Json(
         load_dashboard(&st, id, ctx.principal.user_id.0).await?,
     ))
@@ -3496,10 +3562,12 @@ pub struct BiSqlLabApi;
         db_card_run,
         db_revisions,
         db_revision_revert,
+        db_set_certification,
     ),
     components(schemas(
         CreateDashboard,
         UpdateDashboard,
+        SetDashboardCertification,
         DashboardSummaryDto,
         DashboardDetailDto,
         DashboardTabDto,

@@ -240,6 +240,7 @@ export * from './searchResultDto';
 export * from './secretDto';
 export * from './seedResult';
 export * from './setAccessPolicy';
+export * from './setDashboardCertification';
 export * from './setFeatures';
 export * from './setFeaturesFeatures';
 export * from './setFolder';

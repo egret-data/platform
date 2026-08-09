@@ -34,6 +34,7 @@ import type {
   DashboardSummaryDto,
   DashboardsDbListParams,
   ErrorBody,
+  SetDashboardCertification,
   SetFolder,
   UpdateDashboard
 } from '../model';
@@ -968,6 +969,107 @@ export const useDashboardsDbCardRun = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getDashboardsDbCardRunMutationOptions(options), queryClient);
+    }
+    export type dashboardsDbSetCertificationResponse200 = {
+  data: DashboardDetailDto
+  status: 200
+}
+
+export type dashboardsDbSetCertificationResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type dashboardsDbSetCertificationResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type dashboardsDbSetCertificationResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type dashboardsDbSetCertificationResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type dashboardsDbSetCertificationResponseSuccess = (dashboardsDbSetCertificationResponse200) & {
+  headers: Headers;
+};
+export type dashboardsDbSetCertificationResponseError = (dashboardsDbSetCertificationResponse401 | dashboardsDbSetCertificationResponse403 | dashboardsDbSetCertificationResponse404 | dashboardsDbSetCertificationResponse500) & {
+  headers: Headers;
+};
+
+export type dashboardsDbSetCertificationResponse = (dashboardsDbSetCertificationResponseSuccess | dashboardsDbSetCertificationResponseError)
+
+export const getDashboardsDbSetCertificationUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/dashboards/${encodeURIComponent(id)}/certification`
+}
+
+export const dashboardsDbSetCertification = async (workspace: string,
+    id: string,
+    setDashboardCertification: SetDashboardCertification, options?: RequestInit): Promise<dashboardsDbSetCertificationResponse> => {
+
+  return customInstance<dashboardsDbSetCertificationResponse>(getDashboardsDbSetCertificationUrl(workspace,id),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setDashboardCertification)
+  }
+);}
+
+
+
+
+
+export const getDashboardsDbSetCertificationMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dashboardsDbSetCertification>>, TError,{workspace: string;id: string;data: SetDashboardCertification}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof dashboardsDbSetCertification>>, TError,{workspace: string;id: string;data: SetDashboardCertification}, TContext> => {
+
+const mutationKey = ['dashboardsDbSetCertification'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof dashboardsDbSetCertification>>, {workspace: string;id: string;data: SetDashboardCertification}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  dashboardsDbSetCertification(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DashboardsDbSetCertificationMutationResult = NonNullable<Awaited<ReturnType<typeof dashboardsDbSetCertification>>>
+    export type DashboardsDbSetCertificationMutationBody = SetDashboardCertification
+    export type DashboardsDbSetCertificationMutationError = ErrorBody
+
+    export const useDashboardsDbSetCertification = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dashboardsDbSetCertification>>, TError,{workspace: string;id: string;data: SetDashboardCertification}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof dashboardsDbSetCertification>>,
+        TError,
+        {workspace: string;id: string;data: SetDashboardCertification},
+        TContext
+      > => {
+      return useMutation(getDashboardsDbSetCertificationMutationOptions(options), queryClient);
     }
     export type dashboardsDbDuplicateResponse200 = {
   data: DashboardDetailDto

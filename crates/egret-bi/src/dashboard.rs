@@ -31,6 +31,12 @@ pub struct Dashboard {
     /// that user is hard-deleted (0093's ON DELETE SET NULL treatment).
     pub updated_by: Option<Uuid>,
     pub width: String,
+    /// Certification (0108): a stewardship mark, written only through `set_certification`
+    /// behind the platform-scoped `dashboard:certify` perm — never through the ordinary
+    /// dashboard PUT, so an editor cannot certify their own work by saving it.
+    pub certified: bool,
+    pub certified_by: String,
+    pub certification_details: String,
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -114,7 +120,7 @@ pub struct NewCard {
 }
 
 const COLS: &str =
-    "id, workspace_id, name, description, parameters, created_by, folder_id, updated_at, created_at, updated_by, width, deleted_at";
+    "id, workspace_id, name, description, parameters, created_by, folder_id, updated_at, created_at, updated_by, width, certified, certified_by, certification_details, deleted_at";
 const CARD_COLS: &str =
     "id, dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal, tab_id";
 const REV_COLS: &str = "id, dashboard_id, created_by, created_at, kind, snapshot";
@@ -231,6 +237,37 @@ impl DashboardRepo {
         .bind(parameters)
         .bind(width)
         .bind(updated_by)
+        .execute(&self.db.pool)
+        .await
+        .map_err(map_conflict_err)?;
+        Ok(())
+    }
+
+    /// Set or withdraw certification (0108).
+    ///
+    /// SEPARATE FROM `update` ON PURPOSE. Folding these columns into the ordinary dashboard PUT
+    /// would mean anyone holding `dashboard:manage` could certify by saving — which is exactly
+    /// the self-certification that makes the badge worthless. The route guards this one with the
+    /// platform-scoped `dashboard:certify`, and `update` cannot reach these columns at all.
+    ///
+    /// Withdrawing clears the attribution rather than leaving a stale certifier behind: a
+    /// dashboard that says "not certified, by Ana" is a worse answer than saying nothing.
+    /// `updated_at` is deliberately NOT touched — certifying is not editing, and moving it would
+    /// misreport who last changed the dashboard's content.
+    pub async fn set_certification(
+        &self,
+        id: Uuid,
+        certified: bool,
+        certified_by: &str,
+        details: &str,
+    ) -> Result<(), BiError> {
+        sqlx::query(
+            "UPDATE analytics.dashboards SET certified=$2, certified_by=$3, certification_details=$4 WHERE id=$1",
+        )
+        .bind(id)
+        .bind(certified)
+        .bind(if certified { certified_by } else { "" })
+        .bind(if certified { details } else { "" })
         .execute(&self.db.pool)
         .await
         .map_err(map_conflict_err)?;

@@ -292,6 +292,18 @@ pub static PERMISSIONS: &[Permission] = &[
         "Create, update, and delete dashboards",
         Scope::Workspace
     ),
+    // Platform, not Workspace, and deliberately NOT folded into `dashboard:manage`.
+    //
+    // Certification is a trust signal. If everyone who can edit a dashboard can also mark it
+    // trusted, the mark says only "its author liked it" and a reader learns nothing from it.
+    // Platform scope is what makes it a stewardship act rather than an editing one: it sits
+    // beside `policy:*` (0059) and `tag:*` (0080), which is the set `data_steward` already holds.
+    perm!(
+        "dashboard:certify",
+        "Dashboards",
+        "Mark dashboards as certified, and withdraw certification",
+        Scope::Platform
+    ),
     perm!(
         "notebook:read",
         "Notebooks",
@@ -390,6 +402,21 @@ mod tests {
         for a in ADMIN_GRAPH_ACTIONS {
             assert!(!is_known(a), "{a} must not be grantable");
         }
+    }
+    #[test]
+    fn certifying_a_dashboard_is_a_platform_stewardship_perm_not_an_editing_one() {
+        assert!(is_known("dashboard:certify"));
+        // Grantable governance, like tag:manage — not an admin-graph action.
+        assert!(!is_admin_graph("dashboard:certify"));
+        // PLATFORM, not Workspace. This is the whole point: a workspace editor holds
+        // dashboard:manage and must NOT thereby be able to certify their own work, or the
+        // badge degrades to "the author liked it".
+        assert!(PERMISSIONS
+            .iter()
+            .any(|p| p.key == "dashboard:certify" && p.scope == Scope::Platform));
+        assert!(PERMISSIONS
+            .iter()
+            .any(|p| p.key == "dashboard:manage" && p.scope == Scope::Workspace));
     }
     #[test]
     fn saved_query_perms_are_known() {

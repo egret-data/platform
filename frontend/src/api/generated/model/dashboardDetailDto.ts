@@ -44,6 +44,21 @@ export interface DashboardDetailDto {
      */
   folder_id?: string | null;
   width: string;
+  /**
+     * Marked as trusted by a steward. Same three fields datasets and metrics have carried since
+     * 0098, so "is this certified" is one question across the product rather than three.
+     */
+  certified: boolean;
+  /**
+     * Who certified it, as their email — the string is read by whoever sees the badge, and a
+     * uuid would tell them nothing. Empty while `certified` is false.
+     */
+  certified_by: string;
+  /**
+     * Why, in the certifier's words. Empty is allowed: a certification with no note is still a
+     * certification.
+     */
+  certification_details: string;
   /** @nullable */
   deleted_at?: string | null;
   bookmarked: boolean;

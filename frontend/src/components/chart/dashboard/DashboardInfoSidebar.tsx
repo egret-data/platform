@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { DashboardRevision } from "@/api/dashboards";
 import { attributionLine } from "./attribution";
@@ -27,13 +28,23 @@ interface Props {
   onOpenHistory: () => void;
   onSaveDescription: (next: string) => void;
   onClose: () => void;
+  /** Certification (0108). `canCertify` reflects the PLATFORM-scoped `dashboard:certify`, which
+   *  is deliberately not implied by being able to edit this dashboard — see rbac.rs. */
+  certified: boolean;
+  certifiedBy: string;
+  certificationDetails: string;
+  canCertify: boolean;
+  certifying: boolean;
+  onSetCertification: (certified: boolean, details: string) => void;
 }
 
 export function DashboardInfoSidebar({
   name, description, folderName, folderHref, ownerLabel, createdAt, editorLabel, updatedAt,
   revisions, revisionsLoading, onRevert, reverting, onOpenHistory,
   onSaveDescription, onClose,
+  certified, certifiedBy, certificationDetails, canCertify, certifying, onSetCertification,
 }: Props) {
+  const [note, setNote] = useState("");
   const [draft, setDraft] = useState(description);
   // Re-sync if the description changes underneath us (e.g. a concurrent edit refetch);
   // [description] compares by value, so this only fires on a genuine external change.
@@ -75,7 +86,31 @@ export function DashboardInfoSidebar({
             {edited && (
               <div className="flex justify-between gap-2"><dt className="shrink-0 text-muted-foreground">Last edited</dt><dd className="text-right">{edited}</dd></div>
             )}
+            {certified && (
+              <div className="flex justify-between gap-2">
+                <dt className="shrink-0 text-muted-foreground">Certified</dt>
+                <dd className="truncate text-right" title={certificationDetails || undefined}>
+                  {certifiedBy || "—"}
+                </dd>
+              </div>
+            )}
           </dl>
+          {/* The control is withheld — not disabled — from anyone without `dashboard:certify`.
+              A greyed-out button would advertise a capability the reader does not have and
+              invite them to ask why; showing nothing states the same thing more quietly. */}
+          {canCertify && (
+            <div className="mt-3 flex flex-col gap-2 border-t pt-3">
+              {!certified && (
+                <input aria-label="certification note" className="h-8 w-full rounded border bg-background px-2 text-xs"
+                  placeholder="Why is this trusted? (optional)"
+                  value={note} onChange={(e) => setNote(e.target.value)} />
+              )}
+              <Button size="sm" variant={certified ? "outline" : "default"} disabled={certifying}
+                onClick={() => onSetCertification(!certified, note)}>
+                {certified ? "Withdraw certification" : "Certify this dashboard"}
+              </Button>
+            </div>
+          )}
         </TabsContent>
         <TabsContent value="history">
           <DashboardHistoryTab revisions={revisions} isLoading={revisionsLoading}

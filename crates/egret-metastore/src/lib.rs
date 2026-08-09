@@ -24,6 +24,8 @@ use sqlx::PgPool;
 // re-embed: 0105 dashboard_width_default_fixed (new dashboards default to Metabase's fixed canvas)
 // re-embed: 0106 dashboard_attribution (dashboards.created_at nullable + updated_by)
 // re-embed: 0107 dashboard_revisions (per-dashboard snapshot history, count-bounded at 20)
+// re-embed: 0108 dashboard_certification (certified/certified_by/certification_details + the
+// dashboard:certify seed for data_steward)
 /// All SQL migrations, embedded at compile time from the workspace `migrations/` dir.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 

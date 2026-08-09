@@ -357,6 +357,21 @@ pub struct DashboardTabDto {
     pub position: i32,
 }
 
+/// Body for `PUT /dashboards/{id}/certification`.
+///
+/// A SEPARATE endpoint from the dashboard PUT on purpose: certification is guarded by the
+/// platform-scoped `dashboard:certify`, while editing is guarded by the workspace-scoped
+/// `dashboard:manage`. Folding these fields into `UpdateDashboard` would let any editor certify
+/// their own dashboard by saving it, which is the failure this feature exists to avoid.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+pub struct SetDashboardCertification {
+    pub certified: bool,
+    /// Free text explaining the certification. Ignored when `certified` is false — withdrawing
+    /// clears the note rather than leaving a stale justification attached.
+    #[serde(default)]
+    pub details: String,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DashboardDetailDto {
     pub id: String,
@@ -380,6 +395,15 @@ pub struct DashboardDetailDto {
     /// info sidebar had no folder to name.
     pub folder_id: Option<String>,
     pub width: String,
+    /// Marked as trusted by a steward. Same three fields datasets and metrics have carried since
+    /// 0098, so "is this certified" is one question across the product rather than three.
+    pub certified: bool,
+    /// Who certified it, as their email — the string is read by whoever sees the badge, and a
+    /// uuid would tell them nothing. Empty while `certified` is false.
+    pub certified_by: String,
+    /// Why, in the certifier's words. Empty is allowed: a certification with no note is still a
+    /// certification.
+    pub certification_details: String,
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
     pub bookmarked: bool,
     pub tabs: Vec<DashboardTabDto>,
