@@ -311,19 +311,42 @@ async fn replace_layout_tabs_and_card_assignment() {
 }
 
 #[tokio::test]
-async fn dashboard_width_defaults_full_and_round_trips() {
+async fn new_dashboards_default_to_fixed_and_a_stored_width_survives() {
     let Some(f) = setup().await else {
         eprintln!("skip");
         return;
     };
-    let d = f.repo.create(f.ws, "Wide", "", Some(f.user)).await.unwrap();
-    assert_eq!(f.repo.get(d.id).await.unwrap().unwrap().width, "full");
 
-    f.repo
-        .update(d.id, "Wide", "", &serde_json::json!([]), "fixed")
+    // The column default is the ONLY thing that sets width on create: DashboardRepo::create omits
+    // the column, CreateDashboard has no width field, and the create dialog sends {name}.
+    let d = f
+        .repo
+        .create(f.ws, "Fresh", "", Some(f.user))
         .await
         .unwrap();
-    assert_eq!(f.repo.get(d.id).await.unwrap().unwrap().width, "fixed");
+    assert_eq!(
+        d.width, "fixed",
+        "a newly created dashboard must adopt Metabase's fixed canvas"
+    );
+
+    // A dashboard that has been given a width keeps it. This is the half of the change that must
+    // NOT happen: SET DEFAULT governs future inserts and nothing else, so a stored value always
+    // wins over it.
+    f.repo
+        .update(d.id, "Fresh", "", &serde_json::json!([]), "full")
+        .await
+        .unwrap();
+    let reread = f.repo.get(d.id).await.unwrap().unwrap();
+    assert_eq!(reread.width, "full");
+
+    // And the default is not sticky per-connection or per-transaction — the next create still
+    // gets 'fixed' after a row has been moved to 'full'.
+    let d2 = f
+        .repo
+        .create(f.ws, "Fresher", "", Some(f.user))
+        .await
+        .unwrap();
+    assert_eq!(d2.width, "fixed");
 }
 
 #[tokio::test]

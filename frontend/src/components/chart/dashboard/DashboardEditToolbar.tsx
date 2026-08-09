@@ -6,6 +6,7 @@ import {
   DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
 import { layoutOptions, type SectionLayout } from "./dashboard-sections";
+import { DashboardViewActionsMenu } from "./DashboardActionsMenu.view";
 
 interface Props {
   onAddChart: () => void;
@@ -14,6 +15,9 @@ interface Props {
   onAddLink: () => void;
   onAddSection: (layout: SectionLayout) => void;
   onAddFilter: () => void;
+  /** The DRAFT width — the switch reflects what will be saved, not what is stored. */
+  width: "fixed" | "full";
+  onChangeWidth: (next: "fixed" | "full") => void;
 }
 
 const ICON = "inline-flex size-8 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground";
@@ -47,7 +51,7 @@ function SectionLayoutPreview({ layout }: { layout: SectionLayout }) {
 }
 
 /** Edit-mode add controls as a compact icon group (placed on the title row). */
-export function DashboardEditToolbar({ onAddChart, onAddText, onAddHeading, onAddLink, onAddSection, onAddFilter }: Props) {
+export function DashboardEditToolbar({ onAddChart, onAddText, onAddHeading, onAddLink, onAddSection, onAddFilter, width, onChangeWidth }: Props) {
   return (
     <div className="flex items-center gap-1">
       <button type="button" className={ICON} aria-label="add chart" title="Add a chart" onClick={onAddChart}>
@@ -90,6 +94,8 @@ export function DashboardEditToolbar({ onAddChart, onAddText, onAddHeading, onAd
       <button type="button" className={ICON} aria-label="add filter" title="Add a filter" onClick={onAddFilter}>
         <Filter className="h-4 w-4" />
       </button>
+
+      <DashboardViewActionsMenu width={width} onChangeWidth={onChangeWidth} triggerClassName={ICON} />
     </div>
   );
 }

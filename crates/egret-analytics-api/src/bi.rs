@@ -411,8 +411,11 @@ fn empty_obj() -> serde_json::Value {
 fn empty_arr() -> serde_json::Value {
     serde_json::json!([])
 }
+/// The width a PUT gets when the client omits the field. Must agree with the column default set
+/// by migration 0105 — if these two disagree, a dashboard's width depends on whether the row was
+/// created by the API or by an INSERT, which is exactly the kind of split nobody debugs twice.
 fn default_width() -> String {
-    "full".into()
+    "fixed".into()
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -574,6 +577,22 @@ mod tests {
         "latitude",
         "longitude",
     ];
+
+    #[test]
+    fn update_dashboard_width_defaults_to_fixed_when_the_client_omits_it() {
+        // Agreeing with migration 0105's column default. A PUT body with no `width` used to reset
+        // the dashboard to full width, which for a fixed dashboard is a silent data loss through
+        // an endpoint the client thought it was using to rename something.
+        let b: UpdateDashboard = serde_json::from_str(r#"{"name":"D"}"#).unwrap();
+        assert_eq!(b.width, "fixed");
+    }
+
+    #[test]
+    fn update_dashboard_width_is_taken_from_the_body_when_present() {
+        // The default must not shadow an explicit value — the frontend always sends one.
+        let b: UpdateDashboard = serde_json::from_str(r#"{"name":"D","width":"full"}"#).unwrap();
+        assert_eq!(b.width, "full");
+    }
 
     #[test]
     fn accepts_every_value_the_column_editor_can_produce() {

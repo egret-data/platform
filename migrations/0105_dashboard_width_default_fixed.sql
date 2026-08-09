@@ -1,0 +1,24 @@
+-- New dashboards adopt Metabase's fixed, centred canvas.
+--
+-- WHAT THIS DOES AND DOES NOT DO. `SET DEFAULT` rewrites one catalog entry (pg_attrdef) and
+-- applies to future INSERTs only. It does not scan the table, does not rewrite a page, and does
+-- not change a single existing row: every dashboard that exists keeps whatever its `width` column
+-- already holds. Anything already built keeps its appearance; only boards created from now on
+-- start centred. The before/after row census on the dev database proved it: 8 'fixed' / 32 'full'
+-- on both sides of this migration, byte-identical.
+--
+-- WHY 'fixed'. Metabase's default, measured live at an 1800px viewport: the grid stayed 1048px
+-- wide and centred. Design §3.1.
+--
+-- THE OTHER DEFAULT. `default_width()` in egret-analytics-api/src/bi.rs is the serde default on
+-- UpdateDashboard — the value a PUT gets when the client omits `width`. It moves to "fixed" in the
+-- same commit. It governs updates, not creates (DashboardRepo::create omits the column entirely
+-- and lets this default supply it), but leaving the two disagreeing would mean an API client that
+-- omits `width` silently flips a fixed dashboard to full.
+--
+-- SCHEMA. The table is `analytics.dashboards`. 0018 says plain `dashboards` because it predates
+-- 0067_analytics_kernel_schema.sql, which did `ALTER TABLE dashboards SET SCHEMA analytics`.
+-- The CHECK from 0018 (`width IN ('fixed','full')`) already admits the new default; nothing to
+-- change there.
+ALTER TABLE analytics.dashboards
+  ALTER COLUMN width SET DEFAULT 'fixed';
