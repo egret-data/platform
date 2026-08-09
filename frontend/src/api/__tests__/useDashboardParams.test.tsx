@@ -60,4 +60,12 @@ describe("useDashboardParams", () => {
     act(() => result.current.setValue("user", ["42", "43"]));
     expect(result.current.values.user).toEqual(["42", "43"]);
   });
+
+  it("setValues writes every key in one update", () => {
+    // Two setValue calls in one tick would leave only the last: each reads the same location.
+    const { result } = renderHook(() => useDashboardParams(params), { wrapper: wrap("/d") });
+    act(() => result.current.setValues({ region: "APAC", city: ["Hà Nội"] }));
+    expect(result.current.values.region).toBe("APAC");
+    expect(result.current.values.city).toEqual(["Hà Nội"]);
+  });
 });

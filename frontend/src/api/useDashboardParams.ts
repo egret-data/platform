@@ -4,6 +4,7 @@ import type { DashboardParameter } from "@/api/dashboards";
 export interface DashboardParamsState {
   values: Record<string, unknown>;
   setValue: (slug: string, value: unknown) => void;
+  setValues: (patch: Record<string, unknown>) => void;
 }
 
 /** Parameter types whose value is an ARRAY, and so is JSON-encoded in the URL. `location` is
@@ -36,13 +37,19 @@ export function useDashboardParams(parameters: DashboardParameter[]): DashboardP
       values[p.slug] = raw;
     }
   }
-  const setValue = (slug: string, value: unknown) =>
+  /** Write several parameters in ONE URL update. `setValue` in a loop does NOT work: each call
+   *  reads the same current location, so the last write wins and the rest vanish. Apply writes
+   *  every drafted filter at once, which is exactly that case. */
+  const setValues = (patch: Record<string, unknown>) =>
     setParams((prev) => {
       const n = new URLSearchParams(prev);
-      const blank = value === undefined || value === null || value === "" || (Array.isArray(value) && value.length === 0);
-      if (blank) n.delete(slug);
-      else n.set(slug, typeof value === "object" ? JSON.stringify(value) : String(value));
+      for (const [slug, value] of Object.entries(patch)) {
+        const blank = value === undefined || value === null || value === "" || (Array.isArray(value) && value.length === 0);
+        if (blank) n.delete(slug);
+        else n.set(slug, typeof value === "object" ? JSON.stringify(value) : String(value));
+      }
       return n;
     }, { replace: true });
-  return { values, setValue };
+  const setValue = (slug: string, value: unknown) => setValues({ [slug]: value });
+  return { values, setValue, setValues };
 }
