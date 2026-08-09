@@ -30,16 +30,10 @@ export function autoConnectDoneMessage(columnName: string): string {
   return `The filter was auto-connected to all questions containing “${columnName}”.`;
 }
 
-/** The columns a card can offer a parameter — the same list the mapping overlay shows. A
- *  temporal-unit parameter re-grids an already-grouped column, so it can only be mapped to a
- *  column the saved spec already buckets. */
-export function mappableColumns(
-  spec: { dimensions: string[]; columns: string[]; temporal_units?: Record<string, string> },
-  isTemporalUnit: boolean,
-): string[] {
-  if (isTemporalUnit) return Object.keys(spec.temporal_units ?? {});
-  return [...spec.dimensions, ...spec.columns];
-}
+// The columns a card can offer a parameter live in ONE place: `columnsForParam` in
+// card-map-state.ts. This module deliberately does not carry its own copy — auto-connect and the
+// mapping overlay must agree on what a card offers, or auto-connect would match a column the
+// overlay never showed. It takes the list from its caller via `columnsOf`.
 
 const mappingsOf = (c: AutoConnectCard): Record<string, string> =>
   (c.options.paramMappings as Record<string, string> | undefined) ?? {};
