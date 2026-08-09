@@ -203,6 +203,8 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
 
   return (
     <nav
+      data-testid="app-sidebar"
+      data-collapsed={collapsed ? "true" : "false"}
       className={`flex shrink-0 flex-col gap-1 overflow-y-auto border-r border-border bg-card p-3 transition-[width] duration-200 ${
         collapsed ? "w-16" : "w-56"
       }`}

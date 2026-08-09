@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { UserPlus } from "lucide-react";
 import { useMyWorkspaces } from "@/api/hooks";
+import { cn } from "@/lib/utils";
 import RequestAccessDialog from "@/components/access/RequestAccessDialog";
 import {
   Select,
@@ -14,7 +15,10 @@ import {
 
 const REQUEST_ACCESS_VALUE = "__request-access__";
 
-export function WorkspaceSwitcher() {
+/** `className` overrides the trigger's default fixed width. It exists for the narrow-viewport
+ *  header, where a `w-56` trigger cannot shrink and drives the whole row past the viewport;
+ *  `cn` is tailwind-merge, so a `w-*` passed here replaces `w-56` rather than fighting it. */
+export function WorkspaceSwitcher({ className }: { className?: string } = {}) {
   const navigate = useNavigate();
   const { workspace } = useParams();
   const { data: workspaces } = useMyWorkspaces(true);
@@ -32,7 +36,7 @@ export function WorkspaceSwitcher() {
           navigate(`/explore/${v}`);
         }}
       >
-        <SelectTrigger className="w-56" aria-label="Workspace">
+        <SelectTrigger className={cn("w-56", className)} aria-label="Workspace">
           <SelectValue placeholder="Select a workspace" />
         </SelectTrigger>
         <SelectContent>
