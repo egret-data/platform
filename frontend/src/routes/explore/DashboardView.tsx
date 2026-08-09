@@ -30,6 +30,7 @@ import { cardMapState, columnsForParam } from "@/components/chart/dashboard/card
 import { isDraftDirty, type DashboardDraft } from "@/components/chart/dashboard/edit-draft";
 import { REMOVED_CARD, REPLACED_CARD, deletedTab, undoableDraftEdit } from "@/components/chart/dashboard/draft-undo";
 import { DiscardChangesDialog } from "@/components/chart/dashboard/DiscardChangesDialog";
+import { applyAutoConnect, findAutoConnectTargets, mappableColumns, offerAutoConnect, revertAutoConnect } from "@/components/chart/dashboard/autoConnect";
 import { DashboardFilterBar } from "@/components/chart/dashboard/DashboardFilterBar";
 import { EditSidebar, type EditPanel } from "@/components/chart/dashboard/EditSidebar";
 import { EditFilterChips } from "@/components/chart/dashboard/EditFilterChips";
@@ -417,6 +418,26 @@ export default function DashboardView() {
     });
   }
 
+  /** Auto-connect: mapping ONE card offers to map every other card on this tab that has a column
+   *  of the same name. Resolution, the patch, its inverse and both toasts live in autoConnect.ts;
+   *  this is the wiring that gives them the draft. */
+  function offerAutoConnectFor(sourceCardId: string, paramId: string, column: string) {
+    const isTemporal = parameters.find((p) => p.id === paramId)?.type === "temporal_unit";
+    const columnsOf = (cardId: string) => {
+      const chart = chartById.get((cards as DraftCard[]).find((x) => x.id === cardId)?.chart_id ?? "");
+      return chart ? mappableColumns(chart.params.spec, isTemporal) : [];
+    };
+    const targets = findAutoConnectTargets({
+      cards: cards as DraftCard[], columnsOf, paramId, column, sourceCardId,
+      tabKey: activeTab?.key ?? null,
+    });
+    offerAutoConnect({
+      targets, columnName: column, hasMultipleTabs: tabs.length > 1,
+      connect: () => setDraftCards((prev) => applyAutoConnect(prev ?? cardsAsDraft(), paramId, targets)),
+      revert: () => setDraftCards((prev) => revertAutoConnect(prev ?? cardsAsDraft(), paramId, targets)),
+    });
+  }
+
   // The cards are the single source of truth for positions: the RGL layout is derived
   // from them, and drag/resize writes positions straight back into the draft. This keeps
   // every grid item sized from its card (a newly added card is never auto-placed at 1x1).
@@ -753,6 +774,10 @@ export default function DashboardView() {
                     state={cardMapState({
                       cardType: c.card_type,
                       paramType: activeParam.type,
+                      // `columnsForParam` is `cardMapState`'s own pair, so the overlay keeps one
+                      // contract. NOTE: it and `autoConnect.ts`'s `mappableColumns` are currently
+                      // identical implementations arrived at independently by two workstreams —
+                      // worth collapsing into one, but not during a conflict resolution.
                       columns: baseChart ? columnsForParam(baseChart.params.spec, activeParam.type) : [],
                       rows: c.size_y,
                       chartMissing: c.card_type === "chart" && !baseChart,
@@ -760,7 +785,10 @@ export default function DashboardView() {
                       filterTabKey: undefined,
                     })}
                     value={mappings[activeParamId] ?? ""}
-                    onChange={(col) => updateCardOptions(c.id, { paramMappings: { ...mappings, [activeParamId]: col } })}
+                    onChange={(col) => {
+                      updateCardOptions(c.id, { paramMappings: { ...mappings, [activeParamId]: col } });
+                      if (col) offerAutoConnectFor(c.id, activeParamId, col);
+                    }}
                   />
                 )}
               </div>
