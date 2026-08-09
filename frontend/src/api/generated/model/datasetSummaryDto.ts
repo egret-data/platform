@@ -25,4 +25,6 @@ export interface DatasetSummaryDto {
   /** @nullable */
   deleted_at?: string | null;
   bookmarked: boolean;
+  /** Certified as a trusted/official dataset (for a list badge). */
+  certified: boolean;
 }

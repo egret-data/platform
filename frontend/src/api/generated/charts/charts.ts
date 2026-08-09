@@ -202,6 +202,11 @@ export type chartsChCreateResponse200 = {
   status: 200
 }
 
+export type chartsChCreateResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
 export type chartsChCreateResponse401 = {
   data: ErrorBody
   status: 401
@@ -225,7 +230,7 @@ export type chartsChCreateResponse500 = {
 export type chartsChCreateResponseSuccess = (chartsChCreateResponse200) & {
   headers: Headers;
 };
-export type chartsChCreateResponseError = (chartsChCreateResponse401 | chartsChCreateResponse403 | chartsChCreateResponse404 | chartsChCreateResponse500) & {
+export type chartsChCreateResponseError = (chartsChCreateResponse400 | chartsChCreateResponse401 | chartsChCreateResponse403 | chartsChCreateResponse404 | chartsChCreateResponse500) & {
   headers: Headers;
 };
 
@@ -667,6 +672,11 @@ export type chartsChUpdateResponse200 = {
   status: 200
 }
 
+export type chartsChUpdateResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
 export type chartsChUpdateResponse401 = {
   data: ErrorBody
   status: 401
@@ -690,7 +700,7 @@ export type chartsChUpdateResponse500 = {
 export type chartsChUpdateResponseSuccess = (chartsChUpdateResponse200) & {
   headers: Headers;
 };
-export type chartsChUpdateResponseError = (chartsChUpdateResponse401 | chartsChUpdateResponse403 | chartsChUpdateResponse404 | chartsChUpdateResponse500) & {
+export type chartsChUpdateResponseError = (chartsChUpdateResponse400 | chartsChUpdateResponse401 | chartsChUpdateResponse403 | chartsChUpdateResponse404 | chartsChUpdateResponse500) & {
   headers: Headers;
 };
 

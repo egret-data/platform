@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { DatasetColumnDtoSemanticType } from './datasetColumnDtoSemanticType';
 
 export interface DatasetColumnDto {
   column_name: string;
@@ -17,4 +18,12 @@ export interface DatasetColumnDto {
   verbose_name: string;
   description: string;
   is_calculated: boolean;
+  /** Usable as a groupby dimension in charts. */
+  groupby: boolean;
+  /** Usable as a filter in charts. */
+  filterable: boolean;
+  /** Display format (ColumnFormat JSON); empty = default. */
+  format: string;
+  /** Semantic role driving smart rendering and chart defaults; "" = none. Rejected with 400 if not one of the listed values. */
+  semantic_type: DatasetColumnDtoSemanticType;
 }

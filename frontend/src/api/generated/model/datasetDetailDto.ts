@@ -25,4 +25,8 @@ export interface DatasetDetailDto {
   updated_at: string;
   columns: DatasetColumnDto[];
   metrics: MetricDto[];
+  /** Certified as a trusted/official dataset. */
+  certified: boolean;
+  certified_by: string;
+  certification_details: string;
 }

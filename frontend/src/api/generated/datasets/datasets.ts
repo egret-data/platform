@@ -32,6 +32,7 @@ import type {
   DatasetDataBody,
   DatasetDetailDto,
   DatasetSummaryDto,
+  DatasetUsageDto,
   DatasetsDsListParams,
   ErrorBody,
   MetricBody,
@@ -1994,3 +1995,129 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getDatasetsDsTrashMutationOptions(options), queryClient);
     }
+    export type datasetsDsUsageResponse200 = {
+  data: DatasetUsageDto[]
+  status: 200
+}
+
+export type datasetsDsUsageResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type datasetsDsUsageResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type datasetsDsUsageResponseSuccess = (datasetsDsUsageResponse200) & {
+  headers: Headers;
+};
+export type datasetsDsUsageResponseError = (datasetsDsUsageResponse403 | datasetsDsUsageResponse404) & {
+  headers: Headers;
+};
+
+export type datasetsDsUsageResponse = (datasetsDsUsageResponseSuccess | datasetsDsUsageResponseError)
+
+export const getDatasetsDsUsageUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/usage`
+}
+
+export const datasetsDsUsage = async (workspace: string,
+    id: string, options?: RequestInit): Promise<datasetsDsUsageResponse> => {
+
+  return customInstance<datasetsDsUsageResponse>(getDatasetsDsUsageUrl(workspace,id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getDatasetsDsUsageQueryKey = (workspace: string,
+    id: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/usage`
+    ] as const;
+    }
+
+
+export const getDatasetsDsUsageQueryOptions = <TData = Awaited<ReturnType<typeof datasetsDsUsage>>, TError = ErrorBody>(workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof datasetsDsUsage>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getDatasetsDsUsageQueryKey(workspace,id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof datasetsDsUsage>>> = ({ signal }) => datasetsDsUsage(workspace,id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof datasetsDsUsage>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type DatasetsDsUsageQueryResult = NonNullable<Awaited<ReturnType<typeof datasetsDsUsage>>>
+export type DatasetsDsUsageQueryError = ErrorBody
+
+
+export function useDatasetsDsUsage<TData = Awaited<ReturnType<typeof datasetsDsUsage>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof datasetsDsUsage>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof datasetsDsUsage>>,
+          TError,
+          Awaited<ReturnType<typeof datasetsDsUsage>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useDatasetsDsUsage<TData = Awaited<ReturnType<typeof datasetsDsUsage>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof datasetsDsUsage>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof datasetsDsUsage>>,
+          TError,
+          Awaited<ReturnType<typeof datasetsDsUsage>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useDatasetsDsUsage<TData = Awaited<ReturnType<typeof datasetsDsUsage>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof datasetsDsUsage>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useDatasetsDsUsage<TData = Awaited<ReturnType<typeof datasetsDsUsage>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof datasetsDsUsage>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getDatasetsDsUsageQueryOptions(workspace,id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+

@@ -11,4 +11,10 @@ export interface UpdateDataset {
   description?: string;
   /** @nullable */
   sql?: string | null;
+  /** @nullable */
+  certified?: boolean | null;
+  /** @nullable */
+  certified_by?: string | null;
+  /** @nullable */
+  certification_details?: string | null;
 }

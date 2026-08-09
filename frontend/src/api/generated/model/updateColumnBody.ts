@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { UpdateColumnBodySemanticType } from './updateColumnBodySemanticType';
 
 export interface UpdateColumnBody {
   /** @nullable */
@@ -13,4 +14,17 @@ export interface UpdateColumnBody {
   description?: string | null;
   /** @nullable */
   expression?: string | null;
+  /** @nullable */
+  groupby?: boolean | null;
+  /** @nullable */
+  filterable?: boolean | null;
+  /** @nullable */
+  is_temporal?: boolean | null;
+  /** @nullable */
+  format?: string | null;
+  /**
+     * Semantic role driving smart rendering and chart defaults; "" = none. Rejected with 400 if not one of the listed values.
+     * @nullable
+     */
+  semantic_type?: UpdateColumnBodySemanticType;
 }

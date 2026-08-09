@@ -30,9 +30,13 @@ import type {
   SaveQuery,
   SavedQueryDto,
   SchemaColumn,
+  SearchHit,
   SetFolder,
+  SnippetBody,
+  SnippetDto,
   SqllabColumnsParams,
   SqllabSchemasParams,
+  SqllabSearchParams,
   SqllabTablesParams
 } from '../model';
 
@@ -485,6 +489,147 @@ export function useSqllabSchemas<TData = Awaited<ReturnType<typeof sqllabSchemas
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getSqllabSchemasQueryOptions(workspace,db,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type sqllabSearchResponse200 = {
+  data: SearchHit[]
+  status: 200
+}
+
+export type sqllabSearchResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type sqllabSearchResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type sqllabSearchResponseSuccess = (sqllabSearchResponse200) & {
+  headers: Headers;
+};
+export type sqllabSearchResponseError = (sqllabSearchResponse403 | sqllabSearchResponse404) & {
+  headers: Headers;
+};
+
+export type sqllabSearchResponse = (sqllabSearchResponseSuccess | sqllabSearchResponseError)
+
+export const getSqllabSearchUrl = (workspace: string,
+    db: string,
+    params?: SqllabSearchParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/sqllab/databases/${encodeURIComponent(db)}/search?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/sqllab/databases/${encodeURIComponent(db)}/search`
+}
+
+export const sqllabSearch = async (workspace: string,
+    db: string,
+    params?: SqllabSearchParams, options?: RequestInit): Promise<sqllabSearchResponse> => {
+
+  return customInstance<sqllabSearchResponse>(getSqllabSearchUrl(workspace,db,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getSqllabSearchQueryKey = (workspace: string,
+    db: string,
+    params?: SqllabSearchParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/sqllab/databases/${encodeURIComponent(db)}/search`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getSqllabSearchQueryOptions = <TData = Awaited<ReturnType<typeof sqllabSearch>>, TError = ErrorBody>(workspace: string,
+    db: string,
+    params?: SqllabSearchParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof sqllabSearch>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getSqllabSearchQueryKey(workspace,db,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof sqllabSearch>>> = ({ signal }) => sqllabSearch(workspace,db,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && db !== null && db !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof sqllabSearch>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type SqllabSearchQueryResult = NonNullable<Awaited<ReturnType<typeof sqllabSearch>>>
+export type SqllabSearchQueryError = ErrorBody
+
+
+export function useSqllabSearch<TData = Awaited<ReturnType<typeof sqllabSearch>>, TError = ErrorBody>(
+ workspace: string,
+    db: string,
+    params: undefined |  SqllabSearchParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof sqllabSearch>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof sqllabSearch>>,
+          TError,
+          Awaited<ReturnType<typeof sqllabSearch>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useSqllabSearch<TData = Awaited<ReturnType<typeof sqllabSearch>>, TError = ErrorBody>(
+ workspace: string,
+    db: string,
+    params?: SqllabSearchParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof sqllabSearch>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof sqllabSearch>>,
+          TError,
+          Awaited<ReturnType<typeof sqllabSearch>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useSqllabSearch<TData = Awaited<ReturnType<typeof sqllabSearch>>, TError = ErrorBody>(
+ workspace: string,
+    db: string,
+    params?: SqllabSearchParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof sqllabSearch>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useSqllabSearch<TData = Awaited<ReturnType<typeof sqllabSearch>>, TError = ErrorBody>(
+ workspace: string,
+    db: string,
+    params?: SqllabSearchParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof sqllabSearch>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getSqllabSearchQueryOptions(workspace,db,params,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 
@@ -1301,4 +1446,351 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getSqllabSqSetFolderMutationOptions(options), queryClient);
+    }
+    export type sqllabSnippetsListResponse200 = {
+  data: SnippetDto[]
+  status: 200
+}
+
+export type sqllabSnippetsListResponseSuccess = (sqllabSnippetsListResponse200) & {
+  headers: Headers;
+};
+;
+
+export type sqllabSnippetsListResponse = (sqllabSnippetsListResponseSuccess)
+
+export const getSqllabSnippetsListUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/sqllab/snippets`
+}
+
+export const sqllabSnippetsList = async (workspace: string, options?: RequestInit): Promise<sqllabSnippetsListResponse> => {
+
+  return customInstance<sqllabSnippetsListResponse>(getSqllabSnippetsListUrl(workspace),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getSqllabSnippetsListQueryKey = (workspace: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/sqllab/snippets`
+    ] as const;
+    }
+
+
+export const getSqllabSnippetsListQueryOptions = <TData = Awaited<ReturnType<typeof sqllabSnippetsList>>, TError = unknown>(workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof sqllabSnippetsList>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getSqllabSnippetsListQueryKey(workspace);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof sqllabSnippetsList>>> = ({ signal }) => sqllabSnippetsList(workspace, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof sqllabSnippetsList>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type SqllabSnippetsListQueryResult = NonNullable<Awaited<ReturnType<typeof sqllabSnippetsList>>>
+export type SqllabSnippetsListQueryError = unknown
+
+
+export function useSqllabSnippetsList<TData = Awaited<ReturnType<typeof sqllabSnippetsList>>, TError = unknown>(
+ workspace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof sqllabSnippetsList>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof sqllabSnippetsList>>,
+          TError,
+          Awaited<ReturnType<typeof sqllabSnippetsList>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useSqllabSnippetsList<TData = Awaited<ReturnType<typeof sqllabSnippetsList>>, TError = unknown>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof sqllabSnippetsList>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof sqllabSnippetsList>>,
+          TError,
+          Awaited<ReturnType<typeof sqllabSnippetsList>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useSqllabSnippetsList<TData = Awaited<ReturnType<typeof sqllabSnippetsList>>, TError = unknown>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof sqllabSnippetsList>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useSqllabSnippetsList<TData = Awaited<ReturnType<typeof sqllabSnippetsList>>, TError = unknown>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof sqllabSnippetsList>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getSqllabSnippetsListQueryOptions(workspace,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type sqllabSnippetsCreateResponse200 = {
+  data: SnippetDto
+  status: 200
+}
+
+export type sqllabSnippetsCreateResponseSuccess = (sqllabSnippetsCreateResponse200) & {
+  headers: Headers;
+};
+;
+
+export type sqllabSnippetsCreateResponse = (sqllabSnippetsCreateResponseSuccess)
+
+export const getSqllabSnippetsCreateUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/sqllab/snippets`
+}
+
+export const sqllabSnippetsCreate = async (workspace: string,
+    snippetBody: SnippetBody, options?: RequestInit): Promise<sqllabSnippetsCreateResponse> => {
+
+  return customInstance<sqllabSnippetsCreateResponse>(getSqllabSnippetsCreateUrl(workspace),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(snippetBody)
+  }
+);}
+
+
+
+
+
+export const getSqllabSnippetsCreateMutationOptions = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sqllabSnippetsCreate>>, TError,{workspace: string;data: SnippetBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof sqllabSnippetsCreate>>, TError,{workspace: string;data: SnippetBody}, TContext> => {
+
+const mutationKey = ['sqllabSnippetsCreate'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof sqllabSnippetsCreate>>, {workspace: string;data: SnippetBody}> = (props) => {
+          const {workspace,data} = props ?? {};
+
+          return  sqllabSnippetsCreate(workspace,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SqllabSnippetsCreateMutationResult = NonNullable<Awaited<ReturnType<typeof sqllabSnippetsCreate>>>
+    export type SqllabSnippetsCreateMutationBody = SnippetBody
+    export type SqllabSnippetsCreateMutationError = unknown
+
+    export const useSqllabSnippetsCreate = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sqllabSnippetsCreate>>, TError,{workspace: string;data: SnippetBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof sqllabSnippetsCreate>>,
+        TError,
+        {workspace: string;data: SnippetBody},
+        TContext
+      > => {
+      return useMutation(getSqllabSnippetsCreateMutationOptions(options), queryClient);
+    }
+    export type sqllabSnippetsUpdateResponse200 = {
+  data: SnippetDto
+  status: 200
+}
+
+export type sqllabSnippetsUpdateResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type sqllabSnippetsUpdateResponseSuccess = (sqllabSnippetsUpdateResponse200) & {
+  headers: Headers;
+};
+export type sqllabSnippetsUpdateResponseError = (sqllabSnippetsUpdateResponse404) & {
+  headers: Headers;
+};
+
+export type sqllabSnippetsUpdateResponse = (sqllabSnippetsUpdateResponseSuccess | sqllabSnippetsUpdateResponseError)
+
+export const getSqllabSnippetsUpdateUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/sqllab/snippets/${encodeURIComponent(id)}`
+}
+
+export const sqllabSnippetsUpdate = async (workspace: string,
+    id: string,
+    snippetBody: SnippetBody, options?: RequestInit): Promise<sqllabSnippetsUpdateResponse> => {
+
+  return customInstance<sqllabSnippetsUpdateResponse>(getSqllabSnippetsUpdateUrl(workspace,id),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(snippetBody)
+  }
+);}
+
+
+
+
+
+export const getSqllabSnippetsUpdateMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sqllabSnippetsUpdate>>, TError,{workspace: string;id: string;data: SnippetBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof sqllabSnippetsUpdate>>, TError,{workspace: string;id: string;data: SnippetBody}, TContext> => {
+
+const mutationKey = ['sqllabSnippetsUpdate'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof sqllabSnippetsUpdate>>, {workspace: string;id: string;data: SnippetBody}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  sqllabSnippetsUpdate(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SqllabSnippetsUpdateMutationResult = NonNullable<Awaited<ReturnType<typeof sqllabSnippetsUpdate>>>
+    export type SqllabSnippetsUpdateMutationBody = SnippetBody
+    export type SqllabSnippetsUpdateMutationError = ErrorBody
+
+    export const useSqllabSnippetsUpdate = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sqllabSnippetsUpdate>>, TError,{workspace: string;id: string;data: SnippetBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof sqllabSnippetsUpdate>>,
+        TError,
+        {workspace: string;id: string;data: SnippetBody},
+        TContext
+      > => {
+      return useMutation(getSqllabSnippetsUpdateMutationOptions(options), queryClient);
+    }
+    export type sqllabSnippetsRemoveResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type sqllabSnippetsRemoveResponseSuccess = (sqllabSnippetsRemoveResponse200) & {
+  headers: Headers;
+};
+;
+
+export type sqllabSnippetsRemoveResponse = (sqllabSnippetsRemoveResponseSuccess)
+
+export const getSqllabSnippetsRemoveUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/sqllab/snippets/${encodeURIComponent(id)}`
+}
+
+export const sqllabSnippetsRemove = async (workspace: string,
+    id: string, options?: RequestInit): Promise<sqllabSnippetsRemoveResponse> => {
+
+  return customInstance<sqllabSnippetsRemoveResponse>(getSqllabSnippetsRemoveUrl(workspace,id),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getSqllabSnippetsRemoveMutationOptions = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sqllabSnippetsRemove>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof sqllabSnippetsRemove>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['sqllabSnippetsRemove'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof sqllabSnippetsRemove>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  sqllabSnippetsRemove(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SqllabSnippetsRemoveMutationResult = NonNullable<Awaited<ReturnType<typeof sqllabSnippetsRemove>>>
+
+    export type SqllabSnippetsRemoveMutationError = unknown
+
+    export const useSqllabSnippetsRemove = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sqllabSnippetsRemove>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof sqllabSnippetsRemove>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getSqllabSnippetsRemoveMutationOptions(options), queryClient);
     }
