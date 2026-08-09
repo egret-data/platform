@@ -12,6 +12,7 @@ import {
   type GridBreakpoint,
 } from "./grid-breakpoints";
 import { generateGridBackground } from "./grid-background";
+import { GRID_STROKE_CSS, GRID_STROKE_FALLBACK } from "./grid-stroke";
 
 interface Props {
   editing: boolean;
@@ -50,22 +51,20 @@ export function DashboardGridLayout({
   const ref = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   // CSS custom properties do NOT resolve inside an SVG embedded as a background-image data-URL
-  // (the SVG is an isolated document), so we must read a CONCRETE color and bake it in. We want a
-  // grid a touch darker than --border (which is nearly invisible), so blend it toward --foreground
-  // via color-mix and read the computed result off a probe element. Theme-aware (re-read on edit).
-  const [stroke, setStroke] = useState("oklch(0.8 0 0)");
+  // (the SVG is an isolated document), so we must read a CONCRETE color and bake it in. The
+  // expression itself lives in grid-stroke.ts, where the contrast band it has to satisfy is
+  // documented and pinned by a test. Theme-aware: re-read whenever edit mode toggles.
+  const [stroke, setStroke] = useState(GRID_STROKE_FALLBACK);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     setWidth(el.clientWidth);
     const probe = document.createElement("div");
-    probe.style.color = "color-mix(in oklch, var(--border) 80%, var(--foreground))";
+    probe.style.color = GRID_STROKE_CSS;
     el.appendChild(probe);
-    const mixed = getComputedStyle(probe).color;
+    const resolved = getComputedStyle(probe).color;
     probe.remove();
-    const border = getComputedStyle(document.documentElement).getPropertyValue("--border").trim();
-    if (mixed) setStroke(mixed);          // preferred: border blended toward foreground (visible)
-    else if (border) setStroke(border);   // fallback: plain --border if color-mix is unavailable
+    setStroke(resolved || GRID_STROKE_FALLBACK);
     if (typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(() => {
       const w = el.clientWidth;
