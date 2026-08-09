@@ -24,6 +24,11 @@ export interface DashboardCard {
   grid_row: number;
   size_x: number;
   size_y: number;
+  /** Untyped per-card bag, stored as `jsonb` and echoed back verbatim (bi.rs:349,393-394).
+   *  Live keys: `title`, `description`, `text`, `url`, `label`, `vizOverride`, `paramMappings`,
+   *  `autoHeight`, `hideEmpty`, `noBackground`, `clickBehavior`, and `inlineParameters` — the ids
+   *  of the dashboard parameters this card draws instead of the top bar (see
+   *  `components/chart/dashboard/inlineParameters.ts`). */
   options: Record<string, unknown>;
   tab_id: string | null;
 }
