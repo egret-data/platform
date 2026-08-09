@@ -1,4 +1,6 @@
 import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
+import { showsCardBackground } from "./card-chrome";
 import type { Chart } from "@/api/charts";
 import type { DashboardParameter } from "@/api/dashboards";
 import type { ClickBehavior } from "./click-behavior";
@@ -47,6 +49,16 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
       <Checkbox id={`cs-hide-empty-${card.id}`} aria-label="hide when empty" checked={!!card.options.hideEmpty} onCheckedChange={(v) => onUpdateOptions({ hideEmpty: v === true })} />
     </label>
   ) : null;
+  // Metabase's label verbatim ("Show background", `Text/index.ts:67-73`). EVERY card type gets it,
+  // which is the generalisation §4 W5 asks for — Metabase offers it on text, heading, link and
+  // iframe cards and egret has no reason to draw the line anywhere else. `showsCardBackground`
+  // owns the default so the checkbox and the tile cannot disagree: a heading reads unchecked until
+  // someone switches it on.
+  const backgroundRow = (
+    <label htmlFor={`cs-background-${card.id}`} className="flex items-center justify-between gap-2 text-sm"><span>Show background</span>
+      <Checkbox id={`cs-background-${card.id}`} aria-label="show background" checked={showsCardBackground(card)} onCheckedChange={(v) => onUpdateOptions({ background: v === true })} />
+    </label>
+  );
   if (card.card_type === "text" || card.card_type === "heading") {
     const slugs = parameters.map((p) => p.slug);
     return (
@@ -59,6 +71,7 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
           )}
         </p>
         {autoHeightRow}
+        {backgroundRow}
         {moveToTab}
       </div>
     );
@@ -70,6 +83,7 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
         <input aria-label="link url" placeholder="https://…" className={inp} value={(card.options.url as string) ?? ""} onChange={(e) => onUpdateOptions({ url: e.target.value })} />
         <input aria-label="link label" placeholder="Label (optional)" className={inp} value={(card.options.label as string) ?? ""} onChange={(e) => onUpdateOptions({ label: e.target.value })} />
         {autoHeightRow}
+        {backgroundRow}
         {moveToTab}
       </div>
     );
@@ -82,6 +96,10 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
       <div className="text-sm font-medium">{chart?.name ?? "Card"} settings</div>
       <label className="flex flex-col gap-1 text-xs text-muted-foreground">Title
         <input aria-label="card title" placeholder="Blank = chart name" className={inp} value={(card.options.title as string) ?? ""} onChange={(e) => onUpdateOptions({ title: e.target.value })} />
+      </label>
+      <label className="flex flex-col gap-1 text-xs text-muted-foreground">Description
+        <Textarea aria-label="card description" rows={2} placeholder="Shown behind the info button on the card header"
+          value={(card.options.description as string) ?? ""} onChange={(e) => onUpdateOptions({ description: e.target.value })} />
       </label>
 
       <div className="flex flex-col gap-1">
@@ -114,6 +132,7 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
 
       {autoHeightRow}
       {hideEmptyRow}
+      {backgroundRow}
       {moveToTab}
     </div>
   );

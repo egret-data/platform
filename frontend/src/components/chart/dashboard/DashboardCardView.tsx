@@ -1,4 +1,7 @@
 import { useRef } from "react";
+import { Pencil } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Button } from "@/components/ui/button";
 import type { DashboardCard, DashboardParameter } from "@/api/dashboards";
 import type { Chart, ChartFilter } from "@/api/charts";
 import { useChartData, type ChartData } from "@/api/useChartData";
@@ -13,6 +16,8 @@ import { HeadingCard } from "./HeadingCard";
 import { LinkCard } from "./LinkCard";
 import { applyVizOverride, interpolateParams } from "./params";
 import { AutoHeightMeasure } from "./AutoHeightMeasure";
+import { DashboardCardHeader } from "./DashboardCardHeader";
+import { dashcardHref } from "./dashcard-href";
 
 function asString(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
@@ -47,7 +52,7 @@ function ChartCardTileEdit(props: ChartCardTileProps) {
   return <ChartCardTileBody {...props} data={data} />;
 }
 
-function ChartCardTileBody({ card, chart, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight, data }: ChartCardTileProps & { data: ChartData }) {
+function ChartCardTileBody({ ws, card, chart, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight, data }: ChartCardTileProps & { data: ChartData }) {
   // Ref the render-only container (NOT the whole tile), so the PNG export targets the
   // chart's <svg> and not the export menu's own Download icon. Also keeps PNG hidden for
   // table/pivot cards (their render container has no <svg>).
@@ -60,15 +65,29 @@ function ChartCardTileBody({ card, chart, onValueClick, blocked, editing, autoHe
   // Computed once the chart is known to exist, so both the export menu (which needs the
   // rename that's actually in effect) and the render branch below share the same override.
   const eff = applyVizOverride(chart, card.options.vizOverride as Record<string, unknown> | undefined);
+  // Both hang off the header, so both die with it — `dashcardHref` encodes that rule once.
+  const href = dashcardHref(ws, card, editing);
+  const description = asString(card.options.description);
   return (
     <div className="group relative flex h-full flex-col">
-      {canExport && (
-        <div className="dash-nodrag absolute right-1 top-1 z-10 opacity-0 transition-opacity group-hover:opacity-100">
-          <ChartExportMenu title={headerText || chart?.name} columns={data.columns} rows={data.rows}
-            columnSettings={shellSettings(eff.params).columnSettings} containerRef={chartRef} />
+      {/* THE PENCIL IS A SECOND <svg> IN THE TILE, which is exactly why this cluster sits OUTSIDE
+          `chartRef`. The PNG export does `containerRef.current.querySelector("svg")`; if it pointed
+          at the tile it would find the Download icon or this pencil and export a 16px square. That
+          has happened in this repo. `DashboardCardView.export.test.tsx` is the regression net. */}
+      {(canExport || href) && (
+        <div className="dash-nodrag absolute right-1 top-1 z-10 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+          {href && (
+            <Button asChild size="sm" variant="ghost" aria-label="Edit question">
+              <Link to={href}><Pencil className="h-4 w-4" /></Link>
+            </Button>
+          )}
+          {canExport && (
+            <ChartExportMenu title={headerText || chart?.name} columns={data.columns} rows={data.rows}
+              columnSettings={shellSettings(eff.params).columnSettings} containerRef={chartRef} />
+          )}
         </div>
       )}
-      {showHeader && <div className="px-4 pt-3 pb-2 text-sm font-medium text-foreground">{headerText}</div>}
+      {showHeader && <DashboardCardHeader text={headerText} href={href} description={description} />}
       <div ref={chartRef} className="min-h-0 flex-1 overflow-auto px-2 pb-2">
         {(() => {
           const body = blocked ? <div className="flex h-full items-center justify-center px-3 text-center text-sm text-muted-foreground">Set the required filters to load this card</div>

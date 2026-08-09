@@ -23,6 +23,7 @@ import { DashboardGridLayout } from "@/components/chart/dashboard/DashboardGridL
 import { mayPersistLayout, type GridBreakpoint } from "@/components/chart/dashboard/grid-breakpoints";
 import { useIsNarrowViewport } from "@/lib/useIsNarrowViewport";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
+import { cardChromeClass } from "@/components/chart/dashboard/card-chrome";
 import { DashboardInfoSidebar } from "@/components/chart/dashboard/DashboardInfoSidebar";
 import { CardFilterMapOverlay } from "@/components/chart/dashboard/CardFilterMapOverlay";
 import { cardMapState, columnsForParam } from "@/components/chart/dashboard/card-map-state";
@@ -731,11 +732,7 @@ export default function DashboardView() {
                 tabIndex={editing && c.card_type !== "placeholder" ? 0 : undefined}
                 onClick={editing && c.card_type !== "placeholder" ? () => openPanel({ kind: "card", cardId: c.id }) : undefined}
                 onKeyDown={editing && c.card_type !== "placeholder" ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPanel({ kind: "card", cardId: c.id }); } } : undefined}
-                className={`relative h-full overflow-hidden ${editing && c.card_type !== "placeholder" ? "cursor-pointer" : ""} ${
-                c.card_type === "heading" ? "bg-dashboard"
-                : c.card_type === "placeholder" ? ""
-                : "rounded-sm border bg-card"
-              } ${editing && editPanel?.kind === "card" && editPanel.cardId === c.id ? "ring-2 ring-primary" : ""}`}>
+                className={`relative h-full overflow-hidden ${editing && c.card_type !== "placeholder" ? "cursor-pointer" : ""} ${cardChromeClass(c)} ${editing && editPanel?.kind === "card" && editPanel.cardId === c.id ? "ring-2 ring-primary" : ""}`}>
                 {editing && <div className="dash-draghandle absolute inset-x-0 top-0 z-10 h-6 cursor-move" title="Drag to move" />}
                 {c.card_type === "placeholder" ? (
                   <PlaceholderCard onPick={() => setFillingPlaceholderId(c.id)} />

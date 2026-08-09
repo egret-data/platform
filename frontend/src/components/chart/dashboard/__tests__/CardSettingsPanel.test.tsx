@@ -53,6 +53,29 @@ describe("CardSettingsPanel (chart card)", () => {
     render(<CardSettingsPanel card={card()} chart={chart} parameters={[param]} tabs={tabs} onUpdateOptions={vi.fn()} onMoveToTab={vi.fn()} />);
     expect(screen.getByText("Hide this card if there are no results")).toBeInTheDocument();
   });
+
+  it("edits the per-card description", () => {
+    const onUpdateOptions = vi.fn();
+    render(<CardSettingsPanel card={card()} chart={chart} parameters={[param]} tabs={tabs} onUpdateOptions={onUpdateOptions} onMoveToTab={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("card description"), { target: { value: "Net of refunds." } });
+    expect(onUpdateOptions.mock.calls[0][0]).toStrictEqual({ description: "Net of refunds." });
+  });
+
+  it("shows the background on by default for a chart card and writes only that key", () => {
+    const onUpdateOptions = vi.fn();
+    render(<CardSettingsPanel card={card()} chart={chart} parameters={[param]} tabs={tabs} onUpdateOptions={onUpdateOptions} onMoveToTab={vi.fn()} />);
+    expect(screen.getByLabelText("show background")).toBeChecked();
+    fireEvent.click(screen.getByLabelText("show background"));
+    // toStrictEqual, for the same reason the hide-when-empty case gives: the point is that the
+    // patch carries NOTHING but background.
+    expect(onUpdateOptions).toHaveBeenCalledTimes(1);
+    expect(onUpdateOptions.mock.calls[0][0]).toStrictEqual({ background: false });
+  });
+
+  it("uses Metabase's wording for the background toggle", () => {
+    render(<CardSettingsPanel card={card()} chart={chart} parameters={[param]} tabs={tabs} onUpdateOptions={vi.fn()} onMoveToTab={vi.fn()} />);
+    expect(screen.getByText("Show background")).toBeInTheDocument();
+  });
 });
 
 describe("CardSettingsPanel (text card)", () => {
@@ -67,5 +90,10 @@ describe("CardSettingsPanel (text card)", () => {
     const c: DraftCard = { id: "t1", chart_id: null, card_type: "text", grid_col: 0, grid_row: 0, size_x: 6, size_y: 2, options: { text: "" }, tab_id: null, tabKey: null };
     render(<CardSettingsPanel card={c} chart={undefined} parameters={[param]} tabs={[]} onUpdateOptions={vi.fn()} onMoveToTab={vi.fn()} />);
     expect(screen.queryByLabelText("hide when empty")).toBeNull();
+  });
+  it("offers the background toggle, reading OFF for a heading", () => {
+    const c: DraftCard = { id: "h1", chart_id: null, card_type: "heading", grid_col: 0, grid_row: 0, size_x: 6, size_y: 2, options: { text: "" }, tab_id: null, tabKey: null };
+    render(<CardSettingsPanel card={c} chart={undefined} parameters={[param]} tabs={[]} onUpdateOptions={vi.fn()} onMoveToTab={vi.fn()} />);
+    expect(screen.getByLabelText("show background")).not.toBeChecked();
   });
 });
