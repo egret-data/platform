@@ -13,6 +13,7 @@ interface Props {
   onAddText: () => void;
   onAddHeading: () => void;
   onAddLink: () => void;
+  onAddIframe: () => void;
   onAddSection: (layout: SectionLayout) => void;
   onAddFilter: () => void;
   /** The DRAFT width — the switch reflects what will be saved, not what is stored. */
@@ -51,7 +52,7 @@ function SectionLayoutPreview({ layout }: { layout: SectionLayout }) {
 }
 
 /** Edit-mode add controls as a compact icon group (placed on the title row). */
-export function DashboardEditToolbar({ onAddChart, onAddText, onAddHeading, onAddLink, onAddSection, onAddFilter, width, onChangeWidth }: Props) {
+export function DashboardEditToolbar({ onAddChart, onAddText, onAddHeading, onAddLink, onAddIframe, onAddSection, onAddFilter, width, onChangeWidth }: Props) {
   return (
     <div className="flex items-center gap-1">
       <button type="button" className={ICON} aria-label="add chart" title="Add a chart" onClick={onAddChart}>
@@ -71,9 +72,21 @@ export function DashboardEditToolbar({ onAddChart, onAddText, onAddHeading, onAd
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <button type="button" className={ICON} aria-label="add link" title="Add a link" onClick={onAddLink}>
-        <Link2 className="h-4 w-4" />
-      </button>
+      {/* Metabase pairs these two behind one trigger, labelled "Add a link or iframe"
+          (AddLinkOrEmbedButton.tsx:39-62). onCloseAutoFocus is prevented for the same reason as
+          the heading menu above: Radix's teardown blurs focus to <body> after the card mounts. */}
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button type="button" className={ICON} aria-label="add a link or iframe" title="Add a link or iframe">
+            <Link2 className="h-4 w-4" />
+            <ChevronDown className="h-3 w-3" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" onCloseAutoFocus={(e) => e.preventDefault()}>
+          <DropdownMenuItem onClick={onAddLink}>Link</DropdownMenuItem>
+          <DropdownMenuItem onClick={onAddIframe}>Iframe</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
 
       <DropdownMenu>
         <DropdownMenuTrigger asChild>

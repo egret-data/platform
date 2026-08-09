@@ -388,7 +388,7 @@ export default function DashboardView() {
     setFillingPlaceholderId(null);
   }
 
-  function addVirtualCard(card_type: "text" | "heading" | "link", options: Record<string, unknown>) {
+  function addVirtualCard(card_type: "text" | "heading" | "link" | "iframe", options: Record<string, unknown>) {
     const id = `new-${card_type}-${cardSeqRef.current++}`;
     setDraftCards((prev) => {
       const base = prev ?? cardsAsDraft();
@@ -402,6 +402,9 @@ export default function DashboardView() {
       return [...base, newCard];
     });
     if (card_type === "text" || card_type === "heading") setNewCardId(id);
+    // An iframe card has no inline editor, so the URL is entered in the settings panel. Open it
+    // on add, the way addFilter does for a new filter.
+    if (card_type === "iframe") openPanel({ kind: "card", cardId: id });
   }
   function addFilter() {
     const slug = slugify("filter", parameters.map((p) => p.slug));
@@ -665,6 +668,7 @@ export default function DashboardView() {
               onAddText={() => addVirtualCard("text", { text: "" })}
               onAddHeading={() => addVirtualCard("heading", { text: "" })}
               onAddLink={() => addVirtualCard("link", { url: "", label: "" })}
+              onAddIframe={() => addVirtualCard("iframe", { iframe: "" })}
               onAddSection={addSection}
               onAddFilter={addFilter}
               width={draftWidth}

@@ -133,17 +133,36 @@ describe("DashboardView (Phase B — card variety)", () => {
     fireEvent.change(editor, { target: { value: "Sales" } });
     expect(editor.value).toBe("Sales");
   });
-  it("adds a link card with url + label settings", () => {
+  // The bare "add link" button became a "add a link or iframe" menu (Metabase pairs the two
+  // behind one trigger), so this now opens the menu first — the same shape as the text/heading
+  // cases above, and for the same Radix reason: the trigger opens on pointerdown, which
+  // fireEvent.click does not dispatch.
+  it("adds a link card with url + label settings", async () => {
+    const user = userEvent.setup();
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
     const before = screen.getAllByRole("button", { name: /remove card/i }).length;
-    fireEvent.click(screen.getByRole("button", { name: "add link" }));
+    await user.click(screen.getByRole("button", { name: "add a link or iframe" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Link" }));
     const after = screen.getAllByRole("button", { name: /remove card/i }).length;
     expect(after).toBe(before + 1);
     const bodies = screen.getAllByTestId("dashcard-body");
     fireEvent.click(bodies[bodies.length - 1]);
     expect(screen.getByLabelText(/link url/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/link label/i)).toBeInTheDocument();
+  });
+  it("adds an iframe card, whose settings panel opens by itself", async () => {
+    // Unlike text and heading, an iframe card has no inline editor — the URL is entered in the
+    // settings panel — so `addVirtualCard` opens the panel on add. No dashcard-body click here:
+    // needing one would mean the auto-open never fired.
+    const user = userEvent.setup();
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    const before = screen.getAllByRole("button", { name: /remove card/i }).length;
+    await user.click(screen.getByRole("button", { name: "add a link or iframe" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Iframe" }));
+    expect(screen.getAllByRole("button", { name: /remove card/i }).length).toBe(before + 1);
+    expect(screen.getByLabelText("iframe url or embed code")).toHaveValue("");
   });
   it("offers a title input on a chart card in edit mode", () => {
     renderAt();
