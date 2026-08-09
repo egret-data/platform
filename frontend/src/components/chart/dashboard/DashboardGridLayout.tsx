@@ -4,11 +4,25 @@ import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 import "./dashboard-grid.css";
 import { GRID_COLS, GRID_MARGIN, GRID_PADDING, gridRowHeight, cellWidth } from "@/components/chart/dashboard-grid";
+import {
+  GRID_COLUMNS,
+  GRID_MARGIN_BY_BREAKPOINT,
+  breakpointFor,
+  toMobileLayout,
+  type GridBreakpoint,
+} from "./grid-breakpoints";
 import { generateGridBackground } from "./grid-background";
 
 interface Props {
   editing: boolean;
   layout: Layout[];
+  /** Maps a card id to the string the mobile height table keys on — a chart card's viz type,
+   *  or the card type for text/heading/link. Supplied by the route, which is the only place
+   *  that knows the chart behind a card. */
+  kindOf: (id: string) => string;
+  /** Fires whenever the live breakpoint changes. The route needs this to refuse to persist
+   *  layout and auto-height changes off the desktop breakpoint. */
+  onBreakpointChange: (bp: GridBreakpoint) => void;
   onLayoutChange: (next: Layout[]) => void;
   onResizeStart: () => void;
   onResizeStop: () => void;
@@ -18,9 +32,21 @@ interface Props {
   children: (rowHeight: number) => React.ReactNode;
 }
 
-/** Metabase-style dashboard grid: dynamic aspect-ratio rowHeight, 6px margins, vertical
- *  compaction, and an SVG cell grid behind the cards while editing. */
-export function DashboardGridLayout({ editing, layout, onLayoutChange, onResizeStart, onResizeStop, onDragStart, onDragStop, children }: Props) {
+/** Metabase-style dashboard grid: 24 columns on desktop, one column below 753px of CONTAINER
+ *  width, dynamic aspect-ratio rowHeight, 6px margins, vertical compaction, and an SVG cell grid
+ *  behind the cards while editing on desktop. */
+export function DashboardGridLayout({
+  editing,
+  layout,
+  kindOf,
+  onBreakpointChange,
+  onLayoutChange,
+  onResizeStart,
+  onResizeStop,
+  onDragStart,
+  onDragStop,
+  children,
+}: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   // CSS custom properties do NOT resolve inside an SVG embedded as a background-image data-URL
@@ -46,8 +72,23 @@ export function DashboardGridLayout({ editing, layout, onLayoutChange, onResizeS
     return () => ro.disconnect();
   }, [editing]);
 
+  const breakpoint = breakpointFor(width);
+  const isMobile = breakpoint === "mobile";
+
+  // Tell the route on every change, and on first measurement. The route uses it as a guard,
+  // so a missed notification means a mobile layout can be persisted.
+  useEffect(() => {
+    onBreakpointChange(breakpoint);
+  }, [breakpoint, onBreakpointChange]);
+
+  const cols = GRID_COLUMNS[breakpoint];
+  const margin = GRID_MARGIN_BY_BREAKPOINT[breakpoint];
+  const effectiveLayout = isMobile ? toMobileLayout(layout, kindOf) : layout;
   const rowHeight = gridRowHeight(width);
-  const background = editing && width > 0
+
+  // The guide grid describes a 24-column canvas; on one column it describes nothing, and it is
+  // the loudest element on a small screen. Desktop-and-editing only.
+  const background = editing && !isMobile && width > 0
     ? generateGridBackground({ cellWidth: cellWidth(width), rowHeight, cols: GRID_COLS, marginX: GRID_MARGIN[0], marginY: GRID_MARGIN[1], stroke })
     : undefined;
 
@@ -57,16 +98,16 @@ export function DashboardGridLayout({ editing, layout, onLayoutChange, onResizeS
       <RGL
         className="layout relative z-10"
         width={width}
-        cols={GRID_COLS}
+        cols={cols}
         rowHeight={rowHeight}
-        margin={GRID_MARGIN}
+        margin={margin}
         containerPadding={GRID_PADDING}
         compactType="vertical"
-        isDraggable={editing}
-        isResizable={editing}
+        isDraggable={editing && !isMobile}
+        isResizable={editing && !isMobile}
         draggableHandle=".dash-draghandle"
         draggableCancel=".dash-nodrag"
-        layout={layout}
+        layout={effectiveLayout}
         onLayoutChange={onLayoutChange}
         onResizeStart={onResizeStart}
         onResizeStop={onResizeStop}
