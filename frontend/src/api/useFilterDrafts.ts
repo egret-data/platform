@@ -8,6 +8,10 @@ export interface FilterDraftsState {
   /** What the FILTER BAR shows — applied values with the draft laid over them. */
   editorValues: Record<string, unknown>;
   setValue: (slug: string, value: unknown) => void;
+  /** Set several parameters from ONE interaction — a crossfilter click can set more than one.
+   *  `setValue` in a loop loses all but the last while auto-apply is on, because react-router
+   *  hands every functional `setSearchParams` updater the same current location. */
+  setValues: (patch: Record<string, unknown>) => void;
   changedCount: number;
   apply: () => void;
   cancel: () => void;
@@ -38,10 +42,15 @@ export function useFilterDrafts(
 
   const editorValues = draft === null ? params.values : { ...params.values, ...draft };
 
-  const setValue = (slug: string, value: unknown) => {
-    if (autoApply) { params.setValue(slug, value); return; }
-    setDraft((prev) => ({ ...(prev ?? {}), [slug]: value }));
+  const setValues = (patch: Record<string, unknown>) => {
+    // One URL write while auto-apply is on; one draft merge while it is off. The draft path
+    // would survive a loop (the functional updater accumulates), but the applied path would
+    // not — so both go through here rather than leaving one caller to know the difference.
+    if (autoApply) { params.setValues(patch); return; }
+    setDraft((prev) => ({ ...(prev ?? {}), ...patch }));
   };
+
+  const setValue = (slug: string, value: unknown) => setValues({ [slug]: value });
 
   const apply = () => {
     if (draft) params.setValues(draft);   // ONE URL write — see setValues
@@ -62,6 +71,7 @@ export function useFilterDrafts(
     appliedValues: params.values,
     editorValues,
     setValue,
+    setValues,
     changedCount: countChangedFilters(params.values, editorValues),
     apply,
     cancel,

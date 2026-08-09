@@ -282,7 +282,10 @@ export default function DashboardView() {
     const r = resolveClick(cb, ctx, parameters, filterDrafts.appliedValues);
     const datasetId = chartById.get(card.chart_id ?? "")?.dataset_id ?? null;
     if (r.kind === "url") { if (r.href) window.open(r.href, "_blank", "noreferrer"); return; }
-    if (r.kind === "crossfilter") { for (const s of r.sets) filterDrafts.setValue(s.slug, s.value); return; }
+    // ONE write, not a loop: a crossfilter click can set several parameters, and `setValue` per
+    // slug loses all but the last while auto-apply is on — react-router hands every functional
+    // updater the same current location, so they overwrite instead of accumulating.
+    if (r.kind === "crossfilter") { filterDrafts.setValues(Object.fromEntries(r.sets.map((s) => [s.slug, s.value]))); return; }
     setDrillMenu({ ctx, x, y, datasetId });
   }
 

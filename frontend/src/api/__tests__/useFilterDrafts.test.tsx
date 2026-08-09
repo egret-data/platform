@@ -83,3 +83,42 @@ describe("the auto-apply preference", () => {
     expect(setup().result.current.autoApply).toBe(true);
   });
 });
+
+describe("setting several parameters at once (a crossfilter click)", () => {
+  // A crossfilter click can set more than one parameter from one click. Doing that with
+  // `setValue` in a loop silently loses all but the last, because react-router hands every
+  // functional setSearchParams updater the SAME current location — so each call overwrites
+  // rather than accumulates. The bug is invisible with one parameter, which is why it shipped.
+  it("keeps every value when auto-apply is on", () => {
+    const { result } = setup();
+    act(() => result.current.setValues({ region: "EU", owner: "ana" }));
+    expect(result.current.appliedValues).toMatchObject({ region: "EU", owner: "ana" });
+  });
+
+  it("keeps every value in the draft when auto-apply is off, and applies them together", () => {
+    const { result } = setup();
+    act(() => result.current.setAutoApply(false));
+    act(() => result.current.setValues({ region: "EU", owner: "ana" }));
+
+    // still drafted — the cards must not have moved
+    expect(result.current.appliedValues.region).toBeUndefined();
+    expect(result.current.editorValues).toMatchObject({ region: "EU", owner: "ana" });
+    expect(result.current.changedCount).toBe(2);
+
+    act(() => result.current.apply());
+    expect(result.current.appliedValues).toMatchObject({ region: "EU", owner: "ana" });
+  });
+
+  it("a loop over setValue is what NOT to do — this pins the failure it produces", () => {
+    const { result } = setup();
+    act(() => {
+      for (const [slug, value] of Object.entries({ region: "EU", owner: "ana" })) {
+        result.current.setValue(slug, value);
+      }
+    });
+    // Only the last survives. If this ever starts passing with both values, setValue has become
+    // batched and the crossfilter site can go back to a loop — until then it must not.
+    expect(result.current.appliedValues.owner).toBe("ana");
+    expect(result.current.appliedValues.region).toBeUndefined();
+  });
+});
