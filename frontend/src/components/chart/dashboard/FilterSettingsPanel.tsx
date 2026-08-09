@@ -1,11 +1,16 @@
 import { Checkbox } from "@/components/ui/checkbox";
 import type { DashboardParameter, ParamType, ParamOperator, ParamWidget } from "@/api/dashboards";
 import { OPERATORS } from "./ParameterEditor";
+import { canRenderMultiValue, isMultiValue, isSingleOrMultiSelectable } from "./multiSelect";
+import { linkedFilterState } from "./linkedFilters";
+import { DefaultValueField } from "./DefaultValueField";
 
 interface Props {
   param: DashboardParameter;
   allParameters: DashboardParameter[];
   cardColumns?: { cardId: string; label: string; columns: string[] }[];
+  /** The parameter's loaded option list, so a category/location default is picked, not typed. */
+  defaultOptions?: string[];
   onChange: (next: DashboardParameter) => void;
   onDelete: () => void;
 }
@@ -16,12 +21,13 @@ const WIDGETS: { v: ParamWidget; label: string }[] = [
   { v: "input", label: "Input box" },
 ];
 
-export function FilterSettingsPanel({ param, allParameters, cardColumns = [], onChange, onDelete }: Props) {
+export function FilterSettingsPanel({ param, allParameters, cardColumns = [], defaultOptions = [], onChange, onDelete }: Props) {
   const cls = "h-8 w-full rounded border bg-background px-2 text-sm";
   const showOp = param.type === "text" || param.type === "number" || param.type === "date";
   const showWidget = param.type === "category" || param.type === "id" || param.type === "location" || param.type === "text";
   const showValueSource = param.type === "category" || param.type === "id" || param.type === "location";
   const others = allParameters.filter((o) => o.id !== param.id);
+  const linkState = linkedFilterState(param, others);
   const linked = param.filteringParameters ?? [];
   const toggleLink = (id: string) =>
     onChange({ ...param, filteringParameters: linked.includes(id) ? linked.filter((x) => x !== id) : [...linked, id] });
@@ -97,17 +103,61 @@ export function FilterSettingsPanel({ param, allParameters, cardColumns = [], on
         </div>
       )}
 
-      {/* MVP: default is entered as plain text; multi-value/range defaults aren't round-tripped. */}
-      <label className="flex flex-col gap-1 text-xs text-muted-foreground">Default value
-        <input aria-label="default value" className={cls}
-          value={Array.isArray(param.default) ? (param.default as unknown[]).join(", ") : String(param.default ?? "")}
-          onChange={(e) => onChange({ ...param, default: e.target.value === "" ? undefined : e.target.value })} />
-      </label>
-
-      {others.length > 0 && (
+      {/* Metabase gives "People can pick" exactly this position (ParameterSettings.tsx:221-241):
+          between "How should people filter on this column?" and "Default value". */}
+      {isSingleOrMultiSelectable(param) && canRenderMultiValue(param) && (
         <div className="flex flex-col gap-1">
-          <div className="text-xs text-muted-foreground">Linked filters</div>
-          <p className="text-xs text-muted-foreground/70">Limit this filter's choices to values that match the selected filters.</p>
+          <div className="text-xs text-muted-foreground">People can pick</div>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="radio" name={`multi-${param.id}`} aria-label="people can pick multiple"
+              checked={isMultiValue(param)}
+              onChange={() => onChange({ ...param, isMultiSelect: true })} /> Multiple values
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="radio" name={`multi-${param.id}`} aria-label="people can pick single"
+              checked={!isMultiValue(param)}
+              onChange={() => onChange({ ...param, isMultiSelect: false })} /> A single value
+          </label>
+        </div>
+      )}
+
+      <DefaultValueField param={param} options={defaultOptions}
+        onChange={(d) => onChange({ ...param, default: d })} />
+
+      {/* Metabase's framing, verbatim (ParameterLinkedFilters.tsx:52,93-103,120-127,143-160). The
+          three non-list states used to render as NOTHING AT ALL, because the whole section sat
+          behind `others.length > 0` — a user whose only other filter was a time grouping, or who
+          had put this filter on a custom value list, saw a panel that simply stopped. */}
+      <div className="flex flex-col gap-1">
+        <div className="text-xs font-medium">Limit this filter&apos;s choices</div>
+
+        {linkState.kind === "no-usable" && (
+          <p className="text-xs text-muted-foreground">
+            If you have another dashboard filter, you can limit the choices that are listed for this
+            filter based on the selection of the other one. So first, add another dashboard filter.
+          </p>
+        )}
+
+        {linkState.kind === "custom-source" && (
+          <p className="text-xs text-muted-foreground">
+            If the filter has values that are from another question or model, or a custom list, then
+            this filter can&apos;t be limited by another dashboard filter.
+          </p>
+        )}
+
+        {linkState.kind === "input-widget" && (
+          <p className="text-xs text-muted-foreground">
+            This filter can&apos;t be limited by another dashboard filter because its widget type is an
+            input box.
+          </p>
+        )}
+
+        {linkState.kind === "list" && (
+          <>
+            <p className="text-xs text-muted-foreground/70">
+              If you toggle on one of these dashboard filters, selecting a value for that filter will
+              limit the available choices for <strong>this</strong> filter.
+            </p>
           {/* THE DENSEST LIST THIS CHANGE TOUCHES, and the one worth measuring rather than
               assuming. #443 sized the primitive's transparent hit area at 24×24 against the
               permission picker's 26px pitch, which leaves 2px between neighbouring targets.
@@ -121,13 +171,14 @@ export function FilterSettingsPanel({ param, allParameters, cardColumns = [], on
               in a 255px side panel, and #441's argument for 32px rows was that THE ROW BECOMES
               THE TARGET — which it already is here, because the `<label>` wraps the control and
               spans the row. Height would buy nothing this list does not have. */}
-          {others.map((o) => (
-            <label key={o.id} htmlFor={`fsp-link-${o.id}`} className="flex cursor-pointer items-center gap-2 text-sm">
-              <Checkbox id={`fsp-link-${o.id}`} aria-label={`link ${o.name}`} checked={linked.includes(o.id)} onCheckedChange={() => toggleLink(o.id)} /> {o.name}
-            </label>
-          ))}
-        </div>
-      )}
+            {linkState.usable.map((o) => (
+              <label key={o.id} htmlFor={`fsp-link-${o.id}`} className="flex cursor-pointer items-center gap-2 text-sm">
+                <Checkbox id={`fsp-link-${o.id}`} aria-label={`link ${o.name}`} checked={linked.includes(o.id)} onCheckedChange={() => toggleLink(o.id)} /> {o.name}
+              </label>
+            ))}
+          </>
+        )}
+      </div>
 
       <label htmlFor={`fsp-required-${param.id}`} className="flex cursor-pointer items-center gap-2 text-sm">
         <Checkbox id={`fsp-required-${param.id}`} aria-label="parameter required" checked={!!param.required} onCheckedChange={(v) => onChange({ ...param, required: v === true })} /> Required

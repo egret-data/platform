@@ -23,6 +23,8 @@ interface Props {
   chartForCard: Chart | undefined;
   paramForPanel: DashboardParameter | undefined;
   cardColumns?: { cardId: string; label: string; columns: string[] }[];
+  /** The open filter's loaded option list, so its DEFAULT is picked with the filter's own widget. */
+  defaultOptions?: string[];
   vizForPanel?: { chart: Chart; override: Record<string, unknown> | undefined; columns: { name: string; type: string }[]; rows?: unknown[][] };
   onChangeVizOverride?: (next: Record<string, unknown> | undefined) => void;
   onAddChart: (c: Chart) => void;
@@ -55,7 +57,9 @@ export function EditSidebar(props: Props) {
           columns={props.vizForPanel.columns} rows={props.vizForPanel.rows} onChange={props.onChangeVizOverride} />
       )}
       {panel?.kind === "filter" && props.paramForPanel && (
-        <FilterSettingsPanel param={props.paramForPanel} allParameters={props.parameters} cardColumns={props.cardColumns ?? []} onChange={props.onChangeParam} onDelete={props.onDeleteParam} />
+        <FilterSettingsPanel param={props.paramForPanel} allParameters={props.parameters}
+          cardColumns={props.cardColumns ?? []} defaultOptions={props.defaultOptions ?? []}
+          onChange={props.onChangeParam} onDelete={props.onDeleteParam} />
       )}
     </aside>
   );

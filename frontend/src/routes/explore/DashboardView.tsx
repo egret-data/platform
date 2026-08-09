@@ -16,6 +16,7 @@ import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
 import { type DrillContext } from "@/components/chart/drill";
 import { useDashboardViewControls } from "@/api/useDashboardViewControls";
 import { useDashboardParams } from "@/api/useDashboardParams";
+import { useFilterDrafts } from "@/api/useFilterDrafts";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { sizeForViz, getPositionForNewDashCard } from "@/components/chart/dashboard-grid";
@@ -30,6 +31,7 @@ import { cardMapState, columnsForParam } from "@/components/chart/dashboard/card
 import { isDraftDirty, type DashboardDraft } from "@/components/chart/dashboard/edit-draft";
 import { REMOVED_CARD, REPLACED_CARD, deletedTab, undoableDraftEdit } from "@/components/chart/dashboard/draft-undo";
 import { DiscardChangesDialog } from "@/components/chart/dashboard/DiscardChangesDialog";
+import { applyAutoConnect, findAutoConnectTargets, mappableColumns, offerAutoConnect, revertAutoConnect } from "@/components/chart/dashboard/autoConnect";
 import { DashboardFilterBar } from "@/components/chart/dashboard/DashboardFilterBar";
 import { EditSidebar, type EditPanel } from "@/components/chart/dashboard/EditSidebar";
 import { EditFilterChips } from "@/components/chart/dashboard/EditFilterChips";
@@ -119,6 +121,10 @@ export default function DashboardView() {
   // Hook must run before the early return — use `dash?` since dash may be undefined while loading.
   const paramSource = editing && draftParameters ? draftParameters : (dash?.parameters ?? []);
   const paramsState = useDashboardParams(paramSource);
+  // Draft/Apply layer over the URL params. `appliedValues` is what the CARDS run on; `editorValues`
+  // is what the filter bar shows. Named `filterDrafts`, not `filters`, because `filters` is already
+  // a local inside the ParamOptions map below.
+  const filterDrafts = useFilterDrafts(id, paramsState);
   const [editPanel, setEditPanel] = useState<EditPanel>(null);
   const [replacingId, setReplacingId] = useState<string | null>(null);
   const [fillingPlaceholderId, setFillingPlaceholderId] = useState<string | null>(null);
@@ -227,7 +233,7 @@ export default function DashboardView() {
         editing ? (c as DraftCard).tabKey === activeTab?.key : c.tab_id === activeTab?.key,
       );
   const requiredUnset = parameters.some((p) => {
-    const v = paramsState.values[p.slug];
+    const v = filterDrafts.appliedValues[p.slug];
     return p.required && (Array.isArray(v) ? v.filter((x) => !isBlank(x)).length === 0 : isBlank(v));
   });
   // Drop the cards that asked to hide when empty and came back with nothing. This has to
@@ -257,19 +263,19 @@ export default function DashboardView() {
       mappings,
       // Resolved dashboard-param filters for this card — sent to the view-mode
       // card-data endpoint so filtering is applied server-side (validated).
-      paramFilters: baseChart ? paramFiltersForCard(parameters, paramsState.values, mappings) : [],
+      paramFilters: baseChart ? paramFiltersForCard(parameters, filterDrafts.appliedValues, mappings) : [],
       // Resolved temporal-unit overrides for this card — sent to the view-mode
       // card-data endpoint so a "Time grouping" param re-grids server-side.
-      paramTemporal: baseChart ? temporalOverridesForCard(parameters, paramsState.values, mappings, baseChart.params.spec) : {},
+      paramTemporal: baseChart ? temporalOverridesForCard(parameters, filterDrafts.appliedValues, mappings, baseChart.params.spec) : {},
     };
   }
 
   function onCardValueClick(card: Card, ctx: DrillContext, x: number, y: number) {
     const cb = card.options.clickBehavior as ClickBehavior | undefined;
-    const r = resolveClick(cb, ctx, parameters, paramsState.values);
+    const r = resolveClick(cb, ctx, parameters, filterDrafts.appliedValues);
     const datasetId = chartById.get(card.chart_id ?? "")?.dataset_id ?? null;
     if (r.kind === "url") { if (r.href) window.open(r.href, "_blank", "noreferrer"); return; }
-    if (r.kind === "crossfilter") { for (const s of r.sets) paramsState.setValue(s.slug, s.value); return; }
+    if (r.kind === "crossfilter") { for (const s of r.sets) filterDrafts.setValue(s.slug, s.value); return; }
     setDrillMenu({ ctx, x, y, datasetId });
   }
 
@@ -414,6 +420,26 @@ export default function DashboardView() {
     setDraftCards((prev) => {
       const base = prev ?? cardsAsDraft();
       return base.map((c) => (c.id === cardId ? { ...c, options: { ...c.options, ...patch } } : c));
+    });
+  }
+
+  /** Auto-connect: mapping ONE card offers to map every other card on this tab that has a column
+   *  of the same name. Resolution, the patch, its inverse and both toasts live in autoConnect.ts;
+   *  this is the wiring that gives them the draft. */
+  function offerAutoConnectFor(sourceCardId: string, paramId: string, column: string) {
+    const isTemporal = parameters.find((p) => p.id === paramId)?.type === "temporal_unit";
+    const columnsOf = (cardId: string) => {
+      const chart = chartById.get((cards as DraftCard[]).find((x) => x.id === cardId)?.chart_id ?? "");
+      return chart ? mappableColumns(chart.params.spec, isTemporal) : [];
+    };
+    const targets = findAutoConnectTargets({
+      cards: cards as DraftCard[], columnsOf, paramId, column, sourceCardId,
+      tabKey: activeTab?.key ?? null,
+    });
+    offerAutoConnect({
+      targets, columnName: column, hasMultipleTabs: tabs.length > 1,
+      connect: () => setDraftCards((prev) => applyAutoConnect(prev ?? cardsAsDraft(), paramId, targets)),
+      revert: () => setDraftCards((prev) => revertAutoConnect(prev ?? cardsAsDraft(), paramId, targets)),
     });
   }
 
@@ -639,7 +665,7 @@ export default function DashboardView() {
           // For a 'card' source, linked filters don't meaningfully apply → pass [].
           const mappedCard = cards.find((c) => c.card_type === "chart" && (((c.options.paramMappings as Record<string, string>) ?? {})[p.id]));
           const cardMappings = (mappedCard?.options.paramMappings as Record<string, string>) ?? {};
-          const filters = p.valuesSource?.type === "card" ? [] : computeLinkedFilters(p, cardMappings, parameters, paramsState.values);
+          const filters = p.valuesSource?.type === "card" ? [] : computeLinkedFilters(p, cardMappings, parameters, filterDrafts.appliedValues);
           return <ParamOptions key={p.id} ws={ws} datasetId={resolved.datasetId} column={resolved.column} slug={p.slug} filters={filters} onLoaded={onOptionsLoaded} />;
         })}
       {(editing || tabs.length >= 2) && (
@@ -660,8 +686,13 @@ export default function DashboardView() {
         />
       )}
       {editing
-        ? <EditFilterChips parameters={parameters} activeId={editPanel?.kind === "filter" ? editPanel.paramId : null} onSelect={(id) => openPanel({ kind: "filter", paramId: id })} />
-        : <DashboardFilterBar parameters={parameters} values={paramsState.values} onChange={paramsState.setValue} optionsBySlug={optionsBySlug} />}
+        ? <EditFilterChips parameters={parameters} activeId={editPanel?.kind === "filter" ? editPanel.paramId : null}
+            onSelect={(id) => openPanel({ kind: "filter", paramId: id })}
+            onReorder={setDraftParameters} />
+        : <DashboardFilterBar parameters={parameters} values={filterDrafts.editorValues}
+            onChange={filterDrafts.setValue} optionsBySlug={optionsBySlug}
+            autoApply={filterDrafts.autoApply} onAutoApplyChange={filterDrafts.setAutoApply}
+            changedCount={filterDrafts.changedCount} onApply={filterDrafts.apply} onCancel={filterDrafts.cancel} />}
       {/* Outside the grid on purpose: these must keep running for a card whose tile is
           hidden, which is the whole reason a hidden card can ever come back. */}
       {probeCards.map((c) => {
@@ -714,7 +745,7 @@ export default function DashboardView() {
         >
           {(rowHeight) => visibleCards.map((c) => {
             const { baseChart, mappings, paramFilters, paramTemporal } = cardQueryArgs(c);
-            const injected = baseChart ? applyParamsToChart(baseChart, parameters, paramsState.values, mappings) : undefined;
+            const injected = baseChart ? applyParamsToChart(baseChart, parameters, filterDrafts.appliedValues, mappings) : undefined;
             return (
             <div key={c.id} className="group relative h-full">
               {editing && (
@@ -737,7 +768,7 @@ export default function DashboardView() {
                 {c.card_type === "placeholder" ? (
                   <PlaceholderCard onPick={() => setFillingPlaceholderId(c.id)} />
                 ) : (
-                  <DashboardCardView ws={ws} dashboardId={dashboard.id} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values} paramFilters={paramFilters} paramTemporal={paramTemporal}
+                  <DashboardCardView ws={ws} dashboardId={dashboard.id} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={filterDrafts.appliedValues} paramFilters={paramFilters} paramTemporal={paramTemporal}
                     blocked={!editing && requiredUnset} editing={editing}
                     autoHeight={!!c.options.autoHeight}
                     rowHeight={rowHeight}
@@ -751,6 +782,10 @@ export default function DashboardView() {
                     state={cardMapState({
                       cardType: c.card_type,
                       paramType: activeParam.type,
+                      // `columnsForParam` is `cardMapState`'s own pair, so the overlay keeps one
+                      // contract. NOTE: it and `autoConnect.ts`'s `mappableColumns` are currently
+                      // identical implementations arrived at independently by two workstreams —
+                      // worth collapsing into one, but not during a conflict resolution.
                       columns: baseChart ? columnsForParam(baseChart.params.spec, activeParam.type) : [],
                       rows: c.size_y,
                       chartMissing: c.card_type === "chart" && !baseChart,
@@ -758,7 +793,10 @@ export default function DashboardView() {
                       filterTabKey: undefined,
                     })}
                     value={mappings[activeParamId] ?? ""}
-                    onChange={(col) => updateCardOptions(c.id, { paramMappings: { ...mappings, [activeParamId]: col } })}
+                    onChange={(col) => {
+                      updateCardOptions(c.id, { paramMappings: { ...mappings, [activeParamId]: col } });
+                      if (col) offerAutoConnectFor(c.id, activeParamId, col);
+                    }}
                   />
                 )}
               </div>
@@ -780,6 +818,9 @@ export default function DashboardView() {
             cardForPanel={editPanel?.kind === "card" ? (cards as DraftCard[]).find((c) => c.id === editPanel.cardId) : undefined}
             chartForCard={editPanel?.kind === "card" ? chartById.get((cards as DraftCard[]).find((c) => c.id === editPanel.cardId)?.chart_id ?? "") : undefined}
             paramForPanel={editPanel?.kind === "filter" ? parameters.find((p) => p.id === editPanel.paramId) : undefined}
+            defaultOptions={editPanel?.kind === "filter"
+              ? (optionsBySlug[parameters.find((p) => p.id === editPanel.paramId)?.slug ?? ""] ?? [])
+              : []}
             onAddChart={(c) => addCard(c)}
             onUpdateCardOptions={(patch) => { if (editPanel?.kind === "card") updateCardOptions(editPanel.cardId, patch); }}
             onMoveCardToTab={(tabKey) => { if (editPanel?.kind === "card") setDraftCards(moveCardToTab((cards as DraftCard[]), editPanel.cardId, tabKey)); }}
@@ -857,7 +898,7 @@ export default function DashboardView() {
             if (!f || !("value" in f)) return;
             const target = parameters.find((p) =>
               dashboard.cards.some((c) => ((c.options.paramMappings as Record<string, string>) ?? {})[p.id] === f.col));
-            if (target) paramsState.setValue(target.slug, f.value);
+            if (target) filterDrafts.setValue(target.slug, f.value);
           }}
           onSeeRecords={(fs) => setRecords({ filters: fs, datasetId: drillMenu.datasetId })}
           onClose={() => setDrillMenu(null)} />

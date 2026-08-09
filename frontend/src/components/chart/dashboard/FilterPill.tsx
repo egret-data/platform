@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { TEMPORAL_UNITS } from "@/components/chart/temporal-units";
 import { isBlank, summarize } from "./params";
+import { isMultiValue } from "./multiSelect";
 import { DateFilterPicker } from "./DateFilterPicker";
 
 const RELATIVE = [
@@ -23,11 +24,13 @@ function iconFor(p: DashboardParameter) {
   return Type;
 }
 
-/** Cleared value for a parameter: [] for multi-value, "" otherwise. */
+/** Cleared value for a parameter: [] where the control emits an array, "" otherwise. */
 function clearedValue(p: DashboardParameter): unknown {
-  return p.type === "category" || p.type === "location" ||
-    (p.type === "number" && p.operator === "between") ||
-    (p.type === "date" && p.operator === "range") ? [] : "";
+  const listType = p.type === "category" || p.type === "location" || p.type === "id";
+  if (listType && isMultiValue(p)) return [];
+  if (p.type === "number" && p.operator === "between") return [];
+  if (p.type === "date" && p.operator === "range") return [];
+  return "";
 }
 
 function hasValue(value: unknown): boolean {
@@ -70,7 +73,10 @@ export function FilterPill({ param, value, options, onChange }: Props) {
   );
 }
 
-function FilterControl({ param, value, options, onChange }: Props) {
+/** The value control for one parameter, dispatching on type and operator. Exported because the
+ *  DEFAULT value is a parameter value too, and the settings panel must offer the same widget the
+ *  viewer will use — the structure Metabase gets from sharing `ParameterValueWidget`. */
+export function FilterControl({ param, value, options, onChange }: Props) {
   const [search, setSearch] = useState("");
   const [qy, setQy] = useState(() => {
     const [y = "", q = ""] = String(value ?? "").split("-");
@@ -155,7 +161,9 @@ function FilterControl({ param, value, options, onChange }: Props) {
 
   // dropdown / search list for category, location, and id-with-options
   if (listType || (param.type === "id" && options.length > 0)) {
-    const multi = listType;
+    // The list is rendered for the list types and for an id that has options; whether it is a
+    // checkbox list or a radio list is the author's "People can pick" choice.
+    const multi = isMultiValue(param);
     const selected = Array.isArray(value) ? (value as string[]) : isBlank(value) ? [] : [String(value)];
     const shown = options.filter((o) => o.toLowerCase().includes(search.toLowerCase()));
     const toggle = (o: string) => {

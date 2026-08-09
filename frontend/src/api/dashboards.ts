@@ -60,6 +60,10 @@ export interface DashboardParameter {
   default?: unknown;
   required?: boolean;
   widget?: ParamWidget;            // how the value is picked in view mode
+  /** "People can pick": true = Multiple values, false = A single value. Absent means the type's
+   *  default (see `components/chart/dashboard/multiSelect.ts`). The server stores `parameters` as
+   *  an opaque JSONB value, so this needs no backend change. */
+  isMultiSelect?: boolean;
   filteringParameters?: string[];  // ids of params whose value constrains THIS param's option list
   valuesSource?: ParamValuesSource;
 }
