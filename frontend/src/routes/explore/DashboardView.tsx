@@ -39,6 +39,7 @@ import { slugify, applyParamsToChart, paramFiltersForCard, temporalOverridesForC
 import { useColumnValues } from "@/api/useColumnValues";
 import { useDashboardTabs } from "@/api/useDashboardTabs";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
+import { DashboardShortcuts } from "@/lib/useDashboardShortcuts";
 import { DashboardTabBar } from "@/components/chart/dashboard/DashboardTabBar";
 import { ChartPickerList } from "@/components/chart/dashboard/ChartPickerList";
 import { startTabsDraft, serializeLayout, addTab, renameTab, reorderTab, deleteTab, duplicateTab, moveCardToTab, type DraftTab, type DraftCard } from "@/components/chart/dashboard/tabs";
@@ -477,6 +478,18 @@ export default function DashboardView() {
 
   return (
     <div className={view.isFullscreen ? "fixed inset-0 z-50 overflow-auto bg-dashboard p-4" : "min-h-full bg-dashboard p-4"}>
+      <DashboardShortcuts
+        editing={editing}
+        tabCount={tabs.length}
+        onEdit={startEdit}
+        onCancelEdit={cancelEdit}
+        onSave={onSave}
+        onToggleBookmark={() => { (dash.bookmarked ? removeBookmark : addBookmark).mutateAsync(dash.id).catch((e) => toast.error(String(e))); }}
+        onToggleInfo={() => setShowInfo((v) => !v)}
+        onAddFilter={addFilter}
+        onAddCard={() => openPanel({ kind: "add" })}
+        onSelectTab={setActiveTabPos}
+      />
       {editing && (
         <div className="-mx-4 -mt-4 mb-4 flex items-center justify-between gap-2 bg-primary/90 px-4 py-2 text-sm font-medium text-primary-foreground">
           <span className="flex items-center gap-2"><Pencil className="h-4 w-4" /> You're editing this dashboard</span>
