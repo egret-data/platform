@@ -118,4 +118,31 @@ describe("FilterSettingsPanel base", () => {
       onChange={vi.fn()} onDelete={vi.fn()} />);
     expect(screen.getByText(/its widget type is an input box/)).toBeTruthy();
   });
+
+  it("offers the move control between Required and Delete filter", () => {
+    // Metabase's position (ParameterSettings.tsx:293): after the default/required block, before
+    // the destructive actions. Asserted by DOM order, not by eye.
+    const onMove = vi.fn();
+    render(<FilterSettingsPanel param={p({})} allParameters={[p({})]} onChange={vi.fn()} onDelete={vi.fn()}
+      moveDestinations={[{ cardId: "bar", label: "Revenue", tabName: null }]} hostCardId={null} onMove={onMove} />);
+    const order = [...document.querySelectorAll("[aria-label]")].map((e) => e.getAttribute("aria-label"));
+    expect(order.indexOf("filter location")).toBeGreaterThan(order.indexOf("parameter required"));
+    expect(order.indexOf("filter location")).toBeLessThan(order.indexOf("delete filter"));
+    fireEvent.change(screen.getByLabelText("filter location"), { target: { value: "bar" } });
+    expect(onMove).toHaveBeenCalledWith("bar");
+  });
+
+  it("hides the move control on a dashboard with no card that could host a filter", () => {
+    render(<FilterSettingsPanel param={p({})} allParameters={[p({})]} onChange={vi.fn()} onDelete={vi.fn()}
+      moveDestinations={[]} hostCardId={null} onMove={vi.fn()} />);
+    expect(screen.queryByLabelText("filter location")).toBeNull();
+  });
+
+  it("hides the move control entirely for a caller that has not been wired for it", () => {
+    // Every other W6 test in this file renders without `onMove`. If the control appeared anyway
+    // it would be a `<select>` whose changes go nowhere.
+    render(<FilterSettingsPanel param={p({})} allParameters={[p({})]} onChange={vi.fn()} onDelete={vi.fn()}
+      moveDestinations={[{ cardId: "bar", label: "Revenue", tabName: null }]} />);
+    expect(screen.queryByLabelText("filter location")).toBeNull();
+  });
 });

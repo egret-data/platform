@@ -4,6 +4,8 @@ import { OPERATORS } from "./ParameterEditor";
 import { canRenderMultiValue, isMultiValue, isSingleOrMultiSelectable } from "./multiSelect";
 import { linkedFilterState } from "./linkedFilters";
 import { DefaultValueField } from "./DefaultValueField";
+import { MoveParameterField } from "./MoveParameterField";
+import type { MoveDestination } from "./inlineParameters";
 
 interface Props {
   param: DashboardParameter;
@@ -11,6 +13,12 @@ interface Props {
   cardColumns?: { cardId: string; label: string; columns: string[] }[];
   /** The parameter's loaded option list, so a category/location default is picked, not typed. */
   defaultOptions?: string[];
+  /** Every heading/question card the filter could be moved to, grouped by tab. Empty on a
+   *  dashboard with no hostable card, which hides the control entirely. */
+  moveDestinations?: MoveDestination[];
+  /** The card that currently hosts this filter, or null for the top bar. */
+  hostCardId?: string | null;
+  onMove?: (cardId: string | null) => void;
   onChange: (next: DashboardParameter) => void;
   onDelete: () => void;
 }
@@ -21,7 +29,7 @@ const WIDGETS: { v: ParamWidget; label: string }[] = [
   { v: "input", label: "Input box" },
 ];
 
-export function FilterSettingsPanel({ param, allParameters, cardColumns = [], defaultOptions = [], onChange, onDelete }: Props) {
+export function FilterSettingsPanel({ param, allParameters, cardColumns = [], defaultOptions = [], moveDestinations = [], hostCardId = null, onMove, onChange, onDelete }: Props) {
   const cls = "h-8 w-full rounded border bg-background px-2 text-sm";
   const showOp = param.type === "text" || param.type === "number" || param.type === "date";
   const showWidget = param.type === "category" || param.type === "id" || param.type === "location" || param.type === "text";
@@ -183,6 +191,13 @@ export function FilterSettingsPanel({ param, allParameters, cardColumns = [], de
       <label htmlFor={`fsp-required-${param.id}`} className="flex cursor-pointer items-center gap-2 text-sm">
         <Checkbox id={`fsp-required-${param.id}`} aria-label="parameter required" checked={!!param.required} onCheckedChange={(v) => onChange({ ...param, required: v === true })} /> Required
       </label>
+
+      {/* Metabase's position for this control (ParameterSettings.tsx:293): after the
+          default/required block and before the destructive actions. */}
+      {onMove && (
+        <MoveParameterField value={hostCardId} destinations={moveDestinations} onChange={onMove} />
+      )}
+
       <button type="button" aria-label="delete filter" className="self-start text-sm text-destructive hover:underline" onClick={onDelete}>Delete filter</button>
     </div>
   );
