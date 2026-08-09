@@ -56,6 +56,18 @@ pub struct DashboardTab {
     pub position: i32,
 }
 
+/// One stored dashboard revision. `snapshot` is an `UpdateDashboard`-shaped JSON value — see
+/// migration 0107 for why that shape and not a row copy.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DashboardRevision {
+    pub id: Uuid,
+    pub dashboard_id: Uuid,
+    pub created_by: Option<Uuid>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub kind: String,
+    pub snapshot: serde_json::Value,
+}
+
 /// A tab as supplied by the client when saving a layout (no server id yet).
 #[derive(Debug, Clone)]
 pub struct NewTab {
@@ -105,6 +117,16 @@ const COLS: &str =
     "id, workspace_id, name, description, parameters, created_by, folder_id, updated_at, created_at, updated_by, width, deleted_at";
 const CARD_COLS: &str =
     "id, dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal, tab_id";
+const REV_COLS: &str = "id, dashboard_id, created_by, created_at, kind, snapshot";
+
+/// How many revisions one dashboard keeps.
+///
+/// Metabase keeps 15 (`revision/max-revisions`). egret keeps 20 for a shape reason rather than a
+/// taste one: Metabase writes a revision per small action — add card, move card, rename tab are
+/// each their own API call — so fifteen Metabase revisions can be fifteen minutes of a single
+/// session. egret has exactly one write path, the whole-layout PUT behind the Save button, so one
+/// egret revision is a whole editing session and twenty of them is months of calendar history.
+const MAX_REVISIONS_PER_DASHBOARD: i64 = 20;
 
 /// Map a unique-violation to a Conflict; pass everything else through.
 fn map_conflict_err(e: sqlx::Error) -> BiError {
@@ -499,5 +521,128 @@ impl DashboardRepo {
         }
         tx.commit().await?;
         Ok(Some(copy))
+    }
+
+    /// The dashboard's CURRENT state, shaped exactly like a PUT body so it can be fed straight
+    /// back through the update path. Tab ids become indices — the inverse of `replace_layout`'s
+    /// index→id mapping — and card ids are dropped. That is what makes the value id-free, which
+    /// is what makes revert a re-PUT rather than a graft. `None` if the dashboard is gone.
+    pub async fn snapshot_current(&self, id: Uuid) -> Result<Option<serde_json::Value>, BiError> {
+        let Some(d) = self.get(id).await? else {
+            return Ok(None);
+        };
+        let tabs = self.tabs(id).await?;
+        let cards = self.cards(id).await?;
+        let index_of: std::collections::HashMap<Uuid, usize> =
+            tabs.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
+        Ok(Some(serde_json::json!({
+            "name": d.name,
+            "description": d.description,
+            "parameters": d.parameters,
+            "width": d.width,
+            // `tabs()` orders by (position, id), so enumerate both indexes the cards and
+            // re-normalises position to 0..n-1 — the same thing the frontend's serializeLayout
+            // does, so a snapshot and a hand-made save are the same shape.
+            "tabs": tabs.iter().enumerate()
+                .map(|(i, t)| serde_json::json!({ "name": t.name, "position": i as i32 }))
+                .collect::<Vec<_>>(),
+            "cards": cards.iter().map(|c| serde_json::json!({
+                "chart_id": c.chart_id,
+                "card_type": c.card_type,
+                "grid_col": c.grid_col,
+                "grid_row": c.grid_row,
+                "size_x": c.size_x,
+                "size_y": c.size_y,
+                "options": c.options,
+                "tab_index": c.tab_id.and_then(|t| index_of.get(&t).copied()),
+            })).collect::<Vec<_>>(),
+        })))
+    }
+
+    /// Append a revision and trim the dashboard back to `MAX_REVISIONS_PER_DASHBOARD`, in one
+    /// transaction so a reader can never observe the table over its cap.
+    ///
+    /// `at` overrides the timestamp, and exists for exactly one caller: the 'baseline' revision,
+    /// whose content is the state as of the dashboard's `updated_at`, not as of now. Everything
+    /// else passes `None` and gets the column default.
+    pub async fn insert_revision(
+        &self,
+        dashboard_id: Uuid,
+        created_by: Option<Uuid>,
+        kind: &str,
+        snapshot: &serde_json::Value,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<DashboardRevision, BiError> {
+        let mut tx = self.db.pool.begin().await?;
+        let rev = sqlx::query_as::<_, DashboardRevision>(&format!(
+            "INSERT INTO analytics.dashboard_revisions \
+             (dashboard_id, created_by, kind, snapshot, created_at) \
+             VALUES ($1,$2,$3,$4, COALESCE($5, now())) RETURNING {REV_COLS}"
+        ))
+        .bind(dashboard_id)
+        .bind(created_by)
+        .bind(kind)
+        .bind(snapshot)
+        .bind(at)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM analytics.dashboard_revisions \
+             WHERE dashboard_id = $1 AND id NOT IN ( \
+               SELECT id FROM analytics.dashboard_revisions \
+                WHERE dashboard_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2)",
+        )
+        .bind(dashboard_id)
+        .bind(MAX_REVISIONS_PER_DASHBOARD)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rev)
+    }
+
+    /// A dashboard's revisions, newest first. `limit` is clamped to the retention cap, since
+    /// nothing beyond it can exist.
+    pub async fn list_revisions(
+        &self,
+        dashboard_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<DashboardRevision>, BiError> {
+        let sql = format!(
+            "SELECT {REV_COLS} FROM analytics.dashboard_revisions \
+             WHERE dashboard_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2"
+        );
+        Ok(sqlx::query_as::<_, DashboardRevision>(&sql)
+            .bind(dashboard_id)
+            .bind(limit.clamp(1, MAX_REVISIONS_PER_DASHBOARD))
+            .fetch_all(&self.db.pool)
+            .await?)
+    }
+
+    /// One revision, SCOPED to its dashboard. The scope is the point: an unscoped `WHERE id = $1`
+    /// would let a caller authorised on dashboard B revert B to a snapshot of A, which is the
+    /// nested-resource ownership hole this repo checks for everywhere else.
+    pub async fn revision(
+        &self,
+        dashboard_id: Uuid,
+        revision_id: Uuid,
+    ) -> Result<Option<DashboardRevision>, BiError> {
+        let sql = format!(
+            "SELECT {REV_COLS} FROM analytics.dashboard_revisions WHERE dashboard_id = $1 AND id = $2"
+        );
+        Ok(sqlx::query_as::<_, DashboardRevision>(&sql)
+            .bind(dashboard_id)
+            .bind(revision_id)
+            .fetch_optional(&self.db.pool)
+            .await?)
+    }
+
+    /// How many revisions a dashboard has. Used to decide whether a baseline is still owed.
+    pub async fn revision_count(&self, dashboard_id: Uuid) -> Result<i64, BiError> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM analytics.dashboard_revisions WHERE dashboard_id = $1",
+        )
+        .bind(dashboard_id)
+        .fetch_one(&self.db.pool)
+        .await?)
     }
 }
