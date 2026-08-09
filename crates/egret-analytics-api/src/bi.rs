@@ -386,6 +386,28 @@ pub struct DashboardDetailDto {
     pub cards: Vec<DashboardCardDto>,
 }
 
+/// One entry in a dashboard's History tab.
+///
+/// The `snapshot` is deliberately NOT on this DTO. A 22-card dashboard's PUT body is hundreds of
+/// kilobytes and the cap is twenty of them, so shipping the content would make opening the info
+/// sidebar a multi-megabyte download for a list the user reads as six lines of text. Revert takes
+/// a revision id and does the work server-side, where the snapshot already is.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DashboardRevisionDto {
+    pub id: String,
+    /// `baseline` | `edit` | `revert` — see migration 0107.
+    pub kind: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_by: Option<String>,
+    /// Display name for `created_by`, resolved server-side for the same reason
+    /// `DashboardDetailDto.created_by_name` is.
+    pub created_by_name: Option<String>,
+    /// True for the revision that matches the dashboard's live state — the newest one. The client
+    /// suppresses the revert action on it rather than deriving "newest" from the array order,
+    /// which would silently become wrong the day the endpoint gains a sort parameter.
+    pub is_current: bool,
+}
+
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateDashboard {
     pub name: String,

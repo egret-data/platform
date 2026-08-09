@@ -17,10 +17,11 @@ use crate::dataset::{Dataset, DatasetColumn, Metric};
 pub use egret_analytics_api::bi::{
     AddColumnBody, CardInput, ChartDataResponse, ChartDto, ChartRunResponse, CreateChart,
     CreateDashboard, CreateDataset, CreateFolder, CreateSource, DashboardCardDto,
-    DashboardDetailDto, DashboardSummaryDto, DashboardTabDto, DatasetColumnDto, DatasetDetailDto,
-    DatasetSummaryDto, DatasetUsageDto, FolderDto, MetricBody, MetricDto, NewTabInput,
-    RenameFolder, SaveQuery, SavedQueryDto, SchemaColumn, SearchHit, SetFolder, SnippetBody,
-    SnippetDto, UpdateChart, UpdateColumnBody, UpdateDashboard, UpdateDataset,
+    DashboardDetailDto, DashboardRevisionDto, DashboardSummaryDto, DashboardTabDto,
+    DatasetColumnDto, DatasetDetailDto, DatasetSummaryDto, DatasetUsageDto, FolderDto, MetricBody,
+    MetricDto, NewTabInput, RenameFolder, SaveQuery, SavedQueryDto, SchemaColumn, SearchHit,
+    SetFolder, SnippetBody, SnippetDto, UpdateChart, UpdateColumnBody, UpdateDashboard,
+    UpdateDataset,
 };
 
 pub fn folder_dto(f: crate::folder::Folder) -> FolderDto {
@@ -296,6 +297,21 @@ pub fn dashboard_detail_dto(
         bookmarked,
         tabs: tabs.into_iter().map(dashboard_tab_dto).collect(),
         cards: cards.into_iter().map(dashboard_card_dto).collect(),
+    }
+}
+
+pub fn dashboard_revision_dto(
+    r: crate::dashboard::DashboardRevision,
+    name: Option<String>,
+    is_current: bool,
+) -> DashboardRevisionDto {
+    DashboardRevisionDto {
+        id: r.id.to_string(),
+        kind: r.kind,
+        created_at: r.created_at,
+        created_by: r.created_by.map(|u| u.to_string()),
+        created_by_name: name,
+        is_current,
     }
 }
 
