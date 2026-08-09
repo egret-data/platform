@@ -17,6 +17,9 @@ const dashboard = {
 vi.mock("@/api/dashboards", () => ({
   useDashboard: () => ({ data: dashboard, isLoading: false }),
   useDashboardMutations: () => ({ update: { mutateAsync: vi.fn(), isPending: false } }),
+  // The view-mode "…" menu reads the dashboard's folder from the LIST query, because the detail
+  // DTO carries no folder_id (bi.rs:360-372). An empty list leaves it folderless.
+  useDashboards: () => ({ data: [] }),
 }));
 vi.mock("@/api/charts", async (orig) => ({
   ...(await orig<typeof import("@/api/charts")>()),

@@ -25,6 +25,9 @@ const { updateSpy, dashState } = vi.hoisted(() => {
 vi.mock("@/api/dashboards", () => ({
   useDashboard: () => dashState.current,
   useDashboardMutations: () => ({ update: { mutateAsync: updateSpy, isPending: false } }),
+  // The view-mode "…" menu reads the dashboard's folder from the LIST query, because the detail
+  // DTO carries no folder_id (bi.rs:360-372). An empty list leaves it folderless.
+  useDashboards: () => ({ data: [] }),
 }));
 
 beforeEach(() => { dashState.current = dashState.loaded; });
