@@ -25,6 +25,7 @@ import { useIsNarrowViewport } from "@/lib/useIsNarrowViewport";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
 import { DashboardInfoSidebar } from "@/components/chart/dashboard/DashboardInfoSidebar";
 import { CardFilterMapOverlay } from "@/components/chart/dashboard/CardFilterMapOverlay";
+import { cardMapState, columnsForParam } from "@/components/chart/dashboard/card-map-state";
 import { isDraftDirty, type DashboardDraft } from "@/components/chart/dashboard/edit-draft";
 import { REMOVED_CARD, REPLACED_CARD, deletedTab, undoableDraftEdit } from "@/components/chart/dashboard/draft-undo";
 import { DiscardChangesDialog } from "@/components/chart/dashboard/DiscardChangesDialog";
@@ -491,6 +492,7 @@ export default function DashboardView() {
   }
 
   const activeParamId = editing && editPanel?.kind === "filter" ? editPanel.paramId : null;
+  const activeParam = activeParamId ? parameters.find((p) => p.id === activeParamId) : undefined;
   // Per-card column lists for the filter value-source "card" picker (label + selectable columns).
   const cardColumns = cards
     .filter((c) => c.card_type === "chart")
@@ -744,13 +746,17 @@ export default function DashboardView() {
                     onEditText={editing && (c.card_type === "text" || c.card_type === "heading") ? (t) => { updateCardOptions(c.id, { text: t }); if (newCardId === c.id) setNewCardId(null); } : undefined}
                     autoFocusText={c.id === newCardId} />
                 )}
-                {activeParamId && c.card_type === "chart" && baseChart && (
+                {activeParamId && activeParam && (
                   <CardFilterMapOverlay
-                    columns={
-                      parameters.find((pp) => pp.id === activeParamId)?.type === "temporal_unit"
-                        ? Object.keys(baseChart.params.spec.temporal_units ?? {})
-                        : [...baseChart.params.spec.dimensions, ...baseChart.params.spec.columns]
-                    }
+                    state={cardMapState({
+                      cardType: c.card_type,
+                      paramType: activeParam.type,
+                      columns: baseChart ? columnsForParam(baseChart.params.spec, activeParam.type) : [],
+                      rows: c.size_y,
+                      chartMissing: c.card_type === "chart" && !baseChart,
+                      // egret filters are dashboard-level and have no owning tab; W7 supplies this.
+                      filterTabKey: undefined,
+                    })}
                     value={mappings[activeParamId] ?? ""}
                     onChange={(col) => updateCardOptions(c.id, { paramMappings: { ...mappings, [activeParamId]: col } })}
                   />

@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import DashboardView from "../DashboardView";
+import { HINT_HEADING_CARD } from "@/components/chart/dashboard/card-map-state";
 
 vi.mock("sonner", () => ({ toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn() }) }));
 import { toast } from "sonner";
@@ -107,6 +108,20 @@ describe("DashboardView discard confirmation", () => {
     await user.click(await screen.findByRole("switch", { name: "Full width" }));
     fireEvent.click(bannerCancel());
     expect(screen.getByRole("alertdialog")).toBeTruthy();
+  });
+});
+
+describe("the filter-mapping overlay reaches every card kind", () => {
+  it("explains itself on a heading card, which used to render no overlay at all", () => {
+    // The old JSX condition was `activeParamId && c.card_type === "chart" && baseChart`, so every
+    // non-chart card beside a chart got no explanation whatsoever. The guard now lives inside
+    // `cardMapState`, which returns `{ kind: "none" }` for the cards that really have nothing to
+    // say. This test exists specifically because restoring that JSX guard breaks NOTHING else in
+    // the route suite — the plan predicted that, and it was true when checked.
+    renderView();
+    enterEdit();
+    fireEvent.click(screen.getByLabelText("add filter"));
+    expect(screen.getAllByText(HINT_HEADING_CARD).length).toBe(2);
   });
 });
 
