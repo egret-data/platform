@@ -177,7 +177,13 @@ export function useDatasetMutations(ws: string, id: string) {
     deleteMetric: useMutation({ mutationFn: (metricId: string) => datasetsDsDeleteMetric(ws, id, metricId), onSuccess: inval }),
     addColumn: useMutation({ mutationFn: (b: { column_name: string; expression: string; verbose_name?: string; description?: string }) => datasetsDsAddColumn(ws, id, b), onSuccess: inval }),
     updateColumn: useMutation({
-      mutationFn: (a: { name: string; body: ColumnUpdate }) => datasetsDsUpdateColumn(ws, id, a.name, a.body),
+      // Regenerating the client for the dashboard-revision endpoints also picked up migration
+      // 0104's semantic_type allowlist, which orval now emits as a nullable enum. `ColumnUpdate`
+      // keeps `string` — the FE-local domain types are deliberately looser than the spec here
+      // (see this file's header) — so the widening is confined to this one boundary cast rather
+      // than cascading through DatasetColumn and ColumnsTab.
+      mutationFn: (a: { name: string; body: ColumnUpdate }) =>
+        datasetsDsUpdateColumn(ws, id, a.name, a.body as Parameters<typeof datasetsDsUpdateColumn>[3]),
       onMutate: (a) => optimistic((d) => ({ ...d, columns: d.columns.map((c) => (c.column_name === a.name ? { ...c, ...a.body } : c)) })),
       onError: (_e, _v, ctx) => rollback(ctx as DetailEnvelope | undefined),
       onSettled: inval,

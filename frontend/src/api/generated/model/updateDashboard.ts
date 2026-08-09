@@ -8,6 +8,12 @@
 import type { CardInput } from './cardInput';
 import type { NewTabInput } from './newTabInput';
 
+/**
+ * The dashboard PUT body — and, byte for byte, one stored revision (migration 0107).
+ * `Serialize` is derived alongside `Deserialize` so the snapshot is produced from this exact
+ * type rather than hand-built JSON that could drift from it; a compile error is how a new field
+ * announces that revisions must carry it too.
+ */
 export interface UpdateDashboard {
   name: string;
   description?: string;

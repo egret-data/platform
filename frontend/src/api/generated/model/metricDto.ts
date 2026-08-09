@@ -15,4 +15,10 @@ export interface MetricDto {
   verbose_name: string;
   description: string;
   ordinal: number;
+  /** Display format (ColumnFormat JSON); empty = default. */
+  format: string;
+  /** Marked as a trusted/certified metric. */
+  certified: boolean;
+  certified_by: string;
+  certification_details: string;
 }

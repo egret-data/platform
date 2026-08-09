@@ -154,7 +154,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
 
     // metadata update + guards
     f.repo
-        .update(d.id, "Ops v2", "", &serde_json::json!([]), "full")
+        .update(d.id, "Ops v2", "", &serde_json::json!([]), "full", None)
         .await
         .unwrap();
     assert_eq!(f.repo.get(d.id).await.unwrap().unwrap().name, "Ops v2");
@@ -164,7 +164,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
     // parameters round-trip
     let dash_params = serde_json::json!([{ "id": "p1", "name": "Region", "slug": "region", "type": "text", "operator": "is" }]);
     f.repo
-        .update(d.id, "Ops v2", "", &dash_params, "full")
+        .update(d.id, "Ops v2", "", &dash_params, "full", None)
         .await
         .unwrap();
     assert_eq!(
@@ -333,7 +333,7 @@ async fn new_dashboards_default_to_fixed_and_a_stored_width_survives() {
     // NOT happen: SET DEFAULT governs future inserts and nothing else, so a stored value always
     // wins over it.
     f.repo
-        .update(d.id, "Fresh", "", &serde_json::json!([]), "full")
+        .update(d.id, "Fresh", "", &serde_json::json!([]), "full", None)
         .await
         .unwrap();
     let reread = f.repo.get(d.id).await.unwrap().unwrap();

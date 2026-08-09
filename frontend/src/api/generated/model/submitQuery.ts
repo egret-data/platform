@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { QueryParam } from './queryParam';
 
 export interface SubmitQuery {
   database_id: string;
@@ -14,4 +15,9 @@ export interface SubmitQuery {
      * @nullable
      */
   limit?: number | null;
+  /**
+     * Template parameters substituted into `{{name}}` placeholders before the
+     * query is sent to the engine.
+     */
+  params?: QueryParam[];
 }

@@ -20,7 +20,9 @@ mod typegen;
 
 pub use catalog_tags::{resource_tags_router, CatalogTagAssignment, CatalogTagRepo};
 pub use chart::{Chart, ChartRepo};
-pub use dashboard::{Dashboard, DashboardCard, DashboardRepo, DashboardTab, NewCard, NewTab};
+pub use dashboard::{
+    Dashboard, DashboardCard, DashboardRepo, DashboardRevision, DashboardTab, NewCard, NewTab,
+};
 pub use dataset::{Dataset, DatasetColumn, DatasetRepo, Metric, NewColumn, SourceSpec};
 pub use error::{BiApiError, BiError};
 pub use expr::{validate_expression, DescribedExpr};

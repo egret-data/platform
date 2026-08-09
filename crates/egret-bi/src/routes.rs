@@ -23,10 +23,10 @@ use crate::expr::validate_expression;
 use crate::model::{
     AddColumnBody, CardInput, ChartDataBody, ChartDataResponse, ChartDto, ChartRunResponse,
     CreateChart, CreateDashboard, CreateDataset, CreateFolder, CreateSource, DashboardCardDto,
-    DashboardDetailDto, DashboardSummaryDto, DashboardTabDto, DatasetColumnDto, DatasetDetailDto,
-    DatasetSummaryDto, FolderDto, MetricBody, MetricDto, NewTabInput, RenameFolder, SaveQuery,
-    SavedQueryDto, SchemaColumn, SetFolder, UpdateChart, UpdateColumnBody, UpdateDashboard,
-    UpdateDataset,
+    DashboardDetailDto, DashboardRevisionDto, DashboardSummaryDto, DashboardTabDto,
+    DatasetColumnDto, DatasetDetailDto, DatasetSummaryDto, FolderDto, MetricBody, MetricDto,
+    NewTabInput, RenameFolder, SaveQuery, SavedQueryDto, SchemaColumn, SetFolder, UpdateChart,
+    UpdateColumnBody, UpdateDashboard, UpdateDataset,
 };
 use crate::saved::SavedQueryRepo;
 use crate::schema::SchemaService;
@@ -2359,6 +2359,14 @@ pub fn dashboard_router() -> Router<BiState> {
             "/ws/{workspace}/dashboards/{id}/cards/{card_id}/data",
             post(db_card_run),
         )
+        .route(
+            "/ws/{workspace}/dashboards/{id}/revisions",
+            get(db_revisions),
+        )
+        .route(
+            "/ws/{workspace}/dashboards/{id}/revisions/{revision_id}/revert",
+            post(db_revision_revert),
+        )
 }
 
 /// Optional body for the card-data endpoint: resolved dashboard-parameter filters
@@ -2672,6 +2680,108 @@ async fn db_get(
     ))
 }
 
+/// Best-effort revision write. A failure here must NOT fail the request: the dashboard has already
+/// been updated, so a 500 would tell the client the save was lost when it was not. Same stance as
+/// the audit sink — log and continue.
+async fn capture_revision(
+    st: &BiState,
+    id: Uuid,
+    actor: Option<Uuid>,
+    kind: &str,
+    snapshot: &serde_json::Value,
+    at: Option<chrono::DateTime<chrono::Utc>>,
+) {
+    if let Err(e) = st
+        .dashboards
+        .insert_revision(id, actor, kind, snapshot, at)
+        .await
+    {
+        tracing::warn!(dashboard = %id, kind, error = %e, "failed to record dashboard revision");
+    }
+}
+
+/// The state a dashboard is about to leave, for dashboards that have no history yet.
+///
+/// READS ONLY. The value is held in memory and inserted by `apply_dashboard_update` after the
+/// write lands: snapshotting afterwards would capture the NEW state, and inserting beforehand
+/// would leave a restore point for an edit that then got rejected. Without this, the first edit
+/// after this feature ships is the one edit that cannot be undone — which is the edit a user is
+/// most likely to want back.
+///
+/// Attributed to whoever last touched the dashboard and stamped with that moment, not with now(),
+/// because that is when the state being captured was actually written.
+async fn pending_baseline(
+    st: &BiState,
+    id: Uuid,
+) -> Option<(
+    serde_json::Value,
+    Option<Uuid>,
+    chrono::DateTime<chrono::Utc>,
+)> {
+    if st.dashboards.revision_count(id).await.ok()? != 0 {
+        return None;
+    }
+    let d = st.dashboards.get(id).await.ok()??;
+    let snap = st.dashboards.snapshot_current(id).await.ok()??;
+    Some((snap, d.updated_by.or(d.created_by), d.updated_at))
+}
+
+/// The one write path a dashboard layout takes. `db_update` and `db_revision_revert` both go
+/// through it, so a revert can never take a different validation path than the save it undoes.
+///
+/// Authorization is the CALLER's job — the two handlers require different permissions on different
+/// objects and both resolve the share before calling here.
+async fn apply_dashboard_update(
+    st: &BiState,
+    ctx: &egret_core::context::WorkspaceContext,
+    id: Uuid,
+    b: UpdateDashboard,
+    kind: &str,
+) -> Result<DashboardDetailDto, BiApiError> {
+    require_cards_in_ws(st, ctx, &b.cards).await?;
+    crate::model::validate_layout(&b.tabs, &b.cards).map_err(BiApiError::from)?;
+    if b.width != "fixed" && b.width != "full" {
+        return Err(
+            egret_core::Error::InvalidInput("width must be 'fixed' or 'full'".into()).into(),
+        );
+    }
+    // Held, not written — see pending_baseline.
+    let baseline = pending_baseline(st, id).await;
+    // `UpdateDashboard` is a plain struct of owned values, so this cannot fail; on the impossible
+    // branch we keep the save working and lose one history entry rather than 500-ing.
+    let snapshot = serde_json::to_value(&b).ok();
+
+    st.dashboards
+        .update(
+            id,
+            &b.name,
+            &b.description,
+            &b.parameters,
+            &b.width,
+            Some(ctx.principal.user_id.0),
+        )
+        .await
+        .map_err(BiApiError::from)?;
+    let tabs: Vec<crate::dashboard::NewTab> = b.tabs.into_iter().map(Into::into).collect();
+    let cards: Vec<crate::dashboard::NewCard> = b.cards.into_iter().map(Into::into).collect();
+    st.dashboards
+        .replace_layout(id, &tabs, &cards)
+        .await
+        .map_err(BiApiError::from)?;
+
+    // EVERYTHING THAT CAN REJECT THIS REQUEST HAS NOW RUN. Capturing any earlier would record an
+    // edit that never happened — a 403 from the caller's authz, a 404 from require_cards_in_ws, a
+    // 400 from validate_layout or the width check, or a failed replace_layout. From here the only
+    // failure is a crash, which loses one entry: under-recording, the safe direction.
+    if let Some((snap, actor, at)) = baseline {
+        capture_revision(st, id, actor, "baseline", &snap, Some(at)).await;
+    }
+    if let Some(snap) = snapshot {
+        capture_revision(st, id, Some(ctx.principal.user_id.0), kind, &snap, None).await;
+    }
+    load_dashboard(st, id, ctx.principal.user_id.0).await
+}
+
 #[utoipa::path(
     put,
     path = "/api/ws/{workspace}/dashboards/{id}",
@@ -2700,25 +2810,123 @@ async fn db_update(
     egret_core::authz::require_object(&*st.pdp, &ctx, DB_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_cards_in_ws(&st, &ctx, &b.cards).await?;
-    crate::model::validate_layout(&b.tabs, &b.cards).map_err(BiApiError::from)?;
-    if b.width != "fixed" && b.width != "full" {
-        return Err(
-            egret_core::Error::InvalidInput("width must be 'fixed' or 'full'".into()).into(),
-        );
-    }
-    st.dashboards
-        .update(id, &b.name, &b.description, &b.parameters, &b.width)
-        .await
-        .map_err(BiApiError::from)?;
-    let tabs: Vec<crate::dashboard::NewTab> = b.tabs.into_iter().map(Into::into).collect();
-    let cards: Vec<crate::dashboard::NewCard> = b.cards.into_iter().map(Into::into).collect();
-    st.dashboards
-        .replace_layout(id, &tabs, &cards)
-        .await
-        .map_err(BiApiError::from)?;
     Ok(Json(
-        load_dashboard(&st, id, ctx.principal.user_id.0).await?,
+        apply_dashboard_update(&st, &ctx, id, b, "edit").await?,
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/dashboards/{id}/revisions",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    responses(
+        (status = 200, description = "Revision history, newest first (at most 20 — see migration 0107)", body = Vec<DashboardRevisionDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:read permission", body = ErrorBody),
+        (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+/// Reading history needs only `dashboard:read` — it discloses who edited the dashboard and when,
+/// which anyone who can read the dashboard can already see in the info sidebar. Reverting needs
+/// `dashboard:manage`, because it writes.
+async fn db_revisions(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<Vec<crate::model::DashboardRevisionDto>>, BiApiError> {
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_READ, obj)
+        .await
+        .map_err(BiApiError::from)?;
+    let revs = st
+        .dashboards
+        .list_revisions(id, 20)
+        .await
+        .map_err(BiApiError::from)?;
+    // One users lookup for the whole page rather than one per row: at most twenty rows and
+    // usually one or two distinct authors.
+    let mut names: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
+    for r in &revs {
+        if let Some(u) = r.created_by {
+            if let std::collections::hash_map::Entry::Vacant(e) = names.entry(u) {
+                if let Ok(Some(user)) = st.users.find_by_id(egret_core::UserId(u)).await {
+                    let label = if user.name.trim().is_empty() {
+                        user.email.clone()
+                    } else {
+                        user.name.clone()
+                    };
+                    e.insert(label);
+                }
+            }
+        }
+    }
+    Ok(Json(
+        revs.into_iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let name = r.created_by.and_then(|u| names.get(&u).cloned());
+                crate::model::dashboard_revision_dto(r, name, i == 0)
+            })
+            .collect(),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/dashboards/{id}/revisions/{revision_id}/revert",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+        ("revision_id" = Uuid, Path, description = "Revision to restore (must belong to this dashboard)"),
+    ),
+    responses(
+        (status = 200, description = "Dashboard restored to the revision; the restored state is itself recorded as a new revision", body = DashboardDetailDto),
+        (status = 400, description = "The stored snapshot is not a valid dashboard layout", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission", body = ErrorBody),
+        (status = 404, description = "No such dashboard or revision, or a chart the revision references no longer exists in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+/// Restore an earlier revision by replaying it through the ordinary update path.
+///
+/// The snapshot is id-free by construction (migration 0107), so nothing is remapped — this is NOT
+/// `DashboardRepo::duplicate`, which needs a tab_map only because it copies rows. Revalidation is
+/// not optional: a chart a revision references may have been deleted since, and
+/// `require_cards_in_ws` inside `apply_dashboard_update` turns that into a 404 rather than a
+/// dangling card.
+///
+/// The revert is itself recorded, as kind 'revert', so undoing a revert is an ordinary revert.
+async fn db_revision_revert(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id, revision_id)): Path<(String, Uuid, Uuid)>,
+) -> Result<Json<DashboardDetailDto>, BiApiError> {
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_MANAGE, obj)
+        .await
+        .map_err(BiApiError::from)?;
+    // Scoped on the dashboard, so a revision of ANOTHER dashboard is a 404 and not a cross-object
+    // restore, even for a caller who may manage both.
+    let rev = st
+        .dashboards
+        .revision(id, revision_id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("revision".into()))?;
+    let body: UpdateDashboard = serde_json::from_value(rev.snapshot).map_err(|e| {
+        BiApiError::from(egret_core::Error::InvalidInput(format!(
+            "revision snapshot is not a valid dashboard layout: {e}"
+        )))
+    })?;
+    Ok(Json(
+        apply_dashboard_update(&st, &ctx, id, body, "revert").await?,
     ))
 }
 
@@ -2936,8 +3144,13 @@ async fn load_dashboard(
         .is_bookmarked(user, id)
         .await
         .map_err(BiApiError::from)?;
+    let names = st
+        .dashboards
+        .attribution_names(id)
+        .await
+        .map_err(BiApiError::from)?;
     Ok(crate::model::dashboard_detail_dto(
-        d, tabs, cards, bookmarked,
+        d, tabs, cards, bookmarked, names,
     ))
 }
 
@@ -3281,6 +3494,8 @@ pub struct BiSqlLabApi;
         db_bookmark_remove,
         db_set_folder,
         db_card_run,
+        db_revisions,
+        db_revision_revert,
     ),
     components(schemas(
         CreateDashboard,
@@ -3289,6 +3504,7 @@ pub struct BiSqlLabApi;
         DashboardDetailDto,
         DashboardTabDto,
         DashboardCardDto,
+        DashboardRevisionDto,
         CardInput,
         NewTabInput,
         SetFolder,

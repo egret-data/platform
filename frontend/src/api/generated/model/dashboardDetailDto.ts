@@ -15,7 +15,34 @@ export interface DashboardDetailDto {
   parameters: unknown;
   /** @nullable */
   created_by?: string | null;
+  /**
+     * Display name for `created_by` — the profile name, else the email. Resolved server-side:
+     * the endpoints that can turn a user id into a name are admin-gated, so the browser cannot
+     * do it for an ordinary workspace editor. Same shape and same reason as
+     * `MemberDto.principal_name`.
+     * @nullable
+     */
+  created_by_name?: string | null;
+  /**
+     * NULL for dashboards predating migration 0106, which does not invent a creation date.
+     * @nullable
+     */
+  created_at?: string | null;
+  /** @nullable */
+  updated_by?: string | null;
+  /**
+     * Display name for `updated_by`, resolved the same way as `created_by_name`.
+     * @nullable
+     */
+  updated_by_name?: string | null;
   updated_at: string;
+  /**
+     * The folder this dashboard is filed under; NULL = Uncategorized. Present on
+     * `DashboardSummaryDto` since folders shipped, and absent here until now, which is why the
+     * info sidebar had no folder to name.
+     * @nullable
+     */
+  folder_id?: string | null;
   width: string;
   /** @nullable */
   deleted_at?: string | null;

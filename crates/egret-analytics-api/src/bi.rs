@@ -364,12 +364,48 @@ pub struct DashboardDetailDto {
     pub description: String,
     pub parameters: serde_json::Value,
     pub created_by: Option<String>,
+    /// Display name for `created_by` — the profile name, else the email. Resolved server-side:
+    /// the endpoints that can turn a user id into a name are admin-gated, so the browser cannot
+    /// do it for an ordinary workspace editor. Same shape and same reason as
+    /// `MemberDto.principal_name`.
+    pub created_by_name: Option<String>,
+    /// NULL for dashboards predating migration 0106, which does not invent a creation date.
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub updated_by: Option<String>,
+    /// Display name for `updated_by`, resolved the same way as `created_by_name`.
+    pub updated_by_name: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// The folder this dashboard is filed under; NULL = Uncategorized. Present on
+    /// `DashboardSummaryDto` since folders shipped, and absent here until now, which is why the
+    /// info sidebar had no folder to name.
+    pub folder_id: Option<String>,
     pub width: String,
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
     pub bookmarked: bool,
     pub tabs: Vec<DashboardTabDto>,
     pub cards: Vec<DashboardCardDto>,
+}
+
+/// One entry in a dashboard's History tab.
+///
+/// The `snapshot` is deliberately NOT on this DTO. A 22-card dashboard's PUT body is hundreds of
+/// kilobytes and the cap is twenty of them, so shipping the content would make opening the info
+/// sidebar a multi-megabyte download for a list the user reads as six lines of text. Revert takes
+/// a revision id and does the work server-side, where the snapshot already is.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DashboardRevisionDto {
+    pub id: String,
+    /// `baseline` | `edit` | `revert` — see migration 0107.
+    pub kind: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_by: Option<String>,
+    /// Display name for `created_by`, resolved server-side for the same reason
+    /// `DashboardDetailDto.created_by_name` is.
+    pub created_by_name: Option<String>,
+    /// True for the revision that matches the dashboard's live state — the newest one. The client
+    /// suppresses the revert action on it rather than deriving "newest" from the array order,
+    /// which would silently become wrong the day the endpoint gains a sort parameter.
+    pub is_current: bool,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -380,7 +416,7 @@ pub struct CreateDashboard {
 }
 
 /// Card as supplied by the client when saving a layout.
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CardInput {
     #[serde(default)]
     pub chart_id: Option<Uuid>,
@@ -396,7 +432,7 @@ pub struct CardInput {
     pub tab_index: Option<usize>,
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct NewTabInput {
     pub name: String,
     pub position: i32,
@@ -418,7 +454,11 @@ fn default_width() -> String {
     "fixed".into()
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+/// The dashboard PUT body — and, byte for byte, one stored revision (migration 0107).
+/// `Serialize` is derived alongside `Deserialize` so the snapshot is produced from this exact
+/// type rather than hand-built JSON that could drift from it; a compile error is how a new field
+/// announces that revisions must carry it too.
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct UpdateDashboard {
     pub name: String,
     #[serde(default)]
@@ -714,5 +754,29 @@ mod tests {
             serde_json::to_value(&c).unwrap(),
             serde_json::json!({"name":"id","type":"bigint"})
         );
+    }
+
+    #[test]
+    fn update_dashboard_round_trips_through_json_unchanged() {
+        // A revision is stored by serialising this DTO and restored by deserialising it. If the
+        // two directions disagree about ANY field, a revert silently restores a different
+        // dashboard than the one the user picked — with no error at any layer.
+        let body = serde_json::json!({
+            "name": "Ops",
+            "description": "d",
+            "parameters": [{ "id": "p1", "name": "Cat", "slug": "cat", "type": "category" }],
+            "width": "fixed",
+            "tabs": [{ "name": "A", "position": 0 }],
+            "cards": [{
+                "chart_id": "6f9619ff-8b86-d011-b42d-00c04fc964ff",
+                "card_type": "chart",
+                "grid_col": 3, "grid_row": 1, "size_x": 6, "size_y": 4,
+                "options": { "vizOverride": { "cartesian.stack": true } },
+                "tab_index": 0
+            }]
+        });
+        let dto: super::UpdateDashboard =
+            serde_json::from_value(body.clone()).expect("deserialises");
+        assert_eq!(serde_json::to_value(&dto).unwrap(), body);
     }
 }

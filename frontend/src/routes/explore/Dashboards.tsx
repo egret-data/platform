@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Search, Star, Trash2, FolderPlus, ListChecks } from "lucide-react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { useDashboards, useDashboardMutations, type DashboardSummary } from "@/api/dashboards";
 import { Button } from "@/components/ui/button";
@@ -34,8 +34,14 @@ export default function Dashboards() {
   const setFolder = useSetFolder(ws, "dashboards");
   const { create: createFolder, rename: renameFolder, remove: removeFolder } = useFolderMutations(ws, "dashboards");
   const collapse = useCollapsed(`folders:${ws}:dashboards`);
+  const [searchParams] = useSearchParams();
+  const focusFolder = searchParams.get("folder");
+  // The info sidebar's "Saved in" link lands here. Reveal that section once on arrival; the
+  // visitor's own collapse choices afterwards are theirs and are not re-applied.
+  useEffect(() => { if (focusFolder) collapse.expand(focusFolder); }, [focusFolder, collapse]);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
   const [onlyBookmarked, setOnlyBookmarked] = useState(false);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
@@ -70,7 +76,12 @@ export default function Dashboards() {
   }
   async function onCreate() {
     if (!name.trim()) { toast.error("Name required"); return; }
-    try { const d = await create.mutateAsync({ name: name.trim() }); setOpen(false); setName(""); nav(`/explore/${ws}/dashboards/${d.id}`); }
+    // The description key is OMITTED when blank rather than sent as "". The backend column is
+    // nullable and the info sidebar keys its placeholder on there being no description; a blank
+    // string would persist an empty description block instead.
+    const desc = description.trim();
+    const body = desc ? { name: name.trim(), description: desc } : { name: name.trim() };
+    try { const d = await create.mutateAsync(body); setOpen(false); setName(""); setDescription(""); nav(`/explore/${ws}/dashboards/${d.id}`); }
     catch (e) { toast.error(String(e)); }
   }
   const guard = (p: Promise<unknown>) => p.catch((e) => toast.error(String(e)));
@@ -162,9 +173,21 @@ export default function Dashboards() {
             <DialogTrigger asChild><Button>+ Dashboard</Button></DialogTrigger>
             <DialogContent>
               <DialogHeader><DialogTitle>New dashboard</DialogTitle></DialogHeader>
-              <div className="flex gap-2 py-2">
+              <div className="flex flex-col gap-3 py-2">
                 <Input autoFocus placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") onCreate(); }} />
-                <Button onClick={onCreate} disabled={create.isPending}>Create</Button>
+                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                  Description
+                  <textarea
+                    aria-label="Description"
+                    placeholder="It's optional but oh, so helpful"
+                    className="h-20 w-full resize-none rounded-md border bg-background px-3 py-2 text-sm text-foreground"
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                  />
+                </label>
+                <div className="flex justify-end">
+                  <Button onClick={onCreate} disabled={create.isPending}>Create</Button>
+                </div>
               </div>
             </DialogContent>
           </Dialog>
