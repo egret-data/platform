@@ -3,10 +3,15 @@
  * IS THE `.xlsx` WRITER IN ITS OWN CHUNK, AND IN A CHUNK AT ALL?
  *
  * `export-xlsx.ts` reaches `write-excel-file` through `await import(...)`, so Rollup should emit it
- * as a separate chunk that no dashboard fetches until someone picks `.xlsx`. One static import
- * anywhere — an editor auto-import, a "tidy-up" of the dynamic one, a type import written without
- * `import type` — collapses that back into the entry bundle, and NOTHING ELSE IN THIS REPO WOULD
- * NOTICE:
+ * as a separate chunk that no dashboard fetches until someone picks `.xlsx`. One static import that
+ * is USED — an editor auto-import, a "tidy-up" of the dynamic one — collapses that back into the
+ * entry bundle, and NOTHING ELSE IN THIS REPO WOULD NOTICE:
+ *
+ * (Measured while proving this check can fail: a BARE `import "write-excel-file/browser"` does NOT
+ * trip it, because the package declares `sideEffects: false` and Rollup deletes the statement
+ * outright. Neither would a type-only import. The failure this guards against is a static import
+ * whose binding is called — which is exactly the shape a "tidy-up" of the dynamic import takes, and
+ * which moved the entry chunk from 3,562,208 to 3,634,579 bytes.)
  *
  *   NEITHER VITEST NOR `vite dev` TREE-SHAKES OR CODE-SPLITS. Every unit test passes with the
  *   library eager, lazy, or duplicated. The property this asserts exists only in a production
@@ -26,8 +31,10 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { entryChunkName } from "./dist-entry.mjs";
 
-const ASSETS = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "assets");
+const DIST = join(dirname(fileURLToPath(import.meta.url)), "..", "dist");
+const ASSETS = join(DIST, "assets");
 const MARKER = "xl/worksheets/sheet";
 
 function die(message) {
@@ -42,13 +49,16 @@ try {
   die(`no ${ASSETS} — run \`npm run build\` first. This check reads the production bundle; there is nothing to assert without one.`);
 }
 
-const entries = files.filter((f) => /^index-.*\.js$/.test(f));
-if (entries.length === 0) die("no dist/assets/index-*.js — run `npm run build` first.");
-if (entries.length > 1) {
-  // A stale bundle beside a fresh one has produced a wrong conclusion twice in this programme.
-  die(`${entries.length} candidate entry bundles (${entries.join(", ")}) — \`dist/\` is stale. Remove it and rebuild.`);
+// The entry is whatever `dist/index.html` loads, NOT whatever is called `index-*.js`. The chunk
+// this script exists to find is itself named `index-<hash>.js`, because Rollup names a lazy chunk
+// after its module file and write-excel-file's browser build is `browser/index.js`.
+let entry;
+try {
+  entry = entryChunkName(DIST);
+} catch (e) {
+  die(e.message);
 }
-const entry = entries[0];
+if (!files.includes(entry)) die(`dist/index.html loads /assets/${entry}, which is not in ${ASSETS} — \`dist/\` is inconsistent. Remove it and rebuild.`);
 
 const carriers = files.filter((f) => readFileSync(join(ASSETS, f), "utf8").includes(MARKER));
 const size = (f) => statSync(join(ASSETS, f)).size;

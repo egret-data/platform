@@ -28,11 +28,13 @@
  * property names on objects the layout writes and reads across module boundaries, so they survive
  * verbatim. Measured on this repo: 0 hits each without the registration, 2 hits each with it.
  */
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { entryChunkName } from "./dist-entry.mjs";
 
-const ASSETS = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "assets");
+const DIST = join(dirname(fileURLToPath(import.meta.url)), "..", "dist");
+const ASSETS = join(DIST, "assets");
 
 /** Property names, not local bindings — see this file's header for why the obvious symbols cannot
  *  be used. */
@@ -43,29 +45,33 @@ function die(message) {
   process.exit(1);
 }
 
-let entries;
+// The entry is whatever `dist/index.html` loads. This used to be `/^index-.*\.js$/`, which stopped
+// meaning "entry" the moment a lazy chunk was split out of a dependency whose module file is also
+// called `index.js` — write-excel-file's is, so that regex found two candidates and this guard
+// died on a freshly-built bundle. See `dist-entry.mjs`.
+let entry;
 try {
-  entries = readdirSync(ASSETS).filter((f) => /^index-.*\.js$/.test(f));
-} catch {
-  die(`no ${ASSETS} — run \`npm run build\` first. This check reads the production bundle; there is nothing to assert without one.`);
-}
-if (entries.length === 0) die(`no dist/assets/index-*.js — run \`npm run build\` first.`);
-if (entries.length > 1) {
-  // A stale bundle beside a fresh one has produced a wrong conclusion twice in this programme.
-  die(`${entries.length} candidate entry bundles (${entries.join(", ")}) — \`dist/\` is stale. Remove it and rebuild.`);
+  entry = entryChunkName(DIST);
+} catch (e) {
+  die(e.message);
 }
 
-const source = readFileSync(join(ASSETS, entries[0]), "utf8");
+let source;
+try {
+  source = readFileSync(join(ASSETS, entry), "utf8");
+} catch {
+  die(`dist/index.html loads /assets/${entry}, which is not in ${ASSETS} — \`dist/\` is inconsistent. Remove it and rebuild.`);
+}
 const counts = Object.fromEntries(REQUIRED.map((s) => [s, source.split(s).length - 1]));
 const missing = REQUIRED.filter((s) => counts[s] === 0);
 
 if (missing.length > 0) {
   die(
-    `${entries[0]} contains no LabelManager: ${missing.join(", ")} absent `
+    `${entry} contains no LabelManager: ${missing.join(", ")} absent `
     + `(${REQUIRED.map((s) => `${s}=${counts[s]}`).join(", ")}).\n`
     + `    Every \`labelLayout\` option in src/components/chart/echarts/options/ is dead in this build.\n`
     + `    Check that src/components/chart/echarts/register.ts still passes LabelLayout to use().`,
   );
 }
 
-console.log(`  ✓ ${entries[0]} carries the label-overlap backstop (${REQUIRED.map((s) => `${s}×${counts[s]}`).join(", ")})`);
+console.log(`  ✓ ${entry} carries the label-overlap backstop (${REQUIRED.map((s) => `${s}×${counts[s]}`).join(", ")})`);
