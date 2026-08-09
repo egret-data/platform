@@ -45,6 +45,10 @@ describe("paramToFilters", () => {
   it("id → eq", () => {
     expect(paramToFilters(p({ type: "id", operator: "is" }), 42, "id")).toEqual([{ col: "id", op: "eq", value: 42 }]);
   });
+  it("id: one value stays eq, several become in", () => {
+    expect(paramToFilters(p({ type: "id", operator: "is" }), ["7"], "id")).toEqual([{ col: "id", op: "eq", value: "7" }]);
+    expect(paramToFilters(p({ type: "id", operator: "is" }), ["7", "9"], "id")).toEqual([{ col: "id", op: "in", value: ["7", "9"] }]);
+  });
   it("blank / empty values produce no filters", () => {
     expect(paramToFilters(p({}), "", "region")).toEqual([]);
     expect(paramToFilters(p({ type: "category" }), [], "region")).toEqual([]);

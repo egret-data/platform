@@ -219,8 +219,18 @@ export function paramToFilters(
       return [mkf("ge", iso(start)), mkf("le", iso(end))];
     }
 
-    case "id":
-      return isBlank(value) ? [] : [mkf("eq", value)];
+    case "id": {
+      // A single id keeps emitting `eq` — that is what every saved dashboard's id filter does and
+      // what `params.test.ts` pins. Only an author who turned "People can pick" to Multiple values
+      // can produce more than one, and that becomes `in`.
+      const arr = Array.isArray(value)
+        ? value.filter((v) => !isBlank(v))
+        : isBlank(value)
+          ? []
+          : [value];
+      if (arr.length === 0) return [];
+      return arr.length === 1 ? [mkf("eq", arr[0])] : [mkf("in", arr)];
+    }
 
     case "category": {
       const arr = Array.isArray(value)

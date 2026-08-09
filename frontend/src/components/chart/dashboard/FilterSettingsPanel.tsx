@@ -1,6 +1,7 @@
 import { Checkbox } from "@/components/ui/checkbox";
 import type { DashboardParameter, ParamType, ParamOperator, ParamWidget } from "@/api/dashboards";
 import { OPERATORS } from "./ParameterEditor";
+import { canRenderMultiValue, isMultiValue, isSingleOrMultiSelectable } from "./multiSelect";
 
 interface Props {
   param: DashboardParameter;
@@ -94,6 +95,24 @@ export function FilterSettingsPanel({ param, allParameters, cardColumns = [], on
               </select>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Metabase gives "People can pick" exactly this position (ParameterSettings.tsx:221-241):
+          between "How should people filter on this column?" and "Default value". */}
+      {isSingleOrMultiSelectable(param) && canRenderMultiValue(param) && (
+        <div className="flex flex-col gap-1">
+          <div className="text-xs text-muted-foreground">People can pick</div>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="radio" name={`multi-${param.id}`} aria-label="people can pick multiple"
+              checked={isMultiValue(param)}
+              onChange={() => onChange({ ...param, isMultiSelect: true })} /> Multiple values
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="radio" name={`multi-${param.id}`} aria-label="people can pick single"
+              checked={!isMultiValue(param)}
+              onChange={() => onChange({ ...param, isMultiSelect: false })} /> A single value
+          </label>
         </div>
       )}
 

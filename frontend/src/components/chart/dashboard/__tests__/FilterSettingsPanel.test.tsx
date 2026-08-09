@@ -76,4 +76,23 @@ describe("FilterSettingsPanel base", () => {
     fireEvent.click(screen.getByLabelText("delete filter"));
     expect(onDelete).toHaveBeenCalled();
   });
+
+  it("offers People can pick for a category, and writes the RAW flag", () => {
+    const onChange = vi.fn();
+    render(<FilterSettingsPanel param={p({})} allParameters={[p({})]} onChange={onChange} onDelete={vi.fn()} />);
+    expect(screen.getByLabelText("people can pick multiple")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("people can pick single"));
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ isMultiSelect: false }));
+  });
+
+  it("hides People can pick where egret has no widget that could honour it", () => {
+    // date is absent from Metabase's table; text is present but rendered as a single input here.
+    render(<FilterSettingsPanel param={p({ type: "date", operator: "range" })} allParameters={[]} onChange={vi.fn()} onDelete={vi.fn()} />);
+    expect(screen.queryByLabelText("people can pick multiple")).toBeNull();
+  });
+
+  it("hides People can pick when the widget is an input box", () => {
+    render(<FilterSettingsPanel param={p({ widget: "input" })} allParameters={[]} onChange={vi.fn()} onDelete={vi.fn()} />);
+    expect(screen.queryByLabelText("people can pick multiple")).toBeNull();
+  });
 });

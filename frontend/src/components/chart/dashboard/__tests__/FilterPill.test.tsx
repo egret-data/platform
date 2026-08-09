@@ -68,4 +68,31 @@ describe("FilterPill", () => {
     fireEvent.change(sel, { target: { value: "quarter" } });
     expect(onChange).toHaveBeenCalledWith("quarter");
   });
+
+  it("single-value category emits the RAW option, not an array, and renders no checkboxes", () => {
+    // Keying on the raw value matters: the code stores what it emits here, and a test that
+    // asserted the label "EU" would pass against an implementation storing ["EU"].
+    const onChange = vi.fn();
+    render(<FilterPill param={p({ isMultiSelect: false })} value="" options={["EU", "US"]} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Region/ }));
+    expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
+    fireEvent.click(screen.getByLabelText("option US"));
+    expect(onChange).toHaveBeenCalledWith("US");
+  });
+
+  it("multi-value id emits an array once the author opts in", () => {
+    const onChange = vi.fn();
+    render(<FilterPill param={p({ type: "id", name: "User", slug: "user", isMultiSelect: true })}
+      value={[]} options={["1", "2"]} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: /^User/ }));
+    fireEvent.click(screen.getByLabelText("option 2"));
+    expect(onChange).toHaveBeenCalledWith(["2"]);
+  });
+
+  it("clearing a single-value category yields \"\", not []", () => {
+    const onChange = vi.fn();
+    render(<FilterPill param={p({ isMultiSelect: false })} value="EU" options={["EU"]} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "clear Region" }));
+    expect(onChange).toHaveBeenCalledWith("");
+  });
 });

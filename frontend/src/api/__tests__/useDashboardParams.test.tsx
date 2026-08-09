@@ -50,4 +50,14 @@ describe("useDashboardParams", () => {
     const { result } = renderHook(() => useDashboardParams(params), { wrapper: wrap("/d?tags=42") });
     expect(result.current.values.tags).toBe("42");
   });
+
+  it("round-trips a multi-value id without coercing the single-value form", () => {
+    const idParams: DashboardParameter[] = [
+      { id: "p4", name: "User", slug: "user", type: "id", operator: "is", isMultiSelect: true },
+    ];
+    const { result } = renderHook(() => useDashboardParams(idParams), { wrapper: wrap("/d?user=42") });
+    expect(result.current.values.user).toBe("42");
+    act(() => result.current.setValue("user", ["42", "43"]));
+    expect(result.current.values.user).toEqual(["42", "43"]);
+  });
 });

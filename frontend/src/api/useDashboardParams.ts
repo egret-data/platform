@@ -10,7 +10,7 @@ export interface DashboardParamsState {
  *  multi-select (`FilterPill.tsx`) and was missing here, so a multi-value location was written
  *  as JSON and read back as the JSON *string* — `paramToFilters` then emitted
  *  `in ['["Hanoi","Da Nang"]']` and the card silently returned no rows. */
-const ARRAY_TYPES = new Set(["category", "location"]);
+const ARRAY_TYPES = new Set(["category", "location", "id"]);
 
 /** Read/write each parameter's value in the URL by slug. Arrays/ranges are JSON-encoded. */
 export function useDashboardParams(parameters: DashboardParameter[]): DashboardParamsState {
