@@ -30,4 +30,47 @@ describe("useDashboardViewControls", () => {
     act(() => { vi.advanceTimersByTime(3000); });
     expect(result.current.refreshNonce).toBeGreaterThan(start);
   });
+
+  it("a manual refresh bumps the nonce AND moves the countdown origin", () => {
+    // Two things have to move together. A nonce without an origin leaves the countdown showing
+    // time to a refresh that already happened; an origin without a nonce restarts the clock
+    // without re-running a single card query.
+    const { result } = renderHook(() => useDashboardViewControls(), { wrapper: wrap("/d") });
+    const nonce = result.current.refreshNonce;
+    const at = result.current.refreshedAt;
+    act(() => { vi.advanceTimersByTime(5000); result.current.refreshNow(); });
+    expect(result.current.refreshNonce).toBe(nonce + 1);
+    expect(result.current.refreshedAt).toBe(at + 5000);
+  });
+
+  it("the interval refresh moves the origin too, so the ring restarts", () => {
+    const { result } = renderHook(() => useDashboardViewControls(), { wrapper: wrap("/d?refresh=1") });
+    const at = result.current.refreshedAt;
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(result.current.refreshNonce).toBe(1);
+    expect(result.current.refreshedAt).toBe(at + 1000);
+  });
+
+  it("resetParams drops every slug in ONE write and leaves the view controls alone", () => {
+    // The one-write property is the whole reason this lives here. A loop of per-slug writes would
+    // hand every call the same `prev` — react-router's functional updater reads the CURRENT
+    // location, which does not change between two synchronous calls — so only the last slug would
+    // actually be removed.
+    const { result } = renderHook(() => useDashboardViewControls(), {
+      wrapper: wrap("/d?refresh=60&fullscreen=true&region=EU&tier=gold"),
+    });
+    expect(result.current.hasAnyParam(["region", "tier"])).toBe(true);
+    act(() => { result.current.resetParams(["region", "tier"]); });
+    expect(result.current.hasAnyParam(["region", "tier"])).toBe(false);
+    expect(result.current.refreshSeconds).toBe(60);
+    expect(result.current.isFullscreen).toBe(true);
+  });
+
+  it("hasAnyParam is false when no listed slug carries a value", () => {
+    // This drives whether "Reset all filters" is offered at all, mirroring Metabase's
+    // getCanResetFilters (dashboard/selectors.ts:753-756).
+    const { result } = renderHook(() => useDashboardViewControls(), { wrapper: wrap("/d?refresh=60") });
+    expect(result.current.hasAnyParam(["region", "tier"])).toBe(false);
+    expect(result.current.hasAnyParam([])).toBe(false);
+  });
 });
