@@ -660,7 +660,9 @@ export default function DashboardView() {
         />
       )}
       {editing
-        ? <EditFilterChips parameters={parameters} activeId={editPanel?.kind === "filter" ? editPanel.paramId : null} onSelect={(id) => openPanel({ kind: "filter", paramId: id })} />
+        ? <EditFilterChips parameters={parameters} activeId={editPanel?.kind === "filter" ? editPanel.paramId : null}
+            onSelect={(id) => openPanel({ kind: "filter", paramId: id })}
+            onReorder={setDraftParameters} />
         : <DashboardFilterBar parameters={parameters} values={paramsState.values} onChange={paramsState.setValue} optionsBySlug={optionsBySlug} />}
       {/* Outside the grid on purpose: these must keep running for a card whose tile is
           hidden, which is the whole reason a hidden card can ever come back. */}
