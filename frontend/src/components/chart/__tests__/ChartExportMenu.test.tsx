@@ -4,13 +4,20 @@ import userEvent from "@testing-library/user-event";
 import { useRef } from "react";
 
 const downloadCsv = vi.fn();
+const downloadJson = vi.fn();
 const downloadPng = vi.fn((..._a: unknown[]) => Promise.resolve());
+const downloadXlsx = vi.fn((..._a: unknown[]) => Promise.resolve());
 vi.mock("../export-chart", () => ({
   downloadCsv: (...a: unknown[]) => downloadCsv(...a),
+  downloadJson: (...a: unknown[]) => downloadJson(...a),
   downloadPng: (...a: unknown[]) => downloadPng(...a),
 }));
+vi.mock("../export-xlsx", () => ({ downloadXlsx: (...a: unknown[]) => downloadXlsx(...a) }));
 
 import { ChartExportMenu } from "../ChartExportMenu";
+
+const columns = [{ name: "a", type: "x" }];
+const rows = [["1"]];
 
 function Harness({ withSvg, disabled, columnSettings }: { withSvg: boolean; disabled?: boolean; columnSettings?: Record<string, { column_title?: string }> }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -19,49 +26,100 @@ function Harness({ withSvg, disabled, columnSettings }: { withSvg: boolean; disa
       <div ref={ref} data-testid="container">
         {withSvg ? <svg data-testid="thesvg" /> : <span>table</span>}
       </div>
-      <ChartExportMenu title="My Chart" columns={[{ name: "a", type: "x" }]} rows={[["1"]]} containerRef={ref} disabled={disabled} columnSettings={columnSettings} />
+      <ChartExportMenu title="My Chart" columns={columns} rows={rows} containerRef={ref} disabled={disabled} columnSettings={columnSettings} />
     </div>
   );
 }
 
-describe("ChartExportMenu", () => {
-  beforeEach(() => { downloadCsv.mockClear(); downloadPng.mockClear(); });
+async function open(withSvg: boolean, columnSettings?: Record<string, { column_title?: string }>) {
+  const user = userEvent.setup();
+  render(<Harness withSvg={withSvg} columnSettings={columnSettings} />);
+  await user.click(screen.getByRole("button", { name: /export chart/i }));
+  await screen.findByText("Download data");
+  return user;
+}
 
-  it("shows CSV + PNG when the container has an <svg>", async () => {
-    const user = userEvent.setup();
-    render(<Harness withSvg />);
-    await user.click(screen.getByRole("button", { name: /export chart/i }));
-    expect(await screen.findByText("Download CSV")).toBeTruthy();
-    expect(screen.getByText("Download PNG")).toBeTruthy();
+describe("ChartExportMenu", () => {
+  beforeEach(() => {
+    downloadCsv.mockClear(); downloadJson.mockClear(); downloadPng.mockClear(); downloadXlsx.mockClear();
   });
-  it("shows only CSV when there is no <svg> (table/pivot)", async () => {
-    const user = userEvent.setup();
-    render(<Harness withSvg={false} />);
-    await user.click(screen.getByRole("button", { name: /export chart/i }));
-    expect(await screen.findByText("Download CSV")).toBeTruthy();
-    expect(screen.queryByText("Download PNG")).toBeNull();
+
+  it("offers Metabase's three table formats, in its order", async () => {
+    await open(false);
+    // Asserted by ROLE, not by text: these are radios in a radiogroup, which is what makes the
+    // control a segmented control rather than three buttons that happen to look like one.
+    const radios = screen.getAllByRole("radio");
+    expect(radios.map((r) => r.textContent)).toEqual([".csv", ".xlsx", ".json"]);
   });
-  it("Download CSV calls downloadCsv with the title/columns/rows", async () => {
-    const user = userEvent.setup();
-    render(<Harness withSvg />);
-    await user.click(screen.getByRole("button", { name: /export chart/i }));
-    await user.click(await screen.findByText("Download CSV"));
-    expect(downloadCsv).toHaveBeenCalledWith("My Chart", [{ name: "a", type: "x" }], [["1"]], undefined);
+
+  it("adds .png only when the container rendered an <svg>", async () => {
+    await open(true);
+    expect(screen.getAllByRole("radio").map((r) => r.textContent)).toEqual([".csv", ".xlsx", ".json", ".png"]);
   });
-  it("Download CSV forwards columnSettings so the export can follow a renamed column", async () => {
-    const user = userEvent.setup();
-    render(<Harness withSvg columnSettings={{ a: { column_title: "Column A" } }} />);
-    await user.click(screen.getByRole("button", { name: /export chart/i }));
-    await user.click(await screen.findByText("Download CSV"));
-    expect(downloadCsv).toHaveBeenCalledWith("My Chart", [{ name: "a", type: "x" }], [["1"]], { a: { column_title: "Column A" } });
+
+  it("carries Metabase's formatting checkbox, default on, and its row-limit note", async () => {
+    await open(false);
+    expect(screen.getByLabelText("keep the data formatted")).toBeChecked();
+    expect(screen.getByText("The maximum download size is 1 million rows.")).toBeInTheDocument();
   });
-  it("Download PNG calls downloadPng with the title and the svg element", async () => {
-    const user = userEvent.setup();
-    render(<Harness withSvg />);
-    await user.click(screen.getByRole("button", { name: /export chart/i }));
-    await user.click(await screen.findByText("Download PNG"));
-    expect(downloadPng).toHaveBeenCalledWith("My Chart", expect.anything());
+
+  it("hides the formatting checkbox and the row-limit note for .png", async () => {
+    // Metabase's canConfigureFormatting: an image has no cells to format.
+    const user = await open(true);
+    await user.click(screen.getByRole("radio", { name: ".png" }));
+    expect(screen.queryByLabelText("keep the data formatted")).toBeNull();
+    expect(screen.queryByText("The maximum download size is 1 million rows.")).toBeNull();
   });
+
+  it("downloads CSV with the formatting flag on by default", async () => {
+    const user = await open(false, { a: { column_title: "Column A" } });
+    await user.click(screen.getByRole("button", { name: "Download" }));
+    expect(downloadCsv).toHaveBeenCalledWith("My Chart", columns, rows, { a: { column_title: "Column A" } }, true);
+  });
+
+  it("passes the formatting flag off once the checkbox is cleared", async () => {
+    const user = await open(false);
+    await user.click(screen.getByLabelText("keep the data formatted"));
+    await user.click(screen.getByRole("button", { name: "Download" }));
+    expect(downloadCsv).toHaveBeenCalledWith("My Chart", columns, rows, undefined, false);
+  });
+
+  it("downloads .xlsx through the lazy writer when that format is picked", async () => {
+    const user = await open(false);
+    await user.click(screen.getByRole("radio", { name: ".xlsx" }));
+    await user.click(screen.getByRole("button", { name: "Download" }));
+    expect(downloadXlsx).toHaveBeenCalledWith("My Chart", columns, rows, undefined, true);
+    expect(downloadCsv).not.toHaveBeenCalled();
+  });
+
+  it("downloads .json", async () => {
+    const user = await open(false);
+    await user.click(screen.getByRole("radio", { name: ".json" }));
+    await user.click(screen.getByRole("button", { name: "Download" }));
+    expect(downloadJson).toHaveBeenCalledWith("My Chart", columns, rows, undefined, true);
+  });
+
+  it("downloads PNG from the container's svg, not from the whole tile", async () => {
+    const user = await open(true);
+    await user.click(screen.getByRole("radio", { name: ".png" }));
+    await user.click(screen.getByRole("button", { name: "Download" }));
+    expect(downloadPng).toHaveBeenCalledWith("My Chart", screen.getByTestId("thesvg"));
+  });
+
+  it("falls back to .csv when a card that had an svg no longer does", async () => {
+    // hasSvg is read on open. A card that re-renders as a table between two opens would otherwise
+    // leave .png selected and the Download button would silently do nothing.
+    const user = userEvent.setup();
+    const { rerender } = render(<Harness withSvg />);
+    await user.click(screen.getByRole("button", { name: /export chart/i }));
+    await user.click(await screen.findByRole("radio", { name: ".png" }));
+    await user.keyboard("{Escape}");
+    rerender(<Harness withSvg={false} />);
+    await user.click(screen.getByRole("button", { name: /export chart/i }));
+    await screen.findByText("Download data");
+    expect(screen.getByRole("radio", { name: ".csv" })).toBeChecked();
+  });
+
   it("disabled prop disables the trigger", () => {
     render(<Harness withSvg disabled />);
     expect((screen.getByRole("button", { name: /export chart/i }) as HTMLButtonElement).disabled).toBe(true);
