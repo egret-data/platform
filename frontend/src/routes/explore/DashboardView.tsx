@@ -536,11 +536,14 @@ export default function DashboardView() {
 
   return (
     <div className={view.isFullscreen ? "fixed inset-0 z-50 overflow-auto bg-dashboard p-4" : "min-h-full bg-dashboard p-4"}>
+      {/* `requestCancelEdit`, NOT `discardEdit`: the `e` shortcut must take the same path as the
+          Cancel button — through the discard confirmation — or a keystroke silently destroys a
+          dirty draft, which is the exact loss that confirmation exists to prevent. */}
       <DashboardShortcuts
         editing={editing}
         tabCount={tabs.length}
         onEdit={startEdit}
-        onCancelEdit={cancelEdit}
+        onCancelEdit={requestCancelEdit}
         onSave={onSave}
         onToggleBookmark={() => { (dash.bookmarked ? removeBookmark : addBookmark).mutateAsync(dash.id).catch((e) => toast.error(String(e))); }}
         onToggleInfo={() => setShowInfo((v) => !v)}
