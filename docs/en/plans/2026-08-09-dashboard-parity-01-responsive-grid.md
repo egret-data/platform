@@ -24,6 +24,39 @@ Testing Library.
 
 ---
 
+## ⚠️ Corrected after implementation (PR #447) — read this before Task 2 or Task 3
+
+Two things below turned out to be wrong when executed. They are recorded here rather than silently
+rewritten, because the second is a mistake worth not repeating.
+
+**1. The single route-level guard in Task 3 does not work.** `mayPersistLayout` is necessary but
+not sufficient: two lags defeat it, both measured rather than reasoned about.
+
+- react-grid-layout's `componentDidUpdate` is a **child** lifecycle, so it emits a whole commit
+  before `DashboardGridLayout`'s effect can report the breakpoint upward. Probing RGL 1.5.3 showed
+  the first emission of *every* mount is the flattened one-column layout — even on a 1136px
+  container, because `width` is still 0 on the first render.
+- A card's `ResizeObserver` fires in the same delivery batch as the grid's, before React re-renders
+  either, so auto-height is computed at phone width while state still says `"desktop"`.
+
+The working design is **three** guards, each closing a different window: the grid drops its own
+emission while it is rendering one column; it reports the breakpoint from **inside** its
+`ResizeObserver` rather than from an effect; and the route reads that through a **ref**, not state,
+defaulting to `"mobile"` rather than `"desktop"` so the unknown case fails safe.
+
+**2. Task 2's three tests are too weak to catch the bug they exist for.** They assert only that
+`onBreakpointChange` was called, which passes against a component that never applies the mobile
+projection at all. Four assertions replaced them: one-column vs side-by-side geometry actually
+rendered, drag/resize disabled, `onLayoutChange` never forwarded at mobile, and only the 24-column
+layout forwarded at desktop. **When copying a test out of a plan, ask what implementation it would
+pass against** — a plan's tests get trusted precisely because someone else wrote them.
+
+Three smaller corrections: RGL 1.5.3 does not unmount resize handles when `isResizable: false`, it
+marks them `react-resizable-hide` (`GridItem.js:451-453`), so assert on the class, not on absence.
+`AppShell` cannot render without a `QueryClientProvider` — Header and Sidebar both reach for TanStack
+Query. And Task 3's own steps contradict each other: Step 1 adds `mayPersistLayout` and Step 3 then
+expects "not a function"; write the test first.
+
 ## Background the implementer needs
 
 **Why not `RGL.Responsive`.** react-grid-layout's `Responsive` component wants a `layouts` object
