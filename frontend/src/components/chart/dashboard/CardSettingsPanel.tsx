@@ -89,6 +89,32 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
     );
   }
 
+  if (card.card_type === "iframe") {
+    return (
+      <div className="flex flex-col gap-2 p-3">
+        <div className="text-sm font-medium">Iframe</div>
+        {/* ONE free-text setting, matching Metabase's single `iframe` visualization setting: it
+            takes either a bare URL or a pasted <iframe …> snippet, and `iframe-url.ts` decides
+            which. Deliberately says nothing about {{slug}} — egret does not substitute dashboard
+            parameters into a frame src (its `interpolateParams` does not URL-encode), so no user
+            is promised a placeholder that would not be escaped. */}
+        <Textarea aria-label="iframe url or embed code" rows={4}
+          placeholder={'https://…  or  <iframe src="https://…" />'}
+          value={(card.options.iframe as string) ?? ""} onChange={(e) => onUpdateOptions({ iframe: e.target.value })} />
+        <p className="text-xs text-muted-foreground">
+          Only https pages on egret's allowed hosts can be embedded. Anything else shows a
+          refusal on the card instead of the page.
+        </p>
+        {/* No auto-height row and no hide-when-empty row: a cross-origin frame's content height
+            cannot be measured from here, and an iframe card runs no query so it can never be
+            empty. Both are withheld by `eligible`/`card_type === "chart"` above; naming them
+            here so a future edit does not "restore" them by mistake. */}
+        {backgroundRow}
+        {moveToTab}
+      </div>
+    );
+  }
+
   const cols = chart ? [...chart.params.spec.dimensions, ...chart.params.spec.columns] : [];
   const cb = (card.options.clickBehavior as ClickBehavior | undefined) ?? { type: "menu" };
   return (
