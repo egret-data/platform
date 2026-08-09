@@ -17,7 +17,7 @@ import { rowsToCsv } from "../export-chart";
  *
  * THE INSTRUMENT MEASURED THE BUILT OPTION, AND THE HEADER NEVER GOES THROUGH ONE. Every chart in
  * the product — every viz type, in the studio (`ChartExplore`) and on a dashboard card
- * (`DashboardCardView`) — carries a `ChartExportMenu`, whose "Download CSV" item runs `rowsToCsv`
+ * (`DashboardCardView`) — carries a `ChartExportMenu`, whose `.csv` format runs `rowsToCsv`
  * over the RESULT COLUMNS and the effective `columnSettings`, nowhere near an ECharts option. That
  * function has renamed the header from `column_title` since it was written and says so in its own
  * doc comment: "the header follows the same rename the table shows, so a downloaded file reads the
@@ -62,13 +62,16 @@ describe("column_title reaches every viz through the export", () => {
    * "reachable on every viz" a property of the component rather than a coincidence of its two call
    * sites.
    */
-  it("offers Download CSV without being told which chart it is on", async () => {
+  it("offers the .csv format without being told which chart it is on", async () => {
     const user = userEvent.setup();
     render(
       <ChartExportMenu title="t" columns={cols} rows={rows} containerRef={createRef<HTMLElement>()} />,
     );
     await user.click(screen.getByLabelText("Export chart"));
-    expect(await screen.findByText("Download CSV")).toBeTruthy();
+    // The flat "Download CSV" menu item this used to name became a `.csv` radio in Metabase's
+    // download popover (W5). The property being asserted is unchanged: the component is handed no
+    // viz type, so the CSV path is reachable from every chart in the product.
+    expect(await screen.findByRole("radio", { name: ".csv" })).toBeTruthy();
   });
 
   it("renames the header of a column no chart builder reads", () => {
