@@ -22,6 +22,7 @@ use sqlx::PgPool;
 // migration 0098: dataset semantic_type + certification metadata (dataset + metric certified_by/details)
 // re-embed: 0104 dataset_semantic_type_allowlist (CHECK on dataset_columns.semantic_type; normalises unknown values to '' first)
 // re-embed: 0105 dashboard_width_default_fixed (new dashboards default to Metabase's fixed canvas)
+// re-embed: 0106 dashboard_attribution (dashboards.created_at nullable + updated_by)
 /// All SQL migrations, embedded at compile time from the workspace `migrations/` dir.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
