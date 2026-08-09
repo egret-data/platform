@@ -4,6 +4,11 @@ frontend/node_modules/
 frontend/dist/
 .git/
 .codegraph/
+# Agent git worktrees live under .claude/worktrees/, INSIDE the repo, and each carries its own
+# node_modules and target/. Ten of them made the build context 21.5GB and the transfer alone ran
+# past 400s before anything compiled. The entries above exclude those directories only at the repo
+# root, so they do not match .claude/worktrees/<name>/target/.
+.claude/
 **/*.log
 docs/
 tests/
