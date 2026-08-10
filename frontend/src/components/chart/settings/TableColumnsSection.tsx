@@ -253,7 +253,12 @@ export function TableColumnsSection({
                     data-enabled={isHidden ? "false" : "true"}
                     className={`flex items-center gap-1 rounded-md border px-1.5 py-1 ${isHidden ? "bg-muted/30 opacity-60" : ""}`}
                   >
-                    <div className="flex shrink-0 flex-col leading-none">
+                    {/* SIDE BY SIDE, not stacked. Once these grew from 8×10 glyphs to 24px hit
+                        targets, a vertical pair became a 48px column that drove every row to 58px
+                        tall — twenty of them, in a panel people scroll. Horizontal keeps the
+                        target and gives the row back its height. Pie's slice list already did it
+                        this way. */}
+                    <div className="flex shrink-0 items-center leading-none">
                       {/* Disabled under an active filter, both arrows: the row above a match is
                           off screen, so "up" would swap with something the reader cannot see. */}
                       {/* 22 of these on a table panel, two per column, and they measured 8×10 px.

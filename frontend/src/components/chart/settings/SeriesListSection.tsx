@@ -131,7 +131,9 @@ export function SeriesListSection({
     <div className="space-y-1">
       {visible.map((name, i) => (
         <div key={name} className="flex items-center gap-1">
-          <div className="flex shrink-0 flex-col leading-none">
+          {/* Side by side — see the note in TableColumnsSection: stacking two 24px targets makes
+              the row 58px tall. */}
+          <div className="flex shrink-0 items-center leading-none">
             {/* IconButton, not a bare glyph: these measured 8×10 px, because a `▲` with no box is
                 only as big as the glyph. See `components/ui/icon-button.tsx`. */}
             <IconButton aria-label={`Move ${name} up`} disabled={i === 0}
