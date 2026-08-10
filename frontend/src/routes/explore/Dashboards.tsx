@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Search, Star, Trash2, FolderPlus, ListChecks } from "lucide-react";
+import { Search, Star, Trash2, FolderPlus, ListChecks, BadgeCheck } from "lucide-react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { useDashboards, useDashboardMutations, type DashboardSummary } from "@/api/dashboards";
@@ -67,6 +67,27 @@ export default function Dashboards() {
     return r;
   }, [data, onlyBookmarked, query, sort]);
 
+  /**
+   * Whether to offer the mutating affordances at all — duplicate, move, trash, delete, create,
+   * folders, bulk. Withheld rather than disabled, for the reason the Edit button on the detail
+   * page is: a greyed control advertises a capability the reader does not have, and here the
+   * controls are DESTRUCTIVE. A reader used to be able to select twenty dashboards and press
+   * "Move to Trash" before learning the server refuses.
+   *
+   * It cannot be derived from the session: `me.permissions` is built from PLATFORM grants only,
+   * so workspace-scoped `dashboard:manage` never appears there. The server answers instead, and
+   * the answer is the same on every row (workspace-scoped) — reading row 0 is not a shortcut.
+   *
+   * `data`, not `rows`: `rows` is search-filtered, so typing a query that matches nothing would
+   * otherwise revoke the toolbar.
+   *
+   * The empty list is the one case with no answer — there is no row to carry it. Defaulting to
+   * `true` there leaves the PRE-EXISTING behaviour intact for a reader in an empty workspace
+   * (click Create, get 403); defaulting to `false` would hide Create from a legitimate author
+   * in a fresh workspace, which blocks real work. Wrong-but-recoverable beats blocking.
+   */
+  const canManage = data && data.length > 0 ? data[0].can_manage !== false : true;
+
   const bulk = useBulkSelect(rows);
   const filtering = query.trim() !== "" || onlyBookmarked;
   const groups = useMemo(() => groupByFolder(rows, folders, filtering), [rows, folders, filtering]);
@@ -104,7 +125,7 @@ export default function Dashboards() {
 
   const renderRow = (d: DashboardSummary) => (
     <tr key={d.id} className="border-t hover:bg-accent"
-      draggable={!showTrash} onDragStart={!showTrash ? (e) => e.dataTransfer.setData("text/plain", d.id) : undefined}>
+      draggable={!showTrash && canManage} onDragStart={!showTrash && canManage ? (e) => e.dataTransfer.setData("text/plain", d.id) : undefined}>
       {bulk.bulkMode && !showTrash && <td className="py-1"><Checkbox checked={bulk.selected.has(d.id)} onCheckedChange={() => bulk.toggle(d.id)} aria-label={`Select ${d.name}`} /></td>}
       <td className="py-1 pl-6">
         <span className="inline-flex items-center gap-1">
@@ -115,20 +136,24 @@ export default function Dashboards() {
             </Button>
           )}
           <Link className="font-medium hover:underline" to={`/explore/${ws}/dashboards/${d.id}`}>{d.name}</Link>
+          {/* Same mark the datasets list uses (Datasets.tsx), so "trusted" reads identically
+              wherever content is listed rather than being a per-page invention. */}
+          {d.certified && <BadgeCheck className="h-3.5 w-3.5 text-primary" aria-label="Certified" />}
         </span>
       </td>
       <td className="text-muted-foreground tabular-nums">{d.card_count}</td>
       <td className="text-muted-foreground"><RelativeTime iso={d.updated_at} /></td>
       <td>
         <DashboardActionsMenu
-          ws={ws} dash={d} trashed={showTrash} folders={folders}
+          ws={ws} dash={d} trashed={showTrash} folders={folders} canManage={canManage}
           onDuplicate={(x) => guard(duplicate.mutateAsync(x.id).then((c) => nav(`/explore/${ws}/dashboards/${c.id}`)))}
           onMove={(x, fid) => setFolder.mutateAsync({ id: x.id, folder_id: fid }).catch((e) => toast.error(String(e)))}
           onNewFolder={(x) => setFolderDialog({ mode: "move", dash: x })}
           onTrash={(x) => guard(trash.mutateAsync(x.id).then(() => toast.success("Moved to Trash")))}
           onRestore={(x) => guard(restore.mutateAsync(x.id))}
           onDeletePermanent={setPendingDelete}
-          onShare={setShareTarget}
+          // Sharing hands out grants, so it belongs with the manage actions, not with Open.
+          onShare={canManage ? setShareTarget : undefined}
         />
       </td>
     </tr>
@@ -147,7 +172,7 @@ export default function Dashboards() {
               </Button>
             </TooltipTrigger><TooltipContent side="bottom">Bookmarks</TooltipContent></Tooltip>
           )}
-          {!showTrash && hasData && (
+          {!showTrash && hasData && canManage && (
             <Tooltip><TooltipTrigger asChild>
               <Button size="icon" variant={bulk.bulkMode ? "secondary" : "outline"} aria-label="Bulk select"
                 onClick={() => bulk.setBulkMode(!bulk.bulkMode)}>
@@ -161,7 +186,7 @@ export default function Dashboards() {
               <Trash2 className={`h-4 w-4 ${showTrash ? "fill-current" : ""}`} />
             </Button>
           </TooltipTrigger><TooltipContent side="bottom">Trash</TooltipContent></Tooltip>
-          {!showTrash && (
+          {!showTrash && canManage && (
             <Tooltip><TooltipTrigger asChild>
               <Button size="icon" variant="outline" aria-label="New folder"
                 onClick={() => setFolderDialog({ mode: "new" })}>
@@ -169,8 +194,8 @@ export default function Dashboards() {
               </Button>
             </TooltipTrigger><TooltipContent side="bottom">New folder</TooltipContent></Tooltip>
           )}
-          <Dialog open={open} onOpenChange={setOpen}>
-            <DialogTrigger asChild><Button>+ Dashboard</Button></DialogTrigger>
+          <Dialog open={open && canManage} onOpenChange={setOpen}>
+            {canManage && <DialogTrigger asChild><Button>+ Dashboard</Button></DialogTrigger>}
             <DialogContent>
               <DialogHeader><DialogTitle>New dashboard</DialogTitle></DialogHeader>
               <div className="flex flex-col gap-3 py-2">
@@ -203,7 +228,7 @@ export default function Dashboards() {
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input className="pl-8" placeholder="Search dashboards…" value={query} onChange={(e) => setQuery(e.target.value)} />
             </div>
-            {bulk.bulkMode && bulk.someSelected && !showTrash && (
+            {bulk.bulkMode && bulk.someSelected && !showTrash && canManage && (
               <>
                 <Button variant="outline" size="sm" onClick={() => setFolderDialog({ mode: "bulkmove" })}>
                   Move {bulk.selectedIds.length} to folder…
@@ -250,10 +275,12 @@ export default function Dashboards() {
                         colSpan={bulk.bulkMode ? 5 : 4}
                         collapsed={isCollapsed}
                         onToggle={() => collapse.toggle(key)}
-                        onShare={group.folder ? () => setFolderShare({ id: group.folder!.id, name: group.folder!.name }) : undefined}
-                        onRename={group.folder ? () => setFolderDialog({ mode: "rename", folder: group.folder! }) : undefined}
-                        onDelete={group.folder ? () => removeFolder.mutateAsync(group.folder!.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(String(e))) : undefined}
-                        onDropItem={(id) => setFolder.mutateAsync({ id, folder_id: group.folder?.id ?? null }).catch((e) => toast.error(String(e)))}
+                        // Folder share/rename/delete and the drop target are all workspace
+                        // mutations, so they travel with the same gate as the row menu.
+                        onShare={group.folder && canManage ? () => setFolderShare({ id: group.folder!.id, name: group.folder!.name }) : undefined}
+                        onRename={group.folder && canManage ? () => setFolderDialog({ mode: "rename", folder: group.folder! }) : undefined}
+                        onDelete={group.folder && canManage ? () => removeFolder.mutateAsync(group.folder!.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(String(e))) : undefined}
+                        onDropItem={canManage ? (id) => setFolder.mutateAsync({ id, folder_id: group.folder?.id ?? null }).catch((e) => toast.error(String(e))) : undefined}
                       />
                       {!isCollapsed && group.rows.map(renderRow)}
                     </tbody>

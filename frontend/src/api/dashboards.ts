@@ -47,6 +47,10 @@ export interface DashboardSummary {
   deleted_at?: string | null;
   bookmarked?: boolean;
   folder_id?: string | null;
+  certified?: boolean;
+  /** Workspace-scoped and identical on every row — see the Rust field docs. Optional so an
+   *  older or cached response cannot strip the menu from someone who has always had it. */
+  can_manage?: boolean;
 }
 export type ParamType = "text" | "number" | "date" | "id" | "category" | "boolean" | "location" | "temporal_unit";
 export type ParamOperator =

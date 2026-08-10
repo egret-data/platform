@@ -5,11 +5,14 @@ import { MoveToFolderItems } from "@/components/explore/MoveToFolderSub";
 import type { DashboardSummary } from "@/api/dashboards";
 import type { Folder } from "@/api/folders";
 
-export function DashboardActionsMenu({ ws, dash, trashed, folders, onDuplicate, onMove, onNewFolder, onTrash, onRestore, onDeletePermanent, onShare }: {
+export function DashboardActionsMenu({ ws, dash, trashed, folders, canManage = true, onDuplicate, onMove, onNewFolder, onTrash, onRestore, onDeletePermanent, onShare }: {
   ws: string;
   dash: DashboardSummary;
   trashed: boolean;
   folders: Folder[];
+  /** Whether to offer anything beyond Open. Defaults to `true` so existing callers — and any
+   *  response predating the server field — keep the menu they have always had. */
+  canManage?: boolean;
   onDuplicate: (d: DashboardSummary) => void;
   onMove: (d: DashboardSummary, folderId: string | null) => void;
   onNewFolder: (d: DashboardSummary) => void;
@@ -20,11 +23,23 @@ export function DashboardActionsMenu({ ws, dash, trashed, folders, onDuplicate, 
 }) {
   const nav = useNavigate();
   if (trashed) {
+    // Restore and Delete permanently are BOTH manage actions, so a reader browsing Trash gets an
+    // empty menu — render nothing at all rather than a trigger that opens onto nothing.
+    if (!canManage) return null;
     return (
       <RowActionsMenu>
         <DropdownMenuItem onClick={() => onRestore(dash)}>Restore</DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => onDeletePermanent(dash)}>Delete permanently</DropdownMenuItem>
+      </RowActionsMenu>
+    );
+  }
+  if (!canManage) {
+    // Open is not a mutation, so it stays: a reader keeps the way in, and loses only the
+    // actions the server would refuse.
+    return (
+      <RowActionsMenu>
+        <DropdownMenuItem onClick={() => nav(`/explore/${ws}/dashboards/${dash.id}`)}>Open</DropdownMenuItem>
       </RowActionsMenu>
     );
   }
