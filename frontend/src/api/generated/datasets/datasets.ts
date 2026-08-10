@@ -36,6 +36,7 @@ import type {
   DatasetsDsListParams,
   ErrorBody,
   MetricBody,
+  SetDatasetCertification,
   SetFolder,
   UpdateColumnBody,
   UpdateDataset
@@ -836,6 +837,107 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getDatasetsDsBookmarkRemoveMutationOptions(options), queryClient);
+    }
+    export type datasetsDsSetCertificationResponse200 = {
+  data: DatasetDetailDto
+  status: 200
+}
+
+export type datasetsDsSetCertificationResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type datasetsDsSetCertificationResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type datasetsDsSetCertificationResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type datasetsDsSetCertificationResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type datasetsDsSetCertificationResponseSuccess = (datasetsDsSetCertificationResponse200) & {
+  headers: Headers;
+};
+export type datasetsDsSetCertificationResponseError = (datasetsDsSetCertificationResponse401 | datasetsDsSetCertificationResponse403 | datasetsDsSetCertificationResponse404 | datasetsDsSetCertificationResponse500) & {
+  headers: Headers;
+};
+
+export type datasetsDsSetCertificationResponse = (datasetsDsSetCertificationResponseSuccess | datasetsDsSetCertificationResponseError)
+
+export const getDatasetsDsSetCertificationUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/certification`
+}
+
+export const datasetsDsSetCertification = async (workspace: string,
+    id: string,
+    setDatasetCertification: SetDatasetCertification, options?: RequestInit): Promise<datasetsDsSetCertificationResponse> => {
+
+  return customInstance<datasetsDsSetCertificationResponse>(getDatasetsDsSetCertificationUrl(workspace,id),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setDatasetCertification)
+  }
+);}
+
+
+
+
+
+export const getDatasetsDsSetCertificationMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsSetCertification>>, TError,{workspace: string;id: string;data: SetDatasetCertification}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof datasetsDsSetCertification>>, TError,{workspace: string;id: string;data: SetDatasetCertification}, TContext> => {
+
+const mutationKey = ['datasetsDsSetCertification'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof datasetsDsSetCertification>>, {workspace: string;id: string;data: SetDatasetCertification}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  datasetsDsSetCertification(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DatasetsDsSetCertificationMutationResult = NonNullable<Awaited<ReturnType<typeof datasetsDsSetCertification>>>
+    export type DatasetsDsSetCertificationMutationBody = SetDatasetCertification
+    export type DatasetsDsSetCertificationMutationError = ErrorBody
+
+    export const useDatasetsDsSetCertification = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsSetCertification>>, TError,{workspace: string;id: string;data: SetDatasetCertification}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof datasetsDsSetCertification>>,
+        TError,
+        {workspace: string;id: string;data: SetDatasetCertification},
+        TContext
+      > => {
+      return useMutation(getDatasetsDsSetCertificationMutationOptions(options), queryClient);
     }
     export type datasetsDsAddColumnResponse200 = {
   data: DatasetDetailDto
@@ -1694,6 +1796,109 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getDatasetsDsDeleteMetricMutationOptions(options), queryClient);
+    }
+    export type datasetsDsSetMetricCertificationResponse200 = {
+  data: DatasetDetailDto
+  status: 200
+}
+
+export type datasetsDsSetMetricCertificationResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type datasetsDsSetMetricCertificationResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type datasetsDsSetMetricCertificationResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type datasetsDsSetMetricCertificationResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type datasetsDsSetMetricCertificationResponseSuccess = (datasetsDsSetMetricCertificationResponse200) & {
+  headers: Headers;
+};
+export type datasetsDsSetMetricCertificationResponseError = (datasetsDsSetMetricCertificationResponse401 | datasetsDsSetMetricCertificationResponse403 | datasetsDsSetMetricCertificationResponse404 | datasetsDsSetMetricCertificationResponse500) & {
+  headers: Headers;
+};
+
+export type datasetsDsSetMetricCertificationResponse = (datasetsDsSetMetricCertificationResponseSuccess | datasetsDsSetMetricCertificationResponseError)
+
+export const getDatasetsDsSetMetricCertificationUrl = (workspace: string,
+    id: string,
+    metricId: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/metrics/${encodeURIComponent(metricId)}/certification`
+}
+
+export const datasetsDsSetMetricCertification = async (workspace: string,
+    id: string,
+    metricId: string,
+    setDatasetCertification: SetDatasetCertification, options?: RequestInit): Promise<datasetsDsSetMetricCertificationResponse> => {
+
+  return customInstance<datasetsDsSetMetricCertificationResponse>(getDatasetsDsSetMetricCertificationUrl(workspace,id,metricId),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setDatasetCertification)
+  }
+);}
+
+
+
+
+
+export const getDatasetsDsSetMetricCertificationMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsSetMetricCertification>>, TError,{workspace: string;id: string;metricId: string;data: SetDatasetCertification}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof datasetsDsSetMetricCertification>>, TError,{workspace: string;id: string;metricId: string;data: SetDatasetCertification}, TContext> => {
+
+const mutationKey = ['datasetsDsSetMetricCertification'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof datasetsDsSetMetricCertification>>, {workspace: string;id: string;metricId: string;data: SetDatasetCertification}> = (props) => {
+          const {workspace,id,metricId,data} = props ?? {};
+
+          return  datasetsDsSetMetricCertification(workspace,id,metricId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DatasetsDsSetMetricCertificationMutationResult = NonNullable<Awaited<ReturnType<typeof datasetsDsSetMetricCertification>>>
+    export type DatasetsDsSetMetricCertificationMutationBody = SetDatasetCertification
+    export type DatasetsDsSetMetricCertificationMutationError = ErrorBody
+
+    export const useDatasetsDsSetMetricCertification = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsSetMetricCertification>>, TError,{workspace: string;id: string;metricId: string;data: SetDatasetCertification}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof datasetsDsSetMetricCertification>>,
+        TError,
+        {workspace: string;id: string;metricId: string;data: SetDatasetCertification},
+        TContext
+      > => {
+      return useMutation(getDatasetsDsSetMetricCertificationMutationOptions(options), queryClient);
     }
     export type datasetsDsRefreshResponse200 = {
   data: DatasetDetailDto

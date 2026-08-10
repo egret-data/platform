@@ -114,12 +114,21 @@ pub struct UpdateDataset {
     pub description: String,
     #[serde(default)]
     pub sql: Option<String>,
+    // NO certification fields. They lived here until 0109, and that is how an editor could vouch
+    // for their own dataset — and, because `certified_by` came from this body, name a colleague
+    // as the voucher. Certification now has its own route and its own platform permission.
+}
+
+/// Body of the dataset / metric certification endpoints. Deliberately carries NO `certified_by`:
+/// the certifier is the session, exactly as it is for dashboards. A client that could name the
+/// certifier could forge provenance, which is the defect 0109 closes.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SetDatasetCertification {
+    pub certified: bool,
+    /// Ignored when `certified` is false — withdrawing clears the note rather than leaving a
+    /// stale justification attached to an uncertified dataset.
     #[serde(default)]
-    pub certified: Option<bool>,
-    #[serde(default)]
-    pub certified_by: Option<String>,
-    #[serde(default)]
-    pub certification_details: Option<String>,
+    pub details: String,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -221,12 +230,8 @@ pub struct MetricBody {
     pub description: String,
     #[serde(default)]
     pub format: String,
-    #[serde(default)]
-    pub certified: bool,
-    #[serde(default)]
-    pub certified_by: String,
-    #[serde(default)]
-    pub certification_details: String,
+    // NO certification fields, for the reason on `UpdateDataset`. A metric is what the semantic
+    // layer actually shows a reader, so a forgeable metric badge would defeat the dataset gate.
 }
 
 /// A chart that uses a dataset (for the dataset Usage view).

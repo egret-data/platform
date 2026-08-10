@@ -23,6 +23,8 @@ import {
   datasetsDsDeleteColumn,
   datasetsDsDeleteMetric,
   datasetsDsRefresh,
+  datasetsDsSetCertification,
+  datasetsDsSetMetricCertification,
   datasetsDsRemove,
   datasetsDsRestore,
   datasetsDsTrash,
@@ -95,7 +97,10 @@ export function useCreateDataset(ws: string) {
 }
 export function useUpdateDataset(ws: string, id: string) {
   const qc = useQueryClient();
-  return useMutation<DatasetDetail, ApiError, { name: string; description?: string; sql?: string | null; certified?: boolean; certified_by?: string; certification_details?: string }>({
+  // No certification fields: the server dropped them from this body in 0109, because sending
+  // them here is how an editor used to certify their own dataset — and name someone else as the
+  // certifier. Use `useSetDatasetCertification` instead.
+  return useMutation<DatasetDetail, ApiError, { name: string; description?: string; sql?: string | null }>({
     mutationFn: async (body) => (await datasetsDsUpdate(ws, id, body)).data as DatasetDetail,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: getDatasetsDsGetQueryKey(ws, id) });
@@ -103,6 +108,34 @@ export function useUpdateDataset(ws: string, id: string) {
     },
   });
 }
+/**
+ * Certify a dataset, or one of its metrics, or withdraw either.
+ *
+ * SEPARATE from `useUpdateDataset` because the server guards it with the PLATFORM-scoped
+ * `dataset:certify` (0109). Two consequences the caller must respect: an editor saving the
+ * dataset cannot set this, and there is NO `certified_by` to send — the certifier is the
+ * session, so provenance cannot be forged.
+ *
+ * `metricId` omitted certifies the dataset itself.
+ */
+export function useSetDatasetCertification(ws: string, id: string) {
+  const qc = useQueryClient();
+  return useMutation<DatasetDetail, ApiError, { certified: boolean; details?: string; metricId?: string }>({
+    mutationFn: async ({ certified, details = "", metricId }) => {
+      const body = { certified, details };
+      const r = metricId
+        ? await datasetsDsSetMetricCertification(ws, id, metricId, body)
+        : await datasetsDsSetCertification(ws, id, body);
+      return r.data as DatasetDetail;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: getDatasetsDsGetQueryKey(ws, id) });
+      // The list carries a `certified` badge, so it goes stale too.
+      qc.invalidateQueries({ queryKey: getDatasetsDsListQueryKey(ws) });
+    },
+  });
+}
+
 export function useRefreshDataset(ws: string, id: string) {
   const qc = useQueryClient();
   return useMutation<DatasetDetail, ApiError, void>({
@@ -140,7 +173,9 @@ export function useDatasetListMutations(ws: string) {
   return { trash, restore, addBookmark, removeBookmark };
 }
 
-export interface MetricInput { metric_name: string; expression: string; verbose_name?: string; description?: string; format?: string; certified?: boolean; certified_by?: string; certification_details?: string }
+/** No certification fields — those go through `useSetDatasetCertification`, which the server
+ *  guards with the platform-scoped `dataset:certify` (0109). */
+export interface MetricInput { metric_name: string; expression: string; verbose_name?: string; description?: string; format?: string }
 export interface ColumnUpdate { verbose_name?: string; description?: string; expression?: string; groupby?: boolean; filterable?: boolean; is_temporal?: boolean; format?: string; semantic_type?: string }
 
 // The detail query caches orval's envelope (`{ status, data, headers }`); the

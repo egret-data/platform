@@ -12,7 +12,4 @@ export interface MetricBody {
   verbose_name?: string;
   description?: string;
   format?: string;
-  certified?: boolean;
-  certified_by?: string;
-  certification_details?: string;
 }

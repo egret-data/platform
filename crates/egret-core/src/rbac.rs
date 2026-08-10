@@ -273,6 +273,15 @@ pub static PERMISSIONS: &[Permission] = &[
         "Create, update, and delete datasets",
         Scope::Workspace
     ),
+    // Platform, for the same reason `dashboard:certify` is, and covering METRICS as well as
+    // datasets: a metric belongs to a dataset, and "vouching for this data" is one act. A
+    // separate `metric:certify` would be a second grant to remember and to forget.
+    perm!(
+        "dataset:certify",
+        "Datasets",
+        "Mark datasets and their metrics as certified, and withdraw certification",
+        Scope::Platform
+    ),
     perm!("chart:read", "Charts", "View charts", Scope::Workspace),
     perm!(
         "chart:manage",
@@ -417,6 +426,19 @@ mod tests {
         assert!(PERMISSIONS
             .iter()
             .any(|p| p.key == "dashboard:manage" && p.scope == Scope::Workspace));
+    }
+    #[test]
+    fn certifying_a_dataset_is_the_same_kind_of_act_as_certifying_a_dashboard() {
+        // The asymmetry this closes: `dataset:certify` used to not exist, so certification rode
+        // on `dataset:manage` and an editor could vouch for their own work — and name someone
+        // else as the voucher. Asserted as a PAIR against the dashboard perms so the two cannot
+        // drift apart again without a test noticing.
+        assert!(is_known("dataset:certify"));
+        assert!(!is_admin_graph("dataset:certify"));
+        let scope_of = |k: &str| PERMISSIONS.iter().find(|p| p.key == k).map(|p| p.scope);
+        assert_eq!(scope_of("dataset:certify"), scope_of("dashboard:certify"));
+        assert_eq!(scope_of("dataset:certify"), Some(Scope::Platform));
+        assert_eq!(scope_of("dataset:manage"), Some(Scope::Workspace));
     }
     #[test]
     fn saved_query_perms_are_known() {
