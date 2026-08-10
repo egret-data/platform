@@ -113,7 +113,7 @@ async function mountTable(id = "c-raw-table") {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <TooltipProvider>
-        <MemoryRouter initialEntries={[`/explore/demo/charts/${id}?tab=display`]}>
+        <MemoryRouter initialEntries={[`/explore/demo/charts/${id}?tab=columns`]}>
           <Routes>
             <Route path="/explore/:workspace/charts/:id" element={<ChartExplore />} />
           </Routes>
@@ -161,7 +161,7 @@ const dataColumn = (name: string) => screen.getByRole("checkbox", { name });
  * "Done picking columns" and the fold stays open between toggles.
  */
 const openPicker = async () => {
-  await tab("Display");
+  await tab("Columns");
   const opener = screen.queryByRole("button", { name: /add or remove columns/i });
   if (opener) await userEvent.click(opener);
 };
@@ -207,8 +207,8 @@ describe("a column put back into the query is drawn again", () => {
     await closePicker();
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
 
-    // …and the Display tab agrees, rather than showing it as still hidden.
-    await tab("Display");
+    // …and the Columns tab agrees, rather than showing it as still hidden.
+    await tab("Columns");
     expect(eye("vendor")).toHaveAttribute("aria-pressed", "true");
     // Each step waits on a debounced auto-run, so the whole sequence outlasts the 5s default.
   }, 30000);
@@ -248,7 +248,7 @@ describe("a column put back into the query is drawn again", () => {
     await closePicker();
     await waitFor(() => expect(drawnHeaders()).toEqual(["id"]), { timeout: 3000 });
 
-    await tab("Display");
+    await tab("Columns");
     expect(eye("vendor")).toHaveAttribute("aria-pressed", "false");
     expect(within(document.body).queryByRole("columnheader", { name: /Supplier/ })).not.toBeInTheDocument();
   }, 30000);
@@ -264,12 +264,13 @@ describe("a column put back into the query is drawn again", () => {
  * shipped twice.
  */
 describe("Add or remove columns, from the Display tab", () => {
+
   it("removes a column from the QUERY and the table stops drawing it", async () => {
     await mountTable();
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
 
     // The list is replaced, not joined by a second one: that is the defect being closed.
-    await userEvent.click(screen.getByRole("button", { name: /add or remove columns/i }));
+    await openPicker();
     expect(noEye("vendor")).not.toBeInTheDocument();
 
     await userEvent.click(dataColumn("vendor"));
@@ -289,7 +290,7 @@ describe("Add or remove columns, from the Display tab", () => {
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
 
     expect(screen.queryByLabelText("revenue")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /add or remove columns/i }));
+    await openPicker();
     await userEvent.click(dataColumn("revenue"));
 
     // Aggregating turns the raw columns into dimensions and adds the metric to the result.
@@ -315,7 +316,7 @@ describe("Add or remove columns, from the Display tab", () => {
   it("names a renamed column the way the dataset does, and still keys on the raw name", async () => {
     await mountTable();
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
-    await userEvent.click(screen.getByRole("button", { name: /add or remove columns/i }));
+    await openPicker();
     expect(screen.getByText("Mã")).toBeInTheDocument();
     expect(within(screen.getByText("Mã")).queryByText("id")).toBeNull();
     expect(screen.getByText("Mã")).toHaveAttribute("title", "Mã (id)");

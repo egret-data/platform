@@ -79,6 +79,10 @@ export default function ChartExplore() {
   const descriptor = getDescriptor(viz);
   // Only the charts that declare axis controls get an Axes tab — a pie or a scalar has none.
   const showAxesTab = hasAxesControls(descriptor);
+  // Metabase's table settings are Columns | Display | Conditional Formatting — the column list has
+  // a tab of its own and Display is three toggles. egret stacked the list on top of those toggles,
+  // which is what made this the panel's longest scroll. Only the table has the section.
+  const showColumnsTab = viz === "table";
   // One opaque config for whichever viz is active. Only its descriptor reads inside it;
   // null means "not seeded yet", so the descriptor's own default applies.
   const [descState, setDescState] = useState<unknown>(null);
@@ -651,6 +655,9 @@ export default function ChartExplore() {
         <Tabs value={builderTab} onValueChange={setBuilderTab}>
           <TabsList className={UNDERLINE_LIST}>
             <TabsTrigger value="data" className={UNDERLINE_TRIGGER}>Data</TabsTrigger>
+            {showColumnsTab && (
+              <TabsTrigger value="columns" className={UNDERLINE_TRIGGER}>Columns</TabsTrigger>
+            )}
             <TabsTrigger value="display" className={UNDERLINE_TRIGGER}>Display</TabsTrigger>
             {/* Metabase splits Data | Display | Axes, and the axis settings are the half of the
                 Display tab a reader goes looking for by name. Only the charts that HAVE axes
@@ -748,6 +755,27 @@ export default function ChartExplore() {
           </TabsContent>
 
           {/* ── DISPLAY TAB ── */}
+          {/* ── COLUMNS TAB ── the table's column list, alone. `only="columns"` is what keeps it
+              off the Display tab; a dashboard card passes no `only` at all and still takes the
+              list inline, because a card has no tabs to split it across. */}
+          {showColumnsTab && (
+            <TabsContent value="columns" className="space-y-4">
+              <SharedDisplaySections
+                vizType={viz}
+                resultColumns={resultColumns}
+                styleColumns={[]}
+                tableState={tableState}
+                columnSettings={columnSettings}
+                conditionalFormatting={conditionalFormatting}
+                onTableState={setTableState}
+                onColumnSettings={setColumnSettings}
+                onConditionalFormatting={setConditionalFormatting}
+                queryFields={tableQueryFields}
+                only="columns"
+              />
+            </TabsContent>
+          )}
+
           <TabsContent value="display" className="space-y-4">
 
             {descriptor && (

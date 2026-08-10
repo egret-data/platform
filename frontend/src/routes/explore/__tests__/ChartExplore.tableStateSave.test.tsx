@@ -101,7 +101,7 @@ async function mountTable(id = "c-raw-table") {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <TooltipProvider>
-        <MemoryRouter initialEntries={[`/explore/demo/charts/${id}?tab=display`]}>
+        <MemoryRouter initialEntries={[`/explore/demo/charts/${id}?tab=columns`]}>
           <Routes>
             <Route path="/explore/:workspace/charts/:id" element={<ChartExplore />} />
           </Routes>
