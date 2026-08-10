@@ -300,9 +300,10 @@ describe("Add or remove columns, from the Display tab", () => {
     await mountTable();
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
 
-    // The list is replaced, not joined by a second one: that is the defect being closed.
+    // The picker floats over the list now rather than replacing it, so the row stays put while
+    // its query membership is edited — the pivot's field-zone shape.
     await openPicker();
-    expect(noEye("vendor")).not.toBeInTheDocument();
+    expect(noEye("vendor")).toBeInTheDocument();
 
     await userEvent.click(dataColumn("vendor"));
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state"]), { timeout: 3000 });

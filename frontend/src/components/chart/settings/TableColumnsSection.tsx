@@ -12,6 +12,8 @@ import { useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import type { TableState } from "@/api/charts";
 import type { ColumnFormat } from "@/components/chart/format-types";
+import { Plus } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { CheckList } from "@/components/chart/config/CheckList";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
@@ -214,10 +216,6 @@ export function TableColumnsSection({
   part?: "list" | "layout";
 }) {
   const [filter, setFilter] = useState("");
-  // Metabase's own shape: the button REPLACES the list with the field panel rather than opening a
-  // second thing beside it, and turns into "Done picking columns". Replacing is the point — the
-  // whole defect being fixed is two column lists on screen at once.
-  const [picking, setPicking] = useState(false);
   const hidden = new Set(value.hiddenColumns ?? []);
   const pinnedLeft = value.pinnedLeft ?? 0;
   const pinnedTop = value.pinnedTop ?? 0;
@@ -281,7 +279,7 @@ export function TableColumnsSection({
             already labels it "Columns" — the second heading was only ever there to tell it apart
             from the OTHER column list, which is the thing this section removed. */}
         <div className="flex items-center justify-end">
-          {!picking && (
+          <>
             <div className="flex gap-2">
               <button type="button" className="min-h-6 text-xs text-muted-foreground hover:text-foreground hover:underline"
                 onClick={() => setAllHidden(false)}>
@@ -292,42 +290,9 @@ export function TableColumnsSection({
                 Hide all
               </button>
             </div>
-          )}
+          </>
         </div>
 
-        {picking && queryFields ? (
-          <div className="space-y-3 rounded-md border p-2">
-            {queryFields.map((g, gi) => (
-              <div key={g.label} className="space-y-1">
-                <div className={`truncate ${GROUP_LABEL}`} title={g.label}>{g.label}</div>
-                {/* THE SAME COMPONENT the Data tab used, not the same markup copied.
-                    This fold used to re-spell the row by hand — the comment here said so, and said
-                    a third spelling would be the same bug again. It was right, and copying still
-                    left the two apart: `CheckList` has a filter, a select-all with a count and a
-                    bounded height, and this had none of them. On a fifty-column dataset that was
-                    fifty unbounded rows with no way to search them.
-                    Now that the Data tab's duplicate list is gone, this is the ONLY field picker
-                    for a table, so it has to be the good one. */}
-                <CheckList
-                  idPrefix={`qf-${gi}`}
-                  empty="Nothing to pick from."
-                  options={g.options}
-                  selected={g.selected}
-                  labels={g.labels}
-                  onToggle={(name) =>
-                    g.onChange(
-                      g.selected.includes(name)
-                        ? g.selected.filter((x) => x !== name)
-                        : [...g.selected, name],
-                    )
-                  }
-                  onSetAll={g.onChange}
-                />
-              </div>
-            ))}
-          </div>
-        ) : (
-          <>
             {columns.length >= COLUMN_FILTER_MIN && (
               <Input
                 aria-label="search columns" placeholder="Search columns…" value={filter}
@@ -356,17 +321,48 @@ export function TableColumnsSection({
             </div>
               </SortableContext>
             </DndContext>
-          </>
-        )}
 
         {queryFields && (
-          <button
-            type="button"
-            className="min-h-6 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-            onClick={() => { setPicking((v) => !v); setFilter(""); }}
-          >
-            {picking ? "Done picking columns" : "Add or remove columns"}
-          </button>
+          /* A POPOVER, not a mode. This used to REPLACE the list with the picker and turn the
+             button into "Done picking columns" — one surface pretending to be two. The pivot's
+             field zone already had the better shape: a dashed add-row that floats the picker above
+             the zone, so the list you are adding to stays on screen while you add to it. The old
+             comment defended replacing on the grounds that two column lists must not be visible at
+             once; an overlay is not a second list in the panel's flow, which is what that was
+             about. */
+          <Popover>
+            <PopoverTrigger asChild>
+              <button type="button" aria-label="add or remove columns"
+                className="flex min-h-10 w-full items-center gap-1 rounded-md border border-dashed px-2 text-xs text-muted-foreground hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset">
+                <Plus className="h-3.5 w-3.5" /> Add or remove columns…
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-72 space-y-3 p-2">
+              {queryFields.map((g, gi) => (
+                <div key={g.label} className="space-y-1">
+                  <div className={`truncate ${GROUP_LABEL}`} title={g.label}>{g.label}</div>
+                  {/* The SAME `CheckList` the Data tab used before its duplicate was removed —
+                      component, not a copy of its markup. It brings the filter, the select-all with
+                      a count and the bounded height that a hand-rolled row list never had. */}
+                  <CheckList
+                    idPrefix={`qf-${gi}`}
+                    empty="Nothing to pick from."
+                    options={g.options}
+                    selected={g.selected}
+                    labels={g.labels}
+                    onToggle={(name) =>
+                      g.onChange(
+                        g.selected.includes(name)
+                          ? g.selected.filter((x) => x !== name)
+                          : [...g.selected, name],
+                      )
+                    }
+                    onSetAll={g.onChange}
+                  />
+                </div>
+              ))}
+            </PopoverContent>
+          </Popover>
         )}
       </div>
       )}

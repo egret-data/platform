@@ -377,15 +377,21 @@ describe("TableColumnsSection — Add or remove columns", () => {
     expect(screen.queryByRole("button", { name: /add or remove columns/i })).toBeNull();
   });
 
-  it("swaps the column list for the query field picker, and back", async () => {
+  /**
+   * REVERSED DELIBERATELY. This used to assert the picker REPLACED the list and a second click put
+   * it back — one surface pretending to be two modes. The picker is a popover now, the shape the
+   * pivot's field zone already had: it floats above the list, so the thing being added to stays on
+   * screen while you add to it.
+   */
+  it("floats the query field picker over the list, leaving the list in place", async () => {
     const user = userEvent.setup();
     render(<TableColumnsSection columns={THREE} value={{}} onChange={() => {}} queryFields={queryFields()} />);
     expect(rowOrder()).toHaveLength(3);
     await user.click(screen.getByRole("button", { name: /add or remove columns/i }));
-    expect(rowOrder()).toHaveLength(0);
     expect(screen.getByLabelText("vendor")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /done picking columns/i }));
+    // The assertion that matters: the rows did NOT go away.
     expect(rowOrder()).toHaveLength(3);
+    expect(screen.queryByRole("button", { name: /done picking columns/i })).toBeNull();
   });
 
   // Disagreement #1: on an aggregated table a metric is in the display list and in NO field list
