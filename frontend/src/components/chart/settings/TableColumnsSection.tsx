@@ -225,7 +225,7 @@ export function TableColumnsSection({
               <Input
                 aria-label="search columns" placeholder="Search columns…" value={filter}
                 onChange={(e) => setFilter(e.target.value)}
-                className="text-sm"
+                className="w-full text-sm"
               />
             )}
             {q && visibleColumns.length === 0 && (
@@ -328,7 +328,7 @@ export function TableColumnsSection({
             const n = Number(e.target.value);
             onChange({ ...value, pinnedLeft: Number.isNaN(n) ? 0 : Math.max(0, Math.min(n, columns.length)) });
           }}
-          className="text-sm"
+          className="w-full text-sm"
         />
       </div>
 
@@ -361,7 +361,7 @@ export function TableColumnsSection({
             const n = Number(e.target.value);
             onChange({ ...value, pinnedTop: Number.isNaN(n) ? 0 : Math.max(0, n) });
           }}
-          className="text-sm"
+          className="w-full text-sm"
         />
       </div>
 

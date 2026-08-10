@@ -208,10 +208,10 @@ export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionPr
         <Toggle id="cz-stacktotal" label="Stack totals" checked={!!config.showStackTotal} onChange={(v) => onChange({ showStackTotal: v })} />
       )}
       {anyLine && (
-        <div className="flex items-center justify-between gap-2">
+        <div className="space-y-1.5">
           <Label className="text-sm font-normal">Line shape</Label>
           <Select value={config.lineShape ?? "linear"} onValueChange={(v) => onChange({ lineShape: v as CartesianConfig["lineShape"] })}>
-            <SelectTrigger aria-label="Line shape"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="w-full" aria-label="Line shape"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="linear">Linear</SelectItem>
               <SelectItem value="smooth">Smooth</SelectItem>
@@ -221,10 +221,10 @@ export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionPr
         </div>
       )}
       {anyLine && (
-        <div className="flex items-center justify-between gap-2">
+        <div className="space-y-1.5">
           <Label className="text-sm font-normal">Missing values</Label>
           <Select value={config.missing ?? "interpolate"} onValueChange={(v) => onChange({ missing: v as CartesianConfig["missing"] })}>
-            <SelectTrigger aria-label="Missing values"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="w-full" aria-label="Missing values"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="interpolate">Connect</SelectItem>
               <SelectItem value="zero">Zero</SelectItem>
@@ -234,14 +234,14 @@ export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionPr
         </div>
       )}
       {anyLine && (
-        <div className="flex items-center justify-between gap-2">
+        <div className="space-y-1.5">
           <Label htmlFor="cz-markers" className="text-sm font-normal">Markers</Label>
           {/* A plain three-option Select bound directly to the string, like Line shape and
               Missing values above — NOT AutoToggle. AutoToggle's value is boolean|undefined;
               translating "auto" through it maps that literal to `false` ("Off"), and nothing
               ever un-writes a value that was never wrong to store in the first place. */}
           <Select value={config.markers ?? "auto"} onValueChange={(v) => onChange({ markers: v === "auto" ? undefined : (v as CartesianConfig["markers"]) })}>
-            <SelectTrigger id="cz-markers" aria-label="Markers"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="w-full" id="cz-markers" aria-label="Markers"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="auto" title="Auto shows markers only when there are few enough points to read">Auto</SelectItem>
               <SelectItem value="on">On</SelectItem>
@@ -311,13 +311,13 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope, series
           and `.title_text` carry index 1 and 2 within their group). */}
       {scoped(scope, "category") && (
         <div className="space-y-1">
-          <div className="flex items-center justify-between gap-2">
+          <div className="space-y-1.5">
             <Label htmlFor="cz-xlabel" className="text-sm font-normal">{catAx} label</Label>
             <Switch id="cz-show-xlabel" aria-label={`Show ${catAx} label`} checked={config.showXLabel !== false}
               onCheckedChange={(v) => onChange({ showXLabel: v ? undefined : false })} />
           </div>
           {config.showXLabel !== false && (
-            <Input id="cz-xlabel" aria-label={`${catAx} label`} placeholder="Auto"
+            <Input className="w-full" id="cz-xlabel" aria-label={`${catAx} label`} placeholder="Auto"
               value={config.xLabel ?? ""} onChange={(e) => onChange({ xLabel: e.target.value })} />
           )}
         </div>
@@ -354,7 +354,7 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope, series
               added to fix. Off a resolved chart the two are identical, since `resolveXScale`
               returns a stored scale unchanged. */}
           <Select value={resolveXScale(kind, config.xScale, xColumnType) ?? "ordinal"} onValueChange={(v) => onChange({ xScale: v as CartesianConfig["xScale"] })}>
-            <SelectTrigger aria-label="X axis scale"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="w-full" aria-label="X axis scale"><SelectValue /></SelectTrigger>
             <SelectContent>
               {/* Greyed out where the column cannot carry the scale — Metabase offers only Ordinal
                   on a text x, and picking Timeseries here drew an ENTIRELY EMPTY plot: the builder
@@ -383,13 +383,13 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope, series
 
       {scoped(scope, "value") && (
         <div className="space-y-1">
-          <div className="flex items-center justify-between gap-2">
+          <div className="space-y-1.5">
             <Label htmlFor="cz-ylabel" className="text-sm font-normal">{valAx} label</Label>
             <Switch id="cz-show-ylabel" aria-label={`Show ${valAx} label`} checked={config.showYLabel !== false}
               onCheckedChange={(v) => onChange({ showYLabel: v ? undefined : false })} />
           </div>
           {config.showYLabel !== false && (
-            <Input id="cz-ylabel" aria-label={`${valAx} label`} placeholder="Auto"
+            <Input className="w-full" id="cz-ylabel" aria-label={`${valAx} label`} placeholder="Auto"
               value={config.yLabel ?? ""} onChange={(e) => onChange({ yLabel: e.target.value })} />
           )}
         </div>
@@ -445,14 +445,14 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope, series
             const assigned = (config.rightAxisMetrics ?? []).length > 0;
             const onRight = (config.rightAxisMetrics ?? []).includes(m);
             return (
-              <div key={m} className="flex items-center justify-between gap-2">
+              <div key={m} className="space-y-1.5">
                 <Label className="truncate text-sm font-normal">{m}</Label>
                 <Select value={!assigned ? "auto" : onRight ? "right" : "left"} onValueChange={(v) => {
                   if (v === "auto") { onChange({ rightAxisMetrics: [] }); return; }
                   const rest = (config.rightAxisMetrics ?? []).filter((x) => x !== m);
                   onChange({ rightAxisMetrics: v === "right" ? [...rest, m] : rest });
                 }}>
-                  <SelectTrigger aria-label={`axis ${m}`}><SelectValue /></SelectTrigger>
+                  <SelectTrigger className="w-full" aria-label={`axis ${m}`}><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="auto">Auto</SelectItem>
                     <SelectItem value="left">Left</SelectItem>
@@ -575,11 +575,11 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
           a rule. Metabase agrees on the outcome — `ScatterPlot.tsx` spreads `GRAPH_AXIS_SETTINGS`,
           so its scatter carries the same `graph.y_axis.*` keys as its bar chart. */}
       {scoped(scope, "value") && (
-        <div className="flex items-center justify-between gap-2">
+        <div className="space-y-1.5">
           <Label htmlFor="cz-scale" className="text-sm font-normal">{valAx} scale</Label>
           <Select value={config.logScale ? "log" : "linear"}
             onValueChange={(v) => onChange({ logScale: v === "log" || undefined })}>
-            <SelectTrigger id="cz-scale" aria-label={`${valAx} scale`}><SelectValue /></SelectTrigger>
+            <SelectTrigger className="w-full" id="cz-scale" aria-label={`${valAx} scale`}><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="linear">Linear</SelectItem>
               <SelectItem value="log">Log</SelectItem>
@@ -875,10 +875,10 @@ export function FormatOptions({ config, onChange }: SectionProps) {
       />
       <Toggle id="cz-labels" label="Data labels" checked={!!config.showLabels} onChange={(v) => onChange({ showLabels: v })} />
       {config.showLabels && (
-        <div className="flex items-center justify-between gap-2">
+        <div className="space-y-1.5">
           <Label htmlFor="cz-label-density" className="text-sm font-normal">Data label density</Label>
           <Select value={config.labelDensity === "all" ? "all" : "fit"} onValueChange={(v) => onChange({ labelDensity: v as "fit" | "all" })}>
-            <SelectTrigger id="cz-label-density" aria-label="Data label density"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="w-full" id="cz-label-density" aria-label="Data label density"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="fit">Fit</SelectItem>
               <SelectItem value="all">All</SelectItem>
@@ -935,7 +935,7 @@ export function GoalOptions({ config, onChange }: SectionProps) {
       {config.goalValue != null && (
         <label className="space-y-1">
           <span className="text-xs text-muted-foreground">Goal label</span>
-          <Input placeholder="Goal" value={config.goalLabel ?? ""} onChange={(e) => onChange({ goalLabel: e.target.value || undefined })} />
+          <Input className="w-full" placeholder="Goal" value={config.goalLabel ?? ""} onChange={(e) => onChange({ goalLabel: e.target.value || undefined })} />
         </label>
       )}
     </div>

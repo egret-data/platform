@@ -189,7 +189,7 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
             percentVisibility: v === AUTO ? undefined : (v as PieConfig["percentVisibility"]),
           })}
         >
-          <SelectTrigger aria-label="Percentages"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-full" aria-label="Percentages"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value={AUTO} title={`Auto ${autoPercentHint}`}>Auto</SelectItem>
             <SelectItem value="off">Off</SelectItem>
@@ -209,7 +209,7 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
               legend, the slice labels, the centre total and Percentages' own Auto. Clearing the
               box is also the only way back to that, which typing a default over it never was. */}
           <Input id="pz-decimals" aria-label="Decimal places" type="number" min={0} max={10} step={1}
-            className="text-sm" placeholder="Auto"
+            className="w-full text-sm" placeholder="Auto"
             value={config.decimals ?? ""}
             onChange={(e) => {
               const raw = e.target.value;

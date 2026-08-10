@@ -219,7 +219,7 @@ export function RuleEditor({
           </SelectContent>
         </Select>
         {type === "custom" && (
-          <Input
+          <Input className="w-full"
             type="number"
             aria-label={which === "min" ? "Range start value" : "Range end value"}
            
@@ -312,7 +312,7 @@ export function RuleEditor({
           {!NO_VALUE_OPS.has(operator) && (
             <label className="block space-y-1">
               <span className="text-xs text-muted-foreground">Value</span>
-              <Input value={String((draft as SingleColorRule).value ?? "")}
+              <Input className="w-full" value={String((draft as SingleColorRule).value ?? "")}
                 onChange={(e) => setDraft((d) => ({ ...(d as SingleColorRule), value: e.target.value }))} />
             </label>
           )}

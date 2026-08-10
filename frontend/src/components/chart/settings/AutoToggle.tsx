@@ -23,10 +23,10 @@ export function AutoToggle({
 }: { id: string; label: string; value: boolean | undefined; onChange: (v: boolean | undefined) => void; autoHint: string }) {
   const current = value === undefined ? "auto" : value ? "on" : "off";
   return (
-    <div className="flex items-center justify-between gap-2">
+    <div className="space-y-1.5">
       <Label htmlFor={id} className="text-sm font-normal">{label}</Label>
       <Select value={current} onValueChange={(v) => onChange(v === "auto" ? undefined : v === "on")}>
-        <SelectTrigger id={id} aria-label={label}><SelectValue /></SelectTrigger>
+        <SelectTrigger className="w-full" id={id} aria-label={label}><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value="auto" title={autoHint}>Auto</SelectItem>
           <SelectItem value="on">On</SelectItem>

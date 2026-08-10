@@ -98,13 +98,13 @@ export function BoxplotDisplaySection({ config, onChange }: Props) {
           onChange={(e) => onChange({ color: e.target.value })}
         />
       </div>
-      <div className="flex items-center justify-between gap-2">
+      <div className="space-y-1.5">
         <Label htmlFor="bp-compact" className="text-sm font-normal">Shorten large numbers</Label>
         <Select
           value={config.compactValues === undefined ? "auto" : config.compactValues ? "on" : "off"}
           onValueChange={(v) => onChange({ compactValues: v === "auto" ? undefined : v === "on" })}
         >
-          <SelectTrigger id="bp-compact" aria-label="Shorten large numbers"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-full" id="bp-compact" aria-label="Shorten large numbers"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="auto">Auto</SelectItem>
             <SelectItem value="on">Compact</SelectItem>
@@ -129,7 +129,7 @@ export function BoxplotDisplaySection({ config, onChange }: Props) {
         {config.goalValue != null && (
           <label className="space-y-1">
             <span className="text-xs text-muted-foreground">Goal label</span>
-            <Input placeholder="Goal" aria-label="Goal label" value={config.goalLabel ?? ""}
+            <Input className="w-full" placeholder="Goal" aria-label="Goal label" value={config.goalLabel ?? ""}
               onChange={(e) => onChange({ goalLabel: e.target.value || undefined })} />
           </label>
         )}

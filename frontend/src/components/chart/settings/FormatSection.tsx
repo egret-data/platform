@@ -161,7 +161,7 @@ export function ColumnFormatFields({
   return (
     <>
         <Field label="Column title">
-          <Input
+          <Input className="w-full"
            
             placeholder={c.name}
             value={fmt.column_title ?? ""}
@@ -245,7 +245,7 @@ export function ColumnFormatFields({
                 stored by anything else, so the ceiling here narrows what the panel offers
                 without making a legal saved value unrenderable. */}
             <Field label="Decimal places">
-              <Input type="number" min={0} max={10} step={1} placeholder="Auto"
+              <Input className="w-full" type="number" min={0} max={10} step={1} placeholder="Auto"
                 value={fmt.decimals ?? ""}
                 onChange={(e) => {
                   const raw = e.target.value;
@@ -292,10 +292,10 @@ export function ColumnFormatFields({
 
             <div className="flex gap-2">
               <Field label="Prefix">
-                <Input value={fmt.prefix ?? ""} onChange={(e) => patch({ prefix: e.target.value })} />
+                <Input className="w-full" value={fmt.prefix ?? ""} onChange={(e) => patch({ prefix: e.target.value })} />
               </Field>
               <Field label="Suffix">
-                <Input value={fmt.suffix ?? ""} onChange={(e) => patch({ suffix: e.target.value })} />
+                <Input className="w-full" value={fmt.suffix ?? ""} onChange={(e) => patch({ suffix: e.target.value })} />
               </Field>
             </div>
 
@@ -409,11 +409,11 @@ export function ColumnFormatFields({
             {fmt.view_as === "link" && (
               <>
                 <Field label="Link text">
-                  <Input placeholder="{{value}}" value={fmt.link_text ?? ""}
+                  <Input className="w-full" placeholder="{{value}}" value={fmt.link_text ?? ""}
                     onChange={(e) => patch({ link_text: e.target.value || undefined })} />
                 </Field>
                 <Field label="Link URL">
-                  <Input placeholder="{{value}}" value={fmt.link_url ?? ""}
+                  <Input className="w-full" placeholder="{{value}}" value={fmt.link_url ?? ""}
                     onChange={(e) => patch({ link_url: e.target.value || undefined })} />
                 </Field>
               </>

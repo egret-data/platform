@@ -292,7 +292,7 @@ export function TickCountRow({ id, value, onChange }: {
   return (
     <div className="space-y-1">
       <Label htmlFor={id} className="text-sm font-normal">Number of tick marks</Label>
-      <Input
+      <Input className="w-full"
         id={id} aria-label="Number of tick marks" type="number" min={2} max={20}
         placeholder="auto" value={value ?? ""}
         onChange={(e) => {
@@ -311,12 +311,12 @@ function AxisTitleRow({ id, axis, label, shown, onLabel, onShown }: {
 }) {
   return (
     <div className="space-y-1">
-      <div className="flex items-center justify-between gap-2">
+      <div className="space-y-1.5">
         <Label htmlFor={id} className="text-sm font-normal">Show label</Label>
         <Switch id={`${id}-shown`} aria-label={`Show ${axis} label`} checked={shown} onCheckedChange={onShown} />
       </div>
       {shown && (
-        <Input id={id} aria-label={`${axis} label`} placeholder="Auto"
+        <Input className="w-full" id={id} aria-label={`${axis} label`} placeholder="Auto"
           value={label ?? ""} onChange={(e) => onLabel(e.target.value || undefined)} />
       )}
     </div>
