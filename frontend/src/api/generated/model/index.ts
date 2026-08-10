@@ -241,6 +241,7 @@ export * from './secretDto';
 export * from './seedResult';
 export * from './setAccessPolicy';
 export * from './setDashboardCertification';
+export * from './setDatasetCertification';
 export * from './setFeatures';
 export * from './setFeaturesFeatures';
 export * from './setFolder';

@@ -269,37 +269,79 @@ impl DatasetRepo {
 
     /// Update name/description, (for virtual datasets) sql, and optionally the
     /// certification (a None certification arg leaves that field unchanged).
-    /// Does not touch columns.
-    #[allow(clippy::too_many_arguments)]
+    /// Does not touch columns, and DOES NOT TOUCH CERTIFICATION — see [`Self::set_certification`].
+    /// An ordinary save must not be able to reach those columns, or the `dataset:certify` gate is
+    /// decoration: an editor would simply certify through the update body, which is exactly what
+    /// they used to do. The absence of the parameters is the enforcement.
     pub async fn update(
         &self,
         id: Uuid,
         name: &str,
         description: &str,
         sql: Option<&str>,
-        certified: Option<bool>,
-        certified_by: Option<&str>,
-        certification_details: Option<&str>,
     ) -> Result<Dataset, BiError> {
         let ds = sqlx::query_as::<_, Dataset>(&format!(
             "UPDATE analytics.datasets SET name=$2, description=$3, \
              sql = CASE WHEN sql IS NULL THEN sql ELSE COALESCE($4, sql) END, \
-             certified = COALESCE($5, certified), \
-             certified_by = COALESCE($6, certified_by), \
-             certification_details = COALESCE($7, certification_details), \
              updated_at = now() WHERE id=$1 RETURNING {COLS}"
         ))
         .bind(id)
         .bind(name)
         .bind(description)
         .bind(sql)
-        .bind(certified)
-        .bind(certified_by)
-        .bind(certification_details)
         .fetch_optional(&self.db.pool)
         .await?
         .ok_or_else(|| BiError::NotFound(id.to_string()))?;
         Ok(ds)
+    }
+
+    /// The only way certification reaches a dataset. `by` is the CERTIFIER'S EMAIL, taken from the
+    /// session by the route — never from the request body, which is how an editor used to be able
+    /// to attribute their own certification to somebody else.
+    pub async fn set_certification(
+        &self,
+        id: Uuid,
+        certified: bool,
+        by: &str,
+        details: &str,
+    ) -> Result<Dataset, BiError> {
+        // Withdrawal clears the attribution with it: "not certified, by Ana" is a worse answer
+        // than saying nothing, and leaving Ana's name on a withdrawn badge misrepresents her.
+        let (by, details) = if certified { (by, details) } else { ("", "") };
+        sqlx::query_as::<_, Dataset>(&format!(
+            "UPDATE analytics.datasets SET certified=$2, certified_by=$3, \
+             certification_details=$4 WHERE id=$1 RETURNING {COLS}"
+        ))
+        .bind(id)
+        .bind(certified)
+        .bind(by)
+        .bind(details)
+        .fetch_optional(&self.db.pool)
+        .await?
+        .ok_or_else(|| BiError::NotFound(id.to_string()))
+    }
+
+    /// As [`Self::set_certification`], for one metric. Same permission, because a metric belongs
+    /// to a dataset and vouching for the data is one act.
+    pub async fn set_metric_certification(
+        &self,
+        metric_id: Uuid,
+        certified: bool,
+        by: &str,
+        details: &str,
+    ) -> Result<(), BiError> {
+        let (by, details) = if certified { (by, details) } else { ("", "") };
+        sqlx::query(
+            "UPDATE analytics.dataset_metrics SET certified=$2, certified_by=$3, \
+             certification_details=$4 WHERE id=$1",
+        )
+        .bind(metric_id)
+        .bind(certified)
+        .bind(by)
+        .bind(details)
+        .execute(&self.db.pool)
+        .await?;
+        Ok(())
     }
 
     /// Reconcile the *physical* column snapshot against a fresh introspection, mirroring
@@ -423,7 +465,9 @@ impl DatasetRepo {
         .await?)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// A new metric is NEVER born certified — see [`Self::set_metric_certification`], which is
+    /// the only path to those columns. Accepting them here would let an editor create a
+    /// pre-vouched metric in one call and skip the gate entirely.
     #[allow(clippy::too_many_arguments)]
     pub async fn add_metric(
         &self,
@@ -435,14 +479,11 @@ impl DatasetRepo {
         verbose_name: &str,
         description: &str,
         format: &str,
-        certified: bool,
-        certified_by: &str,
-        certification_details: &str,
     ) -> Result<(), BiError> {
         let r = sqlx::query(
             "INSERT INTO analytics.dataset_metrics \
-               (dataset_id, metric_name, expression, data_type, type_generic, verbose_name, description, format, certified, certified_by, certification_details, ordinal) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, \
+               (dataset_id, metric_name, expression, data_type, type_generic, verbose_name, description, format, ordinal) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8, \
                (SELECT COALESCE(MAX(ordinal),-1)+1 FROM analytics.dataset_metrics WHERE dataset_id=$1))",
         )
         .bind(dataset_id)
@@ -453,9 +494,6 @@ impl DatasetRepo {
         .bind(verbose_name)
         .bind(description)
         .bind(format)
-        .bind(certified)
-        .bind(certified_by)
-        .bind(certification_details)
         .execute(&self.db.pool)
         .await;
         conflict_on_unique(r, "metric name already exists").map(|_| ())
@@ -472,14 +510,12 @@ impl DatasetRepo {
         verbose_name: &str,
         description: &str,
         format: &str,
-        certified: bool,
-        certified_by: &str,
-        certification_details: &str,
     ) -> Result<(), BiError> {
+        // Certification is absent here for the same reason it is absent from `update`: editing a
+        // metric's expression must not be a way to grant it a badge.
         let r = sqlx::query(
             "UPDATE analytics.dataset_metrics SET metric_name=$2, expression=$3, data_type=$4, \
-               type_generic=$5, verbose_name=$6, description=$7, format=$8, certified=$9, \
-               certified_by=$10, certification_details=$11 WHERE id=$1",
+               type_generic=$5, verbose_name=$6, description=$7, format=$8 WHERE id=$1",
         )
         .bind(metric_id)
         .bind(name)
@@ -489,9 +525,6 @@ impl DatasetRepo {
         .bind(verbose_name)
         .bind(description)
         .bind(format)
-        .bind(certified)
-        .bind(certified_by)
-        .bind(certification_details)
         .execute(&self.db.pool)
         .await;
         conflict_on_unique(r, "metric name already exists").map(|_| ())

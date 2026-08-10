@@ -11,7 +11,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { HelpCircle } from "lucide-react";
 import { FormatPicker } from "@/components/dataset/FormatPicker";
-import { useDatasetMutations, type DatasetMetric, type MetricInput } from "@/api/datasets";
+import { useAuth } from "@/auth/useAuth";
+import { useDatasetMutations, useSetDatasetCertification, type DatasetMetric, type MetricInput } from "@/api/datasets";
 
 /** A column header with an info icon that explains the field in plain language. */
 function HeaderHint({ label, hint, center }: { label: string; hint: string; center?: boolean }) {
@@ -38,6 +39,11 @@ type Editing = (Partial<DatasetMetric> & { id?: string; metric_name: string; exp
 
 export function MetricsTab({ ws, datasetId, metrics }: Props) {
   const { addMetric, updateMetric, deleteMetric } = useDatasetMutations(ws, datasetId);
+  const setCertification = useSetDatasetCertification(ws, datasetId);
+  // Platform-scoped `dataset:certify` (0109) — a metric badge that an editor could set would
+  // defeat the dataset gate, since the metric is what the semantic layer actually shows.
+  const { me } = useAuth();
+  const canCertify = !!me && (me.platform_roles.includes("platform_admin") || me.permissions.includes("dataset:certify"));
   const [editing, setEditing] = useState<Editing>(null);
 
   // Inline edits (format/certified) resend the whole metric so the backend can
@@ -45,7 +51,9 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
   const patchMetric = (m: DatasetMetric, patch: Partial<MetricInput>) =>
     updateMetric.mutateAsync({
       metricId: m.id,
-      body: { metric_name: m.metric_name, expression: m.expression, verbose_name: m.verbose_name, description: m.description, format: m.format, certified: m.certified, certified_by: m.certified_by, certification_details: m.certification_details, ...patch },
+      // No certification fields — the server dropped them from this body in 0109. Sending them
+      // here is how an editor used to certify a metric, and name someone else as the certifier.
+      body: { metric_name: m.metric_name, expression: m.expression, verbose_name: m.verbose_name, description: m.description, format: m.format, ...patch },
     }).catch((e) => toast.error(String(e)));
 
   async function save() {
@@ -56,9 +64,6 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
       verbose_name: (editing.verbose_name ?? "").trim(),
       description: (editing.description ?? "").trim(),
       format: (editing.format ?? "").trim(),
-      certified: editing.certified ?? false,
-      certified_by: (editing.certified_by ?? "").trim(),
-      certification_details: (editing.certification_details ?? "").trim(),
     };
     if (!body.metric_name || !body.expression) { toast.error("Name and expression required"); return; }
     try {
@@ -115,7 +120,14 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
                   <td className="px-2 py-1.5">
                     <FormatPicker type={m.data_type} value={m.format} onChange={(v) => { if (v !== m.format) patchMetric(m, { format: v }); }} />
                   </td>
-                  <td className="px-2 py-1.5 text-center"><Switch checked={m.certified} onCheckedChange={(v) => patchMetric(m, { certified: v })} aria-label={`Certified ${m.metric_name}`} /></td>
+                  <td className="px-2 py-1.5 text-center">{canCertify ? (
+                    <Switch checked={m.certified} aria-label={`Certified ${m.metric_name}`}
+                      onCheckedChange={(v) => setCertification.mutateAsync({ certified: v, details: m.certification_details, metricId: m.id }).catch((e) => toast.error(String(e)))} />
+                  ) : (
+                    // A reader still SEES the badge in the name column; what they lose is the
+                    // ability to set it. An empty cell keeps the column aligned.
+                    <span className="text-muted-foreground">—</span>
+                  )}</td>
                   <td className="px-2 py-1.5 text-muted-foreground">{m.verbose_name || "—"}</td>
                   <td className="px-2 py-1.5 text-right">
                     <div className="flex justify-end gap-1">
@@ -158,18 +170,6 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
               <div className="space-y-1.5">
                 <Label htmlFor="m-desc">Description <span className="font-normal text-muted-foreground">(optional)</span></Label>
                 <Textarea id="m-desc" placeholder="What this metric measures" value={editing.description ?? ""} onChange={(e) => setEditing({ ...editing, description: e.target.value })} />
-              </div>
-              <div className="space-y-2 rounded-md border p-2.5">
-                <label className="flex items-center gap-2 text-sm">
-                  <Switch checked={editing.certified ?? false} onCheckedChange={(v) => setEditing({ ...editing, certified: v })} />
-                  Certified <span className="text-muted-foreground">— mark as the trusted, official metric</span>
-                </label>
-                {editing.certified && (
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <Input placeholder="Certified by (name/team)" value={editing.certified_by ?? ""} onChange={(e) => setEditing({ ...editing, certified_by: e.target.value })} />
-                    <Input placeholder="Details (why it's trusted)" value={editing.certification_details ?? ""} onChange={(e) => setEditing({ ...editing, certification_details: e.target.value })} />
-                  </div>
-                )}
               </div>
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={() => setEditing(null)}>Cancel</Button>

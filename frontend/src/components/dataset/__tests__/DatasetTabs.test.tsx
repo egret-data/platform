@@ -13,6 +13,13 @@ vi.mock("@/api/datasets", () => ({
     updateMetric: { mutateAsync: vi.fn(), isPending: false },
     deleteMetric: { mutateAsync: vi.fn(), isPending: false },
   }),
+  useSetDatasetCertification: () => ({ mutateAsync: vi.fn(), isPending: false }),
+}));
+// MetricsTab reads the session to decide whether to offer the certify switch (0109). These
+// tests are about rendering rows, so grant it: a steward sees the fullest markup, which is the
+// stricter thing to assert against.
+vi.mock("@/auth/useAuth", () => ({
+  useAuth: () => ({ me: { platform_roles: [], permissions: ["dataset:certify"] } }),
 }));
 
 import { ColumnsTab } from "@/components/dataset/ColumnsTab";

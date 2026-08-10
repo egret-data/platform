@@ -14557,6 +14557,105 @@
         }
       }
     },
+    "/api/ws/{workspace}/datasets/{id}/certification": {
+      "put": {
+        "tags": [
+          "datasets"
+        ],
+        "operationId": "ds_set_certification",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Dataset id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetDatasetCertification"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Certification set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetDetailDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing dataset:certify permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such dataset in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/datasets/{id}/columns": {
       "post": {
         "tags": [
@@ -15403,6 +15502,115 @@
           },
           "404": {
             "description": "No such dataset, or metric not in this dataset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/datasets/{id}/metrics/{metric_id}/certification": {
+      "put": {
+        "tags": [
+          "datasets"
+        ],
+        "operationId": "ds_set_metric_certification",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Dataset id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "metric_id",
+            "in": "path",
+            "description": "Metric id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetDatasetCertification"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Certification set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetDetailDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing dataset:certify permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such dataset or metric",
             "content": {
               "application/json": {
                 "schema": {
@@ -25082,15 +25290,6 @@
           },
           "format": {
             "type": "string"
-          },
-          "certified": {
-            "type": "boolean"
-          },
-          "certified_by": {
-            "type": "string"
-          },
-          "certification_details": {
-            "type": "string"
           }
         }
       },
@@ -26990,6 +27189,22 @@
           }
         }
       },
+      "SetDatasetCertification": {
+        "type": "object",
+        "description": "Body of the dataset / metric certification endpoints. Deliberately carries NO `certified_by`:\nthe certifier is the session, exactly as it is for dashboards. A client that could name the\ncertifier could forge provenance, which is the defect 0109 closes.",
+        "required": [
+          "certified"
+        ],
+        "properties": {
+          "certified": {
+            "type": "boolean"
+          },
+          "details": {
+            "type": "string",
+            "description": "Ignored when `certified` is false — withdrawing clears the note rather than leaving a\nstale justification attached to an uncertified dataset."
+          }
+        }
+      },
       "SetFeatures": {
         "type": "object",
         "description": "The feature keys to change; any key this workspace's catalog entry already\nhas is left exactly as it is. This is a merge, not a full replacement,\ndespite arriving over `PUT`: `PUT` is still the right verb because the\noperation is idempotent (sending the same body twice yields the same\nstate) — it is not required to mention every field of the resource. A\nmerge is also forward-safe: when a sixth module joins the catalog, a\ncaller that still only sends today's five keys leaves it untouched\ninstead of implicitly switching it on, which is what a true full\nreplacement (write/delete a row for every key, mentioned or not) would do.",
@@ -27957,24 +28172,6 @@
             "type": "string"
           },
           "sql": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "certified": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "certified_by": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "certification_details": {
             "type": [
               "string",
               "null"

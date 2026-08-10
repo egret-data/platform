@@ -590,9 +590,8 @@ async fn dashboard_card_data_merges_and_validates_temporal_units() {
     // A dataset-defined metric so the aggregate query (which applies the temporal grid
     // to its dimension) has a valid measure.
     st.datasets
-        .add_metric(
-            ds, "cnt", "COUNT(*)", "integer", "numeric", "Count", "", "", false, "", "",
-        )
+        // No certification args since 0109 — a metric is never born certified.
+        .add_metric(ds, "cnt", "COUNT(*)", "integer", "numeric", "Count", "", "")
         .await
         .unwrap();
     // Saved spec: group by temporal dimension "d" (pre-gridded to "day"), count metric.

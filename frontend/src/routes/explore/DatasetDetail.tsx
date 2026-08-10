@@ -14,7 +14,8 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SqlEditor } from "@/components/sqllab/SqlEditor";
-import { useDataset, useRefreshDataset, useDeleteDataset, useUpdateDataset } from "@/api/datasets";
+import { useAuth } from "@/auth/useAuth";
+import { useDataset, useRefreshDataset, useDeleteDataset, useUpdateDataset, useSetDatasetCertification } from "@/api/datasets";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { ColumnsTab } from "@/components/dataset/ColumnsTab";
 import { MetricsTab } from "@/components/dataset/MetricsTab";
@@ -39,6 +40,11 @@ export default function DatasetDetail() {
   const refresh = useRefreshDataset(ws, id);
   const del = useDeleteDataset(ws);
   const update = useUpdateDataset(ws, id);
+  const setCertification = useSetDatasetCertification(ws, id);
+  // PLATFORM-scoped, so unlike `dashboard:manage` this DOES appear in the session permission
+  // list and can be read here. Mirrors DashboardView.tsx — platform_admin always passes.
+  const { me } = useAuth();
+  const canCertify = !!me && (me.platform_roles.includes("platform_admin") || me.permissions.includes("dataset:certify"));
 
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState("");
@@ -46,7 +52,8 @@ export default function DatasetDetail() {
   const [sql, setSql] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [certifyOpen, setCertifyOpen] = useState(false);
-  const [cert, setCert] = useState({ certified: false, by: "", details: "" });
+  // No `by`: the certifier is the SESSION now (0109), so there is nothing for the user to type.
+  const [cert, setCert] = useState({ certified: false, details: "" });
   const [searchParams, setSearchParams] = useSearchParams();
 
   const dirty = editing && !!ds && (
@@ -116,19 +123,14 @@ export default function DatasetDetail() {
 
   function openCertify() {
     if (!ds) return;
-    setCert({ certified: ds.certified, by: ds.certified_by, details: ds.certification_details });
+    setCert({ certified: ds.certified, details: ds.certification_details });
     setCertifyOpen(true);
   }
   async function saveCert() {
     if (!ds) return;
     try {
-      await update.mutateAsync({
-        name: ds.name,
-        description: ds.description,
-        certified: cert.certified,
-        certified_by: cert.certified ? cert.by : "",
-        certification_details: cert.certified ? cert.details : "",
-      });
+      // Its own endpoint, not `update` — see `useSetDatasetCertification`.
+      await setCertification.mutateAsync({ certified: cert.certified, details: cert.details });
       setCertifyOpen(false);
       toast.success(cert.certified ? "Dataset certified" : "Certification removed");
     } catch (e) { toast.error(String(e)); }
@@ -198,9 +200,14 @@ export default function DatasetDetail() {
               <Button asChild className="gap-1.5">
                 <Link to={`/explore/${ws}/charts/new?dataset=${ds.id}`}><BarChart3 className="h-4 w-4" /> Create chart</Link>
               </Button>
-              <Button variant="outline" size="icon" title={ds.certified ? "Certification" : "Certify dataset"} onClick={openCertify}>
-                <BadgeCheck className={`h-4 w-4 ${ds.certified ? "text-primary" : ""}`} />
-              </Button>
+              {/* Withheld, not disabled, exactly as on a dashboard: a greyed control advertises
+                  a capability the reader does not have. The BADGE itself stays visible below —
+                  reading who vouched for the data is not a stewardship act. */}
+              {canCertify && (
+                <Button variant="outline" size="icon" title={ds.certified ? "Certification" : "Certify dataset"} onClick={openCertify}>
+                  <BadgeCheck className={`h-4 w-4 ${ds.certified ? "text-primary" : ""}`} />
+                </Button>
+              )}
               <Button variant="outline" size="icon" title="Edit" onClick={startEdit}><Pencil className="h-4 w-4" /></Button>
               <Button variant="outline" size="icon" title="Refresh columns" disabled={refresh.isPending}
                 onClick={() => refresh.mutateAsync().then(() => toast.success("Refreshed")).catch((e) => toast.error(String(e)))}>
@@ -245,10 +252,6 @@ export default function DatasetDetail() {
             </label>
             {cert.certified && (
               <>
-                <div className="space-y-1.5">
-                  <Label htmlFor="cert-by">Certified by</Label>
-                  <Input id="cert-by" placeholder="Name or team" value={cert.by} onChange={(e) => setCert((c) => ({ ...c, by: e.target.value }))} />
-                </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="cert-det">Details <span className="font-normal text-muted-foreground">(optional)</span></Label>
                   <Input id="cert-det" placeholder="Why it's trusted" value={cert.details} onChange={(e) => setCert((c) => ({ ...c, details: e.target.value }))} />

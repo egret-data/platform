@@ -26,6 +26,8 @@ use sqlx::PgPool;
 // re-embed: 0107 dashboard_revisions (per-dashboard snapshot history, count-bounded at 20)
 // re-embed: 0108 dashboard_certification (certified/certified_by/certification_details + the
 // dashboard:certify seed for data_steward)
+// re-embed: 0109 dataset_certify_permission (dataset:certify seed for data_steward; closes
+// self-certification AND client-supplied certified_by on datasets and metrics)
 /// All SQL migrations, embedded at compile time from the workspace `migrations/` dir.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 

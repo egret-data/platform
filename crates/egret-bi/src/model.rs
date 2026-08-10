@@ -20,8 +20,8 @@ pub use egret_analytics_api::bi::{
     DashboardDetailDto, DashboardRevisionDto, DashboardSummaryDto, DashboardTabDto,
     DatasetColumnDto, DatasetDetailDto, DatasetSummaryDto, DatasetUsageDto, FolderDto, MetricBody,
     MetricDto, NewTabInput, RenameFolder, SaveQuery, SavedQueryDto, SchemaColumn, SearchHit,
-    SetDashboardCertification, SetFolder, SnippetBody, SnippetDto, UpdateChart, UpdateColumnBody,
-    UpdateDashboard, UpdateDataset,
+    SetDashboardCertification, SetDatasetCertification, SetFolder, SnippetBody, SnippetDto,
+    UpdateChart, UpdateColumnBody, UpdateDashboard, UpdateDataset,
 };
 
 pub fn folder_dto(f: crate::folder::Folder) -> FolderDto {

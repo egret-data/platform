@@ -26,7 +26,8 @@ use crate::model::{
     DashboardDetailDto, DashboardRevisionDto, DashboardSummaryDto, DashboardTabDto,
     DatasetColumnDto, DatasetDetailDto, DatasetSummaryDto, FolderDto, MetricBody, MetricDto,
     NewTabInput, RenameFolder, SaveQuery, SavedQueryDto, SchemaColumn, SetDashboardCertification,
-    SetFolder, UpdateChart, UpdateColumnBody, UpdateDashboard, UpdateDataset,
+    SetDatasetCertification, SetFolder, UpdateChart, UpdateColumnBody, UpdateDashboard,
+    UpdateDataset,
 };
 use crate::saved::SavedQueryRepo;
 use crate::schema::SchemaService;
@@ -73,6 +74,9 @@ const SQ_READ: &str = "saved_query:read";
 const SQ_MANAGE: &str = "saved_query:manage";
 const DS_READ: &str = "dataset:read";
 const DS_MANAGE: &str = "dataset:manage";
+/// PLATFORM-scoped (0109), like `dashboard:certify`. Holding `dataset:manage` — or owning the
+/// dataset — grants nothing here; that asymmetry is the feature.
+const DS_CERTIFY: &str = "dataset:certify";
 const CH_READ: &str = "chart:read";
 const CH_MANAGE: &str = "chart:manage";
 const DB_READ: &str = "dashboard:read";
@@ -688,10 +692,21 @@ pub fn dataset_router() -> Router<BiState> {
             get(ds_get).put(ds_update).delete(ds_remove),
         )
         .route("/ws/{workspace}/datasets/{id}/refresh", post(ds_refresh))
+        // Certification is its own route for the same reason the dashboard's is: it is guarded by
+        // a PLATFORM permission, and folding it into the object's update body is precisely how an
+        // editor used to be able to certify their own work.
+        .route(
+            "/ws/{workspace}/datasets/{id}/certification",
+            put(ds_set_certification),
+        )
         .route("/ws/{workspace}/datasets/{id}/metrics", post(ds_add_metric))
         .route(
             "/ws/{workspace}/datasets/{id}/metrics/{metric_id}",
             put(ds_update_metric).delete(ds_delete_metric),
+        )
+        .route(
+            "/ws/{workspace}/datasets/{id}/metrics/{metric_id}/certification",
+            put(ds_set_metric_certification),
         )
         .route("/ws/{workspace}/datasets/{id}/columns", post(ds_add_column))
         .route(
@@ -1056,15 +1071,7 @@ async fn ds_update(
         .await
         .map_err(BiApiError::from)?;
     st.datasets
-        .update(
-            id,
-            &b.name,
-            &b.description,
-            b.sql.as_deref(),
-            b.certified,
-            b.certified_by.as_deref(),
-            b.certification_details.as_deref(),
-        )
+        .update(id, &b.name, &b.description, b.sql.as_deref())
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(load_detail(&st, id).await?))
@@ -1333,9 +1340,6 @@ async fn ds_add_metric(
             &b.verbose_name,
             &b.description,
             &b.format,
-            b.certified,
-            &b.certified_by,
-            &b.certification_details,
         )
         .await
         .map_err(BiApiError::from)?;
@@ -1392,10 +1396,95 @@ async fn ds_update_metric(
             &b.verbose_name,
             &b.description,
             &b.format,
-            b.certified,
-            &b.certified_by,
-            &b.certification_details,
         )
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(load_detail(&st, id).await?))
+}
+
+/// Shared by both certification handlers below: resolve the dataset inside the path workspace,
+/// then demand the PLATFORM permission.
+///
+/// SUBJECT IS THE PRINCIPAL, NOT THE WORKSPACE CONTEXT — the same trap that made #461 wrong.
+/// `WorkspaceContext` presents `Resource::Workspace`, and a platform-scoped grant does not
+/// authorize against a workspace resource, so this would 403 for every data_steward, i.e. for
+/// exactly the people the permission is seeded to. `Principal` presents `Resource::Platform`.
+///
+/// The object is resolved FIRST so a caller without the permission cannot use the 403/404
+/// difference to learn whether a dataset id exists in a workspace they cannot see.
+async fn require_dataset_certify(
+    st: &BiState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> Result<(), BiApiError> {
+    let _obj = crate::shares::resolve(st, ctx, "dataset", id).await?;
+    egret_core::authz::require(&*st.pdp, &ctx.principal, DS_CERTIFY)
+        .await
+        .map_err(BiApiError::from)
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/datasets/{id}/certification",
+    tag = "datasets",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "Dataset id")),
+    request_body = SetDatasetCertification,
+    responses(
+        (status = 200, description = "Certification set", body = DatasetDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:certify permission", body = ErrorBody),
+        (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn ds_set_certification(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    Json(b): Json<SetDatasetCertification>,
+) -> Result<Json<DatasetDetailDto>, BiApiError> {
+    require_dataset_certify(&st, &ctx, id).await?;
+    // The certifier's email, from the SESSION. The body cannot name anyone — that is the whole
+    // point of 0109, and the difference from the update path this replaces.
+    let who = ctx.principal.email.clone();
+    st.datasets
+        .set_certification(id, b.certified, &who, &b.details)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(load_detail(&st, id).await?))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/datasets/{id}/metrics/{metric_id}/certification",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+        ("metric_id" = Uuid, Path, description = "Metric id"),
+    ),
+    request_body = SetDatasetCertification,
+    responses(
+        (status = 200, description = "Certification set", body = DatasetDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:certify permission", body = ErrorBody),
+        (status = 404, description = "No such dataset or metric", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn ds_set_metric_certification(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id, metric_id)): Path<(String, Uuid, Uuid)>,
+    Json(b): Json<SetDatasetCertification>,
+) -> Result<Json<DatasetDetailDto>, BiApiError> {
+    require_dataset_certify(&st, &ctx, id).await?;
+    // Without this the metric_id is unconstrained and a caller could certify a metric belonging
+    // to a dataset in ANOTHER workspace, since the permission is platform-wide.
+    require_metric_in_dataset(&st, id, metric_id).await?;
+    let who = ctx.principal.email.clone();
+    st.datasets
+        .set_metric_certification(metric_id, b.certified, &who, &b.details)
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(load_detail(&st, id).await?))
@@ -3447,9 +3536,11 @@ async fn require_folder(
         ds_remove,
         ds_refresh,
         ds_data,
+        ds_set_certification,
         ds_add_metric,
         ds_update_metric,
         ds_delete_metric,
+        ds_set_metric_certification,
         ds_add_column,
         ds_update_column,
         ds_delete_column,
@@ -3464,6 +3555,7 @@ async fn require_folder(
         CreateDataset,
         CreateSource,
         UpdateDataset,
+        SetDatasetCertification,
         DatasetDetailDto,
         DatasetSummaryDto,
         DatasetColumnDto,
