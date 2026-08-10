@@ -9,6 +9,16 @@ import type { CartesianConfig } from "@/api/charts";
 
 const ctrls = (k: Parameters<typeof cartesianDescriptor>[0]) => cartesianDescriptor(k).controls;
 
+/** The swatch is a BUTTON with a background now, not an `<input type="color">` with a value — the
+ *  palette picker replaced the OS colour dialog. jsdom hands `style.backgroundColor` back as
+ *  `rgb(r, g, b)`, so it is converted here rather than rewriting every assertion below: what these
+ *  tests are about is WHICH COLOUR the panel shows, and hex is how the palette states it. */
+function hexOf(el: HTMLElement): string {
+  const m = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(el.style.backgroundColor || "");
+  if (!m) return (el.style.backgroundColor || "").toLowerCase();
+  return "#" + [1, 2, 3].map((i) => Number(m[i]).toString(16).padStart(2, "0")).join("");
+}
+
 describe("cartesian controls are grouped and per-kind", () => {
   it("groups bar's display controls under Series, Axes and Format", () => {
     const groups = ctrls("bar").filter((c) => c.section === "display").map((c) => c.group);
@@ -291,7 +301,7 @@ describe("cartesian controls are grouped and per-kind", () => {
     };
     /** A native `<input type="color">` normalises its value to lower-case (HTML spec), which is also
      *  what this control writes back — so both sides are compared in that casing. */
-    const swatch = (name: string) => (screen.getByLabelText(`color ${name}`) as HTMLInputElement).value.toLowerCase();
+    const swatch = (name: string) => hexOf(screen.getByLabelText(`color ${name}`));
     /** Every series the chart draws, keyed by the RAW name the settings key on. `__raw || name`
      *  rather than `__raw ?? name`: an un-broken-out scatter's one group is named "" and is labelled
      *  with its y-metric, which is the key both the builder and this panel use. */

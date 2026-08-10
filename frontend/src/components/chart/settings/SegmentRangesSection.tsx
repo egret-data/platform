@@ -4,6 +4,7 @@ import { IconButton } from "@/components/ui/icon-button";
 import { Input } from "@/components/ui/input";
 import { DecimalInput } from "./DecimalInput";
 import { Button } from "@/components/ui/button";
+import { ColorPicker } from "./ColorPicker";
 
 /** The widest shape both charts' segments fit into. The gauge's bounds are always numbers; the
  * scalar's may be `null`, meaning unbounded on that side. */
@@ -116,13 +117,8 @@ export function SegmentRangesSection({
         const warning = warnContrast?.(s.color) ?? null;
         return (
         <div key={i} className="flex flex-wrap items-center gap-1">
-          <input
-            type="color"
-            aria-label={`range ${i + 1} color`}
-            className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
-            value={s.color}
-            onChange={(e) => patch(i, "color", e.target.value)}
-          />
+          <ColorPicker label={`range ${i + 1} color`} value={s.color}
+            onChange={(next) => patch(i, "color", next)} />
           {/* DecimalInput, not `type="number"`: a band edge is a data value ("≥ 1701.5 is High"),
               and a number input reports itself EMPTY for as long as a decimal point is the last
               character typed — which arrived here as "the user cleared this bound". See

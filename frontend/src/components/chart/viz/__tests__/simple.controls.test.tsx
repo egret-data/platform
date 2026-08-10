@@ -19,6 +19,16 @@ import type { VizControlProps } from "../types";
  * is handed a pre-ordered `slices` array proves the section renders what it is given and says
  * nothing about what the app gives it. (PR 02 found the same gap on the cartesian side.)
  */
+/** The swatch is a BUTTON with a background now, not an `<input type="color">` with a value — the
+ *  palette picker replaced the OS colour dialog. jsdom hands `style.backgroundColor` back as
+ *  `rgb(r, g, b)`, so it is converted here rather than rewriting every assertion below: what these
+ *  tests are about is WHICH COLOUR the panel shows, and hex is how the palette states it. */
+function hexOf(el: HTMLElement): string {
+  const m = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(el.style.backgroundColor || "");
+  if (!m) return (el.style.backgroundColor || "").toLowerCase();
+  return "#" + [1, 2, 3].map((i) => Number(m[i]).toString(16).padStart(2, "0")).join("");
+}
+
 describe("the pie's slice list, through the descriptor's own control", () => {
   const pieDescriptor = SIMPLE_DESCRIPTORS.find((d) => d.key === "pie")!;
   const control = pieDescriptor.controls.find((c) => c.section === "display")!;
@@ -65,7 +75,7 @@ describe("the pie's slice list, through the descriptor's own control", () => {
   const panelRows = () =>
     screen.getAllByLabelText(/^reorder /).map((el) => el.getAttribute("aria-label")!.slice(8));
   const swatch = (name: string) =>
-    (screen.getByLabelText(`color ${name}`) as HTMLInputElement).value.toLowerCase();
+    hexOf(screen.getByLabelText(`color ${name}`));
 
   it("lists the slices in the order the pie draws them, not the order the rows arrived", () => {
     const drawn = drawnOrder();
@@ -277,7 +287,7 @@ describe("the pie's slice list under a temporal extraction unit", () => {
     }).series[0].data;
     expect(drawn.find((d) => d.name === "Mon")!.itemStyle.color.toLowerCase()).toBe("#f2a86f");
     renderPanel(cfg);
-    expect((screen.getByLabelText("color Mon") as HTMLInputElement).value.toLowerCase()).toBe("#f2a86f");
+    expect(hexOf(screen.getByLabelText("color Mon"))).toBe("#f2a86f");
   });
 
   /** The shell seam. The control gets its units from `VizControlProps`, which `StudioPanel` fills

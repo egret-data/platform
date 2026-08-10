@@ -7,6 +7,16 @@ import { reorderSeriesOrder } from "../SeriesListSection";
 import { PieDisplaySection } from "../PieDisplaySection";
 import { buildPieOption, DEFAULT_SLICE_THRESHOLD } from "@/components/chart/echarts/options/pie";
 
+/** The swatch is a BUTTON with a background now, not an `<input type="color">` with a value — the
+ *  palette picker replaced the OS colour dialog. jsdom hands `style.backgroundColor` back as
+ *  `rgb(r, g, b)`, so it is converted here rather than rewriting every assertion below: what these
+ *  tests are about is WHICH COLOUR the panel shows, and hex is how the palette states it. */
+function hexOf(el: HTMLElement): string {
+  const m = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(el.style.backgroundColor || "");
+  if (!m) return (el.style.backgroundColor || "").toLowerCase();
+  return "#" + [1, 2, 3].map((i) => Number(m[i]).toString(16).padStart(2, "0")).join("");
+}
+
 describe("PieDisplaySection", () => {
   // Legend and Show labels both default from buildPieOption at render time (a pie's colours
   // and slices are unreadable without them), so they are a three-way Auto/On/Off select
@@ -132,8 +142,13 @@ describe("PieDisplaySection", () => {
   it("per-slice colour swatch patches sliceColors by (raw) name", () => {
     const onChange = vi.fn();
     render(<PieDisplaySection config={{}} onChange={onChange} slices={["A", "B"]} />);
-    fireEvent.change(screen.getByLabelText("color B"), { target: { value: "#ff0000" } });
-    expect(onChange).toHaveBeenCalledWith({ sliceColors: { B: "#ff0000" } });
+    // Through the picker the way a user reaches it: the swatch opens a popover of the chart
+    // palette, and each swatch is labelled by its hex. `#ff0000` is not in that palette — the
+    // custom input inside the popover is the route to a colour like that, and it is the second
+    // row rather than the first, which is the point of the change.
+    fireEvent.click(screen.getByLabelText("color B"));
+    fireEvent.click(screen.getByLabelText("#EF8C8C"));
+    expect(onChange).toHaveBeenCalledWith({ sliceColors: { B: "#EF8C8C" } });
   });
 
   it("per-slice rename patches sliceNames and clears (deletes the key) when emptied", () => {
@@ -525,7 +540,7 @@ describe("PieDisplaySection — the slice swatch and the slice the chart draws",
   };
   /** A native `<input type="color">` normalises its value to lower-case (HTML spec), which is also
    *  what the panel writes back — so both sides are compared in that casing. */
-  const swatch = (name: string) => (screen.getByLabelText(`color ${name}`) as HTMLInputElement).value.toLowerCase();
+  const swatch = (name: string) => hexOf(screen.getByLabelText(`color ${name}`));
 
   it("shows each slice the colour the pie draws it in, not the palette slot of its row", () => {
     const chart = pieColors();

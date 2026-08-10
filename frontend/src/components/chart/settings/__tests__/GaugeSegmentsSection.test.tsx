@@ -52,10 +52,13 @@ describe("GaugeSegmentsSection", () => {
     ];
     const onChange = vi.fn();
     render(<GaugeSegmentsSection segments={segments} value={0} onChange={onChange} />);
-    fireEvent.change(screen.getByLabelText("range 2 color"), { target: { value: "#00ff00" } });
+    // Through the palette picker, which is how a colour is chosen now — the swatch opens a
+    // popover and each option is labelled by its hex.
+    fireEvent.click(screen.getByLabelText("range 2 color"));
+    fireEvent.click(screen.getByLabelText("#88BF4D"));
     expect(onChange).toHaveBeenCalledWith([
       { min: 0, max: 50, color: "#111111" },
-      { min: 50, max: 100, color: "#00ff00" },
+      { min: 50, max: 100, color: "#88BF4D" },
     ]);
   });
 
