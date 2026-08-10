@@ -295,8 +295,8 @@ describe("ChartExplore mounts", () => {
     // The unit picker has no label of its own (it is captioned by the "Unit \u00b7 dow" row beside
     // it), and a `combobox` takes no accessible name from its contents — so it is found by the
     // grouping it currently shows.
-    const unitPicker = screen.getAllByRole("combobox").find((c) => c.textContent === "Day of week");
-    await userEvent.click(unitPicker!);
+    const unitPicker = screen.getByRole("combobox", { name: /group .* by/i });
+    await userEvent.click(unitPicker);
     await userEvent.click(await screen.findByRole("option", { name: "Month" }));
     await userEvent.click(screen.getByRole("tab", { name: "Display" }));
 

@@ -26,7 +26,7 @@ export function AutoToggle({
     <div className="flex items-center justify-between gap-2">
       <Label htmlFor={id} className="text-sm font-normal">{label}</Label>
       <Select value={current} onValueChange={(v) => onChange(v === "auto" ? undefined : v === "on")}>
-        <SelectTrigger id={id} aria-label={label} className="h-7 w-24"><SelectValue /></SelectTrigger>
+        <SelectTrigger id={id} aria-label={label}><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value="auto" title={autoHint}>Auto</SelectItem>
           <SelectItem value="on">On</SelectItem>

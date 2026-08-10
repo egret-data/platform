@@ -185,12 +185,21 @@ export default function ChartExplore() {
     // guess, and the uppercase turned the column's own name into a shouted constant — so a row
     // that says "group this column by month" read as a system string. It is a sentence now, and
     // the column name inside it is left in its own case (`ORDER_MONTH` was the CSS, not the data).
+    // AND NOW THE SENTENCE IS GONE TOO. "Group order_month by" repeated a column name that the
+    // field picker shows on the line directly above, and it did so in a control narrower than the
+    // picker — two widths and two mentions of one column, for one decision.
+    //
+    // Metabase does not have this row at all: a bucketed column simply reads `Created At: Month`
+    // on the column itself. This is the same shape, one control wide, keeping the capability
+    // Metabase lacks — it cannot re-bucket a SQL result at all, which is what egret is doing here.
     return c?.is_temporal ? (
-      <div className="flex items-center gap-2 pl-2">
-        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={col}>
-          Group {shown} by
-        </span>
-        <TemporalUnitSelect label={`Group ${shown} by`} value={temporalUnits[col!]} onChange={(u) => setUnit(col!, u)} />
+      <div className="pl-2">
+        <TemporalUnitSelect
+          label={`Group ${shown} by`}
+          prefix={shown}
+          value={temporalUnits[col!]}
+          onChange={(u) => setUnit(col!, u)}
+        />
       </div>
     ) : null;
   };
@@ -630,7 +639,11 @@ export default function ChartExplore() {
           taller than the window looked simply cut off — the pivot's is the longest (totals,
           per-dimension subtotals, formatting, conditional formatting) and it was reported as
           "Display doesn't show everything". It always scrolled; nothing said so. */}
-      <div className="w-72 shrink-0 overflow-y-auto [scrollbar-gutter:stable] border-r p-4 space-y-4">
+      {/* Metabase's chart settings sidebar is 400px with 24px padding, giving 352px of content —
+          the width every control in this panel takes. Written here ONCE so that 352 is a
+          CONSEQUENCE of the panel rather than a number repeated at call sites; repeating it is
+          what produced the eight different widths this replaces. */}
+      <div className="w-[400px] shrink-0 overflow-y-auto [scrollbar-gutter:stable] border-r p-6 space-y-4">
         <Link className="text-xs text-muted-foreground hover:underline" to={`/explore/${ws}/charts`}>← Charts</Link>
 
         <VizSwitcher viz={viz} onChange={changeViz} />

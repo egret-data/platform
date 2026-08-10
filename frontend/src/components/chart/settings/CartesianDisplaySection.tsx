@@ -180,7 +180,7 @@ export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionPr
           <Label className="text-sm font-normal">Stacking</Label>
           <Select value={stackModeOf({ kind, stacked: config.stacked, normalized: config.normalized })}
             onValueChange={(v) => onChange(stackModePatch(v as StackMode))}>
-            <SelectTrigger aria-label="Stacking" className="h-7 w-full"><SelectValue /></SelectTrigger>
+            <SelectTrigger aria-label="Stacking" className="w-full"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="none">Don&apos;t stack</SelectItem>
               <SelectItem value="stacked">Stack</SelectItem>
@@ -211,7 +211,7 @@ export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionPr
         <div className="flex items-center justify-between gap-2">
           <Label className="text-sm font-normal">Line shape</Label>
           <Select value={config.lineShape ?? "linear"} onValueChange={(v) => onChange({ lineShape: v as CartesianConfig["lineShape"] })}>
-            <SelectTrigger aria-label="Line shape" className="h-7 w-24"><SelectValue /></SelectTrigger>
+            <SelectTrigger aria-label="Line shape"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="linear">Linear</SelectItem>
               <SelectItem value="smooth">Smooth</SelectItem>
@@ -224,7 +224,7 @@ export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionPr
         <div className="flex items-center justify-between gap-2">
           <Label className="text-sm font-normal">Missing values</Label>
           <Select value={config.missing ?? "interpolate"} onValueChange={(v) => onChange({ missing: v as CartesianConfig["missing"] })}>
-            <SelectTrigger aria-label="Missing values" className="h-7 w-28"><SelectValue /></SelectTrigger>
+            <SelectTrigger aria-label="Missing values"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="interpolate">Connect</SelectItem>
               <SelectItem value="zero">Zero</SelectItem>
@@ -241,7 +241,7 @@ export function SeriesOptions({ kind, config, onChange, seriesNames }: SectionPr
               translating "auto" through it maps that literal to `false` ("Off"), and nothing
               ever un-writes a value that was never wrong to store in the first place. */}
           <Select value={config.markers ?? "auto"} onValueChange={(v) => onChange({ markers: v === "auto" ? undefined : (v as CartesianConfig["markers"]) })}>
-            <SelectTrigger id="cz-markers" aria-label="Markers" className="h-7 w-24"><SelectValue /></SelectTrigger>
+            <SelectTrigger id="cz-markers" aria-label="Markers"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="auto" title="Auto shows markers only when there are few enough points to read">Auto</SelectItem>
               <SelectItem value="on">On</SelectItem>
@@ -317,7 +317,7 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope, series
               onCheckedChange={(v) => onChange({ showXLabel: v ? undefined : false })} />
           </div>
           {config.showXLabel !== false && (
-            <Input id="cz-xlabel" aria-label={`${catAx} label`} className="h-8" placeholder="Auto"
+            <Input id="cz-xlabel" aria-label={`${catAx} label`} placeholder="Auto"
               value={config.xLabel ?? ""} onChange={(e) => onChange({ xLabel: e.target.value })} />
           )}
         </div>
@@ -354,7 +354,7 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope, series
               added to fix. Off a resolved chart the two are identical, since `resolveXScale`
               returns a stored scale unchanged. */}
           <Select value={resolveXScale(kind, config.xScale, xColumnType) ?? "ordinal"} onValueChange={(v) => onChange({ xScale: v as CartesianConfig["xScale"] })}>
-            <SelectTrigger aria-label="X axis scale" className="h-7 w-28"><SelectValue /></SelectTrigger>
+            <SelectTrigger aria-label="X axis scale"><SelectValue /></SelectTrigger>
             <SelectContent>
               {/* Greyed out where the column cannot carry the scale — Metabase offers only Ordinal
                   on a text x, and picking Timeseries here drew an ENTIRELY EMPTY plot: the builder
@@ -389,7 +389,7 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope, series
               onCheckedChange={(v) => onChange({ showYLabel: v ? undefined : false })} />
           </div>
           {config.showYLabel !== false && (
-            <Input id="cz-ylabel" aria-label={`${valAx} label`} className="h-8" placeholder="Auto"
+            <Input id="cz-ylabel" aria-label={`${valAx} label`} placeholder="Auto"
               value={config.yLabel ?? ""} onChange={(e) => onChange({ yLabel: e.target.value })} />
           )}
         </div>
@@ -452,7 +452,7 @@ export function AxesOptions({ kind, config, onChange, xColumnType, scope, series
                   const rest = (config.rightAxisMetrics ?? []).filter((x) => x !== m);
                   onChange({ rightAxisMetrics: v === "right" ? [...rest, m] : rest });
                 }}>
-                  <SelectTrigger aria-label={`axis ${m}`} className="h-7 w-24"><SelectValue /></SelectTrigger>
+                  <SelectTrigger aria-label={`axis ${m}`}><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="auto">Auto</SelectItem>
                     <SelectItem value="left">Left</SelectItem>
@@ -579,7 +579,7 @@ export function AxisRangeOptions({ kind, config, onChange, xColumnType, scope }:
           <Label htmlFor="cz-scale" className="text-sm font-normal">{valAx} scale</Label>
           <Select value={config.logScale ? "log" : "linear"}
             onValueChange={(v) => onChange({ logScale: v === "log" || undefined })}>
-            <SelectTrigger id="cz-scale" aria-label={`${valAx} scale`} className="h-7 w-28"><SelectValue /></SelectTrigger>
+            <SelectTrigger id="cz-scale" aria-label={`${valAx} scale`}><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="linear">Linear</SelectItem>
               <SelectItem value="log">Log</SelectItem>
@@ -878,7 +878,7 @@ export function FormatOptions({ config, onChange }: SectionProps) {
         <div className="flex items-center justify-between gap-2">
           <Label htmlFor="cz-label-density" className="text-sm font-normal">Data label density</Label>
           <Select value={config.labelDensity === "all" ? "all" : "fit"} onValueChange={(v) => onChange({ labelDensity: v as "fit" | "all" })}>
-            <SelectTrigger id="cz-label-density" aria-label="Data label density" className="h-7 w-24"><SelectValue /></SelectTrigger>
+            <SelectTrigger id="cz-label-density" aria-label="Data label density"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="fit">Fit</SelectItem>
               <SelectItem value="all">All</SelectItem>
@@ -928,14 +928,14 @@ export function GoalOptions({ config, onChange }: SectionProps) {
           DecimalInput for the same reason the axis bounds do. */}
       <label className="space-y-1">
         <span className="text-xs text-muted-foreground">Goal value</span>
-        <DecimalInput className="h-8" placeholder="none"
+        <DecimalInput placeholder="none"
           value={config.goalValue}
           onChange={(goalValue) => onChange({ goalValue })} />
       </label>
       {config.goalValue != null && (
         <label className="space-y-1">
           <span className="text-xs text-muted-foreground">Goal label</span>
-          <Input className="h-8" placeholder="Goal" value={config.goalLabel ?? ""} onChange={(e) => onChange({ goalLabel: e.target.value || undefined })} />
+          <Input placeholder="Goal" value={config.goalLabel ?? ""} onChange={(e) => onChange({ goalLabel: e.target.value || undefined })} />
         </label>
       )}
     </div>

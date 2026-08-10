@@ -189,7 +189,7 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
             percentVisibility: v === AUTO ? undefined : (v as PieConfig["percentVisibility"]),
           })}
         >
-          <SelectTrigger aria-label="Percentages" className="h-7 w-28"><SelectValue /></SelectTrigger>
+          <SelectTrigger aria-label="Percentages"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value={AUTO} title={`Auto ${autoPercentHint}`}>Auto</SelectItem>
             <SelectItem value="off">Off</SelectItem>
@@ -209,7 +209,7 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
               legend, the slice labels, the centre total and Percentages' own Auto. Clearing the
               box is also the only way back to that, which typing a default over it never was. */}
           <Input id="pz-decimals" aria-label="Decimal places" type="number" min={0} max={10} step={1}
-            className="h-7 w-16 text-sm" placeholder="Auto"
+            className="text-sm" placeholder="Auto"
             value={config.decimals ?? ""}
             onChange={(e) => {
               const raw = e.target.value;
@@ -235,7 +235,7 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
               lands there instead of on 0. */}
           <DecimalInput
             id="pz-threshold" aria-label="Group slices below"
-            className="h-7 w-16 text-sm"
+            className="text-sm"
             placeholder={String(DEFAULT_SLICE_THRESHOLD)}
             unsetText={String(DEFAULT_SLICE_THRESHOLD)}
             value={config.sliceThreshold}
@@ -266,12 +266,12 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
                 <input
                   type="color"
                   aria-label={`color ${name}`}
-                  className="h-7 w-8 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+                  className="w-8 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
                   value={config.sliceColors?.[name] ?? defaultSliceColor(name)}
                   onChange={(e) => onChange({ sliceColors: { ...config.sliceColors, [name]: e.target.value } })}
                 />
                 <Input
-                  className="h-7 flex-1"
+                  className="flex-1"
                   aria-label={`label ${name}`}
                   placeholder={name}
                   value={config.sliceNames?.[name] ?? ""}

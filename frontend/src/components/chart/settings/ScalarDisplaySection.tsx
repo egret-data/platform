@@ -35,7 +35,7 @@ export function ScalarDisplaySection({ config, onChange }: {
         <Label htmlFor="scalar-label" className="text-xs text-muted-foreground">Label</Label>
         <Input
           id="scalar-label"
-          className="h-7 text-sm"
+          className="text-sm"
           placeholder="None"
           value={config.label ?? ""}
           onChange={(e) => onChange({ label: e.target.value.trim() ? e.target.value : undefined })}
@@ -49,7 +49,7 @@ export function ScalarDisplaySection({ config, onChange }: {
         <Label htmlFor="scalar-sublabel" className="text-xs text-muted-foreground">Sublabel</Label>
         <Input
           id="scalar-sublabel"
-          className="h-7 text-sm"
+          className="text-sm"
           placeholder="None"
           value={config.sublabel ?? ""}
           onChange={(e) => onChange({ sublabel: e.target.value.trim() ? e.target.value : undefined })}

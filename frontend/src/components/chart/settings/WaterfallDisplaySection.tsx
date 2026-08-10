@@ -34,7 +34,7 @@ function ColorRow({ label, value, fallback, onChange }: {
       <input
         type="color"
         aria-label={label}
-        className="h-7 w-10 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+        className="w-10 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
         value={value ?? fallback}
         onChange={(e) => onChange(e.target.value)}
       />
@@ -76,7 +76,7 @@ export function WaterfallFormatSection({ config, onChange }: Props) {
           <Label htmlFor="wf-density" className="text-sm font-normal">Data label density</Label>
           <Select value={config.labelDensity === "all" ? "all" : "fit"}
             onValueChange={(v) => onChange({ labelDensity: v as "fit" | "all" })}>
-            <SelectTrigger id="wf-density" aria-label="Data label density" className="h-7 w-24"><SelectValue /></SelectTrigger>
+            <SelectTrigger id="wf-density" aria-label="Data label density"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="fit">Fit</SelectItem>
               <SelectItem value="all">All</SelectItem>
@@ -92,7 +92,7 @@ export function WaterfallFormatSection({ config, onChange }: Props) {
           value={config.compactValues === undefined ? "auto" : config.compactValues ? "on" : "off"}
           onValueChange={(v) => onChange({ compactValues: v === "auto" ? undefined : v === "on" })}
         >
-          <SelectTrigger id="wf-compact" aria-label="Shorten large numbers" className="h-7 w-24"><SelectValue /></SelectTrigger>
+          <SelectTrigger id="wf-compact" aria-label="Shorten large numbers"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="auto">Auto</SelectItem>
             <SelectItem value="on">Compact</SelectItem>
@@ -106,7 +106,7 @@ export function WaterfallFormatSection({ config, onChange }: Props) {
           {/* DecimalInput: a goal is a data value, and `type="number"` reports itself EMPTY for
               as long as a decimal point is the last character, which fed `undefined` into the
               config mid-word and lost the keystroke. See DecimalInput. */}
-          <DecimalInput className="h-8" placeholder="none" aria-label="Goal value"
+          <DecimalInput placeholder="none" aria-label="Goal value"
             value={config.goalValue}
             onChange={(goalValue) => onChange({ goalValue })} />
         </label>
@@ -117,7 +117,7 @@ export function WaterfallFormatSection({ config, onChange }: Props) {
         {config.goalValue != null && (
           <label className="space-y-1">
             <span className="text-xs text-muted-foreground">Goal label</span>
-            <Input className="h-8" placeholder="Goal" aria-label="Goal label" value={config.goalLabel ?? ""}
+            <Input placeholder="Goal" aria-label="Goal label" value={config.goalLabel ?? ""}
               onChange={(e) => onChange({ goalLabel: e.target.value || undefined })} />
           </label>
         )}

@@ -16,7 +16,13 @@ import { join } from "node:path";
  * not banned — only the classes that narrow or shorten a control against them. `data-[size=sm]`
  * on the Select primitive is likewise untouched: it is used outside the chart module.
  */
-const BANNED = /\b(h-7|h-8|w-16|w-24|w-28)\b/g;
+/**
+ * The boundaries are `[^\w-]`, not `\b`. `\b` treats a hyphen as a word boundary, so `\bh-8\b`
+ * also matches the `h-8` inside `min-h-8` — a legitimate row-wrapper class (see
+ * `TableColumnsSection.tsx:197`) and not a control override. That false positive would have
+ * failed this guard for the wrong reason.
+ */
+const BANNED = /(?<![\w-])(h-7|h-8|w-16|w-24|w-28)(?![\w-])/g;
 const DIR = join(__dirname, "..");
 
 describe("settings panel geometry", () => {
@@ -35,10 +41,16 @@ describe("settings panel geometry", () => {
    * nineteen panels each asserting their own idea of the width.
    */
   it("has no call site hard-coding the panel's content width", () => {
+    // 100px is the line between a SPACER and a CONTENT WIDTH. `w-[18px]` in
+    // `SegmentRangesSection.tsx` aligns a row against a sibling control and is fine; a
+    // `w-[352px]` would satisfy the class ban above while recreating the exact defect this
+    // programme removes — nineteen panels each asserting their own idea of the width.
     const offenders: string[] = [];
     for (const f of readdirSync(DIR).filter((f) => f.endsWith(".tsx"))) {
       const src = readFileSync(join(DIR, f), "utf8");
-      for (const m of src.matchAll(/w-\[\d+px\]/g)) offenders.push(`${f}: ${m[0]}`);
+      for (const m of src.matchAll(/w-\[(\d+)px\]/g)) {
+        if (Number(m[1]) >= 100) offenders.push(`${f}: ${m[0]}`);
+      }
     }
     expect(offenders).toEqual([]);
   });

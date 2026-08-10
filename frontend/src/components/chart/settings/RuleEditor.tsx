@@ -209,7 +209,7 @@ export function RuleEditor({
       <div className="space-y-1" key={which}>
         <span className="text-xs text-muted-foreground">{label}</span>
         <Select value={type ?? "each"} onValueChange={(v) => setEndpointType(which, v)}>
-          <SelectTrigger aria-label={label} className="h-8 w-full"><SelectValue /></SelectTrigger>
+          <SelectTrigger aria-label={label} className="w-full"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="each">{extreme} value in {many ? "each column" : "this column"}</SelectItem>
             {/* Only with something to compare ACROSS. Over one column this computes the same number
@@ -222,7 +222,7 @@ export function RuleEditor({
           <Input
             type="number"
             aria-label={which === "min" ? "Range start value" : "Range end value"}
-            className="h-8"
+           
             value={range[`${which}_value`] ?? ""}
             onChange={(e) => setEndpointValue(which, e.target.value)}
           />
@@ -248,7 +248,7 @@ export function RuleEditor({
             <button
               type="button"
               aria-label="Columns"
-              className="flex h-8 w-full items-center justify-between gap-2 rounded-md border px-2 text-left text-sm hover:bg-muted/30"
+              className="flex w-full items-center justify-between gap-2 rounded-md border px-2 text-left text-sm hover:bg-muted/30"
             >
               <span className={`truncate ${draft.columns.length ? "" : "text-muted-foreground"}`}>
                 {draft.columns.length === 0
@@ -289,7 +289,7 @@ export function RuleEditor({
         <label className="block space-y-1">
           <span className="text-xs text-muted-foreground">Formatting</span>
           <Select value={draft.type} onValueChange={(v) => setType(v as "single" | "range")}>
-            <SelectTrigger aria-label="Rule type" className="h-8 w-full"><SelectValue /></SelectTrigger>
+            <SelectTrigger aria-label="Rule type" className="w-full"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="single">Single color</SelectItem>
               <SelectItem value="range">Color range</SelectItem>
@@ -303,7 +303,7 @@ export function RuleEditor({
           <label className="block space-y-1">
             <span className="text-xs text-muted-foreground">When a value is</span>
             <Select value={operator} onValueChange={(v) => setDraft((d) => ({ ...(d as SingleColorRule), operator: v as FormattingOperator }))}>
-              <SelectTrigger aria-label="Operator" className="h-8 w-full"><SelectValue /></SelectTrigger>
+              <SelectTrigger aria-label="Operator" className="w-full"><SelectValue /></SelectTrigger>
               <SelectContent>
                 {ops.map((op) => <SelectItem key={op} value={op}>{OPERATOR_LABELS[op]}</SelectItem>)}
               </SelectContent>
@@ -312,7 +312,7 @@ export function RuleEditor({
           {!NO_VALUE_OPS.has(operator) && (
             <label className="block space-y-1">
               <span className="text-xs text-muted-foreground">Value</span>
-              <Input className="h-8" value={String((draft as SingleColorRule).value ?? "")}
+              <Input value={String((draft as SingleColorRule).value ?? "")}
                 onChange={(e) => setDraft((d) => ({ ...(d as SingleColorRule), value: e.target.value }))} />
             </label>
           )}
@@ -358,10 +358,10 @@ export function RuleEditor({
           <div className="space-y-1.5 pt-1">
             <div className="h-2.5 w-full rounded border" style={{ background: `linear-gradient(to right, ${start}, ${end})` }} />
             <div className="flex items-center gap-2">
-              <input type="color" aria-label="start color" className="h-7 w-9 cursor-pointer rounded border bg-transparent p-0.5"
+              <input type="color" aria-label="start color" className="w-9 cursor-pointer rounded border bg-transparent p-0.5"
                 value={start} onChange={(e) => setRangeColor(0, e.target.value)} />
               <span className="flex-1 text-center text-xs text-muted-foreground">low → high</span>
-              <input type="color" aria-label="end color" className="h-7 w-9 cursor-pointer rounded border bg-transparent p-0.5"
+              <input type="color" aria-label="end color" className="w-9 cursor-pointer rounded border bg-transparent p-0.5"
                 value={end} onChange={(e) => setRangeColor(1, e.target.value)} />
             </div>
           </div>

@@ -92,14 +92,14 @@ export function TrendComparisonsSection({ comparisons, unit, onChange }: {
                 label: undefined,
               })}
             >
-              <SelectTrigger className="h-8 flex-1 text-sm" aria-label={`Comparison ${i + 1} type`}>
+              <SelectTrigger className="flex-1 text-sm" aria-label={`Comparison ${i + 1} type`}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 {options.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
               </SelectContent>
             </Select>
-            <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0"
+            <Button variant="ghost" size="icon" className="w-8 shrink-0"
               aria-label={`Remove comparison ${i + 1}`}
               onClick={() => write(rows.filter((_, j) => j !== i))}>
               <Trash2 className="h-3.5 w-3.5" />
@@ -117,7 +117,7 @@ export function TrendComparisonsSection({ comparisons, unit, onChange }: {
                   means, so a fractional entry is floored on the way out rather than rejected in the
                   box — rejecting mid-typing is what `DecimalInput` exists to avoid. `isComparisonValid`
                   is the backstop: a non-integer or a zero drops the row rather than drawing it. */}
-              <DecimalInput id={`cmp-${c.id}-n`} className="h-8 text-sm" placeholder="1"
+              <DecimalInput id={`cmp-${c.id}-n`} className="text-sm" placeholder="1"
                 value={c.value}
                 onChange={(n) => patch(i, { value: n == null ? undefined : Math.max(1, Math.floor(n)) })} />
             </div>
@@ -127,14 +127,14 @@ export function TrendComparisonsSection({ comparisons, unit, onChange }: {
             <div className="flex gap-1.5">
               <div className="flex-1 space-y-1">
                 <Label htmlFor={`cmp-${c.id}-v`} className="text-xs text-muted-foreground">Value</Label>
-                <DecimalInput id={`cmp-${c.id}-v`} className="h-8 text-sm" placeholder="0"
+                <DecimalInput id={`cmp-${c.id}-v`} className="text-sm" placeholder="0"
                   value={c.value} onChange={(n) => patch(i, { value: n })} />
               </div>
               <div className="flex-1 space-y-1">
                 <Label htmlFor={`cmp-${c.id}-l`} className="text-xs text-muted-foreground">Label</Label>
                 {/* REQUIRED, not decorative: this is the whole caption ("vs Goal: 500"), so a row
                     with no label has nothing to say and `isComparisonValid` drops it. */}
-                <Input id={`cmp-${c.id}-l`} className="h-8 text-sm" placeholder="Goal"
+                <Input id={`cmp-${c.id}-l`} className="text-sm" placeholder="Goal"
                   value={c.label ?? ""}
                   onChange={(e) => patch(i, { label: e.target.value || undefined })} />
               </div>
@@ -143,7 +143,7 @@ export function TrendComparisonsSection({ comparisons, unit, onChange }: {
         </div>
       ))}
 
-      <Button variant="outline" size="sm" className="h-8 w-full text-xs"
+      <Button variant="outline" size="sm" className="w-full text-xs"
         disabled={rows.length >= MAX_COMPARISONS} onClick={add}>
         <Plus className="mr-1 h-3.5 w-3.5" /> Add comparison
       </Button>
