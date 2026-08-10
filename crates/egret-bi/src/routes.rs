@@ -2709,6 +2709,11 @@ async fn db_set_certification(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<SetDashboardCertification>,
 ) -> Result<Json<DashboardDetailDto>, BiApiError> {
+    // SUBJECT IS THE PRINCIPAL, NOT THE WORKSPACE CONTEXT. `WorkspaceContext` presents
+    // `Resource::Workspace`, and a PLATFORM-scoped grant does not authorize against a workspace
+    // resource — the request would 403 for everyone except platform_admin, i.e. for exactly the
+    // stewards this perm is seeded to. `Principal` presents `Resource::Platform`, which is where
+    // the grant lives. Pinned by dashboard_certification_routes.rs.
     // `require`, not `require_object`: `dashboard:certify` is PLATFORM-scoped, so holding
     // `dashboard:manage` on this dashboard — or owning it — grants nothing here. That asymmetry
     // is the feature: the badge means a steward vouched for it, not that its author did.
@@ -2716,7 +2721,7 @@ async fn db_set_certification(
     // The object is still resolved first, so a caller without the perm cannot use the 403/404
     // difference to learn whether a dashboard id exists in a workspace they cannot see.
     let _obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
-    egret_core::authz::require(&*st.pdp, &ctx, DB_CERTIFY)
+    egret_core::authz::require(&*st.pdp, &ctx.principal, DB_CERTIFY)
         .await
         .map_err(BiApiError::from)?;
 
