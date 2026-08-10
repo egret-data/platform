@@ -32,7 +32,7 @@ function MapTypeControl({ config, onChange }: VizControlProps<MapConfig>) {
     <div className="space-y-1">
       <Label className={LABEL_CLASS}>Map</Label>
       <Select value={config.mapKey} onValueChange={(v) => onChange({ mapKey: v })}>
-        <SelectTrigger aria-label="Map" className="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
+        <SelectTrigger aria-label="Map" className="w-full text-sm"><SelectValue /></SelectTrigger>
         <SelectContent>
           {Object.values(MAPS).map((m) => <SelectItem key={m.key} value={m.key}>{m.label}</SelectItem>)}
         </SelectContent>
@@ -65,7 +65,7 @@ function MapTypeSelect({ config, onChange, columns }: VizControlProps<MapConfig>
           v === "pin" ? { type: "pin", ...defaultCoordinates(config, columns) } : { type: v as MapType },
         )}
       >
-        <SelectTrigger aria-label="Map type" className="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
+        <SelectTrigger aria-label="Map type" className="w-full text-sm"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value="region">Region map</SelectItem>
           <SelectItem value="pin">Pin map</SelectItem>
@@ -137,7 +137,7 @@ function MapControls({ config, onChange, columns, metrics }: VizControlProps<Map
       <div className="space-y-1">
         <Label className={LABEL_CLASS}>Region</Label>
         <Select value={config.region ?? ""} onValueChange={(v) => onChange({ region: v || undefined })}>
-          <SelectTrigger aria-label="Region" className="h-8 w-full text-sm"><SelectValue placeholder="Pick a region column…" /></SelectTrigger>
+          <SelectTrigger aria-label="Region" className="w-full text-sm"><SelectValue placeholder="Pick a region column…" /></SelectTrigger>
           <SelectContent>
             {columns.map((c) => (
               <SelectItem key={c.column_name} value={c.column_name} title={fieldTitle(c.column_name, colLabels)}>
@@ -150,7 +150,7 @@ function MapControls({ config, onChange, columns, metrics }: VizControlProps<Map
       <div className="space-y-1">
         <Label className={LABEL_CLASS}>Metric</Label>
         <Select value={config.metric ?? ""} onValueChange={(v) => onChange({ metric: v || undefined })}>
-          <SelectTrigger aria-label="Metric" className="h-8 w-full text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
+          <SelectTrigger aria-label="Metric" className="w-full text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
           <SelectContent>
             {metrics.map((m) => (
               <SelectItem key={m.metric_name} value={m.metric_name} title={fieldTitle(m.metric_name, mLabels)}>
@@ -194,7 +194,7 @@ function PinControls({ config, onChange, columns }: VizControlProps<MapConfig>) 
     <div className="space-y-1">
       <Label className={LABEL_CLASS}>{label}</Label>
       <Select value={value ?? ""} onValueChange={(v) => onPick(v || undefined)}>
-        <SelectTrigger aria-label={label} className="h-8 w-full text-sm">
+        <SelectTrigger aria-label={label} className="w-full text-sm">
           <SelectValue placeholder={`Pick a ${label.toLowerCase()} column…`} />
         </SelectTrigger>
         <SelectContent>
@@ -269,7 +269,7 @@ function MapColorControl({ config, onChange }: VizControlProps<MapConfig>) {
       <Label className="text-sm font-normal">Color</Label>
       <input
         type="color" aria-label="Color"
-        className="h-7 w-10 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+        className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
         value={config.color ?? SERIES_PALETTE[0]}
         onChange={(e) => onChange({ color: e.target.value })}
       />

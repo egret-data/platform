@@ -34,7 +34,7 @@ function ColorRow({ label, value, fallback, onChange }: {
       <input
         type="color"
         aria-label={label}
-        className="w-10 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+        className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
         value={value ?? fallback}
         onChange={(e) => onChange(e.target.value)}
       />

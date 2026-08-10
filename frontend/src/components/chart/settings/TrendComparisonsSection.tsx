@@ -143,7 +143,7 @@ export function TrendComparisonsSection({ comparisons, unit, onChange }: {
         </div>
       ))}
 
-      <Button variant="outline" size="sm" className="w-full text-xs"
+      <Button variant="outline" size="lg" className="w-full text-xs"
         disabled={rows.length >= MAX_COMPARISONS} onClick={add}>
         <Plus className="mr-1 h-3.5 w-3.5" /> Add comparison
       </Button>

@@ -358,10 +358,10 @@ export function RuleEditor({
           <div className="space-y-1.5 pt-1">
             <div className="h-2.5 w-full rounded border" style={{ background: `linear-gradient(to right, ${start}, ${end})` }} />
             <div className="flex items-center gap-2">
-              <input type="color" aria-label="start color" className="w-9 cursor-pointer rounded border bg-transparent p-0.5"
+              <input type="color" aria-label="start color" className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
                 value={start} onChange={(e) => setRangeColor(0, e.target.value)} />
               <span className="flex-1 text-center text-xs text-muted-foreground">low → high</span>
-              <input type="color" aria-label="end color" className="w-9 cursor-pointer rounded border bg-transparent p-0.5"
+              <input type="color" aria-label="end color" className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
                 value={end} onChange={(e) => setRangeColor(1, e.target.value)} />
             </div>
           </div>

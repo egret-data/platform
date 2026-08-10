@@ -83,7 +83,7 @@ function CheckList({ idPrefix, empty, options, selected, onToggle, onSetAll, lab
           onChange={(e) => setQuery(e.target.value)}
           placeholder={`Filter ${options.length} fields…`}
           aria-label="Filter fields"
-          className="h-8 w-full text-sm"
+          className="w-full text-sm"
         />
       )}
       {/* Select-all is INDETERMINATE at a partial selection rather than showing an empty box that

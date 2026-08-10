@@ -46,7 +46,7 @@ function XAxisControl({ config, onChange, columns, unitRow }: VizControlProps<Ca
       <div className="space-y-1">
         <Label className={LABEL_CLASS}>X-axis</Label>
         <Select value={config.xAxis ?? ""} onValueChange={(v) => onChange({ xAxis: v || undefined })}>
-          <SelectTrigger className="h-8 w-full text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
+          <SelectTrigger className="w-full text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
           <SelectContent>
             {columns.map((c) => (
               <SelectItem key={c.column_name} value={c.column_name} title={fieldTitle(c.column_name, labels)}>
@@ -67,7 +67,7 @@ function XMetricControl({ config, onChange, metrics }: VizControlProps<Cartesian
     <div className="space-y-1">
       <Label className={LABEL_CLASS}>X metric (optional)</Label>
       <Select value={config.xMetric ?? "__none"} onValueChange={(v) => onChange({ xMetric: v === "__none" ? undefined : v })}>
-        <SelectTrigger className="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
+        <SelectTrigger className="w-full text-sm"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value="__none">None — use the dimension</SelectItem>
           {metrics.map((m) => (
@@ -90,7 +90,7 @@ function BubbleMetricControl({ config, onChange, metrics }: VizControlProps<Cart
     <div className="space-y-1">
       <Label className={LABEL_CLASS}>Bubble size</Label>
       <Select value={config.bubbleMetric ?? "__none"} onValueChange={(v) => onChange({ bubbleMetric: v === "__none" ? undefined : v })}>
-        <SelectTrigger aria-label="Bubble size" className="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
+        <SelectTrigger aria-label="Bubble size" className="w-full text-sm"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value="__none">None — every point the same size</SelectItem>
           {metrics.map((m) => (
@@ -174,7 +174,7 @@ function SeriesControl({ config, onChange, columns }: VizControlProps<CartesianC
     <div className="space-y-1">
       <Label className={LABEL_CLASS}>Series</Label>
       <Select value={config.series ?? "__none"} onValueChange={(v) => onChange({ series: v === "__none" ? undefined : v })}>
-        <SelectTrigger className="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
+        <SelectTrigger className="w-full text-sm"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value="__none">None</SelectItem>
           {columns.filter((c) => c.column_name !== config.xAxis)
@@ -196,7 +196,7 @@ function MaxCategoriesControl({ config, onChange }: VizControlProps<CartesianCon
   return (
     <div className="space-y-1">
       <Label htmlFor="cz-maxcat" className={LABEL_CLASS}>Max categories</Label>
-      <Input id="cz-maxcat" type="number" min={2} className="h-8 text-sm"
+      <Input id="cz-maxcat" type="number" min={2} className="text-sm"
         placeholder="Keep every category"
         value={config.maxCategories ?? ""}
         onChange={(e) => {

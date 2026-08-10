@@ -128,7 +128,7 @@ function FieldControl({ field, config, onChange, columns, metrics, unitRow }: {
             while it is being typed, which a number input cannot (it reports itself empty for
             exactly that long). See DecimalInput. If a future field here is genuinely integer-only,
             it needs its own descriptor kind, not this one. */}
-        <DecimalInput id={`f-${field.id}`} className="h-8 text-sm" placeholder={field.placeholder}
+        <DecimalInput id={`f-${field.id}`} className="text-sm" placeholder={field.placeholder}
           value={config[field.id] as number | undefined}
           onChange={set} />
       </div>
@@ -160,7 +160,7 @@ function FieldControl({ field, config, onChange, columns, metrics, unitRow }: {
       <div className="space-y-1">
         <Label className={LABEL_CLASS}>{field.label}</Label>
         <Select value={(config[field.id] as string) ?? ""} onValueChange={(v) => set(v || undefined)}>
-          <SelectTrigger className="h-8 w-full text-sm">
+          <SelectTrigger className="w-full text-sm">
             <SelectValue placeholder={field.placeholder ?? (field.kind === "metric" ? "Pick a metric…" : "Pick a dimension…")} />
           </SelectTrigger>
           <SelectContent>
@@ -205,7 +205,7 @@ function DimensionsControl({ field, config, options, labelOf, onChange, unitRow 
         return (
           <div key={i} className="flex items-center gap-1">
             <Select value={value ?? ""} onValueChange={(v) => { if (v) { const next = [...chosen]; next[i] = v; emit(next); } }}>
-              <SelectTrigger className="h-8 w-full text-sm">
+              <SelectTrigger className="w-full text-sm">
                 <SelectValue placeholder={value === undefined ? "Add a dimension…" : (field.placeholder ?? "Pick a dimension…")} />
               </SelectTrigger>
               <SelectContent>

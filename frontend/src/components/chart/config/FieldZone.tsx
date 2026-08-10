@@ -22,7 +22,7 @@ function Chip({ id, label, onRemove }: { id: string; label: string; onRemove: ()
     <div
       ref={setNodeRef}
       style={{ transform: CSS.Translate.toString(transform), transition, opacity: isDragging ? 0.6 : 1 }}
-      className="flex min-h-8 items-center gap-1 rounded-md border bg-muted/40 pr-0.5 pl-1 text-sm"
+      className="flex min-h-10 items-center gap-1 rounded-md border bg-muted/40 pr-0.5 pl-1 text-sm"
     >
       {/* The drag handle carries dnd-kit's keyboard listeners as well as its pointer ones, so
           reordering works from the keyboard once this button has focus (space to lift, arrows to
@@ -84,7 +84,7 @@ function FieldPicker({ remaining, labels, onPick }: {
           onChange={(e) => setQuery(e.target.value)}
           placeholder={`Filter ${remaining.length} fields…`}
           aria-label="Filter fields"
-          className="mb-1 h-8 w-full text-sm"
+          className="mb-1 w-full text-sm"
         />
       )}
       {/* Bounded for the reason #443 capped `DialogContent`: a `PopoverContent` sets no maximum
@@ -174,7 +174,7 @@ export function FieldZone({
                 the 24×24 minimum only in one axis but sitting directly beneath 32px rows, so the
                 zone's own rhythm broke at its most-clicked control. */}
             <button type="button" aria-label={`add ${label.toLowerCase()}`}
-              className="flex min-h-8 w-full items-center gap-1 rounded-md border border-dashed px-2 text-xs text-muted-foreground hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset">
+              className="flex min-h-10 w-full items-center gap-1 rounded-md border border-dashed px-2 text-xs text-muted-foreground hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset">
               <Plus className="h-3.5 w-3.5" /> Add {label.toLowerCase()}…
             </button>
           </PopoverTrigger>

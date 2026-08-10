@@ -51,9 +51,11 @@ describe("FieldZone controls are big enough to hit", () => {
     expect(screen.getByRole("button", { name: "remove Region" }).className).toContain("size-6");
   });
 
-  it("gives the add affordance a full row", () => {
+  it("gives the add affordance a full row at the panel's control height", () => {
     zone();
-    expect(screen.getByRole("button", { name: "add rows" }).className).toContain("min-h-8");
+    // 40px, the height every control in the panel takes. It was `min-h-8` (32) — a third
+    // height in a panel whose canonical set is 40 for controls and 24 for icon buttons.
+    expect(screen.getByRole("button", { name: "add rows" }).className).toContain("min-h-10");
   });
 
   /** A zone with nothing selected and nothing left to offer used to draw its heading over blank
