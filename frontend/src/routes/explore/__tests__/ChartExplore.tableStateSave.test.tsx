@@ -54,7 +54,20 @@ const TABLE_JUNK = {
   params: { ...TABLE.params, settings: { ...TABLE.params.settings, "table.state": null } },
 };
 
-const CHARTS: Record<string, unknown> = { "c-raw-table": TABLE, "c-junk": TABLE_JUNK };
+/** The same table with an order ALREADY STORED — the drag cannot be driven in jsdom, so the order
+ *  under test arrives this way. See the note inside the test that uses it. */
+const TABLE_ORDERED = {
+  ...TABLE,
+  id: "c-ordered",
+  params: {
+    ...TABLE.params,
+    settings: { ...TABLE.params.settings, "table.state": { columnOrder: ["state", "id", "vendor"] } },
+  },
+};
+
+const CHARTS: Record<string, unknown> = {
+  "c-raw-table": TABLE, "c-junk": TABLE_JUNK, "c-ordered": TABLE_ORDERED,
+};
 
 vi.mock("@/api/charts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/api/charts")>()),
@@ -101,7 +114,7 @@ async function mountTable(id = "c-raw-table") {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <TooltipProvider>
-        <MemoryRouter initialEntries={[`/explore/demo/charts/${id}?tab=display`]}>
+        <MemoryRouter initialEntries={[`/explore/demo/charts/${id}?tab=data`]}>
           <Routes>
             <Route path="/explore/:workspace/charts/:id" element={<ChartExplore />} />
           </Routes>
@@ -129,14 +142,15 @@ beforeEach(() => updateMutate.mockClear());
 
 describe("a table's column layout is part of what Save sends", () => {
   it("carries the hidden column and the display order into the saved params", async () => {
-    await mountTable();
-    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
+    await mountTable("c-ordered");
+    await waitFor(() => expect(drawnHeaders()).toEqual(["state", "id", "vendor"]), { timeout: 3000 });
 
-    // Two different edits, because they are two different stored keys and a payload that carried
-    // only one of them would be just as broken.
+    // TWO STORED KEYS, and a payload carrying only one of them would be just as broken — the point
+    // of this test. The ORDER arrives from the fixture rather than from an edit: reordering is a
+    // drag now and no test here drives one (dnd-kit's keyboard sensor reads element rects, and
+    // jsdom has none). `reorderColumnOrder` pins what a drop WRITES; this pins that whatever sits
+    // in `tableState` reaches the save alongside the hide.
     await userEvent.click(screen.getByRole("button", { name: "Show vendor" }));
-    expect(drawnHeaders()).toEqual(["id", "state"]);
-    await userEvent.click(screen.getByLabelText("Move state up"));
     expect(drawnHeaders()).toEqual(["state", "id"]);
 
     await saveChart();

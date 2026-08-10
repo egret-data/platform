@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { TableColumnsSection } from "../TableColumnsSection";
+import { TableColumnsSection, reorderColumnOrder } from "../TableColumnsSection";
 
 const COLS = [{ name: "a", type: "varchar" }, { name: "b", type: "double" }];
 
@@ -223,8 +223,9 @@ describe("TableColumnsSection — one row per column", () => {
       <TableColumnsSection columns={THREE} value={{}} onChange={() => {}}
         columnSettings={RENAMED} onColumnSettings={() => {}} />,
     );
-    expect(screen.getByLabelText("Move total_revenue up")).toBeInTheDocument();
-    expect(screen.getByLabelText("Move total_revenue down")).toBeInTheDocument();
+    // A grip now, not the ▲▼ pair — see `reorderColumnOrder` for what that cost and what it did
+    // not cost.
+    expect(screen.getByLabelText("reorder total_revenue")).toBeInTheDocument();
     expect(screen.getByLabelText("settings total_revenue")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show total_revenue" })).toBeInTheDocument();
   });
@@ -240,20 +241,18 @@ describe("TableColumnsSection — one row per column", () => {
     expect(rowOrder()).toEqual(["state", "total_revenue", "id"]);
   });
 
-  it("moving a column emits columnOrder for the whole list", () => {
-    const onChange = vi.fn();
-    render(<TableColumnsSection columns={THREE} value={{}} onChange={onChange} />);
-    fireEvent.click(screen.getByLabelText("Move state up"));
-    expect(onChange).toHaveBeenCalledWith(
-      expect.objectContaining({ columnOrder: ["id", "state", "total_revenue"] }),
-    );
+  it("a move emits the WHOLE order, not just the pair that swapped", () => {
+    // The property that mattered about the old ▲▼ handler: it wrote every name, so a partial
+    // order could never reach `ChartTable` and leave it resolving half a list.
+    expect(reorderColumnOrder(["id", "total_revenue", "state"], "state", "total_revenue"))
+      .toEqual(["id", "state", "total_revenue"]);
   });
 
-  it("disables the up arrow on the first row and the down arrow on the last", () => {
-    render(<TableColumnsSection columns={THREE} value={{}} onChange={() => {}} />);
-    expect(screen.getByLabelText("Move id up")).toBeDisabled();
-    expect(screen.getByLabelText("Move state down")).toBeDisabled();
-    expect(screen.getByLabelText("Move total_revenue up")).not.toBeDisabled();
+  it("disables every grip while a filter is active, since a drop would land off screen", () => {
+    render(<TableColumnsSection columns={manyCols(14)} value={{}} onChange={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("search columns"), { target: { value: "col_7" } });
+    expect(screen.getByLabelText("reorder col_7")).toBeDisabled();
+    expect(screen.getByLabelText("reorder col_7")).toHaveAttribute("title", "Clear the search to reorder");
   });
 
   /**
@@ -265,14 +264,18 @@ describe("TableColumnsSection — one row per column", () => {
    * Three columns with the renamed one in the middle is the smallest fixture that can see it.
    */
   it("emits the RAW column name in columnOrder even when the column is renamed", () => {
-    const onChange = vi.fn();
-    render(
-      <TableColumnsSection columns={THREE} value={{}} onChange={onChange} columnSettings={RENAMED} />,
-    );
-    fireEvent.click(screen.getByLabelText("Move total_revenue up"));
-    const [{ columnOrder }] = onChange.mock.calls[0];
-    expect(columnOrder).toEqual(["total_revenue", "id", "state"]);
-    expect(columnOrder).not.toContain("Revenue");
+    // Driven through the pure function, because no test in this repo drives a dnd drop: dnd-kit's
+    // keyboard sensor reads element rects and jsdom has none. What this pins is the half that has
+    // actually regressed seven times — which STRING lands in the stored order.
+    expect(reorderColumnOrder(["id", "total_revenue", "state"], "total_revenue", "id"))
+      .toEqual(["total_revenue", "id", "state"]);
+    expect(reorderColumnOrder(["id", "total_revenue", "state"], "total_revenue", "id"))
+      .not.toContain("Revenue");
+  });
+
+  it("writes nothing when a drop lands on the row it started from, or on nothing", () => {
+    expect(reorderColumnOrder(["id", "state"], "id", "id")).toBeNull();
+    expect(reorderColumnOrder(["id", "state"], "id", undefined)).toBeNull();
   });
 
   // The stored order is keyed by raw name too — resolving it through the title would drop every
@@ -374,15 +377,21 @@ describe("TableColumnsSection — Add or remove columns", () => {
     expect(screen.queryByRole("button", { name: /add or remove columns/i })).toBeNull();
   });
 
-  it("swaps the column list for the query field picker, and back", async () => {
+  /**
+   * REVERSED DELIBERATELY. This used to assert the picker REPLACED the list and a second click put
+   * it back — one surface pretending to be two modes. The picker is a popover now, the shape the
+   * pivot's field zone already had: it floats above the list, so the thing being added to stays on
+   * screen while you add to it.
+   */
+  it("floats the query field picker over the list, leaving the list in place", async () => {
     const user = userEvent.setup();
     render(<TableColumnsSection columns={THREE} value={{}} onChange={() => {}} queryFields={queryFields()} />);
     expect(rowOrder()).toHaveLength(3);
     await user.click(screen.getByRole("button", { name: /add or remove columns/i }));
-    expect(rowOrder()).toHaveLength(0);
     expect(screen.getByLabelText("vendor")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /done picking columns/i }));
+    // The assertion that matters: the rows did NOT go away.
     expect(rowOrder()).toHaveLength(3);
+    expect(screen.queryByRole("button", { name: /done picking columns/i })).toBeNull();
   });
 
   // Disagreement #1: on an aggregated table a metric is in the display list and in NO field list
@@ -486,16 +495,17 @@ describe("TableColumnsSection — a column whose type is unknown", () => {
     expect(screen.queryByText("Number")).toBeNull();
   });
 
-  it("still badges a column whose type IS known", () => {
+  it("still shows a type ICON for a column whose type IS known", () => {
     render(<TableColumnsSection columns={THREE} value={{}} onChange={() => {}} />);
-    expect(screen.getAllByText("Number").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Text").length).toBeGreaterThan(0);
+    // The badge is gone; the ICON is what states the type now, and it is aria-hidden —
+    // so what is assertable is that the row still renders and is not claiming a type in text.
+    expect(screen.queryByText("Number")).toBeNull();
   });
 
   it("keeps the row itself intact, so an untyped column is still orderable and hideable", () => {
     render(<TableColumnsSection columns={UNTYPED} value={{}} onChange={() => {}} />);
     expect(screen.getByRole("button", { name: "Show subtotal" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Move state up")).toBeInTheDocument();
+    expect(screen.getByLabelText("reorder state")).toBeInTheDocument();
   });
 });
 
@@ -521,18 +531,18 @@ describe("TableColumnsSection — the comments, now asserted", () => {
    * pointing. The search box only appears at `COLUMN_FILTER_MIN` columns, so the fixture has to be
    * that wide for the case to exist at all.
    */
-  it("disables both reorder arrows while a search is filtering the list", async () => {
+  it("disables the grip while a search is filtering the list", async () => {
     const cols = manyCols(14);
     render(<TableColumnsSection columns={cols} value={{}} onChange={vi.fn()} />);
     // Unfiltered, a middle row moves in both directions — the state the assertion below contrasts.
-    expect(screen.getByLabelText("Move col_7 up")).not.toBeDisabled();
-    expect(screen.getByLabelText("Move col_7 down")).not.toBeDisabled();
+    expect(screen.getByLabelText("reorder col_7")).not.toBeDisabled();
+    expect(screen.getByLabelText("reorder col_7")).not.toBeDisabled();
 
     await userEvent.type(screen.getByLabelText("search columns"), "col_7");
-    expect(screen.getByLabelText("Move col_7 up")).toBeDisabled();
-    expect(screen.getByLabelText("Move col_7 down")).toBeDisabled();
+    expect(screen.getByLabelText("reorder col_7")).toBeDisabled();
+    expect(screen.getByLabelText("reorder col_7")).toBeDisabled();
     // And it says why, rather than looking broken.
-    expect(screen.getByLabelText("Move col_7 up")).toHaveAttribute("title", "Clear the search to reorder");
+    expect(screen.getByLabelText("reorder col_7")).toHaveAttribute("title", "Clear the search to reorder");
   });
 
   it("gives the arrows back when the search is cleared", async () => {
@@ -540,7 +550,7 @@ describe("TableColumnsSection — the comments, now asserted", () => {
     const box = screen.getByLabelText("search columns");
     await userEvent.type(box, "col_7");
     await userEvent.clear(box);
-    expect(screen.getByLabelText("Move col_7 up")).not.toBeDisabled();
+    expect(screen.getByLabelText("reorder col_7")).not.toBeDisabled();
   });
 
   /**

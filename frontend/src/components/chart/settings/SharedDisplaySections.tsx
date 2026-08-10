@@ -127,7 +127,9 @@ export function SharedDisplaySections({
    * Formatting) and egret stacked all of it in one column, which is why the pivot's panel — the
    * longest in the app — read as cut off. Callers that want the old single column omit this and
    * get everything, so the dashboard's card editor is unchanged. */
-  only?: "format" | "conditional";
+  /** Which block to render. Absent = all of them, which is the dashboard card's case: it has no
+   *  tabs to split them across. */
+  only?: "format" | "conditional" | "columns";
   /** Columns a rule may target; defaults to `styleColumns`. A pivot narrows it to its measures —
    * see `ruleColumnsFor`. */
   ruleColumns?: ResultColumn[];
@@ -137,8 +139,15 @@ export function SharedDisplaySections({
    * simply absent there. */
   queryFields?: QueryFieldGroup[];
 }) {
-  const showFormat = only !== "conditional";
-  const showConditional = only !== "format";
+  // Spelled as an allow-list rather than the pair of `!==` this used to be. With three sections
+  // the negations stopped being readable — and `only="format"` has to EXCLUDE the column list now
+  // that the list has a tab of its own, which the old `only !== "conditional"` silently included.
+  //
+  // `undefined` means "render everything", which is what `CardVizPanel` relies on: a dashboard
+  // card has no tabs to split these across, so it takes the column list inline.
+  const showColumns = only === undefined || only === "columns";
+  const showFormat = only === undefined || only === "format";
+  const showConditional = only === undefined || only === "conditional";
 
   if (resultColumns.length === 0) {
     // Name what THIS viz needs, not a generic "column formatting" sentence — for a table that
@@ -153,12 +162,23 @@ export function SharedDisplaySections({
   }
   return (
     <>
-      {showFormat && vizType === "table" && (
+      {showColumns && vizType === "table" && (
         <div className="space-y-1.5">
           <SectionLabel>Columns</SectionLabel>
           <TableColumnsSection columns={resultColumns} value={tableState} onChange={onTableState}
-            columnSettings={columnSettings} onColumnSettings={onColumnSettings} queryFields={queryFields} />
+            columnSettings={columnSettings} onColumnSettings={onColumnSettings} queryFields={queryFields}
+            part={only === undefined ? undefined : "list"} />
         </div>
+      )}
+      {/* THE TABLE'S LAYOUT SETTINGS STAY ON DISPLAY — freeze, row index, pagination. They live in
+          the same component as the list because they edit one `tableState`, but Metabase puts them
+          on Display and the list on Columns, and so does egret.
+          Moving the whole section to the Columns tab is what left this tab EMPTY: measured in the
+          browser, and invisible to 4282 tests, none of which assert that Display has anything in
+          it. `only === undefined` — the dashboard card — takes both halves above instead. */}
+      {showFormat && vizType === "table" && (
+        <TableColumnsSection columns={resultColumns} value={tableState} onChange={onTableState}
+          columnSettings={columnSettings} onColumnSettings={onColumnSettings} part="layout" />
       )}
       {/* NOT for the table. Its formattable columns ARE its result columns, so a second accordion
           under this one printed every column's name a third time and put its rename two lists away

@@ -63,7 +63,7 @@ describe("the pie's slice list, through the descriptor's own control", () => {
 
   /** The panel's rows, in the order they are rendered — read off the one control every row has. */
   const panelRows = () =>
-    screen.getAllByLabelText(/^Move .+ up$/).map((el) => el.getAttribute("aria-label")!.slice(5, -3));
+    screen.getAllByLabelText(/^reorder /).map((el) => el.getAttribute("aria-label")!.slice(8));
   const swatch = (name: string) =>
     (screen.getByLabelText(`color ${name}`) as HTMLInputElement).value.toLowerCase();
 
@@ -118,7 +118,7 @@ describe("the pie's slice list, through the descriptor's own control", () => {
     expect(screen.getByText(/^Other/)).toHaveTextContent("Gizmo");
     expect(screen.getByText(/^Other/)).toHaveTextContent("Doohickey");
     expect(screen.queryByLabelText("Show Other")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Move Other up")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("reorder Other")).not.toBeInTheDocument();
   });
 
   /** `buildSlices` refuses to fold a single sub-threshold slice — so the panel must not drop one
@@ -154,10 +154,11 @@ describe("the pie's slice list, through the descriptor's own control", () => {
       onChange, columns: [], metrics: [], resultColumns: cols, rows,
       temporalUnits: {}, columnSettings: {}, unitRow: () => null,
     } as VizControlProps<Record<string, unknown>>));
-    expect(screen.getByLabelText("Move Widget up")).toBeDisabled();
-    expect(screen.getByLabelText("Move Gadget down")).toBeDisabled();
-    fireEvent.click(screen.getByLabelText("Move Widget down"));
-    expect(onChange).toHaveBeenCalledWith({ sliceOrder: ["Gadget", "Widget"] });
+    // Both rows carry a grip — a drag has no first/last to disable, unlike the ▲▼ pair this
+    // replaced. What the drop WRITES is pinned on `reorderSeriesOrder` directly, because no test
+    // here can drive a dnd drop.
+    expect(screen.getByLabelText("reorder Widget")).not.toBeDisabled();
+    expect(screen.getByLabelText("reorder Gadget")).not.toBeDisabled();
   });
 
   // A hidden slice is not drawn, but it must stay listed — its own switch is the only way back.
@@ -216,7 +217,7 @@ describe("the pie's slice list under a temporal extraction unit", () => {
     }).series[0].data.map((d) => d.name);
 
   const panelRows = () =>
-    screen.getAllByLabelText(/^Move .+ up$/).map((el) => el.getAttribute("aria-label")!.slice(5, -3));
+    screen.getAllByLabelText(/^reorder /).map((el) => el.getAttribute("aria-label")!.slice(8));
 
   const renderPanel = (
     cfg: Record<string, unknown> = {},

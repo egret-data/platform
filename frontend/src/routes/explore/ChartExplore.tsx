@@ -79,6 +79,9 @@ export default function ChartExplore() {
   const descriptor = getDescriptor(viz);
   // Only the charts that declare axis controls get an Axes tab — a pie or a scalar has none.
   const showAxesTab = hasAxesControls(descriptor);
+  // Metabase's table settings are Columns | Display | Conditional Formatting — the column list has
+  // a tab of its own and Display is three toggles. egret stacked the list on top of those toggles,
+  // which is what made this the panel's longest scroll. Only the table has the section.
   // One opaque config for whichever viz is active. Only its descriptor reads inside it;
   // null means "not seeded yet", so the descriptor's own default applies.
   const [descState, setDescState] = useState<unknown>(null);
@@ -714,6 +717,33 @@ export default function ChartExplore() {
 
 
 
+            {/* THE COLUMN LIST, ON THE DATA TAB, between the fields it belongs with and the
+                Sort/Row-limit that act on them. It had a tab of its own for one commit; beside
+                Metrics is where it reads as one question — "which fields does this table select,
+                and in what order" — instead of two.
+                The dashboard card is untouched: it composes `SharedDisplaySections` itself and
+                passes no `only`, so where the BUILDER puts this block is the builder's business.
+                THE COST, measured: this tab is 795px tall on a ten-column table against a 783px
+                viewport, so it scrolls — and a fifty-column table scrolls a long way. That is a
+                list of fifty things being fifty things, not the old defect, which was the same
+                names printed three times across two tabs. */}
+            {viz === "table" && (
+              <SharedDisplaySections
+                vizType={viz}
+                resultColumns={resultColumns}
+                styleColumns={[]}
+                tableState={tableState}
+                columnSettings={columnSettings}
+                conditionalFormatting={conditionalFormatting}
+                onTableState={setTableState}
+                onColumnSettings={setColumnSettings}
+                onConditionalFormatting={setConditionalFormatting}
+                queryFields={tableQueryFields}
+                only="columns"
+              />
+            )}
+
+
             {/* Sort sits between the fields and the row limit, the order Metabase's notebook puts
                 its steps in — and the order that reads correctly, since the sort is what decides
                 WHICH rows survive the limit. Not offered where the descriptor would ignore it. */}
@@ -748,6 +778,7 @@ export default function ChartExplore() {
           </TabsContent>
 
           {/* ── DISPLAY TAB ── */}
+
           <TabsContent value="display" className="space-y-4">
 
             {descriptor && (

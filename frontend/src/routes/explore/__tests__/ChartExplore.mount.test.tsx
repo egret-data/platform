@@ -163,7 +163,7 @@ vi.mock("@/api/datasets", () => ({
   }),
 }));
 
-async function mountChart(id: string, tab?: "display" | "rules") {
+async function mountChart(id: string, tab?: "data" | "display" | "rules") {
   const { default: ChartExplore } = await import("../ChartExplore");
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -238,8 +238,10 @@ describe("ChartExplore mounts", () => {
    * label, which is present on every tab. It is replaced by a query for the editor's own prose,
    * which is what "the editor is not here" actually means and cannot be satisfied by a tab label.
    */
-  it("keeps the table's column section on the Display tab, without the rules editor", async () => {
-    await mountChart("c-table", "display");
+  // The column section moved to the Data tab, beside the Metrics list it answers the same kind of
+  // question as. The rules editor staying OUT of it is what this has always been about.
+  it("keeps the table's column section on the Data tab, without the rules editor", async () => {
+    await mountChart("c-table", "data");
     expect(await screen.findByText("Columns")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Add rule" })).not.toBeInTheDocument();
   });

@@ -3,6 +3,7 @@ import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import type { PieConfig } from "@/api/charts";
+import { reorderSeriesOrder } from "../SeriesListSection";
 import { PieDisplaySection } from "../PieDisplaySection";
 import { buildPieOption, DEFAULT_SLICE_THRESHOLD } from "@/components/chart/echarts/options/pie";
 
@@ -168,29 +169,26 @@ describe("PieDisplaySection", () => {
     expect(rows).toEqual(["Show C", "Show A", "Show B"]);
   });
 
-  it("moving the last slice up swaps it with its neighbor", () => {
-    const onChange = vi.fn();
-    render(<PieDisplaySection config={{}} onChange={onChange} slices={["A", "B", "C"]} />);
-    fireEvent.click(screen.getByLabelText("Move C up"));
-    expect(onChange).toHaveBeenCalledWith({ sliceOrder: ["A", "C", "B"] });
+  /**
+   * Driven through the pure helper, not the DOM: reordering is a drag now and no test in this repo
+   * drives a dnd drop (dnd-kit's keyboard sensor reads element rects, and jsdom has none). The pie
+   * shares `reorderSeriesOrder` with the series list because it shares the rule.
+   */
+  it("moving a slice writes the order the pie will draw", () => {
+    expect(reorderSeriesOrder(undefined, ["A", "B", "C"], "C", "B")).toEqual(["A", "C", "B"]);
   });
 
-  it("reordering visible slices merges into the stored order rather than replacing it", () => {
-    const onChange = vi.fn();
-    // "B" is named in the stored order but isn't present in this run's slices.
-    render(<PieDisplaySection config={{ sliceOrder: ["A", "B", "C"] }} onChange={onChange} slices={["A", "C"]} />);
-    fireEvent.click(screen.getByLabelText("Move C up"));
-    const [{ sliceOrder }] = onChange.mock.calls[0];
-    expect(sliceOrder).toContain("B");
-    expect(sliceOrder.indexOf("C")).toBeLessThan(sliceOrder.indexOf("A"));
+  it("merges into the stored order rather than replacing it", () => {
+    // "B" is named in the stored order but is not present in this run's slices — it must survive.
+    const next = reorderSeriesOrder(["A", "B", "C"], ["A", "C"], "C", "A")!;
+    expect(next).toContain("B");
+    expect(next.indexOf("C")).toBeLessThan(next.indexOf("A"));
   });
 
-  it("disables the up-arrow on the first row and the down-arrow on the last", () => {
+  it("gives every row a grip, and no row a disabled one — a drag has no ends to hit", () => {
     render(<PieDisplaySection config={{}} onChange={() => {}} slices={["A", "B"]} />);
-    expect(screen.getByLabelText("Move A up")).toBeDisabled();
-    expect(screen.getByLabelText("Move B down")).toBeDisabled();
-    expect(screen.getByLabelText("Move A down")).not.toBeDisabled();
-    expect(screen.getByLabelText("Move B up")).not.toBeDisabled();
+    expect(screen.getByLabelText("reorder A")).not.toBeDisabled();
+    expect(screen.getByLabelText("reorder B")).not.toBeDisabled();
   });
 
   it("the slice rows do not render when there are no slices", () => {

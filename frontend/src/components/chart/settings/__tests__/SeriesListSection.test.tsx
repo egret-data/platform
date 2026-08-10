@@ -1,14 +1,16 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { SeriesListSection } from "../SeriesListSection";
+import { SeriesListSection, reorderSeriesOrder } from "../SeriesListSection";
 
 describe("SeriesListSection", () => {
-  it("moving the last series up swaps it with its neighbor", () => {
-    const onChange = vi.fn();
-    render(<SeriesListSection names={["a", "b", "c"]} defaultColor={() => "#000000"} onChange={onChange} />);
-    fireEvent.click(screen.getByLabelText("Move c up"));
-    expect(onChange).toHaveBeenCalledWith({ seriesOrder: ["a", "c", "b"] });
+  /**
+   * Driven through the pure helper: reordering is a drag now, and no test in this repo drives a dnd
+   * drop — dnd-kit's keyboard sensor reads element rects and jsdom has none. What the DOM can still
+   * be asked is that every row has a grip, which the last case below does.
+   */
+  it("a move writes the order the chart will draw", () => {
+    expect(reorderSeriesOrder(undefined, ["a", "b", "c"], "c", "b")).toEqual(["a", "c", "b"]);
   });
 
   it("toggling a series' switch off emits hiddenSeries containing it", () => {
@@ -31,22 +33,18 @@ describe("SeriesListSection", () => {
     expect(rows).toEqual(["Show c", "Show a", "Show b"]);
   });
 
-  it("disables the up-arrow on the first row and the down-arrow on the last", () => {
-    render(<SeriesListSection names={["a", "b"]} defaultColor={() => "#000000"} onChange={() => {}} />);
-    expect(screen.getByLabelText("Move a up")).toBeDisabled();
-    expect(screen.getByLabelText("Move b down")).toBeDisabled();
-    expect(screen.getByLabelText("Move a down")).not.toBeDisabled();
-    expect(screen.getByLabelText("Move b up")).not.toBeDisabled();
+  it("gives every row a grip, and no row a disabled one — a drag has no ends to hit", () => {
+    render(<SeriesListSection names={["a", "b"]} onChange={() => {}} />);
+    expect(screen.getByLabelText("reorder a")).not.toBeDisabled();
+    expect(screen.getByLabelText("reorder b")).not.toBeDisabled();
   });
 
   it("reordering visible series does not forget a series absent from this run", () => {
-    const onChange = vi.fn();
-    // "b" is in the stored order but not in this run's names (e.g. filtered out).
-    render(<SeriesListSection names={["a", "c"]} order={["a", "b", "c"]} defaultColor={() => "#000000"} onChange={onChange} />);
-    fireEvent.click(screen.getByLabelText("Move c up"));
-    const [{ seriesOrder }] = onChange.mock.calls[0];
-    expect(seriesOrder).toContain("b");
-    expect(seriesOrder.indexOf("c")).toBeLessThan(seriesOrder.indexOf("a"));
+    // "b" is named in the stored order but is not in this run's `names`. The rule the ▲▼ swap kept
+    // has to survive the move: it must still be there afterwards.
+    const next = reorderSeriesOrder(["a", "b", "c"], ["a", "c"], "c", "a")!;
+    expect(next).toContain("b");
+    expect(next.indexOf("c")).toBeLessThan(next.indexOf("a"));
   });
 });
 
@@ -58,7 +56,7 @@ describe("SeriesListSection — one row per series", () => {
   it("carries colour, rename, order and visibility on the same row", () => {
     const onChange = vi.fn();
     render(<SeriesListSection {...base} onChange={onChange} />);
-    for (const label of ["Move a down", "color a", "label a", "Show a"]) {
+    for (const label of ["reorder a", "color a", "label a", "Show a"]) {
       expect(screen.getByLabelText(label)).toBeInTheDocument();
     }
     fireEvent.change(screen.getByLabelText("color b"), { target: { value: "#ff0000" } });

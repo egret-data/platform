@@ -154,18 +154,18 @@ describe("SharedDisplaySections — the table has ONE column list", () => {
   };
 
   it("renders no separate Formatting section for a table", () => {
-    render(<SharedDisplaySections vizType="table" {...common} only="format" />);
+    render(<SharedDisplaySections vizType="table" {...common} only="columns" />);
     expect(screen.getByText("Columns")).toBeInTheDocument();
     expect(screen.queryByText("Formatting")).not.toBeInTheDocument();
   });
 
   it("prints each column's name exactly once", () => {
-    render(<SharedDisplaySections vizType="table" {...common} only="format" />);
+    render(<SharedDisplaySections vizType="table" {...common} only="columns" />);
     expect(screen.getAllByText("revenue")).toHaveLength(1);
   });
 
   it("puts the formatting behind the row's drill-in instead", () => {
-    render(<SharedDisplaySections vizType="table" {...common} only="format" />);
+    render(<SharedDisplaySections vizType="table" {...common} only="columns" />);
     expect(screen.getByLabelText("settings revenue")).toBeInTheDocument();
   });
 
@@ -175,6 +175,34 @@ describe("SharedDisplaySections — the table has ONE column list", () => {
     render(<SharedDisplaySections vizType="pivot_table" {...common}
       styleColumns={[{ name: "revenue", type: "bigint" }]} only="format" />);
     expect(screen.getByText("Formatting")).toBeInTheDocument();
+  });
+  /**
+   * THE TAB THAT WENT EMPTY. Giving the column list its own tab moved the whole section with it,
+   * and the table's Display tab rendered nothing at all — `innerHTML: ""`, measured in the browser.
+   * 4282 tests were green through that: every one asserts what a tab CONTAINS, and none asserts
+   * that Display contains anything.
+   *
+   * So: the two halves are split by `part`, and both halves are pinned here.
+   */
+  it("keeps the table's layout settings on Display, not on Columns", () => {
+    render(<SharedDisplaySections vizType="table" {...common} only="format" />);
+    expect(screen.getByLabelText("Freeze first columns")).toBeInTheDocument();
+    expect(screen.getByLabelText("Show row index")).toBeInTheDocument();
+    // …and NOT the list, which is the whole point of the split.
+    expect(screen.queryByLabelText("Show revenue")).toBeNull();
+  });
+
+  it("puts the list on Columns without the layout settings", () => {
+    render(<SharedDisplaySections vizType="table" {...common} only="columns" />);
+    expect(screen.getByLabelText("Show revenue")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Freeze first columns")).toBeNull();
+  });
+
+  /** A dashboard card has no tabs to split across, so it takes both halves. */
+  it("gives a card both halves when no `only` is passed", () => {
+    render(<SharedDisplaySections vizType="table" {...common} />);
+    expect(screen.getByLabelText("Show revenue")).toBeInTheDocument();
+    expect(screen.getByLabelText("Freeze first columns")).toBeInTheDocument();
   });
 });
 
@@ -231,7 +259,7 @@ describe("SharedDisplaySections — Display as is the table's, and only the tabl
   // The other half of the same rule: where the setting IS read, the control has to still be there.
   // Without this, "delete the control" passes the assertion above just as well as "gate it".
   it("the table still offers it, in the row's drill-in", async () => {
-    render(<SharedDisplaySections vizType="table" {...common} only="format" />);
+    render(<SharedDisplaySections vizType="table" {...common} only="columns" />);
     await userEvent.click(screen.getByLabelText("settings region"));
     expect(screen.getByLabelText("Display as")).toBeInTheDocument();
   });
@@ -265,7 +293,7 @@ describe("SharedDisplaySections — the date/time controls reach both surfaces",
   });
 
   it("and in the table's row drill-in", async () => {
-    render(<SharedDisplaySections vizType="table" {...common} only="format" />);
+    render(<SharedDisplaySections vizType="table" {...common} only="columns" />);
     await userEvent.click(screen.getByLabelText("settings ordered_at"));
     expect(screen.getByLabelText("Show the time")).toBeInTheDocument();
     expect(screen.getByLabelText("Time style")).toBeInTheDocument();
@@ -319,4 +347,5 @@ describe("styleColumnsFor — map", () => {
   it.each(["funnel", "boxplot", "sankey"] as const)("still offers every column on a %s", (viz) => {
     expect(styleColumnsFor(viz, {} as never, cols).map((c) => c.name)).toEqual(["state", "revenue"]);
   });
+
 });

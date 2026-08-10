@@ -54,7 +54,38 @@ const TABLE_RENAMED = {
   },
 };
 
-const CHARTS: Record<string, unknown> = { "c-raw-table": TABLE, "c-renamed": TABLE_RENAMED };
+/**
+ * The same table with an ORDER ALREADY STORED. It exists because the reorder is a drag now, and no
+ * test in this repo drives a dnd drop — dnd-kit's keyboard sensor reads element rects and jsdom has
+ * none. The WRITE half is unit-tested (`reorderColumnOrder`); this fixture keeps the READ half
+ * covered end to end, which is the half that decides what a reader actually sees.
+ */
+const TABLE_ORDERED = {
+  ...TABLE,
+  id: "c-ordered",
+  params: {
+    ...TABLE.params,
+    settings: { ...TABLE.params.settings, "table.state": { columnOrder: ["id", "vendor", "state"] } },
+  },
+};
+
+const CHARTS: Record<string, unknown> = {
+  "c-raw-table": TABLE,
+  "c-renamed": TABLE_RENAMED,
+  "c-ordered": TABLE_ORDERED,
+  // Renamed AND ordered: the order keys on `vendor`, the header reads "Supplier".
+  "c-renamed-ordered": {
+    ...TABLE_RENAMED,
+    id: "c-renamed-ordered",
+    params: {
+      ...(TABLE_RENAMED as { params: Record<string, unknown> }).params,
+      settings: {
+        ...((TABLE_RENAMED as { params: { settings: Record<string, unknown> } }).params.settings),
+        "table.state": { columnOrder: ["id", "vendor", "state"] },
+      },
+    },
+  },
+};
 
 vi.mock("@/api/charts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/api/charts")>()),
@@ -113,7 +144,7 @@ async function mountTable(id = "c-raw-table") {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <TooltipProvider>
-        <MemoryRouter initialEntries={[`/explore/demo/charts/${id}?tab=display`]}>
+        <MemoryRouter initialEntries={[`/explore/demo/charts/${id}?tab=data`]}>
           <Routes>
             <Route path="/explore/:workspace/charts/:id" element={<ChartExplore />} />
           </Routes>
@@ -152,6 +183,31 @@ const tab = (name: string) => userEvent.click(screen.getByRole("tab", { name }))
  */
 const dataColumn = (name: string) => screen.getByRole("checkbox", { name });
 
+/**
+ * Toggle a column in the QUERY.
+ *
+ * It lives behind Display ▸ "Add or remove columns" now: the Data tab's duplicate list — the same
+ * fields writing the same `config.columns` — was removed, and this fold is the only field picker a
+ * table has. The opener is only clicked when it is still closed; once open it reads
+ * "Done picking columns" and the fold stays open between toggles.
+ */
+const openPicker = async () => {
+  await tab("Data");
+  const opener = screen.queryByRole("button", { name: /add or remove columns/i });
+  if (opener) await userEvent.click(opener);
+};
+const toggleQueryColumn = async (name: string) => {
+  await openPicker();
+  await userEvent.click(dataColumn(name));
+};
+/** The picker REPLACES the column list while it is open, so anything that then wants a row's eye
+ *  or its drill-in has to close it first. That replacement is deliberate — the defect being fixed
+ *  was two column lists on screen at once. */
+const closePicker = async () => {
+  const done = screen.queryByRole("button", { name: /done picking columns/i });
+  if (done) await userEvent.click(done);
+};
+
 const eye = (name: string) => screen.getByRole("button", { name: `Show ${name}` });
 const noEye = (name: string) => screen.queryByRole("button", { name: `Show ${name}` });
 
@@ -165,11 +221,10 @@ describe("a column put back into the query is drawn again", () => {
     await userEvent.click(eye("vendor"));
     expect(drawnHeaders()).toEqual(["id", "state"]);
 
-    // ── step 2: drop `vendor` from the query in the Data tab
-    await tab("Data");
-    await userEvent.click(dataColumn("vendor"));
+    // ── step 2: drop `vendor` from the query, through Display's field picker
+    await toggleQueryColumn("vendor");
     expect(dataColumn("vendor")).not.toBeChecked();
-    await tab("Display");
+    await closePicker();
     // Waiting on the DRAWN HEADERS here would prove nothing — they are already `[id, state]` from
     // step 1, so the assertion passes before the debounced re-run has even gone out and step 3
     // then measures a column that never left. The Visible-columns list is built from the RESULT,
@@ -178,13 +233,13 @@ describe("a column put back into the query is drawn again", () => {
     expect(drawnHeaders()).toEqual(["id", "state"]);
 
     // ── step 3: put `vendor` back into the query
-    await tab("Data");
-    await userEvent.click(dataColumn("vendor"));
+    await toggleQueryColumn("vendor");
     expect(dataColumn("vendor")).toBeChecked();
+    await closePicker();
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
 
-    // …and the Display tab agrees, rather than showing it as still hidden.
-    await tab("Display");
+    // …and the Columns tab agrees, rather than showing it as still hidden.
+    await tab("Data");
     expect(eye("vendor")).toHaveAttribute("aria-pressed", "true");
     // Each step waits on a debounced auto-run, so the whole sequence outlasts the 5s default.
   }, 30000);
@@ -220,11 +275,11 @@ describe("a column put back into the query is drawn again", () => {
     expect(screen.getByText("Supplier")).toBeInTheDocument();
 
     // An edit that re-runs the query without touching `vendor`: drop `state` instead.
-    await tab("Data");
-    await userEvent.click(dataColumn("state"));
+    await toggleQueryColumn("state");
+    await closePicker();
     await waitFor(() => expect(drawnHeaders()).toEqual(["id"]), { timeout: 3000 });
 
-    await tab("Display");
+    await tab("Data");
     expect(eye("vendor")).toHaveAttribute("aria-pressed", "false");
     expect(within(document.body).queryByRole("columnheader", { name: /Supplier/ })).not.toBeInTheDocument();
   }, 30000);
@@ -240,19 +295,21 @@ describe("a column put back into the query is drawn again", () => {
  * shipped twice.
  */
 describe("Add or remove columns, from the Display tab", () => {
+
   it("removes a column from the QUERY and the table stops drawing it", async () => {
     await mountTable();
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
 
-    // The list is replaced, not joined by a second one: that is the defect being closed.
-    await userEvent.click(screen.getByRole("button", { name: /add or remove columns/i }));
-    expect(noEye("vendor")).not.toBeInTheDocument();
+    // The picker floats over the list now rather than replacing it, so the row stays put while
+    // its query membership is edited — the pivot's field-zone shape.
+    await openPicker();
+    expect(noEye("vendor")).toBeInTheDocument();
 
     await userEvent.click(dataColumn("vendor"));
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state"]), { timeout: 3000 });
 
-    // …and the Data tab agrees, because there is one stored key, not two.
-    await tab("Data");
+    // …and the picker agrees, because there is one stored key, not two.
+    await openPicker();
     expect(dataColumn("vendor")).not.toBeChecked();
   }, 30000);
 
@@ -265,7 +322,7 @@ describe("Add or remove columns, from the Display tab", () => {
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
 
     expect(screen.queryByLabelText("revenue")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /add or remove columns/i }));
+    await openPicker();
     await userEvent.click(dataColumn("revenue"));
 
     // Aggregating turns the raw columns into dimensions and adds the metric to the result.
@@ -291,7 +348,7 @@ describe("Add or remove columns, from the Display tab", () => {
   it("names a renamed column the way the dataset does, and still keys on the raw name", async () => {
     await mountTable();
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
-    await userEvent.click(screen.getByRole("button", { name: /add or remove columns/i }));
+    await openPicker();
     expect(screen.getByText("Mã")).toBeInTheDocument();
     expect(within(screen.getByText("Mã")).queryByText("id")).toBeNull();
     expect(screen.getByText("Mã")).toHaveAttribute("title", "Mã (id)");
@@ -308,13 +365,11 @@ describe("Add or remove columns, from the Display tab", () => {
  * stored order — two lists on one screen claiming to be the same thing while disagreeing.
  */
 describe("reordering from the panel moves the drawn column", () => {
-  it("moves a column up and the table follows", async () => {
-    await mountTable();
-    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
-
-    await userEvent.click(screen.getByLabelText("Move vendor up"));
-    expect(drawnHeaders()).toEqual(["id", "vendor", "state"]);
-    // The panel's own list moved too — it is the same list now, not a second one.
+  it("draws the table AND the panel in the stored order, not in result order", async () => {
+    await mountTable("c-ordered");
+    // The query projects id, state, vendor; the stored order says id, vendor, state.
+    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "vendor", "state"]), { timeout: 3000 });
+    // …and the panel's own list is the same list, not a second one that disagrees.
     expect(Array.from(document.querySelectorAll("[data-column]")).map((e) => e.getAttribute("data-column")))
       .toEqual(["id", "vendor", "state"]);
   }, 30000);
@@ -329,11 +384,15 @@ describe("reordering from the panel moves the drawn column", () => {
    * Three columns with the renamed one MOVING INTO THE MIDDLE is the smallest fixture that can see
    * that: with two, losing a name from the order and re-appending it gives the identical layout.
    */
-  it("moves a RENAMED column under its raw name, not its title", async () => {
-    await mountTable("c-renamed");
-    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "Supplier"]), { timeout: 3000 });
-
-    await userEvent.click(screen.getByLabelText("Move vendor up"));
-    expect(drawnHeaders()).toEqual(["id", "Supplier", "state"]);
+  /**
+   * The write half of this — that a move emits `vendor` and never "Supplier" — is pinned on
+   * `reorderColumnOrder` directly, because the reorder is a drag now and no test here drives one.
+   * What is still worth asserting end to end is the READ: an order stored under the RAW name must
+   * move the column even though its header says something else. A `columnOrder` of display strings
+   * would resolve nothing and leave this in result order.
+   */
+  it("resolves a stored order by the RAW name even when the header is renamed", async () => {
+    await mountTable("c-renamed-ordered");
+    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "Supplier", "state"]), { timeout: 3000 });
   }, 30000);
 });
