@@ -166,8 +166,19 @@ export function SharedDisplaySections({
         <div className="space-y-1.5">
           <SectionLabel>Columns</SectionLabel>
           <TableColumnsSection columns={resultColumns} value={tableState} onChange={onTableState}
-            columnSettings={columnSettings} onColumnSettings={onColumnSettings} queryFields={queryFields} />
+            columnSettings={columnSettings} onColumnSettings={onColumnSettings} queryFields={queryFields}
+            part={only === undefined ? undefined : "list"} />
         </div>
+      )}
+      {/* THE TABLE'S LAYOUT SETTINGS STAY ON DISPLAY — freeze, row index, pagination. They live in
+          the same component as the list because they edit one `tableState`, but Metabase puts them
+          on Display and the list on Columns, and so does egret.
+          Moving the whole section to the Columns tab is what left this tab EMPTY: measured in the
+          browser, and invisible to 4282 tests, none of which assert that Display has anything in
+          it. `only === undefined` — the dashboard card — takes both halves above instead. */}
+      {showFormat && vizType === "table" && (
+        <TableColumnsSection columns={resultColumns} value={tableState} onChange={onTableState}
+          columnSettings={columnSettings} onColumnSettings={onColumnSettings} part="layout" />
       )}
       {/* NOT for the table. Its formattable columns ARE its result columns, so a second accordion
           under this one printed every column's name a third time and put its rename two lists away

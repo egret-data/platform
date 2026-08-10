@@ -176,6 +176,34 @@ describe("SharedDisplaySections — the table has ONE column list", () => {
       styleColumns={[{ name: "revenue", type: "bigint" }]} only="format" />);
     expect(screen.getByText("Formatting")).toBeInTheDocument();
   });
+  /**
+   * THE TAB THAT WENT EMPTY. Giving the column list its own tab moved the whole section with it,
+   * and the table's Display tab rendered nothing at all — `innerHTML: ""`, measured in the browser.
+   * 4282 tests were green through that: every one asserts what a tab CONTAINS, and none asserts
+   * that Display contains anything.
+   *
+   * So: the two halves are split by `part`, and both halves are pinned here.
+   */
+  it("keeps the table's layout settings on Display, not on Columns", () => {
+    render(<SharedDisplaySections vizType="table" {...common} only="format" />);
+    expect(screen.getByLabelText("Freeze first columns")).toBeInTheDocument();
+    expect(screen.getByLabelText("Show row index")).toBeInTheDocument();
+    // …and NOT the list, which is the whole point of the split.
+    expect(screen.queryByLabelText("Show revenue")).toBeNull();
+  });
+
+  it("puts the list on Columns without the layout settings", () => {
+    render(<SharedDisplaySections vizType="table" {...common} only="columns" />);
+    expect(screen.getByLabelText("Show revenue")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Freeze first columns")).toBeNull();
+  });
+
+  /** A dashboard card has no tabs to split across, so it takes both halves. */
+  it("gives a card both halves when no `only` is passed", () => {
+    render(<SharedDisplaySections vizType="table" {...common} />);
+    expect(screen.getByLabelText("Show revenue")).toBeInTheDocument();
+    expect(screen.getByLabelText("Freeze first columns")).toBeInTheDocument();
+  });
 });
 
 /**
@@ -319,4 +347,5 @@ describe("styleColumnsFor — map", () => {
   it.each(["funnel", "boxplot", "sankey"] as const)("still offers every column on a %s", (viz) => {
     expect(styleColumnsFor(viz, {} as never, cols).map((c) => c.name)).toEqual(["state", "revenue"]);
   });
+
 });

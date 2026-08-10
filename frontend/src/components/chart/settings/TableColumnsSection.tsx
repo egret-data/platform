@@ -76,7 +76,7 @@ export interface QueryFieldGroup {
  * mutation, with the suite green.
  */
 export function TableColumnsSection({
-  columns, value, onChange, columnSettings, onColumnSettings, queryFields,
+  columns, value, onChange, columnSettings, onColumnSettings, queryFields, part,
 }: {
   columns: ResultColumn[];
   value: TableState;
@@ -89,6 +89,18 @@ export function TableColumnsSection({
    *  EDITABLE, which is the builder's route and nowhere else: a dashboard card overrides display
    *  settings and cannot change what the card's query selects. */
   queryFields?: QueryFieldGroup[];
+  /**
+   * Which half to draw. The column LIST and the table's LAYOUT settings (freeze, row index,
+   * pagination) live in one component because they edit one `tableState`, but Metabase puts them
+   * on different tabs — Columns for the list, Display for the three toggles — and so does egret
+   * now. Absent draws both, which is the dashboard card's case: it has no tabs to split them
+   * across.
+   *
+   * This split exists because moving the whole section to the Columns tab took the toggles with
+   * it and left the table's Display tab EMPTY — measured in the browser, and invisible to the
+   * suite, which asserts what each tab contains but never that Display contains anything.
+   */
+  part?: "list" | "layout";
 }) {
   const [filter, setFilter] = useState("");
   // Metabase's own shape: the button REPLACES the list with the field panel rather than opening a
@@ -152,6 +164,7 @@ export function TableColumnsSection({
 
   return (
     <div className="space-y-3 text-sm">
+      {part !== "layout" && (
       <div className="space-y-1">
         {/* No inner "Visible columns" heading any more. There is one list now, and its caller
             already labels it "Columns" — the second heading was only ever there to tell it apart
@@ -307,7 +320,9 @@ export function TableColumnsSection({
           </button>
         )}
       </div>
+      )}
 
+      {part !== "list" && (<>
       <div className="space-y-1">
         <Label htmlFor="freeze-left" className={FIELD_LABEL}>Freeze first columns</Label>
         <Input
@@ -378,6 +393,7 @@ export function TableColumnsSection({
           </div>
         )}
       </div>
+      </>)}
     </div>
   );
 }
