@@ -171,10 +171,20 @@ describe("every field picker names a field the way its dataset does", () => {
    * THE TABLE'S DATA TAB IS THE CONTROL GROUP — fixed by #444 and it must stay fixed. If this
    * goes red the shared helper broke rather than a call site.
    */
-  it("the table's Data-tab column list still says Khu vực", () => {
+  /**
+   * The table's Data-tab column list is GONE — it duplicated the Display tab's
+   * `Add or remove columns`, which writes the same `config.columns`. The naming rule it was
+   * asserting here did not go with it: the fold reaches the same fields through the same
+   * `CheckList`, and `ChartExplore` hands it the same `labels`. That path is covered by
+   * `table.checklist.test.tsx` ("shows a column's verbose name") and by
+   * `ChartExplore.tableColumns.test.tsx`, which drives the real fold.
+   *
+   * Left as the METRICS half, which is still a Data-tab list of its own.
+   */
+  it("the table's Data-tab metric list still says Doanh thu", () => {
     renderPanel(tableDescriptor(), { columns: [], metrics: [] });
-    expect(screen.getByText("Khu vực")).toBeInTheDocument();
-    expect(screen.queryByText("region")).toBeNull();
+    expect(screen.getByText("Doanh thu")).toBeInTheDocument();
+    expect(screen.queryByText("total_revenue")).toBeNull();
   });
 });
 

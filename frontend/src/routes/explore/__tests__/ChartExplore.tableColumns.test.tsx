@@ -152,6 +152,31 @@ const tab = (name: string) => userEvent.click(screen.getByRole("tab", { name }))
  */
 const dataColumn = (name: string) => screen.getByRole("checkbox", { name });
 
+/**
+ * Toggle a column in the QUERY.
+ *
+ * It lives behind Display ▸ "Add or remove columns" now: the Data tab's duplicate list — the same
+ * fields writing the same `config.columns` — was removed, and this fold is the only field picker a
+ * table has. The opener is only clicked when it is still closed; once open it reads
+ * "Done picking columns" and the fold stays open between toggles.
+ */
+const openPicker = async () => {
+  await tab("Display");
+  const opener = screen.queryByRole("button", { name: /add or remove columns/i });
+  if (opener) await userEvent.click(opener);
+};
+const toggleQueryColumn = async (name: string) => {
+  await openPicker();
+  await userEvent.click(dataColumn(name));
+};
+/** The picker REPLACES the column list while it is open, so anything that then wants a row's eye
+ *  or its drill-in has to close it first. That replacement is deliberate — the defect being fixed
+ *  was two column lists on screen at once. */
+const closePicker = async () => {
+  const done = screen.queryByRole("button", { name: /done picking columns/i });
+  if (done) await userEvent.click(done);
+};
+
 const eye = (name: string) => screen.getByRole("button", { name: `Show ${name}` });
 const noEye = (name: string) => screen.queryByRole("button", { name: `Show ${name}` });
 
@@ -165,11 +190,10 @@ describe("a column put back into the query is drawn again", () => {
     await userEvent.click(eye("vendor"));
     expect(drawnHeaders()).toEqual(["id", "state"]);
 
-    // ── step 2: drop `vendor` from the query in the Data tab
-    await tab("Data");
-    await userEvent.click(dataColumn("vendor"));
+    // ── step 2: drop `vendor` from the query, through Display's field picker
+    await toggleQueryColumn("vendor");
     expect(dataColumn("vendor")).not.toBeChecked();
-    await tab("Display");
+    await closePicker();
     // Waiting on the DRAWN HEADERS here would prove nothing — they are already `[id, state]` from
     // step 1, so the assertion passes before the debounced re-run has even gone out and step 3
     // then measures a column that never left. The Visible-columns list is built from the RESULT,
@@ -178,9 +202,9 @@ describe("a column put back into the query is drawn again", () => {
     expect(drawnHeaders()).toEqual(["id", "state"]);
 
     // ── step 3: put `vendor` back into the query
-    await tab("Data");
-    await userEvent.click(dataColumn("vendor"));
+    await toggleQueryColumn("vendor");
     expect(dataColumn("vendor")).toBeChecked();
+    await closePicker();
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
 
     // …and the Display tab agrees, rather than showing it as still hidden.
@@ -220,8 +244,8 @@ describe("a column put back into the query is drawn again", () => {
     expect(screen.getByText("Supplier")).toBeInTheDocument();
 
     // An edit that re-runs the query without touching `vendor`: drop `state` instead.
-    await tab("Data");
-    await userEvent.click(dataColumn("state"));
+    await toggleQueryColumn("state");
+    await closePicker();
     await waitFor(() => expect(drawnHeaders()).toEqual(["id"]), { timeout: 3000 });
 
     await tab("Display");
@@ -251,8 +275,8 @@ describe("Add or remove columns, from the Display tab", () => {
     await userEvent.click(dataColumn("vendor"));
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state"]), { timeout: 3000 });
 
-    // …and the Data tab agrees, because there is one stored key, not two.
-    await tab("Data");
+    // …and the picker agrees, because there is one stored key, not two.
+    await openPicker();
     expect(dataColumn("vendor")).not.toBeChecked();
   }, 30000);
 

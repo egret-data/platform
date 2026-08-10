@@ -2,21 +2,35 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, within, cleanup } from "@testing-library/react";
 import { createElement } from "react";
 import { objectDescriptor, tableDescriptor, type ObjectConfig, type TableConfig } from "../table";
-import type { VizControlProps } from "../types";
 
 const d = tableDescriptor();
-const columnsControl = d.controls.find((c) => c.id === "columns")!;
+import type { VizControlProps } from "../types";
+import { CheckList } from "@/components/chart/config/CheckList";
 
 const COLS = ["id", "created_at", "title", "category", "vendor", "subtotal", "discount", "total", "quantity", "state"];
 
-function renderColumns(config: Partial<TableConfig> = {}, onChange = vi.fn()) {
-  render(createElement(columnsControl.render, {
-    config: { columns: [], metrics: [], ...config },
-    onChange,
-    columns: COLS.map((column_name) => ({ column_name, type: "text" })),
-    metrics: [], resultColumns: [], rows: [],
-    temporalUnits: {}, columnSettings: {}, unitRow: () => null,
-  } as unknown as VizControlProps<TableConfig>));
+/**
+ * MOUNTED ON `CheckList` DIRECTLY, not through the table's Data-tab control, because that control
+ * no longer exists: it listed the same fields, writing the same `config.columns`, as the Display
+ * tab's `Add or remove columns` fold, and was removed as the duplicate. `CheckList` is unchanged —
+ * it moved to `config/CheckList.tsx` so the fold could use the component instead of a copy of its
+ * markup — so every assertion below still describes the widget it always described.
+ *
+ * The `{ columns: … }` shape the callbacks emit is what the table's control used to build, kept
+ * here so the assertions read the same.
+ */
+function renderColumns(config: { columns?: string[] } = {}, onChange = vi.fn()) {
+  const selected = config.columns ?? [];
+  render(createElement(CheckList, {
+    idPrefix: "col",
+    empty: "Select a dataset to see columns.",
+    options: COLS,
+    selected,
+    onToggle: (name: string) => onChange({
+      columns: selected.includes(name) ? selected.filter((x) => x !== name) : [...selected, name],
+    }),
+    onSetAll: (next: string[]) => onChange({ columns: next }),
+  }));
   return onChange;
 }
 
@@ -126,14 +140,15 @@ describe("the table's column list", () => {
    * list looks ugly next to the pivot's field zones" after #441.
    */
   it("shows a column's verbose name, the way the pivot's zones do", () => {
-    render(createElement(columnsControl.render, {
-      config: { columns: [], metrics: [] },
-      onChange: vi.fn(),
-      columns: [{ column_name: "region", type: "text", verbose_name: "Khu vực" },
-        { column_name: "category", type: "text" }],
-      metrics: [], resultColumns: [], rows: [],
-      temporalUnits: {}, columnSettings: {}, unitRow: () => null,
-    } as unknown as VizControlProps<TableConfig>));
+    render(createElement(CheckList, {
+      idPrefix: "col", empty: "Select a dataset to see columns.",
+      options: ([{ column_name: "region", type: "text", verbose_name: "Khu vực" },
+        { column_name: "category", type: "text" }]).map((c) => c.column_name),
+      labels: Object.fromEntries(([{ column_name: "region", type: "text", verbose_name: "Khu vực" },
+        { column_name: "category", type: "text" }]).filter((c) => "verbose_name" in c).map((c) => [c.column_name, (c as { verbose_name: string }).verbose_name])),
+      selected: [],
+      onToggle: vi.fn(), onSetAll: vi.fn(),
+      }));
     expect(screen.getByText("Khu vực")).toBeInTheDocument();
     expect(screen.queryByText("region")).not.toBeInTheDocument();
     // Unnamed columns are untouched — the fallback is the machine name, as everywhere else.
@@ -147,13 +162,14 @@ describe("the table's column list", () => {
    */
   it("still toggles the raw column name behind a renamed row", () => {
     const onChange = vi.fn();
-    render(createElement(columnsControl.render, {
-      config: { columns: [], metrics: [] },
-      onChange,
-      columns: [{ column_name: "region", type: "text", verbose_name: "Khu vực" }],
-      metrics: [], resultColumns: [], rows: [],
-      temporalUnits: {}, columnSettings: {}, unitRow: () => null,
-    } as unknown as VizControlProps<TableConfig>));
+    render(createElement(CheckList, {
+      idPrefix: "col", empty: "Select a dataset to see columns.",
+      options: ["region"],
+      labels: { region: "Khu vực" },
+      selected: [],
+      onToggle: (name: string) => onChange({ columns: [name] }),
+      onSetAll: (next: string[]) => onChange({ columns: next }),
+    }));
     fireEvent.click(screen.getByText("Khu vực"));
     expect(onChange).toHaveBeenCalledWith({ columns: ["region"] });
   });
@@ -164,14 +180,15 @@ describe("the table's column list", () => {
    * row now says it the same way. An unrenamed column gets its own name, not `region (region)`.
    */
   it("keeps the machine name on hover behind the displayed one", () => {
-    render(createElement(columnsControl.render, {
-      config: { columns: [], metrics: [] },
-      onChange: vi.fn(),
-      columns: [{ column_name: "region", type: "text", verbose_name: "Khu vực" },
-        { column_name: "category", type: "text" }],
-      metrics: [], resultColumns: [], rows: [],
-      temporalUnits: {}, columnSettings: {}, unitRow: () => null,
-    } as unknown as VizControlProps<TableConfig>));
+    render(createElement(CheckList, {
+      idPrefix: "col", empty: "Select a dataset to see columns.",
+      options: ([{ column_name: "region", type: "text", verbose_name: "Khu vực" },
+        { column_name: "category", type: "text" }]).map((c) => c.column_name),
+      labels: Object.fromEntries(([{ column_name: "region", type: "text", verbose_name: "Khu vực" },
+        { column_name: "category", type: "text" }]).filter((c) => "verbose_name" in c).map((c) => [c.column_name, (c as { verbose_name: string }).verbose_name])),
+      selected: [],
+      onToggle: vi.fn(), onSetAll: vi.fn(),
+      }));
     expect(screen.getByText("Khu vực")).toHaveAttribute("title", "Khu vực (region)");
     expect(screen.getByText("category")).toHaveAttribute("title", "category");
   });
@@ -198,14 +215,15 @@ describe("the table's column list", () => {
    * renamed column unreachable by its real name in the very list that decides the projection.
    */
   it("filters on the machine name as well as the displayed one", () => {
-    render(createElement(columnsControl.render, {
-      config: { columns: [], metrics: [] },
-      onChange: vi.fn(),
-      columns: [...COLS.map((column_name) => ({ column_name, type: "text" })),
-        { column_name: "region", type: "text", verbose_name: "Khu vực" }],
-      metrics: [], resultColumns: [], rows: [],
-      temporalUnits: {}, columnSettings: {}, unitRow: () => null,
-    } as unknown as VizControlProps<TableConfig>));
+    render(createElement(CheckList, {
+      idPrefix: "col", empty: "Select a dataset to see columns.",
+      options: ([...COLS.map((column_name) => ({ column_name, type: "text" })),
+        { column_name: "region", type: "text", verbose_name: "Khu vực" }]).map((c) => c.column_name),
+      labels: Object.fromEntries(([...COLS.map((column_name) => ({ column_name, type: "text" })),
+        { column_name: "region", type: "text", verbose_name: "Khu vực" }]).filter((c) => "verbose_name" in c).map((c) => [c.column_name, (c as { verbose_name: string }).verbose_name])),
+      selected: [],
+      onToggle: vi.fn(), onSetAll: vi.fn(),
+      }));
     fireEvent.change(screen.getByLabelText("Filter fields"), { target: { value: "region" } });
     expect(screen.getByText("Khu vực")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Filter fields"), { target: { value: "khu" } });
@@ -230,13 +248,13 @@ describe("the table's column list", () => {
 
   // Under the threshold the filter would be more chrome than help — Metabase's own picker has none.
   it("offers no filter on a short list", () => {
-    render(createElement(columnsControl.render, {
-      config: { columns: [], metrics: [] },
-      onChange: vi.fn(),
-      columns: [{ column_name: "a", type: "text" }, { column_name: "b", type: "text" }],
-      metrics: [], resultColumns: [], rows: [],
-      temporalUnits: {}, columnSettings: {}, unitRow: () => null,
-    } as unknown as VizControlProps<TableConfig>));
+    render(createElement(CheckList, {
+      idPrefix: "col", empty: "Select a dataset to see columns.",
+      options: ([{ column_name: "a", type: "text" }, { column_name: "b", type: "text" }]).map((c) => c.column_name),
+      labels: Object.fromEntries(([{ column_name: "a", type: "text" }, { column_name: "b", type: "text" }]).filter((c) => "verbose_name" in c).map((c) => [c.column_name, (c as { verbose_name: string }).verbose_name])),
+      selected: [],
+      onToggle: vi.fn(), onSetAll: vi.fn(),
+      }));
     expect(screen.queryByLabelText("Filter fields")).not.toBeInTheDocument();
     expect(screen.getByText("0 of 2 selected")).toBeInTheDocument();
   });

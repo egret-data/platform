@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import type { TableState } from "@/api/charts";
 import type { ColumnFormat } from "@/components/chart/format-types";
-import { Checkbox } from "@/components/ui/checkbox";
+import { CheckList } from "@/components/chart/config/CheckList";
 import { IconButton } from "@/components/ui/icon-button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
-import { displayName, fieldTitle, type FieldLabels } from "@/components/chart/config/field-names";
+import type { FieldLabels } from "@/components/chart/config/field-names";
 import { colIcon, colKind } from "./FormatSection";
 import { ColumnSettingsPopover } from "./ColumnSettingsPopover";
 import { FIELD_LABEL, GROUP_LABEL } from "./FieldLabel";
@@ -44,7 +44,7 @@ export interface QueryFieldGroup {
  * WHAT IT REPLACED. egret described a table's columns in three parallel lists (four once the table
  * aggregated), all of them flat and all of them near-identically labelled:
  *
- *   Data ▸ "Columns"            what the QUERY projects        (viz/table.tsx, still there)
+ *   Data ▸ "Columns"            what the QUERY projects        (viz/table.tsx — NOW REMOVED)
  *   Data ▸ "Metrics"            the aggregated half of that    (viz/table.tsx, still there)
  *   Display ▸ "Visible columns" a checkbox per result column   (this file, before)
  *   Display ▸ "Formatting"      an accordion per result column (FormatSection, for the table)
@@ -176,46 +176,29 @@ export function TableColumnsSection({
             {queryFields.map((g, gi) => (
               <div key={g.label} className="space-y-1">
                 <div className={`truncate ${GROUP_LABEL}`} title={g.label}>{g.label}</div>
-                {g.options.length === 0 && (
-                  <p className="text-xs italic text-muted-foreground">Nothing to pick from.</p>
-                )}
-                {/* THE ROW IS THE TARGET, AND THE NAME IS THE DATASET'S.
-                    This is the Data tab's field list reached from the Display tab — the same
-                    fields, built by `ChartExplore` out of the same `columns.map(c => c.column_name)`
-                    — and it got neither of the two things that list got. #441 measured the Data
-                    tab's version at a 16×16 box beside an 11×20 label in a row of which 235px did
-                    nothing, and made its rows full-width 32px `<label>`s with hover; #444 taught it
-                    to read `verbose_name`. Measured here on the kind deployment before this change:
-                    a `<div>` 237px wide and 20px tall, of which `region`'s box-plus-label spanned
-                    62px, saying `region` while the Data tab one click away said "Khu vực".
-                    Both fixes are now literally the same markup and the same helper as `table.tsx`'s
-                    `CheckList`, which is the point — the defect was two lists of one thing
-                    disagreeing, so a third spelling of the row would have been the same bug again. */}
-                {g.options.map((name) => (
-                  <label
-                    key={name}
-                    htmlFor={`qf-${gi}-${name}`}
-                    className="flex min-h-8 cursor-pointer items-center gap-2 rounded-md px-1 hover:bg-muted/50"
-                  >
-                    <Checkbox
-                      id={`qf-${gi}-${name}`}
-                      checked={g.selected.includes(name)}
-                      onCheckedChange={() =>
-                        g.onChange(
-                          g.selected.includes(name)
-                            ? g.selected.filter((x) => x !== name)
-                            : [...g.selected, name],
-                        )
-                      }
-                    />
-                    {/* The friendly name with the machine name on hover — `CheckList`'s anatomy,
-                        for the reason it gives: a second LINE doubles the height of renamed rows
-                        only, and a list with three renames in it goes ragged. */}
-                    <span className="min-w-0 flex-1 truncate text-sm" title={fieldTitle(name, g.labels)}>
-                      {displayName(name, g.labels)}
-                    </span>
-                  </label>
-                ))}
+                {/* THE SAME COMPONENT the Data tab used, not the same markup copied.
+                    This fold used to re-spell the row by hand — the comment here said so, and said
+                    a third spelling would be the same bug again. It was right, and copying still
+                    left the two apart: `CheckList` has a filter, a select-all with a count and a
+                    bounded height, and this had none of them. On a fifty-column dataset that was
+                    fifty unbounded rows with no way to search them.
+                    Now that the Data tab's duplicate list is gone, this is the ONLY field picker
+                    for a table, so it has to be the good one. */}
+                <CheckList
+                  idPrefix={`qf-${gi}`}
+                  empty="Nothing to pick from."
+                  options={g.options}
+                  selected={g.selected}
+                  labels={g.labels}
+                  onToggle={(name) =>
+                    g.onChange(
+                      g.selected.includes(name)
+                        ? g.selected.filter((x) => x !== name)
+                        : [...g.selected, name],
+                    )
+                  }
+                  onSetAll={g.onChange}
+                />
               </div>
             ))}
           </div>
