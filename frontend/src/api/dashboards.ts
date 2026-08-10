@@ -94,6 +94,9 @@ export interface DashboardDetail {
   /** The certifier's email, empty while `certified` is false. */
   certified_by?: string;
   certification_details?: string;
+  /** May THIS user edit it? Workspace-scoped `dashboard:manage`, answered by the PDP — the
+   *  session's permission list carries platform grants only, so the browser cannot derive it. */
+  can_manage?: boolean;
   deleted_at?: string | null;
   bookmarked?: boolean;
 }

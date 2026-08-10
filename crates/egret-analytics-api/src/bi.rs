@@ -404,6 +404,9 @@ pub struct DashboardDetailDto {
     /// Why, in the certifier's words. Empty is allowed: a certification with no note is still a
     /// certification.
     pub certification_details: String,
+    /// May the CALLER edit this dashboard? Workspace-scoped `dashboard:manage`, answered by the
+    /// PDP — the session's permission list carries platform grants only and can never contain it.
+    pub can_manage: bool,
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
     pub bookmarked: bool,
     pub tabs: Vec<DashboardTabDto>,

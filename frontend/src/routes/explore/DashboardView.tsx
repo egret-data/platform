@@ -726,7 +726,17 @@ export default function DashboardView() {
               onChangeWidth={setDraftWidth}
             />
           ) : (
-            <Button size="sm" variant="outline" onClick={startEdit}>Edit</Button>
+            // Withheld, not disabled, and for the same reason the certify control is: a greyed
+            // button advertises a capability the reader does not have. A viewer previously got
+            // the full editor and only learned it was refused when Save returned 403 — after
+            // making the changes.
+            //
+            // `can_manage` comes from the server because it CANNOT be derived here: the session's
+            // permission list is built from platform grants only, so `dashboard:manage` — which
+            // is workspace-scoped — never appears in it.
+            dash.can_manage !== false && (
+              <Button size="sm" variant="outline" onClick={startEdit}>Edit</Button>
+            )
           )}
         </div>
       </div>

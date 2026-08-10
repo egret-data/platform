@@ -279,6 +279,7 @@ pub fn dashboard_detail_dto(
     cards: Vec<DashboardCard>,
     bookmarked: bool,
     names: (Option<String>, Option<String>),
+    can_manage: bool,
 ) -> DashboardDetailDto {
     DashboardDetailDto {
         id: d.id.to_string(),
@@ -296,6 +297,7 @@ pub fn dashboard_detail_dto(
         certified: d.certified,
         certified_by: d.certified_by,
         certification_details: d.certification_details,
+        can_manage,
         deleted_at: d.deleted_at,
         bookmarked,
         tabs: tabs.into_iter().map(dashboard_tab_dto).collect(),

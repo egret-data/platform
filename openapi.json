@@ -23402,6 +23402,7 @@
           "certified",
           "certified_by",
           "certification_details",
+          "can_manage",
           "bookmarked",
           "tabs",
           "cards"
@@ -23476,6 +23477,10 @@
           "certification_details": {
             "type": "string",
             "description": "Why, in the certifier's words. Empty is allowed: a certification with no note is still a\ncertification."
+          },
+          "can_manage": {
+            "type": "boolean",
+            "description": "May the CALLER edit this dashboard? Workspace-scoped `dashboard:manage`, answered by the\nPDP — the session's permission list carries platform grants only and can never contain it."
           },
           "deleted_at": {
             "type": [

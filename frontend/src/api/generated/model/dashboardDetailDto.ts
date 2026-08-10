@@ -59,6 +59,11 @@ export interface DashboardDetailDto {
      * certification.
      */
   certification_details: string;
+  /**
+     * May the CALLER edit this dashboard? Workspace-scoped `dashboard:manage`, answered by the
+     * PDP — the session's permission list carries platform grants only and can never contain it.
+     */
+  can_manage: boolean;
   /** @nullable */
   deleted_at?: string | null;
   bookmarked: boolean;
