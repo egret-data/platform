@@ -2613,9 +2613,16 @@ async fn db_list(
         .list_by_workspace_for(ctx.workspace_id.0, ctx.principal.user_id.0, q.trashed)
         .await
         .map_err(BiApiError::from)?;
+    // ONE decision for the whole list, not one per row — see the field docs on
+    // `DashboardSummaryDto::can_manage` for why per-object here would cost 2 queries per row.
+    // This is the SAME check `db_create` makes, so the row menu and the "+ Dashboard" button
+    // agree with each other and with what the mutating routes will accept at workspace level.
+    let can_manage = egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
+        .await
+        .is_ok();
     Ok(Json(
         rows.into_iter()
-            .map(|(d, n, bm)| crate::model::dashboard_summary_dto(d, n, bm))
+            .map(|(d, n, bm)| crate::model::dashboard_summary_dto(d, n, bm, can_manage))
             .collect(),
     ))
 }

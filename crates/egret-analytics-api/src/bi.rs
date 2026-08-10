@@ -335,6 +335,25 @@ pub struct DashboardSummaryDto {
     pub card_count: i64,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub bookmarked: bool,
+    /// A steward has vouched for this dashboard. Display only — the list carries no
+    /// `certified_by`, since the badge here answers "is it trusted", and "by whom" is a
+    /// question the detail page already answers.
+    pub certified: bool,
+    /// Whether this caller may run the list's mutating actions — duplicate, move, trash,
+    /// delete.
+    ///
+    /// WORKSPACE-SCOPED, AND THE SAME ON EVERY ROW. Unlike `DashboardDetailDto.can_manage`,
+    /// which is evaluated against the individual object, this is one workspace-level decision
+    /// copied across the response. That is deliberate: a per-object answer costs two SQL
+    /// queries PER ROW (`grants_for` plus the classification-tag lookup inside `CedarPdp`),
+    /// so a 100-dashboard list would issue 200 extra queries to draw a menu.
+    ///
+    /// The cost of the shortcut is a FALSE NEGATIVE, never a false positive: someone who holds
+    /// manage only through a per-object or per-folder share sees the row menu withheld here.
+    /// They lose nothing they cannot recover — opening the dashboard runs the real per-object
+    /// check and gives them the editor. The opposite error, offering Trash to a reader, is the
+    /// one that costs.
+    pub can_manage: bool,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]

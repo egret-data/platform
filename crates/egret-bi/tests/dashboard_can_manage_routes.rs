@@ -83,6 +83,9 @@ struct Fx {
     /// Holds `dashboard:read` and nothing more.
     viewer_tok: String,
     dash: Uuid,
+    /// For the certification test, which sets the column through the repo rather than the
+    /// endpoint — this file is about what the LIST reports, not about who may certify.
+    db: Db,
 }
 
 async fn mk_user(db: &Db, tag: &str) -> Uuid {
@@ -159,6 +162,7 @@ async fn setup() -> Option<Fx> {
         viewer_tok: tok.pop().unwrap(),
         editor_tok: tok.pop().unwrap(),
         dash,
+        db,
     })
 }
 
@@ -248,5 +252,71 @@ async fn can_manage_agrees_with_what_the_save_actually_does() {
         StatusCode::FORBIDDEN,
         "can_manage:false must mean the PUT is refused — the flag exists to stop a reader \
          discovering this only after making their changes"
+    );
+}
+
+/// The same claim for the LIST, which carries its own `can_manage` — workspace-scoped and
+/// repeated on every row. The jsdom tests that gate the list's Duplicate/Trash/Delete menu mock
+/// this value, so without this the destructive affordances rest on an unverified server field.
+#[tokio::test]
+async fn the_list_tells_a_viewer_it_cannot_manage() {
+    let Some(fx) = setup().await else { return };
+    let path = format!("/ws/{}/dashboards", fx.slug);
+
+    let (s, editor) = req(&fx, &fx.editor_tok, "GET", &path, None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, viewer) = req(&fx, &fx.viewer_tok, "GET", &path, None).await;
+    assert_eq!(s, StatusCode::OK, "a ws_viewer must still see the list");
+
+    // Control: both principals really are looking at the same non-empty list. An empty array
+    // would make the two assertions below vacuous — `.iter().all()` is true of nothing.
+    assert!(!editor.as_array().unwrap().is_empty());
+    assert_eq!(
+        viewer.as_array().unwrap().len(),
+        editor.as_array().unwrap().len()
+    );
+
+    assert!(
+        editor
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["can_manage"] == serde_json::json!(true)),
+        "a ws_editor may duplicate/move/trash in this workspace"
+    );
+    assert!(
+        viewer
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["can_manage"] == serde_json::json!(false)),
+        "a ws_viewer may not, and the row menu is withheld on exactly this"
+    );
+}
+
+/// `certified` reaches the list, so the badge is not decoration. Both states, because a field
+/// hard-wired to either constant would satisfy a single-state assertion.
+#[tokio::test]
+async fn the_list_reports_certification_both_ways() {
+    let Some(fx) = setup().await else { return };
+    let path = format!("/ws/{}/dashboards", fx.slug);
+
+    let (_, before) = req(&fx, &fx.editor_tok, "GET", &path, None).await;
+    assert_eq!(
+        before.as_array().unwrap()[0]["certified"],
+        serde_json::json!(false),
+        "a fresh dashboard is not certified"
+    );
+
+    DashboardRepo::new(fx.db.clone())
+        .set_certification(fx.dash, true, "steward@egret.local", "reviewed")
+        .await
+        .expect("certify");
+
+    let (_, after) = req(&fx, &fx.editor_tok, "GET", &path, None).await;
+    assert_eq!(
+        after.as_array().unwrap()[0]["certified"],
+        serde_json::json!(true),
+        "certifying must show up in the list, not only on the detail page"
     );
 }

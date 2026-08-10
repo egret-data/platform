@@ -244,6 +244,7 @@ pub fn dashboard_summary_dto(
     d: Dashboard,
     card_count: i64,
     bookmarked: bool,
+    can_manage: bool,
 ) -> DashboardSummaryDto {
     DashboardSummaryDto {
         id: d.id.to_string(),
@@ -254,6 +255,8 @@ pub fn dashboard_summary_dto(
         card_count,
         updated_at: d.updated_at,
         bookmarked,
+        certified: d.certified,
+        can_manage,
     }
 }
 

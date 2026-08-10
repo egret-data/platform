@@ -23554,7 +23554,9 @@
           "description",
           "card_count",
           "updated_at",
-          "bookmarked"
+          "bookmarked",
+          "certified",
+          "can_manage"
         ],
         "properties": {
           "id": {
@@ -23588,6 +23590,14 @@
           },
           "bookmarked": {
             "type": "boolean"
+          },
+          "certified": {
+            "type": "boolean",
+            "description": "A steward has vouched for this dashboard. Display only — the list carries no\n`certified_by`, since the badge here answers \"is it trusted\", and \"by whom\" is a\nquestion the detail page already answers."
+          },
+          "can_manage": {
+            "type": "boolean",
+            "description": "Whether this caller may run the list's mutating actions — duplicate, move, trash,\ndelete.\n\nWORKSPACE-SCOPED, AND THE SAME ON EVERY ROW. Unlike `DashboardDetailDto.can_manage`,\nwhich is evaluated against the individual object, this is one workspace-level decision\ncopied across the response. That is deliberate: a per-object answer costs two SQL\nqueries PER ROW (`grants_for` plus the classification-tag lookup inside `CedarPdp`),\nso a 100-dashboard list would issue 200 extra queries to draw a menu.\n\nThe cost of the shortcut is a FALSE NEGATIVE, never a false positive: someone who holds\nmanage only through a per-object or per-folder share sees the row menu withheld here.\nThey lose nothing they cannot recover — opening the dashboard runs the real per-object\ncheck and gives them the editor. The opposite error, offering Trash to a reader, is the\none that costs."
           }
         }
       },
