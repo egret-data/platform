@@ -9,6 +9,7 @@ import { useChartData } from "@/api/useChartData";
 import { useDataset } from "@/api/datasets";
 import { columnLabels } from "@/components/chart/config/field-names";
 import { useFolders } from "@/api/folders";
+import { useAuth } from "@/auth/useAuth";
 import { resolveClick, type ClickBehavior } from "@/components/chart/dashboard/click-behavior";
 import { resolveValuesSource } from "@/components/chart/dashboard/valuesSource";
 import { hiddenEmptyCardIds } from "@/components/chart/dashboard/hide-empty";
@@ -74,7 +75,11 @@ export default function DashboardView() {
   const { data: dash, isLoading, isError } = useDashboard(ws, id);
   const { data: charts } = useCharts(ws);
   const { data: dashboardFolders = [] } = useFolders(ws, "dashboards");
-  const { update, restore: restoreMut, addBookmark, removeBookmark, revert } = useDashboardMutations(ws);
+  const { update, restore: restoreMut, addBookmark, removeBookmark, revert, setCertification } = useDashboardMutations(ws);
+  // PLATFORM-scoped: holding dashboard:manage on this dashboard grants nothing here. Mirrors
+  // RequirePermission (guards.tsx:59) — platform_admin always passes.
+  const { me } = useAuth();
+  const canCertify = !!me && (me.platform_roles.includes("platform_admin") || me.permissions.includes("dashboard:certify"));
   const [editing, setEditing] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
   // The history query stays disabled until the History tab is opened, so an info sidebar opened
@@ -951,6 +956,17 @@ export default function DashboardView() {
             }}
             onClose={() => setShowInfo(false)}
             onSaveDescription={saveDescription}
+            certified={!!dash.certified}
+            certifiedBy={dash.certified_by ?? ""}
+            certificationDetails={dash.certification_details ?? ""}
+            canCertify={canCertify}
+            certifying={setCertification.isPending}
+            onSetCertification={async (next, details) => {
+              try {
+                await setCertification.mutateAsync({ id: dash.id, certified: next, details });
+                toast.success(next ? "Certified" : "Certification withdrawn");
+              } catch (e) { toast.error(String(e)); }
+            }}
           />
         )}
       </div>

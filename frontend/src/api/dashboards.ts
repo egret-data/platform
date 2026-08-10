@@ -9,6 +9,7 @@ import {
   dashboardsDbRemove,
   dashboardsDbRestore,
   dashboardsDbRevisionRevert,
+  dashboardsDbSetCertification,
   dashboardsDbTrash,
   dashboardsDbUpdate,
   getDashboardsDbGetQueryKey,
@@ -87,6 +88,12 @@ export interface DashboardDetail {
   tabs: DashboardTab[];
   width: "fixed" | "full";
   cards: DashboardCard[];
+  /** Certified by a steward (migration 0108). Written only through `setCertification`, never
+   *  through the ordinary save — see the endpoint's own note for why that separation matters. */
+  certified?: boolean;
+  /** The certifier's email, empty while `certified` is false. */
+  certified_by?: string;
+  certification_details?: string;
   deleted_at?: string | null;
   bookmarked?: boolean;
 }
@@ -167,7 +174,14 @@ export function useDashboardMutations(ws: string) {
       qc.invalidateQueries({ queryKey: getDashboardsDbRevisionsQueryKey(ws, d.id) });
     },
   });
-  return { create, update, remove, duplicate, trash, restore, addBookmark, removeBookmark, revert };
+  /** Certify or withdraw certification. A SEPARATE endpoint from `update` because it is guarded
+   *  by the platform-scoped `dashboard:certify` — an editor saving the dashboard cannot set it. */
+  const setCertification = useMutation<DashboardDetail, ApiError, { id: string; certified: boolean; details?: string }>({
+    mutationFn: async ({ id, certified, details }) =>
+      (await dashboardsDbSetCertification(ws, id, { certified, details: details ?? "" })).data as DashboardDetail,
+    onSuccess: (d) => invalidate(d.id),
+  });
+  return { create, update, remove, duplicate, trash, restore, addBookmark, removeBookmark, revert, setCertification };
 }
 
 export interface DashboardRevision {

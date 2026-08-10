@@ -12691,6 +12691,105 @@
         }
       }
     },
+    "/api/ws/{workspace}/dashboards/{id}/certification": {
+      "put": {
+        "tags": [
+          "dashboards"
+        ],
+        "operationId": "db_set_certification",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Dashboard id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetDashboardCertification"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated dashboard",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardDetailDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing dashboard:certify permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such dashboard in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/dashboards/{id}/duplicate": {
       "post": {
         "tags": [
@@ -23300,6 +23399,9 @@
           "parameters",
           "updated_at",
           "width",
+          "certified",
+          "certified_by",
+          "certification_details",
           "bookmarked",
           "tabs",
           "cards"
@@ -23362,6 +23464,18 @@
           },
           "width": {
             "type": "string"
+          },
+          "certified": {
+            "type": "boolean",
+            "description": "Marked as trusted by a steward. Same three fields datasets and metrics have carried since\n0098, so \"is this certified\" is one question across the product rather than three."
+          },
+          "certified_by": {
+            "type": "string",
+            "description": "Who certified it, as their email — the string is read by whoever sees the badge, and a\nuuid would tell them nothing. Empty while `certified` is false."
+          },
+          "certification_details": {
+            "type": "string",
+            "description": "Why, in the certifier's words. Empty is allowed: a certification with no note is still a\ncertification."
           },
           "deleted_at": {
             "type": [
@@ -26842,6 +26956,22 @@
               "type": "string"
             },
             "description": "Clearance GROUP ids (as strings; Access P3.4). Each is parsed as a `Uuid`\nbefore hitting the repo — a non-uuid entry is rejected `400 BadRequest`\n(never spliced unvalidated into a Cedar policy string)."
+          }
+        }
+      },
+      "SetDashboardCertification": {
+        "type": "object",
+        "description": "Body for `PUT /dashboards/{id}/certification`.\n\nA SEPARATE endpoint from the dashboard PUT on purpose: certification is guarded by the\nplatform-scoped `dashboard:certify`, while editing is guarded by the workspace-scoped\n`dashboard:manage`. Folding these fields into `UpdateDashboard` would let any editor certify\ntheir own dashboard by saving it, which is the failure this feature exists to avoid.",
+        "required": [
+          "certified"
+        ],
+        "properties": {
+          "certified": {
+            "type": "boolean"
+          },
+          "details": {
+            "type": "string",
+            "description": "Free text explaining the certification. Ignored when `certified` is false — withdrawing\nclears the note rather than leaving a stale justification attached."
           }
         }
       },

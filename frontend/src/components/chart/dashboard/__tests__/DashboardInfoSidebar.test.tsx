@@ -20,6 +20,12 @@ describe("DashboardInfoSidebar", () => {
     onRevert: () => {},
     reverting: false,
     onOpenHistory: () => {},
+    certified: false,
+    certifiedBy: "",
+    certificationDetails: "",
+    canCertify: false,
+    certifying: false,
+    onSetCertification: () => {},
   };
   it("shows both attribution lines by name and renders the description", () => {
     wrap(<DashboardInfoSidebar {...base} onSaveDescription={vi.fn()} onClose={vi.fn()} />);
@@ -58,5 +64,52 @@ describe("DashboardInfoSidebar", () => {
     wrap(<DashboardInfoSidebar {...base} onSaveDescription={onSave} onClose={vi.fn()} />);
     fireEvent.blur(screen.getByLabelText("description"));
     expect(onSave).not.toHaveBeenCalled();
+  });
+});
+
+describe("certification", () => {
+  const base = {
+    name: "Sales", description: "", ownerLabel: "Ref User",
+    createdAt: "2026-08-01T12:00:00Z", editorLabel: "Ref User",
+    updatedAt: "2026-08-05T12:00:00Z", folderName: null, folderHref: null,
+    revisions: [], revisionsLoading: false, onRevert: () => {}, reverting: false,
+    onOpenHistory: () => {}, onSaveDescription: () => {}, onClose: () => {},
+    certified: false, certifiedBy: "", certificationDetails: "",
+    canCertify: false, certifying: false, onSetCertification: () => {},
+  };
+
+  it("WITHHOLDS the control from someone without dashboard:certify", () => {
+    // Withheld, not disabled. The whole point of the platform-scoped perm is that a workspace
+    // editor cannot certify their own work; a greyed-out button would advertise the capability
+    // and invite the question. This is the assertion that pins the permission split in the UI.
+    wrap(<DashboardInfoSidebar {...base} canCertify={false} />);
+    expect(screen.queryByRole("button", { name: /certify/i })).toBeNull();
+  });
+
+  it("offers it to a steward", () => {
+    wrap(<DashboardInfoSidebar {...base} canCertify />);
+    expect(screen.getByRole("button", { name: "Certify this dashboard" })).toBeTruthy();
+  });
+
+  it("passes the note along when certifying", () => {
+    const onSet = vi.fn();
+    wrap(<DashboardInfoSidebar {...base} canCertify onSetCertification={onSet} />);
+    fireEvent.change(screen.getByLabelText("certification note"), { target: { value: "reviewed by finance" } });
+    fireEvent.click(screen.getByRole("button", { name: "Certify this dashboard" }));
+    expect(onSet).toHaveBeenCalledWith(true, "reviewed by finance");
+  });
+
+  it("shows who certified it, and offers withdrawal rather than a second certify", () => {
+    wrap(<DashboardInfoSidebar {...base} certified certifiedBy="ana@egret.local"
+      certificationDetails="reviewed by finance" canCertify />);
+    expect(screen.getByText("ana@egret.local")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Withdraw certification" })).toBeTruthy();
+    // The note input is gone once certified — there is nothing to justify about withdrawing.
+    expect(screen.queryByLabelText("certification note")).toBeNull();
+  });
+
+  it("says nothing about certification when the dashboard is not certified", () => {
+    wrap(<DashboardInfoSidebar {...base} />);
+    expect(screen.queryByText(/^Certified$/)).toBeNull();
   });
 });

@@ -20,7 +20,7 @@ const base = {
 let detail: Record<string, unknown> = { ...base };
 vi.mock("@/api/dashboards", async (orig) => {
   const mod = await (orig as () => Promise<Record<string, unknown>>)();
-  return { ...mod, useDashboard: () => ({ data: detail, isLoading: false }), useDashboardMutations: () => ({ update, revert: { mutateAsync: vi.fn(), isPending: false } }) };
+  return { ...mod, useDashboard: () => ({ data: detail, isLoading: false }), useDashboardMutations: () => ({ update, revert: { mutateAsync: vi.fn(), isPending: false }, setCertification: { mutateAsync: vi.fn(), isPending: false } }) };
 });
 
 const renderView = () => render(
