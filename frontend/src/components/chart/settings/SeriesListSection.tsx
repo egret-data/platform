@@ -1,5 +1,13 @@
+import {
+  DndContext, KeyboardSensor, PointerSensor, useSensor, useSensors, closestCenter,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext, verticalListSortingStrategy, arrayMove, sortableKeyboardCoordinates,
+} from "@dnd-kit/sortable";
+import { GripVertical } from "lucide-react";
 import { useState } from "react";
-import { IconButton } from "@/components/ui/icon-button";
+import { SortableRow } from "@/components/chart/config/SortableRow";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -46,6 +54,32 @@ export interface SeriesListPatch {
  * that is too big to sit on the row itself. Metabase's row is the same shape: identity here, the
  * rest behind an ellipsis.
  */
+/**
+ * The order a drop writes — a pure function, because no test in this repo drives a dnd drop
+ * (dnd-kit's keyboard sensor reads element rects and jsdom has none), and the rule below is the
+ * part that has to survive.
+ *
+ * IT MOVES INSIDE THE STORED ORDER, not inside the visible list. A series a filter excluded from
+ * this run still has a remembered place, and reordering two other series must not throw it away —
+ * the same rule the ▲▼ swap kept, restated for a move rather than a swap.
+ */
+export function reorderSeriesOrder(
+  order: string[] | undefined,
+  ranked: string[],
+  activeId: string | number,
+  overId: string | number | undefined,
+): string[] | null {
+  if (overId === undefined || activeId === overId) return null;
+  const a = String(activeId);
+  const b = String(overId);
+  const base = order?.length ? [...order] : [...ranked];
+  for (const n of [a, b]) if (!base.includes(n)) base.push(n);
+  const from = base.indexOf(a);
+  const to = base.indexOf(b);
+  if (from < 0 || to < 0) return null;
+  return arrayMove(base, from, to);
+}
+
 export function SeriesListSection({
   names, order, hidden, colors, labels, types, seriesLine, defaultDisplay, defaultColor,
   hasLineSettings, renameable = true, onChange,
@@ -96,21 +130,10 @@ export function SeriesListSection({
     (a, b) => (rank.get(a) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b) ?? Number.MAX_SAFE_INTEGER),
   );
 
-  const move = (i: number, delta: number) => {
-    const j = i + delta;
-    if (j < 0 || j >= ranked.length) return;
-    const a = ranked[i];
-    const b = ranked[j];
-    // Swap inside the STORED order, not inside the visible list: a series a filter excluded
-    // from this run still has a remembered place, and reordering two other series must not
-    // throw it away.
-    const base = order?.length ? [...order] : [...ranked];
-    for (const n of [a, b]) if (!base.includes(n)) base.push(n);
-    const ia = base.indexOf(a);
-    const ib = base.indexOf(b);
-    [base[ia], base[ib]] = [base[ib], base[ia]];
-    onChange({ seriesOrder: base });
-  };
+  function onDragEnd(e: DragEndEvent) {
+    const next = reorderSeriesOrder(order, ranked, e.active.id, e.over?.id);
+    if (next) onChange({ seriesOrder: next });
+  }
 
   // A breakout decides how many series there are, so this list has no natural bound: a 40-value
   // breakout puts 40 rows in a ~300px panel and pushes every group below it off the tab. Metabase
@@ -123,24 +146,31 @@ export function SeriesListSection({
   // visible row of a truncated list can still be sent down, swapping it with the first hidden one.
   // The alternative is a series that can never be moved past the cut without expanding first, and
   // a disabled arrow that gives no reason.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
   const [expanded, setExpanded] = useState(false);
   const visible = expanded ? ranked : ranked.slice(0, TRUNCATE_AFTER);
   const overflow = ranked.length - visible.length;
 
   return (
     <div className="space-y-1">
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+      <SortableContext items={visible} strategy={verticalListSortingStrategy}>
       {visible.map((name, i) => (
-        <div key={name} className="flex items-center gap-1">
-          {/* Side by side — see the note in TableColumnsSection: stacking two 24px targets makes
-              the row 58px tall. */}
-          <div className="flex shrink-0 items-center leading-none">
-            {/* IconButton, not a bare glyph: these measured 8×10 px, because a `▲` with no box is
-                only as big as the glyph. See `components/ui/icon-button.tsx`. */}
-            <IconButton aria-label={`Move ${name} up`} disabled={i === 0}
-              className="text-[10px]" onClick={() => move(i, -1)}>▲</IconButton>
-            <IconButton aria-label={`Move ${name} down`} disabled={i === ranked.length - 1}
-              className="text-[10px]" onClick={() => move(i, 1)}>▼</IconButton>
-          </div>
+        <SortableRow key={name} id={name} className="flex items-center gap-1">
+        {({ attributes, listeners }) => (<>
+          {/* A DRAG GRIP. The ▲▼ pair predates `FieldZone` getting its `KeyboardSensor`, which is
+              the only reason buttons were preferred — a grip reorders from the keyboard too now.
+              Same control the table's column list and the pivot's zones use. */}
+          <button type="button"
+            className="flex size-6 shrink-0 cursor-grab items-center justify-center rounded text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+            {...attributes} {...listeners}
+            aria-label={`reorder ${name}`}>
+            <GripVertical className="h-3.5 w-3.5" />
+          </button>
           {defaultColor && (
             <input
               type="color"
@@ -211,8 +241,11 @@ export function SeriesListSection({
             onCheckedChange={(v) => onChange({
               hiddenSeries: v ? (hidden ?? []).filter((n) => n !== name) : [...(hidden ?? []), name],
             })} />
-        </div>
+        </>)}
+        </SortableRow>
       ))}
+      </SortableContext>
+      </DndContext>
       {ranked.length > TRUNCATE_AFTER && (
         // Named, not a bare chevron: "Show 3 more series" says what is behind it, where a chevron
         // on a list that is already ten rows long reads as one more row.

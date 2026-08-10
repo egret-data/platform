@@ -1,7 +1,14 @@
 import type { PieConfig } from "@/api/charts";
 import { colorsForKeys } from "@/components/chart/echarts/keyColors";
 import { OTHER_SLICE_COLOR } from "@/components/chart/echarts/palette";
-import { IconButton } from "@/components/ui/icon-button";
+import {
+  DndContext, KeyboardSensor, PointerSensor, useSensor, useSensors, closestCenter,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import { SortableContext, verticalListSortingStrategy, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
+import { GripVertical } from "lucide-react";
+import { SortableRow } from "@/components/chart/config/SortableRow";
+import { reorderSeriesOrder } from "./SeriesListSection";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
@@ -55,6 +62,10 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
   const effectivePercent = resolvePercentVisibility(config.percentVisibility);
   const autoPercentHint = "puts each innermost-ring slice's share beside its name in the legend";
 
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
   const rank = new Map((config.sliceOrder ?? []).map((n, i) => [n, i]));
   const ranked = [...slices].sort(
     (a, b) => (rank.get(a) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b) ?? Number.MAX_SAFE_INTEGER),
@@ -114,21 +125,12 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
   const defaultSliceColor = (name: string) =>
     drawnColors[name] ?? colorsForKeys(listed.filter((n) => n === name || !config.hiddenSlices?.includes(n)), config.sliceColors)[name];
 
-  const move = (i: number, delta: number) => {
-    const j = i + delta;
-    if (j < 0 || j >= listed.length) return;
-    const a = listed[i];
-    const b = listed[j];
-    // Merge into the STORED order, not the visible list: a slice hidden or not present in
-    // this run's data still has a remembered position, and swapping two others must not
-    // throw it away (same reasoning as SeriesOrderSection.move).
-    const base = config.sliceOrder?.length ? [...config.sliceOrder] : [...listed];
-    for (const n of [a, b]) if (!base.includes(n)) base.push(n);
-    const ia = base.indexOf(a);
-    const ib = base.indexOf(b);
-    [base[ia], base[ib]] = [base[ib], base[ia]];
-    onChange({ sliceOrder: base });
-  };
+  function onDragEnd(e: DragEndEvent) {
+    // The SAME rule and the same helper the series list uses: move inside the STORED order so a
+    // slice hidden or absent from this run keeps its remembered position.
+    const next = reorderSeriesOrder(config.sliceOrder, listed, e.active.id, e.over?.id);
+    if (next) onChange({ sliceOrder: next });
+  }
   return (
     <div className="space-y-2.5 pt-1.5">
       <AutoToggle
@@ -256,17 +258,22 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
           <div className="text-xs text-muted-foreground">
             Applies to the innermost ring only — outer rings (additional nested dimensions) aren't affected.
           </div>
-          {listed.map((name, i) => {
+          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+          <SortableContext items={listed} strategy={verticalListSortingStrategy}>
+          {listed.map((name) => {
             const hidden = !!config.hiddenSlices?.includes(name);
             return (
-              <div key={name} className="flex items-center gap-1.5">
+              <SortableRow key={name} id={name} className="flex items-center gap-1.5">
+              {({ attributes, listeners }) => (<>
                 {/* The pie had its OWN reorder buttons, which is why the first pass at this — which
                     only touched SeriesListSection and TableColumnsSection — left eight 9×16 targets
                     here. Same `IconButton` as the other two lists now. */}
-                <IconButton aria-label={`Move ${name} up`} disabled={i === 0}
-                  className="text-xs" onClick={() => move(i, -1)}>↑</IconButton>
-                <IconButton aria-label={`Move ${name} down`} disabled={i === listed.length - 1}
-                  className="text-xs" onClick={() => move(i, 1)}>↓</IconButton>
+                <button type="button"
+                  className="flex size-6 shrink-0 cursor-grab items-center justify-center rounded text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+                  {...attributes} {...listeners}
+                  aria-label={`reorder ${name}`}>
+                  <GripVertical className="h-3.5 w-3.5" />
+                </button>
                 <input
                   type="color"
                   aria-label={`color ${name}`}
@@ -293,9 +300,12 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
                   onCheckedChange={(v) => onChange({
                     hiddenSlices: v ? (config.hiddenSlices ?? []).filter((n) => n !== name) : [...(config.hiddenSlices ?? []), name],
                   })} />
-              </div>
+              </>)}
+              </SortableRow>
             );
           })}
+          </SortableContext>
+          </DndContext>
           {/* The fold, reported so the reader can see where the missing categories went — pinned
               last, which is where the chart draws the bucket (`buildPieRings` ranks it after every
               named slice, however `sliceOrder` is written). Deliberately NOT a row: there is
