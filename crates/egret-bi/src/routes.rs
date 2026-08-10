@@ -2651,9 +2651,7 @@ async fn db_create(
         )
         .await
         .map_err(BiApiError::from)?;
-    Ok(Json(
-        load_dashboard(&st, d.id, ctx.principal.user_id.0).await?,
-    ))
+    Ok(Json(load_dashboard(&st, d.id, &ctx).await?))
 }
 
 #[utoipa::path(
@@ -2681,9 +2679,7 @@ async fn db_get(
     egret_core::authz::require_object(&*st.pdp, &ctx, DB_READ, obj)
         .await
         .map_err(BiApiError::from)?;
-    Ok(Json(
-        load_dashboard(&st, id, ctx.principal.user_id.0).await?,
-    ))
+    Ok(Json(load_dashboard(&st, id, &ctx).await?))
 }
 
 #[utoipa::path(
@@ -2746,9 +2742,7 @@ async fn db_set_certification(
         serde_json::json!({ "certified": b.certified, "details": b.details }),
     ));
 
-    Ok(Json(
-        load_dashboard(&st, id, ctx.principal.user_id.0).await?,
-    ))
+    Ok(Json(load_dashboard(&st, id, &ctx).await?))
 }
 
 /// Best-effort revision write. A failure here must NOT fail the request: the dashboard has already
@@ -2850,7 +2844,7 @@ async fn apply_dashboard_update(
     if let Some(snap) = snapshot {
         capture_revision(st, id, Some(ctx.principal.user_id.0), kind, &snap, None).await;
     }
-    load_dashboard(st, id, ctx.principal.user_id.0).await
+    load_dashboard(st, id, ctx).await
 }
 
 #[utoipa::path(
@@ -3128,9 +3122,7 @@ async fn db_duplicate(
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dashboard".into()))?;
-    Ok(Json(
-        load_dashboard(&st, copy.id, ctx.principal.user_id.0).await?,
-    ))
+    Ok(Json(load_dashboard(&st, copy.id, &ctx).await?))
 }
 
 #[utoipa::path(
@@ -3197,11 +3189,20 @@ async fn db_bookmark_remove(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// `ctx` rather than a bare user id, because the response now carries what the CALLER may do
+/// with this dashboard and that is a PDP question, not a row lookup.
+///
+/// WHY THE SERVER ANSWERS IT. `dashboard:manage` is workspace-scoped, and the session's
+/// `permissions` list is built from **platform** grants only (`session.rs:251-269`, `WHERE
+/// ag.scope_type = 'platform'`) — so it can never contain `dashboard:manage`, and a frontend
+/// gate written against it would hide Edit from everyone. The alternative, having the browser
+/// re-derive workspace authorization from role names, is reimplementing the PDP in TypeScript.
 async fn load_dashboard(
     st: &BiState,
     id: Uuid,
-    user: Uuid,
+    ctx: &egret_core::WorkspaceContext,
 ) -> Result<DashboardDetailDto, BiApiError> {
+    let user = ctx.principal.user_id.0;
     let d = st
         .dashboards
         .get(id)
@@ -3220,8 +3221,17 @@ async fn load_dashboard(
         .attribution_names(id)
         .await
         .map_err(BiApiError::from)?;
+    // Whether THIS caller may edit. The object resolves inside the same workspace guard the
+    // write paths use, so a share granting manage on this dashboard alone counts exactly as it
+    // does when the write is attempted — the flag cannot promise more than the PUT will honour.
+    let can_manage = match crate::shares::resolve(st, ctx, "dashboard", id).await {
+        Ok(obj) => egret_core::authz::require_object(&*st.pdp, ctx, DB_MANAGE, obj)
+            .await
+            .is_ok(),
+        Err(_) => false,
+    };
     Ok(crate::model::dashboard_detail_dto(
-        d, tabs, cards, bookmarked, names,
+        d, tabs, cards, bookmarked, names, can_manage,
     ))
 }
 
