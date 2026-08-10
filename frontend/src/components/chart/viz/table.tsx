@@ -3,6 +3,7 @@ import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { FIELD_LABEL as LABEL_CLASS } from "@/components/chart/settings/FieldLabel";
 import { Label } from "@/components/ui/label";
 import { CheckList } from "@/components/chart/config/CheckList";
+import { FieldZone } from "@/components/chart/config/FieldZone";
 import { isParamsV2 } from "@/api/charts";
 import type { QuerySpec } from "@/api/charts";
 import { columnLabels, metricLabels } from "@/components/chart/config/field-names";
@@ -18,19 +19,27 @@ const toggle = (list: string[], name: string) =>
 function TableMetricsControl({ config, onChange, metrics }: VizControlProps<TableConfig>) {
   return (
     <div className="space-y-1">
-      <Label className={LABEL_CLASS}>Metrics</Label>
       {/* ONE LINE, NOT THREE. This block used to open with a two-line instruction and then, on the
           common case of a dataset that defines no metrics, an italic "No metrics on this dataset."
-          — four lines of prose before the reader reached anything they could act on, at the very
-          top of the tab. The sentence still has to be said (a table with a metric aggregates and
-          one without does not, and nothing else on screen says so), so it is said once and short;
-          `CheckList` owns the empty case, which is where it belongs. */}
-      <p className="text-xs text-muted-foreground">With none, the table lists raw rows.</p>
-      <CheckList idPrefix="metric" empty="No metrics on this dataset."
-        options={metrics.map((m) => m.metric_name)} selected={config.metrics}
+          — four lines of prose before the reader reached anything they could act on. The sentence
+          still has to be said (a table with a metric aggregates and one without does not, and
+          nothing else on screen says so), so it is said once and short. */}
+      {/* `FieldZone`, not the checkbox list this used to be — the same card rows, grip and dashed
+          add-row the column list beside it now uses. The two lists answer the same kind of question
+          ("which fields does this table select") and sat one heading apart looking like different
+          kinds of control. `FieldZone` is the pivot's own component, so this is a third call site
+          rather than a third spelling. */}
+      <FieldZone
+        label="Metrics"
+        selected={config.metrics}
+        options={metrics.map((m) => m.metric_name)}
+        onChange={(next) => onChange({ metrics: next })}
         labels={metricLabels(metrics)}
-        onToggle={(n) => onChange({ metrics: toggle(config.metrics, n) })}
-        onSetAll={(next) => onChange({ metrics: next })} />
+      />
+      {/* AFTER the zone, not before it. `FieldZone` draws its own "Metrics" heading, so a sentence
+          above the component landed above that heading — the explanation arriving before the thing
+          it explains. */}
+      <p className="text-xs text-muted-foreground">With none, the table lists raw rows.</p>
     </div>
   );
 }

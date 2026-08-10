@@ -199,7 +199,9 @@ describe("the table's column list", () => {
   it("shows a metric's verbose name too", () => {
     const metricsControl = d.controls.find((c) => c.id === "metrics")!;
     render(createElement(metricsControl.render, {
-      config: { columns: [], metrics: [] },
+      // SELECTED, because Metrics is a `FieldZone` now: an unpicked field lives in the popover,
+      // and what this asserts is that a chip says the dataset's name for it.
+      config: { columns: [], metrics: ["total_revenue"] },
       onChange: vi.fn(),
       columns: [],
       metrics: [{ metric_name: "total_revenue", verbose_name: "Tổng doanh thu" }],

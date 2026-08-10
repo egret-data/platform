@@ -182,7 +182,9 @@ describe("every field picker names a field the way its dataset does", () => {
    * Left as the METRICS half, which is still a Data-tab list of its own.
    */
   it("the table's Data-tab metric list still says Doanh thu", () => {
-    renderPanel(tableDescriptor(), { columns: [], metrics: [] });
+    // SELECTED: Metrics is a `FieldZone` now, so an unpicked field lives in the popover and only a
+    // chip is on the panel. The rule under test is unchanged — a chip says the dataset's name.
+    renderPanel(tableDescriptor(), { columns: [], metrics: ["total_revenue"] });
     expect(screen.getByText("Doanh thu")).toBeInTheDocument();
     expect(screen.queryByText("total_revenue")).toBeNull();
   });

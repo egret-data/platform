@@ -144,7 +144,7 @@ async function mountTable(id = "c-raw-table") {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <TooltipProvider>
-        <MemoryRouter initialEntries={[`/explore/demo/charts/${id}?tab=columns`]}>
+        <MemoryRouter initialEntries={[`/explore/demo/charts/${id}?tab=data`]}>
           <Routes>
             <Route path="/explore/:workspace/charts/:id" element={<ChartExplore />} />
           </Routes>
@@ -192,7 +192,7 @@ const dataColumn = (name: string) => screen.getByRole("checkbox", { name });
  * "Done picking columns" and the fold stays open between toggles.
  */
 const openPicker = async () => {
-  await tab("Columns");
+  await tab("Data");
   const opener = screen.queryByRole("button", { name: /add or remove columns/i });
   if (opener) await userEvent.click(opener);
 };
@@ -239,7 +239,7 @@ describe("a column put back into the query is drawn again", () => {
     await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
 
     // …and the Columns tab agrees, rather than showing it as still hidden.
-    await tab("Columns");
+    await tab("Data");
     expect(eye("vendor")).toHaveAttribute("aria-pressed", "true");
     // Each step waits on a debounced auto-run, so the whole sequence outlasts the 5s default.
   }, 30000);
@@ -279,7 +279,7 @@ describe("a column put back into the query is drawn again", () => {
     await closePicker();
     await waitFor(() => expect(drawnHeaders()).toEqual(["id"]), { timeout: 3000 });
 
-    await tab("Columns");
+    await tab("Data");
     expect(eye("vendor")).toHaveAttribute("aria-pressed", "false");
     expect(within(document.body).queryByRole("columnheader", { name: /Supplier/ })).not.toBeInTheDocument();
   }, 30000);

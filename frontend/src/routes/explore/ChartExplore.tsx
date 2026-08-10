@@ -82,7 +82,6 @@ export default function ChartExplore() {
   // Metabase's table settings are Columns | Display | Conditional Formatting — the column list has
   // a tab of its own and Display is three toggles. egret stacked the list on top of those toggles,
   // which is what made this the panel's longest scroll. Only the table has the section.
-  const showColumnsTab = viz === "table";
   // One opaque config for whichever viz is active. Only its descriptor reads inside it;
   // null means "not seeded yet", so the descriptor's own default applies.
   const [descState, setDescState] = useState<unknown>(null);
@@ -655,9 +654,6 @@ export default function ChartExplore() {
         <Tabs value={builderTab} onValueChange={setBuilderTab}>
           <TabsList className={UNDERLINE_LIST}>
             <TabsTrigger value="data" className={UNDERLINE_TRIGGER}>Data</TabsTrigger>
-            {showColumnsTab && (
-              <TabsTrigger value="columns" className={UNDERLINE_TRIGGER}>Columns</TabsTrigger>
-            )}
             <TabsTrigger value="display" className={UNDERLINE_TRIGGER}>Display</TabsTrigger>
             {/* Metabase splits Data | Display | Axes, and the axis settings are the half of the
                 Display tab a reader goes looking for by name. Only the charts that HAVE axes
@@ -721,6 +717,33 @@ export default function ChartExplore() {
 
 
 
+            {/* THE COLUMN LIST, ON THE DATA TAB, between the fields it belongs with and the
+                Sort/Row-limit that act on them. It had a tab of its own for one commit; beside
+                Metrics is where it reads as one question — "which fields does this table select,
+                and in what order" — instead of two.
+                The dashboard card is untouched: it composes `SharedDisplaySections` itself and
+                passes no `only`, so where the BUILDER puts this block is the builder's business.
+                THE COST, measured: this tab is 795px tall on a ten-column table against a 783px
+                viewport, so it scrolls — and a fifty-column table scrolls a long way. That is a
+                list of fifty things being fifty things, not the old defect, which was the same
+                names printed three times across two tabs. */}
+            {viz === "table" && (
+              <SharedDisplaySections
+                vizType={viz}
+                resultColumns={resultColumns}
+                styleColumns={[]}
+                tableState={tableState}
+                columnSettings={columnSettings}
+                conditionalFormatting={conditionalFormatting}
+                onTableState={setTableState}
+                onColumnSettings={setColumnSettings}
+                onConditionalFormatting={setConditionalFormatting}
+                queryFields={tableQueryFields}
+                only="columns"
+              />
+            )}
+
+
             {/* Sort sits between the fields and the row limit, the order Metabase's notebook puts
                 its steps in — and the order that reads correctly, since the sort is what decides
                 WHICH rows survive the limit. Not offered where the descriptor would ignore it. */}
@@ -755,26 +778,6 @@ export default function ChartExplore() {
           </TabsContent>
 
           {/* ── DISPLAY TAB ── */}
-          {/* ── COLUMNS TAB ── the table's column list, alone. `only="columns"` is what keeps it
-              off the Display tab; a dashboard card passes no `only` at all and still takes the
-              list inline, because a card has no tabs to split it across. */}
-          {showColumnsTab && (
-            <TabsContent value="columns" className="space-y-4">
-              <SharedDisplaySections
-                vizType={viz}
-                resultColumns={resultColumns}
-                styleColumns={[]}
-                tableState={tableState}
-                columnSettings={columnSettings}
-                conditionalFormatting={conditionalFormatting}
-                onTableState={setTableState}
-                onColumnSettings={setColumnSettings}
-                onConditionalFormatting={setConditionalFormatting}
-                queryFields={tableQueryFields}
-                only="columns"
-              />
-            </TabsContent>
-          )}
 
           <TabsContent value="display" className="space-y-4">
 
