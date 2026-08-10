@@ -182,7 +182,7 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
           control share so they cannot drift). A four-value select with no Auto would have to
           show "Off" while the chart drew them. A stored value that isn't one of the four shows
           — and renders as — Off, which is what the chart does with it. */}
-      <div className="flex items-center justify-between gap-2">
+      <div className="space-y-1.5">
         <Label className="text-sm font-normal">Percentages</Label>
         <Select
           value={config.percentVisibility === undefined ? AUTO : effectivePercent}
@@ -201,7 +201,7 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
         </Select>
       </div>
       {effectivePercent !== "off" && (
-        <div className="flex items-center justify-between gap-2">
+        <div className="space-y-1.5">
           <Label htmlFor="pz-decimals" className="text-sm font-normal">Decimal places</Label>
           {/* EMPTY, not "2", when nothing is stored: the chart no longer has a fixed default to
               show. Unset means the pie derives the precision from its own shares (options/pie.ts,
@@ -221,7 +221,7 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
         </div>
       )}
       <Toggle id="pz-sort" label="Sort by value" checked={config.sortRows !== false} onChange={(v) => onChange({ sortRows: v })} />
-      <div className="flex items-center justify-between gap-2">
+      <div className="space-y-1.5">
         <Label htmlFor="pz-threshold" className="text-sm font-normal">Group slices below</Label>
         <div className="flex items-center gap-1">
           {/* The control this whole family now shares (DecimalInput). This box is where the
