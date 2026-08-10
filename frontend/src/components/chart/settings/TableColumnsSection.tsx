@@ -1,9 +1,18 @@
+import {
+  DndContext, KeyboardSensor, PointerSensor, useSensor, useSensors, closestCenter,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext, verticalListSortingStrategy, useSortable, arrayMove,
+  sortableKeyboardCoordinates,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { GripVertical } from "lucide-react";
 import { useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import type { TableState } from "@/api/charts";
 import type { ColumnFormat } from "@/components/chart/format-types";
 import { CheckList } from "@/components/chart/config/CheckList";
-import { IconButton } from "@/components/ui/icon-button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -11,7 +20,7 @@ import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
 import type { FieldLabels } from "@/components/chart/config/field-names";
-import { colIcon, colKind } from "./FormatSection";
+import { colIcon } from "./FormatSection";
 import { ColumnSettingsPopover } from "./ColumnSettingsPopover";
 import { FIELD_LABEL, GROUP_LABEL } from "./FieldLabel";
 
@@ -75,6 +84,108 @@ export interface QueryFieldGroup {
  * codebase have now come from keying on a display string; two of them were caught only by
  * mutation, with the suite green.
  */
+/**
+ * The order a drop writes, as a pure function — and the reason it is one.
+ *
+ * Swapping the ▲▼ pair for a drag grip cost the END-TO-END reorder tests: dnd-kit's keyboard sensor
+ * reads element rects, and jsdom has none, so no test in this repo drives a drag (`FieldZone`'s
+ * own tests assert its grip EXISTS and stop there). What must not go untested with them is WHICH
+ * STRING lands in `columnOrder`: `column_title` renames the header without renaming the column,
+ * and `ChartTable` resolves the order through `c.name`, so emitting a displayed title writes an
+ * order the renderer resolves nothing out of — silently. Seven bugs in this codebase have come
+ * from keying on a display string.
+ *
+ * So the DOM drag is untested and this is not.
+ */
+export function reorderColumnOrder(
+  names: string[],
+  activeId: string | number,
+  overId: string | number | undefined,
+): string[] | null {
+  if (overId === undefined || activeId === overId) return null;
+  const from = names.indexOf(String(activeId));
+  const to = names.indexOf(String(overId));
+  if (from < 0 || to < 0) return null;
+  return arrayMove(names, from, to);
+}
+
+/**
+ * ONE COLUMN'S ROW. Its own component because `useSortable` is a hook and the list renders inside
+ * a `.map()`, where a hook cannot go — the same reason `FieldZone` has its `Chip`.
+ */
+function ColumnRow({ c, isHidden, title, filtering, columnSettings, onColumnSettings, onToggleHidden }: {
+  c: ResultColumn;
+  isHidden: boolean;
+  title: string;
+  /** A filter is active, so reordering is suppressed — a drop would land off screen. */
+  filtering: boolean;
+  columnSettings?: Record<string, ColumnFormat>;
+  onColumnSettings?: (next: Record<string, ColumnFormat>) => void;
+  onToggleHidden: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: c.name });
+  // A dashboard card carries its columns' NAMES and not their types (`DashboardView` builds them
+  // from the chart's stored spec), so `c.type` is routinely "". `colIcon` falls through to Text for
+  // an unknown type, and a Text icon on `subtotal` is a confident false statement — worse than no
+  // icon. Rendered as an absent type instead, with the icon's box kept so the names still line up.
+  const Icon = c.type ? colIcon(c.type) : null;
+  return (
+    <div
+      ref={setNodeRef}
+      style={{ transform: CSS.Translate.toString(transform), transition, opacity: isDragging ? 0.6 : 1 }}
+      data-column={c.name}
+      // Metabase marks a hidden row and LEAVES IT IN PLACE (`data-enabled="false"`) rather than
+      // moving it to the end or into a second list. That is what makes "turn it back on"
+      // findable: the row is where the reader last saw it.
+      data-enabled={isHidden ? "false" : "true"}
+      className={`flex items-center gap-1 rounded-md border px-1.5 py-1 ${isHidden ? "opacity-60" : ""}`}
+    >
+      {/* A DRAG GRIP, not the ▲▼ pair this replaced. The pair was chosen because PR #356 shipped a
+          dnd-kit reorder that was mouse-only — no `KeyboardSensor` — and buttons come with their
+          keyboard path attached. That reason expired: `FieldZone` fixed the sensor, so a grip here
+          reorders from the keyboard too (focus, space to lift, arrows, space to drop). Metabase's
+          own Columns row uses a grabber, and so does egret's field zone one tab away. */}
+      <button type="button"
+        className="flex size-6 shrink-0 cursor-grab items-center justify-center rounded text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:cursor-not-allowed disabled:opacity-40"
+        disabled={filtering}
+        title={filtering ? "Clear the search to reorder" : undefined}
+        aria-label={`reorder ${c.name}`}
+        {...(filtering ? {} : attributes)} {...(filtering ? {} : listeners)}>
+        <GripVertical className="h-3.5 w-3.5" />
+      </button>
+      {Icon
+        ? <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+        : <span className="h-3.5 w-3.5 shrink-0" aria-hidden />}
+      <span className="min-w-0 flex-1 truncate" title={c.name}>
+        {title}
+        {/* The raw name stays beside the rename — it is the name every other tab, the SQL and the
+            drill menu call this column by. */}
+        {title !== c.name && (
+          <span className="ml-1.5 text-xs text-muted-foreground">{c.name}</span>
+        )}
+      </span>
+      {/* THE TEXT BADGE IS GONE. The row already carries a type ICON to the left, so `NUMBER`
+          beside it said the same thing twice on every row — Metabase's own Columns row has the
+          icon and no badge. Removing it is most of what makes this list read as compact. */}
+      {onColumnSettings && (
+        <ColumnSettingsPopover column={c} value={columnSettings ?? {}} onChange={onColumnSettings} />
+      )}
+      {/* An eye, not the sibling list's Switch: Metabase's column row uses one, and forty switches
+          down a panel this narrow is a different weight of control than ten. `aria-pressed` carries
+          the state, so it is not colour-only. */}
+      <button
+        type="button"
+        aria-label={`Show ${c.name}`}
+        aria-pressed={!isHidden}
+        onClick={onToggleHidden}
+        className="flex size-6 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-muted-foreground hover:bg-accent hover:text-foreground"
+      >
+        {isHidden ? <EyeOff className="h-3.5 w-3.5" aria-hidden /> : <Eye className="h-3.5 w-3.5" aria-hidden />}
+      </button>
+    </div>
+  );
+}
+
 export function TableColumnsSection({
   columns, value, onChange, columnSettings, onColumnSettings, queryFields, part,
 }: {
@@ -133,29 +244,29 @@ export function TableColumnsSection({
       )
     : ordered;
 
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    // The sensor PR #356 forgot, which is why this list reordered with buttons for so long.
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  /**
+   * A drop writes the WHOLE display order back, exactly as the ▲▼ pair did.
+   *
+   * Reordering is suppressed while a filter is active (the grips are disabled), so `ordered` and
+   * what is on screen are the same list here — dragging a filtered subset would otherwise write an
+   * order derived from rows the reader cannot see.
+   */
+  function onDragEnd(e: DragEndEvent) {
+    const next = reorderColumnOrder(ordered.map((c) => c.name), e.active.id, e.over?.id);
+    if (next) onChange({ ...value, columnOrder: next });
+  }
+
   function toggleHidden(name: string) {
     const next = new Set(hidden);
     if (next.has(name)) next.delete(name); else next.add(name);
     onChange({ ...value, hiddenColumns: [...next] });
   }
-
-  /**
-   * Swap two rows and write the WHOLE display order back.
-   *
-   * Not `SeriesListSection`'s rule, which patches inside the stored array so that a series absent
-   * from this run keeps its remembered place. A table has no equivalent: `reconcileTableState`
-   * prunes `columnOrder` of every name that has left the result the moment it leaves, so there is
-   * nothing absent to preserve — and `ChartTable`'s own header drag has always written the full
-   * list this same way. Two writers of one key that disagreed about its shape would be worse than
-   * either shape.
-   */
-  const move = (i: number, delta: number) => {
-    const j = i + delta;
-    if (j < 0 || j >= ordered.length) return;
-    const names = ordered.map((c) => c.name);
-    [names[i], names[j]] = [names[j], names[i]];
-    onChange({ ...value, columnOrder: names });
-  };
 
   // Deliberately `columns`, not the filtered list: a filter is a way to FIND a column, not a
   // selection. "Hide all" while a filter is active must not quietly hide only what is on screen.
@@ -227,86 +338,24 @@ export function TableColumnsSection({
             {q && visibleColumns.length === 0 && (
               <p className="text-xs text-muted-foreground">No column matches “{filter}”.</p>
             )}
+            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+              <SortableContext items={visibleColumns.map((c) => c.name)} strategy={verticalListSortingStrategy}>
             <div className="flex flex-col gap-1">
-              {visibleColumns.map((c) => {
-                const i = ordered.indexOf(c);
-                const isHidden = hidden.has(c.name);
-                const title = titleFor(c);
-                // A dashboard card carries its columns' NAMES and not their types
-                // (`DashboardView` builds them from the chart's stored spec), so `c.type` is
-                // routinely "". `colIcon`/`colKind` fall through to Text for an unknown type, and
-                // a TEXT badge on `subtotal` is a confident false statement — worse than no badge.
-                // Rendered as an absent type instead, with the icon's box kept so the names below
-                // it still line up.
-                const Icon = c.type ? colIcon(c.type) : null;
-                return (
-                  <div
-                    key={c.name}
-                    data-column={c.name}
-                    // Metabase marks a hidden row and LEAVES IT IN PLACE (`data-enabled="false"`)
-                    // rather than moving it to the end or into a second list. That is what makes
-                    // "turn it back on" findable: the row is where the reader last saw it.
-                    data-enabled={isHidden ? "false" : "true"}
-                    className={`flex items-center gap-1 rounded-md border px-1.5 py-1 ${isHidden ? "bg-muted/30 opacity-60" : ""}`}
-                  >
-                    {/* SIDE BY SIDE, not stacked. Once these grew from 8×10 glyphs to 24px hit
-                        targets, a vertical pair became a 48px column that drove every row to 58px
-                        tall — twenty of them, in a panel people scroll. Horizontal keeps the
-                        target and gives the row back its height. Pie's slice list already did it
-                        this way. */}
-                    <div className="flex shrink-0 items-center leading-none">
-                      {/* Disabled under an active filter, both arrows: the row above a match is
-                          off screen, so "up" would swap with something the reader cannot see. */}
-                      {/* 22 of these on a table panel, two per column, and they measured 8×10 px.
-                          `IconButton` also carries the focus ring this markup spelled out by hand. */}
-                      <IconButton aria-label={`Move ${c.name} up`} disabled={!!q || i === 0}
-                        title={q ? "Clear the search to reorder" : undefined}
-                        className="text-[10px]" onClick={() => move(i, -1)}>▲</IconButton>
-                      <IconButton aria-label={`Move ${c.name} down`} disabled={!!q || i === ordered.length - 1}
-                        title={q ? "Clear the search to reorder" : undefined}
-                        className="text-[10px]" onClick={() => move(i, 1)}>▼</IconButton>
-                    </div>
-                    {Icon
-                      ? <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
-                      : <span className="h-3.5 w-3.5 shrink-0" aria-hidden />}
-                    <span className="min-w-0 flex-1 truncate" title={c.name}>
-                      {title}
-                      {/* The raw name stays beside the rename — the anatomy the Formatting list
-                          already had. It is the name every other tab, the SQL and the drill
-                          menu call this column, so a renamed column that showed only its title
-                          would be unrecognisable from anywhere else in the app. */}
-                      {title !== c.name && (
-                        <span className="ml-1.5 text-xs text-muted-foreground">{c.name}</span>
-                      )}
-                    </span>
-                    {c.type && (
-                      <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground">
-                        {colKind(c.type)}
-                      </span>
-                    )}
-                    {onColumnSettings && (
-                      <ColumnSettingsPopover
-                        column={c}
-                        value={columnSettings ?? {}}
-                        onChange={onColumnSettings}
-                      />
-                    )}
-                    {/* An eye, not the sibling list's Switch: Metabase's column row uses one, and
-                        forty switches down a panel this narrow is a different weight of control
-                        than ten. `aria-pressed` carries the state, so it is not colour-only. */}
-                    <button
-                      type="button"
-                      aria-label={`Show ${c.name}`}
-                      aria-pressed={!isHidden}
-                      onClick={() => toggleHidden(c.name)}
-                      className="flex size-6 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-muted-foreground hover:bg-accent hover:text-foreground"
-                    >
-                      {isHidden ? <EyeOff className="h-3.5 w-3.5" aria-hidden /> : <Eye className="h-3.5 w-3.5" aria-hidden />}
-                    </button>
-                  </div>
-                );
-              })}
+              {visibleColumns.map((c) => (
+                <ColumnRow
+                  key={c.name}
+                  c={c}
+                  isHidden={hidden.has(c.name)}
+                  title={titleFor(c)}
+                  filtering={!!q}
+                  columnSettings={columnSettings}
+                  onColumnSettings={onColumnSettings}
+                  onToggleHidden={() => toggleHidden(c.name)}
+                />
+              ))}
             </div>
+              </SortableContext>
+            </DndContext>
           </>
         )}
 

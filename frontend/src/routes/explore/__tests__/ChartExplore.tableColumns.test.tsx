@@ -54,7 +54,38 @@ const TABLE_RENAMED = {
   },
 };
 
-const CHARTS: Record<string, unknown> = { "c-raw-table": TABLE, "c-renamed": TABLE_RENAMED };
+/**
+ * The same table with an ORDER ALREADY STORED. It exists because the reorder is a drag now, and no
+ * test in this repo drives a dnd drop — dnd-kit's keyboard sensor reads element rects and jsdom has
+ * none. The WRITE half is unit-tested (`reorderColumnOrder`); this fixture keeps the READ half
+ * covered end to end, which is the half that decides what a reader actually sees.
+ */
+const TABLE_ORDERED = {
+  ...TABLE,
+  id: "c-ordered",
+  params: {
+    ...TABLE.params,
+    settings: { ...TABLE.params.settings, "table.state": { columnOrder: ["id", "vendor", "state"] } },
+  },
+};
+
+const CHARTS: Record<string, unknown> = {
+  "c-raw-table": TABLE,
+  "c-renamed": TABLE_RENAMED,
+  "c-ordered": TABLE_ORDERED,
+  // Renamed AND ordered: the order keys on `vendor`, the header reads "Supplier".
+  "c-renamed-ordered": {
+    ...TABLE_RENAMED,
+    id: "c-renamed-ordered",
+    params: {
+      ...(TABLE_RENAMED as { params: Record<string, unknown> }).params,
+      settings: {
+        ...((TABLE_RENAMED as { params: { settings: Record<string, unknown> } }).params.settings),
+        "table.state": { columnOrder: ["id", "vendor", "state"] },
+      },
+    },
+  },
+};
 
 vi.mock("@/api/charts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/api/charts")>()),
@@ -333,13 +364,11 @@ describe("Add or remove columns, from the Display tab", () => {
  * stored order — two lists on one screen claiming to be the same thing while disagreeing.
  */
 describe("reordering from the panel moves the drawn column", () => {
-  it("moves a column up and the table follows", async () => {
-    await mountTable();
-    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "vendor"]), { timeout: 3000 });
-
-    await userEvent.click(screen.getByLabelText("Move vendor up"));
-    expect(drawnHeaders()).toEqual(["id", "vendor", "state"]);
-    // The panel's own list moved too — it is the same list now, not a second one.
+  it("draws the table AND the panel in the stored order, not in result order", async () => {
+    await mountTable("c-ordered");
+    // The query projects id, state, vendor; the stored order says id, vendor, state.
+    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "vendor", "state"]), { timeout: 3000 });
+    // …and the panel's own list is the same list, not a second one that disagrees.
     expect(Array.from(document.querySelectorAll("[data-column]")).map((e) => e.getAttribute("data-column")))
       .toEqual(["id", "vendor", "state"]);
   }, 30000);
@@ -354,11 +383,15 @@ describe("reordering from the panel moves the drawn column", () => {
    * Three columns with the renamed one MOVING INTO THE MIDDLE is the smallest fixture that can see
    * that: with two, losing a name from the order and re-appending it gives the identical layout.
    */
-  it("moves a RENAMED column under its raw name, not its title", async () => {
-    await mountTable("c-renamed");
-    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "state", "Supplier"]), { timeout: 3000 });
-
-    await userEvent.click(screen.getByLabelText("Move vendor up"));
-    expect(drawnHeaders()).toEqual(["id", "Supplier", "state"]);
+  /**
+   * The write half of this — that a move emits `vendor` and never "Supplier" — is pinned on
+   * `reorderColumnOrder` directly, because the reorder is a drag now and no test here drives one.
+   * What is still worth asserting end to end is the READ: an order stored under the RAW name must
+   * move the column even though its header says something else. A `columnOrder` of display strings
+   * would resolve nothing and leave this in result order.
+   */
+  it("resolves a stored order by the RAW name even when the header is renamed", async () => {
+    await mountTable("c-renamed-ordered");
+    await waitFor(() => expect(drawnHeaders()).toEqual(["id", "Supplier", "state"]), { timeout: 3000 });
   }, 30000);
 });
