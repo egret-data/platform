@@ -161,8 +161,8 @@ export function ColumnFormatFields({
   return (
     <>
         <Field label="Column title">
-          <Input
-            className="h-8"
+          <Input className="w-full"
+           
             placeholder={c.name}
             value={fmt.column_title ?? ""}
             onChange={(e) =>
@@ -179,7 +179,7 @@ export function ColumnFormatFields({
             <Field label="Number style">
               <Select value={fmt.number_style ?? "decimal"}
                 onValueChange={(v) => patch({ number_style: v as ColumnFormat["number_style"] })}>
-                <SelectTrigger aria-label="Number style" className="h-8 w-full"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="Number style" className="w-full"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="decimal">Normal</SelectItem>
                   <SelectItem value="percent">Percent</SelectItem>
@@ -211,7 +211,7 @@ export function ColumnFormatFields({
                 <Field label="Display">
                   <Select value={fmt.currency_style ?? "symbol"}
                     onValueChange={(v) => patch({ currency_style: v as ColumnFormat["currency_style"] })}>
-                    <SelectTrigger aria-label="Currency display" className="h-8 w-full"><SelectValue /></SelectTrigger>
+                    <SelectTrigger aria-label="Currency display" className="w-full"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="symbol">$</SelectItem>
                       <SelectItem value="code">USD</SelectItem>
@@ -245,7 +245,7 @@ export function ColumnFormatFields({
                 stored by anything else, so the ceiling here narrows what the panel offers
                 without making a legal saved value unrenderable. */}
             <Field label="Decimal places">
-              <Input type="number" min={0} max={10} step={1} className="h-8" placeholder="Auto"
+              <Input className="w-full" type="number" min={0} max={10} step={1} placeholder="Auto"
                 value={fmt.decimals ?? ""}
                 onChange={(e) => {
                   const raw = e.target.value;
@@ -261,7 +261,7 @@ export function ColumnFormatFields({
             <Field label="Separator style">
               <Select value={fmt.number_separators ?? ".,"}
                 onValueChange={(v) => patch({ number_separators: v })}>
-                <SelectTrigger aria-label="Separator style" className="h-8 w-full"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="Separator style" className="w-full"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value=".,">100,000.00</SelectItem>
                   <SelectItem value=", ">100 000,00</SelectItem>
@@ -285,17 +285,17 @@ export function ColumnFormatFields({
                 `type="number"` box cannot hold: the browser reports it EMPTY, which arrived
                 here as `undefined` and dropped the point. See DecimalInput. */}
             <Field label="Multiply by a number">
-              <DecimalInput className="h-8" placeholder="1"
+              <DecimalInput placeholder="1"
                 value={fmt.scale}
                 onChange={(scale) => patch({ scale })} />
             </Field>
 
             <div className="flex gap-2">
               <Field label="Prefix">
-                <Input className="h-8" value={fmt.prefix ?? ""} onChange={(e) => patch({ prefix: e.target.value })} />
+                <Input className="w-full" value={fmt.prefix ?? ""} onChange={(e) => patch({ prefix: e.target.value })} />
               </Field>
               <Field label="Suffix">
-                <Input className="h-8" value={fmt.suffix ?? ""} onChange={(e) => patch({ suffix: e.target.value })} />
+                <Input className="w-full" value={fmt.suffix ?? ""} onChange={(e) => patch({ suffix: e.target.value })} />
               </Field>
             </div>
 
@@ -313,7 +313,7 @@ export function ColumnFormatFields({
           <div className="space-y-3">
             <Field label="Date style">
               <Select value={fmt.date_style ?? "MMMM D, YYYY"} onValueChange={(v) => patch({ date_style: v })}>
-                <SelectTrigger aria-label="Date style" className="h-8 w-full"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="Date style" className="w-full"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="MMMM D, YYYY">January 31, 2024</SelectItem>
                   <SelectItem value="M/D/YYYY">1/31/2024</SelectItem>
@@ -342,7 +342,7 @@ export function ColumnFormatFields({
               <Field label="Date separator">
                 <Select value={fmt.date_separator ?? "/"}
                   onValueChange={(v) => patch({ date_separator: v as ColumnFormat["date_separator"] })}>
-                  <SelectTrigger aria-label="Date separator" className="h-8 w-full"><SelectValue /></SelectTrigger>
+                  <SelectTrigger aria-label="Date separator" className="w-full"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="/">2024/01/31</SelectItem>
                     <SelectItem value="-">2024-01-31</SelectItem>
@@ -363,7 +363,7 @@ export function ColumnFormatFields({
             <Field label="Show the time">
               <Select value={fmt.time_enabled ?? "off"}
                 onValueChange={(v) => patch({ time_enabled: v === "off" ? null : (v as ColumnFormat["time_enabled"]) })}>
-                <SelectTrigger aria-label="Show the time" className="h-8 w-full"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="Show the time" className="w-full"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="off">Off</SelectItem>
                   <SelectItem value="minutes">HH:MM</SelectItem>
@@ -380,7 +380,7 @@ export function ColumnFormatFields({
               <Field label="Time style">
                 <Select value={fmt.time_style ?? "h:mm A"}
                   onValueChange={(v) => patch({ time_style: v as ColumnFormat["time_style"] })}>
-                  <SelectTrigger aria-label="Time style" className="h-8 w-full"><SelectValue /></SelectTrigger>
+                  <SelectTrigger aria-label="Time style" className="w-full"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="h:mm A">5:24 PM (12-hour clock)</SelectItem>
                     <SelectItem value="HH:mm">17:24 (24-hour clock)</SelectItem>
@@ -396,7 +396,7 @@ export function ColumnFormatFields({
             <Field label="Display as">
               <Select value={fmt.view_as ?? "auto"}
                 onValueChange={(v) => patch({ view_as: v as ColumnFormat["view_as"] })}>
-                <SelectTrigger aria-label="Display as" className="h-8 w-full"><SelectValue /></SelectTrigger>
+                <SelectTrigger aria-label="Display as" className="w-full"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="auto">Automatic</SelectItem>
                   <SelectItem value="text">Text</SelectItem>
@@ -409,11 +409,11 @@ export function ColumnFormatFields({
             {fmt.view_as === "link" && (
               <>
                 <Field label="Link text">
-                  <Input className="h-8" placeholder="{{value}}" value={fmt.link_text ?? ""}
+                  <Input className="w-full" placeholder="{{value}}" value={fmt.link_text ?? ""}
                     onChange={(e) => patch({ link_text: e.target.value || undefined })} />
                 </Field>
                 <Field label="Link URL">
-                  <Input className="h-8" placeholder="{{value}}" value={fmt.link_url ?? ""}
+                  <Input className="w-full" placeholder="{{value}}" value={fmt.link_url ?? ""}
                     onChange={(e) => patch({ link_url: e.target.value || undefined })} />
                 </Field>
               </>

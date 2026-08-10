@@ -1,8 +1,7 @@
-import { useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import type { DatasetColumn, DatasetMetric } from "@/api/datasets";
 import type { ColumnFormat } from "@/components/chart/format-types";
 import { SectionLabel } from "@/components/chart/settings/SectionLabel";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import type { VizControl, VizControlProps, VizDescriptor } from "./viz/types";
 
 /** The one group name the shell promotes to its own tab — see `Props.tab`. */
@@ -121,24 +120,17 @@ function ControlGroup<Cfg>({ title, controls, controlProps }: {
   controls: VizControl<Cfg>[];
   controlProps: VizControlProps<Cfg>;
 }) {
-  const [open, setOpen] = useState(false);
-  const advanced = controls.filter((c) => c.advanced);
+  // EVERYTHING RENDERS. The `advanced` flag used to hide controls behind a "More options (2)"
+  // disclosure; Metabase shows its whole Display list. A disclosure with a count announces that
+  // something is hidden without saying what, and the two controls behind it here — a goal line
+  // and a trend line — are not advanced by any reading.
+  //
+  // `advanced` is still honoured by the Axes tab and by `card-data`, which render flat for their
+  // own reasons above, so the flag stays on the descriptors rather than being ripped out.
   return (
     <div className="space-y-1.5">
       <SectionLabel>{title}</SectionLabel>
-      {controls.filter((c) => !c.advanced).map(({ id, render: Control }) => (
-        <Control key={id} {...controlProps} />
-      ))}
-      {advanced.length > 0 && (
-        <Collapsible open={open} onOpenChange={setOpen} className="space-y-1.5">
-          <CollapsibleContent className="space-y-1.5">
-            {advanced.map(({ id, render: Control }) => <Control key={id} {...controlProps} />)}
-          </CollapsibleContent>
-          <CollapsibleTrigger className="text-xs text-muted-foreground hover:text-foreground">
-            {open ? "Fewer options" : `More options (${advanced.length})`}
-          </CollapsibleTrigger>
-        </Collapsible>
-      )}
+      {controls.map(({ id, render: Control }) => <Control key={id} {...controlProps} />)}
     </div>
   );
 }

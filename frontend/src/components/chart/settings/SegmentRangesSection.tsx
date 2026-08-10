@@ -1,5 +1,6 @@
 import { Plus, Trash2 } from "lucide-react";
 import { SERIES_PALETTE } from "@/components/chart/echarts/palette";
+import { IconButton } from "@/components/ui/icon-button";
 import { Input } from "@/components/ui/input";
 import { DecimalInput } from "./DecimalInput";
 import { Button } from "@/components/ui/button";
@@ -101,9 +102,9 @@ export function SegmentRangesSection({
           is nothing to head, so the empty hint below is not preceded by column names. */}
       {rows.length > 0 && (
         <div className="flex items-center gap-1 pl-8 text-[10px] uppercase tracking-wide text-muted-foreground">
-          <span className="w-16 shrink-0">Min</span>
+          <span className="shrink-0">Min</span>
           <span className="w-2 shrink-0" />
-          <span className="w-16 shrink-0">Max</span>
+          <span className="shrink-0">Max</span>
           <span className="min-w-0 flex-1">Label</span>
           <span className="w-[18px] shrink-0" />
         </div>
@@ -118,7 +119,7 @@ export function SegmentRangesSection({
           <input
             type="color"
             aria-label={`range ${i + 1} color`}
-            className="h-7 w-7 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+            className="w-7 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
             value={s.color}
             onChange={(e) => patch(i, "color", e.target.value)}
           />
@@ -128,7 +129,7 @@ export function SegmentRangesSection({
               DecimalInput. */}
           <DecimalInput
             aria-label={`range ${i + 1} min`}
-            className="h-7 w-16 shrink-0 text-sm"
+            className="shrink-0 text-sm"
             placeholder={nullableBounds ? "−∞" : undefined}
             value={s.min ?? undefined}
             onChange={(v) => patchBound(i, "min", v)}
@@ -136,27 +137,26 @@ export function SegmentRangesSection({
           <span className="shrink-0 text-xs text-muted-foreground">–</span>
           <DecimalInput
             aria-label={`range ${i + 1} max`}
-            className="h-7 w-16 shrink-0 text-sm"
+            className="shrink-0 text-sm"
             placeholder={nullableBounds ? "∞" : undefined}
             value={s.max ?? undefined}
             onChange={(v) => patchBound(i, "max", v)}
           />
           <Input
             aria-label={`range ${i + 1} name`}
-            className="h-7 min-w-0 flex-1 text-sm"
+            className="min-w-0 flex-1 text-sm"
             placeholder="Optional"
             value={s.label ?? ""}
             onChange={(e) => patch(i, "label", e.target.value.trim() ? e.target.value : undefined)}
           />
-          <button
-            type="button"
+          <IconButton
             aria-label={`remove range ${i + 1}`}
             disabled={rows.length <= minRows}
-            className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-destructive disabled:opacity-30"
+            className="hover:text-destructive"
             onClick={() => removeRange(i)}
           >
             <Trash2 className="h-3.5 w-3.5" />
-          </button>
+          </IconButton>
           {/* Said out loud rather than silently rendered. A band colour lands on the headline
               number itself, so an unreadable one is not a cosmetic problem. */}
           {warning && (

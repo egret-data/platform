@@ -78,7 +78,7 @@ export function BoxplotDisplaySection({ config, onChange }: Props) {
           <Label htmlFor="bp-valuemode" className="text-sm font-normal">Values to display</Label>
           <Select value={config.labelMode ?? "median"}
             onValueChange={(v) => onChange({ labelMode: v as "median" | "all" })}>
-            <SelectTrigger id="bp-valuemode" aria-label="Values to display" className="h-8 w-full"><SelectValue /></SelectTrigger>
+            <SelectTrigger id="bp-valuemode" aria-label="Values to display" className="w-full"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="median">Median only</SelectItem>
               <SelectItem value="all">All</SelectItem>
@@ -93,18 +93,18 @@ export function BoxplotDisplaySection({ config, onChange }: Props) {
         <Label className="text-sm font-normal">Color</Label>
         <input
           type="color" aria-label="Color"
-          className="h-7 w-10 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+          className="w-10 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
           value={config.color ?? SERIES_PALETTE[0]}
           onChange={(e) => onChange({ color: e.target.value })}
         />
       </div>
-      <div className="flex items-center justify-between gap-2">
+      <div className="space-y-1.5">
         <Label htmlFor="bp-compact" className="text-sm font-normal">Shorten large numbers</Label>
         <Select
           value={config.compactValues === undefined ? "auto" : config.compactValues ? "on" : "off"}
           onValueChange={(v) => onChange({ compactValues: v === "auto" ? undefined : v === "on" })}
         >
-          <SelectTrigger id="bp-compact" aria-label="Shorten large numbers" className="h-8 w-24"><SelectValue /></SelectTrigger>
+          <SelectTrigger className="w-full" id="bp-compact" aria-label="Shorten large numbers"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="auto">Auto</SelectItem>
             <SelectItem value="on">Compact</SelectItem>
@@ -112,13 +112,13 @@ export function BoxplotDisplaySection({ config, onChange }: Props) {
           </SelectContent>
         </Select>
       </div>
-      <div className="grid grid-cols-2 gap-2 border-t pt-2">
+      <div className="space-y-2 border-t pt-2">
         <label className="space-y-1">
           <span className="text-xs text-muted-foreground">Goal value</span>
           {/* DecimalInput: a goal is a data value, and `type="number"` reports itself EMPTY for
               as long as a decimal point is the last character, which fed `undefined` into the
               config mid-word and lost the keystroke. See DecimalInput. */}
-          <DecimalInput className="h-8" placeholder="none" aria-label="Goal value"
+          <DecimalInput placeholder="none" aria-label="Goal value"
             value={config.goalValue}
             onChange={(goalValue) => onChange({ goalValue })} />
         </label>
@@ -129,7 +129,7 @@ export function BoxplotDisplaySection({ config, onChange }: Props) {
         {config.goalValue != null && (
           <label className="space-y-1">
             <span className="text-xs text-muted-foreground">Goal label</span>
-            <Input className="h-8" placeholder="Goal" aria-label="Goal label" value={config.goalLabel ?? ""}
+            <Input className="w-full" placeholder="Goal" aria-label="Goal label" value={config.goalLabel ?? ""}
               onChange={(e) => onChange({ goalLabel: e.target.value || undefined })} />
           </label>
         )}

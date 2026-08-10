@@ -3,6 +3,7 @@ import { Eye, EyeOff } from "lucide-react";
 import type { TableState } from "@/api/charts";
 import type { ColumnFormat } from "@/components/chart/format-types";
 import { Checkbox } from "@/components/ui/checkbox";
+import { IconButton } from "@/components/ui/icon-button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -224,7 +225,7 @@ export function TableColumnsSection({
               <Input
                 aria-label="search columns" placeholder="Search columns…" value={filter}
                 onChange={(e) => setFilter(e.target.value)}
-                className="h-8 text-sm"
+                className="w-full text-sm"
               />
             )}
             {q && visibleColumns.length === 0 && (
@@ -255,12 +256,14 @@ export function TableColumnsSection({
                     <div className="flex shrink-0 flex-col leading-none">
                       {/* Disabled under an active filter, both arrows: the row above a match is
                           off screen, so "up" would swap with something the reader cannot see. */}
-                      <button type="button" aria-label={`Move ${c.name} up`} disabled={!!q || i === 0}
+                      {/* 22 of these on a table panel, two per column, and they measured 8×10 px.
+                          `IconButton` also carries the focus ring this markup spelled out by hand. */}
+                      <IconButton aria-label={`Move ${c.name} up`} disabled={!!q || i === 0}
                         title={q ? "Clear the search to reorder" : undefined}
-                        className="rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-[10px] text-muted-foreground disabled:opacity-40" onClick={() => move(i, -1)}>▲</button>
-                      <button type="button" aria-label={`Move ${c.name} down`} disabled={!!q || i === ordered.length - 1}
+                        className="text-[10px]" onClick={() => move(i, -1)}>▲</IconButton>
+                      <IconButton aria-label={`Move ${c.name} down`} disabled={!!q || i === ordered.length - 1}
                         title={q ? "Clear the search to reorder" : undefined}
-                        className="rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-[10px] text-muted-foreground disabled:opacity-40" onClick={() => move(i, 1)}>▼</button>
+                        className="text-[10px]" onClick={() => move(i, 1)}>▼</IconButton>
                     </div>
                     {Icon
                       ? <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
@@ -295,7 +298,7 @@ export function TableColumnsSection({
                       aria-label={`Show ${c.name}`}
                       aria-pressed={!isHidden}
                       onClick={() => toggleHidden(c.name)}
-                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-muted-foreground hover:bg-accent hover:text-foreground"
+                      className="flex w-7 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-muted-foreground hover:bg-accent hover:text-foreground"
                     >
                       {isHidden ? <EyeOff className="h-3.5 w-3.5" aria-hidden /> : <Eye className="h-3.5 w-3.5" aria-hidden />}
                     </button>
@@ -325,7 +328,7 @@ export function TableColumnsSection({
             const n = Number(e.target.value);
             onChange({ ...value, pinnedLeft: Number.isNaN(n) ? 0 : Math.max(0, Math.min(n, columns.length)) });
           }}
-          className="h-8 text-sm"
+          className="w-full text-sm"
         />
       </div>
 
@@ -358,7 +361,7 @@ export function TableColumnsSection({
             const n = Number(e.target.value);
             onChange({ ...value, pinnedTop: Number.isNaN(n) ? 0 : Math.max(0, n) });
           }}
-          className="h-8 text-sm"
+          className="w-full text-sm"
         />
       </div>
 
@@ -379,7 +382,7 @@ export function TableColumnsSection({
           <div className="space-y-1">
             <Label className={FIELD_LABEL}>Page size</Label>
             <Select value={String(pagination.pageSize)} onValueChange={(v) => onChange({ ...value, pagination: { ...pagination, pageSize: Number(v) } })}>
-              <SelectTrigger className="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="w-full text-sm"><SelectValue /></SelectTrigger>
               <SelectContent>
                 {PAGE_SIZES.map((s) => <SelectItem key={s} value={String(s)}>{s}</SelectItem>)}
               </SelectContent>

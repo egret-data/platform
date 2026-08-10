@@ -98,7 +98,7 @@ export function CurrencySelect({ value, onChange, id }: {
           // control and its ring, and a bare `focus:` variant draws the ring on the mouse path too
           // — and it caught this component's first draft doing exactly that. One indicator, one
           // shape, product-wide (#419).
-          className="flex h-8 w-full items-center justify-between gap-1 rounded-md border border-input bg-transparent px-2 text-left text-sm outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+          className="flex w-full items-center justify-between gap-1 rounded-md border border-input bg-transparent px-2 text-left text-sm outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
         >
           <span className="truncate">{selectedName}</span>
           <ChevronsUpDown className="h-4 w-4 shrink-0 text-muted-foreground opacity-50" />
@@ -111,7 +111,7 @@ export function CurrencySelect({ value, onChange, id }: {
           aria-label="Search currencies"
           aria-controls="currency-listbox"
           aria-activedescendant={matches.length ? `currency-opt-${activeIndex}` : undefined}
-          className="mb-1 h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm outline-none placeholder:text-muted-foreground"
+          className="mb-1 w-full rounded-md border border-input bg-transparent px-2 text-sm outline-none placeholder:text-muted-foreground"
           placeholder="Search…"
           value={query}
           onChange={(e) => { setQuery(e.target.value); setActiveIndex(0); }}

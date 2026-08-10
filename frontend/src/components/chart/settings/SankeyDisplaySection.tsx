@@ -19,7 +19,7 @@ export function SankeyDisplaySection({ config, onChange }: {
         <Label htmlFor="sk-align" className="text-sm font-normal">Align</Label>
         <Select value={config.nodeAlign ?? "left"}
           onValueChange={(v) => onChange({ nodeAlign: v === "left" ? undefined : v as SankeyConfig["nodeAlign"] })}>
-          <SelectTrigger id="sk-align" aria-label="Align" className="h-8 w-full"><SelectValue /></SelectTrigger>
+          <SelectTrigger id="sk-align" aria-label="Align" className="w-full"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="left">Left</SelectItem>
             <SelectItem value="right">Right</SelectItem>
@@ -37,7 +37,7 @@ export function SankeyDisplaySection({ config, onChange }: {
           <Label htmlFor="sk-fmt" className="text-sm font-normal">Auto formatting</Label>
           <Select value={config.labelFormatting ?? "auto"}
             onValueChange={(v) => onChange({ labelFormatting: v === "auto" ? undefined : v as "compact" | "full" })}>
-            <SelectTrigger id="sk-fmt" aria-label="Auto formatting" className="h-8 w-full"><SelectValue /></SelectTrigger>
+            <SelectTrigger id="sk-fmt" aria-label="Auto formatting" className="w-full"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="auto">Auto</SelectItem>
               <SelectItem value="compact">Compact</SelectItem>
@@ -54,7 +54,7 @@ export function SankeyDisplaySection({ config, onChange }: {
         <Label htmlFor="sk-edge-color" className="text-sm font-normal">Edge color</Label>
         <Select value={config.edgeColor ?? "source"}
           onValueChange={(v) => onChange({ edgeColor: v === "source" ? undefined : v as "gray" | "target" })}>
-          <SelectTrigger id="sk-edge-color" aria-label="Edge color" className="h-8 w-full"><SelectValue /></SelectTrigger>
+          <SelectTrigger id="sk-edge-color" aria-label="Edge color" className="w-full"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="gray">Gray</SelectItem>
             <SelectItem value="source">Source</SelectItem>

@@ -10,23 +10,36 @@ export function TemporalUnitSelect({
   value,
   onChange,
   label,
+  prefix,
 }: {
   value: string | undefined;
   onChange: (token: string | undefined) => void;
-  /** Accessible name. The visible text beside this control names the COLUMN ("Group created_at
-   *  by"), and a bare select next to it announced only its current value — so with two date
-   *  dimensions a screen-reader user heard "Month" twice with nothing to tell them apart. */
+  /** Accessible name. The trigger now shows `column: Unit`, but the column name is decoration to a
+   *  screen reader — it still needs to hear which column this select governs, and with two date
+   *  dimensions a bare "Month" twice told a user nothing. */
   label?: string;
+  /** The column this buckets, rendered on the trigger as `order_month: Month`. Metabase names a
+   *  bucketed column exactly this way; it replaces a separate "Group <column> by" row that
+   *  repeated a name shown directly above it. */
+  prefix?: string;
 }) {
   const trunc = TEMPORAL_UNITS.filter((u) => u.group === "trunc");
   const extract = TEMPORAL_UNITS.filter((u) => u.group === "extract");
   return (
     <Select value={value ?? NONE} onValueChange={(v) => onChange(v === NONE ? undefined : v)}>
-      {/* `w-28`, not the shadcn default `w-fit`: this sits in an inline row and its width otherwise
-          tracked the chosen unit's text, so the row visibly reflowed between "Day" and "Quarter of
-          year" — and two of these under one zone never lined up with each other. */}
-      <SelectTrigger aria-label={label} className="h-7 w-28 text-xs">
-        <SelectValue placeholder="None" />
+      {/* Full width, like every other control in the panel. It used to be `w-28` (112px) sitting
+          beside a 255px field picker — the single most visible width mismatch in the whole panel,
+          and it was pinned here to stop the row reflowing between "Day" and "Quarter of year".
+          Taking the panel's width solves the reflow too, and without inventing a second width. */}
+      <SelectTrigger aria-label={label} className="w-full">
+        {prefix ? (
+          <span className="flex min-w-0 items-baseline gap-1">
+            <span className="truncate text-muted-foreground">{prefix}:</span>
+            <SelectValue placeholder="None" />
+          </span>
+        ) : (
+          <SelectValue placeholder="None" />
+        )}
       </SelectTrigger>
       <SelectContent>
         <SelectItem value={NONE}>None</SelectItem>

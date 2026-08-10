@@ -85,7 +85,7 @@ export function SeriesLineStyleSection({ name, seriesLine, onChange }: {
             value={seriesLine?.[name]?.[field] ?? "auto"}
             onValueChange={(v) => patch(field, v === "auto" ? undefined : v)}
           >
-            <SelectTrigger aria-label={`${field} ${name}`} className="h-7 w-28"><SelectValue /></SelectTrigger>
+            <SelectTrigger aria-label={`${field} ${name}`}><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="auto" title={autoTitle}>Auto</SelectItem>
               {options.map(([value, text]) => <SelectItem key={value} value={value}>{text}</SelectItem>)}

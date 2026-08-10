@@ -210,11 +210,11 @@ describe("ChartExplore unsaved-changes guard", () => {
   it("leaves a chart clean when a load-time default lands after hydration", async () => {
     await mountChart("c-bar-temporal");
     // The monthly default is applied to the temporal dimension on load; the picker showing it is
-    // the proof that the settling write has landed, so the guard is asked afterwards. Found by
-    // its rendered value the way the mount test's unit picker is — a combobox takes no accessible
-    // name from its contents.
+    // the proof that the settling write has landed, so the guard is asked afterwards. Matched on
+    // the trigger CONTAINING "Month" — it reads `<column>: Month` now that the bucket is named on
+    // the column itself, so an equality check on the whole string no longer holds.
     await waitFor(() =>
-      expect(screen.getAllByRole("combobox").some((c) => c.textContent === "Month")).toBe(true));
+      expect(screen.getAllByRole("combobox").some((c) => /Month/.test(c.textContent ?? ""))).toBe(true));
     expect(guardArmed()).toBe(false);
   });
 
@@ -281,7 +281,7 @@ describe("ChartExplore unsaved-changes guard", () => {
     expect(guardArmed()).toBe(false);
     fireEvent.click(screen.getByText("go-to-c-bar-temporal"));
     await waitFor(() =>
-      expect(screen.getAllByRole("combobox").some((c) => c.textContent === "Month")).toBe(true));
+      expect(screen.getAllByRole("combobox").some((c) => /Month/.test(c.textContent ?? ""))).toBe(true));
     expect(guardArmed()).toBe(false);
   });
 

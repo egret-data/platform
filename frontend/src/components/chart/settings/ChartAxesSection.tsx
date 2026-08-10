@@ -206,7 +206,7 @@ export function CategoryTicksSelect({ axis, id, value, onChange, rotationsDisabl
     <div className="space-y-1">
       <Label htmlFor={id} className="text-sm font-normal">Show lines and tick marks</Label>
       <Select value={value} onValueChange={(v) => onChange(v as XTicksChoice)}>
-        <SelectTrigger id={id} aria-label={`${axis} show lines and tick marks`} className="h-8 w-full"
+        <SelectTrigger id={id} aria-label={`${axis} show lines and tick marks`} className="w-full"
           aria-describedby={describedBy}><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value="hide">Hide</SelectItem>
@@ -232,7 +232,7 @@ export function ValueTicksSelect({ axis, id, shown, onChange }: {
     <div className="space-y-1">
       <Label htmlFor={id} className="text-sm font-normal">Show lines and tick marks</Label>
       <Select value={shown ? "show" : "hide"} onValueChange={(v) => onChange(v !== "hide")}>
-        <SelectTrigger id={id} aria-label={`${axis} show lines and tick marks`} className="h-8 w-full"><SelectValue /></SelectTrigger>
+        <SelectTrigger id={id} aria-label={`${axis} show lines and tick marks`} className="w-full"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value="hide">Hide</SelectItem>
           <SelectItem value="show">Show</SelectItem>
@@ -265,15 +265,15 @@ export function ValueRangeRows({ axis, idPrefix, min, max, onChange }: {
       <Toggle id={`${idPrefix}-autorange`} label={`Auto ${axis.toLowerCase()}-axis range`} checked={autoRange}
         onChange={(v) => onChange(v ? { yMin: undefined, yMax: undefined } : { yMin: 0 })} />
       {!autoRange && (
-        <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-2">
           <label className="space-y-1">
             <span className="text-xs text-muted-foreground">{axis} min</span>
-            <DecimalInput className="h-8" placeholder="auto" aria-label={`${axis} min`}
+            <DecimalInput placeholder="auto" aria-label={`${axis} min`}
               value={min} onChange={(yMin) => onChange({ yMin })} />
           </label>
           <label className="space-y-1">
             <span className="text-xs text-muted-foreground">{axis} max</span>
-            <DecimalInput className="h-8" placeholder="auto" aria-label={`${axis} max`}
+            <DecimalInput placeholder="auto" aria-label={`${axis} max`}
               value={max} onChange={(yMax) => onChange({ yMax })} />
           </label>
         </div>
@@ -292,9 +292,9 @@ export function TickCountRow({ id, value, onChange }: {
   return (
     <div className="space-y-1">
       <Label htmlFor={id} className="text-sm font-normal">Number of tick marks</Label>
-      <Input
+      <Input className="w-full"
         id={id} aria-label="Number of tick marks" type="number" min={2} max={20}
-        className="h-8" placeholder="auto" value={value ?? ""}
+        placeholder="auto" value={value ?? ""}
         onChange={(e) => {
           const n = Number(e.target.value);
           onChange(e.target.value === "" || Number.isNaN(n) ? undefined : n);
@@ -311,12 +311,12 @@ function AxisTitleRow({ id, axis, label, shown, onLabel, onShown }: {
 }) {
   return (
     <div className="space-y-1">
-      <div className="flex items-center justify-between gap-2">
+      <div className="space-y-1.5">
         <Label htmlFor={id} className="text-sm font-normal">Show label</Label>
         <Switch id={`${id}-shown`} aria-label={`Show ${axis} label`} checked={shown} onCheckedChange={onShown} />
       </div>
       {shown && (
-        <Input id={id} aria-label={`${axis} label`} className="h-8" placeholder="Auto"
+        <Input className="w-full" id={id} aria-label={`${axis} label`} placeholder="Auto"
           value={label ?? ""} onChange={(e) => onLabel(e.target.value || undefined)} />
       )}
     </div>
@@ -402,7 +402,7 @@ export function ChartAxesSection<C extends AxesConfig>({ config, onChange, idPre
           <Label htmlFor={`${idPrefix}-scale`} className="text-sm font-normal">Scale</Label>
           <Select value={config.logScale ? "log" : "linear"}
             onValueChange={(v) => onChange({ logScale: v === "log" || undefined } as Partial<C>)}>
-            <SelectTrigger id={`${idPrefix}-scale`} aria-label="Y scale" className="h-8 w-full"><SelectValue /></SelectTrigger>
+            <SelectTrigger id={`${idPrefix}-scale`} aria-label="Y scale" className="w-full"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="linear">Linear</SelectItem>
               <SelectItem value="log">Log</SelectItem>

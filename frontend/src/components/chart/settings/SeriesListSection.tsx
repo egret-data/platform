@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { IconButton } from "@/components/ui/icon-button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -131,16 +132,18 @@ export function SeriesListSection({
       {visible.map((name, i) => (
         <div key={name} className="flex items-center gap-1">
           <div className="flex shrink-0 flex-col leading-none">
-            <button type="button" aria-label={`Move ${name} up`} disabled={i === 0}
-              className="text-[10px] text-muted-foreground disabled:opacity-40" onClick={() => move(i, -1)}>▲</button>
-            <button type="button" aria-label={`Move ${name} down`} disabled={i === ranked.length - 1}
-              className="text-[10px] text-muted-foreground disabled:opacity-40" onClick={() => move(i, 1)}>▼</button>
+            {/* IconButton, not a bare glyph: these measured 8×10 px, because a `▲` with no box is
+                only as big as the glyph. See `components/ui/icon-button.tsx`. */}
+            <IconButton aria-label={`Move ${name} up`} disabled={i === 0}
+              className="text-[10px]" onClick={() => move(i, -1)}>▲</IconButton>
+            <IconButton aria-label={`Move ${name} down`} disabled={i === ranked.length - 1}
+              className="text-[10px]" onClick={() => move(i, 1)}>▼</IconButton>
           </div>
           {defaultColor && (
             <input
               type="color"
               aria-label={`color ${name}`}
-              className="h-7 w-7 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+              className="w-7 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
               value={colors?.[name] ?? defaultColor(name)}
               onChange={(e) => onChange({ seriesColors: { ...colors, [name]: e.target.value } })}
             />
@@ -150,7 +153,7 @@ export function SeriesListSection({
               value={types?.[name] ?? defaultDisplay(naturalIndex.get(name) ?? i)}
               onValueChange={(v) => onChange({ seriesTypes: { ...types, [name]: v as SeriesDisplay } })}
             >
-              <SelectTrigger aria-label={`display ${name}`} className="h-7 w-[4.5rem] shrink-0 px-2 text-xs">
+              <SelectTrigger aria-label={`display ${name}`} className="w-[4.5rem] shrink-0 px-2 text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -162,7 +165,7 @@ export function SeriesListSection({
           )}
           {renameable ? (
             <Input
-              className="h-7 min-w-0 flex-1"
+              className="min-w-0 flex-1"
               aria-label={`label ${name}`}
               placeholder={name}
               value={labels?.[name] ?? ""}
@@ -184,7 +187,7 @@ export function SeriesListSection({
             // the divergence being closed. Suppressed when they are the same string, which is the
             // common case (a text dimension, or no format set) — a row reading "Paid Paid" would be
             // noise on every funnel that has no format at all.
-            <div className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md border px-3 text-sm" title={name}>
+            <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md border px-3 text-sm" title={name}>
               <span className="truncate">{labels?.[name] ?? name}</span>
               {labels?.[name] != null && labels[name] !== name && (
                 <span className="shrink-0 truncate text-xs text-muted-foreground">{name}</span>

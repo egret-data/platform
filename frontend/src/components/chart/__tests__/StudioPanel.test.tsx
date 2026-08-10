@@ -111,7 +111,13 @@ describe("StudioPanel", () => {
     expect(headings).toEqual(["Series", "Format"]);
   });
 
-  it("puts advanced controls behind a disclosure that starts closed", async () => {
+  /**
+   * REVERSED DELIBERATELY. This used to assert that `advanced` controls hid behind a
+   * "More options (2)" disclosure. Metabase shows its whole Display list, and a disclosure with a
+   * count announces that something is hidden without saying what — so the group now renders
+   * everything, and this pins that instead.
+   */
+  it("renders advanced controls inline, with no disclosure to open", () => {
     const withAdvanced = {
       ...desc,
       controls: [
@@ -121,15 +127,19 @@ describe("StudioPanel", () => {
     } as unknown as VizDescriptor<{ yMetrics: string[] }>;
     render(<StudioPanel {...props} descriptor={withAdvanced} tab="display" />);
     expect(screen.getByText("Always")).toBeInTheDocument();
-    expect(screen.queryByText("Rare")).not.toBeInTheDocument();
-    const trigger = screen.getByRole("button", { name: /more options/i });
-    expect(trigger).toHaveAttribute("aria-expanded", "false");
-    await userEvent.click(trigger);
+    // The assertion that matters: visible WITHOUT any interaction.
     expect(screen.getByText("Rare")).toBeInTheDocument();
-    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(screen.queryByRole("button", { name: /more options/i })).toBeNull();
   });
 
-  it("resets a group's disclosure when the active viz changes", async () => {
+  /**
+   * WHAT SURVIVED THE DISCLOSURE'S REMOVAL. This test used to pin that a group's open/closed state
+   * reset across a chart-type switch — React would otherwise reuse the `ControlGroup` instance and
+   * leak it. There is no disclosure state left to leak, but the switch itself still has to swap
+   * the controls, and an advanced one must arrive visible rather than hidden. That is asserted
+   * here; the `key={descriptor.key}:${g}` that made the old bug possible is untouched.
+   */
+  it("swaps in the new viz's controls, advanced ones included, when the active viz changes", () => {
     const descA = {
       ...desc,
       key: "bar",
@@ -147,10 +157,11 @@ describe("StudioPanel", () => {
       ],
     } as unknown as VizDescriptor<{ yMetrics: string[] }>;
     const { rerender } = render(<StudioPanel {...props} descriptor={descA} tab="display" />);
-    await userEvent.click(screen.getByRole("button", { name: /more options/i }));
     expect(screen.getByText("RareA")).toBeInTheDocument();
     rerender(<StudioPanel {...props} descriptor={descB} tab="display" />);
-    expect(screen.queryByText("RareB")).not.toBeInTheDocument();
+    expect(screen.getByText("RareB")).toBeInTheDocument();
+    // And the outgoing viz's control is gone — a swap, not an accumulation.
+    expect(screen.queryByText("RareA")).toBeNull();
   });
 
   it("still renders ungrouped controls, with no heading", () => {

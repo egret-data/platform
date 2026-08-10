@@ -53,13 +53,12 @@ describe("StudioPanel renders bar's grouped Display controls", () => {
     expect(screen.getByLabelText("Legend")).toBeInTheDocument();
   });
 
-  it("an advanced control becomes reachable once its group's disclosure opens", async () => {
+  // Was "an advanced control becomes reachable once its group's disclosure opens". The disclosure
+  // is gone — Metabase shows its whole Display list — so the control is simply there.
+  it("renders an advanced control with no disclosure to open first", () => {
     render(<StudioPanel {...props} />);
-    expect(screen.queryByLabelText("Trend line")).not.toBeInTheDocument();
-    for (const trigger of screen.getAllByRole("button", { name: /more options/i })) {
-      await userEvent.click(trigger);
-    }
     expect(screen.getByLabelText("Trend line")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /more options/i })).toBeNull();
   });
 });
 
@@ -103,11 +102,10 @@ describe("StudioPanel: per-series line settings are one click from the series' o
       expect(screen.queryByLabelText(`${f} revenue`)).not.toBeInTheDocument();
       expect(screen.queryByLabelText(`${f} cost`)).not.toBeInTheDocument();
     }
-    // And opening every disclosure on the tab does not bring them back — the old route is gone,
-    // which is the half of this that a "the new route works" assertion would not have caught.
-    for (const trigger of screen.getAllByRole("button", { name: /more options/i })) {
-      await userEvent.click(trigger);
-    }
+    // The old route out — a "More options" disclosure — no longer exists at all, so there is
+    // nothing left to open that could bring them back. Asserting its ABSENCE keeps the half of
+    // this test that a "the new route works" assertion would not have caught.
+    expect(screen.queryByRole("button", { name: /more options/i })).toBeNull();
     expect(screen.queryByLabelText("style revenue")).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByLabelText("settings revenue"));

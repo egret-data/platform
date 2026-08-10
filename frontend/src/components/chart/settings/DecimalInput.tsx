@@ -67,7 +67,7 @@ export function DecimalInput({
   // null = "not being edited"; show what is stored. Any string, including "", is a live draft.
   const [draft, setDraft] = useState<string | null>(null);
   return (
-    <Input
+    <Input className="w-full"
       {...rest}
       type="text"
       inputMode="decimal"
