@@ -265,7 +265,7 @@ export function ValueRangeRows({ axis, idPrefix, min, max, onChange }: {
       <Toggle id={`${idPrefix}-autorange`} label={`Auto ${axis.toLowerCase()}-axis range`} checked={autoRange}
         onChange={(v) => onChange(v ? { yMin: undefined, yMax: undefined } : { yMin: 0 })} />
       {!autoRange && (
-        <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-2">
           <label className="space-y-1">
             <span className="text-xs text-muted-foreground">{axis} min</span>
             <DecimalInput placeholder="auto" aria-label={`${axis} min`}

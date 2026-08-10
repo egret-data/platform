@@ -1,6 +1,7 @@
 import type { PieConfig } from "@/api/charts";
 import { colorsForKeys } from "@/components/chart/echarts/keyColors";
 import { OTHER_SLICE_COLOR } from "@/components/chart/echarts/palette";
+import { IconButton } from "@/components/ui/icon-button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
@@ -259,10 +260,13 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
             const hidden = !!config.hiddenSlices?.includes(name);
             return (
               <div key={name} className="flex items-center gap-1.5">
-                <button type="button" aria-label={`Move ${name} up`} disabled={i === 0}
-                  className="text-xs text-muted-foreground disabled:opacity-40" onClick={() => move(i, -1)}>↑</button>
-                <button type="button" aria-label={`Move ${name} down`} disabled={i === listed.length - 1}
-                  className="text-xs text-muted-foreground disabled:opacity-40" onClick={() => move(i, 1)}>↓</button>
+                {/* The pie had its OWN reorder buttons, which is why the first pass at this — which
+                    only touched SeriesListSection and TableColumnsSection — left eight 9×16 targets
+                    here. Same `IconButton` as the other two lists now. */}
+                <IconButton aria-label={`Move ${name} up`} disabled={i === 0}
+                  className="text-xs" onClick={() => move(i, -1)}>↑</IconButton>
+                <IconButton aria-label={`Move ${name} down`} disabled={i === listed.length - 1}
+                  className="text-xs" onClick={() => move(i, 1)}>↓</IconButton>
                 <input
                   type="color"
                   aria-label={`color ${name}`}

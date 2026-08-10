@@ -1,5 +1,6 @@
 import { Plus, Trash2 } from "lucide-react";
 import { SERIES_PALETTE } from "@/components/chart/echarts/palette";
+import { IconButton } from "@/components/ui/icon-button";
 import { Input } from "@/components/ui/input";
 import { DecimalInput } from "./DecimalInput";
 import { Button } from "@/components/ui/button";
@@ -148,15 +149,14 @@ export function SegmentRangesSection({
             value={s.label ?? ""}
             onChange={(e) => patch(i, "label", e.target.value.trim() ? e.target.value : undefined)}
           />
-          <button
-            type="button"
+          <IconButton
             aria-label={`remove range ${i + 1}`}
             disabled={rows.length <= minRows}
-            className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-destructive disabled:opacity-30"
+            className="hover:text-destructive"
             onClick={() => removeRange(i)}
           >
             <Trash2 className="h-3.5 w-3.5" />
-          </button>
+          </IconButton>
           {/* Said out loud rather than silently rendered. A band colour lands on the headline
               number itself, so an unreadable one is not a cosmetic problem. */}
           {warning && (

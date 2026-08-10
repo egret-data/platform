@@ -112,7 +112,7 @@ export function BoxplotDisplaySection({ config, onChange }: Props) {
           </SelectContent>
         </Select>
       </div>
-      <div className="grid grid-cols-2 gap-2 border-t pt-2">
+      <div className="space-y-2 border-t pt-2">
         <label className="space-y-1">
           <span className="text-xs text-muted-foreground">Goal value</span>
           {/* DecimalInput: a goal is a data value, and `type="number"` reports itself EMPTY for

@@ -923,7 +923,7 @@ export function FormatOptions({ config, onChange }: SectionProps) {
  */
 export function GoalOptions({ config, onChange }: SectionProps) {
   return (
-    <div className="grid grid-cols-2 gap-2 pt-2">
+    <div className="space-y-2 pt-2">
       {/* A goal is a data value — a 4.5% conversion target, a 1250.75 revenue line — so it takes
           DecimalInput for the same reason the axis bounds do. */}
       <label className="space-y-1">
