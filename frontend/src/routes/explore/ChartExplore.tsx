@@ -686,7 +686,7 @@ export default function ChartExplore() {
             <div className="space-y-1">
               <Label className={FIELD_LABEL}>Dataset</Label>
               <Select value={datasetId ?? ""} onValueChange={(v) => { setDatasetId(v || null); resetControls(); }}>
-                <SelectTrigger className="h-8 w-full text-sm"><SelectValue placeholder="Pick a dataset…" /></SelectTrigger>
+                <SelectTrigger className="w-full text-sm"><SelectValue placeholder="Pick a dataset…" /></SelectTrigger>
                 <SelectContent>
                   {(datasets.data ?? []).map((d) => (
                     <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>
@@ -738,7 +738,7 @@ export default function ChartExplore() {
                 aria-describedby="row-limit-hint"
                 aria-invalid={rowLimit > MAX_CHART_ROWS || undefined}
                 onChange={(e) => { const n = Number(e.target.value); setRowLimit(Number.isNaN(n) ? 0 : n); }}
-                className="h-8 w-full text-sm" />
+                className="w-full text-sm" />
               <p id="row-limit-hint" className="text-xs text-muted-foreground">
                 {rowLimit > MAX_CHART_ROWS
                   ? `Over the maximum — only ${MAX_CHART_ROWS.toLocaleString()} rows will be returned.`

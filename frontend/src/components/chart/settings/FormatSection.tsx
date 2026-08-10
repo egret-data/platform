@@ -81,7 +81,7 @@ export function FormatSection({
             <button
               type="button"
               onClick={() => setOpen(isOpen ? null : c.name)}
-              className={`flex w-full items-center gap-2 px-2 py-1.5 text-left ${isOpen ? "bg-muted/40" : "hover:bg-muted/30"}`}
+              className={`flex h-10 w-full items-center gap-2 px-2 text-left ${isOpen ? "bg-muted/40" : "hover:bg-muted/30"}`}
             >
               <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
               <span className="flex-1 truncate">

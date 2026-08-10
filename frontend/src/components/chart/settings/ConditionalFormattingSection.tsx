@@ -69,7 +69,7 @@ export function ConditionalFormattingSection({
           </div>
         </div>
       ))}
-      <Button type="button" variant="outline" size="sm" className="w-full" onClick={() => setEditing(rules.length)}>
+      <Button type="button" variant="outline" size="lg" className="w-full" onClick={() => setEditing(rules.length)}>
         <Plus className="mr-1 h-3.5 w-3.5" /> Add rule
       </Button>
     </div>

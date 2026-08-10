@@ -93,7 +93,7 @@ export function BoxplotDisplaySection({ config, onChange }: Props) {
         <Label className="text-sm font-normal">Color</Label>
         <input
           type="color" aria-label="Color"
-          className="w-10 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+          className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
           value={config.color ?? SERIES_PALETTE[0]}
           onChange={(e) => onChange({ color: e.target.value })}
         />

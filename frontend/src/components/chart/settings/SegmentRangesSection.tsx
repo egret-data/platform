@@ -119,7 +119,7 @@ export function SegmentRangesSection({
           <input
             type="color"
             aria-label={`range ${i + 1} color`}
-            className="w-7 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+            className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
             value={s.color}
             onChange={(e) => patch(i, "color", e.target.value)}
           />
@@ -165,7 +165,7 @@ export function SegmentRangesSection({
         </div>
         );
       })}
-      <Button type="button" variant="outline" size="sm" className="w-full" onClick={addRange}>
+      <Button type="button" variant="outline" size="lg" className="w-full" onClick={addRange}>
         <Plus className="mr-1 h-3.5 w-3.5" /> Add range
       </Button>
     </div>

@@ -143,7 +143,7 @@ export function SeriesListSection({
             <input
               type="color"
               aria-label={`color ${name}`}
-              className="w-7 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+              className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
               value={colors?.[name] ?? defaultColor(name)}
               onChange={(e) => onChange({ seriesColors: { ...colors, [name]: e.target.value } })}
             />

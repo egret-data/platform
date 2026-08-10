@@ -23,14 +23,25 @@ import { join } from "node:path";
  * failed this guard for the wrong reason.
  */
 const BANNED = /(?<![\w-])(h-7|h-8|w-16|w-24|w-28)(?![\w-])/g;
-const DIR = join(__dirname, "..");
+
+/**
+ * `settings/` is where the panel's controls live, but not the only place: two colour inputs sat in
+ * `viz/` on `h-7`, kept their 28px height through the whole height pass, and were found only by
+ * measuring the live panel. A guard scoped to one directory would have stayed green through that.
+ */
+const DIRS = [join(__dirname, ".."), join(__dirname, "..", "..", "viz")];
+const filesIn = (d: string) =>
+  readdirSync(d)
+    .filter((f) => f.endsWith(".tsx"))
+    .map((f) => [`${d.split("/").slice(-1)[0]}/${f}`, readFileSync(join(d, f), "utf8")] as const);
 
 describe("settings panel geometry", () => {
   it("has no call site overriding the primitive control geometry", () => {
     const offenders: string[] = [];
-    for (const f of readdirSync(DIR).filter((f) => f.endsWith(".tsx"))) {
-      const src = readFileSync(join(DIR, f), "utf8");
-      for (const m of src.matchAll(BANNED)) offenders.push(`${f}: ${m[0]}`);
+    for (const dir of DIRS) {
+      for (const [name, src] of filesIn(dir)) {
+        for (const m of src.matchAll(BANNED)) offenders.push(`${name}: ${m[0]}`);
+      }
     }
     expect(offenders).toEqual([]);
   });
@@ -46,10 +57,11 @@ describe("settings panel geometry", () => {
     // `w-[352px]` would satisfy the class ban above while recreating the exact defect this
     // programme removes — nineteen panels each asserting their own idea of the width.
     const offenders: string[] = [];
-    for (const f of readdirSync(DIR).filter((f) => f.endsWith(".tsx"))) {
-      const src = readFileSync(join(DIR, f), "utf8");
-      for (const m of src.matchAll(/w-\[(\d+)px\]/g)) {
-        if (Number(m[1]) >= 100) offenders.push(`${f}: ${m[0]}`);
+    for (const dir of DIRS) {
+      for (const [name, src] of filesIn(dir)) {
+        for (const m of src.matchAll(/w-\[(\d+)px\]/g)) {
+          if (Number(m[1]) >= 100) offenders.push(`${name}: ${m[0]}`);
+        }
       }
     }
     expect(offenders).toEqual([]);

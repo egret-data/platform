@@ -51,7 +51,7 @@ export function ColumnSettingsPopover({
           // "settings <rename>" would stop finding the row the moment anyone typed a title.
           aria-label={`settings ${column.name}`}
           title={`Settings for ${shown}`}
-          className="flex w-7 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-muted-foreground hover:bg-accent hover:text-foreground"
+          className="flex size-6 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-muted-foreground hover:bg-accent hover:text-foreground"
         >
           <Settings2 className="h-3.5 w-3.5" aria-hidden />
         </button>

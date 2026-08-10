@@ -270,7 +270,7 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
                 <input
                   type="color"
                   aria-label={`color ${name}`}
-                  className="w-8 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+                  className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
                   value={config.sliceColors?.[name] ?? defaultSliceColor(name)}
                   onChange={(e) => onChange({ sliceColors: { ...config.sliceColors, [name]: e.target.value } })}
                 />

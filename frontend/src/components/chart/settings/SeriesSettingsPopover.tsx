@@ -45,7 +45,7 @@ export function SeriesSettingsPopover({ name, label, color, seriesLine, onChange
           // finding the row the moment someone typed in the name box.
           aria-label={`settings ${name}`}
           title={`Settings for ${shown}`}
-          className="flex w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+          className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
         >
           <Settings2 className="h-3.5 w-3.5" aria-hidden />
         </button>

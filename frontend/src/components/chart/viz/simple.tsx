@@ -157,7 +157,7 @@ function ProgressDisplayControl({ config, onChange, metrics }: VizControlProps<C
         <Label htmlFor="pg-color" className="text-sm font-normal">Colour</Label>
         <input
           id="pg-color" type="color" aria-label="Colour"
-          className="h-7 w-8 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+          className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
           value={color}
           onChange={(e) => onChange({ color: e.target.value } as Partial<Cfg>)}
         />
@@ -168,7 +168,7 @@ function ProgressDisplayControl({ config, onChange, metrics }: VizControlProps<C
           value={(config.goalColumn as string | undefined) ?? "__none"}
           onValueChange={(v) => onChange({ goalColumn: v === "__none" ? undefined : v } as Partial<Cfg>)}
         >
-          <SelectTrigger aria-label="Goal from a metric" className="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
+          <SelectTrigger aria-label="Goal from a metric" className="w-full text-sm"><SelectValue /></SelectTrigger>
           {/* The tightest version of the naming split there is: the METRIC field two rows above
               this one is drawn by `fields.tsx`, which has read `verbose_name` all along, so a
               renamed metric appeared as "Doanh thu" up there and `total_revenue` down here — the
@@ -254,7 +254,7 @@ function FunnelTypeControl({ config, onChange }: VizControlProps<Cfg>) {
       <Label className="text-sm font-normal">Funnel type</Label>
       <Select value={(config.type as string | undefined) ?? "funnel"}
         onValueChange={(v) => onChange({ type: v === "funnel" ? undefined : v } as Partial<Cfg>)}>
-        <SelectTrigger aria-label="Funnel type" className="h-8 w-full text-sm"><SelectValue /></SelectTrigger>
+        <SelectTrigger aria-label="Funnel type" className="w-full text-sm"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value="funnel">Funnel — one narrowing band</SelectItem>
           <SelectItem value="bar">Bar — a column per step</SelectItem>

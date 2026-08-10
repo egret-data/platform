@@ -159,11 +159,11 @@ export function TableColumnsSection({
         <div className="flex items-center justify-end">
           {!picking && (
             <div className="flex gap-2">
-              <button type="button" className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+              <button type="button" className="min-h-6 text-xs text-muted-foreground hover:text-foreground hover:underline"
                 onClick={() => setAllHidden(false)}>
                 Show all
               </button>
-              <button type="button" className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+              <button type="button" className="min-h-6 text-xs text-muted-foreground hover:text-foreground hover:underline"
                 onClick={() => setAllHidden(true)}>
                 Hide all
               </button>
@@ -298,7 +298,7 @@ export function TableColumnsSection({
                       aria-label={`Show ${c.name}`}
                       aria-pressed={!isHidden}
                       onClick={() => toggleHidden(c.name)}
-                      className="flex w-7 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-muted-foreground hover:bg-accent hover:text-foreground"
+                      className="flex size-6 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-muted-foreground hover:bg-accent hover:text-foreground"
                     >
                       {isHidden ? <EyeOff className="h-3.5 w-3.5" aria-hidden /> : <Eye className="h-3.5 w-3.5" aria-hidden />}
                     </button>
@@ -312,7 +312,7 @@ export function TableColumnsSection({
         {queryFields && (
           <button
             type="button"
-            className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+            className="min-h-6 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
             onClick={() => { setPicking((v) => !v); setFilter(""); }}
           >
             {picking ? "Done picking columns" : "Add or remove columns"}
