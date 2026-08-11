@@ -43,6 +43,70 @@ describe("serializeLayout", () => {
   });
 });
 
+/**
+ * THE IDS ARE WHAT STOPS A SAVE FROM RECREATING EVERYTHING.
+ *
+ * The server keeps a card or tab when the payload re-sends the id it already has, and inserts a
+ * fresh row otherwise (`replace_layout`). So an id dropped here is not a cosmetic loss: it makes
+ * the save churn every id, which is the defect this replaced.
+ *
+ * The other direction is worse than cosmetic too. A card added in this editing session carries a
+ * fabricated id — `new-<chart>-3` — and the field is `Option<Uuid>` on the wire, so sending one
+ * does not get ignored: it fails to deserialize and takes the whole save down with a 400.
+ */
+const UUID_A = "11111111-2222-4333-8444-555555555555";
+const UUID_B = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+
+describe("serializeLayout — ids", () => {
+  it("sends the id of a card that already has one", () => {
+    const draftCards: DraftCard[] = [{ ...card(UUID_A, null), tabKey: null }];
+    expect(serializeLayout([], draftCards).cards[0].id).toBe(UUID_A);
+  });
+
+  it("omits the fabricated id of a card added in this session", () => {
+    const draftCards: DraftCard[] = [
+      { ...card("new-chart1-0", null), tabKey: null },
+      { ...card("new-dup-3", null), tabKey: null },
+      { ...card("new-section-1", null), tabKey: null },
+    ];
+    const out = serializeLayout([], draftCards);
+    expect(out.cards.map((c) => c.id)).toEqual([undefined, undefined, undefined]);
+  });
+
+  it("sends a tab's server id and omits it for a tab added in this session", () => {
+    const draftTabs: DraftTab[] = [
+      { key: "ka", name: "A", position: 0, serverId: UUID_B },
+      { key: "kb", name: "B", position: 1 },
+    ];
+    const out = serializeLayout(draftTabs, []);
+    expect(out.tabs.map((t) => t.id)).toEqual([UUID_B, undefined]);
+  });
+
+  it("carries the server tab id through the draft, which is where it used to be dropped", () => {
+    const tabs: DashboardTab[] = [{ id: UUID_B, name: "A", position: 0 }];
+    const { draftTabs } = startTabsDraft(tabs, []);
+    expect(draftTabs[0].serverId).toBe(UUID_B);
+    // and it survives a round trip through the serializer
+    expect(serializeLayout(draftTabs, []).tabs[0].id).toBe(UUID_B);
+  });
+
+  it("refuses anything that is not a uuid, whatever it is named", () => {
+    // Keyed on SHAPE, not on the `new-` prefix: the prefix belongs to DashboardView's draft
+    // naming, and this must not start sending garbage the day somebody renames it.
+    const odd = ["", "undefined", "1234", "not-a-uuid", "11111111-2222-4333-8444-5555555555"];
+    const out = serializeLayout([], odd.map((id) => ({ ...card(id, null), tabKey: null })));
+    expect(out.cards.map((c) => c.id)).toEqual(odd.map(() => undefined));
+  });
+
+  it("does not let a duplicated tab claim the original's id", () => {
+    // Both rows would then be one row server-side, and the duplicate would silently overwrite the
+    // tab it was copied from.
+    const draftTabs: DraftTab[] = [{ key: "ka", name: "A", position: 0, serverId: UUID_B }];
+    const r = duplicateTab(draftTabs, [], "ka");
+    expect(r.draftTabs.map((t) => t.serverId)).toEqual([UUID_B, undefined]);
+  });
+});
+
 describe("addTab", () => {
   it("first add on a tabless dashboard splits existing cards onto Tab 1 + empty Tab 2", () => {
     const draftCards: DraftCard[] = [{ ...card("k1", null), tabKey: null }];

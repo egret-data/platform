@@ -74,9 +74,11 @@ pub struct DashboardRevision {
     pub snapshot: serde_json::Value,
 }
 
-/// A tab as supplied by the client when saving a layout (no server id yet).
+/// A tab as supplied by the client when saving a layout. `id` is present when the client is
+/// re-sending a tab that already exists; see [`NewCard::id`].
 #[derive(Debug, Clone)]
 pub struct NewTab {
+    pub id: Option<Uuid>,
     pub name: String,
     pub position: i32,
 }
@@ -105,9 +107,11 @@ struct AttributionNames {
     updated_by_name: Option<String>,
 }
 
-/// A card as supplied by the client when saving a layout (no server id yet).
+/// A card as supplied by the client when saving a layout.
 #[derive(Debug, Clone)]
 pub struct NewCard {
+    /// The card's existing id, when it has one. `None` is a genuinely new card.
+    pub id: Option<Uuid>,
     pub chart_id: Option<Uuid>,
     pub card_type: String,
     pub grid_col: i32,
@@ -396,8 +400,20 @@ impl DashboardRepo {
         .await?)
     }
 
-    /// Atomically replace the dashboard's full tab + card set (in supplied order).
-    /// Cards reference their tab by `tab_index` into `tabs`; `None` means no tab.
+    /// Atomically reconcile the dashboard's full tab + card set to the supplied one (in supplied
+    /// order). Cards reference their tab by `tab_index` into `tabs`; `None` means no tab.
+    ///
+    /// RECONCILE, NOT DELETE-AND-REINSERT. It used to delete every tab and card and insert the
+    /// payload fresh, which meant **every card and tab got a new id on every save** — Metabase
+    /// keeps its dashcard ids, and so does this now. The churn was not theoretical: a save left
+    /// the client holding ids that no longer existed, and the five cards of one ordinary dashboard
+    /// each fetched their data into a 404 (fixed downstream in the cache by #474, but this is
+    /// where it came from). Anything that stores a card id — a bookmark, a link, a future
+    /// per-card setting — was invalidated by an ordinary save.
+    ///
+    /// A row is kept when the client sends an id THIS dashboard already owns; everything else in
+    /// the payload is inserted, and everything not in the payload is deleted. The whole thing is
+    /// one transaction, so a partial reconcile cannot be observed.
     pub async fn replace_layout(
         &self,
         dashboard_id: Uuid,
@@ -417,37 +433,108 @@ impl DashboardRepo {
         }
 
         let mut tx = self.db.pool.begin().await?;
-        sqlx::query("DELETE FROM analytics.dashboard_cards WHERE dashboard_id = $1")
-            .bind(dashboard_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM analytics.dashboard_tabs WHERE dashboard_id = $1")
-            .bind(dashboard_id)
-            .execute(&mut *tx)
-            .await?;
 
-        let mut tab_ids: Vec<Uuid> = Vec::with_capacity(tabs.len());
+        // WHICH IDS THIS DASHBOARD ACTUALLY OWNS. Every id the client sent is checked against
+        // these sets and against nothing else, which is what makes an id a hint rather than an
+        // instruction: an id belonging to ANOTHER dashboard is not in here, so it falls through to
+        // the insert branch and mints a fresh row. No statement below ever addresses a row by id
+        // alone — `dashboard_id` is in every WHERE clause as a second, independent guard.
+        let existing_tabs: std::collections::HashSet<Uuid> = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM analytics.dashboard_tabs WHERE dashboard_id = $1",
+        )
+        .bind(dashboard_id)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
+        let existing_cards: std::collections::HashSet<Uuid> = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM analytics.dashboard_cards WHERE dashboard_id = $1",
+        )
+        .bind(dashboard_id)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
+
+        // `kept` doubles as the delete filter and, for tabs, as the index→id table the cards
+        // resolve `tab_index` through. `claimed` stops a payload that names one id twice from
+        // updating the same row twice and then deleting nothing — the duplicate becomes a new row.
+        let mut kept_tabs: Vec<Uuid> = Vec::with_capacity(tabs.len());
+        let mut claimed_tabs: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
         for t in tabs {
-            let id: Uuid = sqlx::query_scalar(
-                "INSERT INTO analytics.dashboard_tabs (dashboard_id, name, position) VALUES ($1,$2,$3) RETURNING id",
-            )
-            .bind(dashboard_id).bind(&t.name).bind(t.position)
-            .fetch_one(&mut *tx).await?;
-            tab_ids.push(id);
+            let reuse =
+                t.id.filter(|id| existing_tabs.contains(id) && claimed_tabs.insert(*id));
+            let id = match reuse {
+                Some(id) => {
+                    sqlx::query(
+                        "UPDATE analytics.dashboard_tabs SET name = $3, position = $4 \
+                         WHERE dashboard_id = $1 AND id = $2",
+                    )
+                    .bind(dashboard_id).bind(id).bind(&t.name).bind(t.position)
+                    .execute(&mut *tx).await?;
+                    id
+                }
+                None => sqlx::query_scalar(
+                    "INSERT INTO analytics.dashboard_tabs (dashboard_id, name, position) VALUES ($1,$2,$3) RETURNING id",
+                )
+                .bind(dashboard_id).bind(&t.name).bind(t.position)
+                .fetch_one(&mut *tx).await?,
+            };
+            kept_tabs.push(id);
         }
 
+        let mut kept_cards: Vec<Uuid> = Vec::with_capacity(cards.len());
+        let mut claimed_cards: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
         for (i, c) in cards.iter().enumerate() {
-            let tab_id = c.tab_index.map(|idx| tab_ids[idx]);
-            sqlx::query(
-                "INSERT INTO analytics.dashboard_cards \
-                 (dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal, tab_id) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
-            )
-            .bind(dashboard_id).bind(c.chart_id).bind(&c.card_type)
-            .bind(c.grid_col).bind(c.grid_row).bind(c.size_x).bind(c.size_y)
-            .bind(&c.options).bind(i as i32).bind(tab_id)
-            .execute(&mut *tx).await?;
+            let tab_id = c.tab_index.map(|idx| kept_tabs[idx]);
+            let reuse =
+                c.id.filter(|id| existing_cards.contains(id) && claimed_cards.insert(*id));
+            let id = match reuse {
+                Some(id) => {
+                    sqlx::query(
+                        "UPDATE analytics.dashboard_cards SET chart_id = $3, card_type = $4, \
+                         grid_col = $5, grid_row = $6, size_x = $7, size_y = $8, options = $9, \
+                         ordinal = $10, tab_id = $11 WHERE dashboard_id = $1 AND id = $2",
+                    )
+                    .bind(dashboard_id).bind(id).bind(c.chart_id).bind(&c.card_type)
+                    .bind(c.grid_col).bind(c.grid_row).bind(c.size_x).bind(c.size_y)
+                    .bind(&c.options).bind(i as i32).bind(tab_id)
+                    .execute(&mut *tx).await?;
+                    id
+                }
+                None => sqlx::query_scalar(
+                    "INSERT INTO analytics.dashboard_cards \
+                     (dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal, tab_id) \
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id",
+                )
+                .bind(dashboard_id).bind(c.chart_id).bind(&c.card_type)
+                .bind(c.grid_col).bind(c.grid_row).bind(c.size_x).bind(c.size_y)
+                .bind(&c.options).bind(i as i32).bind(tab_id)
+                .fetch_one(&mut *tx).await?,
+            };
+            kept_cards.push(id);
         }
+
+        // CARDS BEFORE TABS. `dashboard_cards.tab_id` is `ON DELETE CASCADE` (migration 0017), so
+        // dropping a tab takes its cards with it; deleting the stale cards first means the cascade
+        // has nothing left to reach that this save wanted to keep. Nothing kept ever points at a
+        // dropped tab anyway — `tab_id` is resolved out of `kept_tabs` — but the order costs
+        // nothing and removes the question.
+        sqlx::query(
+            "DELETE FROM analytics.dashboard_cards WHERE dashboard_id = $1 AND id <> ALL($2)",
+        )
+        .bind(dashboard_id)
+        .bind(&kept_cards)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM analytics.dashboard_tabs WHERE dashboard_id = $1 AND id <> ALL($2)",
+        )
+        .bind(dashboard_id)
+        .bind(&kept_tabs)
+        .execute(&mut *tx)
+        .await?;
+
         tx.commit().await?;
         Ok(())
     }

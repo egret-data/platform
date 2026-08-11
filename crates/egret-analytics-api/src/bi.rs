@@ -469,6 +469,19 @@ pub struct CreateDashboard {
 /// Card as supplied by the client when saving a layout.
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CardInput {
+    /// The id this card already has, so a save can UPDATE it instead of replacing it.
+    ///
+    /// Absent means "new card" — which is what every client sent before this field existed, and
+    /// what a card the user has just dropped onto the canvas still sends. It is a HINT, not an
+    /// instruction: the server keeps the id only when it already belongs to THIS dashboard (see
+    /// `replace_layout`), so a stale or borrowed id can never make one dashboard adopt another's
+    /// card.
+    ///
+    /// `skip_serializing_if` keeps a body without ids byte-identical to what it was before this
+    /// field existed — `update_dashboard_round_trips_through_json_unchanged` caught the `"id":
+    /// null` this would otherwise have added to every card of every re-serialized body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<Uuid>,
     #[serde(default)]
     pub chart_id: Option<Uuid>,
     #[serde(default = "default_card_type")]
@@ -485,6 +498,13 @@ pub struct CardInput {
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct NewTabInput {
+    /// The id this tab already has. Same contract as [`CardInput::id`]: a hint, honoured only when
+    /// the tab already belongs to this dashboard.
+    ///
+    /// Tabs need it for a reason cards do not: `dashboard_cards.tab_id` is `ON DELETE CASCADE`, so
+    /// recreating a tab took every card on it with it — the cards were being deleted twice over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<Uuid>,
     pub name: String,
     pub position: i32,
 }
