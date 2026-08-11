@@ -184,6 +184,12 @@ export function SeriesListSection({
               value={types?.[name] ?? defaultDisplay(naturalIndex.get(name) ?? i)}
               onValueChange={(v) => onChange({ seriesTypes: { ...types, [name]: v as SeriesDisplay } })}
             >
+              {/* A TYPED WIDTH, on purpose, and one of only two left in this panel.
+                  Its options are "Bar", "Line" and "Area" — short and unequal — so `w-fit` would
+                  reflow the row as the value changes and, worse, leave a combo's two rows with
+                  their rename inputs starting at different x. The rest of the row is a grip, a
+                  swatch, a `flex-1` rename and a switch, so this is the only element that can
+                  decide the alignment. The guard names this exception explicitly. */}
               <SelectTrigger aria-label={`display ${name}`} className="w-[4.5rem] shrink-0 px-2 text-xs">
                 <SelectValue />
               </SelectTrigger>

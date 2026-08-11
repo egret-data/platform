@@ -51,19 +51,36 @@ describe("settings panel geometry", () => {
    * `w-[352px]` would satisfy the ban above while recreating the defect it exists to prevent —
    * nineteen panels each asserting their own idea of the width.
    */
-  it("has no call site hard-coding the panel's content width", () => {
-    // 100px is the line between a SPACER and a CONTENT WIDTH. `w-[18px]` in
-    // `SegmentRangesSection.tsx` aligns a row against a sibling control and is fine; a
-    // `w-[352px]` would satisfy the class ban above while recreating the exact defect this
-    // programme removes — nineteen panels each asserting their own idea of the width.
+  /**
+   * A typed width is a DECISION, and every one left has to be an argued one.
+   *
+   * The threshold used to be 100px, on the grounds that anything smaller was a spacer. That let
+   * `w-[4.5rem]` — 72px, on the series display select — sit unexamined, so the rule is now: no
+   * typed width at all, except the two named here. Both were measured and both have a reason on
+   * the line itself; a third has to earn its place in this list, which is the point.
+   *
+   * Everything else that renders at an odd width does so through `flex-1`, which is one rule
+   * producing different pixels per row rather than several decisions. Counting rendered widths
+   * conflates the two — that is a limitation of the sweep, not of the panel.
+   */
+  const ALLOWED = new Set([
+    "w-[18px]",   // SegmentRangesSection: a spacer aligning a row against a sibling control
+    "w-[4.5rem]", // SeriesListSection: the display select, which decides the row's alignment
+  ]);
+
+  it("types no width that is not an argued exception", () => {
     const offenders: string[] = [];
     for (const dir of DIRS) {
       for (const [name, src] of filesIn(dir)) {
-        for (const m of src.matchAll(/w-\[(\d+)px\]/g)) {
-          if (Number(m[1]) >= 100) offenders.push(`${name}: ${m[0]}`);
+        // Numeric LENGTHS only. `w-[--radix-popover-trigger-width]` is an arbitrary value too,
+        // but it defers to the trigger rather than deciding anything — it is the opposite of a
+        // typed width and banning it would be banning the fix.
+        for (const m of src.matchAll(/w-\[[\d.]+(?:px|rem|em|%)\]/g)) {
+          if (!ALLOWED.has(m[0])) offenders.push(`${name}: ${m[0]}`);
         }
       }
     }
     expect(offenders).toEqual([]);
   });
+
 });
