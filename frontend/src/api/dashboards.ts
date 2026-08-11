@@ -140,13 +140,40 @@ export function useDashboardMutations(ws: string) {
     qc.invalidateQueries({ queryKey: getDashboardsDbListQueryKey(ws) });
     if (id) qc.invalidateQueries({ queryKey: getDashboardsDbGetQueryKey(ws, id) });
   };
+
+  /**
+   * Publish the detail the server just returned, INSTEAD OF waiting for the invalidated refetch.
+   *
+   * WHY IT MATTERS, and it is not a micro-optimisation. Saving replaces the whole layout, and the
+   * backend recreates every card — so **every card gets a new id on every save**. `invalidate`
+   * alone leaves the cache holding the OLD ids for as long as the refetch is in flight, and the
+   * save path exits edit mode the instant `mutateAsync` resolves. The view-mode cards therefore
+   * mount against ids that no longer exist and each fires `POST …/cards/{old_id}/data`, which
+   * 404s. Measured on the deployed cluster: five cards, five 404s, on one ordinary save.
+   *
+   * Seeding here closes the window entirely — `onSuccess` runs before `mutateAsync` resolves, so
+   * the new ids are in the cache before the caller can leave edit mode. The subsequent
+   * `invalidate` stays: it is what refreshes the LIST, and a redundant detail refetch is now
+   * merely redundant rather than wrong.
+   *
+   * The updater is functional and preserves the envelope. `useDashboard` reads through
+   * `select: (r) => r.data`, so this cache holds the orval `{ status, data, headers }` wrapper and
+   * not the bare detail — writing `d` straight in would make `select` read `undefined`. A miss
+   * (`prev` absent) is left alone deliberately: there is nothing to patch, and `invalidate` will
+   * fetch it.
+   */
+  const publishDetail = (d: DashboardDetail) =>
+    qc.setQueryData<{ data: DashboardDetail } | undefined>(
+      getDashboardsDbGetQueryKey(ws, d.id),
+      (prev) => (prev ? { ...prev, data: d } : prev),
+    );
   const create = useMutation<DashboardDetail, ApiError, { name: string; description?: string }>({
     mutationFn: async (b) => (await dashboardsDbCreate(ws, b)).data as DashboardDetail,
     onSuccess: () => invalidate(),
   });
   const update = useMutation<DashboardDetail, ApiError, { id: string; name: string; description?: string; parameters: DashboardParameter[]; tabs: { name: string; position: number }[]; width: "fixed" | "full"; cards: CardInput[] }>({
     mutationFn: async ({ id, ...b }) => (await dashboardsDbUpdate(ws, id, b)).data as DashboardDetail,
-    onSuccess: (d) => invalidate(d.id),
+    onSuccess: (d) => { publishDetail(d); invalidate(d.id); },
   });
   const remove = useMutation<void, ApiError, string>({
     mutationFn: async (id) => { await dashboardsDbRemove(ws, id); },
@@ -176,7 +203,10 @@ export function useDashboardMutations(ws: string) {
     mutationFn: async ({ id, revisionId }) =>
       (await dashboardsDbRevisionRevert(ws, id, revisionId)).data as DashboardDetail,
     // A revert changes the dashboard AND appends to its history, so both caches are stale.
+    // It rewrites the layout the same way a save does, so it mints new card ids too and needs
+    // the same publish — see `publishDetail`.
     onSuccess: (d) => {
+      publishDetail(d);
       invalidate(d.id);
       qc.invalidateQueries({ queryKey: getDashboardsDbRevisionsQueryKey(ws, d.id) });
     },
