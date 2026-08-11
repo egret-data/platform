@@ -242,17 +242,22 @@ impl AutomationRunner {
             "The alert \"{}\" fired.\n\nObserved value: {}\n\nThe triggering rows are attached.\n",
             s.name, value
         );
-        // Column names are not carried on the evaluation, so the CSV header is
-        // positional. Better a header that says `column_1` than one that claims
-        // a name the query did not return.
-        let width = eval
-            .rows
-            .as_array()
-            .and_then(|r| r.first())
-            .and_then(|r| r.as_array())
-            .map(Vec::len)
-            .unwrap_or(1);
-        let columns: Vec<String> = (1..=width).map(|i| format!("column_{i}")).collect();
+        // The query's own column names. Falls back to positional headers only
+        // if the engine returned none — a header of `column_1` is a last
+        // resort, not the normal case, because an alert email is read by
+        // someone who cannot see the SQL.
+        let columns: Vec<String> = if eval.columns.is_empty() {
+            let width = eval
+                .rows
+                .as_array()
+                .and_then(|r| r.first())
+                .and_then(|r| r.as_array())
+                .map(Vec::len)
+                .unwrap_or(1);
+            (1..=width).map(|i| format!("column_{i}")).collect()
+        } else {
+            eval.columns.clone()
+        };
         let csv = email::rows_to_csv(&columns, &eval.rows);
 
         email::send(

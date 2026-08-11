@@ -145,6 +145,11 @@ pub struct Evaluation {
     pub value: Option<f64>,
     /// The triggering row, for the notification body.
     pub rows: serde_json::Value,
+    /// The query's own column names, carried so an attached CSV can be headed
+    /// with what the user actually selected. Without them the header falls back
+    /// to `column_1`, which is worse than useless in a 3am email: it makes the
+    /// reader map positions by hand against SQL they cannot see.
+    pub columns: Vec<String>,
 }
 
 /// Run `sql` as `identity` and apply the validator.
@@ -164,7 +169,13 @@ pub async fn evaluate(
     let value = first_cell(&result)?;
     let fired = should_fire(validator, validator_config, value)?;
     let rows = serde_json::to_value(&result.rows).unwrap_or(serde_json::Value::Null);
-    Ok(Evaluation { fired, value, rows })
+    let columns = result.columns.iter().map(|c| c.name.clone()).collect();
+    Ok(Evaluation {
+        fired,
+        value,
+        rows,
+        columns,
+    })
 }
 
 /// The first column of the first row (§5.2), as a number.
@@ -314,6 +325,24 @@ mod tests {
         assert!(out.fired);
         assert_eq!(out.value, Some(42.0));
         assert_eq!(out.rows[0][0], 42, "the triggering row rides along");
+    }
+
+    #[tokio::test]
+    async fn the_evaluation_carries_the_querys_column_names() {
+        // They end up as the CSV header in the alert email. Dropping them
+        // leaves a reader mapping `column_1` against SQL they cannot see.
+        let runner = SpyRunner::returning(vec![serde_json::json!(7)]);
+        let out = evaluate(
+            &runner,
+            Uuid::new_v4(),
+            "q",
+            ValidatorType::NotNull,
+            &serde_json::json!({}),
+            &owner_id(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.columns, vec!["v".to_string()]);
     }
 
     #[tokio::test]
