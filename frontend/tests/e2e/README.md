@@ -277,3 +277,35 @@ default `warehouse` bucket carries a lakekeeper orphan — see the data-plane no
 cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
   EGRET_E2E_BUCKET=e2e npx playwright test provisioning-ui-kind
 ```
+
+## Chart settings drag lists (`settings-dnd-kind.spec.ts`)
+
+Opt-in (`EGRET_E2E_KIND=1`), runs against any in-cluster deploy. Drags a table
+column and a pie slice with the **keyboard** (`Space`, `ArrowDown`, `Space`) and
+asserts both the settings list and the rendered chart follow, then that dragging
+back restores the original order, then that clicking a row's colour swatch opens
+the picker instead of picking the row up.
+
+**Why it is not a unit test.** `dnd-kit` resolves a drop by measuring elements —
+`PointerSensor` needs a real 6px movement and `sortableKeyboardCoordinates` reads
+`getBoundingClientRect`. jsdom performs no layout, so every rect is zeros, a
+"drag" resolves to nothing, and the assertion passes against an unmoved list.
+
+Two things that will waste an afternoon if rediscovered the hard way:
+
+- **Wait after the activating `Space`.** `dnd-kit` binds its move handlers in an
+  effect, so an `ArrowDown` in the same tick is silently dropped and the list
+  never moves — which looks exactly like a broken product. The spec waits two
+  animation frames, and asserts the move landed on a *different* droppable (the
+  pickup announcement uses the same "was moved over" wording).
+- **One login for the file.** Sign-in is rate limited to 5 per 5 minutes; a login
+  per test spends the budget in one run and the later tests fail at
+  `waitForURL`.
+
+```bash
+cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://localhost:30080 \
+  npx playwright test settings-dnd
+```
+
+Chart fixtures are overridable: `EGRET_E2E_TABLE_CHART`, `EGRET_E2E_PIE_CHART`,
+`EGRET_E2E_WORKSPACE`.
