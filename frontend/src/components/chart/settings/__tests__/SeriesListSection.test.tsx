@@ -3,6 +3,14 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SeriesListSection, reorderSeriesOrder } from "../SeriesListSection";
 
+/** The swatch is a BUTTON with a background now, not an `<input type="color">` with a value.
+ *  jsdom returns `rgb(r, g, b)`, so it is converted back to the hex the palette states. */
+function hexOf(el: HTMLElement): string {
+  const m = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(el.style.backgroundColor || "");
+  if (!m) return (el.style.backgroundColor || "").toLowerCase();
+  return "#" + [1, 2, 3].map((i) => Number(m[i]).toString(16).padStart(2, "0")).join("");
+}
+
 describe("SeriesListSection", () => {
   /**
    * Driven through the pure helper: reordering is a drag now, and no test in this repo drives a dnd
@@ -59,8 +67,9 @@ describe("SeriesListSection — one row per series", () => {
     for (const label of ["reorder a", "color a", "label a", "Show a"]) {
       expect(screen.getByLabelText(label)).toBeInTheDocument();
     }
-    fireEvent.change(screen.getByLabelText("color b"), { target: { value: "#ff0000" } });
-    expect(onChange).toHaveBeenCalledWith({ seriesColors: { b: "#ff0000" } });
+    fireEvent.click(screen.getByLabelText("color b"));
+    fireEvent.click(screen.getByLabelText("#EF8C8C"));
+    expect(onChange).toHaveBeenCalledWith({ seriesColors: { b: "#EF8C8C" } });
   });
 
   it("renames and clears the rename when emptied", () => {
@@ -89,8 +98,8 @@ describe("SeriesListSection — one row per series", () => {
     );
     const rows = screen.getAllByRole("switch").map((el) => el.getAttribute("aria-label"));
     expect(rows).toEqual(["Show c", "Show a", "Show b"]);
-    expect((screen.getByLabelText("color c") as HTMLInputElement).value).toBe("#333333");
-    expect((screen.getByLabelText("color a") as HTMLInputElement).value).toBe("#111111");
+    expect(hexOf(screen.getByLabelText("color c"))).toBe("#333333");
+    expect(hexOf(screen.getByLabelText("color a"))).toBe("#111111");
   });
 });
 

@@ -11,6 +11,7 @@ import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
 import { GROUP_LABEL } from "./FieldLabel";
+import { ColorPicker } from "./ColorPicker";
 
 interface ResultColumn { name: string; type: string }
 
@@ -358,11 +359,9 @@ export function RuleEditor({
           <div className="space-y-1.5 pt-1">
             <div className="h-2.5 w-full rounded border" style={{ background: `linear-gradient(to right, ${start}, ${end})` }} />
             <div className="flex items-center gap-2">
-              <input type="color" aria-label="start color" className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
-                value={start} onChange={(e) => setRangeColor(0, e.target.value)} />
+              <ColorPicker label="start color" value={start} onChange={(next) => setRangeColor(0, next)} />
               <span className="flex-1 text-center text-xs text-muted-foreground">low → high</span>
-              <input type="color" aria-label="end color" className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
-                value={end} onChange={(e) => setRangeColor(1, e.target.value)} />
+              <ColorPicker label="end color" value={end} onChange={(next) => setRangeColor(1, next)} />
             </div>
           </div>
           {/* The colours say what the gradient looks like; these say what it MEANS. Both endpoints,

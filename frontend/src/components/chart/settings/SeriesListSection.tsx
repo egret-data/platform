@@ -8,6 +8,7 @@ import {
 import { GripVertical } from "lucide-react";
 import { useState } from "react";
 import { SortableRow } from "@/components/chart/config/SortableRow";
+import { ColorPicker } from "./ColorPicker";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -172,12 +173,10 @@ export function SeriesListSection({
             <GripVertical className="h-3.5 w-3.5" />
           </button>
           {defaultColor && (
-            <input
-              type="color"
-              aria-label={`color ${name}`}
-              className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+            <ColorPicker
+              label={`color ${name}`}
               value={colors?.[name] ?? defaultColor(name)}
-              onChange={(e) => onChange({ seriesColors: { ...colors, [name]: e.target.value } })}
+              onChange={(next) => onChange({ seriesColors: { ...colors, [name]: next } })}
             />
           )}
           {defaultDisplay && (

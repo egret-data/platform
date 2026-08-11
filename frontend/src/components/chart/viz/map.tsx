@@ -10,6 +10,7 @@ import type { SharedQueryState, VizControlProps, VizDescriptor } from "./types";
 import { SERIES_PALETTE } from "@/components/chart/echarts/palette";
 
 import { FIELD_LABEL as LABEL_CLASS } from "@/components/chart/settings/FieldLabel";
+import { ColorPicker } from "@/components/chart/settings/ColorPicker";
 
 /**
  * WHICH MAP the rows are painted onto — Metabase's "Region map".
@@ -267,12 +268,8 @@ function MapColorControl({ config, onChange }: VizControlProps<MapConfig>) {
   return (
     <div className="flex items-center justify-between gap-2">
       <Label className="text-sm font-normal">Color</Label>
-      <input
-        type="color" aria-label="Color"
-        className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
-        value={config.color ?? SERIES_PALETTE[0]}
-        onChange={(e) => onChange({ color: e.target.value })}
-      />
+      <ColorPicker label="Color" value={config.color ?? SERIES_PALETTE[0]}
+        onChange={(next) => onChange({ color: next })} />
     </div>
   );
 }

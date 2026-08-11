@@ -18,6 +18,7 @@ import {
 import { AutoToggle } from "./AutoToggle";
 import { DecimalInput } from "./DecimalInput";
 import { resolvePercentVisibility, resolveShowLabels, DEFAULT_SLICE_THRESHOLD } from "@/components/chart/echarts/options/pie";
+import { ColorPicker } from "./ColorPicker";
 
 // A Radix Select item cannot carry an empty value, so "leave it unset" needs a sentinel that
 // no real percentVisibility can collide with.
@@ -274,12 +275,10 @@ export function PieDisplaySection({ config, onChange, slices = [], foldedSlices 
                   aria-label={`reorder ${name}`}>
                   <GripVertical className="h-3.5 w-3.5" />
                 </button>
-                <input
-                  type="color"
-                  aria-label={`color ${name}`}
-                  className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+                <ColorPicker
+                  label={`color ${name}`}
                   value={config.sliceColors?.[name] ?? defaultSliceColor(name)}
-                  onChange={(e) => onChange({ sliceColors: { ...config.sliceColors, [name]: e.target.value } })}
+                  onChange={(next) => onChange({ sliceColors: { ...config.sliceColors, [name]: next } })}
                 />
                 <Input
                   className="flex-1"

@@ -1,4 +1,5 @@
 import { Input } from "@/components/ui/input";
+import { ColorPicker } from "./ColorPicker";
 import { DecimalInput } from "./DecimalInput";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -31,13 +32,7 @@ function ColorRow({ label, value, fallback, onChange }: {
   return (
     <div className="flex items-center justify-between gap-2">
       <Label className="text-sm font-normal">{label}</Label>
-      <input
-        type="color"
-        aria-label={label}
-        className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
-        value={value ?? fallback}
-        onChange={(e) => onChange(e.target.value)}
-      />
+      <ColorPicker label={label} value={value ?? fallback} onChange={onChange} />
     </div>
   );
 }

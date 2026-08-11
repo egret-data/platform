@@ -23,6 +23,7 @@ import { SeriesListSection } from "@/components/chart/settings/SeriesListSection
 import { displayName, fieldTitle, metricLabels } from "@/components/chart/config/field-names";
 import { fieldDescriptor } from "./fields";
 import type { VizControl, VizControlProps, VizDescriptor } from "./types";
+import { ColorPicker } from "@/components/chart/settings/ColorPicker";
 
 type Cfg = Record<string, unknown>;
 
@@ -154,13 +155,9 @@ function ProgressDisplayControl({ config, onChange, metrics }: VizControlProps<C
   return (
     <div className="space-y-2.5">
       <div className="flex items-center justify-between gap-2">
-        <Label htmlFor="pg-color" className="text-sm font-normal">Colour</Label>
-        <input
-          id="pg-color" type="color" aria-label="Colour"
-          className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
-          value={color}
-          onChange={(e) => onChange({ color: e.target.value } as Partial<Cfg>)}
-        />
+        <Label className="text-sm font-normal">Colour</Label>
+        <ColorPicker label="Colour" value={color}
+          onChange={(next) => onChange({ color: next } as Partial<Cfg>)} />
       </div>
       <div className="space-y-1">
         <Label className="text-sm font-normal">Goal from a metric</Label>

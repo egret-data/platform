@@ -7,6 +7,7 @@ import type { BoxplotConfig } from "@/api/charts";
 import { SERIES_PALETTE } from "@/components/chart/echarts/palette";
 import { pointsModeFor } from "@/components/chart/echarts/options/boxplot";
 import { Toggle } from "@/components/chart/settings/ChartAxesSection";
+import { ColorPicker } from "./ColorPicker";
 
 /**
  * The box plot's Display controls, in Metabase's own order: whiskers, points, mean, values, goal.
@@ -91,12 +92,8 @@ export function BoxplotDisplaySection({ config, onChange }: Props) {
           would let them disagree, which is the state Metabase's derivation exists to prevent. */}
       <div className="flex items-center justify-between gap-2">
         <Label className="text-sm font-normal">Color</Label>
-        <input
-          type="color" aria-label="Color"
-          className="size-6 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
-          value={config.color ?? SERIES_PALETTE[0]}
-          onChange={(e) => onChange({ color: e.target.value })}
-        />
+        <ColorPicker label="Color" value={config.color ?? SERIES_PALETTE[0]}
+          onChange={(next) => onChange({ color: next })} />
       </div>
       <div className="space-y-1.5">
         <Label htmlFor="bp-compact" className="text-sm font-normal">Shorten large numbers</Label>
