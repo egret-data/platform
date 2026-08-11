@@ -1,8 +1,18 @@
 import type { CardInput, DashboardCard, DashboardTab } from "@/api/dashboards";
 import { withoutInlineParameters } from "./inlineParameters";
 
-/** A tab in the edit-mode draft. `key` is a client-only id (server ids churn on save). */
-export interface DraftTab { key: string; name: string; position: number }
+/**
+ * A tab in the edit-mode draft.
+ *
+ * `key` is a client-only handle: the draft reorders, renames and deletes tabs freely, and a tab
+ * the user has just added has no server id at all, so the draft cannot key off one.
+ *
+ * `serverId` is the id the tab already has, carried through so the save can UPDATE it rather than
+ * replace it. It used to be dropped here — the comment on this line read "server ids churn on
+ * save", which was true and was the defect: `dashboard_cards.tab_id` cascades on delete, so
+ * recreating a tab recreated every card on it.
+ */
+export interface DraftTab { key: string; name: string; position: number; serverId?: string }
 
 /** A card in the edit-mode draft: the API card plus its draft tab link (`tabKey`). */
 export type DraftCard = DashboardCard & { tabKey: string | null };
@@ -22,7 +32,7 @@ export function startTabsDraft(
   const draftTabs = ordered.map((t, i) => {
     const key = newTabKey();
     keyByServerId.set(t.id, key);
-    return { key, name: t.name, position: i };
+    return { key, name: t.name, position: i, serverId: t.id };
   });
   const draftCards = cards.map((c) => ({
     ...c, tabKey: c.tab_id ? (keyByServerId.get(c.tab_id) ?? null) : null,
@@ -30,17 +40,37 @@ export function startTabsDraft(
   return { draftTabs, draftCards };
 }
 
+/**
+ * A server id, as opposed to one this session invented.
+ *
+ * The draft fabricates ids for cards the user has just added — `new-<chart>-3`, `new-dup-1`,
+ * `new-section-0` — so the grid has something to key on before anything is saved. Those must not
+ * be sent: the field is a `Option<Uuid>` on the wire, so a `new-…` string is not "ignored", it
+ * fails to deserialize and takes the whole save down with a 400.
+ *
+ * Tested for SHAPE rather than for the `new-` prefix, because the prefix is a detail of how
+ * `DashboardView` names its drafts and this must not silently start sending garbage the day
+ * somebody renames it.
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const serverId = (id: string | undefined): string | undefined =>
+  id !== undefined && UUID.test(id) ? id : undefined;
+
 /** Serialize the draft into the PUT body shape: tabs ordered by position, each card's
- *  `tab_index` resolved from its `tabKey` (or null when there are no tabs). */
+ *  `tab_index` resolved from its `tabKey` (or null when there are no tabs).
+ *
+ *  Cards and tabs carry their existing `id` so the server updates them in place instead of
+ *  recreating them — see `replace_layout`. A draft-only row sends none and is inserted. */
 export function serializeLayout(
   draftTabs: DraftTab[],
   draftCards: DraftCard[],
-): { tabs: { name: string; position: number }[]; cards: CardInput[] } {
+): { tabs: { id?: string; name: string; position: number }[]; cards: CardInput[] } {
   const ordered = [...draftTabs].sort((a, b) => a.position - b.position);
   const indexByKey = new Map(ordered.map((t, i) => [t.key, i] as const));
   return {
-    tabs: ordered.map((t, i) => ({ name: t.name, position: i })),
+    tabs: ordered.map((t, i) => ({ id: serverId(t.serverId), name: t.name, position: i })),
     cards: draftCards.map((c) => ({
+      id: serverId(c.id),
       chart_id: c.chart_id, card_type: c.card_type,
       grid_col: c.grid_col, grid_row: c.grid_row, size_x: c.size_x, size_y: c.size_y, options: c.options,
       tab_index: c.tabKey != null ? (indexByKey.get(c.tabKey) ?? null) : null,

@@ -99,6 +99,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
     // place two cards (one referencing the chart)
     let cards = vec![
         NewCard {
+            id: None,
             chart_id: Some(chart.id),
             card_type: "chart".into(),
             grid_col: 0,
@@ -109,6 +110,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
             tab_index: None,
         },
         NewCard {
+            id: None,
             chart_id: Some(chart.id),
             card_type: "chart".into(),
             grid_col: 6,
@@ -138,6 +140,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
             d.id,
             &[],
             &[NewCard {
+                id: None,
                 chart_id: Some(chart.id),
                 card_type: "chart".into(),
                 grid_col: 0,
@@ -202,16 +205,19 @@ async fn replace_layout_tabs_and_card_assignment() {
 
     let tabs = vec![
         NewTab {
+            id: None,
             name: "Overview".into(),
             position: 0,
         },
         NewTab {
+            id: None,
             name: "Detail".into(),
             position: 1,
         },
     ];
     let cards = vec![
         NewCard {
+            id: None,
             chart_id: Some(chart.id),
             card_type: "chart".into(),
             grid_col: 0,
@@ -222,6 +228,7 @@ async fn replace_layout_tabs_and_card_assignment() {
             tab_index: Some(0),
         },
         NewCard {
+            id: None,
             chart_id: Some(chart.id),
             card_type: "chart".into(),
             grid_col: 0,
@@ -249,6 +256,7 @@ async fn replace_layout_tabs_and_card_assignment() {
             d.id,
             &[],
             &[NewCard {
+                id: None,
                 chart_id: Some(chart.id),
                 card_type: "chart".into(),
                 grid_col: 0,
@@ -269,10 +277,12 @@ async fn replace_layout_tabs_and_card_assignment() {
         .replace_layout(
             d.id,
             &[NewTab {
+                id: None,
                 name: "Only".into(),
                 position: 0,
             }],
             &[NewCard {
+                id: None,
                 chart_id: Some(chart.id),
                 card_type: "chart".into(),
                 grid_col: 0,
@@ -290,10 +300,12 @@ async fn replace_layout_tabs_and_card_assignment() {
         .replace_layout(
             d.id,
             &[NewTab {
+                id: None,
                 name: "T".into(),
                 position: 0,
             }],
             &[NewCard {
+                id: None,
                 chart_id: Some(chart.id),
                 card_type: "chart".into(),
                 grid_col: 0,
@@ -388,16 +400,19 @@ async fn duplicate_copies_tabs_and_cards_with_new_owner() {
         .unwrap();
     let tabs = vec![
         NewTab {
+            id: None,
             name: "T1".into(),
             position: 0,
         },
         NewTab {
+            id: None,
             name: "T2".into(),
             position: 1,
         },
     ];
     let cards = vec![
         NewCard {
+            id: None,
             chart_id: None,
             card_type: "text".into(),
             grid_col: 0,
@@ -408,6 +423,7 @@ async fn duplicate_copies_tabs_and_cards_with_new_owner() {
             tab_index: Some(0),
         },
         NewCard {
+            id: None,
             chart_id: None,
             card_type: "heading".into(),
             grid_col: 0,

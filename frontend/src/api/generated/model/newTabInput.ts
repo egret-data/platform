@@ -7,6 +7,15 @@
  */
 
 export interface NewTabInput {
+  /**
+     * The id this tab already has. Same contract as [`CardInput::id`]: a hint, honoured only when
+     * the tab already belongs to this dashboard.
+     *
+     * Tabs need it for a reason cards do not: `dashboard_cards.tab_id` is `ON DELETE CASCADE`, so
+     * recreating a tab took every card on it with it — the cards were being deleted twice over.
+     * @nullable
+     */
+  id?: string | null;
   name: string;
   position: number;
 }

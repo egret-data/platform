@@ -188,6 +188,7 @@ pub struct ChartDataBody {
 impl From<CardInput> for NewCard {
     fn from(v: CardInput) -> Self {
         NewCard {
+            id: v.id,
             chart_id: v.chart_id,
             card_type: v.card_type,
             grid_col: v.grid_col,
@@ -204,6 +205,7 @@ impl From<CardInput> for NewCard {
 impl From<NewTabInput> for crate::dashboard::NewTab {
     fn from(v: NewTabInput) -> Self {
         crate::dashboard::NewTab {
+            id: v.id,
             name: v.name,
             position: v.position,
         }
@@ -329,10 +331,12 @@ mod tests {
     fn validate_layout_rejects_mixed_and_out_of_range() {
         use super::{validate_layout, CardInput, NewTabInput};
         let tab = || NewTabInput {
+            id: None,
             name: "T".into(),
             position: 0,
         };
         let card = |ti: Option<usize>| CardInput {
+            id: None,
             chart_id: None,
             card_type: "chart".into(),
             grid_col: 0,

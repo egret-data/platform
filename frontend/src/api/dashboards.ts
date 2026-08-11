@@ -105,6 +105,10 @@ export interface DashboardDetail {
   bookmarked?: boolean;
 }
 export interface CardInput {
+  /** The card's existing id, so the server updates it in place instead of recreating it. Omitted
+   *  for a card added in this editing session — see `serializeLayout`, which is the only thing
+   *  allowed to decide that, and `replace_layout`, which treats it as a hint it may refuse. */
+  id?: string;
   chart_id: string | null;
   card_type: string;
   grid_col: number;
@@ -171,7 +175,7 @@ export function useDashboardMutations(ws: string) {
     mutationFn: async (b) => (await dashboardsDbCreate(ws, b)).data as DashboardDetail,
     onSuccess: () => invalidate(),
   });
-  const update = useMutation<DashboardDetail, ApiError, { id: string; name: string; description?: string; parameters: DashboardParameter[]; tabs: { name: string; position: number }[]; width: "fixed" | "full"; cards: CardInput[] }>({
+  const update = useMutation<DashboardDetail, ApiError, { id: string; name: string; description?: string; parameters: DashboardParameter[]; tabs: { id?: string; name: string; position: number }[]; width: "fixed" | "full"; cards: CardInput[] }>({
     mutationFn: async ({ id, ...b }) => (await dashboardsDbUpdate(ws, id, b)).data as DashboardDetail,
     onSuccess: (d) => { publishDetail(d); invalidate(d.id); },
   });

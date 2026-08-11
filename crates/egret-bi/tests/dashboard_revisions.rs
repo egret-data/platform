@@ -26,6 +26,7 @@ async fn setup() -> Option<(DashboardRepo, Uuid, Uuid)> {
 
 fn card(tab_index: Option<usize>, col: i32) -> NewCard {
     NewCard {
+        id: None,
         chart_id: None,
         card_type: "text".into(),
         grid_col: col,
@@ -48,10 +49,12 @@ async fn snapshot_current_is_a_put_body_with_tab_indices_not_tab_ids() {
         d.id,
         &[
             NewTab {
+                id: None,
                 name: "A".into(),
                 position: 0,
             },
             NewTab {
+                id: None,
                 name: "B".into(),
                 position: 1,
             },

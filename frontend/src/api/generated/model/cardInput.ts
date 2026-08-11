@@ -10,6 +10,21 @@
  * Card as supplied by the client when saving a layout.
  */
 export interface CardInput {
+  /**
+     * The id this card already has, so a save can UPDATE it instead of replacing it.
+     *
+     * Absent means "new card" — which is what every client sent before this field existed, and
+     * what a card the user has just dropped onto the canvas still sends. It is a HINT, not an
+     * instruction: the server keeps the id only when it already belongs to THIS dashboard (see
+     * `replace_layout`), so a stale or borrowed id can never make one dashboard adopt another's
+     * card.
+     *
+     * `skip_serializing_if` keeps a body without ids byte-identical to what it was before this
+     * field existed — `update_dashboard_round_trips_through_json_unchanged` caught the `"id":
+     * null` this would otherwise have added to every card of every re-serialized body.
+     * @nullable
+     */
+  id?: string | null;
   /** @nullable */
   chart_id?: string | null;
   card_type?: string;

@@ -22523,6 +22523,14 @@
           "size_y"
         ],
         "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The id this card already has, so a save can UPDATE it instead of replacing it.\n\nAbsent means \"new card\" — which is what every client sent before this field existed, and\nwhat a card the user has just dropped onto the canvas still sends. It is a HINT, not an\ninstruction: the server keeps the id only when it already belongs to THIS dashboard (see\n`replace_layout`), so a stale or borrowed id can never make one dashboard adopt another's\ncard.\n\n`skip_serializing_if` keeps a body without ids byte-identical to what it was before this\nfield existed — `update_dashboard_round_trips_through_json_unchanged` caught the `\"id\":\nnull` this would otherwise have added to every card of every re-serialized body."
+          },
           "chart_id": {
             "type": [
               "string",
@@ -25400,6 +25408,14 @@
           "position"
         ],
         "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The id this tab already has. Same contract as [`CardInput::id`]: a hint, honoured only when\nthe tab already belongs to this dashboard.\n\nTabs need it for a reason cards do not: `dashboard_cards.tab_id` is `ON DELETE CASCADE`, so\nrecreating a tab took every card on it with it — the cards were being deleted twice over."
+          },
           "name": {
             "type": "string"
           },
