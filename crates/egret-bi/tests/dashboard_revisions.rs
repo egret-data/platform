@@ -70,30 +70,47 @@ async fn snapshot_current_is_a_put_body_with_tab_indices_not_tab_ids() {
     // "fixed", not "full": W3's migration 0105 changed the column default to Metabase's fixed
     // canvas. The plan predates that and expected "full".
     assert_eq!(snap["width"], "fixed");
+
+    // TABS CARRY THEIR ID AND THEIR INDEX. The index is what cards reference; the id is what keeps
+    // a tab from being recreated on the way back in, which would cascade its cards away. This test
+    // previously asserted the opposite — that the snapshot held no id at all — because
+    // `replace_layout` used to renumber everything on every save, which made ids worthless. Once a
+    // save keeps them, a revert that dropped them would be the one operation left that silently
+    // renumbers a dashboard.
+    let tabs = repo.tabs(d.id).await.unwrap();
     assert_eq!(
         snap["tabs"],
         serde_json::json!([
-            { "name": "A", "position": 0 },
-            { "name": "B", "position": 1 },
+            { "id": tabs[0].id, "name": "A", "position": 0 },
+            { "id": tabs[1].id, "name": "B", "position": 1 },
         ])
     );
-    // The point of the whole design: no uuid anywhere in the snapshot, so nothing has to be
-    // remapped on the way back in. Serialising the value and searching it is a blunt check and
-    // that is exactly why it is used — it catches an id leaking in from ANY field, not just the
-    // fields this test thought to name.
-    let text = snap.to_string();
+
+    // THE DASHBOARD's OWN id still must not appear. A snapshot is fed back into a PUT addressed to
+    // a dashboard by URL; an id inside the body would be a second, disagreeing answer to which
+    // dashboard is being written. The blunt string search stays for that reason — it catches a
+    // leak from ANY field, not just the ones this test thought to name.
     assert!(
-        !text.contains(&d.id.to_string()),
+        !snap.to_string().contains(&d.id.to_string()),
         "dashboard id leaked into the snapshot"
     );
-    for c in snap["cards"].as_array().unwrap() {
-        assert!(
-            c.get("id").is_none(),
-            "card id leaked into the snapshot: {c}"
+
+    let card_ids: Vec<String> = repo
+        .cards(d.id)
+        .await
+        .unwrap()
+        .iter()
+        .map(|c| c.id.to_string())
+        .collect();
+    for (i, c) in snap["cards"].as_array().unwrap().iter().enumerate() {
+        assert_eq!(
+            c["id"].as_str().unwrap(),
+            card_ids[i],
+            "each card must carry the id it was snapshotted with: {c}"
         );
         assert!(
             c["tab_index"].is_number(),
-            "cards must reference a tab by index: {c}"
+            "cards must still reference a tab by INDEX, not by tab id: {c}"
         );
     }
 }

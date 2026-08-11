@@ -1568,8 +1568,15 @@ export const getDashboardsDbRevisionRevertUrl = (workspace: string,
 }
 
 /**
- * The snapshot is id-free by construction (migration 0107), so nothing is remapped — this is NOT
- * `DashboardRepo::duplicate`, which needs a tab_map only because it copies rows. Revalidation is
+ * The snapshot CARRIES the card and tab ids it was taken with, so a revert keeps the id of every
+ * card that still exists instead of renumbering the whole dashboard. Nothing is remapped here:
+ * `replace_layout` decides what an id means, and it honours one only when this dashboard already
+ * owns it — a card deleted since the revision comes back with a fresh id, and an id that never
+ * belonged here cannot be adopted. (This is still NOT `DashboardRepo::duplicate`, which needs a
+ * tab_map because it copies rows into a DIFFERENT dashboard.)
+ *
+ * A revision recorded before ids were carried has none, and reverts exactly as it always did —
+ * every card inserted fresh. Revalidation is
  * not optional: a chart a revision references may have been deleted since, and
  * `require_cards_in_ws` inside `apply_dashboard_update` turns that into a 404 rather than a
  * dangling card.
