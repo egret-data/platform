@@ -124,7 +124,11 @@ The first phase that does something. Alerts fire end to end; email waits for P3.
       refused, so the checked destination is the dialled one.
 - [x] Run-log writes on every path, with a `nothing_due_writes_nothing` control so the others
       cannot pass by writing rows unconditionally.
-- [ ] **Live check on kind** — NOT DONE. Everything above is verified against fakes.
+- [x] **Live check DONE** (locally, not on kind): real Trino + a webhook listener. Observed, in
+      order, in one run log — `error` (engine rejection, with the engine's words) → `success` with
+      the SSRF guard refusing loopback and ZERO hits delivered → `success` + delivered, HMAC
+      verified against an independently computed digest → `grace` suppressing the next firing with
+      still exactly one hit total.
 - [x] Commit.
 
 **Two corrections to this plan, made while building**
@@ -167,7 +171,17 @@ claimer returns inside 500ms.)*
 - [x] `lettre` sender: STARTTLS / implicit / none, each explicitly chosen rather than inferred
       from the port. CSV attachment of the triggering rows, every field quoted.
 - [x] **Send test email** endpoint + button, returning the relay's own error text.
-- [ ] **Live check on kind with mailpit** — NOT DONE, along with P2's live check.
+- [x] **Live check DONE with mailpit** (locally, not on kind). The send-test button earned itself
+      immediately: pointed at a relay offering no auth while credentials were configured, it
+      returned the relay's own "No compatible authentication mechanism was found" — which is
+      exactly the "configured" vs "configured correctly" distinction it exists to make. Clearing
+      the password (live-exercising `password: ""` → removed, vault row gone) made the send
+      succeed. The alert email arrived with both recipients, the custom subject, and a CSV
+      attachment.
+
+**What the live check caught that 120 tests did not:** the CSV was headed `column_1,column_2` for
+a query selecting `n` and `label` — `Evaluation` dropped the column names `TabularResult` had all
+along. Fixed in `3136e7d6` and re-verified live.
 - [x] Commit.
 
 **One addition the plan did not specify: who may change these settings.** SMTP is gated by
