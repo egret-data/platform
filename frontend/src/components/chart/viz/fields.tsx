@@ -11,7 +11,7 @@ import { isParamsV2 } from "@/api/charts";
 import type { AnyChartParams, QuerySpec, VizSettings, VizType } from "@/api/charts";
 import type { SharedQueryState, VizControl, VizControlProps, VizDescriptor } from "./types";
 
-import { FIELD_LABEL as LABEL_CLASS } from "@/components/chart/settings/FieldLabel";
+import { FIELD_LABEL as LABEL_CLASS, ICON_BUTTON } from "@/components/chart/settings/FieldLabel";
 
 type Cfg = Record<string, unknown>;
 
@@ -214,7 +214,7 @@ function DimensionsControl({ field, config, options, labelOf, onChange, unitRow 
             </Select>
             {value !== undefined && (
               <button type="button" aria-label={`Remove ${value}`}
-                className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-destructive"
+                className={`${ICON_BUTTON} hover:text-destructive`}
                 onClick={() => emit(chosen.filter((_, j) => j !== i))}>
                 <Trash2 className="h-3.5 w-3.5" />
               </button>

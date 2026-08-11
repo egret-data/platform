@@ -6,8 +6,7 @@ import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
 
-import { FIELD_LABEL as LABEL_CLASS } from "@/components/chart/settings/FieldLabel";
-const ICON_BUTTON = "rounded p-0.5 hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent";
+import { FIELD_LABEL as LABEL_CLASS, ICON_BUTTON } from "@/components/chart/settings/FieldLabel";
 
 /**
  * The order a chart's rows come back in — the studio's first AUTHORED query clause (filters still
