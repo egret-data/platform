@@ -183,6 +183,28 @@ describe("Alerts & Reports list", () => {
     expect(body.sql ?? null).toBeNull();
   });
 
+  it("omits an absent database rather than sending an empty string", async () => {
+    // An empty string is not a UUID, so the server rejects the whole body with
+    // a bare 422 "Unprocessable Entity" before its own validation runs — the
+    // user loses the message naming the field and sees an HTTP status instead.
+    // Found in a browser, not by these tests: they had always supplied a
+    // database.
+    vi.mocked(await import("@/api/databases")).useDatabases = (() => ({
+      data: [],
+    })) as never;
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole("button", { name: /new alert/i }));
+    await user.type(screen.getByLabelText(/^name$/i), "no db");
+    await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const body = createMutate.mock.calls[0][0];
+    expect(body.database_id).toBeNull();
+    expect(body.database_id).not.toBe("");
+  });
+
   it("surfaces the server's validation message instead of a generic failure", async () => {
     const user = userEvent.setup();
     createMutate.mockRejectedValueOnce(
