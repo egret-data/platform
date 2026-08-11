@@ -1411,6 +1411,46 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         });
     }
 
+    // ── Alerts & Reports ticker (P2) ───────────────────────────────────────
+    //
+    // One per replica, beside the kernel reaper and cancelled by the same
+    // token. No leader election: the claim uses FOR UPDATE SKIP LOCKED, so N
+    // replicas ticking together is the design rather than a hazard.
+    if config.automation.enabled {
+        let automation_runner = std::sync::Arc::new(egret_automation::runner::AutomationRunner {
+            db: db.clone(),
+            schedules: egret_automation::ScheduleRepo::new(db.clone()),
+            databases: databases.clone(),
+            users: UserRepo::new(db.clone()),
+            minter: engine_minter.clone(),
+            query: std::sync::Arc::new(egret_automation::evaluator::EngineRunner {
+                databases: databases.clone(),
+                factory: std::sync::Arc::new(
+                    egret_query::execution::connector::DefaultConnectorFactory,
+                ),
+                limits: egret_query::execution::model::Limits {
+                    max_rows: config.engine.max_rows,
+                    timeout: std::time::Duration::from_secs(config.engine.query_timeout_secs),
+                },
+            }),
+            resolver: std::sync::Arc::new(egret_automation::deliver::destination::SystemResolver),
+            policy: egret_automation::deliver::destination::SsrfPolicy {
+                allow_hosts: config.automation.webhook_allow_hosts.clone(),
+            },
+        });
+        egret_automation::runner::spawn(
+            automation_runner,
+            std::time::Duration::from_secs(config.automation.tick_interval_secs),
+            reaper_cancel.clone(),
+        );
+        tracing::info!(
+            interval_secs = config.automation.tick_interval_secs,
+            "automation ticker started"
+        );
+    } else {
+        tracing::info!("automation ticker disabled by config");
+    }
+
     // api_url: the server's own externally-reachable base URL (for EGRET_API_URL
     // forwarded to kernel processes as a callback base). Defaults to
     // http://127.0.0.1:{port} from the configured listen address when catalog

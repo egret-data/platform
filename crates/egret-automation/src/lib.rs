@@ -5,10 +5,15 @@
 //! live here too, beside the repo they claim rows from.
 
 pub mod cron;
+pub mod deliver;
 mod error;
+pub mod evaluator;
 pub mod model;
 mod repo;
 mod routes;
+pub mod runner;
+pub mod scheduler;
+pub mod validator;
 
 pub use error::{AutomationApiError, AutomationError};
 pub use repo::{NewSchedule, Owner, Recipient, Schedule, ScheduleRepo, ScheduleRun};

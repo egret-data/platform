@@ -94,40 +94,58 @@ nothing. `next_run_at` IS populated, so P2's claim query has rows to find on day
 
 ---
 
-## Phase 2 — Scheduler + alert evaluation + webhook
+## Phase 2 — Scheduler + alert evaluation + webhook ✅ *(done, except the live check)*
 
 The first phase that does something. Alerts fire end to end; email waits for P3.
 
-**Files**
-- Create: `crates/egret-automation/src/scheduler.rs`, `evaluator.rs`, `validator.rs`
-- Create: `crates/egret-automation/src/deliver/webhook.rs`, `deliver/mod.rs`
-- Modify: `crates/egret-bin/src/main.rs` — spawn the ticker beside the kernel reaper
-- Create: `crates/egret-automation/tests/{validator,scheduler,webhook_ssrf}.rs`
+**Files** *(as built)*
+- Create: `crates/egret-automation/src/{validator,scheduler,evaluator,runner}.rs`
+- Create: `crates/egret-automation/src/deliver/{mod,destination,webhook}.rs` — `destination.rs`
+  was not in the plan; the SSRF check earned its own module (see below)
+- Create: `crates/egret-automation/tests/tick_end_to_end.rs`
+- Modify: `crates/egret-bin/src/main.rs` — ticker beside the kernel reaper, same cancel token
+- Modify: `crates/egret-config/src/lib.rs` — an `automation` section (enabled, tick interval,
+  webhook allow-list)
 
-- [ ] **Validator unit tests first** — pure functions, no DB: `not_null` on null/0/non-zero, every
-      operator, `between` inclusive bounds, and a null value against `>` (must not fire).
-- [ ] Validator implementation.
-- [ ] **Scheduler claim test**: two concurrent claimers must not both take the same row
-      (`FOR UPDATE SKIP LOCKED`); a row in `working` past `working_timeout_s` is force-released;
-      a run inside `grace_period_s` returns `grace` and sends nothing.
-- [ ] Scheduler implementation (`tokio::interval`, cancellation token, copying
-      `egret-kernel/src/reaper.rs`).
-- [ ] **Evaluation runs as the owner** — test that a schedule owned by a user without access to the
-      table fails with `error` rather than returning rows. This is the privilege-escalation guard
-      from §5.2 and it is the single most important test in this plan.
-- [ ] Evaluator implementation against the existing query path, with an owner-scoped engine token.
-- [ ] **Webhook SSRF tests before the sender**: `169.254.169.254`, `127.0.0.1`, `10.0.0.0/8`, a
-      public hostname whose DNS resolves into a private range, and a URL of the shape
-      `https://evil.test/http://internal/` (the recorded `url-normaliser` trap). All rejected;
-      an allow-listed internal host accepted.
-- [ ] Webhook sender + HMAC signature.
-- [ ] Run-log writes on every path: success, error, noop, grace.
-- [ ] **Live check on kind**: create an alert whose SQL is `SELECT 1`, point it at a webhook
-      listener, watch it fire, then watch the grace period suppress the next tick.
-- [ ] Commit.
+- [x] **Validator unit tests first**, then the validator. 10 tests; mutation-checked against a
+      null coerced to zero, `not_null` accepting zero, an off-by-one at `<=`, and `between` made
+      exclusive.
+- [x] **Scheduler claim tests**, then the scheduler. `#[sqlx::test]` for a database per test,
+      rather than the shared `egret_test` — the P1 sweep had already been bitten by cross-binary
+      interference.
+- [x] **Evaluation runs as the owner.** Tested at both seams: `owner_identity` mints for the owner
+      and nobody else, and the tick hands that identity to the engine. Mutation-checked against
+      minting for a service identity and against falling back to an empty token.
+- [x] Evaluator against the existing `run_query` path, behind a `QueryRunner` trait so the
+      security property is assertable without an engine.
+- [x] **Webhook SSRF tests before the sender**, with an injectable resolver — the interesting
+      cases are exactly the ones real DNS will not reproduce on demand.
+- [x] Webhook sender + HMAC. The vetted addresses are PINNED on the client and redirects are
+      refused, so the checked destination is the dialled one.
+- [x] Run-log writes on every path, with a `nothing_due_writes_nothing` control so the others
+      cannot pass by writing rows unconditionally.
+- [ ] **Live check on kind** — NOT DONE. Everything above is verified against fakes.
+- [x] Commit.
+
+**Two corrections to this plan, made while building**
+
+1. **`https://evil.test/http://internal/` is NOT rejected**, contrary to the checklist above.
+   That request goes to `evil.test`, an ordinary public host; blocking it would be substring
+   matching rather than address checking, and a check that fires on the wrong signal cannot be
+   reasoned about. The genuinely dangerous shape — tested instead — is
+   `https://hooks.example.com@169.254.169.254/`, where the authority's host IS the metadata
+   address and a naive parser sees the trusted name first.
+2. **Grace keys on FIRING (`state='success'`), not on delivery.** Keying on
+   `notification_sent_at` would make an alert whose only recipients are email — i.e. every alert
+   until P3 — re-fire on every tick and fill the run log with a success a minute.
+
+**Carried into P3/P4:** reports are claimed and evaluated by nothing yet (the tick runs alerts
+only); an email recipient is skipped with no error until P3 wires SMTP.
 
 **Watch for:** a scheduler test that passes because nothing was due. Assert on the run log, not on
-the absence of an error.
+the absence of an error. *(This bit: the first concurrency test passed with and without
+`SKIP LOCKED`, because plain `FOR UPDATE` blocks and then returns empty. It now asserts the second
+claimer returns inside 500ms.)*
 
 ---
 
