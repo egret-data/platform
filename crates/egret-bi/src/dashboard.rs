@@ -648,9 +648,27 @@ impl DashboardRepo {
     }
 
     /// The dashboard's CURRENT state, shaped exactly like a PUT body so it can be fed straight
-    /// back through the update path. Tab ids become indices — the inverse of `replace_layout`'s
-    /// index→id mapping — and card ids are dropped. That is what makes the value id-free, which
-    /// is what makes revert a re-PUT rather than a graft. `None` if the dashboard is gone.
+    /// back through the update path. `None` if the dashboard is gone.
+    ///
+    /// IT CARRIES IDS, and used to not. The old contract — stated here, in `db_revision_revert`
+    /// and at length in migration 0107 — was that a snapshot is id-free, on the grounds that
+    /// nothing can then collide with the ids currently in the tables. That reasoning was sound
+    /// only because `replace_layout` deleted and reinserted everything on every save, so ids were
+    /// worthless. They are not any more: a save keeps them, and a revert that dropped them would
+    /// be the one remaining operation that silently renumbered a dashboard.
+    ///
+    /// Sending the ids back makes a revert reconcile the same way a save does — a card that still
+    /// exists is updated in place and keeps its id; a card deleted since is inserted fresh, since
+    /// its id is no longer one this dashboard owns and `replace_layout` refuses it. The collision
+    /// the old design worried about is exactly what that ownership check already handles.
+    ///
+    /// TAB IDS TOO, and `tab_index` STAYS. Cards still reference their tab by index, because the
+    /// index also survives a tab being replaced; the tab's own id rides alongside so a tab that
+    /// still exists is not recreated, which would cascade its cards away.
+    ///
+    /// Migration 0107's comment still describes the id-free design. It is left alone deliberately:
+    /// editing an applied migration changes its checksum and sqlx then refuses to run. Read it as
+    /// history — this doc comment is the current contract.
     pub async fn snapshot_current(&self, id: Uuid) -> Result<Option<serde_json::Value>, BiError> {
         let Some(d) = self.get(id).await? else {
             return Ok(None);
@@ -668,9 +686,10 @@ impl DashboardRepo {
             // re-normalises position to 0..n-1 — the same thing the frontend's serializeLayout
             // does, so a snapshot and a hand-made save are the same shape.
             "tabs": tabs.iter().enumerate()
-                .map(|(i, t)| serde_json::json!({ "name": t.name, "position": i as i32 }))
+                .map(|(i, t)| serde_json::json!({ "id": t.id, "name": t.name, "position": i as i32 }))
                 .collect::<Vec<_>>(),
             "cards": cards.iter().map(|c| serde_json::json!({
+                "id": c.id,
                 "chart_id": c.chart_id,
                 "card_type": c.card_type,
                 "grid_col": c.grid_col,

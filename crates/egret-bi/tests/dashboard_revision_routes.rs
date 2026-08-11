@@ -321,3 +321,184 @@ async fn a_revision_of_another_dashboard_is_a_404_not_a_cross_object_restore() {
     fx.st.dashboards.delete(fx.dash).await.unwrap();
     other.st.dashboards.delete(other.dash).await.unwrap();
 }
+
+/// A card that re-sends the id it already has — what the browser sends for every card that was
+/// already on the dashboard.
+fn text_card_with_id(id: &str, col: i32) -> String {
+    format!(
+        r#"{{"id":"{id}","chart_id":null,"card_type":"text","grid_col":{col},"grid_row":0,"size_x":6,"size_y":4,"options":{{}},"tab_index":null}}"#
+    )
+}
+
+async fn card_ids(fx: &Fx) -> Vec<String> {
+    dashboard(fx).await["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// REVERTING MUST NOT RENUMBER THE DASHBOARD.
+///
+/// Saving keeps card ids; if a revert dropped them it would be the one remaining operation that
+/// silently renumbers everything, and the cache, bookmarks and any stored card reference would go
+/// stale on an undo — the exact failure that made an ordinary save fetch five cards into 404s.
+#[tokio::test]
+async fn revert_keeps_the_id_of_a_card_that_still_exists() {
+    let Some(fx) = setup().await else {
+        eprintln!("skip");
+        return;
+    };
+    assert_eq!(
+        put(&fx, &put_body(&[text_card(0), text_card(6)])).await,
+        StatusCode::OK
+    );
+    let ids = card_ids(&fx).await;
+    assert_eq!(ids.len(), 2);
+
+    // An ordinary re-save: both cards re-send their ids, so THIS revision's snapshot carries them.
+    assert_eq!(
+        put(
+            &fx,
+            &put_body(&[text_card_with_id(&ids[0], 0), text_card_with_id(&ids[1], 6)])
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        card_ids(&fx).await,
+        ids,
+        "the re-save itself must keep them"
+    );
+    let two_card = revisions(&fx).await[0]["id"].as_str().unwrap().to_string();
+
+    // Now drop the second card, then undo that.
+    assert_eq!(
+        put(&fx, &put_body(&[text_card_with_id(&ids[0], 0)])).await,
+        StatusCode::OK
+    );
+    assert_eq!(card_ids(&fx).await, vec![ids[0].clone()]);
+
+    assert_eq!(revert(&fx, &two_card).await, StatusCode::OK);
+    let after = card_ids(&fx).await;
+    assert_eq!(after.len(), 2, "revert must restore the earlier card set");
+    assert_eq!(
+        after[0], ids[0],
+        "the card that survived must keep its id through the revert"
+    );
+    // The second one CANNOT keep its id: that row was deleted, so the id is no longer one this
+    // dashboard owns and `replace_layout` refuses it rather than resurrecting a deleted row. It
+    // comes back as a new card, which is the honest outcome and worth pinning so nobody later
+    // "fixes" it into an insert-with-supplied-id.
+    assert_ne!(after[1], ids[1]);
+    fx.st.dashboards.delete(fx.dash).await.unwrap();
+}
+
+/// Revisions recorded before snapshots carried ids still revert, exactly as they always did.
+#[tokio::test]
+async fn a_legacy_id_free_snapshot_still_reverts() {
+    let Some(fx) = setup().await else {
+        eprintln!("skip");
+        return;
+    };
+    assert_eq!(put(&fx, &put_body(&[text_card(0)])).await, StatusCode::OK);
+
+    // Hand-written in the OLD shape — no `id` on the card, no `id` on the tab — which is what
+    // every revision stored before this change looks like. `serde(default)` is what makes it
+    // still parse; without it this is a 400 and every pre-existing revision becomes unrevertable.
+    let legacy = serde_json::json!({
+        "name": "Rev", "description": "", "parameters": [], "width": "fixed", "tabs": [],
+        "cards": [{
+            "chart_id": null, "card_type": "text", "grid_col": 0, "grid_row": 0,
+            "size_x": 6, "size_y": 4, "options": {}, "tab_index": null
+        }, {
+            "chart_id": null, "card_type": "text", "grid_col": 6, "grid_row": 0,
+            "size_x": 6, "size_y": 4, "options": {}, "tab_index": null
+        }]
+    });
+    fx.st
+        .dashboards
+        .insert_revision(fx.dash, None, "edit", &legacy, None)
+        .await
+        .unwrap();
+    let legacy_id = revisions(&fx).await[0]["id"].as_str().unwrap().to_string();
+
+    assert_eq!(revert(&fx, &legacy_id).await, StatusCode::OK);
+    assert_eq!(
+        card_ids(&fx).await.len(),
+        2,
+        "a snapshot with no ids must still restore its card set"
+    );
+    fx.st.dashboards.delete(fx.dash).await.unwrap();
+}
+
+/// The same guarantee for a BASELINE revision, whose snapshot comes from `snapshot_current`
+/// rather than from a request body.
+///
+/// This exists because a mutation check found the gap: deleting the card id from
+/// `snapshot_current` left `revert_keeps_the_id_of_a_card_that_still_exists` green, since that
+/// revision was recorded from the client's PUT. Without this test the snapshot path was pinned
+/// only by a shape assertion, and shape assertions do not notice a revert renumbering a dashboard.
+#[tokio::test]
+async fn revert_to_a_baseline_keeps_the_ids_it_snapshotted() {
+    let Some(fx) = setup().await else {
+        eprintln!("skip");
+        return;
+    };
+    // Place two cards WITHOUT going through the route, so no revision exists yet — that is what
+    // makes the next PUT capture a baseline, and the baseline is a snapshot of this state.
+    let card = |col: i32| egret_bi::NewCard {
+        id: None,
+        chart_id: None,
+        card_type: "text".into(),
+        grid_col: col,
+        grid_row: 0,
+        size_x: 6,
+        size_y: 4,
+        options: serde_json::json!({}),
+        tab_index: None,
+    };
+    fx.st
+        .dashboards
+        .replace_layout(fx.dash, &[], &[card(0), card(6)])
+        .await
+        .unwrap();
+    let ids = card_ids(&fx).await;
+    assert_eq!(ids.len(), 2);
+
+    // First routed save: captures the baseline (the two cards above) and keeps their ids.
+    assert_eq!(
+        put(
+            &fx,
+            &put_body(&[text_card_with_id(&ids[0], 0), text_card_with_id(&ids[1], 6)])
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(card_ids(&fx).await, ids);
+
+    let revs = revisions(&fx).await;
+    let baseline = revs
+        .iter()
+        .find(|r| r["kind"] == "baseline")
+        .expect("the first save must record a baseline")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Drop one card, then revert to the baseline.
+    assert_eq!(
+        put(&fx, &put_body(&[text_card_with_id(&ids[0], 0)])).await,
+        StatusCode::OK
+    );
+    assert_eq!(revert(&fx, &baseline).await, StatusCode::OK);
+
+    let after = card_ids(&fx).await;
+    assert_eq!(after.len(), 2);
+    assert_eq!(
+        after[0], ids[0],
+        "the surviving card must keep its id through a baseline revert"
+    );
+    fx.st.dashboards.delete(fx.dash).await.unwrap();
+}

@@ -13166,7 +13166,7 @@
           "dashboards"
         ],
         "summary": "Restore an earlier revision by replaying it through the ordinary update path.",
-        "description": "The snapshot is id-free by construction (migration 0107), so nothing is remapped — this is NOT\n`DashboardRepo::duplicate`, which needs a tab_map only because it copies rows. Revalidation is\nnot optional: a chart a revision references may have been deleted since, and\n`require_cards_in_ws` inside `apply_dashboard_update` turns that into a 404 rather than a\ndangling card.\n\nThe revert is itself recorded, as kind 'revert', so undoing a revert is an ordinary revert.",
+        "description": "The snapshot CARRIES the card and tab ids it was taken with, so a revert keeps the id of every\ncard that still exists instead of renumbering the whole dashboard. Nothing is remapped here:\n`replace_layout` decides what an id means, and it honours one only when this dashboard already\nowns it — a card deleted since the revision comes back with a fresh id, and an id that never\nbelonged here cannot be adopted. (This is still NOT `DashboardRepo::duplicate`, which needs a\ntab_map because it copies rows into a DIFFERENT dashboard.)\n\nA revision recorded before ids were carried has none, and reverts exactly as it always did —\nevery card inserted fresh. Revalidation is\nnot optional: a chart a revision references may have been deleted since, and\n`require_cards_in_ws` inside `apply_dashboard_update` turns that into a 404 rather than a\ndangling card.\n\nThe revert is itself recorded, as kind 'revert', so undoing a revert is an ordinary revert.",
         "operationId": "db_revision_revert",
         "parameters": [
           {
