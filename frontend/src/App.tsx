@@ -103,7 +103,14 @@ function ExploreRoutes() {
           <Route path="data-api" element={<Placeholder title="Data API" />} />
           <Route path="pipelines" element={<Placeholder title="Pipelines" />} />
           <Route path="workflows" element={<Placeholder title="Workflows" />} />
-          <Route path="alerts" element={<Placeholder title="Alerts" />} />
+          <Route
+            path="alerts"
+            element={
+              <RequireFeature feature="alerts">
+                <Placeholder title="Alerts & Reports" />
+              </RequireFeature>
+            }
+          />
           <Route path="settings" element={<WorkspaceSettings />}>
             <Route index element={<Navigate to="members" replace />} />
             <Route path="members" element={<Members />} />

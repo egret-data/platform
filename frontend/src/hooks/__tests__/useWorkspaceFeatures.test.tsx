@@ -32,7 +32,14 @@ function wrap(fetchImpl: () => Promise<Response> = () => new Promise(() => {})) 
 describe("useWorkspaceFeatures", () => {
   test("returns every key while /me/workspaces is still loading", () => {
     const { result } = renderHook(() => useWorkspaceFeatures(), { wrapper: wrap() });
-    expect(result.current).toEqual(["sql_lab", "datasets", "charts", "dashboards", "notebooks"]);
+    expect(result.current).toEqual([
+      "sql_lab",
+      "datasets",
+      "charts",
+      "dashboards",
+      "notebooks",
+      "alerts",
+    ]);
   });
 
   test("returns the current workspace's actual features once loaded", async () => {
@@ -54,6 +61,16 @@ describe("useDefaultExplorePath", () => {
       wrapper: wrap(() => wsResponse(["charts", "notebooks"])),
     });
     await waitFor(() => expect(result.current).toBe("charts"));
+  });
+
+  test("lands on alerts when it is the only enabled module", async () => {
+    // Alerts sits LAST in nav order, so it is the module a workspace falls back
+    // to rather than one that can ever displace SQL Lab as the default landing
+    // page — the ordering consequence of adding an entry to EXPLORE_MODULES.
+    const { result } = renderHook(() => useDefaultExplorePath(), {
+      wrapper: wrap(() => wsResponse(["alerts"])),
+    });
+    await waitFor(() => expect(result.current).toBe("alerts"));
   });
 
   test("falls back to settings/members when every module is disabled", async () => {

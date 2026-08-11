@@ -1,5 +1,6 @@
 import {
   BarChart3,
+  Bell,
   LayoutDashboard,
   NotebookText,
   SquareTerminal,
@@ -8,7 +9,7 @@ import {
 } from "lucide-react";
 
 /**
- * The five explore modules gated by a workspace's feature entitlements
+ * The explore modules gated by a workspace's feature entitlements
  * (`FeatureDto.key` on the backend), in nav order.
  *
  * This is the SINGLE source of truth for that order plus each module's label,
@@ -33,4 +34,8 @@ export const EXPLORE_MODULES: ExploreModule[] = [
   { key: "charts", label: "Charts", icon: BarChart3, path: "charts" },
   { key: "dashboards", label: "Dashboards", icon: LayoutDashboard, path: "dashboards" },
   { key: "notebooks", label: "Notebooks", icon: NotebookText, path: "notebooks" },
+  // Last in nav order deliberately: Alerts & Reports acts ON the modules above
+  // (it queries data and mails charts), so it reads as their consumer — and
+  // being last means it can never displace SQL Lab as the default landing page.
+  { key: "alerts", label: "Alerts & Reports", icon: Bell, path: "alerts" },
 ];

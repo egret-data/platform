@@ -15,27 +15,37 @@ spec** before implementation; the rest are covered by the design above.
 
 ---
 
-## Phase 0 — Move Alerts into Explore *(small, ships immediately)*
+## Phase 0 — Move Alerts into Explore ✅ *(done)*
 
 Independent of everything else, and worth landing first so the IA question is closed while the
 engine is being built.
 
-**Files**
-- Modify: `frontend/src/lib/exploreModules.ts` — add the module
-- Modify: `frontend/src/components/layout/Sidebar.tsx` — drop `Alerts` from the `Automate` group
-- Modify: `frontend/src/App.tsx:106` — keep the `alerts` route, still a `Placeholder` for now
+**Files** *(as built)*
+- Modify: `frontend/src/lib/exploreModules.ts` — the module, **last** in nav order
+- Modify: `frontend/src/components/layout/Sidebar.tsx` — dropped `Alerts` from `Automate`
+- Modify: `frontend/src/App.tsx` — the `alerts` route, now wrapped in `RequireFeature`
+- Modify: `crates/egret-workspace/src/features.rs` — `FEATURE_KEYS` + a `FEATURES` entry
 - Test: `frontend/src/components/layout/__tests__/Sidebar.test.tsx`,
-  `frontend/src/lib/__tests__/exploreModules.test.ts` (or nearest existing)
+  `frontend/src/hooks/__tests__/useWorkspaceFeatures.test.tsx`, `features.rs` unit tests
+- Modify: `crates/egret-workspace/tests/features_routes.rs` — catalog size read from
+  `FEATURE_KEYS` instead of the literal `5`
 
-- [ ] **Write the failing test.** Assert `Alerts & Reports` renders under the **Explore** heading
-      and is absent from `Automate`; and that it disappears when the `alerts` feature is disabled
-      (the entitlement path is the part that silently breaks).
-- [ ] **Run it, watch it fail** for the right reason (item still under Automate).
-- [ ] **Implement**: add `{ key: "alerts", label: "Alerts & Reports", icon: Bell, path: "alerts" }`
-      to `EXPLORE_MODULES`; remove the `Automate` entry.
-- [ ] **Run the tests.** Also check `useDefaultExplorePath` tests still pass — the module list is
-      shared with it, and adding an entry changes which module a restricted user lands on.
-- [ ] **Commit.**
+- [x] **Write the failing test.** Asserts `Alerts & Reports` renders inside the **Explore** group
+      and not `Automate` (structurally, by group containment — mere presence was already true
+      before the move), and that it disappears when the `alerts` entitlement is absent.
+- [x] **Run it, watch it fail** — 5 frontend + 1 backend red, all for the missing module.
+- [x] **Implement** both sides. The backend catalog entry is not optional: the nav filters on the
+      keys `/me/workspaces` returns, so a frontend-only change is invisible in the browser.
+- [x] **Run the tests.** Full frontend suite green (4300); `useDefaultExplorePath` gained a case
+      pinning that alerts, being last, can only ever be a fallback landing page.
+- [x] **Mutation-check** the group assertion: moving the item back under `Automate` fails 3 tests,
+      so the structural assertion is not passing on presence alone.
+- [x] **Commit.**
+
+**Carried into P1:** the `alerts` feature declares `prefix("alerts")` over routes that do not
+exist yet. That is deliberate — an unmatched prefix rule is inert, whereas a route that lands
+before its rule fails OPEN — but P1 must mount its router under `/api/ws/{workspace}/alerts` for
+the declaration to bite.
 
 ---
 

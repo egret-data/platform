@@ -192,7 +192,10 @@ async fn list_returns_every_feature_enabled_by_default() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = f.json(resp).await;
     let arr = json.as_array().expect("array");
-    assert_eq!(arr.len(), 5);
+    // Against the catalog rather than a literal count: the point of this
+    // assertion is "the route lists every module", which a hard-coded number
+    // turns into "…and someone remembered to bump it" every time one is added.
+    assert_eq!(arr.len(), egret_workspace::features::FEATURE_KEYS.len());
     assert!(arr.iter().all(|f| f["enabled"] == true));
     assert!(arr
         .iter()
