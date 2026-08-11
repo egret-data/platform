@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Plus, ChevronUp, ChevronDown, Trash2 } from "lucide-react";
 import type { Rule, SingleColorRule } from "../format-types";
 import { Button } from "@/components/ui/button";
+import { ICON_BUTTON } from "./FieldLabel";
 import { RuleEditor } from "./RuleEditor";
 
 interface ResultColumn { name: string; type: string }
@@ -57,13 +58,13 @@ export function ConditionalFormattingSection({
             <span className="truncate text-xs">{describeRule(rule)}</span>
           </button>
           <div className="flex items-center text-muted-foreground">
-            <button type="button" aria-label="move rule up" disabled={i === 0} className="rounded p-0.5 hover:bg-accent hover:text-foreground disabled:opacity-30" onClick={() => move(i, -1)}>
+            <button type="button" aria-label="move rule up" disabled={i === 0} className={ICON_BUTTON} onClick={() => move(i, -1)}>
               <ChevronUp className="h-3.5 w-3.5" />
             </button>
-            <button type="button" aria-label="move rule down" disabled={i === rules.length - 1} className="rounded p-0.5 hover:bg-accent hover:text-foreground disabled:opacity-30" onClick={() => move(i, 1)}>
+            <button type="button" aria-label="move rule down" disabled={i === rules.length - 1} className={ICON_BUTTON} onClick={() => move(i, 1)}>
               <ChevronDown className="h-3.5 w-3.5" />
             </button>
-            <button type="button" aria-label="delete rule" className="rounded p-0.5 hover:bg-accent hover:text-destructive" onClick={() => onChange(rules.filter((_, k) => k !== i))}>
+            <button type="button" aria-label="delete rule" className={`${ICON_BUTTON} hover:text-destructive`} onClick={() => onChange(rules.filter((_, k) => k !== i))}>
               <Trash2 className="h-3.5 w-3.5" />
             </button>
           </div>

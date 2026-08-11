@@ -48,3 +48,23 @@ export const FIELD_LABEL = "text-sm font-normal text-foreground";
  * which survives at any zoom, rather than letter-spacing, which does not.
  */
 export const GROUP_LABEL = "text-xs font-medium text-muted-foreground";
+
+/**
+ * The box every ICON-ONLY button in the config sidebar wears: 24px square, icon centred.
+ *
+ * WHY IT EXISTS. `rounded p-0.5` around an `h-3.5 w-3.5` icon renders **18×18** — a destructive
+ * button, a third smaller than the 24px every other icon control in this panel sits at, sharing a
+ * row with a 40px select. Three components had hand-rolled it: the `Remove …` on a dimension slot,
+ * the move-up/move-down/delete trio on a formatting rule, and `SortRows`.
+ *
+ * WHY THE HEIGHT PASS MISSED IT. That pass banned the classes that NAME a small size (`h-7`,
+ * `h-8`); padding names no size at all, so the guard could not see it and neither could the live
+ * sweep — two of the three only render once the user has added a rule or a sort, and every parity
+ * chart was measured with none. It was found on the deployed cluster, on the one chart that had a
+ * filled dimension slot.
+ *
+ * `size-6` and not a larger target because 24px is the floor this panel agreed on, and a row of
+ * three of these already spans 72px inside a 352px content column.
+ */
+export const ICON_BUTTON =
+  "inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent";
