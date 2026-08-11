@@ -10668,6 +10668,311 @@
         }
       }
     },
+    "/api/ws/{workspace}/alerts": {
+      "get": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "description": "Narrow to one tab. Omitted returns both.",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/ScheduleType"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Schedules in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ScheduleSummaryDto"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "create",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSchedule"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleDetailDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body"
+          },
+          "409": {
+            "description": "Name already used by a schedule of this type"
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/alerts/{id}": {
+      "get": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "detail",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Schedule id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleDetailDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such schedule in this workspace"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "update",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Schedule id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSchedule"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleDetailDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body"
+          },
+          "404": {
+            "description": "No such schedule in this workspace"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "remove",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Schedule id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "No such schedule in this workspace"
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/alerts/{id}/runs": {
+      "get": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "runs",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Schedule id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent runs, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RunDto"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/charts": {
       "get": {
         "tags": [
@@ -23326,6 +23631,138 @@
           }
         }
       },
+      "CreateSchedule": {
+        "type": "object",
+        "description": "Create body. `type` decides which optional block is required, checked in the\nroute before the database's CHECK constraints see it, so the client gets a\nmessage naming the missing field rather than a constraint name.",
+        "required": [
+          "type",
+          "name",
+          "crontab"
+        ],
+        "properties": {
+          "type": {
+            "$ref": "#/components/schemas/ScheduleType"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "crontab": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "database_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "sql": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "validator_type": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ValidatorType"
+              }
+            ]
+          },
+          "validator_config": {},
+          "chart_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "dashboard_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "report_format": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReportFormat"
+              }
+            ]
+          },
+          "custom_width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "custom_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "grace_period_s": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "working_timeout_s": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "log_retention_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "email_subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owners": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Owner user ids. Empty means \"the creator\", resolved server-side — a\nschedule with no owner has no identity to run as (§5.2)."
+          },
+          "recipients": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecipientInput"
+            }
+          }
+        }
+      },
       "CreateSecretInput": {
         "type": "object",
         "description": "Request body for creating a global named secret. Either a typed `data` map\n(with `type`, default `Opaque`) or the legacy single `value` (→ Opaque{value}).",
@@ -25889,6 +26326,22 @@
           }
         }
       },
+      "OwnerDto": {
+        "type": "object",
+        "description": "A schedule owner. The owner is a security-relevant field, not decoration:\nthe alert's query runs with this user's permissions at run time (§5.2).",
+        "required": [
+          "user_id",
+          "email"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          }
+        }
+      },
       "PartitionDto": {
         "type": "object",
         "required": [
@@ -26587,6 +27040,46 @@
           }
         }
       },
+      "RecipientDto": {
+        "type": "object",
+        "description": "A delivery destination. `config` is kind-dependent — `{\"addresses\": [...]}`\nfor email, `{\"url\": \"...\", \"secret_id\": \"...\"}` for webhook — and is\nvalidated against `kind` on the way in.",
+        "required": [
+          "id",
+          "kind",
+          "config"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/RecipientKind"
+          },
+          "config": {}
+        }
+      },
+      "RecipientInput": {
+        "type": "object",
+        "description": "A recipient as submitted; the id is assigned by the server.",
+        "required": [
+          "kind",
+          "config"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/RecipientKind"
+          },
+          "config": {}
+        }
+      },
+      "RecipientKind": {
+        "type": "string",
+        "description": "Where a firing schedule delivers to.",
+        "enum": [
+          "email",
+          "webhook"
+        ]
+      },
       "RenameFolder": {
         "type": "object",
         "required": [
@@ -26623,6 +27116,16 @@
             }
           }
         }
+      },
+      "ReportFormat": {
+        "type": "string",
+        "description": "The rendering a report delivers.",
+        "enum": [
+          "png",
+          "pdf",
+          "csv",
+          "text"
+        ]
       },
       "ResetPasswordInput": {
         "type": "object",
@@ -26910,6 +27413,65 @@
           }
         }
       },
+      "RunDto": {
+        "type": "object",
+        "description": "One entry in the run-log drawer.",
+        "required": [
+          "id",
+          "state",
+          "started_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RunState"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ended_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "value": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "notification_sent_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "RunState": {
+        "type": "string",
+        "description": "Superset's five run states, verbatim. They are the vocabulary that makes the\nlist page legible — in particular `noop` (\"ran, condition false\") and `grace`\n(\"would have fired, suppressed\") are the two answers to \"why didn't I get an\nemail?\", and collapsing either into `success` loses that answer.",
+        "enum": [
+          "success",
+          "working",
+          "error",
+          "noop",
+          "grace"
+        ]
+      },
       "SaveQuery": {
         "type": "object",
         "required": [
@@ -26981,6 +27543,264 @@
             "format": "date-time"
           }
         }
+      },
+      "ScheduleDetailDto": {
+        "type": "object",
+        "description": "The editor's view: everything on the summary plus the type-specific blocks,\nrecipients, and the advanced knobs.",
+        "required": [
+          "id",
+          "type",
+          "name",
+          "description",
+          "active",
+          "crontab",
+          "timezone",
+          "validator_config",
+          "grace_period_s",
+          "working_timeout_s",
+          "log_retention_days",
+          "owners",
+          "recipients",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/ScheduleType"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "crontab": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "next_run_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "database_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sql": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "validator_type": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ValidatorType"
+              }
+            ]
+          },
+          "validator_config": {},
+          "last_state": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RunState"
+              }
+            ]
+          },
+          "last_eval_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_value": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "chart_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dashboard_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "report_format": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReportFormat"
+              }
+            ]
+          },
+          "custom_width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "custom_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "grace_period_s": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "working_timeout_s": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "log_retention_days": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "email_subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owners": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OwnerDto"
+            }
+          },
+          "recipients": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecipientDto"
+            }
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ScheduleSummaryDto": {
+        "type": "object",
+        "description": "One row of the list page.\n\n`last_state` is the column the page exists for, so it is on the summary\nrather than the detail — a list that needs a second request per row to say\nwhether anything is broken would not be opened.",
+        "required": [
+          "id",
+          "type",
+          "name",
+          "description",
+          "active",
+          "crontab",
+          "timezone",
+          "owners",
+          "updated_at",
+          "can_manage"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/ScheduleType"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "crontab": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "next_run_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_state": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RunState"
+              }
+            ]
+          },
+          "last_eval_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "owners": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OwnerDto"
+            }
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "can_manage": {
+            "type": "boolean",
+            "description": "Whether the caller may edit/delete schedules in this workspace.\n\nOne workspace-level answer repeated on every row, not a per-object\ndecision — `alert:manage` is workspace-scoped, so the answer is the same\nfor the whole list. It exists because the client CANNOT derive it: a\nsession's `permissions` carries PLATFORM grants only, so a UI that\nguessed would show a reader destructive controls that 403 on click."
+          }
+        }
+      },
+      "ScheduleType": {
+        "type": "string",
+        "description": "What a schedule does: evaluate a query (`alert`) or deliver a rendering of a\nsaved object (`report`).",
+        "enum": [
+          "alert",
+          "report"
+        ]
       },
       "SchemaColumn": {
         "type": "object",
@@ -28252,6 +29072,134 @@
           }
         }
       },
+      "UpdateSchedule": {
+        "type": "object",
+        "description": "Update body. Same shape as create minus `type`, which is immutable: an alert\nand a report have disjoint required fields, so flipping the type of an\nexisting row can only produce a row that violates its own constraints.",
+        "required": [
+          "name",
+          "active",
+          "crontab"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "crontab": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "database_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "sql": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "validator_type": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ValidatorType"
+              }
+            ]
+          },
+          "validator_config": {},
+          "chart_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "dashboard_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "report_format": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReportFormat"
+              }
+            ]
+          },
+          "custom_width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "custom_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "grace_period_s": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "working_timeout_s": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "log_retention_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "email_subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owners": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "recipients": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecipientInput"
+            }
+          }
+        }
+      },
       "UpdateSecretInput": {
         "type": "object",
         "description": "Request body for updating a global named secret. Any subset may be present:\na `name` triggers a rename (re-describing with `description`); a `type`+`data`\n(or legacy `value`) rotates the underlying vault row.",
@@ -28387,6 +29335,14 @@
             "type": "string"
           }
         }
+      },
+      "ValidatorType": {
+        "type": "string",
+        "description": "How an alert's query result becomes a fire/don't-fire decision.",
+        "enum": [
+          "not_null",
+          "operator"
+        ]
       },
       "WarehouseConfigDto": {
         "type": "object",

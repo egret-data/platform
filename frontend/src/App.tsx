@@ -25,6 +25,7 @@ import DatasetDetail from "@/routes/explore/DatasetDetail";
 import Charts from "@/routes/explore/Charts";
 import ChartExplore from "@/routes/explore/ChartExplore";
 import Dashboards from "@/routes/explore/Dashboards";
+import Alerts from "@/routes/explore/Alerts";
 import DashboardView from "@/routes/explore/DashboardView";
 import Notebooks from "@/routes/explore/Notebooks";
 import NotebookPage from "@/routes/explore/NotebookPage";
@@ -107,7 +108,7 @@ function ExploreRoutes() {
             path="alerts"
             element={
               <RequireFeature feature="alerts">
-                <Placeholder title="Alerts & Reports" />
+                <Alerts />
               </RequireFeature>
             }
           />

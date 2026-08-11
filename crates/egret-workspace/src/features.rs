@@ -162,10 +162,9 @@ pub const FEATURES: &[Feature] = &[
         key: "alerts",
         label: "Alerts & Reports",
         description: "Schedule SQL alerts and recurring report deliveries.",
-        // The routes this claims do not exist yet (P1 creates them). Declaring
-        // the rule now rather than later means the module cannot be mounted
-        // ungated by accident: a prefix rule that matches nothing is inert,
-        // whereas a route that lands before its rule fails OPEN.
+        // Claims `egret-automation`'s router (P1). Declared in P0, one phase
+        // before the routes existed, because an unmatched prefix rule is inert
+        // while a route that lands before its rule fails OPEN.
         rules: &[prefix("alerts")],
     },
 ];

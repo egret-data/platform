@@ -32,6 +32,7 @@ egret-policy.workspace = true
 egret-secrets.workspace = true
 egret-query.workspace = true
 egret-bi.workspace = true
+egret-automation.workspace = true
 egret-notebook.workspace = true
 egret-kernel.workspace = true
 egret-orchestrator.workspace = true

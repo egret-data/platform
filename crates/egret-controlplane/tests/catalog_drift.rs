@@ -53,6 +53,8 @@ const EXTRA_FILES: &[&str] = &[
     // Workspace-feature keys are gated via `require_workspace` in the
     // feature-route crates (mostly via `const` args, resolved below).
     "../egret-bi/src/routes.rs",
+    // `alert:manage` is gated via `authz::require` in the Alerts & Reports seam.
+    "../egret-automation/src/routes.rs",
     "../egret-notebook/src/routes.rs",
     "../egret-query/src/execution/routes.rs",
     "../egret-query/src/registry/routes.rs",

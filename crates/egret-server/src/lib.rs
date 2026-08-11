@@ -32,6 +32,8 @@ pub struct AppState {
     pub engine: Option<egret_query::EngineState>,
     /// Present once the BI layer is wired (in `egret-bin`); `None` in unit tests.
     pub bi: Option<egret_bi::BiState>,
+    /// Present once the Alerts & Reports seam is wired (in `egret-bin`); `None` in unit tests.
+    pub automation: Option<egret_automation::AutomationState>,
     /// Present once the notebook layer is wired (in `egret-bin`); `None` in unit tests.
     pub notebook: Option<egret_notebook::NotebookState>,
     /// Present once the kernel layer is wired (in `egret-bin`); `None` in unit tests.
@@ -63,6 +65,7 @@ impl AppState {
             database: None,
             engine: None,
             bi: None,
+            automation: None,
             notebook: None,
             kernel: None,
             control_plane: None,
@@ -116,6 +119,7 @@ pub fn openapi_doc() -> utoipa::openapi::OpenApi {
     let mut doc = BaseApiDoc::openapi();
     doc.merge(egret_query::openapi());
     doc.merge(egret_bi::openapi());
+    doc.merge(egret_automation::openapi());
     doc.merge(egret_auth::openapi());
     doc.merge(egret_workspace::openapi());
     doc.merge(egret_notebook::openapi());
@@ -214,6 +218,14 @@ pub fn build_router(state: AppState) -> Router {
             .nest("/api", bi_routes)
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(bi);
+        router = router.merge(group);
+    }
+
+    if let Some(automation) = state.automation.clone() {
+        let group = Router::new()
+            .nest("/api", egret_automation::automation_router())
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(automation);
         router = router.merge(group);
     }
 

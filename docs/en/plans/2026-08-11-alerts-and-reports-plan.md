@@ -49,37 +49,48 @@ the declaration to bite.
 
 ---
 
-## Phase 1 — Model + CRUD, no execution
+## Phase 1 — Model + CRUD, no execution ✅ *(done)*
 
 The whole feature as data: create, list, edit, delete schedules and recipients. Nothing runs yet,
 which keeps the review about the model.
 
-**Files**
-- Create: `migrations/0110_automation_schedules.sql` (schema `automation`, five tables per §4)
-- Create: `crates/egret-automation/` — `lib.rs`, `model.rs`, `repo.rs`, `routes.rs`
-- Create: `crates/egret-automation-api/src/lib.rs` — DTOs (`ScheduleDto`, `CreateSchedule`, …)
-- Modify: `crates/egret-server/src/lib.rs` — mount the router, register the OpenAPI paths
-- Modify: `migrations/…` — seed `alert:manage` to `ws_editor`/`ws_admin` (copy 0014's shape)
-- Create: `crates/egret-automation/tests/schedule_repo.rs`, `…/tests/schedule_routes.rs`
-- Frontend: `src/routes/explore/AlertsPage.tsx`, `ScheduleEditor.tsx`, `src/api/automation.ts`
+**Files** *(as built)*
+- Create: `migrations/0110_automation_schedules.sql` — schema `automation`, **four** tables, not
+  five: `smtp_config` belongs to P3, which already declares `0111_automation_smtp.sql`.
+- Create: `crates/egret-automation/` — `lib.rs`, `cron.rs`, `error.rs`, `model.rs`, `repo.rs`,
+  `routes.rs`. `cron.rs` was not in the plan; see below.
+- Create: `crates/egret-automation-api/src/lib.rs` — the wire DTOs
+- Modify: `crates/egret-server/src/lib.rs`, `crates/egret-bin/src/main.rs` — mount + state
+- Modify: `crates/egret-core/src/rbac.rs` — the `alert:manage` catalog entry
+- Modify: `crates/egret-controlplane/tests/catalog_drift.rs` — scan the new seam's routes
+- Create: `crates/egret-automation/tests/{schedule_repo,schedule_routes}.rs`
+- Frontend: `routes/explore/Alerts.tsx`, `components/alerts/{ScheduleEditor,RunLogDrawer}.tsx`,
+  `api/alerts.ts`, `routes/explore/__tests__/Alerts.test.tsx`
 
-- [ ] Migration first, with the CHECK constraints written out (`type`, `validator_type`,
-      `report_format`, the five states). A state written by a typo is a row nothing will ever pick
-      up.
-- [ ] Repo tests (DB-gated, following `crates/egret-bi/tests/dashboard_repo.rs`): create, list by
-      workspace, update, delete, and **the unique constraint on (workspace, type, name)**.
-- [ ] Repo implementation.
-- [ ] Route tests: authz (`alert:manage` required to write), workspace scoping (a schedule of
-      another workspace is a 404, not a 403 — matches the rest of the API), validation (a cron that
-      does not parse is a 400, an alert with no SQL is a 400, a report with neither chart nor
-      dashboard is a 400).
-- [ ] Routes + DTOs; regenerate `openapi.json` and the orval client.
-- [ ] Frontend list page + editor modal against the real API, with the entitlement gate.
-- [ ] Commit.
+- [x] Migration first, with the CHECK constraints written out. Every constraint was **probed
+      directly against a database clone** before any Rust was written — which caught one written
+      backwards (`schedule_report_needs_target` rejected exactly the valid case).
+- [x] Repo tests (13, DB-gated), watched fail on `todo!()`, then the repo.
+- [x] Route tests (12): authz, cross-workspace 404-not-403, validation 400s, 409 on duplicate.
+- [x] Routes + DTOs; `openapi.json` and the orval client regenerated (drift test green).
+- [x] Frontend list page + editor modal + run-log drawer (10 tests), behind `RequireFeature`.
+- [x] Commit.
 
-**Watch for:** `openapi.json` drift is a committed-file gate in this repo. Regenerate it in the
-same commit, and verify with `shasum`, not with the `rtk diff` wrapper — it has reported
-byte-different files as identical.
+**Two additions the plan did not anticipate**
+
+1. **`cron.rs` and two new dependencies** (`croner`, `chrono-tz`). Validating "a cron that does not
+   parse is a 400" needs a parser, and `next_run_at` — which §5.1's claim query keys on — has to be
+   computed on every write or P2 inherits a table of rows it can never claim. `croner` over the
+   older `cron` crate because `cron` requires a leading SECONDS field: it would read the `0 9 * * *`
+   a user types as *minute 9 of every hour*, firing 60× a day with no error to notice.
+2. **`can_manage` on the summary DTO.** Not in the plan, but the list page cannot derive it — a
+   session's `permissions` carries PLATFORM grants only, so workspace-scoped `alert:manage` never
+   appears there. Without it a reader is shown Create/Edit/Delete that 403 on click, which is the
+   exact defect `dashboard_can_manage_routes.rs` exists to prevent.
+
+**Carried into P2:** `automation.schedule_runs` is written by nothing yet, so every run log is
+empty and every `last_state` is NULL — the UI says so rather than implying a schedule ran and did
+nothing. `next_run_at` IS populated, so P2's claim query has rows to find on day one.
 
 ---
 
