@@ -194,20 +194,25 @@ is P4. `automation.smtp_config` is also what a report will send through, unchang
 
 ---
 
-## Phase 4 — Report rendering *(own spec first)*
+## Phase 4 — Report rendering
 
-**Before writing code**, write `docs/en/specs/…-report-renderer-design.md` covering: the print
-route, the per-render token (single-object, single-use, ~60s), image sizing, the k8s Deployment,
-resource limits, and what happens when the renderer is down.
+**The spec is written** — `docs/en/specs/2026-08-12-report-renderer-design.md` — and so is the
+task-by-task plan: **`docs/en/plans/2026-08-12-report-renderer-plan.md`** (8 tasks, 44 steps).
 
-Sketch of the work: `egret-renderer` image (Playwright + Chromium), `POST /render`, cluster-only
-Service, a `/embed/print/:kind/:id` route in the SPA that renders one object chrome-free, token
-minting in the backend, PNG then PDF, and report delivery wired into P3's email sender.
+Decisions taken before writing them, two against the recommendation and recorded as such:
+all four formats in one phase; a render failure is an `error` run retried on schedule; the renderer
+is a REQUIRED component helm always installs.
 
-**Do not start this phase until P2 and P3 are merged.** Alerts are useful without it; it is not
-useful without them.
+The three things that shaped the design:
 
----
+1. **Knowing when to capture is the hard part.** ECharts animates on mount and fonts resolve after
+   first paint, so a fixed wait yields a correct image most of the time and a half-drawn one
+   occasionally — invisible to tests, roughly one run in twenty. Readiness is an explicit flag; a
+   timeout is a FAILED render, never a partial capture.
+2. **Single-use forces the print page to fetch exactly once**, so one endpoint returns the spec and
+   every card's data together and the token row is deleted inside the transaction that reads it.
+3. **A dashboard has no single table**, so `csv`/`text` are chart-only — a new CHECK constraint,
+   which is why P4 carries a migration.
 
 ## Phase 5 — Run log UI, retention, polish
 
