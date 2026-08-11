@@ -185,6 +185,13 @@ pub const UNGATED: &[&str] = &[
     // it stays reachable regardless of which feature modules a workspace has.
     "impersonate",
     "members",
+    // Per-workspace SMTP. Deliberately NOT claimed by `alerts`, even though
+    // alerts are its only consumer today: it is workspace-level configuration
+    // reached from Workspace settings, authorized by `workspace:manage_members`
+    // rather than by a module entitlement, and P4's reports will send through
+    // the same relay. Gating it on `alerts` would mean an admin could not
+    // prepare (or clean up) mail settings for a module they had switched off.
+    "notifications",
     "objects",
     "roles",
     "shares",
@@ -451,6 +458,10 @@ mod tests {
             "engines",
             "databases",
             "access-requests",
+            // Workspace SMTP: reached from Workspace settings and authorized by
+            // `workspace:manage_members`, so it must stay reachable with every
+            // module switched off.
+            "notifications/smtp",
         ] {
             assert_eq!(
                 gated_feature(suffix, "GET"),

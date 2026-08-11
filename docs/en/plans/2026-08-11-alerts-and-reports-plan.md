@@ -149,22 +149,34 @@ claimer returns inside 500ms.)*
 
 ---
 
-## Phase 3 — Per-workspace SMTP + email delivery
+## Phase 3 — Per-workspace SMTP + email delivery ✅ *(done, except the live check)*
 
-**Files**
+**Files** *(as built)*
 - Create: `migrations/0111_automation_smtp.sql`
-- Create: `crates/egret-automation/src/deliver/email.rs`, `smtp_config.rs`
-- Modify: `crates/egret-secrets` usage for the password
-- Frontend: `src/routes/explore/settings/Notifications.tsx` (Workspace settings tab)
+- Create: `crates/egret-automation/src/deliver/{smtp_config,email}.rs`
+- Modify: `crates/egret-automation/src/{routes,runner}.rs` — settings endpoints; email in the
+  delivery path
+- Create: `crates/egret-automation/tests/{smtp_config_db,smtp_routes}.rs`
+- Frontend: `routes/explore/settings/Notifications.tsx`, `api/notifications.ts`, its test
 
-- [ ] Config repo + route tests, including **that the password never appears in a GET response**
-      (assert on the serialized body, not on the struct).
-- [ ] SMTP config CRUD, password stored as a typed secret, id referenced.
-- [ ] `lettre` sender: STARTTLS / implicit TLS / none; CSV attachment of the triggering rows.
-- [ ] **Send test email** endpoint + button — the only thing that distinguishes "configured" from
-      "configured correctly".
-- [ ] Live check on kind with a mail catcher (mailpit) as the workspace's SMTP host.
-- [ ] Commit.
+- [x] Config repo + route tests, including **that the password never appears in a response** —
+      asserted against the raw body bytes at the HTTP layer, and separately against the stored row
+      read back as text. Mutation-checked by adding a password field to the DTO.
+- [x] SMTP config CRUD, password stored via `egret-secrets`, only its id in the table. Replacing a
+      password deletes the superseded ciphertext; an omitted one is kept, an empty one removed.
+- [x] `lettre` sender: STARTTLS / implicit / none, each explicitly chosen rather than inferred
+      from the port. CSV attachment of the triggering rows, every field quoted.
+- [x] **Send test email** endpoint + button, returning the relay's own error text.
+- [ ] **Live check on kind with mailpit** — NOT DONE, along with P2's live check.
+- [x] Commit.
+
+**One addition the plan did not specify: who may change these settings.** SMTP is gated by
+`workspace:manage_members`, NOT `alert:manage`. An editor can author alerts all day; the relay
+credential and the identity every alert sends as are workspace administration. Mutation-checked by
+downgrading the gate.
+
+**Carried into P4:** report delivery has an email path now, but nothing to attach — the renderer
+is P4. `automation.smtp_config` is also what a report will send through, unchanged.
 
 ---
 

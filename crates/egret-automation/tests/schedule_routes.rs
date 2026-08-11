@@ -111,6 +111,13 @@ async fn setup() -> Option<Fx> {
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
         authz: egret_workspace::rbac::Authorizer::new(db.clone()),
         pdp,
+        smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
+            db.clone(),
+            egret_secrets::SecretStore::new(
+                db.clone(),
+                Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+            ),
+        ),
     };
 
     let mut tok = Vec::new();

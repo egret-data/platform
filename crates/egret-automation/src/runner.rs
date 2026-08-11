@@ -16,6 +16,8 @@ use egret_query::DatabaseRepo;
 use tokio_util::sync::CancellationToken;
 
 use crate::deliver::destination::{Resolver, SsrfPolicy};
+use crate::deliver::email::{self, EmailMessage};
+use crate::deliver::smtp_config::SmtpConfigRepo;
 use crate::deliver::webhook::{self, WebhookPayload};
 use crate::evaluator::{evaluate, owner_identity, EvalError, QueryRunner};
 use crate::repo::{Schedule, ScheduleRepo};
@@ -35,6 +37,7 @@ pub struct AutomationRunner {
     pub query: Arc<dyn QueryRunner>,
     pub resolver: Arc<dyn Resolver>,
     pub policy: SsrfPolicy,
+    pub smtp: SmtpConfigRepo,
 }
 
 impl AutomationRunner {
@@ -139,11 +142,13 @@ impl AutomationRunner {
         })
     }
 
-    /// Send to every webhook recipient. Email waits for P3's SMTP config.
+    /// Send to every recipient — webhooks, and email where the workspace has
+    /// SMTP configured.
     ///
     /// Returns the first failure, if any: the run is still `success` (the alert
     /// DID fire, and the grace period starts) but the error is recorded so a
-    /// silently-unreachable webhook is visible in the run log.
+    /// silently-undelivered notification is visible in the run log rather than
+    /// only in a log file nobody is reading.
     async fn deliver(
         &self,
         s: &Schedule,
@@ -155,9 +160,19 @@ impl AutomationRunner {
             .await
             .map_err(|e| e.to_string())?;
         let mut first_error = None;
+        let mut email_to: Vec<String> = Vec::new();
         for r in recipients {
+            if RecipientKind::parse(&r.kind) == Some(RecipientKind::Email) {
+                // Collected rather than sent per-recipient: one message with
+                // several addressees is one connection to the relay, and one
+                // thread for the people reading it.
+                if let Some(addrs) = r.config.get("addresses").and_then(|v| v.as_array()) {
+                    email_to.extend(addrs.iter().filter_map(|a| a.as_str().map(str::to_string)));
+                }
+                continue;
+            }
             if RecipientKind::parse(&r.kind) != Some(RecipientKind::Webhook) {
-                continue; // email is P3
+                continue;
             }
             let Some(url) = r.config.get("url").and_then(|v| v.as_str()) else {
                 continue;
@@ -179,10 +194,93 @@ impl AutomationRunner {
                 first_error.get_or_insert(e.to_string());
             }
         }
+        if !email_to.is_empty() {
+            if let Err(e) = self.send_email(s, eval, &email_to).await {
+                tracing::warn!(schedule = %s.id, error = %e, "automation: email failed");
+                first_error.get_or_insert(e);
+            }
+        }
+
         match first_error {
             Some(e) => Err(e),
             None => Ok(()),
         }
+    }
+
+    /// One mail to all of this schedule's email recipients.
+    ///
+    /// A workspace with no SMTP configured is a REPORTED failure, not a silent
+    /// skip: the user added an email recipient, so "nothing happened and
+    /// nothing said why" is the outcome to avoid.
+    async fn send_email(
+        &self,
+        s: &Schedule,
+        eval: &crate::evaluator::Evaluation,
+        to: &[String],
+    ) -> Result<(), String> {
+        let config = self
+            .smtp
+            .get(s.workspace_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| crate::deliver::email::EmailError::NotConfigured.to_string())?;
+        let password = self
+            .smtp
+            .resolve_password(&config)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let subject = s
+            .email_subject
+            .clone()
+            .unwrap_or_else(|| format!("[egret] {} triggered", s.name));
+        let value = eval
+            .value
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "(no value)".into());
+        let body = format!(
+            "The alert \"{}\" fired.\n\nObserved value: {}\n\nThe triggering rows are attached.\n",
+            s.name, value
+        );
+        // Column names are not carried on the evaluation, so the CSV header is
+        // positional. Better a header that says `column_1` than one that claims
+        // a name the query did not return.
+        let width = eval
+            .rows
+            .as_array()
+            .and_then(|r| r.first())
+            .and_then(|r| r.as_array())
+            .map(Vec::len)
+            .unwrap_or(1);
+        let columns: Vec<String> = (1..=width).map(|i| format!("column_{i}")).collect();
+        let csv = email::rows_to_csv(&columns, &eval.rows);
+
+        email::send(
+            &config,
+            password,
+            &EmailMessage {
+                to,
+                subject: &subject,
+                body,
+                csv: Some((format!("{}.csv", slugify(&s.name)), csv)),
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+}
+
+/// A filename-safe version of a schedule name.
+fn slugify(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let s = s.trim_matches('-').to_lowercase();
+    if s.is_empty() {
+        "alert".into()
+    } else {
+        s
     }
 }
 

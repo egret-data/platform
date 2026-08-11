@@ -165,6 +165,10 @@ async fn setup(pool: sqlx::PgPool, value: serde_json::Value, fail: bool, webhook
             query: engine.clone(),
             resolver: Arc::new(PublicDns),
             policy: SsrfPolicy::default(),
+            smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
+                db.clone(),
+                egret_secrets::SecretStore::new(db.clone(), None),
+            ),
         },
         db,
         schedule,

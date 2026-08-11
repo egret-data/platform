@@ -26,6 +26,7 @@ import Charts from "@/routes/explore/Charts";
 import ChartExplore from "@/routes/explore/ChartExplore";
 import Dashboards from "@/routes/explore/Dashboards";
 import Alerts from "@/routes/explore/Alerts";
+import Notifications from "@/routes/explore/settings/Notifications";
 import DashboardView from "@/routes/explore/DashboardView";
 import Notebooks from "@/routes/explore/Notebooks";
 import NotebookPage from "@/routes/explore/NotebookPage";
@@ -120,6 +121,7 @@ function ExploreRoutes() {
             <Route path="requests" element={<AccessRequests />} />
             <Route path="engines" element={<DatabasesPage />} />
             <Route path="general" element={<WorkspaceGeneral />} />
+            <Route path="notifications" element={<Notifications />} />
           </Route>
           <Route path="*" element={<Navigate to={defaultPath} replace />} />
         </Routes>

@@ -4,7 +4,7 @@
 //! would silently escape the module gate.
 
 use axum::extract::{FromRef, Path, Query, State};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use egret_auth::session::SessionService;
 use egret_core::Error;
@@ -14,6 +14,8 @@ use egret_workspace::workspaces::WorkspaceRepo;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::deliver::email::{self, EmailMessage};
+use crate::deliver::smtp_config::{self, SmtpConfigBody, SmtpConfigDto, SmtpConfigRepo};
 use crate::error::{AutomationApiError, AutomationError};
 use crate::model::{
     detail_dto, run_dto, summary_dto, update_body, CreateSchedule, RunDto, ScheduleDetailDto,
@@ -30,6 +32,11 @@ const MANAGE: &str = "alert:manage";
 /// turn the run log into an unpaged table scan.
 const RUNS_LIMIT: i64 = 100;
 
+/// SMTP settings are workspace administration, not alert authoring: they carry
+/// a credential and set the identity every alert in the workspace sends as.
+/// `alert:manage` (an editor grant) is deliberately NOT enough.
+const SMTP_MANAGE: &str = "workspace:manage_members";
+
 #[derive(Clone)]
 pub struct AutomationState {
     pub db: egret_metastore::Db,
@@ -38,6 +45,7 @@ pub struct AutomationState {
     pub workspaces: WorkspaceRepo,
     pub authz: Authorizer,
     pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
+    pub smtp: SmtpConfigRepo,
 }
 
 impl FromRef<AutomationState> for SessionService {
@@ -64,11 +72,27 @@ pub fn automation_router() -> Router<AutomationState> {
             get(detail).put(update).delete(remove),
         )
         .route("/ws/{workspace}/alerts/{id}/runs", get(runs))
+        .route(
+            "/ws/{workspace}/notifications/smtp",
+            get(smtp_get).put(smtp_put).delete(smtp_delete),
+        )
+        .route("/ws/{workspace}/notifications/smtp/test", post(smtp_test))
 }
 
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(list, create, detail, update, remove, runs),
+    paths(
+        list,
+        create,
+        detail,
+        update,
+        remove,
+        runs,
+        smtp_get,
+        smtp_put,
+        smtp_delete,
+        smtp_test
+    ),
     components(schemas(
         egret_automation_api::ScheduleSummaryDto,
         egret_automation_api::ScheduleDetailDto,
@@ -83,6 +107,10 @@ pub fn automation_router() -> Router<AutomationState> {
         egret_automation_api::ScheduleType,
         egret_automation_api::ValidatorType,
         egret_automation_api::ReportFormat,
+        crate::deliver::smtp_config::SmtpConfigDto,
+        crate::deliver::smtp_config::SmtpConfigBody,
+        crate::deliver::smtp_config::TlsMode,
+        SmtpTestBody,
     ))
 )]
 pub struct AutomationApi;
@@ -340,4 +368,142 @@ async fn load_detail(
         owners.get(&id).map(Vec::as_slice).unwrap_or(&[]),
         &recipients,
     )))
+}
+
+// ── Workspace SMTP (P3) ─────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct SmtpTestBody {
+    /// Where to send the probe. Defaults to the configured from-address.
+    #[serde(default)]
+    pub to: Option<String>,
+}
+
+#[utoipa::path(
+    get, path = "/api/ws/{workspace}/notifications/smtp", tag = "alerts",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "The workspace's SMTP settings, without the password",
+         body = SmtpConfigDto),
+        (status = 404, description = "Not configured"),
+    ),
+)]
+async fn smtp_get(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<SmtpConfigDto>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, SMTP_MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+    let cfg = st
+        .smtp
+        .get(ctx.workspace_id.0)
+        .await
+        .map_err(AutomationApiError::from)?
+        .ok_or_else(|| AutomationApiError::from(AutomationError::NotFound("smtp config".into())))?;
+    // `dto` has no password field at all — see its docs.
+    Ok(Json(smtp_config::dto(&cfg)))
+}
+
+#[utoipa::path(
+    put, path = "/api/ws/{workspace}/notifications/smtp", tag = "alerts",
+    params(WorkspacePath), request_body = SmtpConfigBody,
+    responses((status = 200, description = "Saved", body = SmtpConfigDto)),
+)]
+async fn smtp_put(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+    Json(body): Json<SmtpConfigBody>,
+) -> Result<Json<SmtpConfigDto>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, SMTP_MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+    if body.host.trim().is_empty() {
+        return Err(AutomationApiError::from(AutomationError::BadRequest(
+            "host is required".into(),
+        )));
+    }
+    if !body.from_address.contains('@') {
+        return Err(AutomationApiError::from(AutomationError::BadRequest(
+            "from_address must be an email address".into(),
+        )));
+    }
+    let saved = st
+        .smtp
+        .upsert(ctx.workspace_id.0, &body, Some(ctx.principal.user_id.0))
+        .await
+        .map_err(AutomationApiError::from)?;
+    Ok(Json(smtp_config::dto(&saved)))
+}
+
+#[utoipa::path(
+    delete, path = "/api/ws/{workspace}/notifications/smtp", tag = "alerts",
+    params(WorkspacePath),
+    responses((status = 200, description = "Removed")),
+)]
+async fn smtp_delete(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<serde_json::Value>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, SMTP_MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+    st.smtp
+        .delete(ctx.workspace_id.0)
+        .await
+        .map_err(AutomationApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Send a probe message.
+///
+/// This endpoint is the whole reason the settings page is trustworthy:
+/// "configured" and "configured correctly" are otherwise indistinguishable
+/// until an alert fires at 3am and silently does not arrive. The relay's own
+/// error text is returned verbatim, because "authentication failed" and
+/// "connection refused" send the operator to different places.
+#[utoipa::path(
+    post, path = "/api/ws/{workspace}/notifications/smtp/test", tag = "alerts",
+    params(WorkspacePath), request_body = SmtpTestBody,
+    responses(
+        (status = 200, description = "The probe was accepted by the relay"),
+        (status = 400, description = "The relay refused; the message says why"),
+    ),
+)]
+async fn smtp_test(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+    Json(body): Json<SmtpTestBody>,
+) -> Result<Json<serde_json::Value>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, SMTP_MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+    let cfg = st
+        .smtp
+        .get(ctx.workspace_id.0)
+        .await
+        .map_err(AutomationApiError::from)?
+        .ok_or_else(|| AutomationApiError::from(AutomationError::NotFound("smtp config".into())))?;
+    let password = st
+        .smtp
+        .resolve_password(&cfg)
+        .await
+        .map_err(AutomationApiError::from)?;
+
+    let to = vec![body.to.unwrap_or_else(|| cfg.from_address.clone())];
+    email::send(
+        &cfg,
+        password,
+        &EmailMessage {
+            to: &to,
+            subject: "egret test message",
+            body: "This is a test message from egret. If you are reading it, this \
+                   workspace's SMTP settings work.\n"
+                .into(),
+            csv: None,
+        },
+    )
+    .await
+    .map_err(|e| AutomationApiError::from(AutomationError::BadRequest(e.to_string())))?;
+    Ok(Json(serde_json::json!({ "ok": true, "sent_to": to })))
 }

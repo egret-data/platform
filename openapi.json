@@ -19347,6 +19347,140 @@
         }
       }
     },
+    "/api/ws/{workspace}/notifications/smtp": {
+      "get": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "smtp_get",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The workspace's SMTP settings, without the password",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SmtpConfigDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not configured"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "smtp_put",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SmtpConfigBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SmtpConfigDto"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "smtp_delete",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed"
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notifications/smtp/test": {
+      "post": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Send a probe message.",
+        "description": "This endpoint is the whole reason the settings page is trustworthy:\n\"configured\" and \"configured correctly\" are otherwise indistinguishable\nuntil an alert fires at 3am and silently does not arrive. The relay's own\nerror text is returned verbatim, because \"authentication failed\" and\n\"connection refused\" send the operator to different places.",
+        "operationId": "smtp_test",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SmtpTestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The probe was accepted by the relay"
+          },
+          "400": {
+            "description": "The relay refused; the message says why"
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/objects/{kind}/{id}/grants": {
       "get": {
         "tags": [
@@ -28138,6 +28272,109 @@
           }
         }
       },
+      "SmtpConfigBody": {
+        "type": "object",
+        "description": "Create/update body.",
+        "required": [
+          "host",
+          "port",
+          "from_address",
+          "tls_mode"
+        ],
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from_address": {
+            "type": "string"
+          },
+          "from_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tls_mode": {
+            "$ref": "#/components/schemas/TlsMode"
+          },
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Omitted means \"keep the stored password\"; `\"\"` means \"remove it\".\n\nWithout the distinction, an editor that renders a blank field (because\nit cannot show the real one) would erase the password on every save."
+          }
+        }
+      },
+      "SmtpConfigDto": {
+        "type": "object",
+        "description": "What a GET returns.\n\nThere is deliberately no password field — not even an empty or masked one.\n`has_password` is what the editor needs (to show \"configured\" and to let the\nuser keep the existing one), and it is a boolean, so no serialization change\ncan turn it into the secret.",
+        "required": [
+          "host",
+          "port",
+          "from_address",
+          "tls_mode",
+          "has_password",
+          "updated_at"
+        ],
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from_address": {
+            "type": "string"
+          },
+          "from_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tls_mode": {
+            "$ref": "#/components/schemas/TlsMode"
+          },
+          "has_password": {
+            "type": "boolean",
+            "description": "Whether a password is stored. The password itself is never returned."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SmtpTestBody": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where to send the probe. Defaults to the configured from-address."
+          }
+        }
+      },
       "SnapshotDto": {
         "type": "object",
         "required": [
@@ -28760,6 +28997,15 @@
             "type": "string"
           }
         }
+      },
+      "TlsMode": {
+        "type": "string",
+        "description": "How the connection is secured. Spelled out rather than inferred from the\nport: 587-means-STARTTLS is a convention, not a rule, and guessing wrong\nsilently sends credentials in the clear.",
+        "enum": [
+          "starttls",
+          "implicit",
+          "none"
+        ]
       },
       "TokenForm": {
         "type": "object",

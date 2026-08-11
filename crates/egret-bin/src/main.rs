@@ -1336,6 +1336,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
         pdp: pdp.clone(),
+        smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
+            db.clone(),
+            secrets.clone(),
+        ),
     });
 
     let notebook_state = egret_notebook::NotebookState {
@@ -1437,6 +1441,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             policy: egret_automation::deliver::destination::SsrfPolicy {
                 allow_hosts: config.automation.webhook_allow_hosts.clone(),
             },
+            smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
+                db.clone(),
+                secrets.clone(),
+            ),
         });
         egret_automation::runner::spawn(
             automation_runner,

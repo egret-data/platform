@@ -82,6 +82,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # expressed in, so "09:00 Asia/Ho_Chi_Minh" survives DST rather than drifting.
 croner = "2"
 chrono-tz = "0.10"
+# SMTP for alert/report email (P3). rustls to match the rest of the workspace's
+# TLS stack, so there is one certificate story rather than two.
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder", "hostname", "ring"] }
 argon2 = "0.5"
 aes-gcm = "0.10"
 rand = "0.8"
