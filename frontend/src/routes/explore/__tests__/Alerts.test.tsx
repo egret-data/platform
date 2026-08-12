@@ -11,6 +11,8 @@ const runsMock = vi.fn(() => ({ data: [] as ScheduleRun[], isLoading: false }));
 const createMutate = vi.fn().mockResolvedValue({ id: "new" });
 const updateMutate = vi.fn().mockResolvedValue({ id: "s1" });
 const removeMutate = vi.fn().mockResolvedValue(undefined);
+const runNowMutate = vi.fn().mockResolvedValue({ id: "r1", state: "success" });
+const setActiveMutate = vi.fn().mockResolvedValue({ id: "s1", active: false });
 
 vi.mock("@/api/alerts", async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
@@ -21,6 +23,8 @@ vi.mock("@/api/alerts", async (orig) => ({
     create: { mutateAsync: createMutate, isPending: false },
     update: { mutateAsync: updateMutate, isPending: false },
     remove: { mutateAsync: removeMutate, isPending: false },
+    runNow: { mutateAsync: runNowMutate, isPending: false },
+    setActive: { mutateAsync: setActiveMutate, isPending: false },
   }),
 }));
 
@@ -131,6 +135,8 @@ describe("Alerts & Reports list", () => {
     expect(screen.queryByRole("button", { name: /new alert/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /edit/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /delete/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /run now/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
     // ...but the row itself is still readable.
     expect(screen.getByText("Orders dropped")).toBeInTheDocument();
   });
@@ -242,6 +248,67 @@ describe("Alerts & Reports list", () => {
     await user.click(screen.getByRole("button", { name: /run log/i }));
     const log = await screen.findByRole("dialog");
     expect(within(log).getByText(/table not found/i)).toBeInTheDocument();
+  });
+
+  it("shows a humanised crontab, with the raw expression available as a tooltip", () => {
+    renderPage();
+    expect(screen.getByText("Every day at 09:00")).toBeInTheDocument();
+    // The raw expression must still be reachable — a wrong humanisation would
+    // be worse than the raw string, so the original is one hover away.
+    expect(screen.getByTitle("0 9 * * *")).toBeInTheDocument();
+  });
+
+  it("falls back to the raw expression for a crontab it cannot humanise", () => {
+    schedulesMock.mockReturnValue({
+      data: [row({ crontab: "0 9 * * 1-5" })],
+      isLoading: false,
+      isError: false,
+    });
+    renderPage();
+    expect(screen.getByText("0 9 * * 1-5")).toBeInTheDocument();
+  });
+
+  it("runs a schedule now and reports the result, for a user who can manage", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole("button", { name: /run now/i }));
+    await waitFor(() => expect(runNowMutate).toHaveBeenCalledWith("s1"));
+  });
+
+  it("withholds Run now from a user the server says cannot manage", () => {
+    schedulesMock.mockReturnValue({
+      data: [row({ can_manage: false })],
+      isLoading: false,
+      isError: false,
+    });
+    renderPage();
+    expect(screen.queryByRole("button", { name: /run now/i })).not.toBeInTheDocument();
+  });
+
+  it("offers an active toggle to a user who can manage", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    const toggle = screen.getByRole("switch");
+    expect(toggle).toBeChecked();
+    await user.click(toggle);
+    await waitFor(() =>
+      expect(setActiveMutate).toHaveBeenCalledWith({ id: "s1", active: false }),
+    );
+  });
+
+  it("withholds the active toggle from a user who cannot manage, showing a Paused badge instead", () => {
+    // Not merely disabled: a viewer must not even see a control that will
+    // 403 on click. The read-only fallback still answers "is this paused?".
+    schedulesMock.mockReturnValue({
+      data: [row({ can_manage: false, active: false })],
+      isLoading: false,
+      isError: false,
+    });
+    renderPage();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(screen.getByText(/paused/i)).toBeInTheDocument();
   });
 
   it("renders an empty state rather than a bare table when there is nothing", () => {

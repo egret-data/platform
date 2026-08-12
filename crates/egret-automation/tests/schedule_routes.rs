@@ -124,6 +124,43 @@ async fn setup() -> Option<Fx> {
     let secrets = egret_secrets::SecretStore::new(db.clone(), None);
     let ws_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
     let databases = egret_query::DatabaseRepo::new(db.clone(), secrets, ws_secrets);
+    let smtp = egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
+        db.clone(),
+        egret_secrets::SecretStore::new(
+            db.clone(),
+            Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+        ),
+    );
+    // "Run now" goes through the SAME `AutomationRunner` the tick uses — this
+    // is the one place both `AutomationState.runner` (the route) and a real
+    // `runner::spawn` ticker (production) would share, so a manual run and a
+    // scheduled run cannot evaluate an alert differently. This fixture never
+    // spawns the ticker, so the runner here is exercised only via the route.
+    let runner = Arc::new(egret_automation::runner::AutomationRunner {
+        db: db.clone(),
+        schedules: ScheduleRepo::new(db.clone()),
+        databases: databases.clone(),
+        users: egret_auth::users::UserRepo::new(db.clone()),
+        minter: Arc::new(NoMinter),
+        query: Arc::new(egret_automation::evaluator::EngineRunner {
+            databases: databases.clone(),
+            factory: Arc::new(egret_query::execution::connector::DefaultConnectorFactory),
+            limits: egret_query::execution::model::Limits {
+                max_rows: 1000,
+                timeout: std::time::Duration::from_secs(5),
+            },
+        }),
+        resolver: Arc::new(egret_automation::deliver::destination::SystemResolver),
+        policy: egret_automation::deliver::destination::SsrfPolicy::default(),
+        smtp: smtp.clone(),
+        charts: egret_bi::ChartRepo::new(db.clone()),
+        datasets: egret_bi::DatasetRepo::new(db.clone()),
+        render_tokens: RenderTokenRepo::new(db.clone()),
+        renderer: Arc::new(egret_automation::render::client::HttpRenderer::new(
+            "http://127.0.0.1:1".into(),
+        )),
+        public_url: "https://egret.test".into(),
+    });
     let st = AutomationState {
         db: db.clone(),
         schedules: ScheduleRepo::new(db.clone()),
@@ -131,13 +168,7 @@ async fn setup() -> Option<Fx> {
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
         authz: egret_workspace::rbac::Authorizer::new(db.clone()),
         pdp,
-        smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
-            db.clone(),
-            egret_secrets::SecretStore::new(
-                db.clone(),
-                Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
-            ),
-        ),
+        smtp,
         render_tokens: RenderTokenRepo::new(db.clone()),
         charts: egret_bi::ChartRepo::new(db.clone()),
         dashboards: egret_bi::DashboardRepo::new(db.clone()),
@@ -155,6 +186,7 @@ async fn setup() -> Option<Fx> {
                 timeout: std::time::Duration::from_secs(5),
             },
         }),
+        runner,
     };
 
     let mut tok = Vec::new();
@@ -751,6 +783,260 @@ async fn can_manage_distinguishes_a_viewer_from_an_editor() {
     )
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+// ── Run now (P5) ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn running_a_schedule_now_writes_a_run_log_row() {
+    // The route must go through the SAME `AutomationRunner` the tick uses
+    // (`Fx.runner` above), so this asserts on the RUN LOG it wrote — never on
+    // the absence of an error. This fixture's database points at a host
+    // nothing is listening on, so the expected outcome is a recorded
+    // `error`, not a fabricated success; what matters is that the manual run
+    // actually executed and logged SOMETHING through the real evaluator.
+    let fx = fixture!();
+    let (_, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json(&fx, "run me")),
+    )
+    .await;
+    let id = made["id"].as_str().unwrap();
+
+    let (s, run) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts/{id}/run", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "got {run}");
+    assert_eq!(
+        run["state"], "error",
+        "the fake database refuses the connection"
+    );
+
+    let (s, runs) = req(
+        &fx,
+        &fx.editor_tok,
+        "GET",
+        &format!("/ws/{}/alerts/{id}/runs", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let rows = runs.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "the manual run must appear in the run log");
+    assert_eq!(rows[0]["id"], run["id"], "same row the route returned");
+}
+
+#[tokio::test]
+async fn running_a_schedule_does_not_move_its_next_run_or_last_state() {
+    // The manual-run contract from `runner.rs`: `run_now` must not call
+    // `release`, so the schedule's own cadence is untouched by a click.
+    let fx = fixture!();
+    let (_, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json(&fx, "cadence")),
+    )
+    .await;
+    let id = made["id"].as_str().unwrap();
+    let before = made["next_run_at"].as_str().unwrap().to_string();
+
+    req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts/{id}/run", fx.slug),
+        None,
+    )
+    .await;
+
+    let (_, after) = req(
+        &fx,
+        &fx.editor_tok,
+        "GET",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(
+        after["next_run_at"].as_str().unwrap(),
+        before,
+        "a manual run must not change next_run_at"
+    );
+}
+
+#[tokio::test]
+async fn a_viewer_cannot_run_a_schedule() {
+    let fx = fixture!();
+    let (_, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json(&fx, "guarded run")),
+    )
+    .await;
+    let id = made["id"].as_str().unwrap();
+
+    let (s, _) = req(
+        &fx,
+        &fx.viewer_tok,
+        "POST",
+        &format!("/ws/{}/alerts/{id}/run", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "run now requires alert:manage");
+
+    let (_, runs) = req(
+        &fx,
+        &fx.editor_tok,
+        "GET",
+        &format!("/ws/{}/alerts/{id}/runs", fx.slug),
+        None,
+    )
+    .await;
+    assert!(
+        runs.as_array().unwrap().is_empty(),
+        "a forbidden request must not have run anything"
+    );
+}
+
+#[tokio::test]
+async fn running_a_schedule_of_another_workspace_is_404() {
+    let fx = fixture!();
+    let (_, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json(&fx, "elsewhere run")),
+    )
+    .await;
+    let id = made["id"].as_str().unwrap();
+
+    let (s, _) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts/{id}/run", fx.other_slug),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+// ── Active toggle (P5) ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn toggling_active_flips_only_that_field() {
+    let fx = fixture!();
+    let (_, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json(&fx, "togglable")),
+    )
+    .await;
+    let id = made["id"].as_str().unwrap();
+    assert_eq!(made["active"], true);
+
+    let (s, after) = req(
+        &fx,
+        &fx.editor_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}/active", fx.slug),
+        Some(serde_json::json!({"active": false}).to_string()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "got {after}");
+    assert_eq!(after["active"], false);
+    assert_eq!(after["name"], "togglable", "nothing else must change");
+
+    let (_, detail) = req(
+        &fx,
+        &fx.editor_tok,
+        "GET",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(detail["active"], false);
+    assert_eq!(
+        detail["sql"], "SELECT count(*) FROM orders",
+        "the rest of the row must be untouched by the toggle"
+    );
+}
+
+#[tokio::test]
+async fn a_viewer_cannot_toggle_active() {
+    let fx = fixture!();
+    let (_, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json(&fx, "guarded toggle")),
+    )
+    .await;
+    let id = made["id"].as_str().unwrap();
+
+    let (s, _) = req(
+        &fx,
+        &fx.viewer_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}/active", fx.slug),
+        Some(serde_json::json!({"active": false}).to_string()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    let (_, still) = req(
+        &fx,
+        &fx.editor_tok,
+        "GET",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(
+        still["active"], true,
+        "the viewer's request must not have applied"
+    );
+}
+
+#[tokio::test]
+async fn toggling_active_of_another_workspace_is_404() {
+    let fx = fixture!();
+    let (_, made) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json(&fx, "elsewhere toggle")),
+    )
+    .await;
+    let id = made["id"].as_str().unwrap();
+
+    let (s, _) = req(
+        &fx,
+        &fx.editor_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}/active", fx.other_slug),
+        Some(serde_json::json!({"active": false}).to_string()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

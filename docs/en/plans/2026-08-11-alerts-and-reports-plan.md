@@ -216,11 +216,18 @@ The three things that shaped the design:
 
 ## Phase 5 — Run log UI, retention, polish
 
-- [ ] Run-log drawer on the list page (state, duration, value, error).
-- [ ] `log_retention_days` pruning, inline at insert like `MAX_REVISIONS_PER_DASHBOARD`.
-- [ ] Humanised crontab in the list ("every day at 09:00"), timezone shown.
-- [ ] "Run now" action; active toggle from the list row.
-- [ ] Empty states and the entitlement-disabled state.
+- [x] Run-log drawer on the list page (state, duration, value, error).
+- [x] `log_retention_days` pruning, inline at insert like `MAX_REVISIONS_PER_DASHBOARD`.
+- [x] Humanised crontab in the list ("every day at 09:00"), timezone shown. Hand-rolled
+      `frontend/src/lib/humanizeCron.ts`, falling back to the raw expression (kept in a `title`
+      tooltip) for anything it does not prove itself against — steps/ranges/lists beyond a plain
+      minute step or a weekday list, day-of-month or month restrictions.
+- [x] "Run now" action; active toggle from the list row. `POST .../alerts/{id}/run` runs through
+      `AutomationRunner::run_now`, which shares `evaluate_and_deliver` with the tick and skips only
+      `release` — so `next_run_at`/`last_state` are untouched but the grace period still applies.
+      `PUT .../alerts/{id}/active` is a dedicated single-field update, not a read-modify-write
+      through the full-replace `PUT .../alerts/{id}`.
+- [x] Empty states and the entitlement-disabled state.
 
 ---
 

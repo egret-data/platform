@@ -1329,6 +1329,45 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         audit: audit_sink.clone(),
     });
 
+    // The tick engine (P2), built unconditionally and shared: `AutomationState`
+    // holds the SAME `Arc` the ticker below spawns (when
+    // `config.automation.enabled`), so P5's "Run now" route runs a schedule
+    // through the exact `evaluate_and_deliver` the tick uses rather than a
+    // second instance that could quietly drift from it. Building it here does
+    // not start anything — only `runner::spawn`, further down, does that.
+    let automation_runner = std::sync::Arc::new(egret_automation::runner::AutomationRunner {
+        db: db.clone(),
+        schedules: egret_automation::ScheduleRepo::new(db.clone()),
+        databases: databases.clone(),
+        users: UserRepo::new(db.clone()),
+        minter: engine_minter.clone(),
+        query: std::sync::Arc::new(egret_automation::evaluator::EngineRunner {
+            databases: databases.clone(),
+            factory: std::sync::Arc::new(
+                egret_query::execution::connector::DefaultConnectorFactory,
+            ),
+            limits: egret_query::execution::model::Limits {
+                max_rows: config.engine.max_rows,
+                timeout: std::time::Duration::from_secs(config.engine.query_timeout_secs),
+            },
+        }),
+        resolver: std::sync::Arc::new(egret_automation::deliver::destination::SystemResolver),
+        policy: egret_automation::deliver::destination::SsrfPolicy {
+            allow_hosts: config.automation.webhook_allow_hosts.clone(),
+        },
+        smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
+            db.clone(),
+            secrets.clone(),
+        ),
+        charts: egret_bi::ChartRepo::new(db.clone()),
+        datasets: egret_bi::DatasetRepo::new(db.clone()),
+        render_tokens: egret_automation::render::token::RenderTokenRepo::new(db.clone()),
+        renderer: std::sync::Arc::new(egret_automation::render::client::HttpRenderer::new(
+            config.automation.renderer_url.clone(),
+        )),
+        public_url: config.automation.public_url.clone(),
+    });
+
     let automation = Some(egret_automation::AutomationState {
         db: db.clone(),
         schedules: egret_automation::ScheduleRepo::new(db.clone()),
@@ -1347,7 +1386,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         databases: databases.clone(),
         users: UserRepo::new(db.clone()),
         engine_minter: engine_minter.clone(),
-        // Same `EngineRunner` shape `automation_runner` below uses for alert
+        // Same `EngineRunner` shape `automation_runner` above uses for alert
         // evaluation, but with the chart-run ceiling (`egret_bi`'s
         // `MAX_CHART_ROWS`/30s) rather than the alert evaluator's
         // one-row/`config.engine` limits — a rendered report needs every row
@@ -1362,6 +1401,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 timeout: std::time::Duration::from_secs(30),
             },
         }),
+        runner: automation_runner.clone(),
     });
 
     let notebook_state = egret_notebook::NotebookState {
@@ -1442,39 +1482,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // One per replica, beside the kernel reaper and cancelled by the same
     // token. No leader election: the claim uses FOR UPDATE SKIP LOCKED, so N
     // replicas ticking together is the design rather than a hazard.
+    //
+    // `automation_runner` itself is always built (above, shared with
+    // `AutomationState.runner` for P5's "Run now"); this flag only decides
+    // whether the periodic claim loop runs — a replica with it off can still
+    // serve a manual run.
     if config.automation.enabled {
-        let automation_runner = std::sync::Arc::new(egret_automation::runner::AutomationRunner {
-            db: db.clone(),
-            schedules: egret_automation::ScheduleRepo::new(db.clone()),
-            databases: databases.clone(),
-            users: UserRepo::new(db.clone()),
-            minter: engine_minter.clone(),
-            query: std::sync::Arc::new(egret_automation::evaluator::EngineRunner {
-                databases: databases.clone(),
-                factory: std::sync::Arc::new(
-                    egret_query::execution::connector::DefaultConnectorFactory,
-                ),
-                limits: egret_query::execution::model::Limits {
-                    max_rows: config.engine.max_rows,
-                    timeout: std::time::Duration::from_secs(config.engine.query_timeout_secs),
-                },
-            }),
-            resolver: std::sync::Arc::new(egret_automation::deliver::destination::SystemResolver),
-            policy: egret_automation::deliver::destination::SsrfPolicy {
-                allow_hosts: config.automation.webhook_allow_hosts.clone(),
-            },
-            smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
-                db.clone(),
-                secrets.clone(),
-            ),
-            charts: egret_bi::ChartRepo::new(db.clone()),
-            datasets: egret_bi::DatasetRepo::new(db.clone()),
-            render_tokens: egret_automation::render::token::RenderTokenRepo::new(db.clone()),
-            renderer: std::sync::Arc::new(egret_automation::render::client::HttpRenderer::new(
-                config.automation.renderer_url.clone(),
-            )),
-            public_url: config.automation.public_url.clone(),
-        });
         egret_automation::runner::spawn(
             automation_runner,
             std::time::Duration::from_secs(config.automation.tick_interval_secs),

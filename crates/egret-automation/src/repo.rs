@@ -292,6 +292,39 @@ impl ScheduleRepo {
         Ok(Some(row))
     }
 
+    /// Flip only `active`, nothing else (P5's list-row toggle).
+    ///
+    /// A dedicated statement rather than a read-modify-write built on
+    /// `update`: `update` REPLACES every field from a full body, so building
+    /// a toggle out of it would mean reading the current row and writing it
+    /// straight back with one field changed — a window in which a concurrent
+    /// edit (crontab, recipients, SQL, …) could be silently discarded. This
+    /// touches exactly the one column the toggle means to change.
+    ///
+    /// `next_run_at` is deliberately left untouched, in both directions:
+    /// pausing does not need to change it (`claim_due` already requires
+    /// `active`), and resuming does not recompute it either, so a schedule
+    /// paused past its last computed slot becomes due again as soon as it is
+    /// reactivated — the same "catch up once" behaviour a user gets from
+    /// editing and re-saving it.
+    pub async fn set_active(
+        &self,
+        ws: Uuid,
+        id: Uuid,
+        active: bool,
+    ) -> Result<Option<Schedule>, AutomationError> {
+        sqlx::query_as(&format!(
+            "UPDATE automation.schedules SET active = $3, updated_at = now() \
+             WHERE id = $1 AND workspace_id = $2 RETURNING {COLS}"
+        ))
+        .bind(id)
+        .bind(ws)
+        .bind(active)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(AutomationError::from_db)
+    }
+
     /// Returns whether a row was actually deleted, so the route can 404 on an
     /// id belonging to another workspace instead of reporting a false success.
     pub async fn delete(&self, ws: Uuid, id: Uuid) -> Result<bool, AutomationError> {

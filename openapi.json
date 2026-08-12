@@ -10948,6 +10948,121 @@
         }
       }
     },
+    "/api/ws/{workspace}/alerts/{id}/active": {
+      "put": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "set_active",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Schedule id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetActiveBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleSummaryDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such schedule in this workspace"
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/alerts/{id}/run": {
+      "post": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Run one schedule immediately (P5's \"Run now\"). Goes through the exact\nsame `AutomationRunner::run_now` the tick's own claim loop calls\n`evaluate_and_deliver` through — see that function's doc comment for why\na manual run is not a second evaluator and does not bypass the grace\nperiod. Returns the run-log row it just wrote, so the caller can show the\nresult without a second request.",
+        "operationId": "run_now",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Schedule id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ran once; the run-log row it wrote",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such schedule in this workspace"
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/alerts/{id}/runs": {
       "get": {
         "tags": [
@@ -28229,6 +28344,18 @@
               "type": "string"
             },
             "description": "Clearance GROUP ids (as strings; Access P3.4). Each is parsed as a `Uuid`\nbefore hitting the repo — a non-uuid entry is rejected `400 BadRequest`\n(never spliced unvalidated into a Cedar policy string)."
+          }
+        }
+      },
+      "SetActiveBody": {
+        "type": "object",
+        "description": "Flip only `active` (P5's list-row toggle). A dedicated endpoint rather\nthan routing a toggle through `PUT .../alerts/{id}`, which is a FULL\nREPLACE requiring every field — building a toggle on top of it would mean\na read-modify-write that could clobber a concurrent edit to the rest of\nthe schedule.",
+        "required": [
+          "active"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean"
           }
         }
       },

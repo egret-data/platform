@@ -4,7 +4,7 @@
 //! would silently escape the module gate.
 
 use axum::extract::{FromRef, Path, Query, State};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use egret_auth::session::SessionService;
 use egret_core::Error;
@@ -66,6 +66,11 @@ pub struct AutomationState {
     /// already does for alert evaluation. Production wiring is `EngineRunner`
     /// (the real `run_query` path); tests inject a fake.
     pub query: std::sync::Arc<dyn crate::evaluator::QueryRunner>,
+    /// The tick engine itself (P5's "Run now"). The SAME `Arc` production
+    /// wires into `runner::spawn` — never a second instance built from this
+    /// state's own fields — so a manual run and a scheduled run share
+    /// `evaluate_and_deliver` byte for byte and cannot diverge.
+    pub runner: std::sync::Arc<crate::runner::AutomationRunner>,
 }
 
 impl FromRef<AutomationState> for SessionService {
@@ -92,6 +97,8 @@ pub fn automation_router() -> Router<AutomationState> {
             get(detail).put(update).delete(remove),
         )
         .route("/ws/{workspace}/alerts/{id}/runs", get(runs))
+        .route("/ws/{workspace}/alerts/{id}/run", post(run_now))
+        .route("/ws/{workspace}/alerts/{id}/active", put(set_active))
         .route(
             "/ws/{workspace}/notifications/smtp",
             get(smtp_get).put(smtp_put).delete(smtp_delete),
@@ -113,6 +120,8 @@ pub fn automation_router() -> Router<AutomationState> {
         update,
         remove,
         runs,
+        run_now,
+        set_active,
         smtp_get,
         smtp_put,
         smtp_delete,
@@ -137,6 +146,7 @@ pub fn automation_router() -> Router<AutomationState> {
         crate::deliver::smtp_config::SmtpConfigBody,
         crate::deliver::smtp_config::TlsMode,
         SmtpTestBody,
+        SetActiveBody,
         crate::render::payload::RenderPayload,
         crate::render::payload::RenderCard,
     ))
@@ -367,6 +377,101 @@ async fn runs(
         .await
         .map_err(AutomationApiError::from)?;
     Ok(Json(rows.iter().map(run_dto).collect()))
+}
+
+/// Run one schedule immediately (P5's "Run now"). Goes through the exact
+/// same `AutomationRunner::run_now` the tick's own claim loop calls
+/// `evaluate_and_deliver` through — see that function's doc comment for why
+/// a manual run is not a second evaluator and does not bypass the grace
+/// period. Returns the run-log row it just wrote, so the caller can show the
+/// result without a second request.
+#[utoipa::path(
+    post, path = "/api/ws/{workspace}/alerts/{id}/run", tag = "alerts",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "Schedule id")),
+    responses(
+        (status = 200, description = "Ran once; the run-log row it wrote", body = RunDto),
+        (status = 404, description = "No such schedule in this workspace"),
+    ),
+)]
+async fn run_now(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<RunDto>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+
+    // Read (workspace-scoped) first: an id from another workspace must 404
+    // rather than run a schedule the caller cannot even see.
+    let schedule = st
+        .schedules
+        .get(ctx.workspace_id.0, id)
+        .await
+        .map_err(AutomationApiError::from)?
+        .ok_or_else(|| AutomationApiError::from(AutomationError::NotFound("schedule".into())))?;
+
+    st.runner.run_now(&schedule).await;
+
+    // `run_now` always writes exactly one run-log row (`run_and_log`'s
+    // contract), so the newest row for this schedule IS the one it just
+    // wrote — no id needs threading back out of the runner for this.
+    let mut written = st
+        .schedules
+        .runs(ctx.workspace_id.0, id, 1)
+        .await
+        .map_err(AutomationApiError::from)?;
+    let row = written.pop().ok_or_else(|| {
+        AutomationApiError::from(egret_core::Error::Internal(anyhow::anyhow!(
+            "run_now wrote no run-log row for schedule {id}"
+        )))
+    })?;
+    Ok(Json(run_dto(&row)))
+}
+
+/// Flip only `active` (P5's list-row toggle). A dedicated endpoint rather
+/// than routing a toggle through `PUT .../alerts/{id}`, which is a FULL
+/// REPLACE requiring every field — building a toggle on top of it would mean
+/// a read-modify-write that could clobber a concurrent edit to the rest of
+/// the schedule.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct SetActiveBody {
+    pub active: bool,
+}
+
+#[utoipa::path(
+    put, path = "/api/ws/{workspace}/alerts/{id}/active", tag = "alerts",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "Schedule id")),
+    request_body = SetActiveBody,
+    responses(
+        (status = 200, description = "Updated", body = ScheduleSummaryDto),
+        (status = 404, description = "No such schedule in this workspace"),
+    ),
+)]
+async fn set_active(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    Json(body): Json<SetActiveBody>,
+) -> Result<Json<ScheduleSummaryDto>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+
+    let row = st
+        .schedules
+        .set_active(ctx.workspace_id.0, id, body.active)
+        .await
+        .map_err(AutomationApiError::from)?
+        .ok_or_else(|| AutomationApiError::from(AutomationError::NotFound("schedule".into())))?;
+    let owners = st
+        .schedules
+        .owners_for(&[id])
+        .await
+        .map_err(AutomationApiError::from)?;
+    // The caller just passed `alert:manage` above, so `can_manage` is `true`
+    // for this response — same reasoning `list` uses for every row.
+    Ok(Json(summary_dto(&row, &owners, true)))
 }
 
 /// Read a schedule with its owners and recipients, or 404.

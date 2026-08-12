@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
-import { AlertCircle, Bell, FileClock, Plus } from "lucide-react";
+import { AlertCircle, Bell, FileClock, Play, Plus } from "lucide-react";
+import { toast } from "sonner";
 import {
   useScheduleMutations,
   useSchedules,
@@ -9,6 +10,7 @@ import {
 } from "@/api/alerts";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -22,6 +24,7 @@ import {
 } from "@/components/ui/dialog";
 import { ScheduleEditor } from "@/components/alerts/ScheduleEditor";
 import { RunLogDrawer } from "@/components/alerts/RunLogDrawer";
+import { humanizeCrontab } from "@/lib/humanizeCron";
 import type { RunState } from "@/api/alerts";
 
 /**
@@ -58,7 +61,7 @@ export default function Alerts() {
   const ws = useParams().workspace!;
   const [tab, setTab] = useState<ScheduleType>("alert");
   const { data, isLoading, isError } = useSchedules(ws, tab);
-  const { remove } = useScheduleMutations(ws);
+  const { remove, runNow, setActive } = useScheduleMutations(ws);
 
   const [editing, setEditing] = useState<{ id: string | null } | null>(null);
   const [runLogFor, setRunLogFor] = useState<ScheduleSummary | null>(null);
@@ -131,6 +134,7 @@ export default function Alerts() {
           <thead className="border-b text-left text-muted-foreground">
             <tr>
               <th className="py-2 font-medium">Name</th>
+              <th className="py-2 font-medium">Active</th>
               <th className="py-2 font-medium">Last run</th>
               <th className="py-2 font-medium">Schedule</th>
               <th className="py-2 font-medium">Next run</th>
@@ -146,10 +150,23 @@ export default function Alerts() {
                   {s.description && (
                     <div className="text-xs text-muted-foreground">{s.description}</div>
                   )}
-                  {!s.active && (
-                    <Badge variant="outline" className="mt-1">
-                      Paused
-                    </Badge>
+                </td>
+                <td className="py-3">
+                  {canManage ? (
+                    <Switch
+                      checked={s.active}
+                      disabled={setActive.isPending}
+                      aria-label={`${s.active ? "Pause" : "Activate"} ${s.name}`}
+                      onCheckedChange={(active) =>
+                        setActive
+                          .mutateAsync({ id: s.id, active })
+                          .catch((e) => toast.error(String(e)))
+                      }
+                    />
+                  ) : s.active ? (
+                    <span className="text-xs text-muted-foreground">Active</span>
+                  ) : (
+                    <Badge variant="outline">Paused</Badge>
                   )}
                 </td>
                 <td className="py-3">
@@ -161,7 +178,7 @@ export default function Alerts() {
                   )}
                 </td>
                 <td className="py-3">
-                  <code className="text-xs">{s.crontab}</code>
+                  <span title={s.crontab}>{humanizeCrontab(s.crontab)}</span>
                   <div className="text-xs text-muted-foreground">{s.timezone}</div>
                 </td>
                 <td className="py-3 text-muted-foreground">
@@ -172,6 +189,22 @@ export default function Alerts() {
                 </td>
                 <td className="py-3">
                   <div className="flex justify-end gap-2">
+                    {canManage && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={runNow.isPending}
+                        onClick={() =>
+                          runNow
+                            .mutateAsync(s.id)
+                            .then((run) => toast.success(`Ran now: ${STATE_LABEL[run.state]}`))
+                            .catch((e) => toast.error(String(e)))
+                        }
+                      >
+                        <Play className="mr-2 h-4 w-4" />
+                        Run now
+                      </Button>
+                    )}
                     <Button
                       variant="ghost"
                       size="sm"

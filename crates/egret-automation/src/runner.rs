@@ -106,7 +106,24 @@ impl AutomationRunner {
 
     /// Run one claimed schedule to a terminal state.
     async fn run_one(&self, s: Schedule) {
-        let outcome = self.evaluate_and_deliver(&s).await;
+        let (state, value, _error) = self.run_and_log(&s).await;
+        // The next run is computed even on the error path: an alert that fails
+        // must keep trying on its schedule, not stop dead. Leaving it unreleased
+        // would strand the row in `working` until its timeout.
+        let next = crate::cron::next_run_after(&s.crontab, &s.timezone, chrono::Utc::now()).ok();
+        if let Err(e) = release(&self.db, s.id, &state, value, next).await {
+            tracing::error!(schedule = %s.id, error = %e, "automation: release failed");
+        }
+    }
+
+    /// Evaluate+deliver `s` and append the resulting run-log row. Shared by
+    /// the tick (`run_one`, above — which then also `release`s the claim and
+    /// advances `next_run_at`) and manual "Run now" (`run_now`, below — which
+    /// does neither). This is the ONE place that turns an
+    /// `evaluate_and_deliver` outcome into a run-log row, so a manual run and
+    /// a scheduled run can never record the same outcome differently.
+    async fn run_and_log(&self, s: &Schedule) -> (String, Option<f64>, Option<String>) {
+        let outcome = self.evaluate_and_deliver(s).await;
         let (state, value, error) = match outcome {
             Ok(Outcome::Fired { value, delivered }) => ("success", value, delivered.err()),
             Ok(Outcome::NotFired { value }) => ("noop", value, None),
@@ -118,13 +135,44 @@ impl AutomationRunner {
         if let Err(e) = record_run(&self.db, s.id, state, value, error.as_deref(), notified).await {
             tracing::error!(schedule = %s.id, error = %e, "automation: run log write failed");
         }
-        // The next run is computed even on the error path: an alert that fails
-        // must keep trying on its schedule, not stop dead. Leaving it unreleased
-        // would strand the row in `working` until its timeout.
-        let next = crate::cron::next_run_after(&s.crontab, &s.timezone, chrono::Utc::now()).ok();
-        if let Err(e) = release(&self.db, s.id, state, value, next).await {
-            tracing::error!(schedule = %s.id, error = %e, "automation: release failed");
-        }
+        (state.to_string(), value, error)
+    }
+
+    /// Run one schedule immediately — the "Run now" button (P5). Bypasses the
+    /// scheduler queue entirely: unlike `run_one`, it never claims the row
+    /// (no `last_state = 'working'`) and never calls `release`, so
+    /// `next_run_at` is left exactly as it was. That is deliberate: a manual
+    /// run must not cause the schedule's own cadence to skip a slot (because
+    /// `release` moved `next_run_at` forward) or double-fire one (because the
+    /// row was claimed and instantly re-releasable, racing a concurrent
+    /// tick). The tradeoff is that a manual run can run concurrently with a
+    /// tick claiming the same schedule — acceptable, because the only thing
+    /// that must never happen is corrupting the schedule's own timing, and
+    /// this path never touches it.
+    ///
+    /// Runs through the exact same `evaluate_and_deliver` the tick uses (via
+    /// `run_and_log` above), so a manual run and a scheduled run can never
+    /// evaluate an alert differently — including the grace-period check
+    /// inside it.
+    ///
+    /// DELIBERATE CHOICE: a manual run does NOT bypass the grace period. If
+    /// the alert already fired (and notified) within its grace window,
+    /// "Run now" records `grace` and sends nothing — exactly what the tick
+    /// would do right now. Two reasons this is the right default rather than
+    /// a bypass flag threaded into the evaluator:
+    /// (1) a bypass is a second evaluation path in disguise, which is exactly
+    ///     what this function exists to avoid — "Run now" is supposed to
+    ///     answer "what would happen right now", and grace suppression IS
+    ///     part of that answer;
+    /// (2) silently skipping the anti-spam guard because the user clicked a
+    ///     button would let someone who mashes "Run now" a few times in a row
+    ///     spam every recipient once per click, which is the exact failure
+    ///     mode the grace period exists to prevent.
+    /// The `grace` state still lands in the run log, so the UI can show the
+    /// user WHY nothing was sent rather than the button silently doing
+    /// nothing.
+    pub async fn run_now(&self, s: &Schedule) {
+        self.run_and_log(s).await;
     }
 
     async fn evaluate_and_deliver(&self, s: &Schedule) -> Result<Outcome, EvalError> {

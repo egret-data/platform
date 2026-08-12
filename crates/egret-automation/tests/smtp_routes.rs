@@ -97,6 +97,40 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
     let secrets = egret_secrets::SecretStore::new(db.clone(), None);
     let ws_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
     let databases = egret_query::DatabaseRepo::new(db.clone(), secrets, ws_secrets);
+    let smtp = egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
+        db.clone(),
+        egret_secrets::SecretStore::new(
+            db.clone(),
+            Some(egret_secrets::Crypto::new(&[3u8; 32]).unwrap()),
+        ),
+    );
+    // Not exercised by this file's tests; wired for the struct to construct
+    // at all.
+    let runner = Arc::new(egret_automation::runner::AutomationRunner {
+        db: db.clone(),
+        schedules: ScheduleRepo::new(db.clone()),
+        databases: databases.clone(),
+        users: egret_auth::users::UserRepo::new(db.clone()),
+        minter: Arc::new(NoMinter),
+        query: Arc::new(egret_automation::evaluator::EngineRunner {
+            databases: databases.clone(),
+            factory: Arc::new(egret_query::execution::connector::DefaultConnectorFactory),
+            limits: egret_query::execution::model::Limits {
+                max_rows: 1000,
+                timeout: std::time::Duration::from_secs(5),
+            },
+        }),
+        resolver: Arc::new(egret_automation::deliver::destination::SystemResolver),
+        policy: egret_automation::deliver::destination::SsrfPolicy::default(),
+        smtp: smtp.clone(),
+        charts: egret_bi::ChartRepo::new(db.clone()),
+        datasets: egret_bi::DatasetRepo::new(db.clone()),
+        render_tokens: RenderTokenRepo::new(db.clone()),
+        renderer: Arc::new(egret_automation::render::client::HttpRenderer::new(
+            "http://127.0.0.1:1".into(),
+        )),
+        public_url: "https://egret.test".into(),
+    });
     let st = AutomationState {
         db: db.clone(),
         schedules: ScheduleRepo::new(db.clone()),
@@ -104,13 +138,7 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
         authz: egret_workspace::rbac::Authorizer::new(db.clone()),
         pdp,
-        smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
-            db.clone(),
-            egret_secrets::SecretStore::new(
-                db.clone(),
-                Some(egret_secrets::Crypto::new(&[3u8; 32]).unwrap()),
-            ),
-        ),
+        smtp,
         render_tokens: RenderTokenRepo::new(db.clone()),
         charts: egret_bi::ChartRepo::new(db.clone()),
         dashboards: egret_bi::DashboardRepo::new(db.clone()),
@@ -128,6 +156,7 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
                 timeout: std::time::Duration::from_secs(5),
             },
         }),
+        runner,
     };
 
     let mut tok = Vec::new();

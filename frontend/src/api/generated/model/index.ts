@@ -254,6 +254,7 @@ export * from './searchResultDto';
 export * from './secretDto';
 export * from './seedResult';
 export * from './setAccessPolicy';
+export * from './setActiveBody';
 export * from './setDashboardCertification';
 export * from './setDatasetCertification';
 export * from './setFeatures';

@@ -31,6 +31,7 @@ import type {
   RunDto,
   ScheduleDetailDto,
   ScheduleSummaryDto,
+  SetActiveBody,
   SmtpConfigBody,
   SmtpConfigDto,
   SmtpTestBody,
@@ -695,6 +696,193 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getAlertsRemoveMutationOptions(options), queryClient);
+    }
+    export type alertsSetActiveResponse200 = {
+  data: ScheduleSummaryDto
+  status: 200
+}
+
+export type alertsSetActiveResponse404 = {
+  data: void
+  status: 404
+}
+
+export type alertsSetActiveResponseSuccess = (alertsSetActiveResponse200) & {
+  headers: Headers;
+};
+export type alertsSetActiveResponseError = (alertsSetActiveResponse404) & {
+  headers: Headers;
+};
+
+export type alertsSetActiveResponse = (alertsSetActiveResponseSuccess | alertsSetActiveResponseError)
+
+export const getAlertsSetActiveUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/alerts/${encodeURIComponent(id)}/active`
+}
+
+export const alertsSetActive = async (workspace: string,
+    id: string,
+    setActiveBody: SetActiveBody, options?: RequestInit): Promise<alertsSetActiveResponse> => {
+
+  return customInstance<alertsSetActiveResponse>(getAlertsSetActiveUrl(workspace,id),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setActiveBody)
+  }
+);}
+
+
+
+
+
+export const getAlertsSetActiveMutationOptions = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsSetActive>>, TError,{workspace: string;id: string;data: SetActiveBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof alertsSetActive>>, TError,{workspace: string;id: string;data: SetActiveBody}, TContext> => {
+
+const mutationKey = ['alertsSetActive'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof alertsSetActive>>, {workspace: string;id: string;data: SetActiveBody}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  alertsSetActive(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AlertsSetActiveMutationResult = NonNullable<Awaited<ReturnType<typeof alertsSetActive>>>
+    export type AlertsSetActiveMutationBody = SetActiveBody
+    export type AlertsSetActiveMutationError = void
+
+    export const useAlertsSetActive = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsSetActive>>, TError,{workspace: string;id: string;data: SetActiveBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof alertsSetActive>>,
+        TError,
+        {workspace: string;id: string;data: SetActiveBody},
+        TContext
+      > => {
+      return useMutation(getAlertsSetActiveMutationOptions(options), queryClient);
+    }
+    export type alertsRunNowResponse200 = {
+  data: RunDto
+  status: 200
+}
+
+export type alertsRunNowResponse404 = {
+  data: void
+  status: 404
+}
+
+export type alertsRunNowResponseSuccess = (alertsRunNowResponse200) & {
+  headers: Headers;
+};
+export type alertsRunNowResponseError = (alertsRunNowResponse404) & {
+  headers: Headers;
+};
+
+export type alertsRunNowResponse = (alertsRunNowResponseSuccess | alertsRunNowResponseError)
+
+export const getAlertsRunNowUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/alerts/${encodeURIComponent(id)}/run`
+}
+
+/**
+ * @summary Run one schedule immediately (P5's "Run now"). Goes through the exact
+same `AutomationRunner::run_now` the tick's own claim loop calls
+`evaluate_and_deliver` through — see that function's doc comment for why
+a manual run is not a second evaluator and does not bypass the grace
+period. Returns the run-log row it just wrote, so the caller can show the
+result without a second request.
+ */
+export const alertsRunNow = async (workspace: string,
+    id: string, options?: RequestInit): Promise<alertsRunNowResponse> => {
+
+  return customInstance<alertsRunNowResponse>(getAlertsRunNowUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getAlertsRunNowMutationOptions = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsRunNow>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof alertsRunNow>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['alertsRunNow'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof alertsRunNow>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  alertsRunNow(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AlertsRunNowMutationResult = NonNullable<Awaited<ReturnType<typeof alertsRunNow>>>
+
+    export type AlertsRunNowMutationError = void
+
+    /**
+ * @summary Run one schedule immediately (P5's "Run now"). Goes through the exact
+same `AutomationRunner::run_now` the tick's own claim loop calls
+`evaluate_and_deliver` through — see that function's doc comment for why
+a manual run is not a second evaluator and does not bypass the grace
+period. Returns the run-log row it just wrote, so the caller can show the
+result without a second request.
+ */
+export const useAlertsRunNow = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsRunNow>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof alertsRunNow>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getAlertsRunNowMutationOptions(options), queryClient);
     }
     export type alertsRunsResponse200 = {
   data: RunDto[]
