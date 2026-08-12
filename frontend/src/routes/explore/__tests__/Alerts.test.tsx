@@ -36,7 +36,13 @@ vi.mock("@/api/databases", () => ({
   useDatabases: () => ({ data: [{ id: "db1", name: "Trino" }] }),
 }));
 vi.mock("@/api/dashboards", () => ({
-  useDashboards: () => ({ data: [{ id: "d1", name: "Ops" }] }),
+  // Two, so a multi-target report has a second object to pick.
+  useDashboards: () => ({
+    data: [
+      { id: "d1", name: "Ops" },
+      { id: "d2", name: "Revenue" },
+    ],
+  }),
 }));
 vi.mock("@/api/charts", () => ({
   useCharts: () => ({ data: [{ id: "c1", name: "Revenue" }] }),
@@ -261,6 +267,26 @@ describe("Alerts & Reports list", () => {
     // Exactly one target, and no alert-only fields riding along.
     expect(Boolean(body.dashboard_id) !== Boolean(body.chart_id)).toBe(true);
     expect(body.sql ?? null).toBeNull();
+  });
+
+  it("forces PDF once a report covers more than one object", async () => {
+    // A PNG has no second page. Sending one object of several and letting the
+    // recipient believe that is the whole report is the failure to avoid.
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole("tab", { name: /reports/i }));
+    await user.click(screen.getByRole("button", { name: /\+ report/i }));
+    await user.type(screen.getByLabelText(/^name$/i), "weekly pack");
+    await user.selectOptions(screen.getByLabelText(/^format$/i), "png");
+    await user.click(screen.getByRole("button", { name: /add another/i }));
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const body = createMutate.mock.calls[0][0];
+    expect(body.report_format).toBe("pdf");
+    expect(body.targets).toHaveLength(2);
+    // Page order is the order the editor showed.
+    expect(body.targets[0].object_id).not.toBe(body.targets[1].object_id);
   });
 
   it("omits an absent database rather than sending an empty string", async () => {

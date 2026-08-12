@@ -15,7 +15,13 @@ use serde::Serialize;
 /// refactored out from under them.
 #[derive(Debug, Clone, Serialize)]
 pub struct RenderRequest {
+    /// The single-object form. Kept as the primary field so every existing
+    /// caller and the renderer's own one-URL fast path are unchanged.
     pub url: String,
+    /// The multi-object form. When non-empty the renderer captures each page
+    /// and returns ONE document; `url` is then only used for logging.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub urls: Vec<String>,
     pub width: u32,
     pub height: u32,
     pub format: String,

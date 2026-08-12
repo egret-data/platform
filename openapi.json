@@ -24458,6 +24458,13 @@
             "type": "boolean",
             "description": "Metabase's `skip_if_empty`: send nothing when the run produced no rows."
           },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TargetInput"
+            },
+            "description": "Objects a REPORT delivers, in page order. Empty falls back to the\nsingle `chart_id`/`dashboard_id`, which is every pre-0115 row."
+          },
           "owners": {
             "type": "array",
             "items": {
@@ -28477,6 +28484,13 @@
             "type": "boolean",
             "description": "Metabase's `skip_if_empty`: send nothing when the run produced no rows."
           },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TargetInput"
+            },
+            "description": "Objects a REPORT delivers, in page order. Empty falls back to the\nsingle `chart_id`/`dashboard_id`, which is every pre-0115 row."
+          },
           "owners": {
             "type": "array",
             "items": {
@@ -29620,6 +29634,24 @@
           }
         }
       },
+      "TargetInput": {
+        "type": "object",
+        "description": "One object a report delivers.",
+        "required": [
+          "kind",
+          "object_id"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`chart` or `dashboard`."
+          },
+          "object_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "TaskDto": {
         "type": "object",
         "required": [
@@ -30136,6 +30168,13 @@
           "skip_if_empty": {
             "type": "boolean",
             "description": "Metabase's `skip_if_empty`: send nothing when the run produced no rows."
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TargetInput"
+            },
+            "description": "Objects a REPORT delivers, in page order. Empty falls back to the\nsingle `chart_id`/`dashboard_id`, which is every pre-0115 row."
           },
           "owners": {
             "type": "array",

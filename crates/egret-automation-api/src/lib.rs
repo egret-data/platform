@@ -162,6 +162,14 @@ impl RecipientKind {
     }
 }
 
+/// One object a report delivers.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+pub struct TargetInput {
+    /// `chart` or `dashboard`.
+    pub kind: String,
+    pub object_id: uuid::Uuid,
+}
+
 /// A delivery destination. `config` is kind-dependent — `{"addresses": [...]}`
 /// for email, `{"url": "...", "secret_id": "..."}` for webhook — and is
 /// validated against `kind` on the way in.
@@ -264,6 +272,10 @@ pub struct ScheduleDetailDto {
     /// Metabase's `skip_if_empty`: send nothing when the run produced no rows.
     #[serde(default)]
     pub skip_if_empty: bool,
+    /// Objects a REPORT delivers, in page order. Empty falls back to the
+    /// single `chart_id`/`dashboard_id`, which is every pre-0115 row.
+    #[serde(default)]
+    pub targets: Vec<TargetInput>,
 
     pub owners: Vec<OwnerDto>,
     pub recipients: Vec<RecipientDto>,
@@ -321,6 +333,10 @@ pub struct CreateSchedule {
     /// Metabase's `skip_if_empty`: send nothing when the run produced no rows.
     #[serde(default)]
     pub skip_if_empty: bool,
+    /// Objects a REPORT delivers, in page order. Empty falls back to the
+    /// single `chart_id`/`dashboard_id`, which is every pre-0115 row.
+    #[serde(default)]
+    pub targets: Vec<TargetInput>,
 
     /// Owner user ids. Empty means "the creator", resolved server-side — a
     /// schedule with no owner has no identity to run as (§5.2).
@@ -377,6 +393,10 @@ pub struct UpdateSchedule {
     /// Metabase's `skip_if_empty`: send nothing when the run produced no rows.
     #[serde(default)]
     pub skip_if_empty: bool,
+    /// Objects a REPORT delivers, in page order. Empty falls back to the
+    /// single `chart_id`/`dashboard_id`, which is every pre-0115 row.
+    #[serde(default)]
+    pub targets: Vec<TargetInput>,
 
     #[serde(default)]
     pub owners: Vec<Uuid>,

@@ -49,6 +49,7 @@ pub struct WriteBody<'a> {
     pub email_subject: Option<&'a str>,
     pub message: Option<&'a str>,
     pub skip_if_empty: bool,
+    pub targets: &'a [egret_automation_api::TargetInput],
     pub owners: &'a [Uuid],
     pub recipients: &'a [RecipientInput],
 }
@@ -77,6 +78,7 @@ impl<'a> From<&'a CreateSchedule> for WriteBody<'a> {
             email_subject: b.email_subject.as_deref(),
             message: b.message.as_deref(),
             skip_if_empty: b.skip_if_empty,
+            targets: &b.targets,
             owners: &b.owners,
             recipients: &b.recipients,
         }
@@ -108,6 +110,7 @@ pub fn update_body<'a>(b: &'a UpdateSchedule, stored_type: ScheduleType) -> Writ
         email_subject: b.email_subject.as_deref(),
         message: b.message.as_deref(),
         skip_if_empty: b.skip_if_empty,
+        targets: &b.targets,
         owners: &b.owners,
         recipients: &b.recipients,
     }
@@ -233,6 +236,11 @@ pub fn to_new(body: &WriteBody<'_>, creator: Option<Uuid>) -> Result<NewSchedule
         email_subject: body.email_subject.map(str::to_string),
         message: body.message.map(str::to_string),
         skip_if_empty: body.skip_if_empty,
+        targets: body
+            .targets
+            .iter()
+            .map(|t| (t.kind.clone(), t.object_id))
+            .collect(),
         owners,
         recipients: body
             .recipients
@@ -386,7 +394,12 @@ pub fn summary_dto(
     }
 }
 
-pub fn detail_dto(s: &Schedule, owners: &[Owner], recipients: &[Recipient]) -> ScheduleDetailDto {
+pub fn detail_dto(
+    s: &Schedule,
+    owners: &[Owner],
+    recipients: &[Recipient],
+    targets: &[crate::repo::Target],
+) -> ScheduleDetailDto {
     ScheduleDetailDto {
         id: s.id.to_string(),
         ty: ScheduleType::parse(&s.r#type).unwrap_or(ScheduleType::Alert),
@@ -414,6 +427,13 @@ pub fn detail_dto(s: &Schedule, owners: &[Owner], recipients: &[Recipient]) -> S
         email_subject: s.email_subject.clone(),
         message: s.message.clone(),
         skip_if_empty: s.skip_if_empty,
+        targets: targets
+            .iter()
+            .map(|t| egret_automation_api::TargetInput {
+                kind: t.kind.clone(),
+                object_id: t.object_id,
+            })
+            .collect(),
         owners: owners.iter().map(owner_dto).collect(),
         recipients: recipients
             .iter()

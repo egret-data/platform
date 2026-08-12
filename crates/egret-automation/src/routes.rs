@@ -654,10 +654,16 @@ async fn load_detail(
         .recipients_for(id)
         .await
         .map_err(AutomationApiError::from)?;
+    let targets = st
+        .schedules
+        .targets_for(id)
+        .await
+        .map_err(AutomationApiError::from)?;
     Ok(Json(detail_dto(
         &row,
         owners.get(&id).map(Vec::as_slice).unwrap_or(&[]),
         &recipients,
+        &targets,
     )))
 }
 

@@ -7,6 +7,7 @@
  */
 import type { RecipientInput } from './recipientInput';
 import type { ReportFormat } from './reportFormat';
+import type { TargetInput } from './targetInput';
 import type { ValidatorType } from './validatorType';
 
 /**
@@ -51,6 +52,11 @@ export interface UpdateSchedule {
   message?: string | null;
   /** Metabase's `skip_if_empty`: send nothing when the run produced no rows. */
   skip_if_empty?: boolean;
+  /**
+     * Objects a REPORT delivers, in page order. Empty falls back to the
+     * single `chart_id`/`dashboard_id`, which is every pre-0115 row.
+     */
+  targets?: TargetInput[];
   owners?: string[];
   recipients?: RecipientInput[];
 }

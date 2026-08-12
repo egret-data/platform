@@ -82,6 +82,8 @@ export function ScheduleEditor({
   const [threshold, setThreshold] = useState("0");
   const [targetKind, setTargetKind] = useState<"dashboard" | "chart">("dashboard");
   const [targetId, setTargetId] = useState("");
+  /** Reports only: additional objects delivered in the same message. */
+  const [extraTargets, setExtraTargets] = useState<string[]>([]);
   const [reportFormat, setReportFormat] = useState("png");
   const [emails, setEmails] = useState("");
   const [emailSubject, setEmailSubject] = useState("");
@@ -134,6 +136,15 @@ export function ScheduleEditor({
       setTargetId(existing.dashboard_id);
     }
     setReportFormat(existing.report_format ?? "png");
+    // The first stored target is the primary one shown above; the rest are
+    // the extras. A pre-0115 report has no target rows at all and falls back
+    // to the chart_id/dashboard_id the columns still hold.
+    const stored = existing.targets ?? [];
+    if (stored.length > 0) {
+      setTargetKind(stored[0].kind === "chart" ? "chart" : "dashboard");
+      setTargetId(stored[0].object_id);
+      setExtraTargets(stored.slice(1).map((t) => t.object_id));
+    }
     setEmailSubject(existing.email_subject ?? "");
     setOwners(existing.owners.map((o) => o.user_id));
     setGracePeriod(String(existing.grace_period_s ?? 14400));
@@ -251,10 +262,18 @@ export function ScheduleEditor({
           : { chart_id: null, dashboard_id: null }),
       };
     }
+    // Every target as one list, primary first — the server stores page order
+    // from this array, so what the editor shows top-to-bottom is what the PDF
+    // pages read.
+    const allTargets = [defaultTarget, ...extraTargets]
+      .filter(Boolean)
+      .map((id) => ({ kind: targetKind, object_id: id }));
+
     return {
       ...shared,
       type: "report" as const,
-      report_format: reportFormat,
+      report_format: allTargets.length > 1 ? "pdf" : reportFormat,
+      targets: allTargets,
       // Same reason as `database_id` above: an empty target must be absent,
       // not an empty string.
       ...(targetKind === "dashboard"
@@ -489,6 +508,57 @@ export function ScheduleEditor({
               ))}
             </select>
           </div>
+          {extraTargets.map((id, i) => (
+            <div key={i} className="flex items-end gap-2">
+              <div className="flex flex-1 flex-col gap-1.5">
+                <Label htmlFor={`sched-extra-${i}`}>
+                  Also include {targetKind === "dashboard" ? "dashboard" : "chart"}
+                </Label>
+                <select
+                  id={`sched-extra-${i}`}
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                  value={id}
+                  onChange={(e) =>
+                    setExtraTargets(extraTargets.map((x, j) => (j === i ? e.target.value : x)))
+                  }
+                >
+                  {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
+                    <option key={o.id} value={o.id}>{o.name}</option>
+                  ))}
+                </select>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setExtraTargets(extraTargets.filter((_, j) => j !== i))}
+              >
+                Remove
+              </Button>
+            </div>
+          ))}
+          <div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                const pool = (targetKind === "dashboard" ? dashboards : charts) ?? [];
+                const first = pool.find(
+                  (o) => o.id !== defaultTarget && !extraTargets.includes(o.id),
+                );
+                if (first) setExtraTargets([...extraTargets, first.id]);
+              }}
+            >
+              + Add another
+            </Button>
+            {extraTargets.length > 0 && (
+              <span className="ml-2 text-xs text-muted-foreground">
+                Delivered as one PDF, one page each, in this order.
+              </span>
+            )}
+          </div>
+
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="sched-format">Format</Label>
             <select
@@ -503,7 +573,9 @@ export function ScheduleEditor({
               <option value="text">Text</option>
             </select>
             <p className="text-xs text-muted-foreground">
-              Image and PDF delivery needs the rendering service, which is not deployed yet.
+              {extraTargets.length > 0
+                ? "Several objects are always delivered as a multi-page PDF — a PNG has no second page."
+                : "PNG and PDF are produced by the rendering service; CSV and text are read straight from the query."}
             </p>
           </div>
         </section>

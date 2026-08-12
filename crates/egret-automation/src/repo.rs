@@ -89,6 +89,15 @@ pub struct Owner {
     pub email: String,
 }
 
+/// One object a report delivers. A report may have several; an alert has at
+/// most one, and keeps it in the schedule's own columns.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Target {
+    pub kind: String,
+    pub object_id: Uuid,
+    pub ordinal: i32,
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Recipient {
     pub id: Uuid,
@@ -142,6 +151,9 @@ pub struct NewSchedule {
 
     pub owners: Vec<Uuid>,
     pub recipients: Vec<(String, serde_json::Value)>,
+    /// Extra delivery targets, in page order. Empty means "use the single
+    /// target in `chart_id`/`dashboard_id`", which is every pre-0115 row.
+    pub targets: Vec<(String, Uuid)>,
 }
 
 const COLS: &str = "id, workspace_id, type, name, description, active, crontab, timezone, \
@@ -320,7 +332,7 @@ impl ScheduleRepo {
         .await
         .map_err(AutomationError::from_db)?;
 
-        write_children(&mut tx, row.id, &new.owners, &recipients).await?;
+        write_children(&mut tx, row.id, &new.owners, &recipients, &new.targets).await?;
         tx.commit().await.map_err(AutomationError::from_db)?;
         Ok(row)
     }
@@ -402,6 +414,18 @@ impl ScheduleRepo {
         .await
         .map_err(AutomationError::from_db)?;
         Ok(done.rows_affected() > 0)
+    }
+
+    /// Extra targets for one schedule, in page order.
+    pub async fn targets_for(&self, id: Uuid) -> Result<Vec<Target>, AutomationError> {
+        sqlx::query_as(
+            "SELECT kind, object_id, ordinal FROM automation.schedule_targets \
+             WHERE schedule_id = $1 ORDER BY ordinal, kind",
+        )
+        .bind(id)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(AutomationError::from_db)
     }
 
     pub async fn add_bookmark(&self, user: Uuid, id: Uuid) -> Result<(), AutomationError> {
@@ -521,7 +545,12 @@ impl ScheduleRepo {
             .execute(&mut *tx)
             .await
             .map_err(AutomationError::from_db)?;
-        write_children(&mut tx, id, &new.owners, &recipients).await?;
+        sqlx::query("DELETE FROM automation.schedule_targets WHERE schedule_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AutomationError::from_db)?;
+        write_children(&mut tx, id, &new.owners, &recipients, &new.targets).await?;
         tx.commit().await.map_err(AutomationError::from_db)?;
 
         // Only once the row committed: had the write failed, the old secret is
@@ -670,6 +699,7 @@ async fn write_children(
     schedule_id: Uuid,
     owners: &[Uuid],
     recipients: &[(String, serde_json::Value)],
+    targets: &[(String, Uuid)],
 ) -> Result<(), AutomationError> {
     for owner in owners {
         sqlx::query(
@@ -678,6 +708,32 @@ async fn write_children(
         )
         .bind(schedule_id)
         .bind(owner)
+        .execute(&mut **tx)
+        .await
+        .map_err(AutomationError::from_db)?;
+    }
+    for (i, (kind, object_id)) in targets.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO automation.schedule_targets (schedule_id, kind, object_id, ordinal) \
+             VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+        )
+        .bind(schedule_id)
+        .bind(kind)
+        .bind(object_id)
+        .bind(i as i32)
+        .execute(&mut **tx)
+        .await
+        .map_err(AutomationError::from_db)?;
+    }
+    for (i, (kind, object_id)) in targets.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO automation.schedule_targets (schedule_id, kind, object_id, ordinal) \
+             VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+        )
+        .bind(schedule_id)
+        .bind(kind)
+        .bind(object_id)
+        .bind(i as i32)
         .execute(&mut **tx)
         .await
         .map_err(AutomationError::from_db)?;

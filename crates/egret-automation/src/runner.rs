@@ -297,17 +297,55 @@ impl AutomationRunner {
         owner: uuid::Uuid,
         format: ReportFormat,
     ) -> Result<ReportContent, EvalError> {
-        let (kind, object_id) =
-            report_target(s).ok_or(EvalError::NotRunnable("report has no chart or dashboard"))?;
-        let token = self
-            .render_tokens
-            .mint(kind, object_id, owner, RENDER_TOKEN_TTL)
+        // Several targets, in page order — or the single one in the schedule's
+        // own columns, which is every report written before 0115.
+        let stored = self
+            .schedules
+            .targets_for(s.id)
             .await
             .map_err(|e| EvalError::Query(e.to_string()))?;
-        let url = format!(
-            "{}/embed/print/{kind}/{object_id}?t={token}",
-            self.public_url.trim_end_matches('/')
-        );
+        let targets: Vec<(&'static str, uuid::Uuid)> = if stored.is_empty() {
+            report_target(s)
+                .map(|t| vec![t])
+                .ok_or(EvalError::NotRunnable("report has no chart or dashboard"))?
+        } else {
+            stored
+                .iter()
+                .map(|t| {
+                    let kind: &'static str = if t.kind == "chart" {
+                        "chart"
+                    } else {
+                        "dashboard"
+                    };
+                    (kind, t.object_id)
+                })
+                .collect()
+        };
+
+        // One token PER object: a render token is bound to a single object by
+        // design, so N pages need N of them.
+        let mut urls = Vec::with_capacity(targets.len());
+        for (kind, object_id) in &targets {
+            let token = self
+                .render_tokens
+                .mint(kind, *object_id, owner, RENDER_TOKEN_TTL)
+                .await
+                .map_err(|e| EvalError::Query(e.to_string()))?;
+            urls.push(format!(
+                "{}/embed/print/{kind}/{object_id}?t={token}",
+                self.public_url.trim_end_matches('/')
+            ));
+        }
+        let (kind, object_id) = targets[0];
+        let url = urls[0].clone();
+        // A PNG has no second page. Rather than send one object of several and
+        // let the recipient believe that is the whole report, several targets
+        // force the multi-page format.
+        let format = if targets.len() > 1 {
+            ReportFormat::Pdf
+        } else {
+            format
+        };
         let (width, height) = match (s.custom_width, s.custom_height) {
             (Some(w), Some(h)) if w > 0 && h > 0 => (w as u32, h as u32),
             _ => default_size(kind),
@@ -316,6 +354,7 @@ impl AutomationRunner {
             .renderer
             .render(RenderRequest {
                 url,
+                urls: if targets.len() > 1 { urls } else { Vec::new() },
                 width,
                 height,
                 format: format.as_str().to_string(),
@@ -669,6 +708,7 @@ impl AutomationRunner {
             .renderer
             .render(RenderRequest {
                 url,
+                urls: Vec::new(),
                 width,
                 height,
                 format: format.as_str().to_string(),
