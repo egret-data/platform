@@ -154,6 +154,25 @@ pub struct Config {
     pub engine: EngineConfig,
     pub audit: AuditConfig,
     pub kernel: KernelConfig,
+    pub automation: AutomationConfig,
+}
+
+/// Alerts & Reports (P2). The scheduler is on by default: a schedule the user
+/// created and can see in the UI, which silently never runs, is worse than one
+/// that runs and errors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutomationConfig {
+    /// Turn the ticker off entirely (a replica dedicated to serving, say).
+    pub enabled: bool,
+    /// Seconds between ticks. The floor on how promptly a due schedule runs;
+    /// finer than the finest crontab (1 minute) buys nothing.
+    pub tick_interval_secs: u64,
+    /// Hosts a webhook may reach even though they resolve into private space.
+    ///
+    /// The escape hatch from the design's SSRF rule. It exists so that
+    /// "webhook our own in-cluster incident bot" has a supported answer —
+    /// without one, an operator who needs it turns the whole check off.
+    pub webhook_allow_hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,6 +305,11 @@ impl Default for Config {
                 pull_secret: None,
                 callback_url: None,
                 engine_tls_insecure: false,
+            },
+            automation: AutomationConfig {
+                enabled: true,
+                tick_interval_secs: 30,
+                webhook_allow_hosts: vec![],
             },
         }
     }
