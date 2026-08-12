@@ -4,7 +4,7 @@
 //! that produced it as a CSV attachment. An alert people cannot read on a phone
 //! at 3am is an alert they will turn off.
 
-use lettre::message::{header::ContentType, Attachment, MultiPart, SinglePart};
+use lettre::message::{header::ContentType, Attachment as LettreAttachment, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
@@ -66,13 +66,28 @@ fn push_row<'a>(out: &mut String, cells: impl Iterator<Item = &'a str>) {
     out.push('\n');
 }
 
+/// A single file riding along with an [`EmailMessage`].
+///
+/// Generic over content type (rather than a `csv`-shaped field) because P4
+/// adds a second attachment shape — a rendered PNG/PDF — and a report's `csv`
+/// format still uses this same struct with `content_type: "text/csv"`. Bytes
+/// rather than `String`: an image/PDF is binary, and a CSV is ASCII-clean
+/// bytes either way, so one field covers both without a second variant.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub filename: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
 /// One outgoing message.
 pub struct EmailMessage<'a> {
     pub to: &'a [String],
     pub subject: &'a str,
     pub body: String,
-    /// `(filename, contents)` — the triggering rows, when there are any.
-    pub csv: Option<(String, String)>,
+    /// The triggering rows (alerts) or the rendered/exported report, when
+    /// there is one to send.
+    pub attachment: Option<Attachment>,
 }
 
 /// Build the `lettre` transport for `config`.
@@ -122,17 +137,16 @@ pub fn build(config: &SmtpConfig, msg: &EmailMessage<'_>) -> Result<Message, Ema
         .header(ContentType::TEXT_PLAIN)
         .body(msg.body.clone());
 
-    match &msg.csv {
+    match &msg.attachment {
         None => builder
             .singlepart(text)
             .map_err(|e| EmailError::Build(e.to_string())),
-        Some((name, contents)) => {
-            let attachment = Attachment::new(name.clone()).body(
-                contents.clone(),
-                "text/csv"
-                    .parse()
-                    .expect("text/csv is a valid content type"),
-            );
+        Some(a) => {
+            let content_type = a.content_type.parse::<ContentType>().map_err(|_| {
+                EmailError::Build(format!("invalid content type: {}", a.content_type))
+            })?;
+            let attachment =
+                LettreAttachment::new(a.filename.clone()).body(a.bytes.clone(), content_type);
             builder
                 .multipart(MultiPart::mixed().singlepart(text).singlepart(attachment))
                 .map_err(|e| EmailError::Build(e.to_string()))
@@ -201,7 +215,7 @@ mod tests {
             to: &["on-call@example.com".to_string()],
             subject: "[alert] orders",
             body: "value 7".into(),
-            csv: None,
+            attachment: None,
         };
         let built = build(&config("starttls", false), &msg).unwrap();
         let raw = String::from_utf8(built.formatted()).unwrap();
@@ -221,7 +235,7 @@ mod tests {
             to: &["x@example.com".to_string()],
             subject: "s",
             body: "b".into(),
-            csv: None,
+            attachment: None,
         };
         let raw = String::from_utf8(build(&c, &msg).unwrap().formatted()).unwrap();
         assert!(raw.contains("From: alerts@example.com"), "{raw}");
@@ -235,7 +249,11 @@ mod tests {
             to: &["x@example.com".to_string()],
             subject: "s",
             body: "value 7".into(),
-            csv: Some(("orders.csv".into(), "\"n\"\n\"7\"\n".into())),
+            attachment: Some(Attachment {
+                filename: "orders.csv".into(),
+                content_type: "text/csv".into(),
+                bytes: b"\"n\"\n\"7\"\n".to_vec(),
+            }),
         };
         let raw =
             String::from_utf8(build(&config("none", false), &msg).unwrap().formatted()).unwrap();
@@ -250,7 +268,7 @@ mod tests {
             to: &["not an address".to_string()],
             subject: "s",
             body: "b".into(),
-            csv: None,
+            attachment: None,
         };
         assert!(matches!(
             build(&config("none", false), &msg),
@@ -292,7 +310,7 @@ mod tests {
             to: &[],
             subject: "s",
             body: "b".into(),
-            csv: None,
+            attachment: None,
         };
         assert!(send(&config("none", false), None, &msg).await.is_ok());
     }

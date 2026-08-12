@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use egret_automation::deliver::destination::{Resolver, SsrfPolicy};
 use egret_automation::evaluator::{QueryRunner, RunIdentity};
+use egret_automation::render::client::{RenderRequest, Renderer};
 use egret_automation::runner::AutomationRunner;
 use egret_automation::ScheduleRepo;
 use egret_core::tabular::ColumnMeta;
@@ -63,6 +64,18 @@ impl egret_analytics_api::engine_token::EngineTokenMinter for NoMinter {
         egret_analytics_api::engine_token::BrokerError,
     > {
         Err(egret_analytics_api::engine_token::BrokerError::NoRefreshToken)
+    }
+}
+
+/// This fixture only ever runs the ALERT path (P4's report branch is tested
+/// separately in `report_tick.rs`), so the renderer is never actually called
+/// — a hard failure here would turn "the report branch ran unexpectedly" into
+/// a silent pass instead of a loud one.
+struct NeverRenderer;
+#[async_trait::async_trait]
+impl Renderer for NeverRenderer {
+    async fn render(&self, _req: RenderRequest) -> Result<Vec<u8>, String> {
+        Err("NeverRenderer: the alert-path fixture must never call the renderer".into())
     }
 }
 
@@ -170,6 +183,11 @@ async fn setup(pool: sqlx::PgPool, value: serde_json::Value, fail: bool, webhook
                 db.clone(),
                 egret_secrets::SecretStore::new(db.clone(), None),
             ),
+            charts: egret_bi::ChartRepo::new(db.clone()),
+            datasets: egret_bi::DatasetRepo::new(db.clone()),
+            render_tokens: egret_automation::render::token::RenderTokenRepo::new(db.clone()),
+            renderer: Arc::new(NeverRenderer),
+            public_url: "https://egret.internal".into(),
         },
         db,
         schedule,

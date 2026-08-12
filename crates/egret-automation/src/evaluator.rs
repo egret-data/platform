@@ -44,8 +44,14 @@ pub enum EvalError {
     NotANumber(String),
     #[error("{0}")]
     Validator(#[from] ValidatorError),
-    #[error("schedule is not a runnable alert: {0}")]
+    #[error("schedule is not runnable: {0}")]
     NotRunnable(&'static str),
+    /// The renderer (`egret-renderer`) refused or could not be reached. Its
+    /// own message rides through verbatim — it is already redacted of the
+    /// render token (`renderer/server.js`'s `safeLocation`) before it ever
+    /// leaves that process.
+    #[error("render failed: {0}")]
+    Render(String),
 }
 
 /// The engine identity a run executes under. Never constructed from the caller

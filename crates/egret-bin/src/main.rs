@@ -1467,6 +1467,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 db.clone(),
                 secrets.clone(),
             ),
+            charts: egret_bi::ChartRepo::new(db.clone()),
+            datasets: egret_bi::DatasetRepo::new(db.clone()),
+            render_tokens: egret_automation::render::token::RenderTokenRepo::new(db.clone()),
+            renderer: std::sync::Arc::new(egret_automation::render::client::HttpRenderer::new(
+                config.automation.renderer_url.clone(),
+            )),
+            public_url: config.automation.public_url.clone(),
         });
         egret_automation::runner::spawn(
             automation_runner,
