@@ -26,6 +26,9 @@ pub struct ScheduleRepo {
 /// back to what issued it.
 pub const WEBHOOK_SECRET_KIND: &str = "automation_webhook_secret";
 
+/// `secrets.kind` for a Slack bot token.
+pub const SLACK_TOKEN_KIND: &str = "automation_slack_token";
+
 /// A schedule row, as stored. The type-dependent columns are `Option` because
 /// one table holds both alerts and reports; which ones must be present is
 /// pinned by migration 0110's CHECK constraints.
@@ -192,17 +195,20 @@ impl ScheduleRepo {
         let mut stored: HashMap<String, Uuid> = HashMap::new();
         if let Some(id) = existing {
             for r in self.recipients_for(id).await? {
-                if r.kind != "webhook" {
-                    continue;
-                }
-                let url = r.config.get("url").and_then(|v| v.as_str());
-                let sid = r
-                    .config
-                    .get("secret_id")
+                // Keyed by the destination's own identity — a webhook by URL,
+                // a slack recipient by channel — so "absent means keep" can
+                // find the credential that belongs to it.
+                let (key, secret) = match r.kind.as_str() {
+                    "webhook" => (r.config.get("url"), r.config.get("secret_id")),
+                    "slack" => (r.config.get("channel"), r.config.get("token_id")),
+                    _ => continue,
+                };
+                let key = key.and_then(|v| v.as_str());
+                let sid = secret
                     .and_then(|v| v.as_str())
                     .and_then(|s| Uuid::parse_str(s).ok());
-                if let (Some(url), Some(sid)) = (url, sid) {
-                    stored.insert(url.to_string(), sid);
+                if let (Some(key), Some(sid)) = (key, sid) {
+                    stored.insert(key.to_string(), sid);
                 }
             }
         }
@@ -210,6 +216,36 @@ impl ScheduleRepo {
         let mut out = Vec::with_capacity(recipients.len());
         let mut kept: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
         for (kind, config) in recipients {
+            // Slack's bot token is a credential exactly like a webhook signing
+            // secret: the row keeps a reference, never the value. Keyed by
+            // channel, so "absent means keep" works the same way.
+            if kind == "slack" {
+                let channel = config
+                    .get("channel")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let token_id = match config.get("token").and_then(|v| v.as_str()) {
+                    Some("") => None,
+                    Some(t) => Some(
+                        self.secrets
+                            .put(SLACK_TOKEN_KIND, t)
+                            .await
+                            .map_err(|e| AutomationError::BadRequest(e.to_string()))?,
+                    ),
+                    None => stored.get(&channel).copied(),
+                };
+                if let Some(id) = token_id {
+                    kept.insert(id);
+                }
+                let mut cfg = serde_json::Map::new();
+                cfg.insert("channel".into(), serde_json::Value::String(channel));
+                if let Some(id) = token_id {
+                    cfg.insert("token_id".into(), serde_json::Value::String(id.to_string()));
+                }
+                out.push((kind.clone(), serde_json::Value::Object(cfg)));
+                continue;
+            }
             if kind != "webhook" {
                 out.push((kind.clone(), config.clone()));
                 continue;
@@ -257,8 +293,17 @@ impl ScheduleRepo {
     /// The one place a webhook signing secret becomes plaintext, called at
     /// delivery time by the runner.
     pub async fn resolve_webhook_secret(&self, config: &serde_json::Value) -> Option<String> {
+        self.resolve_secret(config, "secret_id").await
+    }
+
+    /// The Slack bot token for one recipient, from the vault.
+    pub async fn resolve_slack_token(&self, config: &serde_json::Value) -> Option<String> {
+        self.resolve_secret(config, "token_id").await
+    }
+
+    async fn resolve_secret(&self, config: &serde_json::Value, key: &str) -> Option<String> {
         let id = config
-            .get("secret_id")
+            .get(key)
             .and_then(|v| v.as_str())
             .and_then(|s| Uuid::parse_str(s).ok())?;
         match self.secrets.get(id).await {

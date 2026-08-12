@@ -15,4 +15,5 @@ export type RecipientKind = typeof RecipientKind[keyof typeof RecipientKind];
 export const RecipientKind = {
   email: 'email',
   webhook: 'webhook',
+  slack: 'slack',
 } as const;

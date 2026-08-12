@@ -307,6 +307,17 @@ fn validate_recipient(r: &RecipientInput) -> Result<(), String> {
             }
             Ok(())
         }
+        RecipientKind::Slack => {
+            let channel = r
+                .config
+                .get("channel")
+                .and_then(|v| v.as_str())
+                .ok_or("a slack recipient needs a \"channel\"")?;
+            if channel.trim().is_empty() {
+                return Err("a slack channel cannot be empty".into());
+            }
+            Ok(())
+        }
         RecipientKind::Webhook => {
             let url = r
                 .config

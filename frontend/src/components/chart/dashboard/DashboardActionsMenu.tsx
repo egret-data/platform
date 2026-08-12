@@ -54,6 +54,18 @@ export function DashboardActionsMenu({ ws, dash, trashed, folders, canManage = t
         onNewFolder={() => onNewFolder(dash)}
       />
       {onShare && <DropdownMenuItem onClick={() => onShare(dash)}>Share…</DropdownMenuItem>}
+      {/* Discovery: both reference products create a subscription FROM the
+          object, not from a separate page you must already know about. */}
+      <DropdownMenuItem
+        onClick={() =>
+          nav(
+            `/explore/${ws}/alerts?new=report&kind=dashboard&object=${dash.id}`,
+          )
+        }
+      >
+        Subscribe…
+      </DropdownMenuItem>
+
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={() => onTrash(dash)}>Move to Trash</DropdownMenuItem>
     </RowActionsMenu>

@@ -27795,7 +27795,8 @@
         "description": "Where a firing schedule delivers to.",
         "enum": [
           "email",
-          "webhook"
+          "webhook",
+          "slack"
         ]
       },
       "RenameFolder": {

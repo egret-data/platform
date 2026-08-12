@@ -41,11 +41,14 @@ export function ScheduleEditor({
   ws,
   type,
   scheduleId,
+  prefill,
   onDone,
 }: {
   ws: string;
   type: ScheduleType;
   scheduleId: string | null;
+  /** A target chosen elsewhere — the Subscribe item on a dashboard or chart. */
+  prefill?: { kind: "chart" | "dashboard"; object: string };
   onDone: () => void;
 }) {
   const { data: existing } = useSchedule(ws, scheduleId);
@@ -80,8 +83,10 @@ export function ScheduleEditor({
   const [validatorType, setValidatorType] = useState<"not_null" | "operator">("not_null");
   const [op, setOp] = useState(">");
   const [threshold, setThreshold] = useState("0");
-  const [targetKind, setTargetKind] = useState<"dashboard" | "chart">("dashboard");
-  const [targetId, setTargetId] = useState("");
+  const [targetKind, setTargetKind] = useState<"dashboard" | "chart">(
+    prefill?.kind ?? "dashboard",
+  );
+  const [targetId, setTargetId] = useState(prefill?.object ?? "");
   /** Reports only: additional objects delivered in the same message. */
   const [extraTargets, setExtraTargets] = useState<string[]>([]);
   const [reportFormat, setReportFormat] = useState("png");
@@ -96,6 +101,9 @@ export function ScheduleEditor({
   /** Alerts only: attach a rendering of this chart/dashboard when it fires. */
   const [attachTarget, setAttachTarget] = useState(false);
   const [webhooks, setWebhooks] = useState("");
+  const [slackChannel, setSlackChannel] = useState("");
+  const [slackToken, setSlackToken] = useState("");
+  const [slackHasToken, setSlackHasToken] = useState(false);
   /**
    * Which webhook URLs already have an HMAC signing secret.
    *
@@ -164,6 +172,12 @@ export function ScheduleEditor({
       .map((r) => r.config as { url?: string; has_secret?: boolean })
       .filter((c): c is { url: string; has_secret?: boolean } => Boolean(c.url));
     setWebhooks(hooks.map((c) => c.url).join("\n"));
+    const sl = existing.recipients.find((r) => r.kind === "slack")?.config as
+      | { channel?: string; has_token?: boolean }
+      | undefined;
+    setSlackChannel(sl?.channel ?? "");
+    setSlackHasToken(Boolean(sl?.has_token));
+    setSlackToken("");
     setSignedUrls(new Set(hooks.filter((c) => c.has_secret).map((c) => c.url)));
   }, [existing]);
 
@@ -204,6 +218,20 @@ export function ScheduleEditor({
       // already stored for this URL" (`ScheduleRepo::vault_secrets`), so the
       // browser never has to hold a credential to avoid destroying it.
       ...urls.map((url) => ({ kind: "webhook" as const, config: { url } })),
+      // Same three-way rule as the webhook secret: an absent `token` keeps the
+      // stored one, so the browser never has to hold a credential in order to
+      // avoid destroying it.
+      ...(slackChannel.trim()
+        ? [
+            {
+              kind: "slack" as const,
+              config: {
+                channel: slackChannel.trim(),
+                ...(slackToken.trim() ? { token: slackToken.trim() } : {}),
+              },
+            },
+          ]
+        : []),
     ];
 
     // An empty number field means "use the default", not zero — the server
@@ -823,6 +851,32 @@ export function ScheduleEditor({
           />
           <p className="text-xs text-muted-foreground">
             Comma separated. Sending needs workspace SMTP, which is configured separately.
+          </p>
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="sched-slack">Slack channel</Label>
+          <div className="flex gap-2">
+            <Input
+              id="sched-slack"
+              className="flex-1"
+              value={slackChannel}
+              onChange={(e) => setSlackChannel(e.target.value)}
+              placeholder="#data-alerts"
+            />
+            <Input
+              aria-label="Slack bot token"
+              className="flex-1"
+              type="password"
+              autoComplete="new-password"
+              value={slackToken}
+              onChange={(e) => setSlackToken(e.target.value)}
+              placeholder={slackHasToken ? "Unchanged" : "xoxb-…"}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {slackHasToken
+              ? "A bot token is stored. Leave it blank to keep it."
+              : "Needs a bot token with chat:write, and the bot invited to the channel."}
           </p>
         </div>
         <div className="flex flex-col gap-1.5">

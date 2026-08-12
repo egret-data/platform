@@ -143,6 +143,7 @@ impl RunState {
 pub enum RecipientKind {
     Email,
     Webhook,
+    Slack,
 }
 
 impl RecipientKind {
@@ -150,6 +151,7 @@ impl RecipientKind {
         match self {
             RecipientKind::Email => "email",
             RecipientKind::Webhook => "webhook",
+            RecipientKind::Slack => "slack",
         }
     }
 
@@ -157,6 +159,7 @@ impl RecipientKind {
         match s {
             "email" => Some(RecipientKind::Email),
             "webhook" => Some(RecipientKind::Webhook),
+            "slack" => Some(RecipientKind::Slack),
             _ => None,
         }
     }

@@ -377,6 +377,50 @@ describe("Alerts & Reports list", () => {
     expect(hook?.config).toEqual({ url: "https://hooks.example.com/egret/1" });
   });
 
+  it("opens a prefilled report from a Subscribe deep link", async () => {
+    // The entry point both reference products have and egret did not: you
+    // subscribe FROM the dashboard, not from a page you must already know
+    // exists.
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <MemoryRouter
+            initialEntries={["/explore/eng/alerts?new=report&kind=dashboard&object=d2"]}
+          >
+            <Routes>
+              <Route path="/explore/:workspace/alerts" element={<Alerts />} />
+            </Routes>
+          </MemoryRouter>
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+
+    // The dialog opens on its own, on the Reports tab, pointed at the object.
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/new report/i)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText(/^dashboard$/i)).toHaveValue("d2");
+  });
+
+  it("sends a slack destination as a channel, never a token in the row", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole("button", { name: /\+ alert/i }));
+    await user.type(screen.getByLabelText(/^name$/i), "to slack");
+    await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await user.type(screen.getByLabelText(/slack channel/i), "#data-alerts");
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const slack = createMutate.mock.calls[0][0].recipients.find(
+      (r: { kind: string }) => r.kind === "slack",
+    );
+    expect(slack.config.channel).toBe("#data-alerts");
+    // No token typed means "keep whatever is stored" — the browser must not
+    // invent an empty one, which the server reads as "remove it".
+    expect(slack.config.token).toBeUndefined();
+  });
+
   it("surfaces the server's validation message instead of a generic failure", async () => {
     const user = userEvent.setup();
     createMutate.mockRejectedValueOnce(

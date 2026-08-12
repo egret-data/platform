@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::deliver::destination::{Resolver, SsrfPolicy};
 use crate::deliver::email::{self, Attachment, EmailMessage};
+use crate::deliver::slack;
 use crate::deliver::smtp_config::SmtpConfigRepo;
 use crate::deliver::webhook::{self, WebhookPayload};
 use crate::evaluator::{evaluate, owner_identity, EvalError, QueryRunner};
@@ -336,7 +337,9 @@ impl AutomationRunner {
                 self.public_url.trim_end_matches('/')
             ));
         }
-        let (kind, object_id) = targets[0];
+        // `kind` still drives the default capture size; the id is already in
+        // the URL list built above.
+        let (kind, _) = targets[0];
         let url = urls[0].clone();
         // A PNG has no second page. Rather than send one object of several and
         // let the recipient believe that is the whole report, several targets
@@ -485,7 +488,7 @@ impl AutomationRunner {
             .map_err(|e| e.to_string())?;
         let mut first_error = None;
         let mut email_to: Vec<String> = Vec::new();
-        for r in recipients {
+        for r in &recipients {
             if RecipientKind::parse(&r.kind) == Some(RecipientKind::Email) {
                 if let Some(addrs) = r.config.get("addresses").and_then(|v| v.as_array()) {
                     email_to.extend(addrs.iter().filter_map(|a| a.as_str().map(str::to_string)));
@@ -521,6 +524,9 @@ impl AutomationRunner {
                 tracing::warn!(schedule = %s.id, error = %e, "automation: report webhook failed");
                 first_error.get_or_insert(e.to_string());
             }
+        }
+        if let Some(e) = self.deliver_slack(s, &content.body, &recipients).await {
+            first_error.get_or_insert(e);
         }
         if !email_to.is_empty() {
             if let Err(e) = self.send_report_email(s, content, &email_to).await {
@@ -595,7 +601,7 @@ impl AutomationRunner {
             .map_err(|e| e.to_string())?;
         let mut first_error = None;
         let mut email_to: Vec<String> = Vec::new();
-        for r in recipients {
+        for r in &recipients {
             if RecipientKind::parse(&r.kind) == Some(RecipientKind::Email) {
                 // Collected rather than sent per-recipient: one message with
                 // several addressees is one connection to the relay, and one
@@ -635,6 +641,16 @@ impl AutomationRunner {
                 first_error.get_or_insert(e.to_string());
             }
         }
+        let value = eval
+            .value
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "(no value)".into());
+        if let Some(e) = self
+            .deliver_slack(s, &format!("Observed value: {value}"), &recipients)
+            .await
+        {
+            first_error.get_or_insert(e);
+        }
         if !email_to.is_empty() {
             if let Err(e) = self.send_email(s, eval, &email_to).await {
                 tracing::warn!(schedule = %s.id, error = %e, "automation: email failed");
@@ -646,6 +662,37 @@ impl AutomationRunner {
             Some(e) => Err(e),
             None => Ok(()),
         }
+    }
+
+    /// Post to every Slack recipient. One message per channel, best-effort in
+    /// the same sense as the rest of delivery: one refusing channel must not
+    /// stop the others or lose the run.
+    async fn deliver_slack(
+        &self,
+        s: &Schedule,
+        summary: &str,
+        recipients: &[crate::repo::Recipient],
+    ) -> Option<String> {
+        let mut first_error: Option<String> = None;
+        let url = self.object_url(s, &self.workspace_slug(s.workspace_id).await);
+        for r in recipients {
+            if RecipientKind::parse(&r.kind) != Some(RecipientKind::Slack) {
+                continue;
+            }
+            let Some(channel) = r.config.get("channel").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(token) = self.schedules.resolve_slack_token(&r.config).await else {
+                first_error.get_or_insert_with(|| slack::SlackError::NoToken.to_string());
+                continue;
+            };
+            let text = slack::message(&s.name, s.message.as_deref(), summary, &url);
+            if let Err(e) = slack::deliver(&token, channel, &text).await {
+                tracing::warn!(schedule = %s.id, error = %e, "automation: slack delivery failed");
+                first_error.get_or_insert(e.to_string());
+            }
+        }
+        first_error
     }
 
     /// The workspace slug, for building a user-facing URL. A schedule always

@@ -81,7 +81,8 @@ export default function Alerts() {
   // The tab lives in the URL so a report list can be linked, bookmarked and
   // reached with the back button — `?type=report`.
   const [params, setParams] = useSearchParams();
-  const tab: ScheduleType = params.get("type") === "report" ? "report" : "alert";
+  const tab: ScheduleType =
+    params.get("type") === "report" || params.get("new") === "report" ? "report" : "alert";
   const setTab = (t: ScheduleType) =>
     setParams(
       (p) => {
@@ -113,7 +114,21 @@ export default function Alerts() {
   } = useFolderMutations(ws, "alerts");
   const collapse = useCollapsed(`folders:${ws}:alerts`);
 
-  const [editing, setEditing] = useState<{ id: string | null } | null>(null);
+  /**
+   * `?new=report&kind=dashboard&object=<id>` opens the editor on a new
+   * schedule already pointed at that object — what the Subscribe item on a
+   * dashboard or chart links to. Read once on mount and then cleared from the
+   * URL, so a refresh does not reopen a dialog the user closed.
+   */
+  const [editing, setEditing] = useState<{ id: string | null } | null>(() =>
+    params.get("new") ? { id: null } : null,
+  );
+  const prefill = useMemo((): { kind: "chart" | "dashboard"; object: string } | undefined => {
+    const kind = params.get("kind");
+    const object = params.get("object");
+    if (kind !== "chart" && kind !== "dashboard") return undefined;
+    return { kind, object: object ?? "" };
+  }, [params]);
   const [runLogFor, setRunLogFor] = useState<ScheduleSummary | null>(null);
   const [pendingDelete, setPendingDelete] = useState<ScheduleSummary | null>(null);
   const [onlyBookmarked, setOnlyBookmarked] = useState(false);
@@ -644,7 +659,23 @@ export default function Alerts() {
               ws={ws}
               type={tab}
               scheduleId={editing.id}
-              onDone={() => setEditing(null)}
+              prefill={editing.id ? undefined : prefill}
+              onDone={() => {
+                setEditing(null);
+                // Drop the deep-link params so closing and reopening the page
+                // does not resurrect the dialog.
+                if (params.get("new")) {
+                  setParams(
+                    (p) => {
+                      p.delete("new");
+                      p.delete("kind");
+                      p.delete("object");
+                      return p;
+                    },
+                    { replace: true },
+                  );
+                }
+              }}
             />
           </DialogContent>
         </Dialog>

@@ -2,5 +2,6 @@
 
 pub mod destination;
 pub mod email;
+pub mod slack;
 pub mod smtp_config;
 pub mod webhook;
