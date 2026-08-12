@@ -60,15 +60,14 @@ export function ScheduleEditor({
   const [emails, setEmails] = useState("");
   const [webhooks, setWebhooks] = useState("");
   /**
-   * The stored config of each webhook URL, keyed by URL.
+   * Which webhook URLs already have an HMAC signing secret.
    *
-   * A webhook destination is more than its URL: the runner reads
-   * `config.secret` at delivery time to sign the POST. Rebuilding the
-   * recipient from the textarea alone would drop that key and silently unsign
-   * every later delivery, so the original object is kept and re-sent verbatim
-   * for any URL that was already there.
+   * The secret itself is never sent to a browser — it lives in the vault and
+   * the server reports only `has_secret`. Keeping the SERVER responsible for
+   * carrying it across a save (absent means keep, per `vault_secrets`) is why
+   * this form can send a bare `{ url }` without unsigning anything.
    */
-  const [webhookConfigs, setWebhookConfigs] = useState<Record<string, object>>({});
+  const [signedUrls, setSignedUrls] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
 
   // Populate from the loaded schedule when editing. Keyed on the row's id so
@@ -103,10 +102,10 @@ export function ScheduleEditor({
     );
     const hooks = existing.recipients
       .filter((r) => r.kind === "webhook")
-      .map((r) => r.config as { url?: string })
-      .filter((c): c is { url: string } => Boolean(c.url));
+      .map((r) => r.config as { url?: string; has_secret?: boolean })
+      .filter((c): c is { url: string; has_secret?: boolean } => Boolean(c.url));
     setWebhooks(hooks.map((c) => c.url).join("\n"));
-    setWebhookConfigs(Object.fromEntries(hooks.map((c) => [c.url, c])));
+    setSignedUrls(new Set(hooks.filter((c) => c.has_secret).map((c) => c.url)));
   }, [existing]);
 
   /**
@@ -142,10 +141,10 @@ export function ScheduleEditor({
     // the recipient set, so a kind missing from this array is a kind deleted.
     const recipients = [
       ...(addresses.length ? [{ kind: "email" as const, config: { addresses } }] : []),
-      ...urls.map((url) => ({
-        kind: "webhook" as const,
-        config: webhookConfigs[url] ?? { url },
-      })),
+      // The URL alone. A `secret` key absent from the body means "keep the one
+      // already stored for this URL" (`ScheduleRepo::vault_secrets`), so the
+      // browser never has to hold a credential to avoid destroying it.
+      ...urls.map((url) => ({ kind: "webhook" as const, config: { url } })),
     ];
 
     const shared = {
@@ -436,9 +435,8 @@ export function ScheduleEditor({
           />
           <p className="text-xs text-muted-foreground">
             One per line, http(s). Each fires a POST with the run's result.
-            {Object.values(webhookConfigs).some(
-              (c) => (c as { secret?: string }).secret,
-            ) && " A signing secret is already set and is kept on save."}
+            {signedUrls.size > 0 &&
+              ` ${signedUrls.size === 1 ? "One is" : `${signedUrls.size} are`} HMAC-signed; the secret is stored server-side and kept on save.`}
           </p>
         </div>
       </section>

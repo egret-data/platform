@@ -138,7 +138,15 @@ async fn setup() -> Option<Fx> {
     // spawns the ticker, so the runner here is exercised only via the route.
     let runner = Arc::new(egret_automation::runner::AutomationRunner {
         db: db.clone(),
-        schedules: ScheduleRepo::new(db.clone()),
+        schedules: ScheduleRepo::new(
+            db.clone(),
+            // Crypto-enabled: `SecretStore::new(db, None)` cannot ENCRYPT, so a
+            // webhook secret would fail to vault on write.
+            egret_secrets::SecretStore::new(
+                db.clone(),
+                Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+            ),
+        ),
         databases: databases.clone(),
         users: egret_auth::users::UserRepo::new(db.clone()),
         minter: Arc::new(NoMinter),
@@ -163,7 +171,15 @@ async fn setup() -> Option<Fx> {
     });
     let st = AutomationState {
         db: db.clone(),
-        schedules: ScheduleRepo::new(db.clone()),
+        schedules: ScheduleRepo::new(
+            db.clone(),
+            // Crypto-enabled: `SecretStore::new(db, None)` cannot ENCRYPT, so a
+            // webhook secret would fail to vault on write.
+            egret_secrets::SecretStore::new(
+                db.clone(),
+                Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+            ),
+        ),
         sessions: sessions.clone(),
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
         authz: egret_workspace::rbac::Authorizer::new(db.clone()),
@@ -259,6 +275,60 @@ fn alert_json(fx: &Fx, name: &str) -> String {
         "sql": "SELECT count(*) FROM orders",
         "validator_type": "not_null",
         "recipients": [{"kind": "email", "config": {"addresses": ["on-call@t.local"]}}],
+    })
+    .to_string()
+}
+
+/// Like [`req`] but returns the RAW body text.
+///
+/// The webhook-secret assertions have to read the bytes on the wire, not a
+/// parsed field: a secret that leaked under some other key, or nested inside
+/// `config`, would still satisfy `v["secret"].is_none()`.
+async fn req_raw(
+    fx: &Fx,
+    tok: &str,
+    method: &str,
+    path: &str,
+    body: Option<String>,
+) -> (StatusCode, String) {
+    let mut b = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("Cookie", format!("egret_session={tok}"));
+    if body.is_some() {
+        b = b.header("Content-Type", "application/json");
+    }
+    let res = fx
+        .app
+        .clone()
+        .oneshot(
+            b.body(body.map(Body::from).unwrap_or(Body::empty()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// An alert delivering to a webhook whose POSTs are HMAC-signed.
+fn alert_with_webhook(fx: &Fx, name: &str, secret: &str) -> String {
+    serde_json::json!({
+        "type": "alert",
+        "name": name,
+        "active": true,
+        "crontab": "0 9 * * *",
+        "timezone": "UTC",
+        "database_id": fx.database,
+        "sql": "SELECT count(*) FROM orders",
+        "validator_type": "not_null",
+        "recipients": [{
+            "kind": "webhook",
+            "config": {"url": "https://hooks.example.com/egret", "secret": secret},
+        }],
     })
     .to_string()
 }
@@ -1053,5 +1123,158 @@ async fn an_unauthenticated_request_is_rejected() {
     assert!(
         s == StatusCode::UNAUTHORIZED || s == StatusCode::FORBIDDEN,
         "expected an auth rejection, got {s}"
+    );
+}
+
+/// The webhook signing secret must never travel back to a client.
+///
+/// Same rule, and the same assertion style, as the SMTP password (P3): checked
+/// against the RAW body of every response that carries a schedule, because a
+/// secret nested inside `config` still satisfies a `v["secret"].is_none()`.
+/// `secret_id` is withheld too — a vault reference is not a thing the editor
+/// needs, and handing one out invites a fetch nobody intended.
+#[tokio::test]
+async fn a_webhook_secret_never_appears_in_any_response() {
+    const SECRET: &str = "sup3r-s3cret-hmac-key";
+    let fx = fixture!();
+
+    let (s, created) = req_raw(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_with_webhook(&fx, "signed", SECRET)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "create failed: {created}");
+    assert!(
+        !created.contains(SECRET),
+        "the POST response echoed the secret back: {created}"
+    );
+
+    let id = serde_json::from_str::<serde_json::Value>(&created).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (s, got) = req_raw(
+        &fx,
+        &fx.editor_tok,
+        "GET",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(
+        !got.contains(SECRET),
+        "the GET response leaks the secret: {got}"
+    );
+    assert!(
+        !got.contains("secret_id"),
+        "the GET response hands out the vault reference: {got}"
+    );
+
+    // ...but the client can still tell that signing is configured.
+    let v: serde_json::Value = serde_json::from_str(&got).unwrap();
+    let hook = v["recipients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "webhook")
+        .expect("the webhook recipient survived");
+    assert_eq!(hook["config"]["url"], "https://hooks.example.com/egret");
+    assert_eq!(hook["config"]["has_secret"], true);
+    assert!(hook["config"].get("secret").is_none());
+}
+
+/// The secret is not merely hidden — it is not in the row.
+#[tokio::test]
+async fn a_webhook_secret_is_not_stored_in_the_recipient_row() {
+    const SECRET: &str = "not-in-the-table";
+    let fx = fixture!();
+    let (s, created) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_with_webhook(&fx, "at-rest", SECRET)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "create failed: {created}");
+    // Scoped to the id just created, not the name: every run makes its own
+    // workspace, so a name lookup can pick up a row from an earlier run.
+    let id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+
+    let config: serde_json::Value = sqlx::query_scalar(
+        "SELECT config FROM automation.schedule_recipients \
+         WHERE schedule_id = $1 AND kind = 'webhook'",
+    )
+    .bind(id)
+    .fetch_one(&fx.db.pool)
+    .await
+    .expect("the webhook row exists");
+    assert!(
+        !config.to_string().contains(SECRET),
+        "cleartext secret at rest in schedule_recipients.config: {config}"
+    );
+    assert!(
+        config.get("secret_id").is_some(),
+        "the row should reference a vault entry instead: {config}"
+    );
+}
+
+/// An update that does not carry a secret keeps the stored one.
+///
+/// The editor cannot render a secret it is never sent, so its blank field must
+/// not mean "remove" — the same three-way rule the SMTP password follows.
+#[tokio::test]
+async fn saving_a_webhook_without_a_secret_keeps_the_stored_one() {
+    const SECRET: &str = "keep-me-through-a-save";
+    let fx = fixture!();
+    let (s, created) = req(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_with_webhook(&fx, "kept", SECRET)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "create failed: {created}");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // What the editor actually sends back: the URL, no secret.
+    let body = serde_json::json!({
+        "name": "kept",
+        "active": true,
+        "crontab": "0 9 * * *",
+        "timezone": "UTC",
+        "database_id": fx.database,
+        "sql": "SELECT count(*) FROM orders",
+        "validator_type": "not_null",
+        "recipients": [{
+            "kind": "webhook",
+            "config": {"url": "https://hooks.example.com/egret"},
+        }],
+    })
+    .to_string();
+    let (s, updated) = req(
+        &fx,
+        &fx.editor_tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        Some(body),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "update failed: {updated}");
+
+    let hook = updated["recipients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "webhook")
+        .expect("the webhook survived the save");
+    assert_eq!(
+        hook["config"]["has_secret"], true,
+        "a save with no secret field silently unsigned the webhook: {updated}"
     );
 }

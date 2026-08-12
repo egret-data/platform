@@ -17,7 +17,14 @@ use crate::error::AutomationError;
 #[derive(Clone)]
 pub struct ScheduleRepo {
     db: Db,
+    /// Where a webhook's HMAC signing secret actually lives. The recipient row
+    /// stores only a `secret_id` reference — see [`ScheduleRepo::vault_secrets`].
+    secrets: egret_secrets::SecretStore,
 }
+
+/// `secrets.kind` for a webhook signing secret, so a vault row can be traced
+/// back to what issued it.
+pub const WEBHOOK_SECRET_KIND: &str = "automation_webhook_secret";
 
 /// A schedule row, as stored. The type-dependent columns are `Option` because
 /// one table holds both alerts and reports; which ones must be present is
@@ -125,8 +132,114 @@ const COLS: &str = "id, workspace_id, type, name, description, active, crontab, 
      grace_period_s, working_timeout_s, log_retention_days, email_subject, created_by, updated_at";
 
 impl ScheduleRepo {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(db: Db, secrets: egret_secrets::SecretStore) -> Self {
+        Self { db, secrets }
+    }
+
+    /// Move any cleartext webhook secret into the vault, returning the configs
+    /// to store and the vault rows the write leaves behind.
+    ///
+    /// A webhook's signing secret is a credential, so it follows the same rule
+    /// as the SMTP password (P3): the row holds a `secret_id` reference and the
+    /// value never appears in a column, a response, or a log line. Three-way,
+    /// like SMTP's, because the editor is never sent the secret and so cannot
+    /// render it:
+    ///
+    /// - `secret` absent → keep whatever is stored for that URL;
+    /// - `secret: ""` → remove it;
+    /// - `secret: "…"` → replace it.
+    ///
+    /// The stored config is REBUILT from `url` + `secret_id` rather than
+    /// patched, so a client cannot smuggle extra keys — including a cleartext
+    /// `secret` — into the row by sending them alongside.
+    async fn vault_secrets(
+        &self,
+        existing: Option<Uuid>,
+        recipients: &[(String, serde_json::Value)],
+    ) -> Result<(Vec<(String, serde_json::Value)>, Vec<Uuid>), AutomationError> {
+        // url -> stored secret id, the lookup behind "absent means keep".
+        let mut stored: HashMap<String, Uuid> = HashMap::new();
+        if let Some(id) = existing {
+            for r in self.recipients_for(id).await? {
+                if r.kind != "webhook" {
+                    continue;
+                }
+                let url = r.config.get("url").and_then(|v| v.as_str());
+                let sid = r
+                    .config
+                    .get("secret_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Uuid::parse_str(s).ok());
+                if let (Some(url), Some(sid)) = (url, sid) {
+                    stored.insert(url.to_string(), sid);
+                }
+            }
+        }
+
+        let mut out = Vec::with_capacity(recipients.len());
+        let mut kept: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        for (kind, config) in recipients {
+            if kind != "webhook" {
+                out.push((kind.clone(), config.clone()));
+                continue;
+            }
+            let url = config
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let secret_id = match config.get("secret").and_then(|v| v.as_str()) {
+                Some("") => None,
+                Some(s) => Some(
+                    self.secrets
+                        .put(WEBHOOK_SECRET_KIND, s)
+                        .await
+                        .map_err(|e| AutomationError::BadRequest(e.to_string()))?,
+                ),
+                None => stored.get(&url).copied(),
+            };
+            if let Some(id) = secret_id {
+                kept.insert(id);
+            }
+            let mut cfg = serde_json::Map::new();
+            cfg.insert("url".into(), serde_json::Value::String(url));
+            if let Some(id) = secret_id {
+                cfg.insert(
+                    "secret_id".into(),
+                    serde_json::Value::String(id.to_string()),
+                );
+            }
+            out.push((kind.clone(), serde_json::Value::Object(cfg)));
+        }
+
+        // Anything the schedule referenced and no longer does — a rotated
+        // secret, or a webhook that was removed outright. A superseded
+        // credential left in the vault is one nobody is watching.
+        let orphans = stored
+            .values()
+            .copied()
+            .filter(|id| !kept.contains(id))
+            .collect();
+        Ok((out, orphans))
+    }
+
+    /// The one place a webhook signing secret becomes plaintext, called at
+    /// delivery time by the runner.
+    pub async fn resolve_webhook_secret(&self, config: &serde_json::Value) -> Option<String> {
+        let id = config
+            .get("secret_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())?;
+        match self.secrets.get(id).await {
+            Ok(s) => Some(s),
+            Err(e) => {
+                // Never fall back to sending unsigned: a receiver verifying the
+                // signature would reject it anyway, and a silent downgrade is
+                // the failure mode this whole change exists to prevent.
+                tracing::warn!(secret = %id, error = %e, "automation: webhook secret unreadable");
+                None
+            }
+        }
     }
 
     /// Insert a schedule with its owners and recipients in ONE transaction.
@@ -141,6 +254,8 @@ impl ScheduleRepo {
         actor: Option<UserId>,
     ) -> Result<Schedule, AutomationError> {
         let next_run_at = crate::cron::next_run_after(&new.crontab, &new.timezone, Utc::now())?;
+        // Nothing stored yet, so there is no secret to carry forward.
+        let (recipients, _) = self.vault_secrets(None, &new.recipients).await?;
 
         let mut tx = self
             .db
@@ -184,7 +299,7 @@ impl ScheduleRepo {
         .await
         .map_err(AutomationError::from_db)?;
 
-        write_children(&mut tx, row.id, new).await?;
+        write_children(&mut tx, row.id, &new.owners, &recipients).await?;
         tx.commit().await.map_err(AutomationError::from_db)?;
         Ok(row)
     }
@@ -277,6 +392,10 @@ impl ScheduleRepo {
             return Ok(None);
         };
 
+        // After the visibility check, so a caller who cannot see this schedule
+        // never causes a vault write.
+        let (recipients, orphans) = self.vault_secrets(Some(id), &new.recipients).await?;
+
         sqlx::query("DELETE FROM automation.schedule_owners WHERE schedule_id = $1")
             .bind(id)
             .execute(&mut *tx)
@@ -287,8 +406,14 @@ impl ScheduleRepo {
             .execute(&mut *tx)
             .await
             .map_err(AutomationError::from_db)?;
-        write_children(&mut tx, id, new).await?;
+        write_children(&mut tx, id, &new.owners, &recipients).await?;
         tx.commit().await.map_err(AutomationError::from_db)?;
+
+        // Only once the row committed: had the write failed, the old secret is
+        // still the live one.
+        for sid in orphans {
+            let _ = self.secrets.delete(sid).await;
+        }
         Ok(Some(row))
     }
 
@@ -328,13 +453,30 @@ impl ScheduleRepo {
     /// Returns whether a row was actually deleted, so the route can 404 on an
     /// id belonging to another workspace instead of reporting a false success.
     pub async fn delete(&self, ws: Uuid, id: Uuid) -> Result<bool, AutomationError> {
+        // Read the vault references BEFORE the cascade removes the rows that
+        // name them, or the secrets outlive the schedule with nothing left
+        // pointing at them.
+        let secret_ids: Vec<Uuid> = self
+            .recipients_for(id)
+            .await?
+            .iter()
+            .filter_map(|r| r.config.get("secret_id").and_then(|v| v.as_str()))
+            .filter_map(|s| Uuid::parse_str(s).ok())
+            .collect();
+
         let done = sqlx::query("DELETE FROM automation.schedules WHERE id=$1 AND workspace_id=$2")
             .bind(id)
             .bind(ws)
             .execute(&self.db.pool)
             .await
             .map_err(AutomationError::from_db)?;
-        Ok(done.rows_affected() > 0)
+        let deleted = done.rows_affected() > 0;
+        if deleted {
+            for sid in secret_ids {
+                let _ = self.secrets.delete(sid).await;
+            }
+        }
+        Ok(deleted)
     }
 
     /// Owners for several schedules in one query — the list page shows an owner
@@ -405,12 +547,16 @@ impl ScheduleRepo {
 /// Insert a schedule's owners and recipients inside the caller's transaction.
 /// Shared by create and update so the two paths cannot drift in what they
 /// consider a complete schedule.
+/// `recipients` are the VAULTED configs from [`ScheduleRepo::vault_secrets`],
+/// passed separately from `owners` so a caller cannot accidentally write the
+/// raw, still-cleartext ones off `NewSchedule`.
 async fn write_children(
     tx: &mut Transaction<'_, Postgres>,
     schedule_id: Uuid,
-    new: &NewSchedule,
+    owners: &[Uuid],
+    recipients: &[(String, serde_json::Value)],
 ) -> Result<(), AutomationError> {
-    for owner in &new.owners {
+    for owner in owners {
         sqlx::query(
             "INSERT INTO automation.schedule_owners (schedule_id, user_id) VALUES ($1,$2) \
              ON CONFLICT DO NOTHING",
@@ -421,7 +567,7 @@ async fn write_children(
         .await
         .map_err(AutomationError::from_db)?;
     }
-    for (kind, config) in &new.recipients {
+    for (kind, config) in recipients {
         sqlx::query(
             "INSERT INTO automation.schedule_recipients (schedule_id, kind, config) \
              VALUES ($1,$2,$3)",
