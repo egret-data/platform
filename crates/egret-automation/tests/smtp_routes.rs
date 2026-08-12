@@ -11,11 +11,28 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use egret_automation::render::token::RenderTokenRepo;
 use egret_automation::{automation_router, AutomationState, ScheduleRepo};
 use egret_metastore::Db;
 use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
+
+/// This file doesn't exercise rendering; every database in it is
+/// non-delegated, so the minter is never actually called.
+struct NoMinter;
+#[async_trait::async_trait]
+impl egret_analytics_api::engine_token::EngineTokenMinter for NoMinter {
+    async fn mint(
+        &self,
+        _user: Uuid,
+    ) -> Result<
+        egret_analytics_api::engine_token::EngineToken,
+        egret_analytics_api::engine_token::BrokerError,
+    > {
+        Err(egret_analytics_api::engine_token::BrokerError::NoRefreshToken)
+    }
+}
 
 struct Fx {
     app: axum::Router,
@@ -77,6 +94,8 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
         chrono::Duration::hours(24),
         chrono::Duration::minutes(60),
     );
+    let secrets = egret_secrets::SecretStore::new(db.clone(), None);
+    let ws_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
     let st = AutomationState {
         db: db.clone(),
         schedules: ScheduleRepo::new(db.clone()),
@@ -91,6 +110,13 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
                 Some(egret_secrets::Crypto::new(&[3u8; 32]).unwrap()),
             ),
         ),
+        render_tokens: RenderTokenRepo::new(db.clone()),
+        charts: egret_bi::ChartRepo::new(db.clone()),
+        dashboards: egret_bi::DashboardRepo::new(db.clone()),
+        datasets: egret_bi::DatasetRepo::new(db.clone()),
+        databases: egret_query::DatabaseRepo::new(db.clone(), secrets, ws_secrets),
+        users: egret_auth::users::UserRepo::new(db.clone()),
+        engine_minter: Arc::new(NoMinter),
     };
 
     let mut tok = Vec::new();

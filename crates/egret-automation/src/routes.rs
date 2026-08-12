@@ -46,6 +46,20 @@ pub struct AutomationState {
     pub authz: Authorizer,
     pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
     pub smtp: SmtpConfigRepo,
+    /// Per-render credentials (P4): mints/redeems the single-use tokens the
+    /// print page's renderer authenticates with. See `render::token`.
+    pub render_tokens: crate::render::token::RenderTokenRepo,
+    /// The rest of P4's render-payload dependencies. Reused rather than
+    /// reimplemented from `egret_bi::BiState`: `charts`/`dashboards`/`datasets`
+    /// so a report loads the SAME rows the interactive UI does, `databases` +
+    /// `users` + `engine_minter` so `evaluator::owner_identity` can mint the
+    /// token's OWNER an engine identity (never a service one).
+    pub charts: egret_bi::ChartRepo,
+    pub dashboards: egret_bi::DashboardRepo,
+    pub datasets: egret_bi::DatasetRepo,
+    pub databases: egret_query::DatabaseRepo,
+    pub users: egret_auth::users::UserRepo,
+    pub engine_minter: std::sync::Arc<dyn egret_analytics_api::engine_token::EngineTokenMinter>,
 }
 
 impl FromRef<AutomationState> for SessionService {
@@ -77,6 +91,11 @@ pub fn automation_router() -> Router<AutomationState> {
             get(smtp_get).put(smtp_put).delete(smtp_delete),
         )
         .route("/ws/{workspace}/notifications/smtp/test", post(smtp_test))
+        // NOT workspace-scoped, and deliberately not under `/ws/{workspace}`:
+        // the caller (the headless renderer) has no session to put a workspace
+        // in front of. It is authenticated by the render token alone — see
+        // `render_payload` below.
+        .route("/render/payload", get(render_payload))
 }
 
 #[derive(utoipa::OpenApi)]
@@ -91,7 +110,8 @@ pub fn automation_router() -> Router<AutomationState> {
         smtp_get,
         smtp_put,
         smtp_delete,
-        smtp_test
+        smtp_test,
+        render_payload
     ),
     components(schemas(
         egret_automation_api::ScheduleSummaryDto,
@@ -111,6 +131,8 @@ pub fn automation_router() -> Router<AutomationState> {
         crate::deliver::smtp_config::SmtpConfigBody,
         crate::deliver::smtp_config::TlsMode,
         SmtpTestBody,
+        crate::render::payload::RenderPayload,
+        crate::render::payload::RenderCard,
     ))
 )]
 pub struct AutomationApi;
@@ -506,4 +528,38 @@ async fn smtp_test(
     .await
     .map_err(|e| AutomationApiError::from(AutomationError::BadRequest(e.to_string())))?;
     Ok(Json(serde_json::json!({ "ok": true, "sent_to": to })))
+}
+
+// ── Report rendering (P4) ────────────────────────────────────────────────────
+
+/// The print page's ONE request. Deliberately token-only: there is no
+/// `WsContext` extractor here, so an ordinary session cookie authenticates
+/// nothing on this route — widening it to sessions would make it a second,
+/// unaudited read path for any chart or dashboard.
+#[utoipa::path(
+    get, path = "/api/render/payload", tag = "alerts",
+    responses(
+        (status = 200, description = "Everything the print page needs: the object's spec and every card's already-executed rows", body = crate::render::payload::RenderPayload),
+        (status = 401, description = "No render token"),
+        (status = 404, description = "Token unknown, expired, or already used"),
+    ),
+)]
+async fn render_payload(
+    State(st): State<AutomationState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<crate::render::payload::RenderPayload>, AutomationApiError> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(AutomationApiError::from(egret_core::Error::Unauthorized))?;
+    let grant = st
+        .render_tokens
+        .redeem(token)
+        .await
+        .map_err(AutomationApiError::from)?;
+    let payload = crate::render::payload::build(&st, &grant)
+        .await
+        .map_err(AutomationApiError::from)?;
+    Ok(Json(payload))
 }

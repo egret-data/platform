@@ -15,6 +15,11 @@ egret-workspace.workspace = true
 egret-auth.workspace = true
 egret-query.workspace = true
 egret-analytics-api.workspace = true
+# The render-payload endpoint (P4 Task 3) compiles a chart's saved spec with
+# egret-bi's own `compile_chart_sql`, so a report can never diverge from what
+# the interactive chart/dashboard endpoints would show. No cycle: egret-bi
+# depends on none of egret-automation/-automation-api.
+egret-bi.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 axum.workspace = true

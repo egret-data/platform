@@ -1340,6 +1340,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             db.clone(),
             secrets.clone(),
         ),
+        render_tokens: egret_automation::render::token::RenderTokenRepo::new(db.clone()),
+        charts: egret_bi::ChartRepo::new(db.clone()),
+        dashboards: egret_bi::DashboardRepo::new(db.clone()),
+        datasets: egret_bi::DatasetRepo::new(db.clone()),
+        databases: databases.clone(),
+        users: UserRepo::new(db.clone()),
+        engine_minter: engine_minter.clone(),
     });
 
     let notebook_state = egret_notebook::NotebookState {

@@ -27,6 +27,7 @@ import type {
 import type {
   AlertsListParams,
   CreateSchedule,
+  RenderPayload,
   RunDto,
   ScheduleDetailDto,
   ScheduleSummaryDto,
@@ -57,6 +58,136 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   }
   return result;
 };
+
+export type alertsRenderPayloadResponse200 = {
+  data: RenderPayload
+  status: 200
+}
+
+export type alertsRenderPayloadResponse401 = {
+  data: void
+  status: 401
+}
+
+export type alertsRenderPayloadResponse404 = {
+  data: void
+  status: 404
+}
+
+export type alertsRenderPayloadResponseSuccess = (alertsRenderPayloadResponse200) & {
+  headers: Headers;
+};
+export type alertsRenderPayloadResponseError = (alertsRenderPayloadResponse401 | alertsRenderPayloadResponse404) & {
+  headers: Headers;
+};
+
+export type alertsRenderPayloadResponse = (alertsRenderPayloadResponseSuccess | alertsRenderPayloadResponseError)
+
+export const getAlertsRenderPayloadUrl = () => {
+
+
+
+
+  return `/api/render/payload`
+}
+
+/**
+ * @summary The print page's ONE request. Deliberately token-only: there is no
+`WsContext` extractor here, so an ordinary session cookie authenticates
+nothing on this route — widening it to sessions would make it a second,
+unaudited read path for any chart or dashboard.
+ */
+export const alertsRenderPayload = async ( options?: RequestInit): Promise<alertsRenderPayloadResponse> => {
+
+  return customInstance<alertsRenderPayloadResponse>(getAlertsRenderPayloadUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getAlertsRenderPayloadQueryKey = () => {
+    return [
+    `/api/render/payload`
+    ] as const;
+    }
+
+
+export const getAlertsRenderPayloadQueryOptions = <TData = Awaited<ReturnType<typeof alertsRenderPayload>>, TError = void>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsRenderPayload>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getAlertsRenderPayloadQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof alertsRenderPayload>>> = ({ signal }) => alertsRenderPayload({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof alertsRenderPayload>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type AlertsRenderPayloadQueryResult = NonNullable<Awaited<ReturnType<typeof alertsRenderPayload>>>
+export type AlertsRenderPayloadQueryError = void
+
+
+export function useAlertsRenderPayload<TData = Awaited<ReturnType<typeof alertsRenderPayload>>, TError = void>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsRenderPayload>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof alertsRenderPayload>>,
+          TError,
+          Awaited<ReturnType<typeof alertsRenderPayload>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useAlertsRenderPayload<TData = Awaited<ReturnType<typeof alertsRenderPayload>>, TError = void>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsRenderPayload>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof alertsRenderPayload>>,
+          TError,
+          Awaited<ReturnType<typeof alertsRenderPayload>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useAlertsRenderPayload<TData = Awaited<ReturnType<typeof alertsRenderPayload>>, TError = void>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsRenderPayload>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary The print page's ONE request. Deliberately token-only: there is no
+`WsContext` extractor here, so an ordinary session cookie authenticates
+nothing on this route — widening it to sessions would make it a second,
+unaudited read path for any chart or dashboard.
+ */
+
+export function useAlertsRenderPayload<TData = Awaited<ReturnType<typeof alertsRenderPayload>>, TError = void>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsRenderPayload>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getAlertsRenderPayloadQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
 
 export type alertsListResponse200 = {
   data: ScheduleSummaryDto[]

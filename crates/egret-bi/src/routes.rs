@@ -2069,43 +2069,53 @@ async fn ch_data(
     egret_core::authz::require(&*st.pdp, &ctx, CH_READ)
         .await
         .map_err(BiApiError::from)?;
-    let (sql, database_id) = compile_chart_sql(&st, &ctx, b.dataset_id, &b.query_spec).await?;
+    let (sql, database_id) = compile_chart_sql(
+        &st.datasets,
+        &st.databases,
+        ctx.workspace_id.0,
+        b.dataset_id,
+        &b.query_spec,
+    )
+    .await?;
     Ok(Json(ChartDataResponse {
         sql,
         database_id: database_id.to_string(),
     }))
 }
 
-/// Compile a dataset's `QuerySpec` to `(sql, database_id)`. The dataset must live
-/// in the caller's workspace (cross-tenant guard → `NotFound`). Shared by
-/// `ch_data` (client-supplied spec) and `ch_run` (the chart's SAVED spec).
-async fn compile_chart_sql(
-    st: &BiState,
-    ctx: &egret_core::WorkspaceContext,
+/// Compile a dataset's `QuerySpec` to `(sql, database_id)`, scoped to
+/// `workspace_id` (cross-tenant guard → `NotFound`). Shared by `ch_data`
+/// (client-supplied spec), `ch_run`/`ch_run_spec` (the chart's SAVED spec), and
+/// — the reason this takes repos rather than `&BiState` — `egret-automation`'s
+/// render-payload endpoint, which compiles a chart with no `WorkspaceContext` at
+/// all (a render token authenticates it, not a session) but does know the
+/// object's workspace from the grant it redeemed. `pub` so that crate can call
+/// it directly: two code paths that compile a chart differently is how a
+/// report silently stops matching the dashboard it claims to show.
+pub async fn compile_chart_sql(
+    datasets: &crate::dataset::DatasetRepo,
+    databases: &DatabaseRepo,
+    workspace_id: Uuid,
     dataset_id: Uuid,
     spec: &chartquery::QuerySpec,
 ) -> Result<(String, Uuid), BiApiError> {
-    let ds = st
-        .datasets
+    let ds = datasets
         .get(dataset_id)
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dataset".into()))?;
-    if ds.workspace_id != ctx.workspace_id.0 {
+    if ds.workspace_id != workspace_id {
         return Err(Error::NotFound("dataset".into()).into());
     }
-    let database = st
-        .databases
+    let database = databases
         .get(ds.database_id)
         .await
         .map_err(|e| BiApiError::from(crate::BiError::from(e)))?;
-    let cols = st
-        .datasets
+    let cols = datasets
         .columns(dataset_id)
         .await
         .map_err(BiApiError::from)?;
-    let metrics = st
-        .datasets
+    let metrics = datasets
         .metrics(dataset_id)
         .await
         .map_err(BiApiError::from)?;
@@ -2213,7 +2223,14 @@ async fn ch_run(
     )
     .map_err(|_| Error::InvalidInput("chart spec invalid".into()))?;
 
-    let (sql, database_id) = compile_chart_sql(&st, &ctx, chart.dataset_id, &spec).await?;
+    let (sql, database_id) = compile_chart_sql(
+        &st.datasets,
+        &st.databases,
+        ctx.workspace_id.0,
+        chart.dataset_id,
+        &spec,
+    )
+    .await?;
     let (session_user, bearer) = resolve_delegation(&st, &ctx, database_id).await?;
     let result = egret_query::execution::run_query(
         &st.databases,
@@ -2273,7 +2290,14 @@ async fn ch_run_spec(
         .await
         .map_err(BiApiError::from)?;
 
-    let (sql, database_id) = compile_chart_sql(&st, &ctx, b.dataset_id, &b.query_spec).await?;
+    let (sql, database_id) = compile_chart_sql(
+        &st.datasets,
+        &st.databases,
+        ctx.workspace_id.0,
+        b.dataset_id,
+        &b.query_spec,
+    )
+    .await?;
     let (session_user, bearer) = resolve_delegation(&st, &ctx, database_id).await?;
     let result = egret_query::execution::run_query(
         &st.databases,
@@ -2586,7 +2610,14 @@ async fn db_card_run(
     // also rejected there, so a client cannot smuggle raw SQL through the unit value.
     spec.temporal_units.extend(body.temporal_units);
 
-    let (sql, database_id) = compile_chart_sql(&st, &ctx, chart.dataset_id, &spec).await?;
+    let (sql, database_id) = compile_chart_sql(
+        &st.datasets,
+        &st.databases,
+        ctx.workspace_id.0,
+        chart.dataset_id,
+        &spec,
+    )
+    .await?;
     let (session_user, bearer) = resolve_delegation(&st, &ctx, database_id).await?;
     let result = egret_query::execution::run_query(
         &st.databases,

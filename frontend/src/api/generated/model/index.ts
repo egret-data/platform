@@ -222,6 +222,8 @@ export * from './recipientInput';
 export * from './recipientKind';
 export * from './renameFolder';
 export * from './renameGroupInput';
+export * from './renderCard';
+export * from './renderPayload';
 export * from './reorderCells';
 export * from './reportFormat';
 export * from './resetPasswordInput';
