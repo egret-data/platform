@@ -7,6 +7,9 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ScheduleRun, ScheduleSummary } from "@/api/alerts";
 
 const schedulesMock = vi.fn();
+const scheduleMock = vi.fn(
+  (): { data: unknown; isLoading: boolean } => ({ data: undefined, isLoading: false }),
+);
 const runsMock = vi.fn(() => ({ data: [] as ScheduleRun[], isLoading: false }));
 const createMutate = vi.fn().mockResolvedValue({ id: "new" });
 const updateMutate = vi.fn().mockResolvedValue({ id: "s1" });
@@ -18,7 +21,7 @@ vi.mock("@/api/alerts", async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   useSchedules: (...a: unknown[]) => schedulesMock(...a),
   useScheduleRuns: () => runsMock(),
-  useSchedule: () => ({ data: undefined, isLoading: false }),
+  useSchedule: () => scheduleMock(),
   useScheduleMutations: () => ({
     create: { mutateAsync: createMutate, isPending: false },
     update: { mutateAsync: updateMutate, isPending: false },
@@ -79,6 +82,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   schedulesMock.mockReturnValue({ data: [row()], isLoading: false, isError: false });
   runsMock.mockReturnValue({ data: [], isLoading: false });
+  scheduleMock.mockReturnValue({ data: undefined, isLoading: false });
 });
 
 describe("Alerts & Reports list", () => {
@@ -211,6 +215,69 @@ describe("Alerts & Reports list", () => {
     expect(body.database_id).not.toBe("");
   });
 
+  /** A saved alert delivering to both an inbox and a signed webhook. */
+  function withWebhook() {
+    scheduleMock.mockReturnValue({
+      data: {
+        ...row(),
+        sql: "SELECT 1",
+        database_id: "db1",
+        validator_type: "not_null",
+        validator_config: {},
+        recipients: [
+          { id: "r1", kind: "email", config: { addresses: ["on-call@t.local"] } },
+          {
+            id: "r2",
+            kind: "webhook",
+            // The runner reads `config.secret` at delivery time to sign the
+            // POST, so it is part of the destination, not decoration.
+            config: { url: "https://hooks.example.com/egret/1", secret: "s3cr3t" },
+          },
+        ],
+      },
+      isLoading: false,
+    });
+  }
+
+  async function openEditorAndSave(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole("button", { name: /actions for/i }));
+    await user.click(await screen.findByRole("menuitem", { name: /edit/i }));
+    await user.click(await screen.findByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(updateMutate).toHaveBeenCalled());
+    return updateMutate.mock.calls[0][0].body.recipients as {
+      kind: string;
+      config: Record<string, unknown>;
+    }[];
+  }
+
+  it("keeps a webhook destination through a no-op save", async () => {
+    // The update REPLACES the recipient set, so a body carrying only the email
+    // field silently deletes the webhook. Opening the editor and pressing Save
+    // without touching anything must change nothing.
+    const user = userEvent.setup();
+    withWebhook();
+    renderPage();
+
+    const recipients = await openEditorAndSave(user);
+    expect(recipients.filter((r) => r.kind === "webhook")).toHaveLength(1);
+    expect(recipients.find((r) => r.kind === "webhook")?.config.url).toBe(
+      "https://hooks.example.com/egret/1",
+    );
+    // The email is still there too — the fix must not trade one for the other.
+    expect(recipients.filter((r) => r.kind === "email")).toHaveLength(1);
+  });
+
+  it("carries the webhook signing secret through a save it never displays", async () => {
+    // Rebuilding the recipient from the URL alone would drop `secret` and
+    // silently unsign every later delivery — the same bug one level down.
+    const user = userEvent.setup();
+    withWebhook();
+    renderPage();
+
+    const recipients = await openEditorAndSave(user);
+    expect(recipients.find((r) => r.kind === "webhook")?.config.secret).toBe("s3cr3t");
+  });
+
   it("surfaces the server's validation message instead of a generic failure", async () => {
     const user = userEvent.setup();
     createMutate.mockRejectedValueOnce(
@@ -225,6 +292,24 @@ describe("Alerts & Reports list", () => {
     await waitFor(() =>
       expect(screen.getByText(/invalid crontab/i)).toBeInTheDocument(),
     );
+  });
+
+  it("scrolls a rejected save into view", async () => {
+    // The banner is at the top of a form tall enough to scroll and Save is at
+    // the bottom, so rendering the message is not the same as showing it —
+    // without this, pressing Save looks like it did nothing.
+    const scrollIntoView = vi.fn();
+    HTMLElement.prototype.scrollIntoView = scrollIntoView;
+    const user = userEvent.setup();
+    createMutate.mockRejectedValueOnce(
+      Object.assign(new Error("bad"), { body: { error: "webhook url must be http(s)" } }),
+    );
+    renderPage();
+    await user.click(screen.getByRole("button", { name: /\+ alert/i }));
+    await user.type(screen.getByLabelText(/^name$/i), "x");
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
   });
 
   it("opens the run log for a schedule", async () => {

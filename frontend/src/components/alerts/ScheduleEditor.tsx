@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   useSchedule,
   useScheduleMutations,
@@ -58,6 +58,17 @@ export function ScheduleEditor({
   const [targetId, setTargetId] = useState("");
   const [reportFormat, setReportFormat] = useState("png");
   const [emails, setEmails] = useState("");
+  const [webhooks, setWebhooks] = useState("");
+  /**
+   * The stored config of each webhook URL, keyed by URL.
+   *
+   * A webhook destination is more than its URL: the runner reads
+   * `config.secret` at delivery time to sign the POST. Rebuilding the
+   * recipient from the textarea alone would drop that key and silently unsign
+   * every later delivery, so the original object is kept and re-sent verbatim
+   * for any URL that was already there.
+   */
+  const [webhookConfigs, setWebhookConfigs] = useState<Record<string, object>>({});
   const [error, setError] = useState<string | null>(null);
 
   // Populate from the loaded schedule when editing. Keyed on the row's id so
@@ -90,7 +101,26 @@ export function ScheduleEditor({
         .flatMap((r) => ((r.config as { addresses?: string[] }).addresses ?? []))
         .join(", "),
     );
+    const hooks = existing.recipients
+      .filter((r) => r.kind === "webhook")
+      .map((r) => r.config as { url?: string })
+      .filter((c): c is { url: string } => Boolean(c.url));
+    setWebhooks(hooks.map((c) => c.url).join("\n"));
+    setWebhookConfigs(Object.fromEntries(hooks.map((c) => [c.url, c])));
   }, [existing]);
+
+  /**
+   * Bring a rejected save into view.
+   *
+   * The banner renders at the top of a form tall enough to scroll, and Save
+   * sits at the bottom — so without this the server's message ("webhook url
+   * must be http(s)") is off-screen and pressing Save looks like it did
+   * nothing at all. Applies to every validation error, not only webhooks.
+   */
+  const errorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (error) errorRef.current?.scrollIntoView({ block: "nearest" });
+  }, [error]);
 
   const isAlert = type === "alert";
   const defaultTarget =
@@ -101,9 +131,22 @@ export function ScheduleEditor({
       .split(",")
       .map((e) => e.trim())
       .filter(Boolean);
-    const recipients = addresses.length
-      ? [{ kind: "email" as const, config: { addresses } }]
-      : [];
+    // One URL per line, not comma-separated like the addresses above: a comma
+    // is legal inside a URL's query string.
+    const urls = webhooks
+      .split("\n")
+      .map((u) => u.trim())
+      .filter(Boolean);
+
+    // Every destination the schedule has, in one list — the update REPLACES
+    // the recipient set, so a kind missing from this array is a kind deleted.
+    const recipients = [
+      ...(addresses.length ? [{ kind: "email" as const, config: { addresses } }] : []),
+      ...urls.map((url) => ({
+        kind: "webhook" as const,
+        config: webhookConfigs[url] ?? { url },
+      })),
+    ];
 
     const shared = {
       name,
@@ -173,10 +216,12 @@ export function ScheduleEditor({
   return (
     <form onSubmit={submit} className="flex flex-col gap-5">
       {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
+        <div ref={errorRef}>
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        </div>
       )}
 
       <section className="flex flex-col gap-3">
@@ -378,6 +423,22 @@ export function ScheduleEditor({
           />
           <p className="text-xs text-muted-foreground">
             Comma separated. Sending needs workspace SMTP, which is configured separately.
+          </p>
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="sched-webhooks">Webhook URLs</Label>
+          <Textarea
+            id="sched-webhooks"
+            rows={2}
+            value={webhooks}
+            onChange={(e) => setWebhooks(e.target.value)}
+            placeholder="https://hooks.example.com/egret"
+          />
+          <p className="text-xs text-muted-foreground">
+            One per line, http(s). Each fires a POST with the run's result.
+            {Object.values(webhookConfigs).some(
+              (c) => (c as { secret?: string }).secret,
+            ) && " A signing secret is already set and is kept on save."}
           </p>
         </div>
       </section>
