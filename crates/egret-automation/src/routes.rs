@@ -60,6 +60,12 @@ pub struct AutomationState {
     pub databases: egret_query::DatabaseRepo,
     pub users: egret_auth::users::UserRepo,
     pub engine_minter: std::sync::Arc<dyn egret_analytics_api::engine_token::EngineTokenMinter>,
+    /// The same execution seam `AutomationRunner` (the tick engine) uses —
+    /// `crate::evaluator::QueryRunner` — so a rendered chart card runs through
+    /// code a test can fake an engine behind, exactly like `tick_end_to_end.rs`
+    /// already does for alert evaluation. Production wiring is `EngineRunner`
+    /// (the real `run_query` path); tests inject a fake.
+    pub query: std::sync::Arc<dyn crate::evaluator::QueryRunner>,
 }
 
 impl FromRef<AutomationState> for SessionService {

@@ -1347,6 +1347,21 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         databases: databases.clone(),
         users: UserRepo::new(db.clone()),
         engine_minter: engine_minter.clone(),
+        // Same `EngineRunner` shape `automation_runner` below uses for alert
+        // evaluation, but with the chart-run ceiling (`egret_bi`'s
+        // `MAX_CHART_ROWS`/30s) rather than the alert evaluator's
+        // one-row/`config.engine` limits — a rendered report needs every row
+        // a chart was built to show, not just its first cell.
+        query: std::sync::Arc::new(egret_automation::evaluator::EngineRunner {
+            databases: databases.clone(),
+            factory: std::sync::Arc::new(
+                egret_query::execution::connector::DefaultConnectorFactory,
+            ),
+            limits: egret_query::execution::model::Limits {
+                max_rows: egret_bi::chartquery::MAX_CHART_ROWS as usize,
+                timeout: std::time::Duration::from_secs(30),
+            },
+        }),
     });
 
     let notebook_state = egret_notebook::NotebookState {

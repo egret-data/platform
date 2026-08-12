@@ -56,7 +56,14 @@ pub struct RunIdentity {
     pub bearer_token: Option<String>,
 }
 
-/// Execution seam, so the evaluator can be tested without an engine.
+/// Execution seam, so the evaluator (and, via the same trait, the render
+/// payload builder — see `render::payload`) can be tested without an engine.
+///
+/// `limit` is the caller's row cap, not a fixed constant of this trait: an
+/// alert only ever reads the first cell of the first row (`evaluate` passes
+/// `Some(1)`), while a rendered chart card needs its full saved `row_limit`.
+/// Baking `1` into the runner itself — as this used to do — would silently
+/// truncate every rendered report to one row per card.
 #[async_trait::async_trait]
 pub trait QueryRunner: Send + Sync {
     async fn run(
@@ -64,11 +71,13 @@ pub trait QueryRunner: Send + Sync {
         database_id: Uuid,
         sql: &str,
         identity: &RunIdentity,
+        limit: Option<usize>,
     ) -> Result<TabularResult, String>;
 }
 
 /// The production runner: the same `run_query` path the interactive endpoints
-/// use, so a scheduled query and a hand-run one go through identical code.
+/// use, so a scheduled query, a hand-run one, and a rendered report card all
+/// go through identical code.
 pub struct EngineRunner {
     pub databases: DatabaseRepo,
     pub factory: std::sync::Arc<dyn egret_query::execution::connector::ConnectorFactory>,
@@ -82,13 +91,14 @@ impl QueryRunner for EngineRunner {
         database_id: Uuid,
         sql: &str,
         identity: &RunIdentity,
+        limit: Option<usize>,
     ) -> Result<TabularResult, String> {
         egret_query::execution::run_query(
             &self.databases,
             &*self.factory,
             database_id,
             sql,
-            Some(1),
+            limit,
             identity.session_user.clone(),
             identity.bearer_token.clone(),
             &self.limits,
@@ -161,8 +171,10 @@ pub async fn evaluate(
     validator_config: &serde_json::Value,
     identity: &RunIdentity,
 ) -> Result<Evaluation, EvalError> {
+    // An alert only ever reads the first cell of the first row (§5.2's
+    // `first_cell`), so it asks the runner for exactly one.
     let result = runner
-        .run(database_id, sql, identity)
+        .run(database_id, sql, identity, Some(1))
         .await
         .map_err(EvalError::Query)?;
 
@@ -251,6 +263,7 @@ mod tests {
             _db: Uuid,
             _sql: &str,
             identity: &RunIdentity,
+            _limit: Option<usize>,
         ) -> Result<TabularResult, String> {
             *self.seen.lock().unwrap() = Some(identity.clone());
             self.answer.clone()

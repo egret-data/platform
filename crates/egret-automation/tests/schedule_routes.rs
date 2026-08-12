@@ -123,6 +123,7 @@ async fn setup() -> Option<Fx> {
     );
     let secrets = egret_secrets::SecretStore::new(db.clone(), None);
     let ws_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
+    let databases = egret_query::DatabaseRepo::new(db.clone(), secrets, ws_secrets);
     let st = AutomationState {
         db: db.clone(),
         schedules: ScheduleRepo::new(db.clone()),
@@ -141,9 +142,19 @@ async fn setup() -> Option<Fx> {
         charts: egret_bi::ChartRepo::new(db.clone()),
         dashboards: egret_bi::DashboardRepo::new(db.clone()),
         datasets: egret_bi::DatasetRepo::new(db.clone()),
-        databases: egret_query::DatabaseRepo::new(db.clone(), secrets, ws_secrets),
+        databases: databases.clone(),
         users: egret_auth::users::UserRepo::new(db.clone()),
         engine_minter: Arc::new(NoMinter),
+        // Not exercised by this file's tests; wired for the struct to
+        // construct at all.
+        query: Arc::new(egret_automation::evaluator::EngineRunner {
+            databases,
+            factory: Arc::new(egret_query::execution::connector::DefaultConnectorFactory),
+            limits: egret_query::execution::model::Limits {
+                max_rows: 1000,
+                timeout: std::time::Duration::from_secs(5),
+            },
+        }),
     };
 
     let mut tok = Vec::new();

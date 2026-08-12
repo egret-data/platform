@@ -5,13 +5,16 @@
 //! what the interactive UI fetches piecemeal: the object's spec, and each
 //! card's already-executed rows.
 //!
-//! Every query runs as the token's OWNER, through the same `run_query` path the
-//! interactive endpoints use (§5.2) — a report must never render data its owner
-//! could not open themselves. And every chart is compiled through `egret_bi`'s
-//! own `compile_chart_sql` — the exact function `charts/{id}/data` calls — so
-//! there is exactly one place a chart's saved spec turns into SQL. Two code
-//! paths that compile a chart differently is how a report silently stops
-//! matching the dashboard it claims to show.
+//! Every query runs as the token's OWNER, through the SAME execution seam the
+//! tick engine uses (§5.2) — `crate::evaluator::QueryRunner`, injected on
+//! `AutomationState` as `query` — a report must never render data its owner
+//! could not open themselves, and this module must be testable without a live
+//! engine exactly the way `AutomationRunner`/`tick_end_to_end.rs` already are.
+//! And every chart is compiled through `egret_bi`'s own `compile_chart_sql` —
+//! the exact function `charts/{id}/data` calls — so there is exactly one place
+//! a chart's saved spec turns into SQL. Two code paths that compile a chart
+//! differently is how a report silently stops matching the dashboard it
+//! claims to show.
 
 use serde::Serialize;
 
@@ -35,16 +38,6 @@ pub struct RenderPayload {
     pub id: String,
     pub title: String,
     pub cards: Vec<RenderCard>,
-}
-
-/// Row/time ceiling for a rendered card. A report is a static image, not a
-/// paging UI, so this mirrors `egret_bi`'s own chart-run ceiling rather than
-/// an alert's single-row need.
-fn render_limits() -> egret_query::execution::model::Limits {
-    egret_query::execution::model::Limits {
-        max_rows: egret_bi::chartquery::MAX_CHART_ROWS as usize,
-        timeout: std::time::Duration::from_secs(30),
-    }
 }
 
 /// Assemble the full payload for whatever the grant names.
@@ -152,19 +145,22 @@ async fn render_chart_card(
     .await
     .map_err(|e| AutomationError::Internal(e.to_string()))?;
 
-    let result = egret_query::execution::run_query(
-        &st.databases,
-        &egret_query::execution::connector::DefaultConnectorFactory,
-        database_id,
-        &sql,
-        Some(spec.row_limit.max(0) as usize),
-        identity.session_user,
-        identity.bearer_token,
-        &render_limits(),
-        tokio_util::sync::CancellationToken::new(),
-    )
-    .await
-    .map_err(|e| AutomationError::Internal(format!("query failed: {e}")))?;
+    // Through `QueryRunner`, not a direct `run_query`/`DefaultConnectorFactory`
+    // call: the same seam `AutomationRunner` injects a fake engine behind in
+    // `tick_end_to_end.rs`, so this path is fakeable in tests too. The chart's
+    // own saved `row_limit` goes through untouched — an alert's runner asks
+    // for `Some(1)` because it only reads one cell; a report needs every row
+    // the chart was built to show.
+    let result = st
+        .query
+        .run(
+            database_id,
+            &sql,
+            &identity,
+            Some(spec.row_limit.max(0) as usize),
+        )
+        .await
+        .map_err(|e| AutomationError::Internal(format!("query failed: {e}")))?;
 
     Ok(RenderCard {
         chart_id: chart.id.to_string(),

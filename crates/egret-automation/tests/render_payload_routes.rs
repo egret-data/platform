@@ -1,24 +1,32 @@
 //! HTTP tests for the one-shot render-payload endpoint (P4 Task 3).
 //!
 //! The print page makes exactly ONE authenticated request — no session, no
-//! second call — so these assertions are about that envelope, not chart
-//! rendering: a valid token returns spec + already-executed data together, the
-//! token cannot be replayed, and nothing except the token itself (not a
-//! session cookie) can stand in for it.
+//! second call — so these assertions are about that envelope: a valid token
+//! returns spec + already-executed data together (and the data is the ROWS
+//! the engine actually returned, not merely "an array"), the token cannot be
+//! replayed, and nothing except the token itself (not a session cookie) can
+//! stand in for it.
 //!
-//! Runs a real chart against the local dev Trino (`tpch.tiny.orders`), the
-//! same fixture `egret-bi`'s own live-engine tests use, because the endpoint
-//! hardcodes `DefaultConnectorFactory` — there is no seam to fake the engine
-//! out of this test.
+//! The chart is compiled for real (`egret_bi::compile_chart_sql`, against a
+//! real dataset/column row) but EXECUTED against a fake engine injected
+//! through `AutomationState.query: Arc<dyn QueryRunner>` — the same seam
+//! `AutomationRunner` already gets a `FakeEngine` through in
+//! `tick_end_to_end.rs`. That makes the success path deterministic and
+//! independent of whether a live query engine is reachable in this
+//! environment, and lets these assertions check the actual row content
+//! instead of merely "some status in {200, 502, 500}".
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use egret_automation::evaluator::{QueryRunner, RunIdentity};
 use egret_automation::render::token::RenderTokenRepo;
 use egret_automation::{automation_router, AutomationState, ScheduleRepo};
 use egret_bi::{ChartRepo, DashboardRepo, DatasetRepo, NewCard, NewColumn, SourceSpec};
+use egret_core::tabular::ColumnMeta;
+use egret_core::TabularResult;
 use egret_metastore::Db;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -35,6 +43,52 @@ impl egret_analytics_api::engine_token::EngineTokenMinter for NoMinter {
         egret_analytics_api::engine_token::BrokerError,
     > {
         Err(egret_analytics_api::engine_token::BrokerError::NoRefreshToken)
+    }
+}
+
+/// A query engine that returns one fixed, known table — modeled on
+/// `tick_end_to_end.rs`'s `FakeEngine`. What it returns is the exact thing
+/// the success-path test checks the response against, so the test proves the
+/// endpoint carries the engine's rows through to the HTTP body rather than
+/// merely reaching `run_query` without erroring.
+struct FakeEngine {
+    columns: Vec<&'static str>,
+    rows: Vec<Vec<serde_json::Value>>,
+}
+
+#[async_trait::async_trait]
+impl QueryRunner for FakeEngine {
+    async fn run(
+        &self,
+        _database_id: Uuid,
+        _sql: &str,
+        _identity: &RunIdentity,
+        _limit: Option<usize>,
+    ) -> Result<TabularResult, String> {
+        Ok(TabularResult {
+            columns: self
+                .columns
+                .iter()
+                .map(|c| ColumnMeta {
+                    name: (*c).to_string(),
+                    ty: "varchar".into(),
+                })
+                .collect(),
+            row_count: self.rows.len() as u64,
+            rows: self.rows.clone(),
+            bytes_scanned: None,
+            truncated: false,
+        })
+    }
+}
+
+fn fake_engine() -> FakeEngine {
+    FakeEngine {
+        columns: vec!["orderpriority"],
+        rows: vec![
+            vec![serde_json::json!("1-URGENT")],
+            vec![serde_json::json!("2-HIGH")],
+        ],
     }
 }
 
@@ -82,11 +136,9 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
     .await
     .unwrap();
 
-    // The local dev stack's Trino (deploy/docker-compose.dev.yml maps it to
-    // localhost:8090) with the built-in `tpch` connector — the same fixture
-    // `egret-bi`'s chart_engine.rs live tests use. read-only access for any
-    // username is allowed by the dev rules.json, so a non-delegated database
-    // needs no token broker.
+    // Never actually dialed — execution goes through `FakeEngine`, not a real
+    // connector — but `compile_chart_sql` still needs a real `query.databases`
+    // row (engine + dataset source) to compile the chart's spec to SQL text.
     let database: Uuid = sqlx::query_scalar(
         "INSERT INTO query.databases (name, engine, host, port, workspace_id, delegated) \
          VALUES ($1,'trino','localhost',8090,$2,false) RETURNING id",
@@ -212,6 +264,7 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
         databases,
         users: egret_auth::users::UserRepo::new(db.clone()),
         engine_minter: Arc::new(NoMinter),
+        query: Arc::new(fake_engine()),
     };
 
     Fx {
@@ -288,64 +341,38 @@ async fn get_payload_with_cookie(fx: &Fx, session_tok: &str) -> (StatusCode, Str
 #[sqlx::test(migrations = "../../migrations")]
 async fn the_payload_is_returned_once_for_a_valid_token(pool: sqlx::PgPool) {
     // The print page's only request. It must arrive complete — spec AND data —
-    // because the page makes no second call.
-    //
-    // No insecure-reachable query engine is guaranteed in every environment
-    // this suite runs in: the local dev Trino enforces JWT auth and refuses
-    // plain HTTP outright (`curl` against it returns "403 Forbidden:
-    // Authentication over HTTP is not enabled" — confirmed by hand; see
-    // deploy/trino/etc/config.properties). So, exactly like egret-bi's own
-    // `charts_run_executes_a_client_supplied_spec` (crates/egret-bi/tests/
-    // chart_run_spec.rs), this accepts 502/500 as proof the token was
-    // honoured and the request reached `run_query` — the part actually under
-    // test — and asserts the full response shape only when a live engine
-    // answered.
+    // because the page makes no second call. Unconditional: the engine is
+    // faked (see `FakeEngine` above), so there is no environment-dependent
+    // branch here.
     let fx = setup(pool).await;
     let token = fx.mint_for_dashboard().await;
     let (s, body) = get_payload(&fx, &token).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["kind"], "dashboard");
     assert!(
-        s == StatusCode::OK
-            || s == StatusCode::BAD_GATEWAY
-            || s == StatusCode::INTERNAL_SERVER_ERROR,
-        "expected the token to be honoured and the request to reach execution \
-         (200 with a live engine, else 502/500); got {s}: {body}"
+        !v["cards"].as_array().unwrap().is_empty(),
+        "cards carry their own data: {body}"
     );
-    if s == StatusCode::OK {
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["kind"], "dashboard");
-        assert!(
-            !v["cards"].as_array().unwrap().is_empty(),
-            "cards carry their own data: {body}"
-        );
-        assert!(v["cards"][0]["rows"].is_array());
-    } else {
-        eprintln!(
-            "note: no live/reachable query engine in this environment — proved the token \
-             was honoured and the request reached run_query ({s}), not that it returned rows"
-        );
-    }
+    // The claim under test: the rows are the ENGINE's rows, carried through
+    // to the response byte-for-byte — not merely "some array".
+    assert_eq!(
+        v["cards"][0]["columns"],
+        serde_json::json!(["orderpriority"])
+    );
+    assert_eq!(
+        v["cards"][0]["rows"],
+        serde_json::json!([["1-URGENT"], ["2-HIGH"]]),
+        "{body}"
+    );
 }
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_replayed_token_is_refused(pool: sqlx::PgPool) {
-    // Single use, end to end: the SECOND fetch of the same page fails. This
-    // holds regardless of whether a live engine is reachable in this
-    // environment (see the test above) — `redeem` deletes the token row
-    // before the query ever runs, so replay-refusal cannot depend on
-    // execution succeeding.
+    // Single use, end to end: the SECOND fetch of the same page fails.
     let fx = setup(pool).await;
     let token = fx.mint_for_dashboard().await;
-    let first = get_payload(&fx, &token).await.0;
-    assert_ne!(
-        first,
-        StatusCode::NOT_FOUND,
-        "the token must have been valid on first use"
-    );
-    assert_ne!(
-        first,
-        StatusCode::UNAUTHORIZED,
-        "the token must have been valid on first use"
-    );
+    assert_eq!(get_payload(&fx, &token).await.0, StatusCode::OK);
     assert_eq!(get_payload(&fx, &token).await.0, StatusCode::NOT_FOUND);
 }
 

@@ -32,6 +32,7 @@ impl QueryRunner for FakeEngine {
         _db: Uuid,
         _sql: &str,
         identity: &RunIdentity,
+        _limit: Option<usize>,
     ) -> Result<TabularResult, String> {
         self.seen.lock().unwrap().push(identity.clone());
         if self.fail {
