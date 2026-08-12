@@ -1,5 +1,5 @@
 // src/components/chart/ChartRenderer.tsx
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   AnyChartParams, BoxplotConfig, CartesianConfig, FunnelConfig, GaugeConfig,
   PieConfig, ProgressConfig, SankeyConfig, ScalarConfig, SmartScalarConfig, VizType, WaterfallConfig,
@@ -44,6 +44,26 @@ const EmptyState = ({ message = "No data" }: { message?: string }) => (
 const NO_METRIC_TYPES: Record<string, string> = {};
 
 /**
+ * Fires `onFinished` once after mount — for the branches below with no ECharts `finished` event of
+ * their own to forward (a plain result table, a big number, an empty-result message) because they
+ * draw synchronously, in the one React commit that mounts them, with nothing further coming.
+ *
+ * Its own component because hooks cannot live in `ChartRenderer` past its early returns (see the
+ * other small components above), and this is the one every early-return branch shares rather than
+ * a bespoke `useEffect` in each.
+ */
+function FinishedOnMount({ onFinished, children }: { onFinished?: () => void; children: ReactNode }) {
+  useEffect(() => {
+    onFinished?.();
+    // Fires once per mount, deliberately: a caller (the print route) that already counted this
+    // card as finished must not see a second, unmatched call just because a sibling's state
+    // change re-rendered this one — `onFinished`'s identity is stable there (a plain arrow that
+    // increments a counter) precisely so this dependency list can be empty.
+  }, []);
+  return <>{children}</>;
+}
+
+/**
  * The pie branch, as its own component purely so the option can be memoised: pie is one of the
  * vizzes whose `option` is a FUNCTION of the measured container size (so are the other size-function
  * components below, which all have this component's shape for the same reason — named as a set
@@ -59,12 +79,13 @@ const NO_METRIC_TYPES: Record<string, string> = {};
  * Hooks can't live in ChartRenderer itself past its early returns, and a component boundary is
  * cheaper than a memo that runs for every viz type.
  */
-function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
+function PieChart({ params, columns, rows, metricTypes, onValueClick, onFinished }: {
   params: AnyChartParams;
   columns: ResultColumn[];
   rows: unknown[][];
   metricTypes: Record<string, string>;
   onValueClick?: (ctx: DrillContext, x: number, y: number) => void;
+  onFinished?: () => void;
 }) {
   const pie = vizConfig<PieConfig>("pie", params);
   const { columnSettings } = shellSettings(params);
@@ -162,12 +183,20 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
   // config they do.
   const hasSlices = useMemo(() => pieHasSlices(columns, rows, input), [input, columns, rows]);
 
+  // "No values to chart" below is a terminal state ECharts never draws — fire directly rather than
+  // via the chart's own `onFinished`, the same split `ChartRenderer`'s other empty-result branches
+  // make with `FinishedOnMount`. Declared here, ahead of the early return, per the rules of hooks.
+  useEffect(() => {
+    if (!hasSlices) onFinished?.();
+  }, [hasSlices, onFinished]);
+
   const chart = (
     <EChartsRenderer
       key="chart"
       option={option}
       overlay={overlay}
       className="min-h-0 min-w-0 flex-1"
+      onFinished={onFinished}
       // A sunburst node carries its own name and value on the hover event, so the readout needs no
       // lookup back into the data at all. `treePathInfo[1]` is the ring-0 slice this one descends
       // from (entry 0 being ECharts' virtual root) — the legend entry that names its colour family,
@@ -268,7 +297,7 @@ function PieChart({ params, columns, rows, metricTypes, onValueClick }: {
  * rather than reimplementing the folding rules), so that second build has to be pinned to data and
  * config changes too, or it runs on every render.
  */
-function CartesianChart({ columns, rows, cfg, onPointClick }: {
+function CartesianChart({ columns, rows, cfg, onPointClick, onFinished }: {
   columns: ResultColumn[];
   rows: unknown[][];
   cfg: CartesianBuildConfig;
@@ -280,6 +309,7 @@ function CartesianChart({ columns, rows, cfg, onPointClick }: {
    *  of its four dependency arrays, so a new identity costs one property assignment and nothing
    *  else. Only `option` is expensive to hand over anew, which is what the memo below is for. */
   onPointClick?: (p: EChartsPointClick, meta: CartesianMeta) => void;
+  onFinished?: () => void;
 }) {
   // A VALUE key, deliberately not an identity dep — the same treatment, for the same reason,
   // `PieChart` gives its own config above. `cfg` CANNOT be an identity dep: `ChartRenderer`
@@ -302,6 +332,7 @@ function CartesianChart({ columns, rows, cfg, onPointClick }: {
     <EChartsRenderer
       option={option}
       onPointClick={onPointClick && ((p) => onPointClick(p, meta))}
+      onFinished={onFinished}
     />
   );
 }
@@ -339,13 +370,14 @@ function CartesianChart({ columns, rows, cfg, onPointClick }: {
  * Hooks cannot live in `ChartRenderer` itself past its early returns, so this is a component
  * rather than a memo.
  */
-function GaugeChart({ columns, rows, cfg, onValueClick }: {
+function GaugeChart({ columns, rows, cfg, onValueClick, onFinished }: {
   columns: ResultColumn[];
   rows: unknown[][];
   cfg: GaugeBuildConfig;
   /** Present when the chart is drillable; handed the cursor position, since the context it makes
    *  carries nothing else. */
   onValueClick?: (x: number, y: number) => void;
+  onFinished?: () => void;
 }) {
   // A VALUE key, deliberately not an identity dep — the same treatment, for the same reason,
   // `PieChart` and `CartesianChart` give their own configs above. `cfg` CANNOT be an identity dep:
@@ -372,7 +404,7 @@ function GaugeChart({ columns, rows, cfg, onValueClick }: {
   const mi = cfg.metric != null ? columns.findIndex((c) => c.name === cfg.metric) : -1;
   const hasValue = mi >= 0 && rows.length > 0 && rows[0][mi] != null;
 
-  const chart = <EChartsRenderer option={option} />;
+  const chart = <EChartsRenderer option={option} onFinished={onFinished} />;
   if (!onValueClick || !hasValue) return chart;
   // A BUTTON WRAPPING THE CANVAS, not an ECharts `click` handler. Two reasons, and the first is the
   // one that matters: ECharts' gauge draws its arc as axis-line geometry rather than as data items,
@@ -410,11 +442,12 @@ function GaugeChart({ columns, rows, cfg, onValueClick }: {
  * Hooks cannot live in `ChartRenderer` itself past its early returns, so this is a component
  * rather than a memo.
  */
-function SankeyChart({ columns, rows, cfg, onPointClick }: {
+function SankeyChart({ columns, rows, cfg, onPointClick, onFinished }: {
   columns: ResultColumn[];
   rows: unknown[][];
   cfg: SankeyBuildConfig;
   onPointClick?: (p: EChartsPointClick) => void;
+  onFinished?: () => void;
 }) {
   // A VALUE key, not an identity dep, for the reason spelled out in `GaugeChart` above:
   // `ChartRenderer` builds this config fresh on every render, so `[cfg]` would memoise nothing.
@@ -426,7 +459,7 @@ function SankeyChart({ columns, rows, cfg, onPointClick }: {
     () => (size: EChartsSize) => buildSankeyOption(columns, rows, cfg, undefined, size),
     [columns, rows, cfgKey],
   );
-  return <EChartsRenderer option={option} onPointClick={onPointClick} />;
+  return <EChartsRenderer option={option} onPointClick={onPointClick} onFinished={onFinished} />;
 }
 
 /**
@@ -445,11 +478,12 @@ function SankeyChart({ columns, rows, cfg, onPointClick }: {
  * Hooks cannot live in `ChartRenderer` itself past its early returns, so this is a component
  * rather than a memo.
  */
-function WaterfallChart({ columns, rows, cfg, onPointClick }: {
+function WaterfallChart({ columns, rows, cfg, onPointClick, onFinished }: {
   columns: ResultColumn[];
   rows: unknown[][];
   cfg: WaterfallBuildConfig;
   onPointClick?: (p: EChartsPointClick) => void;
+  onFinished?: () => void;
 }) {
   // A VALUE key, not an identity dep, for the reason spelled out in `GaugeChart` above:
   // `ChartRenderer` builds this config fresh on every render, so `[cfg]` would memoise nothing.
@@ -458,7 +492,7 @@ function WaterfallChart({ columns, rows, cfg, onPointClick }: {
     () => (size: EChartsSize) => buildWaterfallOption(columns, rows, cfg, size),
     [columns, rows, cfgKey],
   );
-  return <EChartsRenderer option={option} onPointClick={onPointClick} />;
+  return <EChartsRenderer option={option} onPointClick={onPointClick} onFinished={onFinished} />;
 }
 
 /**
@@ -483,12 +517,13 @@ function WaterfallChart({ columns, rows, cfg, onPointClick }: {
  * Hooks cannot live in `ChartRenderer` itself past its early returns, so this is a component
  * rather than a memo.
  */
-function BoxplotChart({ columns, rows, cfg, onPointClick }: {
+function BoxplotChart({ columns, rows, cfg, onPointClick, onFinished }: {
   columns: ResultColumn[];
   rows: unknown[][];
   cfg: BoxplotBuildConfig;
   /** Handed the categories this component derived — see the second memo below. */
   onPointClick?: (p: EChartsPointClick, categories: string[]) => void;
+  onFinished?: () => void;
 }) {
   // A VALUE key, not an identity dep, for the reason spelled out in `GaugeChart` above:
   // `ChartRenderer` builds this config fresh on every render, so `[cfg]` would memoise nothing.
@@ -507,6 +542,7 @@ function BoxplotChart({ columns, rows, cfg, onPointClick }: {
     <EChartsRenderer
       option={option}
       onPointClick={onPointClick && ((p) => onPointClick(p, categories))}
+      onFinished={onFinished}
     />
   );
 }
@@ -523,9 +559,18 @@ export interface ChartRendererProps {
   /** The card's width in dashboard grid columns, when it is on a grid. Supplied only by
    * `DashboardCardView`; the studio preview has no grid and omits it. */
   gridCols?: number;
+  /** "This chart is done drawing." Added for the print route (`routes/print/PrintObject.tsx`),
+   *  which screenshots a chrome-free page and has to know when every card on it has actually
+   *  painted rather than guessing with a fixed wait. Every branch below fires it exactly once per
+   *  mount: the ECharts-backed ones forward ECharts' own `finished` event (see
+   *  `EChartsRenderer`'s doc comment), and the rest — a table, a big number, an empty-result
+   *  message — fire it straight from `FinishedOnMount` because they draw synchronously and have
+   *  nothing further coming. No caller outside the print route reads it yet, so this is a pure
+   *  addition; every existing call site keeps working with it omitted. */
+  onFinished?: () => void;
 }
 
-export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO_METRIC_TYPES, onValueClick, gridCols }: ChartRendererProps) {
+export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO_METRIC_TYPES, onValueClick, gridCols, onFinished }: ChartRendererProps) {
   // One config, from the viz's own descriptor; each branch below reads it as its type.
   const cfg = vizConfig(vizType, params);
   const cartesian = { yMetrics: [], ...cfg } as CartesianConfig;
@@ -570,68 +615,74 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
 
   if (vizType === "object") {
     return (
-      <ObjectDetail
-        columns={columns}
-        rows={rows}
-        columnSettings={columnSettings}
-        // PER FIELD, not per record. Metabase's object detail gives its VALUE cells a click object
-        // of `{ column, value }` and its label cells none (`ObjectDetailsTable.tsx:209-238`), which
-        // with no `dimensions` resolves to its quick-filter drill — `column = value`. The same
-        // predicate here, so "See these records" on a field answers "which other records share
-        // this?" rather than "show me the one I am already looking at".
-        //
-        // No temporal unit is attached, and that is not an omission: the object view is a RAW-rows
-        // surface (`spec.columns`, no metrics, no group-by), so its columns are never the bucketed
-        // output of a `temporal_units` grouping. Reading the map here would attach a month range to
-        // a raw timestamp and widen the filter from one record to a whole month.
-        onFieldClick={onValueClick && ((col, value, x, y) => onValueClick({ dims: [{ col, value }] }, x, y))}
-      />
+      <FinishedOnMount onFinished={onFinished}>
+        <ObjectDetail
+          columns={columns}
+          rows={rows}
+          columnSettings={columnSettings}
+          // PER FIELD, not per record. Metabase's object detail gives its VALUE cells a click object
+          // of `{ column, value }` and its label cells none (`ObjectDetailsTable.tsx:209-238`), which
+          // with no `dimensions` resolves to its quick-filter drill — `column = value`. The same
+          // predicate here, so "See these records" on a field answers "which other records share
+          // this?" rather than "show me the one I am already looking at".
+          //
+          // No temporal unit is attached, and that is not an omission: the object view is a RAW-rows
+          // surface (`spec.columns`, no metrics, no group-by), so its columns are never the bucketed
+          // output of a `temporal_units` grouping. Reading the map here would attach a month range to
+          // a raw timestamp and widen the filter from one record to a whole month.
+          onFieldClick={onValueClick && ((col, value, x, y) => onValueClick({ dims: [{ col, value }] }, x, y))}
+        />
+      </FinishedOnMount>
     );
   }
 
   if (vizType === "map") {
-    return <MapChart columns={columns} rows={rows} params={params} metricTypes={metricTypes} onValueClick={onValueClick} />;
+    return <MapChart columns={columns} rows={rows} params={params} metricTypes={metricTypes} onValueClick={onValueClick} onFinished={onFinished} />;
   }
 
   if (vizType === "table") {
     return (
-      <ChartTable
-        columns={columns}
-        rows={rows}
-        columnSettings={columnSettings}
-        conditionalFormatting={conditionalFormatting}
-        tableState={tableState}
-        dimensionColumns={dimensionColumns}
-        temporalUnits={params.spec.temporal_units ?? {}}
-        onCellDrill={onValueClick}
-      />
+      <FinishedOnMount onFinished={onFinished}>
+        <ChartTable
+          columns={columns}
+          rows={rows}
+          columnSettings={columnSettings}
+          conditionalFormatting={conditionalFormatting}
+          tableState={tableState}
+          dimensionColumns={dimensionColumns}
+          temporalUnits={params.spec.temporal_units ?? {}}
+          onCellDrill={onValueClick}
+        />
+      </FinishedOnMount>
     );
   }
 
   if (vizType === "pivot_table") {
     return (
-      <PivotTable
-        input={{
-          columns: columns.map((c) => c.name),
-          rows,
-          rowDims: pivot.rows ?? [],
-          colDims: pivot.cols ?? [],
-          metrics: pivot.metrics ?? [],
-          showRowTotals: pivot.showRowTotals ?? true,
-          showColTotals: pivot.showColTotals ?? true,
-          condense: pivot.condense ?? false,
-          collapsed: new Set(pivot.collapsedRows ?? []),
-          sortDims: pivot.sort ?? {},
-          dimTotals: pivot.dimTotals,
-        }}
-        columnWidths={pivot.columnWidths}
-        temporalUnits={params.spec.temporal_units ?? {}}
-        columnTypes={Object.fromEntries(columns.map((c) => [c.name, c.type]))}
-        columnSettings={columnSettings}
-        conditionalFormatting={conditionalFormatting}
-        metricTypes={metricTypes}
-        onCellDrill={onValueClick}
-      />
+      <FinishedOnMount onFinished={onFinished}>
+        <PivotTable
+          input={{
+            columns: columns.map((c) => c.name),
+            rows,
+            rowDims: pivot.rows ?? [],
+            colDims: pivot.cols ?? [],
+            metrics: pivot.metrics ?? [],
+            showRowTotals: pivot.showRowTotals ?? true,
+            showColTotals: pivot.showColTotals ?? true,
+            condense: pivot.condense ?? false,
+            collapsed: new Set(pivot.collapsedRows ?? []),
+            sortDims: pivot.sort ?? {},
+            dimTotals: pivot.dimTotals,
+          }}
+          columnWidths={pivot.columnWidths}
+          temporalUnits={params.spec.temporal_units ?? {}}
+          columnTypes={Object.fromEntries(columns.map((c) => [c.name, c.type]))}
+          columnSettings={columnSettings}
+          conditionalFormatting={conditionalFormatting}
+          metricTypes={metricTypes}
+          onCellDrill={onValueClick}
+        />
+      </FinishedOnMount>
     );
   }
 
@@ -659,8 +710,8 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
     return (
       <div className="h-full w-full">
         {rows.length === 0
-          ? <EmptyState />
-          : <CartesianChart columns={columns} rows={rows} cfg={cartesianCfg}
+          ? <FinishedOnMount onFinished={onFinished}><EmptyState /></FinishedOnMount>
+          : <CartesianChart columns={columns} rows={rows} cfg={cartesianCfg} onFinished={onFinished}
             // `meta` is what this handler used to read back off the built option — impossible now
             // that the option is a function, so `CartesianChart` derives it and hands it over. See
             // `cartesianMeta`.
@@ -735,8 +786,8 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
     return (
       <div className="h-full w-full">
         {rows.length === 0
-          ? <EmptyState />
-          : <PieChart params={params} columns={columns} rows={rows} metricTypes={metricTypes} onValueClick={onValueClick} />}
+          ? <FinishedOnMount onFinished={onFinished}><EmptyState /></FinishedOnMount>
+          : <PieChart params={params} columns={columns} rows={rows} metricTypes={metricTypes} onValueClick={onValueClick} onFinished={onFinished} />}
       </div>
     );
   }
@@ -747,14 +798,16 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
     // alone, and this unit adds three more fields to the other side of it.
     return (
       <div className="h-full w-full">
-        <BigNumber
-          {...scalar}
-          columns={columns}
-          rows={rows}
-          format={scalar.metric ? columnSettings[scalar.metric] : undefined}
-          onValueClick={onValueClick}
-          gridCols={gridCols}
-        />
+        <FinishedOnMount onFinished={onFinished}>
+          <BigNumber
+            {...scalar}
+            columns={columns}
+            rows={rows}
+            format={scalar.metric ? columnSettings[scalar.metric] : undefined}
+            onValueClick={onValueClick}
+            gridCols={gridCols}
+          />
+        </FinishedOnMount>
       </div>
     );
   }
@@ -762,19 +815,21 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
   if (vizType === "progress") {
     return (
       <div className="h-full w-full">
-        <ProgressChart
-          columns={columns}
-          rows={rows}
-          metric={progress.metric}
-          goal={progress.goal}
-          goalColumn={progress.goalColumn}
-          color={progress.color}
-          format={progress.metric ? columnSettings[progress.metric] : undefined}
-          // `{ dims: [] }`, the scalar's drill — a progress bar shows one aggregate against a goal
-          // and has no dimension to filter by. See `ProgressChart`'s own note, and `GaugeChart`
-          // above for the Metabase reading that settled all three of these.
-          onValueClick={onValueClick && ((x, y) => onValueClick({ dims: [] }, x, y))}
-        />
+        <FinishedOnMount onFinished={onFinished}>
+          <ProgressChart
+            columns={columns}
+            rows={rows}
+            metric={progress.metric}
+            goal={progress.goal}
+            goalColumn={progress.goalColumn}
+            color={progress.color}
+            format={progress.metric ? columnSettings[progress.metric] : undefined}
+            // `{ dims: [] }`, the scalar's drill — a progress bar shows one aggregate against a goal
+            // and has no dimension to filter by. See `ProgressChart`'s own note, and `GaugeChart`
+            // above for the Metabase reading that settled all three of these.
+            onValueClick={onValueClick && ((x, y) => onValueClick({ dims: [] }, x, y))}
+          />
+        </FinishedOnMount>
       </div>
     );
   }
@@ -798,9 +853,9 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
     return (
       <div className="h-full w-full">
         {rows.length === 0
-          ? <EmptyState />
+          ? <FinishedOnMount onFinished={onFinished}><EmptyState /></FinishedOnMount>
           // `{ dims: [] }` — the scalar's own drill, and for the same reason. See GaugeChart.
-          : <GaugeChart columns={columns} rows={rows} cfg={gaugeCfg}
+          : <GaugeChart columns={columns} rows={rows} cfg={gaugeCfg} onFinished={onFinished}
             onValueClick={onValueClick && ((x, y) => onValueClick({ dims: [] }, x, y))} />}
       </div>
     );
@@ -810,8 +865,8 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
     return (
       <div className="h-full w-full">
         {rows.length === 0
-          ? <EmptyState />
-          : <FunnelChart columns={columns} rows={rows} {...funnel} columnSettings={columnSettings} metricTypes={metricTypes}
+          ? <FinishedOnMount onFinished={onFinished}><EmptyState /></FinishedOnMount>
+          : <FunnelChart columns={columns} rows={rows} {...funnel} columnSettings={columnSettings} metricTypes={metricTypes} onFinished={onFinished}
             // A funnel step IS a row, and its steps come from a dimension, so this is an ordinary
             // dimensional drill — the same one the waterfall and the box plot make. This branch
             // passed no handler at all, in EITHER of the funnel's two modes, so clicking a funnel
@@ -852,11 +907,12 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
     return (
       <div className="h-full w-full">
         {rows.length === 0
-          ? <EmptyState />
+          ? <FinishedOnMount onFinished={onFinished}><EmptyState /></FinishedOnMount>
           : <WaterfallChart
             columns={columns}
             rows={rows}
             cfg={waterfallCfg}
+            onFinished={onFinished}
             // A waterfall step IS a row, so it drills like a bar — Metabase's does, being a
             // CartesianChart. This branch passed no handler at all, so clicking a waterfall did
             // nothing; the same seam-level omission the pie had in the studio preview.
@@ -879,6 +935,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
   if (vizType === "smartscalar") {
     return (
       <div className="h-full w-full">
+        <FinishedOnMount onFinished={onFinished}>
         <SmartScalarChart
           columns={columns}
           rows={rows}
@@ -923,6 +980,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
             onValueClick({ dims: [dim] }, x, y);
           })}
         />
+        </FinishedOnMount>
       </div>
     );
   }
@@ -933,11 +991,12 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
     return (
       <div className="h-full w-full">
         {rows.length === 0
-          ? <EmptyState />
+          ? <FinishedOnMount onFinished={onFinished}><EmptyState /></FinishedOnMount>
           : <BoxplotChart
             columns={columns}
             rows={rows}
             cfg={boxCfg}
+            onFinished={onFinished}
             // Metabase's box plot drills; egret's branch passed no handler, so clicking a box did
             // nothing. A box IS a category, and so is the point drawn above it. The categories the
             // builder settled on arrive from `BoxplotChart`, read back off a build rather than
@@ -974,15 +1033,18 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
     return (
       <div className="h-full w-full">
         {rows.length === 0
-          ? <EmptyState />
+          ? <FinishedOnMount onFinished={onFinished}><EmptyState /></FinishedOnMount>
           : sankeyIssue
-            ? <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
-              {sankeyIssue}
-            </div>
+            ? <FinishedOnMount onFinished={onFinished}>
+              <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
+                {sankeyIssue}
+              </div>
+            </FinishedOnMount>
             : <SankeyChart
               columns={columns}
               rows={rows}
               cfg={sankeyCfg}
+              onFinished={onFinished}
               // Metabase's sankey drills from both kinds of element; egret's branch passed no
               // handler at all — the third chart in a row with that gap. An EDGE names both of its
               // ends, so it filters on both columns; a NODE names only itself, and which column
@@ -1015,5 +1077,5 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = NO
     );
   }
 
-  return null;
+  return <FinishedOnMount onFinished={onFinished}>{null}</FinishedOnMount>;
 }

@@ -16,9 +16,15 @@ import type { DrillContext } from "@/components/chart/drill";
 const registered = new Set<string>();
 
 /** Choropleth map. Lazy-loads + registers the selected geojson, then renders via EChartsRenderer. */
-export function MapChart({ columns, rows, params, metricTypes = {}, onValueClick }: {
+export function MapChart({ columns, rows, params, metricTypes = {}, onValueClick, onFinished }: {
   columns: ResultColumn[]; rows: unknown[][]; params: AnyChartParams; metricTypes?: Record<string, string>;
   onValueClick?: (ctx: DrillContext, x: number, y: number) => void;
+  /** See `EChartsRenderer`'s own doc comment. Forwarded to it on the happy path below; fired
+   *  directly from the early returns that never reach ECharts at all (an error, an unregistered
+   *  region, an empty result) — every one of those IS a finished draw, just not one ECharts drew.
+   *  The "still loading the geojson" state deliberately does NOT fire it: a print page waiting on
+   *  this card has more drawing coming and must keep waiting for it. */
+  onFinished?: () => void;
 }) {
   const map = vizConfig<MapConfig>("map", params);
   const isPin = map.type === "pin";
@@ -57,6 +63,14 @@ export function MapChart({ columns, rows, params, metricTypes = {}, onValueClick
       alive = false;
     };
   }, [def]);
+
+  // The two TERMINAL non-drawing states — "no map" and "no data" — count as finished for the same
+  // reason a chart's own empty state does: nothing further is coming. "Loading map…" deliberately
+  // does NOT fire it: `forceUpdate` above re-renders once the geojson lands, and a print page
+  // waiting on this card must keep waiting through that, not declare it done early.
+  useEffect(() => {
+    if (error || (ready && rows.length === 0)) onFinished?.();
+  }, [error, ready, rows.length, onFinished]);
 
   if (error) return <div className="flex h-full items-center justify-center text-sm text-destructive">Couldn't load the map</div>;
   if (!ready) return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading map…</div>;
@@ -130,6 +144,7 @@ export function MapChart({ columns, rows, params, metricTypes = {}, onValueClick
       <div className="min-h-0 w-full flex-1">
       <EChartsRenderer
         option={buildMapOption(columns, rows, cfg)}
+        onFinished={onFinished}
         // Metabase's region map drills; egret's branch passed no handler — the same seam gap the
         // waterfall, box plot and sankey each had. A region is a row, so it filters by the RAW
         // dimension value, not by the normalised key the geojson is matched on: those differ

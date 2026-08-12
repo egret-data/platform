@@ -12,6 +12,7 @@ import { useMyWorkspaces } from "@/api/hooks";
 import { queryClient } from "@/api/queryClient";
 import { RequireFeature } from "@/components/explore/RequireFeature";
 import { useDefaultExplorePath } from "@/hooks/useWorkspaceFeatures";
+import PrintObject from "@/routes/print/PrintObject";
 
 function LoginRoute() {
   const { me, isLoading } = useAuth();
@@ -205,6 +206,11 @@ export default function App() {
           <AuthProvider>
             <Routes>
               <Route path="/login" element={<LoginRoute />} />
+              {/* The headless renderer's browser has no session — that is the entire point of the
+                  single-use `?t=` token this route reads for itself. It must stay OUTSIDE
+                  `RequireAuth`/`RequireWorkspace`: either guard would redirect an unauthenticated
+                  renderer to `/login` and it would screenshot that instead of the report. */}
+              <Route path="/embed/print/:kind/:id" element={<PrintObject />} />
               <Route path="/" element={<RequireAuth><HomeRedirect /></RequireAuth>} />
               <Route path="/explore/:workspace/*" element={<RequireAuth><ExploreRoutes /></RequireAuth>} />
               <Route path="/control-plane/*" element={<RequireAuth><ControlPlaneRoutes /></RequireAuth>} />

@@ -137,7 +137,7 @@ function StepColumn({ step, onStepClick, className, children }: {
 
 export function FunnelChart({
   columns, rows, dimension, metric, stepOrder, hiddenSteps, columnSettings, metricTypes, type = "funnel",
-  onStepClick,
+  onStepClick, onFinished,
 }: FunnelBuildConfig & {
   columns: ResultColumn[];
   rows: unknown[][];
@@ -152,12 +152,23 @@ export function FunnelChart({
    *  the only thing this component can pass on: `FunnelStep.name` is `String(row[dimensionIndex])`
    *  (see `funnelSteps`), never a label. Nothing here reads back the text it drew. */
   onStepClick?: (step: FunnelStep, x: number, y: number) => void;
+  /** See `EChartsRenderer`'s own doc comment. Forwarded to it below for the "bar" mode, which
+   *  draws through `EChartsRenderer`; fired directly for "No data", which never reaches it. */
+  onFinished?: () => void;
 }) {
   const { ref, isNarrow, isShort } = useMeasuredSize();
 
   const steps = funnelSteps(columns, rows, {
     dimension, metric, stepOrder, hiddenSteps, columnSettings, metricTypes,
   });
+
+  // Declared before the early return below so the hook still runs on every render, per the rules
+  // of hooks. Two of this component's three shapes draw synchronously — "No data" and the default
+  // trapezoid funnel (plain markup below, no ECharts involved) — so both fire here; only "bar"
+  // mode defers to `StepBars`' own `EChartsRenderer`, which is handed `onFinished` below instead.
+  useEffect(() => {
+    if (steps.length === 0 || type !== "bar") onFinished?.();
+  }, [steps.length, type, onFinished]);
 
   if (steps.length === 0) {
     return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>;
@@ -169,7 +180,7 @@ export function FunnelChart({
 
   if (type === "bar") {
     return <StepBars steps={steps} columns={columns} dimension={dimension} metric={metric}
-      columnSettings={columnSettings} metricTypes={metricTypes} onStepClick={onStepClick} />;
+      columnSettings={columnSettings} metricTypes={metricTypes} onStepClick={onStepClick} onFinished={onFinished} />;
   }
 
   const [first, ...rest] = steps;
@@ -289,10 +300,11 @@ export function FunnelChart({
  * a value only in its own column — and stacking, so the four series land in four x positions
  * instead of being grouped side by side inside each one.
  */
-function StepBars({ steps, columns, dimension, metric, columnSettings, metricTypes, onStepClick }: {
+function StepBars({ steps, columns, dimension, metric, columnSettings, metricTypes, onStepClick, onFinished }: {
   steps: FunnelStep[];
   columns: ResultColumn[];
   onStepClick?: (step: FunnelStep, x: number, y: number) => void;
+  onFinished?: () => void;
 } & Pick<FunnelBuildConfig, "dimension" | "metric" | "columnSettings" | "metricTypes">) {
   const dimName = dimension ?? "step";
   const metricType = (metric ? metricTypes?.[metric] : undefined) ?? "double";
@@ -366,6 +378,7 @@ function StepBars({ steps, columns, dimension, metric, columnSettings, metricTyp
         const step = steps.find((s) => s.raw === p.name);
         if (step) onStepClick(step, p.x, p.y);
       })}
+      onFinished={onFinished}
     />
   );
 }
