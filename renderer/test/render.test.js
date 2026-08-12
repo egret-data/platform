@@ -120,7 +120,9 @@ test("a page that signals readiness returns real PNG bytes, not an icon-sized ca
 });
 
 test("a page that never signals readiness or failure times out with no image", async () => {
+  const t0 = Date.now();
   const { status, body } = await postRender(shortAppBase, { url: `${fixtureBase}/never` });
+  const elapsedMs = Date.now() - t0;
 
   assert.notEqual(status, 200);
   assert.ok(status >= 500 && status < 600, `expected a 5xx, got ${status}`);
@@ -128,6 +130,62 @@ test("a page that never signals readiness or failure times out with no image", a
 
   const text = body.toString("utf8");
   assert.match(text.toLowerCase(), /timeout/, "error body should mention the timeout");
+
+  // Load-bearing regression guard for the `page.waitForFunction(fn, undefined,
+  // options)` arg-order fix: `shortApp` is configured with a 500ms readiness
+  // timeout, so a correct implementation returns in well under a second. If
+  // the `undefined` arg were ever dropped again, Playwright would silently
+  // fall back to its own 30s default timeout instead of honoring
+  // `readyTimeoutMs` — asserting on the status/message alone would NOT catch
+  // that regression (it would still eventually time out, just 60x slower),
+  // so this asserts wall-clock time too.
+  assert.ok(
+    elapsedMs < 5000,
+    `timeout took ${elapsedMs}ms — expected well under 5000ms for a 500ms readyTimeoutMs; ` +
+      `~30000ms would indicate the waitForFunction(fn, undefined, options) arg-order fix regressed`,
+  );
+});
+
+test("a navigation failure never leaks the render token into the response body or logs", async () => {
+  // A port with nothing listening reproduces a realistic navigation failure
+  // (connection refused) without any dependency on the network.
+  const probe = createServer();
+  await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const deadPort = probe.address().port;
+  await new Promise((resolve) => probe.close(resolve));
+
+  const secretToken = "SECRET_RENDER_TOKEN_9f3a7c";
+  const deadUrl = `http://127.0.0.1:${deadPort}/embed/print/chart/abc-123?t=${secretToken}`;
+
+  // Playwright conventionally embeds the full navigated URL — token included
+  // — in its own navigation-error message. Capture every console.log call
+  // during this request so we can assert the token never reaches a log line,
+  // not just the HTTP response.
+  const originalLog = console.log;
+  const loggedLines = [];
+  console.log = (...args) => {
+    loggedLines.push(args.map(String).join(" "));
+  };
+
+  let status, body;
+  try {
+    ({ status, body } = await postRender(appBase, { url: deadUrl }));
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.ok(status >= 400 && status < 600, `expected a non-2xx status, got ${status}`);
+  assert.ok(!isPngMagic(body), "a navigation failure must never return image bytes");
+
+  const responseText = body.toString("utf8");
+  assert.ok(
+    !responseText.includes(secretToken),
+    `render token leaked into the response body: ${responseText}`,
+  );
+  assert.ok(
+    !loggedLines.some((line) => line.includes(secretToken)),
+    `render token leaked into a log line: ${JSON.stringify(loggedLines)}`,
+  );
 });
 
 test("a page that reports __EGRET_PRINT_FAILED__ returns non-2xx with no image", async () => {

@@ -69,61 +69,91 @@ function createLimiter(maxConcurrent) {
   };
 }
 
-class RenderTimeoutError extends Error {}
-class RenderFailedError extends Error {}
+// A common base so the route handler can recognise "a message WE constructed"
+// versus "raw text from Playwright/Node that might still carry the render
+// token". Every RenderError subclass below is built exclusively from fixed
+// template strings plus, at most, `safeLocation(url)` — never from another
+// error's own `.message`.
+class RenderError extends Error {}
+class RenderNavigationError extends RenderError {}
+class RenderTimeoutError extends RenderError {}
+class RenderFailedError extends RenderError {}
+class RenderInternalError extends RenderError {}
 
 async function renderOnce({ url, width, height, format, scale, readyTimeoutMs }) {
-  const browser = await getBrowser();
-  const context = await browser.newContext({
-    viewport: {
-      width: Number.isFinite(width) && width > 0 ? Math.round(width) : 1280,
-      height: Number.isFinite(height) && height > 0 ? Math.round(height) : 800,
-    },
-    deviceScaleFactor: Number.isFinite(scale) && scale > 0 ? scale : 1,
-  });
+  let context;
   try {
-    const page = await context.newPage();
-    await page.goto(url, { waitUntil: "domcontentloaded" });
-
-    try {
-      // Waits for the page's OWN readiness flag. A timeout here is a FAILED
-      // render — we must not fall through and screenshot a half-drawn page.
-      //
-      // NOTE: `page.waitForFunction`'s real signature is
-      // `(pageFunction, arg, options)` — passing `{ timeout }` as the SECOND
-      // positional argument (a common mistake) is silently treated as `arg`,
-      // not `options`, and the call falls back to the 30s default timeout
-      // instead of `readyTimeoutMs`. The explicit `undefined` here is load
-      // bearing.
-      await page.waitForFunction(
-        () =>
-          window.__EGRET_PRINT_READY__ === true || window.__EGRET_PRINT_FAILED__ === true,
-        undefined,
-        { timeout: readyTimeoutMs },
-      );
-    } catch (e) {
-      if (e?.name === "TimeoutError") {
-        throw new RenderTimeoutError(
-          `print page did not signal readiness within ${readyTimeoutMs}ms (timeout)`,
-        );
-      }
-      throw e;
-    }
-
-    const failed = await page.evaluate(() => window.__EGRET_PRINT_FAILED__ === true);
-    if (failed) {
-      throw new RenderFailedError("the print page reported a failure");
-    }
-
-    if (format === "pdf") {
-      const buffer = await page.pdf({ printBackground: true });
-      return { buffer, contentType: "application/pdf" };
-    }
-    const buffer = await page.screenshot({ type: "png" });
-    return { buffer, contentType: "image/png" };
+    const browser = await getBrowser();
+    context = await browser.newContext({
+      viewport: {
+        width: Number.isFinite(width) && width > 0 ? Math.round(width) : 1280,
+        height: Number.isFinite(height) && height > 0 ? Math.round(height) : 800,
+      },
+      deviceScaleFactor: Number.isFinite(scale) && scale > 0 ? scale : 1,
+    });
+    return await captureReadyPage(context, { url, format, readyTimeoutMs });
+  } catch (e) {
+    if (e instanceof RenderError) throw e;
+    // Anything we didn't explicitly classify below — a browser-launch
+    // failure, a crashed page, some other Playwright internal error — might
+    // still carry the raw URL: Playwright conventionally embeds the full
+    // navigated URL (query string and all, i.e. the render token) in its own
+    // error messages. Never let that raw text reach a log line or a response
+    // body; replace it with a message we build ourselves, capped at the
+    // URL's origin + path.
+    throw new RenderInternalError(`unexpected render error (${safeLocation(url)})`);
   } finally {
-    await context.close().catch(() => {});
+    if (context) await context.close().catch(() => {});
   }
+}
+
+async function captureReadyPage(context, { url, format, readyTimeoutMs }) {
+  let page;
+  try {
+    page = await context.newPage();
+    await page.goto(url, { waitUntil: "domcontentloaded" });
+  } catch (e) {
+    // e.g. DNS failure, connection refused, or a navigation timeout — all
+    // real production failure modes, and Playwright's own error text for
+    // every one of them includes the full URL it tried to navigate to.
+    throw new RenderNavigationError(`failed to load the print page at ${safeLocation(url)}`);
+  }
+
+  try {
+    // Waits for the page's OWN readiness flag. A timeout here is a FAILED
+    // render — we must not fall through and screenshot a half-drawn page.
+    //
+    // NOTE: `page.waitForFunction`'s real signature is
+    // `(pageFunction, arg, options)` — passing `{ timeout }` as the SECOND
+    // positional argument (a common mistake) is silently treated as `arg`,
+    // not `options`, and the call falls back to the 30s default timeout
+    // instead of `readyTimeoutMs`. The explicit `undefined` here is load
+    // bearing (see the elapsed-time regression test in test/render.test.js).
+    await page.waitForFunction(
+      () => window.__EGRET_PRINT_READY__ === true || window.__EGRET_PRINT_FAILED__ === true,
+      undefined,
+      { timeout: readyTimeoutMs },
+    );
+  } catch (e) {
+    if (e?.name === "TimeoutError") {
+      throw new RenderTimeoutError(
+        `print page at ${safeLocation(url)} did not signal readiness within ${readyTimeoutMs}ms (timeout)`,
+      );
+    }
+    throw new RenderInternalError(`error while waiting for readiness on ${safeLocation(url)}`);
+  }
+
+  const failed = await page.evaluate(() => window.__EGRET_PRINT_FAILED__ === true);
+  if (failed) {
+    throw new RenderFailedError(`the print page at ${safeLocation(url)} reported a failure`);
+  }
+
+  if (format === "pdf") {
+    const buffer = await page.pdf({ printBackground: true });
+    return { buffer, contentType: "application/pdf" };
+  }
+  const buffer = await page.screenshot({ type: "png" });
+  return { buffer, contentType: "image/png" };
 }
 
 function readBody(req, maxBytes) {
@@ -175,8 +205,12 @@ export function createApp({
       try {
         const raw = await readBody(req, MAX_BODY_BYTES);
         body = JSON.parse(raw.toString("utf8"));
-      } catch (e) {
-        sendJson(res, 400, { error: `invalid request body: ${e.message}` });
+      } catch {
+        // Deliberately not echoing the parse error's own message: the raw
+        // request body is exactly `{url, ...}`, i.e. it may itself contain
+        // the render token, and some JSON.parse error messages quote a
+        // snippet of the offending input.
+        sendJson(res, 400, { error: "invalid request body: could not parse as JSON" });
         return;
       }
 
