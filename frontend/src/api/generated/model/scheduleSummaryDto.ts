@@ -41,4 +41,16 @@ export interface ScheduleSummaryDto {
      * guessed would show a reader destructive controls that 403 on click.
      */
   can_manage: boolean;
+  /** Whether the CALLER has starred this one — per-user, unlike `can_manage`. */
+  bookmarked: boolean;
+  /**
+     * The folder this row is grouped under, or `None` for "Uncategorized".
+     * @nullable
+     */
+  folder_id?: string | null;
+  /**
+     * Set only in the trash view; `None` for a live schedule.
+     * @nullable
+     */
+  deleted_at?: string | null;
 }

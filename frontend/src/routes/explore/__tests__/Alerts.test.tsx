@@ -98,10 +98,10 @@ describe("Alerts & Reports list", () => {
     const user = userEvent.setup();
     renderPage();
     // Alerts tab is the default.
-    expect(schedulesMock).toHaveBeenCalledWith("eng", "alert");
+    expect(schedulesMock).toHaveBeenCalledWith("eng", "alert", false);
 
     await user.click(screen.getByRole("tab", { name: /reports/i }));
-    await waitFor(() => expect(schedulesMock).toHaveBeenCalledWith("eng", "report"));
+    await waitFor(() => expect(schedulesMock).toHaveBeenCalledWith("eng", "report", false));
   });
 
   it("shows every run state distinctly, including noop and grace", () => {

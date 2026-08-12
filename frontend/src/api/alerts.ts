@@ -3,8 +3,13 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { ApiError } from "./client";
 
 import {
+  alertsBookmarkAdd,
+  alertsBookmarkRemove,
   alertsCreate,
   alertsRemove,
+  alertsRestore,
+  alertsSetFolder,
+  alertsTrash,
   alertsRunNow,
   alertsSetActive,
   alertsUpdate,
@@ -37,13 +42,17 @@ export type ScheduleRun = RunDto;
  * client-side would fetch rows the tab will never show and make the counts
  * disagree with what the server considers a duplicate.
  */
-export function useSchedules(ws: string, type?: ScheduleType) {
+export function useSchedules(ws: string, type?: ScheduleType, trashed = false) {
   // `select` unwraps orval's `{data, headers}` envelope, matching how every
   // other api module here exposes a list — without it every consumer would
   // have to reach through `.data`.
-  return useAlertsList<ScheduleSummary[], ApiError>(ws, type ? { type } : undefined, {
-    query: { enabled: Boolean(ws), select: (r) => r.data as ScheduleSummary[] },
-  });
+  return useAlertsList<ScheduleSummary[], ApiError>(
+    ws,
+    { ...(type ? { type } : {}), ...(trashed ? { trashed: true } : {}) },
+    {
+      query: { enabled: Boolean(ws), select: (r) => r.data as ScheduleSummary[] },
+    },
+  );
 }
 
 export function useSchedule(ws: string, id: string | null) {
@@ -120,5 +129,38 @@ export function useScheduleMutations(ws: string) {
       alertsSetActive(ws, id, { active }),
     onSuccess: invalidate,
   });
-  return { create, update, remove, runNow, setActive };
+  /** Soft delete. `remove` is the permanent one, offered only from the trash. */
+  const trash = useMutation({
+    mutationFn: (id: string) => alertsTrash(ws, id),
+    onSuccess: invalidate,
+  });
+  const restore = useMutation({
+    mutationFn: (id: string) => alertsRestore(ws, id),
+    onSuccess: invalidate,
+  });
+  const setFolder = useMutation({
+    mutationFn: ({ id, folder_id }: { id: string; folder_id: string | null }) =>
+      alertsSetFolder(ws, id, { folder_id }),
+    onSuccess: invalidate,
+  });
+  const addBookmark = useMutation({
+    mutationFn: (id: string) => alertsBookmarkAdd(ws, id),
+    onSuccess: invalidate,
+  });
+  const removeBookmark = useMutation({
+    mutationFn: (id: string) => alertsBookmarkRemove(ws, id),
+    onSuccess: invalidate,
+  });
+  return {
+    create,
+    update,
+    remove,
+    runNow,
+    setActive,
+    trash,
+    restore,
+    setFolder,
+    addBookmark,
+    removeBookmark,
+  };
 }

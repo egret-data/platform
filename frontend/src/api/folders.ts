@@ -22,10 +22,17 @@ import {
   useFoldersFoldersList,
 } from "./generated/folders/folders";
 import type { FolderDto } from "./generated/model";
+import { alertsSetFolder, getAlertsListQueryKey } from "./generated/alerts/alerts";
 import { notebooksSetFolder } from "./generated/notebooks/notebooks";
 import { sqllabSqSetFolder } from "./generated/sqllab/sqllab";
 
-export type EntityKind = "charts" | "dashboards" | "datasets" | "notebooks" | "saved_queries";
+export type EntityKind =
+  | "charts"
+  | "dashboards"
+  | "datasets"
+  | "notebooks"
+  | "saved_queries"
+  | "alerts";
 export type Folder = FolderDto;
 
 /** Invalidation key for each entity's list; generated for migrated domains,
@@ -36,6 +43,8 @@ const listKeyOf: Record<EntityKind, (ws: string) => readonly unknown[]> = {
   datasets: (ws) => getDatasetsDsListQueryKey(ws),
   notebooks: (ws) => ["notebooks", ws],
   saved_queries: (ws) => ["sqllab", ws, "saved"],
+  // Prefix key: both list tabs (`{type: alert|report}`) invalidate together.
+  alerts: (ws) => getAlertsListQueryKey(ws),
 };
 
 /** `PATCH /ws/{ws}/{kind}/{id}/folder` via each domain's generated fetch fn. */
@@ -45,6 +54,7 @@ const setFolderOf: Record<EntityKind, (ws: string, id: string, folderId: string 
   datasets: (ws, id, folder_id) => datasetsDsSetFolder(ws, id, { folder_id }),
   notebooks: (ws, id, folder_id) => notebooksSetFolder(ws, id, { folder_id }),
   saved_queries: (ws, id, folder_id) => sqllabSqSetFolder(ws, id, { folder_id }),
+  alerts: (ws, id, folder_id) => alertsSetFolder(ws, id, { folder_id }),
 };
 
 export const folderKeys = { list: (ws: string, kind: EntityKind) => getFoldersFoldersListQueryKey(ws, kind) };

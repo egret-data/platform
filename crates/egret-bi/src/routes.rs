@@ -3382,6 +3382,10 @@ fn kind_perms(kind: &str) -> Option<(&'static str, &'static str, &'static str)> 
         // we don't take a cross-crate dependency.
         "notebooks" => Some(("notebook", "notebook:read", "notebook:write")),
         "saved_queries" => Some(("saved_query", SQ_READ, SQ_MANAGE)),
+        // Alerts live in egret-automation and share this router the same way
+        // notebooks do; `alert:read` was added by migration 0113 precisely so
+        // this pair exists. Literal strings, again to avoid a cross-crate dep.
+        "alerts" => Some(("alert", "alert:read", "alert:manage")),
         _ => None,
     }
 }
