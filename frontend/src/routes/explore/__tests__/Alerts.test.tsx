@@ -132,7 +132,7 @@ describe("Alerts & Reports list", () => {
     });
     renderPage();
 
-    expect(screen.queryByRole("button", { name: /new alert/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /\+ alert/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /edit/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /delete/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /run now/i })).not.toBeInTheDocument();
@@ -143,13 +143,13 @@ describe("Alerts & Reports list", () => {
 
   it("offers the write controls to a user who can manage", () => {
     renderPage();
-    expect(screen.getByRole("button", { name: /new alert/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /\+ alert/i })).toBeInTheDocument();
   });
 
   it("creates an alert through the real body shape", async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.click(screen.getByRole("button", { name: /new alert/i }));
+    await user.click(screen.getByRole("button", { name: /\+ alert/i }));
 
     await user.type(screen.getByLabelText(/^name$/i), "Revenue dip");
     await user.clear(screen.getByLabelText(/cron/i));
@@ -175,7 +175,7 @@ describe("Alerts & Reports list", () => {
     const user = userEvent.setup();
     renderPage();
     await user.click(screen.getByRole("tab", { name: /reports/i }));
-    await user.click(screen.getByRole("button", { name: /new report/i }));
+    await user.click(screen.getByRole("button", { name: /\+ report/i }));
 
     await user.type(screen.getByLabelText(/^name$/i), "Weekly ops");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
@@ -200,7 +200,7 @@ describe("Alerts & Reports list", () => {
     })) as never;
     const user = userEvent.setup();
     renderPage();
-    await user.click(screen.getByRole("button", { name: /new alert/i }));
+    await user.click(screen.getByRole("button", { name: /\+ alert/i }));
     await user.type(screen.getByLabelText(/^name$/i), "no db");
     await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
@@ -217,7 +217,7 @@ describe("Alerts & Reports list", () => {
       Object.assign(new Error("bad"), { body: { error: "invalid crontab: bad expression" } }),
     );
     renderPage();
-    await user.click(screen.getByRole("button", { name: /new alert/i }));
+    await user.click(screen.getByRole("button", { name: /\+ alert/i }));
     await user.type(screen.getByLabelText(/^name$/i), "x");
     await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
@@ -272,18 +272,27 @@ describe("Alerts & Reports list", () => {
     const user = userEvent.setup();
     renderPage();
 
-    await user.click(screen.getByRole("button", { name: /run now/i }));
+    // Row actions live in the `…` menu, so the item only exists once it is open.
+    await user.click(screen.getByRole("button", { name: /actions for/i }));
+    await user.click(await screen.findByRole("menuitem", { name: /run now/i }));
     await waitFor(() => expect(runNowMutate).toHaveBeenCalledWith("s1"));
   });
 
-  it("withholds Run now from a user the server says cannot manage", () => {
+  it("withholds Run now from a user the server says cannot manage", async () => {
+    const user = userEvent.setup();
     schedulesMock.mockReturnValue({
       data: [row({ can_manage: false })],
       isLoading: false,
       isError: false,
     });
     renderPage();
-    expect(screen.queryByRole("button", { name: /run now/i })).not.toBeInTheDocument();
+
+    // The menu still opens — Run log is a read action — but the managing items
+    // are absent, not merely disabled.
+    await user.click(screen.getByRole("button", { name: /actions for/i }));
+    expect(await screen.findByRole("menuitem", { name: /run log/i })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /run now/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).not.toBeInTheDocument();
   });
 
   it("offers an active toggle to a user who can manage", async () => {
@@ -308,7 +317,10 @@ describe("Alerts & Reports list", () => {
     });
     renderPage();
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
-    expect(screen.getByText(/paused/i)).toBeInTheDocument();
+    // Exact case, not /paused/i: the summary strip also carries a lowercase
+    // "paused" count, and a case-insensitive match would pass on that alone —
+    // i.e. it would still pass with the row's read-only badge deleted.
+    expect(screen.getByText("Paused")).toBeInTheDocument();
   });
 
   it("renders an empty state rather than a bare table when there is nothing", () => {
