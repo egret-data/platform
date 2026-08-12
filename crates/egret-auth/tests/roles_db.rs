@@ -93,7 +93,14 @@ async fn full_role_lifecycle() {
     assert!(direct.iter().any(|r| r.id == role_id));
 
     // count_platform_admins: assign platform_admin to a temp user and check it counts.
-    let before = roles.count_platform_admins().await.unwrap();
+    //
+    // Asserted against THIS user, not as a global before/after delta. The two
+    // sibling tests in this binary each grant AND revoke platform_admin, and
+    // `#[tokio::test]` functions run concurrently, so a revoke landing between
+    // the two reads made `after > before` false. That failed only under
+    // `cargo test --workspace` — where the extra load changes the interleaving
+    // — and passed under `-p egret-auth`, which is the shape of a bug that
+    // looks like it belongs to whatever change happened to be in flight.
     let admin_role = roles
         .list()
         .await
@@ -105,8 +112,17 @@ async fn full_role_lifecycle() {
         .assign("user", user_id.0, admin_role.id)
         .await
         .unwrap();
-    let after = roles.count_platform_admins().await.unwrap();
-    assert!(after > before);
+    assert!(
+        roles
+            .platform_admin_user_ids()
+            .await
+            .unwrap()
+            .contains(&user_id),
+        "the granted user must be counted as a platform admin"
+    );
+    // The counting query itself still has to work; it just cannot be asserted
+    // as an exact delta from a concurrently-mutated global.
+    assert!(roles.count_platform_admins().await.unwrap() >= 1);
 
     // Update description.
     roles

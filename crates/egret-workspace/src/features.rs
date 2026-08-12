@@ -29,7 +29,14 @@ use egret_core::{Error, Result, UserId, WorkspaceId};
 use crate::workspaces::{db_err, WorkspaceRepo};
 
 /// Every module key, in the order the UI lists them.
-pub const FEATURE_KEYS: &[&str] = &["sql_lab", "datasets", "charts", "dashboards", "notebooks"];
+pub const FEATURE_KEYS: &[&str] = &[
+    "sql_lab",
+    "datasets",
+    "charts",
+    "dashboards",
+    "notebooks",
+    "alerts",
+];
 
 /// True if `key` names a module in the catalog.
 pub fn is_known(key: &str) -> bool {
@@ -150,6 +157,15 @@ pub const FEATURES: &[Feature] = &[
             prefix("notebook-runtime"),
             prefix("notebook-settings"),
         ],
+    },
+    Feature {
+        key: "alerts",
+        label: "Alerts & Reports",
+        description: "Schedule SQL alerts and recurring report deliveries.",
+        // Claims `egret-automation`'s router (P1). Declared in P0, one phase
+        // before the routes existed, because an unmatched prefix rule is inert
+        // while a route that lands before its rule fails OPEN.
+        rules: &[prefix("alerts")],
     },
 ];
 
@@ -393,6 +409,18 @@ mod tests {
             gated_feature("datasets/abc/columns", "GET"),
             Some("datasets")
         );
+    }
+
+    #[test]
+    fn alerts_is_a_module_that_gates_its_own_surface() {
+        // The catalog is what makes `alerts` reach the frontend at all: the
+        // Explore nav filters on the keys `/me/workspaces` returns, which are
+        // built from FEATURE_KEYS. A frontend-only move leaves the item
+        // invisible in the browser while jsdom tests still pass.
+        assert!(is_known("alerts"));
+        assert!(FEATURE_KEYS.contains(&"alerts"));
+        assert_eq!(gated_feature("alerts", "GET"), Some("alerts"));
+        assert_eq!(gated_feature("alerts/abc/runs", "GET"), Some("alerts"));
     }
 
     #[test]

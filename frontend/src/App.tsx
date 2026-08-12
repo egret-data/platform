@@ -25,6 +25,7 @@ import DatasetDetail from "@/routes/explore/DatasetDetail";
 import Charts from "@/routes/explore/Charts";
 import ChartExplore from "@/routes/explore/ChartExplore";
 import Dashboards from "@/routes/explore/Dashboards";
+import Alerts from "@/routes/explore/Alerts";
 import DashboardView from "@/routes/explore/DashboardView";
 import Notebooks from "@/routes/explore/Notebooks";
 import NotebookPage from "@/routes/explore/NotebookPage";
@@ -103,7 +104,14 @@ function ExploreRoutes() {
           <Route path="data-api" element={<Placeholder title="Data API" />} />
           <Route path="pipelines" element={<Placeholder title="Pipelines" />} />
           <Route path="workflows" element={<Placeholder title="Workflows" />} />
-          <Route path="alerts" element={<Placeholder title="Alerts" />} />
+          <Route
+            path="alerts"
+            element={
+              <RequireFeature feature="alerts">
+                <Alerts />
+              </RequireFeature>
+            }
+          />
           <Route path="settings" element={<WorkspaceSettings />}>
             <Route index element={<Navigate to="members" replace />} />
             <Route path="members" element={<Members />} />

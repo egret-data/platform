@@ -1329,6 +1329,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         audit: audit_sink.clone(),
     });
 
+    let automation = Some(egret_automation::AutomationState {
+        db: db.clone(),
+        schedules: egret_automation::ScheduleRepo::new(db.clone()),
+        sessions: sessions.clone(),
+        workspaces: WorkspaceRepo::new(db.clone()),
+        authz: Authorizer::new(db.clone()),
+        pdp: pdp.clone(),
+    });
+
     let notebook_state = egret_notebook::NotebookState {
         store: egret_notebook::NotebookStore::new(db.clone()),
         catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
@@ -1650,6 +1659,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         database,
         engine,
         bi,
+        automation,
         notebook,
         kernel,
         control_plane,

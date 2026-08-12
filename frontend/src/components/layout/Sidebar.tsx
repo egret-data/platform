@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
-  Bell, Boxes, ChevronDown, ChevronRight, Compass,
+  Boxes, ChevronDown, ChevronRight, Compass,
   FolderKanban, Gauge, HardDrive, KeyRound, ListChecks, type LucideIcon,
   PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Server, Settings, Share2, ShieldCheck,
   Tags, UserCog, Users, UsersRound, Waypoints, Workflow,
@@ -25,16 +25,15 @@ type NavGroup = { heading: string; items: NavItem[] };
 const EXPLORE_GROUPS: NavGroup[] = [
   {
     heading: "Explore",
-    // The five modules + their order/route come from EXPLORE_MODULES, the
+    // The modules + their order/route come from EXPLORE_MODULES, the
     // single source of truth shared with useDefaultExplorePath — see there.
     items: EXPLORE_MODULES.map((m) => ({ label: m.label, icon: m.icon, feature: m.key, to: m.path })),
   },
   {
     heading: "Automate",
-    items: [
-      { label: "Workflows", icon: Workflow },
-      { label: "Alerts", icon: Bell },
-    ],
+    // Alerts moved to Explore (it is an entitlement-gated module now, listed in
+    // EXPLORE_MODULES); Workflows is what remains of the original pair.
+    items: [{ label: "Workflows", icon: Workflow }],
   },
   {
     heading: "Data Engineering",

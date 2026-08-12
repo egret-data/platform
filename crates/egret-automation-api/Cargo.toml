@@ -1,0 +1,18 @@
+[package]
+name = "egret-automation-api"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Leaf contract crate for the Alerts & Reports seam (P1). Pure-serde wire DTOs
+# for `automation.schedules` and its children, mirroring egret-analytics-api /
+# egret-query-api: no sqlx, no axum, so the contract can be depended on without
+# dragging the data layer along. `utoipa` is proc-macro + a light runtime, so the
+# leaf stays clean while still carrying the `ToSchema` derives egret-server needs
+# to emit `openapi.json`.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+utoipa.workspace = true

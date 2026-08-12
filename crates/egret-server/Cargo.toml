@@ -17,6 +17,7 @@ egret-machine-idp.workspace = true
 egret-policy.workspace = true
 egret-query.workspace = true
 egret-bi.workspace = true
+egret-automation.workspace = true
 egret-notebook.workspace = true
 egret-kernel.workspace = true
 axum.workspace = true

@@ -84,7 +84,6 @@ describe("Sidebar – workspace zones", () => {
       "Data API",
       "Pipelines",
       "Workflows",
-      "Alerts",
       "Workspace settings",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
@@ -97,6 +96,25 @@ describe("Sidebar – workspace zones", () => {
       "href",
       "/explore/eng/settings/members",
     );
+  });
+
+  /**
+   * The <div> holding a group's heading toggle and its items. Asserted
+   * structurally rather than by mere presence: "Alerts & Reports is somewhere
+   * in the sidebar" was already true before the move, so only containment
+   * inside the right group can tell the two states apart.
+   */
+  const groupOf = (heading: string) =>
+    screen.getByRole("button", { name: new RegExp(`^${heading}$`, "i") }).parentElement;
+
+  test("Alerts & Reports is an Explore module, not an Automate item", () => {
+    renderSidebar("/explore/eng/sql-lab");
+    const link = screen.getByRole("link", { name: "Alerts & Reports" });
+    expect(groupOf("Explore")).toContainElement(link);
+    expect(groupOf("Automate")).not.toContainElement(link);
+    expect(link).toHaveAttribute("href", "/explore/eng/alerts");
+    // The old Automate entry is gone, label and all.
+    expect(screen.queryByRole("link", { name: "Alerts" })).not.toBeInTheDocument();
   });
 
   test("dropped items are gone", () => {
@@ -305,9 +323,40 @@ describe("Sidebar – workspace feature entitlements", () => {
   test("while /me/workspaces is still loading, every Explore item shows (no flash)", () => {
     // fetchImpl never resolves — the query stays pending for the whole test.
     renderSidebar("/explore/eng/sql-lab");
-    for (const label of ["SQL Lab", "Datasets", "Charts", "Dashboards", "Notebooks"]) {
+    for (const label of [
+      "SQL Lab",
+      "Datasets",
+      "Charts",
+      "Dashboards",
+      "Notebooks",
+      "Alerts & Reports",
+    ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
+  });
+
+  test("hides Alerts & Reports when the workspace lacks the alerts entitlement", async () => {
+    // The failure mode this pins: a frontend-only move leaves `alerts` out of
+    // the BACKEND feature catalog, so `/me/workspaces` never lists the key and
+    // the item is filtered out of a workspace that should have it.
+    renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () =>
+      wsResponse(["sql_lab", "datasets", "charts", "dashboards", "notebooks"]),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "Alerts & Reports" })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("link", { name: "Notebooks" })).toBeInTheDocument();
+  });
+
+  test("shows Alerts & Reports when the workspace has the alerts entitlement", async () => {
+    renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () => wsResponse(["alerts"]));
+    // Wait on SQL Lab DISAPPEARING, not on Alerts appearing: the optimistic
+    // loading state returns every key, so "Alerts is present" is already true
+    // before the fetch resolves and would pass without proving anything.
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "SQL Lab" })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("link", { name: "Alerts & Reports" })).toBeInTheDocument();
   });
 
   test("hides a disabled item once the workspace's features load", async () => {
@@ -323,7 +372,14 @@ describe("Sidebar – workspace feature entitlements", () => {
   test("drops the Explore group entirely when every module is disabled", async () => {
     renderSidebar("/explore/eng/sql-lab", ADMIN_ME, () => wsResponse([]));
     await waitFor(() => expect(screen.queryByText("Explore")).not.toBeInTheDocument());
-    for (const label of ["SQL Lab", "Datasets", "Charts", "Dashboards", "Notebooks"]) {
+    for (const label of [
+      "SQL Lab",
+      "Datasets",
+      "Charts",
+      "Dashboards",
+      "Notebooks",
+      "Alerts & Reports",
+    ]) {
       expect(screen.queryByRole("link", { name: label })).not.toBeInTheDocument();
     }
     // Unaffected groups (no `feature` on their items) still render.

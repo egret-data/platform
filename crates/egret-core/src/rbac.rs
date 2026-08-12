@@ -337,6 +337,17 @@ pub static PERMISSIONS: &[Permission] = &[
         "Create, edit, and delete saved queries",
         Scope::Workspace
     ),
+    // One permission covers alerts AND reports: they are one table, one editor
+    // and one list page, and splitting the grant would mean an editor who can
+    // schedule an email of a dashboard but not an email of a query — a
+    // distinction with no security content, since both deliver data the owner
+    // can already read.
+    perm!(
+        "alert:manage",
+        "Alerts & Reports",
+        "Create, edit, and delete scheduled alerts and reports",
+        Scope::Workspace
+    ),
     perm!(
         "workspace:manage_members",
         "Workspaces",

@@ -26,6 +26,8 @@ egret-query-api = { path = "crates/egret-query-api" }
 egret-query = { path = "crates/egret-query" }
 egret-bi = { path = "crates/egret-bi" }
 egret-analytics-api = { path = "crates/egret-analytics-api" }
+egret-automation-api = { path = "crates/egret-automation-api" }
+egret-automation = { path = "crates/egret-automation" }
 egret-notebook = { path = "crates/egret-notebook" }
 egret-kernel = { path = "crates/egret-kernel" }
 egret-orchestrator = { path = "crates/egret-orchestrator" }
@@ -73,6 +75,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+# Cron parsing for automation schedules (P1). `croner` speaks the standard
+# 5-field crontab users type (and that Superset accepts); the older `cron` crate
+# requires a leading seconds field, which would silently reinterpret every
+# expression a user pastes in. `chrono-tz` resolves the IANA zone a schedule is
+# expressed in, so "09:00 Asia/Ho_Chi_Minh" survives DST rather than drifting.
+croner = "2"
+chrono-tz = "0.10"
 argon2 = "0.5"
 aes-gcm = "0.10"
 rand = "0.8"
