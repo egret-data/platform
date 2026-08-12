@@ -1131,6 +1131,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .await
         .context("P1b basic-auth backfill")?;
 
+    // Move any cleartext webhook signing secret into the vault. Without this the
+    // runner — which now resolves `secret_id` only — would silently start
+    // delivering those webhooks unsigned.
+    backfill::backfill_webhook_secrets(&db, &secrets)
+        .await
+        .context("automation webhook-secret backfill")?;
+
     // Epic B: the named per-workspace secret layer over the vault. Built once from
     // the shared vault and threaded into the browse + database states so storage
     // and database connections reference named secrets.
@@ -1337,7 +1344,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // not start anything — only `runner::spawn`, further down, does that.
     let automation_runner = std::sync::Arc::new(egret_automation::runner::AutomationRunner {
         db: db.clone(),
-        schedules: egret_automation::ScheduleRepo::new(db.clone()),
+        schedules: egret_automation::ScheduleRepo::new(db.clone(), secrets.clone()),
         databases: databases.clone(),
         users: UserRepo::new(db.clone()),
         minter: engine_minter.clone(),
@@ -1370,7 +1377,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
 
     let automation = Some(egret_automation::AutomationState {
         db: db.clone(),
-        schedules: egret_automation::ScheduleRepo::new(db.clone()),
+        schedules: egret_automation::ScheduleRepo::new(db.clone(), secrets.clone()),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),

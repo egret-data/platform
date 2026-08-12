@@ -122,3 +122,53 @@ mod tests {
         assert!(!convert_one(&secrets, v2, "").await.unwrap());
     }
 }
+
+/// One-shot boot backfill: move any CLEARTEXT webhook signing secret out of
+/// `automation.schedule_recipients.config` and into the vault, leaving a
+/// `secret_id` reference. Idempotent; a no-op once converged.
+///
+/// Rows written before the vault existed hold `{"url": …, "secret": "…"}`. The
+/// runner now resolves `secret_id` only, so without this pass those webhooks
+/// would keep their cleartext at rest AND silently start delivering unsigned —
+/// a downgrade no receiver would notice until it started rejecting.
+pub async fn backfill_webhook_secrets(db: &Db, secrets: &SecretStore) -> anyhow::Result<()> {
+    let rows: Vec<(Uuid, serde_json::Value)> = sqlx::query_as(
+        "SELECT id, config FROM automation.schedule_recipients \
+         WHERE kind = 'webhook' AND config ? 'secret'",
+    )
+    .fetch_all(&db.pool)
+    .await?;
+
+    let mut moved = 0usize;
+    for (id, config) in rows {
+        let Some(plaintext) = config.get("secret").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // An empty string is not a credential; drop the key rather than mint a
+        // vault row holding nothing.
+        let new_config = if plaintext.is_empty() {
+            serde_json::json!({ "url": config.get("url").cloned().unwrap_or(serde_json::Value::Null) })
+        } else {
+            let vault_ref = secrets
+                .put(egret_automation::WEBHOOK_SECRET_KIND, plaintext)
+                .await?;
+            serde_json::json!({
+                "url": config.get("url").cloned().unwrap_or(serde_json::Value::Null),
+                "secret_id": vault_ref.to_string(),
+            })
+        };
+        sqlx::query("UPDATE automation.schedule_recipients SET config = $2 WHERE id = $1")
+            .bind(id)
+            .bind(&new_config)
+            .execute(&db.pool)
+            .await?;
+        moved += 1;
+    }
+    if moved > 0 {
+        tracing::info!(
+            count = moved,
+            "moved cleartext webhook secrets into the vault"
+        );
+    }
+    Ok(())
+}

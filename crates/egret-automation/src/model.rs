@@ -300,6 +300,37 @@ fn validate_recipient(r: &RecipientInput) -> Result<(), String> {
 
 // ── domain → wire ─────────────────────────────────────────────────────────
 
+/// What a client is allowed to see of a recipient's `config`.
+///
+/// A webhook's signing secret lives in the vault and its `secret_id` is a
+/// reference the editor has no use for — handing one out only invites a fetch
+/// nobody intended. Both are replaced by a boolean, the same shape the SMTP
+/// config uses for its password (`has_password`).
+///
+/// This is an ALLOW-LIST, not a redaction: the two keys a webhook may show are
+/// named, and anything else in the row — including a cleartext `secret` left by
+/// a row written before this existed — is dropped rather than passed through.
+fn redact_recipient_config(kind: &str, config: &serde_json::Value) -> serde_json::Value {
+    if kind != "webhook" {
+        return config.clone();
+    }
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "url".into(),
+        config
+            .get("url")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    );
+    out.insert(
+        "has_secret".into(),
+        serde_json::Value::Bool(
+            config.get("secret_id").is_some() || config.get("secret").is_some(),
+        ),
+    );
+    serde_json::Value::Object(out)
+}
+
 fn owner_dto(o: &Owner) -> OwnerDto {
     OwnerDto {
         user_id: o.user_id.to_string(),
@@ -364,7 +395,7 @@ pub fn detail_dto(s: &Schedule, owners: &[Owner], recipients: &[Recipient]) -> S
             .map(|r| RecipientDto {
                 id: r.id.to_string(),
                 kind: RecipientKind::parse(&r.kind).unwrap_or(RecipientKind::Email),
-                config: r.config.clone(),
+                config: redact_recipient_config(&r.kind, &r.config),
             })
             .collect(),
         created_by: s.created_by.map(|v| v.to_string()),

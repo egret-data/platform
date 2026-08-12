@@ -17,7 +17,9 @@ pub mod scheduler;
 pub mod validator;
 
 pub use error::{AutomationApiError, AutomationError};
-pub use repo::{NewSchedule, Owner, Recipient, Schedule, ScheduleRepo, ScheduleRun};
+pub use repo::{
+    NewSchedule, Owner, Recipient, Schedule, ScheduleRepo, ScheduleRun, WEBHOOK_SECRET_KIND,
+};
 pub use routes::{automation_router, AutomationState};
 
 /// This seam's OpenAPI document, merged into the top-level doc by

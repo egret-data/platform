@@ -108,7 +108,15 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
     // at all.
     let runner = Arc::new(egret_automation::runner::AutomationRunner {
         db: db.clone(),
-        schedules: ScheduleRepo::new(db.clone()),
+        schedules: ScheduleRepo::new(
+            db.clone(),
+            // Crypto-enabled: `SecretStore::new(db, None)` cannot ENCRYPT, so a
+            // webhook secret would fail to vault on write.
+            egret_secrets::SecretStore::new(
+                db.clone(),
+                Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+            ),
+        ),
         databases: databases.clone(),
         users: egret_auth::users::UserRepo::new(db.clone()),
         minter: Arc::new(NoMinter),
@@ -133,7 +141,15 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
     });
     let st = AutomationState {
         db: db.clone(),
-        schedules: ScheduleRepo::new(db.clone()),
+        schedules: ScheduleRepo::new(
+            db.clone(),
+            // Crypto-enabled: `SecretStore::new(db, None)` cannot ENCRYPT, so a
+            // webhook secret would fail to vault on write.
+            egret_secrets::SecretStore::new(
+                db.clone(),
+                Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+            ),
+        ),
         sessions: sessions.clone(),
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
         authz: egret_workspace::rbac::Authorizer::new(db.clone()),

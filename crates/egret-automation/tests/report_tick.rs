@@ -128,7 +128,15 @@ fn runner(
     let ws_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
     AutomationRunner {
         db: db.clone(),
-        schedules: ScheduleRepo::new(db.clone()),
+        schedules: ScheduleRepo::new(
+            db.clone(),
+            // Crypto-enabled: `SecretStore::new(db, None)` cannot ENCRYPT, so a
+            // webhook secret would fail to vault on write.
+            egret_secrets::SecretStore::new(
+                db.clone(),
+                Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+            ),
+        ),
         databases: egret_query::DatabaseRepo::new(db.clone(), secrets, ws_secrets),
         users: egret_auth::users::UserRepo::new(db.clone()),
         minter: Arc::new(NoMinter),

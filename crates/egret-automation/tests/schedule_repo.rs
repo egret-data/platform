@@ -59,7 +59,15 @@ async fn setup() -> Option<Fixture> {
     .unwrap();
 
     Some(Fixture {
-        repo: ScheduleRepo::new(db.clone()),
+        repo: ScheduleRepo::new(
+            db.clone(),
+            // Crypto-enabled: `SecretStore::new(db, None)` cannot ENCRYPT, so a
+            // webhook secret would fail to vault on write.
+            egret_secrets::SecretStore::new(
+                db.clone(),
+                Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+            ),
+        ),
         ws,
         other_ws,
         user,
@@ -456,4 +464,86 @@ async fn a_dashboard(f: &Fixture) -> Uuid {
     .fetch_one(&f.db.pool)
     .await
     .unwrap()
+}
+
+/// A vaulted webhook secret must come back out as the SAME plaintext.
+///
+/// This is the seam the runner signs with: `vault_secrets` stores an id and
+/// `resolve_webhook_secret` turns it back into the key the HMAC is computed
+/// from. If the round trip breaks, every webhook silently delivers unsigned —
+/// a receiver rejects it, but nothing in egret would have said so. The rest of
+/// the chain is already covered: `webhook::sign` has its own digest tests and
+/// `deliver` sets the header iff it is given a secret.
+#[tokio::test]
+async fn a_vaulted_webhook_secret_round_trips_to_the_signing_key() {
+    const SECRET: &str = "the-key-the-hmac-uses";
+    let f = fixture!();
+
+    let mut n = alert(&f, "signed-hook");
+    n.recipients = vec![(
+        "webhook".into(),
+        serde_json::json!({"url": "https://hooks.example.com/x", "secret": SECRET}),
+    )];
+    let made = f.repo.create(f.ws, &n, None).await.expect("create");
+
+    let stored = f.repo.recipients_for(made.id).await.expect("recipients");
+    let hook = stored
+        .iter()
+        .find(|r| r.kind == "webhook")
+        .expect("webhook");
+    // Stored as a reference, not a value...
+    assert!(
+        hook.config.get("secret").is_none(),
+        "cleartext secret at rest: {}",
+        hook.config
+    );
+    assert!(hook.config.get("secret_id").is_some());
+
+    // ...and the reference resolves back to the original key.
+    assert_eq!(
+        f.repo.resolve_webhook_secret(&hook.config).await.as_deref(),
+        Some(SECRET),
+    );
+}
+
+/// Rotating a secret must not leave the superseded one in the vault.
+#[tokio::test]
+async fn rotating_a_webhook_secret_deletes_the_old_vault_row() {
+    let f = fixture!();
+    let mut n = alert(&f, "rotate-hook");
+    n.recipients = vec![(
+        "webhook".into(),
+        serde_json::json!({"url": "https://hooks.example.com/x", "secret": "first"}),
+    )];
+    let made = f.repo.create(f.ws, &n, None).await.expect("create");
+    let before = f.repo.recipients_for(made.id).await.unwrap();
+    let old_id = before[0].config["secret_id"].as_str().unwrap().to_string();
+
+    n.recipients = vec![(
+        "webhook".into(),
+        serde_json::json!({"url": "https://hooks.example.com/x", "secret": "second"}),
+    )];
+    f.repo
+        .update(f.ws, made.id, &n, None)
+        .await
+        .expect("update")
+        .expect("still there");
+
+    let after = f.repo.recipients_for(made.id).await.unwrap();
+    let new_id = after[0].config["secret_id"].as_str().unwrap().to_string();
+    assert_ne!(old_id, new_id, "rotation should mint a new vault row");
+    assert_eq!(
+        f.repo
+            .resolve_webhook_secret(&after[0].config)
+            .await
+            .as_deref(),
+        Some("second"),
+    );
+
+    let orphan: i64 = sqlx::query_scalar("SELECT count(*) FROM secrets WHERE id = $1::uuid")
+        .bind(&old_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(orphan, 0, "the superseded secret is still in the vault");
 }

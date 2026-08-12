@@ -229,9 +229,9 @@ describe("Alerts & Reports list", () => {
           {
             id: "r2",
             kind: "webhook",
-            // The runner reads `config.secret` at delivery time to sign the
-            // POST, so it is part of the destination, not decoration.
-            config: { url: "https://hooks.example.com/egret/1", secret: "s3cr3t" },
+            // What the server actually returns: the secret lives in the vault
+            // and only its presence is reported.
+            config: { url: "https://hooks.example.com/egret/1", has_secret: true },
           },
         ],
       },
@@ -267,15 +267,18 @@ describe("Alerts & Reports list", () => {
     expect(recipients.filter((r) => r.kind === "email")).toHaveLength(1);
   });
 
-  it("carries the webhook signing secret through a save it never displays", async () => {
-    // Rebuilding the recipient from the URL alone would drop `secret` and
-    // silently unsign every later delivery — the same bug one level down.
+  it("sends a webhook as a bare url, never a credential", async () => {
+    // The browser is never given the signing secret, so it must not try to
+    // carry one: an absent `secret` means "keep the stored one" server-side.
+    // Echoing `has_secret` back would also be wrong — it is a report, not an
+    // input, and the server rebuilds the config from what it is sent.
     const user = userEvent.setup();
     withWebhook();
     renderPage();
 
     const recipients = await openEditorAndSave(user);
-    expect(recipients.find((r) => r.kind === "webhook")?.config.secret).toBe("s3cr3t");
+    const hook = recipients.find((r) => r.kind === "webhook");
+    expect(hook?.config).toEqual({ url: "https://hooks.example.com/egret/1" });
   });
 
   it("surfaces the server's validation message instead of a generic failure", async () => {

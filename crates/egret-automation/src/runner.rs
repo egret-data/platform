@@ -452,7 +452,8 @@ impl AutomationRunner {
             let Some(url) = r.config.get("url").and_then(|v| v.as_str()) else {
                 continue;
             };
-            let secret = r.config.get("secret").and_then(|v| v.as_str());
+            // From the vault, never the row — see `ScheduleRepo::vault_secrets`.
+            let secret = self.schedules.resolve_webhook_secret(&r.config).await;
             let payload = WebhookPayload {
                 schedule: &s.name,
                 schedule_id: &s.id.to_string(),
@@ -462,8 +463,14 @@ impl AutomationRunner {
                 triggered_at: chrono::Utc::now(),
                 rows: serde_json::Value::Null,
             };
-            if let Err(e) =
-                webhook::deliver(url, secret, &payload, &self.policy, &*self.resolver).await
+            if let Err(e) = webhook::deliver(
+                url,
+                secret.as_deref(),
+                &payload,
+                &self.policy,
+                &*self.resolver,
+            )
+            .await
             {
                 tracing::warn!(schedule = %s.id, error = %e, "automation: report webhook failed");
                 first_error.get_or_insert(e.to_string());
@@ -552,7 +559,8 @@ impl AutomationRunner {
             let Some(url) = r.config.get("url").and_then(|v| v.as_str()) else {
                 continue;
             };
-            let secret = r.config.get("secret").and_then(|v| v.as_str());
+            // From the vault, never the row — see `ScheduleRepo::vault_secrets`.
+            let secret = self.schedules.resolve_webhook_secret(&r.config).await;
             let payload = WebhookPayload {
                 schedule: &s.name,
                 schedule_id: &s.id.to_string(),
@@ -562,8 +570,14 @@ impl AutomationRunner {
                 triggered_at: chrono::Utc::now(),
                 rows: eval.rows.clone(),
             };
-            if let Err(e) =
-                webhook::deliver(url, secret, &payload, &self.policy, &*self.resolver).await
+            if let Err(e) = webhook::deliver(
+                url,
+                secret.as_deref(),
+                &payload,
+                &self.policy,
+                &*self.resolver,
+            )
+            .await
             {
                 tracing::warn!(schedule = %s.id, error = %e, "automation: webhook failed");
                 first_error.get_or_insert(e.to_string());
