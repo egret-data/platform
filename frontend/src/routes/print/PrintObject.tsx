@@ -105,7 +105,12 @@ export default function PrintObject() {
   if (!payload) return <div className="min-h-screen bg-white" />;
 
   return (
-    <div className="min-h-screen w-full bg-white p-6 text-black">
+    <div data-print-root className="min-h-screen w-full bg-white p-6 text-black">
+      {/* `data-print-root` marks the content region for the renderer's post-readiness height
+          measurement (see `measureContentHeight` in `renderer/server.js`). This wrapper's own
+          `min-h-screen` always fills the viewport regardless of content, so the renderer must not
+          measure IT — it measures the bounding boxes of its children (this title + each card)
+          instead, which size themselves off their own content. */}
       {/* Belt and braces alongside the readiness flag, not a substitute for it: a screenshot taken
           the instant the flag flips should not still be mid-transition on anything CSS-driven.
           ECharts' own mount animation is JS-driven and unaffected by this — the flag is what

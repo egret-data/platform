@@ -37,6 +37,28 @@ const FIXTURES = {
   "/failed": `<!doctype html><html><body>
     <script>window.__EGRET_PRINT_FAILED__ = true;</script>
   </body></html>`,
+  // Mirrors the real print page's structure (`frontend/src/routes/print/PrintObject.tsx`): a
+  // `data-print-root` wrapper with `min-height: 100vh` — which always fills the viewport
+  // regardless of its own content — wrapping two short blocks that together are much shorter
+  // than the requested viewport height. A renderer that measured the wrapper (or
+  // `document.documentElement.scrollHeight`) would report the full viewport; measuring the
+  // wrapper's CHILDREN reports the true ~150px of content.
+  "/short-content": `<!doctype html><html><body style="margin:0">
+    <div data-print-root style="min-height:100vh;margin:0;padding:0;width:100%;background:#fff">
+      <div style="height:40px;margin:0;padding:0;background:#111"></div>
+      <div style="height:110px;margin:0;padding:0;background:#333"></div>
+    </div>
+    <script>window.__EGRET_PRINT_READY__ = true;</script>
+  </body></html>`,
+  // Same structure, but content taller than the requested viewport — the captured image must
+  // grow to fit it rather than crop the bottom off.
+  "/tall-content": `<!doctype html><html><body style="margin:0">
+    <div data-print-root style="min-height:100vh;margin:0;padding:0;width:100%;background:#fff">
+      <div style="height:1200px;margin:0;padding:0;background:#111"></div>
+      <div style="height:1300px;margin:0;padding:0;background:#333"></div>
+    </div>
+    <script>window.__EGRET_PRINT_READY__ = true;</script>
+  </body></html>`,
 };
 
 let fixtureServer;
@@ -193,6 +215,76 @@ test("a page that reports __EGRET_PRINT_FAILED__ returns non-2xx with no image",
 
   assert.ok(status < 200 || status >= 300, `expected non-2xx, got ${status}`);
   assert.ok(!isPngMagic(body), "a reported failure must never return image bytes");
+});
+
+test("a short page is captured at its content height, not the full requested viewport", async () => {
+  const REQUESTED_WIDTH = 500;
+  const REQUESTED_HEIGHT = 400;
+
+  const { status, body } = await postRender(appBase, {
+    url: `${fixtureBase}/short-content`,
+    width: REQUESTED_WIDTH,
+    height: REQUESTED_HEIGHT,
+  });
+
+  assert.equal(status, 200);
+  const { width, height } = pngDimensions(body);
+  assert.equal(width, REQUESTED_WIDTH, "requested width must stay authoritative");
+  assert.ok(
+    height < REQUESTED_HEIGHT,
+    `short content (~150px) captured at height ${height} — expected it to be well under the ` +
+      `${REQUESTED_HEIGHT}px requested viewport, not stretched to fill it (the white-band bug)`,
+  );
+  // Content is exactly two stacked blocks of 40px + 110px = 150px. Give a little slack for
+  // devicePixelRatio/rounding, but this must be close to content, not close to the viewport.
+  assert.ok(
+    height >= 140 && height <= 170,
+    `expected captured height close to the real ~150px content, got ${height}`,
+  );
+});
+
+test("a tall page is captured in full, never cropped to the requested viewport", async () => {
+  const REQUESTED_WIDTH = 500;
+  const REQUESTED_HEIGHT = 400;
+
+  const { status, body } = await postRender(appBase, {
+    url: `${fixtureBase}/tall-content`,
+    width: REQUESTED_WIDTH,
+    height: REQUESTED_HEIGHT,
+  });
+
+  assert.equal(status, 200);
+  const { width, height } = pngDimensions(body);
+  assert.equal(width, REQUESTED_WIDTH, "requested width must stay authoritative");
+  assert.ok(
+    height > REQUESTED_HEIGHT,
+    `tall content (2500px) captured at height ${height} — must exceed the requested ` +
+      `${REQUESTED_HEIGHT}px viewport rather than being cropped to it`,
+  );
+  // Content is exactly two stacked blocks of 1200px + 1300px = 2500px.
+  assert.ok(
+    height >= 2490 && height <= 2510,
+    `expected captured height close to the real ~2500px content, got ${height}`,
+  );
+});
+
+test("a short page and a tall page rendered at the same requested size produce different heights", async () => {
+  const size = { width: 500, height: 400 };
+  const [shortResult, tallResult] = await Promise.all([
+    postRender(appBase, { url: `${fixtureBase}/short-content`, ...size }),
+    postRender(appBase, { url: `${fixtureBase}/tall-content`, ...size }),
+  ]);
+
+  assert.equal(shortResult.status, 200);
+  assert.equal(tallResult.status, 200);
+  const shortHeight = pngDimensions(shortResult.body).height;
+  const tallHeight = pngDimensions(tallResult.body).height;
+  assert.notEqual(
+    shortHeight,
+    tallHeight,
+    "short and tall content rendered at the same requested viewport must not produce the same " +
+      "captured height",
+  );
 });
 
 test('format: "pdf" returns PDF bytes', async () => {

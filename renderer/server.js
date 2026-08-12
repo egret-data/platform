@@ -19,6 +19,11 @@ const READY_TIMEOUT_MS = Number(process.env.RENDER_READY_TIMEOUT_MS || 20000);
 const MAX_CONCURRENT = Number(process.env.RENDER_MAX_CONCURRENT || 2);
 const MAX_BODY_BYTES = 1024 * 1024; // 1 MiB is generous for a {url,width,height,format,scale} body
 
+// A page whose content is far taller than any real report should ever be gets capped here
+// rather than captured at its full height — Chromium's memory, not CPU, is this pod's binding
+// constraint, and an unbounded capture buffer for a runaway/malicious page is how you OOM it.
+const MAX_CAPTURE_HEIGHT_PX = 20000;
+
 // One browser PROCESS for the life of the service — Chromium's memory, not
 // CPU, is the binding constraint, so we never spawn more than one. Each
 // request gets its own page (via a fresh context), bounded by the
@@ -84,14 +89,13 @@ async function renderOnce({ url, width, height, format, scale, readyTimeoutMs })
   let context;
   try {
     const browser = await getBrowser();
+    const viewportWidth = Number.isFinite(width) && width > 0 ? Math.round(width) : 1280;
+    const viewportHeight = Number.isFinite(height) && height > 0 ? Math.round(height) : 800;
     context = await browser.newContext({
-      viewport: {
-        width: Number.isFinite(width) && width > 0 ? Math.round(width) : 1280,
-        height: Number.isFinite(height) && height > 0 ? Math.round(height) : 800,
-      },
+      viewport: { width: viewportWidth, height: viewportHeight },
       deviceScaleFactor: Number.isFinite(scale) && scale > 0 ? scale : 1,
     });
-    return await captureReadyPage(context, { url, format, readyTimeoutMs });
+    return await captureReadyPage(context, { url, format, readyTimeoutMs, viewportWidth });
   } catch (e) {
     if (e instanceof RenderError) throw e;
     // Anything we didn't explicitly classify below — a browser-launch
@@ -107,7 +111,36 @@ async function renderOnce({ url, width, height, format, scale, readyTimeoutMs })
   }
 }
 
-async function captureReadyPage(context, { url, format, readyTimeoutMs }) {
+// Measures the print page's real content height, AFTER readiness, so the caller can size the
+// capture to it instead of the fixed requested viewport — that fixed viewport is what leaves a
+// white band below short content (or, worse, silently crops tall content).
+//
+// `document.documentElement.scrollHeight` is NOT used: the print page's own wrapper
+// (`frontend/src/routes/print/PrintObject.tsx`) sets `min-height: 100vh` so it always fills the
+// viewport, even when its own content is much shorter — measuring the document root (or that
+// wrapper itself) would just report the viewport height back to us, defeating the whole point of
+// this measurement. Instead this looks at the wrapper's DIRECT CHILDREN (the title and each
+// card): those size themselves off their own content, never off the wrapper's `min-height`, so
+// the tallest child's bottom edge is the true content height regardless of how the wrapper
+// stretches. `[data-print-root]` names that wrapper explicitly; pages without it (e.g. this
+// service's own test fixtures) fall back to `document.body`.
+async function measureContentHeight(page) {
+  const height = await page.evaluate(() => {
+    const root = document.querySelector("[data-print-root]") || document.body;
+    let maxBottom = 0;
+    for (const el of root.children) {
+      const bottom = el.getBoundingClientRect().bottom;
+      if (bottom > maxBottom) maxBottom = bottom;
+    }
+    // Only reached if `root` rendered no children at all — fall back to its own scrollHeight
+    // rather than report zero.
+    if (maxBottom <= 0) maxBottom = root.scrollHeight;
+    return maxBottom;
+  });
+  return Math.ceil(height);
+}
+
+async function captureReadyPage(context, { url, format, readyTimeoutMs, viewportWidth }) {
   let page;
   try {
     page = await context.newPage();
@@ -149,9 +182,24 @@ async function captureReadyPage(context, { url, format, readyTimeoutMs }) {
   }
 
   if (format === "pdf") {
+    // Deliberately NOT given the same content-height treatment as the PNG path below: `page.pdf`
+    // lays out onto paper-sized pages via print CSS and paginates automatically (it has never
+    // used the screenshot viewport as an image canvas), so it cannot exhibit "content shorter
+    // than a fixed capture height" — there is no equivalent white band to fix here.
     const buffer = await page.pdf({ printBackground: true });
     return { buffer, contentType: "application/pdf" };
   }
+
+  // Measurement happens strictly AFTER the readiness wait and failure check above — never
+  // instead of it — so a still-drawing or genuinely stuck page can never reach this point.
+  const measuredHeight = await measureContentHeight(page);
+  // Clamp: never capture a zero/negative height (an unmeasurable or truly empty page), and cap
+  // at MAX_CAPTURE_HEIGHT_PX so a runaway page can't force an enormous capture buffer.
+  const captureHeight = Math.min(Math.max(measuredHeight, 1), MAX_CAPTURE_HEIGHT_PX);
+  // Resize (rather than pass a `clip` taller than the current viewport) so the capture is just
+  // "screenshot the whole viewport" — no reliance on Playwright's clip-beyond-viewport behavior.
+  // Only the height changes; the requested width stays authoritative.
+  await page.setViewportSize({ width: viewportWidth, height: captureHeight });
   const buffer = await page.screenshot({ type: "png" });
   return { buffer, contentType: "image/png" };
 }
