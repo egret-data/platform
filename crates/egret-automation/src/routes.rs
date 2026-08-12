@@ -4,7 +4,7 @@
 //! would silently escape the module gate.
 
 use axum::extract::{FromRef, Path, Query, State};
-use axum::routing::get;
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use egret_auth::session::SessionService;
 use egret_core::Error;
@@ -14,6 +14,8 @@ use egret_workspace::workspaces::WorkspaceRepo;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::deliver::email::{self, EmailMessage};
+use crate::deliver::smtp_config::{self, SmtpConfigBody, SmtpConfigDto, SmtpConfigRepo};
 use crate::error::{AutomationApiError, AutomationError};
 use crate::model::{
     detail_dto, run_dto, summary_dto, update_body, CreateSchedule, RunDto, ScheduleDetailDto,
@@ -30,6 +32,11 @@ const MANAGE: &str = "alert:manage";
 /// turn the run log into an unpaged table scan.
 const RUNS_LIMIT: i64 = 100;
 
+/// SMTP settings are workspace administration, not alert authoring: they carry
+/// a credential and set the identity every alert in the workspace sends as.
+/// `alert:manage` (an editor grant) is deliberately NOT enough.
+const SMTP_MANAGE: &str = "workspace:manage_members";
+
 #[derive(Clone)]
 pub struct AutomationState {
     pub db: egret_metastore::Db,
@@ -38,6 +45,32 @@ pub struct AutomationState {
     pub workspaces: WorkspaceRepo,
     pub authz: Authorizer,
     pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
+    pub smtp: SmtpConfigRepo,
+    /// Per-render credentials (P4): mints/redeems the single-use tokens the
+    /// print page's renderer authenticates with. See `render::token`.
+    pub render_tokens: crate::render::token::RenderTokenRepo,
+    /// The rest of P4's render-payload dependencies. Reused rather than
+    /// reimplemented from `egret_bi::BiState`: `charts`/`dashboards`/`datasets`
+    /// so a report loads the SAME rows the interactive UI does, `databases` +
+    /// `users` + `engine_minter` so `evaluator::owner_identity` can mint the
+    /// token's OWNER an engine identity (never a service one).
+    pub charts: egret_bi::ChartRepo,
+    pub dashboards: egret_bi::DashboardRepo,
+    pub datasets: egret_bi::DatasetRepo,
+    pub databases: egret_query::DatabaseRepo,
+    pub users: egret_auth::users::UserRepo,
+    pub engine_minter: std::sync::Arc<dyn egret_analytics_api::engine_token::EngineTokenMinter>,
+    /// The same execution seam `AutomationRunner` (the tick engine) uses —
+    /// `crate::evaluator::QueryRunner` — so a rendered chart card runs through
+    /// code a test can fake an engine behind, exactly like `tick_end_to_end.rs`
+    /// already does for alert evaluation. Production wiring is `EngineRunner`
+    /// (the real `run_query` path); tests inject a fake.
+    pub query: std::sync::Arc<dyn crate::evaluator::QueryRunner>,
+    /// The tick engine itself (P5's "Run now"). The SAME `Arc` production
+    /// wires into `runner::spawn` — never a second instance built from this
+    /// state's own fields — so a manual run and a scheduled run share
+    /// `evaluate_and_deliver` byte for byte and cannot diverge.
+    pub runner: std::sync::Arc<crate::runner::AutomationRunner>,
 }
 
 impl FromRef<AutomationState> for SessionService {
@@ -64,11 +97,37 @@ pub fn automation_router() -> Router<AutomationState> {
             get(detail).put(update).delete(remove),
         )
         .route("/ws/{workspace}/alerts/{id}/runs", get(runs))
+        .route("/ws/{workspace}/alerts/{id}/run", post(run_now))
+        .route("/ws/{workspace}/alerts/{id}/active", put(set_active))
+        .route(
+            "/ws/{workspace}/notifications/smtp",
+            get(smtp_get).put(smtp_put).delete(smtp_delete),
+        )
+        .route("/ws/{workspace}/notifications/smtp/test", post(smtp_test))
+        // NOT workspace-scoped, and deliberately not under `/ws/{workspace}`:
+        // the caller (the headless renderer) has no session to put a workspace
+        // in front of. It is authenticated by the render token alone — see
+        // `render_payload` below.
+        .route("/render/payload", get(render_payload))
 }
 
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(list, create, detail, update, remove, runs),
+    paths(
+        list,
+        create,
+        detail,
+        update,
+        remove,
+        runs,
+        run_now,
+        set_active,
+        smtp_get,
+        smtp_put,
+        smtp_delete,
+        smtp_test,
+        render_payload
+    ),
     components(schemas(
         egret_automation_api::ScheduleSummaryDto,
         egret_automation_api::ScheduleDetailDto,
@@ -83,6 +142,13 @@ pub fn automation_router() -> Router<AutomationState> {
         egret_automation_api::ScheduleType,
         egret_automation_api::ValidatorType,
         egret_automation_api::ReportFormat,
+        crate::deliver::smtp_config::SmtpConfigDto,
+        crate::deliver::smtp_config::SmtpConfigBody,
+        crate::deliver::smtp_config::TlsMode,
+        SmtpTestBody,
+        SetActiveBody,
+        crate::render::payload::RenderPayload,
+        crate::render::payload::RenderCard,
     ))
 )]
 pub struct AutomationApi;
@@ -313,6 +379,101 @@ async fn runs(
     Ok(Json(rows.iter().map(run_dto).collect()))
 }
 
+/// Run one schedule immediately (P5's "Run now"). Goes through the exact
+/// same `AutomationRunner::run_now` the tick's own claim loop calls
+/// `evaluate_and_deliver` through — see that function's doc comment for why
+/// a manual run is not a second evaluator and does not bypass the grace
+/// period. Returns the run-log row it just wrote, so the caller can show the
+/// result without a second request.
+#[utoipa::path(
+    post, path = "/api/ws/{workspace}/alerts/{id}/run", tag = "alerts",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "Schedule id")),
+    responses(
+        (status = 200, description = "Ran once; the run-log row it wrote", body = RunDto),
+        (status = 404, description = "No such schedule in this workspace"),
+    ),
+)]
+async fn run_now(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<RunDto>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+
+    // Read (workspace-scoped) first: an id from another workspace must 404
+    // rather than run a schedule the caller cannot even see.
+    let schedule = st
+        .schedules
+        .get(ctx.workspace_id.0, id)
+        .await
+        .map_err(AutomationApiError::from)?
+        .ok_or_else(|| AutomationApiError::from(AutomationError::NotFound("schedule".into())))?;
+
+    st.runner.run_now(&schedule).await;
+
+    // `run_now` always writes exactly one run-log row (`run_and_log`'s
+    // contract), so the newest row for this schedule IS the one it just
+    // wrote — no id needs threading back out of the runner for this.
+    let mut written = st
+        .schedules
+        .runs(ctx.workspace_id.0, id, 1)
+        .await
+        .map_err(AutomationApiError::from)?;
+    let row = written.pop().ok_or_else(|| {
+        AutomationApiError::from(egret_core::Error::Internal(anyhow::anyhow!(
+            "run_now wrote no run-log row for schedule {id}"
+        )))
+    })?;
+    Ok(Json(run_dto(&row)))
+}
+
+/// Flip only `active` (P5's list-row toggle). A dedicated endpoint rather
+/// than routing a toggle through `PUT .../alerts/{id}`, which is a FULL
+/// REPLACE requiring every field — building a toggle on top of it would mean
+/// a read-modify-write that could clobber a concurrent edit to the rest of
+/// the schedule.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct SetActiveBody {
+    pub active: bool,
+}
+
+#[utoipa::path(
+    put, path = "/api/ws/{workspace}/alerts/{id}/active", tag = "alerts",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "Schedule id")),
+    request_body = SetActiveBody,
+    responses(
+        (status = 200, description = "Updated", body = ScheduleSummaryDto),
+        (status = 404, description = "No such schedule in this workspace"),
+    ),
+)]
+async fn set_active(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    Json(body): Json<SetActiveBody>,
+) -> Result<Json<ScheduleSummaryDto>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+
+    let row = st
+        .schedules
+        .set_active(ctx.workspace_id.0, id, body.active)
+        .await
+        .map_err(AutomationApiError::from)?
+        .ok_or_else(|| AutomationApiError::from(AutomationError::NotFound("schedule".into())))?;
+    let owners = st
+        .schedules
+        .owners_for(&[id])
+        .await
+        .map_err(AutomationApiError::from)?;
+    // The caller just passed `alert:manage` above, so `can_manage` is `true`
+    // for this response — same reasoning `list` uses for every row.
+    Ok(Json(summary_dto(&row, &owners, true)))
+}
+
 /// Read a schedule with its owners and recipients, or 404.
 async fn load_detail(
     st: &AutomationState,
@@ -340,4 +501,176 @@ async fn load_detail(
         owners.get(&id).map(Vec::as_slice).unwrap_or(&[]),
         &recipients,
     )))
+}
+
+// ── Workspace SMTP (P3) ─────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct SmtpTestBody {
+    /// Where to send the probe. Defaults to the configured from-address.
+    #[serde(default)]
+    pub to: Option<String>,
+}
+
+#[utoipa::path(
+    get, path = "/api/ws/{workspace}/notifications/smtp", tag = "alerts",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "The workspace's SMTP settings, without the password",
+         body = SmtpConfigDto),
+        (status = 404, description = "Not configured"),
+    ),
+)]
+async fn smtp_get(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<SmtpConfigDto>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, SMTP_MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+    let cfg = st
+        .smtp
+        .get(ctx.workspace_id.0)
+        .await
+        .map_err(AutomationApiError::from)?
+        .ok_or_else(|| AutomationApiError::from(AutomationError::NotFound("smtp config".into())))?;
+    // `dto` has no password field at all — see its docs.
+    Ok(Json(smtp_config::dto(&cfg)))
+}
+
+#[utoipa::path(
+    put, path = "/api/ws/{workspace}/notifications/smtp", tag = "alerts",
+    params(WorkspacePath), request_body = SmtpConfigBody,
+    responses((status = 200, description = "Saved", body = SmtpConfigDto)),
+)]
+async fn smtp_put(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+    Json(body): Json<SmtpConfigBody>,
+) -> Result<Json<SmtpConfigDto>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, SMTP_MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+    if body.host.trim().is_empty() {
+        return Err(AutomationApiError::from(AutomationError::BadRequest(
+            "host is required".into(),
+        )));
+    }
+    if !body.from_address.contains('@') {
+        return Err(AutomationApiError::from(AutomationError::BadRequest(
+            "from_address must be an email address".into(),
+        )));
+    }
+    let saved = st
+        .smtp
+        .upsert(ctx.workspace_id.0, &body, Some(ctx.principal.user_id.0))
+        .await
+        .map_err(AutomationApiError::from)?;
+    Ok(Json(smtp_config::dto(&saved)))
+}
+
+#[utoipa::path(
+    delete, path = "/api/ws/{workspace}/notifications/smtp", tag = "alerts",
+    params(WorkspacePath),
+    responses((status = 200, description = "Removed")),
+)]
+async fn smtp_delete(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<serde_json::Value>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, SMTP_MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+    st.smtp
+        .delete(ctx.workspace_id.0)
+        .await
+        .map_err(AutomationApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Send a probe message.
+///
+/// This endpoint is the whole reason the settings page is trustworthy:
+/// "configured" and "configured correctly" are otherwise indistinguishable
+/// until an alert fires at 3am and silently does not arrive. The relay's own
+/// error text is returned verbatim, because "authentication failed" and
+/// "connection refused" send the operator to different places.
+#[utoipa::path(
+    post, path = "/api/ws/{workspace}/notifications/smtp/test", tag = "alerts",
+    params(WorkspacePath), request_body = SmtpTestBody,
+    responses(
+        (status = 200, description = "The probe was accepted by the relay"),
+        (status = 400, description = "The relay refused; the message says why"),
+    ),
+)]
+async fn smtp_test(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+    Json(body): Json<SmtpTestBody>,
+) -> Result<Json<serde_json::Value>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, SMTP_MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+    let cfg = st
+        .smtp
+        .get(ctx.workspace_id.0)
+        .await
+        .map_err(AutomationApiError::from)?
+        .ok_or_else(|| AutomationApiError::from(AutomationError::NotFound("smtp config".into())))?;
+    let password = st
+        .smtp
+        .resolve_password(&cfg)
+        .await
+        .map_err(AutomationApiError::from)?;
+
+    let to = vec![body.to.unwrap_or_else(|| cfg.from_address.clone())];
+    email::send(
+        &cfg,
+        password,
+        &EmailMessage {
+            to: &to,
+            subject: "egret test message",
+            body: "This is a test message from egret. If you are reading it, this \
+                   workspace's SMTP settings work.\n"
+                .into(),
+            attachment: None,
+        },
+    )
+    .await
+    .map_err(|e| AutomationApiError::from(AutomationError::BadRequest(e.to_string())))?;
+    Ok(Json(serde_json::json!({ "ok": true, "sent_to": to })))
+}
+
+// ── Report rendering (P4) ────────────────────────────────────────────────────
+
+/// The print page's ONE request. Deliberately token-only: there is no
+/// `WsContext` extractor here, so an ordinary session cookie authenticates
+/// nothing on this route — widening it to sessions would make it a second,
+/// unaudited read path for any chart or dashboard.
+#[utoipa::path(
+    get, path = "/api/render/payload", tag = "alerts",
+    responses(
+        (status = 200, description = "Everything the print page needs: the object's spec and every card's already-executed rows", body = crate::render::payload::RenderPayload),
+        (status = 401, description = "No render token"),
+        (status = 404, description = "Token unknown, expired, or already used"),
+    ),
+)]
+async fn render_payload(
+    State(st): State<AutomationState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<crate::render::payload::RenderPayload>, AutomationApiError> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(AutomationApiError::from(egret_core::Error::Unauthorized))?;
+    let grant = st
+        .render_tokens
+        .redeem(token)
+        .await
+        .map_err(AutomationApiError::from)?;
+    let payload = crate::render::payload::build(&st, &grant)
+        .await
+        .map_err(AutomationApiError::from)?;
+    Ok(Json(payload))
 }

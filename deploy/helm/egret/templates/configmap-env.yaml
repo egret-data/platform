@@ -18,3 +18,5 @@ data:
   EGRET_RANGER__AUTH_TOKEN: ""
   EGRET_ADMIN_EMAIL: "{{ .Values.admin.email }}"
   EGRET_LOG__FILTER: "info,egret=debug"
+  EGRET_AUTOMATION__RENDERER_URL: "http://{{ include "egret.fullname" . }}-renderer:8080"
+  EGRET_AUTOMATION__PUBLIC_URL: "http://{{ include "egret.fullname" . }}-frontend"

@@ -5,8 +5,11 @@ import type { ApiError } from "./client";
 import {
   alertsCreate,
   alertsRemove,
+  alertsRunNow,
+  alertsSetActive,
   alertsUpdate,
   getAlertsListQueryKey,
+  getAlertsRunsQueryKey,
   useAlertsDetail,
   useAlertsList,
   useAlertsRuns,
@@ -92,5 +95,30 @@ export function useScheduleMutations(ws: string) {
     mutationFn: (id: string) => alertsRemove(ws, id),
     onSuccess: invalidate,
   });
-  return { create, update, remove };
+  /**
+   * "Run now" (P5). Deliberately does NOT invalidate the list: `run_now`
+   * never touches `next_run_at` or `last_state` (see the route's own doc
+   * comment — a manual run must not move the schedule's own cadence), so the
+   * list has nothing new to show. What DID change is the run log, so only
+   * that query is invalidated — the drawer, if open, picks up the new row.
+   *
+   * Unwraps orval's `{data, status}` envelope to the `RunDto` itself — orval
+   * widens `data` to `RunDto | void` because the generated type also covers
+   * the 404 response, but `apiFetch` throws on non-2xx, so a resolved promise
+   * here was always the 200 body.
+   */
+  const runNow = useMutation({
+    mutationFn: async (id: string) => {
+      const res = await alertsRunNow(ws, id);
+      return res.data as RunDto;
+    },
+    onSuccess: (_run, id) =>
+      qc.invalidateQueries({ queryKey: getAlertsRunsQueryKey(ws, id) }),
+  });
+  const setActive = useMutation({
+    mutationFn: ({ id, active }: { id: string; active: boolean }) =>
+      alertsSetActive(ws, id, { active }),
+    onSuccess: invalidate,
+  });
+  return { create, update, remove, runNow, setActive };
 }

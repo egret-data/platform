@@ -44,8 +44,14 @@ pub enum EvalError {
     NotANumber(String),
     #[error("{0}")]
     Validator(#[from] ValidatorError),
-    #[error("schedule is not a runnable alert: {0}")]
+    #[error("schedule is not runnable: {0}")]
     NotRunnable(&'static str),
+    /// The renderer (`egret-renderer`) refused or could not be reached. Its
+    /// own message rides through verbatim — it is already redacted of the
+    /// render token (`renderer/server.js`'s `safeLocation`) before it ever
+    /// leaves that process.
+    #[error("render failed: {0}")]
+    Render(String),
 }
 
 /// The engine identity a run executes under. Never constructed from the caller
@@ -56,7 +62,14 @@ pub struct RunIdentity {
     pub bearer_token: Option<String>,
 }
 
-/// Execution seam, so the evaluator can be tested without an engine.
+/// Execution seam, so the evaluator (and, via the same trait, the render
+/// payload builder — see `render::payload`) can be tested without an engine.
+///
+/// `limit` is the caller's row cap, not a fixed constant of this trait: an
+/// alert only ever reads the first cell of the first row (`evaluate` passes
+/// `Some(1)`), while a rendered chart card needs its full saved `row_limit`.
+/// Baking `1` into the runner itself — as this used to do — would silently
+/// truncate every rendered report to one row per card.
 #[async_trait::async_trait]
 pub trait QueryRunner: Send + Sync {
     async fn run(
@@ -64,11 +77,13 @@ pub trait QueryRunner: Send + Sync {
         database_id: Uuid,
         sql: &str,
         identity: &RunIdentity,
+        limit: Option<usize>,
     ) -> Result<TabularResult, String>;
 }
 
 /// The production runner: the same `run_query` path the interactive endpoints
-/// use, so a scheduled query and a hand-run one go through identical code.
+/// use, so a scheduled query, a hand-run one, and a rendered report card all
+/// go through identical code.
 pub struct EngineRunner {
     pub databases: DatabaseRepo,
     pub factory: std::sync::Arc<dyn egret_query::execution::connector::ConnectorFactory>,
@@ -82,13 +97,14 @@ impl QueryRunner for EngineRunner {
         database_id: Uuid,
         sql: &str,
         identity: &RunIdentity,
+        limit: Option<usize>,
     ) -> Result<TabularResult, String> {
         egret_query::execution::run_query(
             &self.databases,
             &*self.factory,
             database_id,
             sql,
-            Some(1),
+            limit,
             identity.session_user.clone(),
             identity.bearer_token.clone(),
             &self.limits,
@@ -145,6 +161,11 @@ pub struct Evaluation {
     pub value: Option<f64>,
     /// The triggering row, for the notification body.
     pub rows: serde_json::Value,
+    /// The query's own column names, carried so an attached CSV can be headed
+    /// with what the user actually selected. Without them the header falls back
+    /// to `column_1`, which is worse than useless in a 3am email: it makes the
+    /// reader map positions by hand against SQL they cannot see.
+    pub columns: Vec<String>,
 }
 
 /// Run `sql` as `identity` and apply the validator.
@@ -156,15 +177,23 @@ pub async fn evaluate(
     validator_config: &serde_json::Value,
     identity: &RunIdentity,
 ) -> Result<Evaluation, EvalError> {
+    // An alert only ever reads the first cell of the first row (§5.2's
+    // `first_cell`), so it asks the runner for exactly one.
     let result = runner
-        .run(database_id, sql, identity)
+        .run(database_id, sql, identity, Some(1))
         .await
         .map_err(EvalError::Query)?;
 
     let value = first_cell(&result)?;
     let fired = should_fire(validator, validator_config, value)?;
     let rows = serde_json::to_value(&result.rows).unwrap_or(serde_json::Value::Null);
-    Ok(Evaluation { fired, value, rows })
+    let columns = result.columns.iter().map(|c| c.name.clone()).collect();
+    Ok(Evaluation {
+        fired,
+        value,
+        rows,
+        columns,
+    })
 }
 
 /// The first column of the first row (§5.2), as a number.
@@ -240,6 +269,7 @@ mod tests {
             _db: Uuid,
             _sql: &str,
             identity: &RunIdentity,
+            _limit: Option<usize>,
         ) -> Result<TabularResult, String> {
             *self.seen.lock().unwrap() = Some(identity.clone());
             self.answer.clone()
@@ -314,6 +344,24 @@ mod tests {
         assert!(out.fired);
         assert_eq!(out.value, Some(42.0));
         assert_eq!(out.rows[0][0], 42, "the triggering row rides along");
+    }
+
+    #[tokio::test]
+    async fn the_evaluation_carries_the_querys_column_names() {
+        // They end up as the CSV header in the alert email. Dropping them
+        // leaves a reader mapping `column_1` against SQL they cannot see.
+        let runner = SpyRunner::returning(vec![serde_json::json!(7)]);
+        let out = evaluate(
+            &runner,
+            Uuid::new_v4(),
+            "q",
+            ValidatorType::NotNull,
+            &serde_json::json!({}),
+            &owner_id(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.columns, vec!["v".to_string()]);
     }
 
     #[tokio::test]

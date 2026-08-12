@@ -27,9 +27,14 @@ import type {
 import type {
   AlertsListParams,
   CreateSchedule,
+  RenderPayload,
   RunDto,
   ScheduleDetailDto,
   ScheduleSummaryDto,
+  SetActiveBody,
+  SmtpConfigBody,
+  SmtpConfigDto,
+  SmtpTestBody,
   UpdateSchedule
 } from '../model';
 
@@ -54,6 +59,136 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   }
   return result;
 };
+
+export type alertsRenderPayloadResponse200 = {
+  data: RenderPayload
+  status: 200
+}
+
+export type alertsRenderPayloadResponse401 = {
+  data: void
+  status: 401
+}
+
+export type alertsRenderPayloadResponse404 = {
+  data: void
+  status: 404
+}
+
+export type alertsRenderPayloadResponseSuccess = (alertsRenderPayloadResponse200) & {
+  headers: Headers;
+};
+export type alertsRenderPayloadResponseError = (alertsRenderPayloadResponse401 | alertsRenderPayloadResponse404) & {
+  headers: Headers;
+};
+
+export type alertsRenderPayloadResponse = (alertsRenderPayloadResponseSuccess | alertsRenderPayloadResponseError)
+
+export const getAlertsRenderPayloadUrl = () => {
+
+
+
+
+  return `/api/render/payload`
+}
+
+/**
+ * @summary The print page's ONE request. Deliberately token-only: there is no
+`WsContext` extractor here, so an ordinary session cookie authenticates
+nothing on this route — widening it to sessions would make it a second,
+unaudited read path for any chart or dashboard.
+ */
+export const alertsRenderPayload = async ( options?: RequestInit): Promise<alertsRenderPayloadResponse> => {
+
+  return customInstance<alertsRenderPayloadResponse>(getAlertsRenderPayloadUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getAlertsRenderPayloadQueryKey = () => {
+    return [
+    `/api/render/payload`
+    ] as const;
+    }
+
+
+export const getAlertsRenderPayloadQueryOptions = <TData = Awaited<ReturnType<typeof alertsRenderPayload>>, TError = void>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsRenderPayload>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getAlertsRenderPayloadQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof alertsRenderPayload>>> = ({ signal }) => alertsRenderPayload({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof alertsRenderPayload>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type AlertsRenderPayloadQueryResult = NonNullable<Awaited<ReturnType<typeof alertsRenderPayload>>>
+export type AlertsRenderPayloadQueryError = void
+
+
+export function useAlertsRenderPayload<TData = Awaited<ReturnType<typeof alertsRenderPayload>>, TError = void>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsRenderPayload>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof alertsRenderPayload>>,
+          TError,
+          Awaited<ReturnType<typeof alertsRenderPayload>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useAlertsRenderPayload<TData = Awaited<ReturnType<typeof alertsRenderPayload>>, TError = void>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsRenderPayload>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof alertsRenderPayload>>,
+          TError,
+          Awaited<ReturnType<typeof alertsRenderPayload>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useAlertsRenderPayload<TData = Awaited<ReturnType<typeof alertsRenderPayload>>, TError = void>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsRenderPayload>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary The print page's ONE request. Deliberately token-only: there is no
+`WsContext` extractor here, so an ordinary session cookie authenticates
+nothing on this route — widening it to sessions would make it a second,
+unaudited read path for any chart or dashboard.
+ */
+
+export function useAlertsRenderPayload<TData = Awaited<ReturnType<typeof alertsRenderPayload>>, TError = void>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsRenderPayload>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getAlertsRenderPayloadQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
 
 export type alertsListResponse200 = {
   data: ScheduleSummaryDto[]
@@ -562,6 +697,193 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getAlertsRemoveMutationOptions(options), queryClient);
     }
+    export type alertsSetActiveResponse200 = {
+  data: ScheduleSummaryDto
+  status: 200
+}
+
+export type alertsSetActiveResponse404 = {
+  data: void
+  status: 404
+}
+
+export type alertsSetActiveResponseSuccess = (alertsSetActiveResponse200) & {
+  headers: Headers;
+};
+export type alertsSetActiveResponseError = (alertsSetActiveResponse404) & {
+  headers: Headers;
+};
+
+export type alertsSetActiveResponse = (alertsSetActiveResponseSuccess | alertsSetActiveResponseError)
+
+export const getAlertsSetActiveUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/alerts/${encodeURIComponent(id)}/active`
+}
+
+export const alertsSetActive = async (workspace: string,
+    id: string,
+    setActiveBody: SetActiveBody, options?: RequestInit): Promise<alertsSetActiveResponse> => {
+
+  return customInstance<alertsSetActiveResponse>(getAlertsSetActiveUrl(workspace,id),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setActiveBody)
+  }
+);}
+
+
+
+
+
+export const getAlertsSetActiveMutationOptions = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsSetActive>>, TError,{workspace: string;id: string;data: SetActiveBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof alertsSetActive>>, TError,{workspace: string;id: string;data: SetActiveBody}, TContext> => {
+
+const mutationKey = ['alertsSetActive'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof alertsSetActive>>, {workspace: string;id: string;data: SetActiveBody}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  alertsSetActive(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AlertsSetActiveMutationResult = NonNullable<Awaited<ReturnType<typeof alertsSetActive>>>
+    export type AlertsSetActiveMutationBody = SetActiveBody
+    export type AlertsSetActiveMutationError = void
+
+    export const useAlertsSetActive = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsSetActive>>, TError,{workspace: string;id: string;data: SetActiveBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof alertsSetActive>>,
+        TError,
+        {workspace: string;id: string;data: SetActiveBody},
+        TContext
+      > => {
+      return useMutation(getAlertsSetActiveMutationOptions(options), queryClient);
+    }
+    export type alertsRunNowResponse200 = {
+  data: RunDto
+  status: 200
+}
+
+export type alertsRunNowResponse404 = {
+  data: void
+  status: 404
+}
+
+export type alertsRunNowResponseSuccess = (alertsRunNowResponse200) & {
+  headers: Headers;
+};
+export type alertsRunNowResponseError = (alertsRunNowResponse404) & {
+  headers: Headers;
+};
+
+export type alertsRunNowResponse = (alertsRunNowResponseSuccess | alertsRunNowResponseError)
+
+export const getAlertsRunNowUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/alerts/${encodeURIComponent(id)}/run`
+}
+
+/**
+ * @summary Run one schedule immediately (P5's "Run now"). Goes through the exact
+same `AutomationRunner::run_now` the tick's own claim loop calls
+`evaluate_and_deliver` through — see that function's doc comment for why
+a manual run is not a second evaluator and does not bypass the grace
+period. Returns the run-log row it just wrote, so the caller can show the
+result without a second request.
+ */
+export const alertsRunNow = async (workspace: string,
+    id: string, options?: RequestInit): Promise<alertsRunNowResponse> => {
+
+  return customInstance<alertsRunNowResponse>(getAlertsRunNowUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getAlertsRunNowMutationOptions = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsRunNow>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof alertsRunNow>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['alertsRunNow'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof alertsRunNow>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  alertsRunNow(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AlertsRunNowMutationResult = NonNullable<Awaited<ReturnType<typeof alertsRunNow>>>
+
+    export type AlertsRunNowMutationError = void
+
+    /**
+ * @summary Run one schedule immediately (P5's "Run now"). Goes through the exact
+same `AutomationRunner::run_now` the tick's own claim loop calls
+`evaluate_and_deliver` through — see that function's doc comment for why
+a manual run is not a second evaluator and does not bypass the grace
+period. Returns the run-log row it just wrote, so the caller can show the
+result without a second request.
+ */
+export const useAlertsRunNow = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsRunNow>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof alertsRunNow>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getAlertsRunNowMutationOptions(options), queryClient);
+    }
     export type alertsRunsResponse200 = {
   data: RunDto[]
   status: 200
@@ -676,3 +998,364 @@ export function useAlertsRuns<TData = Awaited<ReturnType<typeof alertsRuns>>, TE
 
 
 
+export type alertsSmtpGetResponse200 = {
+  data: SmtpConfigDto
+  status: 200
+}
+
+export type alertsSmtpGetResponse404 = {
+  data: void
+  status: 404
+}
+
+export type alertsSmtpGetResponseSuccess = (alertsSmtpGetResponse200) & {
+  headers: Headers;
+};
+export type alertsSmtpGetResponseError = (alertsSmtpGetResponse404) & {
+  headers: Headers;
+};
+
+export type alertsSmtpGetResponse = (alertsSmtpGetResponseSuccess | alertsSmtpGetResponseError)
+
+export const getAlertsSmtpGetUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/notifications/smtp`
+}
+
+export const alertsSmtpGet = async (workspace: string, options?: RequestInit): Promise<alertsSmtpGetResponse> => {
+
+  return customInstance<alertsSmtpGetResponse>(getAlertsSmtpGetUrl(workspace),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getAlertsSmtpGetQueryKey = (workspace: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/notifications/smtp`
+    ] as const;
+    }
+
+
+export const getAlertsSmtpGetQueryOptions = <TData = Awaited<ReturnType<typeof alertsSmtpGet>>, TError = void>(workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSmtpGet>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getAlertsSmtpGetQueryKey(workspace);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof alertsSmtpGet>>> = ({ signal }) => alertsSmtpGet(workspace, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof alertsSmtpGet>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type AlertsSmtpGetQueryResult = NonNullable<Awaited<ReturnType<typeof alertsSmtpGet>>>
+export type AlertsSmtpGetQueryError = void
+
+
+export function useAlertsSmtpGet<TData = Awaited<ReturnType<typeof alertsSmtpGet>>, TError = void>(
+ workspace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSmtpGet>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof alertsSmtpGet>>,
+          TError,
+          Awaited<ReturnType<typeof alertsSmtpGet>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useAlertsSmtpGet<TData = Awaited<ReturnType<typeof alertsSmtpGet>>, TError = void>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSmtpGet>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof alertsSmtpGet>>,
+          TError,
+          Awaited<ReturnType<typeof alertsSmtpGet>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useAlertsSmtpGet<TData = Awaited<ReturnType<typeof alertsSmtpGet>>, TError = void>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSmtpGet>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useAlertsSmtpGet<TData = Awaited<ReturnType<typeof alertsSmtpGet>>, TError = void>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof alertsSmtpGet>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getAlertsSmtpGetQueryOptions(workspace,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type alertsSmtpPutResponse200 = {
+  data: SmtpConfigDto
+  status: 200
+}
+
+export type alertsSmtpPutResponseSuccess = (alertsSmtpPutResponse200) & {
+  headers: Headers;
+};
+;
+
+export type alertsSmtpPutResponse = (alertsSmtpPutResponseSuccess)
+
+export const getAlertsSmtpPutUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/notifications/smtp`
+}
+
+export const alertsSmtpPut = async (workspace: string,
+    smtpConfigBody: SmtpConfigBody, options?: RequestInit): Promise<alertsSmtpPutResponse> => {
+
+  return customInstance<alertsSmtpPutResponse>(getAlertsSmtpPutUrl(workspace),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(smtpConfigBody)
+  }
+);}
+
+
+
+
+
+export const getAlertsSmtpPutMutationOptions = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsSmtpPut>>, TError,{workspace: string;data: SmtpConfigBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof alertsSmtpPut>>, TError,{workspace: string;data: SmtpConfigBody}, TContext> => {
+
+const mutationKey = ['alertsSmtpPut'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof alertsSmtpPut>>, {workspace: string;data: SmtpConfigBody}> = (props) => {
+          const {workspace,data} = props ?? {};
+
+          return  alertsSmtpPut(workspace,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AlertsSmtpPutMutationResult = NonNullable<Awaited<ReturnType<typeof alertsSmtpPut>>>
+    export type AlertsSmtpPutMutationBody = SmtpConfigBody
+    export type AlertsSmtpPutMutationError = unknown
+
+    export const useAlertsSmtpPut = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsSmtpPut>>, TError,{workspace: string;data: SmtpConfigBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof alertsSmtpPut>>,
+        TError,
+        {workspace: string;data: SmtpConfigBody},
+        TContext
+      > => {
+      return useMutation(getAlertsSmtpPutMutationOptions(options), queryClient);
+    }
+    export type alertsSmtpDeleteResponse200 = {
+  data: void
+  status: 200
+}
+
+export type alertsSmtpDeleteResponseSuccess = (alertsSmtpDeleteResponse200) & {
+  headers: Headers;
+};
+;
+
+export type alertsSmtpDeleteResponse = (alertsSmtpDeleteResponseSuccess)
+
+export const getAlertsSmtpDeleteUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/notifications/smtp`
+}
+
+export const alertsSmtpDelete = async (workspace: string, options?: RequestInit): Promise<alertsSmtpDeleteResponse> => {
+
+  return customInstance<alertsSmtpDeleteResponse>(getAlertsSmtpDeleteUrl(workspace),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getAlertsSmtpDeleteMutationOptions = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsSmtpDelete>>, TError,{workspace: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof alertsSmtpDelete>>, TError,{workspace: string}, TContext> => {
+
+const mutationKey = ['alertsSmtpDelete'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof alertsSmtpDelete>>, {workspace: string}> = (props) => {
+          const {workspace} = props ?? {};
+
+          return  alertsSmtpDelete(workspace,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AlertsSmtpDeleteMutationResult = NonNullable<Awaited<ReturnType<typeof alertsSmtpDelete>>>
+
+    export type AlertsSmtpDeleteMutationError = unknown
+
+    export const useAlertsSmtpDelete = <TError = unknown,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsSmtpDelete>>, TError,{workspace: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof alertsSmtpDelete>>,
+        TError,
+        {workspace: string},
+        TContext
+      > => {
+      return useMutation(getAlertsSmtpDeleteMutationOptions(options), queryClient);
+    }
+    export type alertsSmtpTestResponse200 = {
+  data: void
+  status: 200
+}
+
+export type alertsSmtpTestResponse400 = {
+  data: void
+  status: 400
+}
+
+export type alertsSmtpTestResponseSuccess = (alertsSmtpTestResponse200) & {
+  headers: Headers;
+};
+export type alertsSmtpTestResponseError = (alertsSmtpTestResponse400) & {
+  headers: Headers;
+};
+
+export type alertsSmtpTestResponse = (alertsSmtpTestResponseSuccess | alertsSmtpTestResponseError)
+
+export const getAlertsSmtpTestUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/notifications/smtp/test`
+}
+
+/**
+ * This endpoint is the whole reason the settings page is trustworthy:
+ * "configured" and "configured correctly" are otherwise indistinguishable
+ * until an alert fires at 3am and silently does not arrive. The relay's own
+ * error text is returned verbatim, because "authentication failed" and
+ * "connection refused" send the operator to different places.
+ * @summary Send a probe message.
+ */
+export const alertsSmtpTest = async (workspace: string,
+    smtpTestBody: SmtpTestBody, options?: RequestInit): Promise<alertsSmtpTestResponse> => {
+
+  return customInstance<alertsSmtpTestResponse>(getAlertsSmtpTestUrl(workspace),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(smtpTestBody)
+  }
+);}
+
+
+
+
+
+export const getAlertsSmtpTestMutationOptions = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsSmtpTest>>, TError,{workspace: string;data: SmtpTestBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof alertsSmtpTest>>, TError,{workspace: string;data: SmtpTestBody}, TContext> => {
+
+const mutationKey = ['alertsSmtpTest'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof alertsSmtpTest>>, {workspace: string;data: SmtpTestBody}> = (props) => {
+          const {workspace,data} = props ?? {};
+
+          return  alertsSmtpTest(workspace,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AlertsSmtpTestMutationResult = NonNullable<Awaited<ReturnType<typeof alertsSmtpTest>>>
+    export type AlertsSmtpTestMutationBody = SmtpTestBody
+    export type AlertsSmtpTestMutationError = void
+
+    /**
+ * @summary Send a probe message.
+ */
+export const useAlertsSmtpTest = <TError = void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsSmtpTest>>, TError,{workspace: string;data: SmtpTestBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof alertsSmtpTest>>,
+        TError,
+        {workspace: string;data: SmtpTestBody},
+        TContext
+      > => {
+      return useMutation(getAlertsSmtpTestMutationOptions(options), queryClient);
+    }

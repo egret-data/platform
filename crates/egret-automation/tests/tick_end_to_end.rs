@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use egret_automation::deliver::destination::{Resolver, SsrfPolicy};
 use egret_automation::evaluator::{QueryRunner, RunIdentity};
+use egret_automation::render::client::{RenderRequest, Renderer};
 use egret_automation::runner::AutomationRunner;
 use egret_automation::ScheduleRepo;
 use egret_core::tabular::ColumnMeta;
@@ -32,6 +33,7 @@ impl QueryRunner for FakeEngine {
         _db: Uuid,
         _sql: &str,
         identity: &RunIdentity,
+        _limit: Option<usize>,
     ) -> Result<TabularResult, String> {
         self.seen.lock().unwrap().push(identity.clone());
         if self.fail {
@@ -65,6 +67,18 @@ impl egret_analytics_api::engine_token::EngineTokenMinter for NoMinter {
     }
 }
 
+/// This fixture only ever runs the ALERT path (P4's report branch is tested
+/// separately in `report_tick.rs`), so the renderer is never actually called
+/// — a hard failure here would turn "the report branch ran unexpectedly" into
+/// a silent pass instead of a loud one.
+struct NeverRenderer;
+#[async_trait::async_trait]
+impl Renderer for NeverRenderer {
+    async fn render(&self, _req: RenderRequest) -> Result<Vec<u8>, String> {
+        Err("NeverRenderer: the alert-path fixture must never call the renderer".into())
+    }
+}
+
 /// Resolves everything to a public address so the SSRF guard admits it; the
 /// guard's own behaviour is tested in its module.
 struct PublicDns;
@@ -87,6 +101,7 @@ impl Resolver for PublicDns {
 struct Fx {
     runner: AutomationRunner,
     db: Db,
+    ws: Uuid,
     schedule: Uuid,
     engine: Arc<FakeEngine>,
 }
@@ -165,8 +180,18 @@ async fn setup(pool: sqlx::PgPool, value: serde_json::Value, fail: bool, webhook
             query: engine.clone(),
             resolver: Arc::new(PublicDns),
             policy: SsrfPolicy::default(),
+            smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
+                db.clone(),
+                egret_secrets::SecretStore::new(db.clone(), None),
+            ),
+            charts: egret_bi::ChartRepo::new(db.clone()),
+            datasets: egret_bi::DatasetRepo::new(db.clone()),
+            render_tokens: egret_automation::render::token::RenderTokenRepo::new(db.clone()),
+            renderer: Arc::new(NeverRenderer),
+            public_url: "https://egret.internal".into(),
         },
         db,
+        ws,
         schedule,
         engine,
     }
@@ -366,5 +391,85 @@ async fn nothing_due_writes_nothing(pool: sqlx::PgPool) {
     assert!(
         fx.engine.seen.lock().unwrap().is_empty(),
         "no query may be sent for a schedule that is not due"
+    );
+}
+
+// ── run_now (P5 "Run now") ──────────────────────────────────────────────
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn run_now_writes_a_run_log_row_without_touching_next_run_at_or_last_state(
+    pool: sqlx::PgPool,
+) {
+    // The whole point of `run_now` NOT calling `release`: a manual run must
+    // not move the schedule's own cadence. Pin `next_run_at` and `last_state`
+    // to known values first, so "unchanged" is checked against something
+    // other than NULL.
+    let fx = setup(pool, serde_json::json!(7), false, false).await;
+    let pinned_next = chrono::Utc::now() + chrono::Duration::hours(3);
+    sqlx::query(
+        "UPDATE automation.schedules SET next_run_at = $2, last_state = 'noop' WHERE id = $1",
+    )
+    .bind(fx.schedule)
+    .bind(pinned_next)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+
+    let schedule = fx
+        .runner
+        .schedules
+        .get(fx.ws, fx.schedule)
+        .await
+        .unwrap()
+        .expect("schedule exists");
+    fx.runner.run_now(&schedule).await;
+
+    let log = run_log(&fx).await;
+    assert_eq!(log.len(), 1, "a manual run must write a run-log row");
+    assert_eq!(log[0].0, "success");
+
+    let (last_state, next_run_at) = schedule_state(&fx).await;
+    assert_eq!(
+        last_state, "noop",
+        "run_now must not touch last_state — that would race a concurrent tick's claim"
+    );
+    assert_eq!(
+        next_run_at,
+        Some(pinned_next),
+        "run_now must not touch next_run_at, or the schedule's own slot would skip or double-fire"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn run_now_still_honours_the_grace_period(pool: sqlx::PgPool) {
+    // The documented, deliberate choice: a manual run does not bypass
+    // anti-spam. If the tick already fired and notified inside the grace
+    // window, "Run now" must record `grace`, not resend.
+    let fx = setup(pool, serde_json::json!(5), false, false).await;
+    sqlx::query("UPDATE automation.schedules SET grace_period_s = 3600 WHERE id = $1")
+        .bind(fx.schedule)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+
+    // First firing, via the normal tick.
+    fx.runner.tick_once().await;
+
+    // Now press "Run now" while still inside the grace window.
+    let schedule = fx
+        .runner
+        .schedules
+        .get(fx.ws, fx.schedule)
+        .await
+        .unwrap()
+        .expect("schedule exists");
+    fx.runner.run_now(&schedule).await;
+
+    let log = run_log(&fx).await;
+    let states: Vec<&str> = log.iter().map(|(s, _)| s.as_str()).collect();
+    assert_eq!(
+        states,
+        vec!["success", "grace"],
+        "a manual run inside the grace window must be suppressed and SAID SO, not resent"
     );
 }

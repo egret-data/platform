@@ -75,7 +75,7 @@ export type EChartsOptionInput = EChartsCoreOption | ((size: EChartsSize) => ECh
  * Thin SVG ECharts wrapper, mirroring Metabase's EChartsRenderer:
  * init on mount, setOption on change, resize via ResizeObserver, dispose on unmount.
  */
-export function EChartsRenderer({ option, className, onPointClick, onPointHover, overlay, highlightDataIndex }: {
+export function EChartsRenderer({ option, className, onPointClick, onPointHover, overlay, highlightDataIndex, onFinished }: {
   option: EChartsOptionInput;
   className?: string;
   onPointClick?: (p: EChartsPointClick) => void;
@@ -98,6 +98,15 @@ export function EChartsRenderer({ option, className, onPointClick, onPointHover,
   /** Datum to hold in ECharts' emphasis state — the legend's half of a two-way hover. Downplayed
    * again when it changes or the chart unmounts. */
   highlightDataIndex?: number;
+  /** ECharts' own `finished` event — fires once the chart has actually painted, including its
+   * mount animation, as opposed to `rendered` which fires on every frame of one. The print route
+   * (`routes/print/PrintObject.tsx`) is the reason this exists: it screenshots a chrome-free page
+   * and needs to know when every chart on it is done drawing rather than guessing with a fixed
+   * wait, which captures a half-drawn chart on an unlucky run. Not deduped or unsubscribed after
+   * the first call — ECharts fires it again after a resize or a theme change, and a caller that
+   * only wants the first one (the print route does, via a ref-guarded flag) is free to ignore the
+   * rest. */
+  onFinished?: () => void;
 }) {
   const elRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<ECharts | null>(null);
@@ -105,6 +114,8 @@ export function EChartsRenderer({ option, className, onPointClick, onPointHover,
   clickRef.current = onPointClick;
   const hoverRef = useRef(onPointHover);
   hoverRef.current = onPointHover;
+  const finishedRef = useRef(onFinished);
+  finishedRef.current = onFinished;
 
   // The chart's last-measured real size — read on init (before ECharts even exists yet) and kept
   // current by the ResizeObserver below, so a function-valued `option` always gets rebuilt
@@ -171,6 +182,7 @@ export function EChartsRenderer({ option, className, onPointClick, onPointHover,
       });
     });
     chart.on("mouseout", "series", () => hoverRef.current?.(null));
+    chart.on("finished", () => finishedRef.current?.());
 
     /**
      * WHAT THE BUILDER DERIVED FROM THE SERIES LIST HAS TO FOLLOW THE LEGEND. ECharts' legend hides

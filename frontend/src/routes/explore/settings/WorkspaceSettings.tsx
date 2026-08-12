@@ -3,6 +3,7 @@ import {
   Database,
   Inbox,
   type LucideIcon,
+  Mail,
   PanelLeftClose,
   PanelLeftOpen,
   Settings2,
@@ -41,7 +42,10 @@ const GROUPS: SettingsGroup[] = [
   },
   {
     heading: "Workspace",
-    items: [{ to: "general", label: "General", icon: Settings2 }],
+    items: [
+      { to: "notifications", label: "Notifications", icon: Mail },
+      { to: "general", label: "General", icon: Settings2 },
+    ],
   },
 ];
 

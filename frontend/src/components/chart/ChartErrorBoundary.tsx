@@ -5,6 +5,10 @@ interface Props {
   /** When this value changes, the boundary resets — so a fixed/re-queried chart recovers
    *  instead of staying stuck on a previous error. */
   resetKey?: unknown;
+  /** Fired once, alongside the fallback markup below, so a caller that has its own notion of
+   *  failure (the print route's `__EGRET_PRINT_FAILED__`) hears about a caught error without
+   *  scraping this boundary's rendered output for it. */
+  onError?: (error: Error) => void;
 }
 interface State {
   error: Error | null;
@@ -17,6 +21,10 @@ export class ChartErrorBoundary extends Component<Props, State> {
 
   static getDerivedStateFromError(error: Error): State {
     return { error };
+  }
+
+  componentDidCatch(error: Error) {
+    this.props.onError?.(error);
   }
 
   componentDidUpdate(prev: Props) {

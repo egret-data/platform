@@ -173,6 +173,16 @@ pub struct AutomationConfig {
     /// "webhook our own in-cluster incident bot" has a supported answer —
     /// without one, an operator who needs it turns the whole check off.
     pub webhook_allow_hosts: Vec<String>,
+    /// Base URL of the `egret-renderer` service (P4), reachable from THIS
+    /// server. In-cluster this is a Service DNS name, not a public hostname.
+    pub renderer_url: String,
+    /// Base URL the RENDERER can reach to fetch `/embed/print/{kind}/{id}` —
+    /// in-cluster, this server's OWN Service name, which is generally not the
+    /// same as the user-facing hostname (`catalog.public_url`) an ingress or a
+    /// browser would use. Getting this wrong is a silent failure mode: the
+    /// renderer's navigation would time out trying to reach an address only a
+    /// browser outside the cluster can resolve.
+    pub public_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,6 +320,8 @@ impl Default for Config {
                 enabled: true,
                 tick_interval_secs: 30,
                 webhook_allow_hosts: vec![],
+                renderer_url: "http://egret-renderer:8080".into(),
+                public_url: "http://egret:8080".into(),
             },
         }
     }

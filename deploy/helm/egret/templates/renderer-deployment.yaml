@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: {{ include "egret.fullname" . }}-renderer, namespace: {{ .Release.Namespace }} }
+spec:
+  replicas: {{ .Values.renderer.replicas }}
+  selector: { matchLabels: { app: egret-renderer } }
+  template:
+    metadata: { labels: { app: egret-renderer } }
+    spec:
+      containers:
+        - name: egret-renderer
+          image: "{{ .Values.renderer.image.repository }}:{{ .Values.renderer.image.tag }}"
+          imagePullPolicy: {{ .Values.renderer.image.pullPolicy }}
+          ports: [{ containerPort: 8080 }]
+          # Chromium's memory (not CPU) is the binding constraint: server.js keeps
+          # one browser process alive for the pod's lifetime, and headless Chromium
+          # commonly needs several hundred MiB at idle with spikes well past that
+          # while rendering a busy dashboard. A too-small request just means the
+          # scheduler under-provisions the node and the kernel OOMKills the pod
+          # under load — which users experience as "reports work sometimes", not
+          # as a clean error.
+          resources:
+            requests: { memory: "512Mi", cpu: "250m" }
+            limits: { memory: "1Gi", cpu: "1000m" }
+          readinessProbe: { httpGet: { path: /healthz, port: 8080 }, initialDelaySeconds: 5, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /healthz, port: 8080 }, initialDelaySeconds: 30, periodSeconds: 20 }

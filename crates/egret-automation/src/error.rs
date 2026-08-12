@@ -17,6 +17,13 @@ pub enum AutomationError {
     Conflict(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
+    /// An unexpected failure below the domain — a query-engine error, a
+    /// credential broker failure, or anything else that is not the caller's
+    /// fault to fix. The real message is logged; the response is redacted the
+    /// same way `egret_core::Error::Internal` redacts, so an engine's error
+    /// text (which can carry table/column names) never reaches the browser.
+    #[error("internal: {0}")]
+    Internal(String),
 }
 
 impl AutomationError {
@@ -61,6 +68,13 @@ impl IntoResponse for AutomationError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal error".to_string(),
             ),
+            AutomationError::Internal(msg) => {
+                tracing::error!(error = %msg, "automation: internal error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal error".to_string(),
+                )
+            }
         };
         (status, Json(serde_json::json!({ "error": msg }))).into_response()
     }

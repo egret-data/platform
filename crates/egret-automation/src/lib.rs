@@ -9,6 +9,7 @@ pub mod deliver;
 mod error;
 pub mod evaluator;
 pub mod model;
+pub mod render;
 mod repo;
 mod routes;
 pub mod runner;

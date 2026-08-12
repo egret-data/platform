@@ -372,6 +372,22 @@ pub fn detail_dto(s: &Schedule, owners: &[Owner], recipients: &[Recipient]) -> S
     }
 }
 
+/// The object a report renders, and the `kind` string the render-token
+/// vocabulary and print-page routes use for it (`chart`|`dashboard` — mirrors
+/// migration 0112's `render_token_kind_valid` CHECK).
+///
+/// `None` only for a corrupt row: migration 0110's report CHECK guarantees a
+/// real report schedule carries exactly one of `chart_id`/`dashboard_id`.
+pub fn report_target(s: &Schedule) -> Option<(&'static str, Uuid)> {
+    if let Some(id) = s.chart_id {
+        Some(("chart", id))
+    } else if let Some(id) = s.dashboard_id {
+        Some(("dashboard", id))
+    } else {
+        None
+    }
+}
+
 pub fn run_dto(r: &ScheduleRun) -> RunDto {
     RunDto {
         id: r.id.to_string(),

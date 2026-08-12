@@ -43,11 +43,12 @@ k8s-up:
 k8s-down:
     kind delete cluster --name egret
 
-# Build all egret images (backend + frontend + kernel).
+# Build all egret images (backend + frontend + kernel + renderer).
 images-build:
     docker build -f deploy/docker/backend.Dockerfile -t egret-backend:dev .
     docker build -f frontend/Dockerfile -t egret-frontend:dev frontend
     docker build -t egret-kernel:dev kernel-image
+    docker build -t egret-renderer:dev renderer
 
 # Build images, load them into the kind `egret` cluster, and (re)install the chart.
 # Force fresh pods onto the just-loaded `:dev` images. A `helm upgrade` with an
@@ -62,7 +63,7 @@ _kind-refresh:
     kubectl delete pods -n egret-notebooks --all --ignore-not-found=true
 
 deploy-kind: images-build
-    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev --name egret
+    kind load docker-image egret-backend:dev egret-frontend:dev egret-kernel:dev egret-renderer:dev --name egret
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m
     just _kind-refresh
     @echo "egret SPA: http://localhost:30080  (login admin@egret.local / Admin12345!)"

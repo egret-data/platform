@@ -121,7 +121,12 @@ export function ScheduleEditor({
       return {
         ...shared,
         type: "alert" as const,
-        database_id: databaseId || databases?.[0]?.id || "",
+        // `null`, never `""`. An empty string is not a UUID, so serde rejects
+        // the whole body with a bare 422 "Unprocessable Entity" BEFORE the
+        // server's own validation runs — the user loses the message that names
+        // the field ("an alert needs a database_id") and gets an HTTP status
+        // instead. Omitting the value lets the real validator answer.
+        database_id: databaseId || databases?.[0]?.id || null,
         sql,
         validator_type: validatorType,
         validator_config:
@@ -134,9 +139,11 @@ export function ScheduleEditor({
       ...shared,
       type: "report" as const,
       report_format: reportFormat,
+      // Same reason as `database_id` above: an empty target must be absent,
+      // not an empty string.
       ...(targetKind === "dashboard"
-        ? { dashboard_id: defaultTarget }
-        : { chart_id: defaultTarget }),
+        ? { dashboard_id: defaultTarget || null }
+        : { chart_id: defaultTarget || null }),
     };
   }
 
@@ -233,6 +240,12 @@ export function ScheduleEditor({
             <p className="text-xs text-muted-foreground">
               The first column of the first row is the value the condition is tested against.
             </p>
+            {(databases ?? []).length === 0 && (
+              <p className="text-xs text-destructive">
+                This workspace has no database connection yet. Add one under Workspace
+                settings &rarr; Engines before creating an alert.
+              </p>
+            )}
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="sched-validator">Condition</Label>

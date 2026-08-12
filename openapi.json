@@ -10384,6 +10384,33 @@
         }
       }
     },
+    "/api/render/payload": {
+      "get": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "The print page's ONE request. Deliberately token-only: there is no\n`WsContext` extractor here, so an ordinary session cookie authenticates\nnothing on this route — widening it to sessions would make it a second,\nunaudited read path for any chart or dashboard.",
+        "operationId": "render_payload",
+        "responses": {
+          "200": {
+            "description": "Everything the print page needs: the object's spec and every card's already-executed rows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RenderPayload"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No render token"
+          },
+          "404": {
+            "description": "Token unknown, expired, or already used"
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/access-requests": {
       "get": {
         "tags": [
@@ -10914,6 +10941,121 @@
         "responses": {
           "200": {
             "description": "Deleted"
+          },
+          "404": {
+            "description": "No such schedule in this workspace"
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/alerts/{id}/active": {
+      "put": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "set_active",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Schedule id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetActiveBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleSummaryDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such schedule in this workspace"
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/alerts/{id}/run": {
+      "post": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Run one schedule immediately (P5's \"Run now\"). Goes through the exact\nsame `AutomationRunner::run_now` the tick's own claim loop calls\n`evaluate_and_deliver` through — see that function's doc comment for why\na manual run is not a second evaluator and does not bypass the grace\nperiod. Returns the run-log row it just wrote, so the caller can show the\nresult without a second request.",
+        "operationId": "run_now",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Schedule id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ran once; the run-log row it wrote",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDto"
+                }
+              }
+            }
           },
           "404": {
             "description": "No such schedule in this workspace"
@@ -19347,6 +19489,140 @@
         }
       }
     },
+    "/api/ws/{workspace}/notifications/smtp": {
+      "get": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "smtp_get",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The workspace's SMTP settings, without the password",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SmtpConfigDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not configured"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "smtp_put",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SmtpConfigBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SmtpConfigDto"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "smtp_delete",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed"
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notifications/smtp/test": {
+      "post": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Send a probe message.",
+        "description": "This endpoint is the whole reason the settings page is trustworthy:\n\"configured\" and \"configured correctly\" are otherwise indistinguishable\nuntil an alert fires at 3am and silently does not arrive. The relay's own\nerror text is returned verbatim, because \"authentication failed\" and\n\"connection refused\" send the operator to different places.",
+        "operationId": "smtp_test",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SmtpTestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The probe was accepted by the relay"
+          },
+          "400": {
+            "description": "The relay refused; the message says why"
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/objects/{kind}/{id}/grants": {
       "get": {
         "tags": [
@@ -27102,6 +27378,68 @@
           }
         }
       },
+      "RenderCard": {
+        "type": "object",
+        "required": [
+          "chart_id",
+          "title",
+          "viz_type",
+          "params",
+          "columns",
+          "rows"
+        ],
+        "properties": {
+          "chart_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "viz_type": {
+            "type": "string"
+          },
+          "params": {},
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ColumnMeta"
+            }
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {}
+            }
+          }
+        }
+      },
+      "RenderPayload": {
+        "type": "object",
+        "required": [
+          "kind",
+          "id",
+          "title",
+          "cards"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "cards": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RenderCard"
+            }
+          }
+        }
+      },
       "ReorderCells": {
         "type": "object",
         "required": [
@@ -28009,6 +28347,18 @@
           }
         }
       },
+      "SetActiveBody": {
+        "type": "object",
+        "description": "Flip only `active` (P5's list-row toggle). A dedicated endpoint rather\nthan routing a toggle through `PUT .../alerts/{id}`, which is a FULL\nREPLACE requiring every field — building a toggle on top of it would mean\na read-modify-write that could clobber a concurrent edit to the rest of\nthe schedule.",
+        "required": [
+          "active"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean"
+          }
+        }
+      },
       "SetDashboardCertification": {
         "type": "object",
         "description": "Body for `PUT /dashboards/{id}/certification`.\n\nA SEPARATE endpoint from the dashboard PUT on purpose: certification is guarded by the\nplatform-scoped `dashboard:certify`, while editing is guarded by the workspace-scoped\n`dashboard:manage`. Folding these fields into `UpdateDashboard` would let any editor certify\ntheir own dashboard by saving it, which is the failure this feature exists to avoid.",
@@ -28135,6 +28485,109 @@
               "type": "string",
               "format": "uuid"
             }
+          }
+        }
+      },
+      "SmtpConfigBody": {
+        "type": "object",
+        "description": "Create/update body.",
+        "required": [
+          "host",
+          "port",
+          "from_address",
+          "tls_mode"
+        ],
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from_address": {
+            "type": "string"
+          },
+          "from_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tls_mode": {
+            "$ref": "#/components/schemas/TlsMode"
+          },
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Omitted means \"keep the stored password\"; `\"\"` means \"remove it\".\n\nWithout the distinction, an editor that renders a blank field (because\nit cannot show the real one) would erase the password on every save."
+          }
+        }
+      },
+      "SmtpConfigDto": {
+        "type": "object",
+        "description": "What a GET returns.\n\nThere is deliberately no password field — not even an empty or masked one.\n`has_password` is what the editor needs (to show \"configured\" and to let the\nuser keep the existing one), and it is a boolean, so no serialization change\ncan turn it into the secret.",
+        "required": [
+          "host",
+          "port",
+          "from_address",
+          "tls_mode",
+          "has_password",
+          "updated_at"
+        ],
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from_address": {
+            "type": "string"
+          },
+          "from_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tls_mode": {
+            "$ref": "#/components/schemas/TlsMode"
+          },
+          "has_password": {
+            "type": "boolean",
+            "description": "Whether a password is stored. The password itself is never returned."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SmtpTestBody": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where to send the probe. Defaults to the configured from-address."
           }
         }
       },
@@ -28760,6 +29213,15 @@
             "type": "string"
           }
         }
+      },
+      "TlsMode": {
+        "type": "string",
+        "description": "How the connection is secured. Spelled out rather than inferred from the\nport: 587-means-STARTTLS is a convention, not a rule, and guessing wrong\nsilently sends credentials in the clear.",
+        "enum": [
+          "starttls",
+          "implicit",
+          "none"
+        ]
       },
       "TokenForm": {
         "type": "object",

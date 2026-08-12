@@ -124,7 +124,11 @@ The first phase that does something. Alerts fire end to end; email waits for P3.
       refused, so the checked destination is the dialled one.
 - [x] Run-log writes on every path, with a `nothing_due_writes_nothing` control so the others
       cannot pass by writing rows unconditionally.
-- [ ] **Live check on kind** — NOT DONE. Everything above is verified against fakes.
+- [x] **Live check DONE** (locally, not on kind): real Trino + a webhook listener. Observed, in
+      order, in one run log — `error` (engine rejection, with the engine's words) → `success` with
+      the SSRF guard refusing loopback and ZERO hits delivered → `success` + delivered, HMAC
+      verified against an independently computed digest → `grace` suppressing the next firing with
+      still exactly one hit total.
 - [x] Commit.
 
 **Two corrections to this plan, made while building**
@@ -149,47 +153,81 @@ claimer returns inside 500ms.)*
 
 ---
 
-## Phase 3 — Per-workspace SMTP + email delivery
+## Phase 3 — Per-workspace SMTP + email delivery ✅ *(done, except the live check)*
 
-**Files**
+**Files** *(as built)*
 - Create: `migrations/0111_automation_smtp.sql`
-- Create: `crates/egret-automation/src/deliver/email.rs`, `smtp_config.rs`
-- Modify: `crates/egret-secrets` usage for the password
-- Frontend: `src/routes/explore/settings/Notifications.tsx` (Workspace settings tab)
+- Create: `crates/egret-automation/src/deliver/{smtp_config,email}.rs`
+- Modify: `crates/egret-automation/src/{routes,runner}.rs` — settings endpoints; email in the
+  delivery path
+- Create: `crates/egret-automation/tests/{smtp_config_db,smtp_routes}.rs`
+- Frontend: `routes/explore/settings/Notifications.tsx`, `api/notifications.ts`, its test
 
-- [ ] Config repo + route tests, including **that the password never appears in a GET response**
-      (assert on the serialized body, not on the struct).
-- [ ] SMTP config CRUD, password stored as a typed secret, id referenced.
-- [ ] `lettre` sender: STARTTLS / implicit TLS / none; CSV attachment of the triggering rows.
-- [ ] **Send test email** endpoint + button — the only thing that distinguishes "configured" from
-      "configured correctly".
-- [ ] Live check on kind with a mail catcher (mailpit) as the workspace's SMTP host.
-- [ ] Commit.
+- [x] Config repo + route tests, including **that the password never appears in a response** —
+      asserted against the raw body bytes at the HTTP layer, and separately against the stored row
+      read back as text. Mutation-checked by adding a password field to the DTO.
+- [x] SMTP config CRUD, password stored via `egret-secrets`, only its id in the table. Replacing a
+      password deletes the superseded ciphertext; an omitted one is kept, an empty one removed.
+- [x] `lettre` sender: STARTTLS / implicit / none, each explicitly chosen rather than inferred
+      from the port. CSV attachment of the triggering rows, every field quoted.
+- [x] **Send test email** endpoint + button, returning the relay's own error text.
+- [x] **Live check DONE with mailpit** (locally, not on kind). The send-test button earned itself
+      immediately: pointed at a relay offering no auth while credentials were configured, it
+      returned the relay's own "No compatible authentication mechanism was found" — which is
+      exactly the "configured" vs "configured correctly" distinction it exists to make. Clearing
+      the password (live-exercising `password: ""` → removed, vault row gone) made the send
+      succeed. The alert email arrived with both recipients, the custom subject, and a CSV
+      attachment.
+
+**What the live check caught that 120 tests did not:** the CSV was headed `column_1,column_2` for
+a query selecting `n` and `label` — `Evaluation` dropped the column names `TabularResult` had all
+along. Fixed in `3136e7d6` and re-verified live.
+- [x] Commit.
+
+**One addition the plan did not specify: who may change these settings.** SMTP is gated by
+`workspace:manage_members`, NOT `alert:manage`. An editor can author alerts all day; the relay
+credential and the identity every alert sends as are workspace administration. Mutation-checked by
+downgrading the gate.
+
+**Carried into P4:** report delivery has an email path now, but nothing to attach — the renderer
+is P4. `automation.smtp_config` is also what a report will send through, unchanged.
 
 ---
 
-## Phase 4 — Report rendering *(own spec first)*
+## Phase 4 — Report rendering
 
-**Before writing code**, write `docs/en/specs/…-report-renderer-design.md` covering: the print
-route, the per-render token (single-object, single-use, ~60s), image sizing, the k8s Deployment,
-resource limits, and what happens when the renderer is down.
+**The spec is written** — `docs/en/specs/2026-08-12-report-renderer-design.md` — and so is the
+task-by-task plan: **`docs/en/plans/2026-08-12-report-renderer-plan.md`** (8 tasks, 44 steps).
 
-Sketch of the work: `egret-renderer` image (Playwright + Chromium), `POST /render`, cluster-only
-Service, a `/embed/print/:kind/:id` route in the SPA that renders one object chrome-free, token
-minting in the backend, PNG then PDF, and report delivery wired into P3's email sender.
+Decisions taken before writing them, two against the recommendation and recorded as such:
+all four formats in one phase; a render failure is an `error` run retried on schedule; the renderer
+is a REQUIRED component helm always installs.
 
-**Do not start this phase until P2 and P3 are merged.** Alerts are useful without it; it is not
-useful without them.
+The three things that shaped the design:
 
----
+1. **Knowing when to capture is the hard part.** ECharts animates on mount and fonts resolve after
+   first paint, so a fixed wait yields a correct image most of the time and a half-drawn one
+   occasionally — invisible to tests, roughly one run in twenty. Readiness is an explicit flag; a
+   timeout is a FAILED render, never a partial capture.
+2. **Single-use forces the print page to fetch exactly once**, so one endpoint returns the spec and
+   every card's data together and the token row is deleted inside the transaction that reads it.
+3. **A dashboard has no single table**, so `csv`/`text` are chart-only — a new CHECK constraint,
+   which is why P4 carries a migration.
 
 ## Phase 5 — Run log UI, retention, polish
 
-- [ ] Run-log drawer on the list page (state, duration, value, error).
-- [ ] `log_retention_days` pruning, inline at insert like `MAX_REVISIONS_PER_DASHBOARD`.
-- [ ] Humanised crontab in the list ("every day at 09:00"), timezone shown.
-- [ ] "Run now" action; active toggle from the list row.
-- [ ] Empty states and the entitlement-disabled state.
+- [x] Run-log drawer on the list page (state, duration, value, error).
+- [x] `log_retention_days` pruning, inline at insert like `MAX_REVISIONS_PER_DASHBOARD`.
+- [x] Humanised crontab in the list ("every day at 09:00"), timezone shown. Hand-rolled
+      `frontend/src/lib/humanizeCron.ts`, falling back to the raw expression (kept in a `title`
+      tooltip) for anything it does not prove itself against — steps/ranges/lists beyond a plain
+      minute step or a weekday list, day-of-month or month restrictions.
+- [x] "Run now" action; active toggle from the list row. `POST .../alerts/{id}/run` runs through
+      `AutomationRunner::run_now`, which shares `evaluate_and_deliver` with the tick and skips only
+      `release` — so `next_run_at`/`last_state` are untouched but the grace period still applies.
+      `PUT .../alerts/{id}/active` is a dedicated single-field update, not a read-modify-write
+      through the full-replace `PUT .../alerts/{id}`.
+- [x] Empty states and the entitlement-disabled state.
 
 ---
 
