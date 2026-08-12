@@ -155,6 +155,12 @@ pub fn to_new(body: &WriteBody<'_>, creator: Option<Uuid>) -> Result<NewSchedule
         }
     }
 
+    // A target is optional on an alert, but "both" is meaningless on either
+    // type — the renderer has to know which object it is capturing.
+    if body.ty == ScheduleType::Alert && body.chart_id.is_some() && body.dashboard_id.is_some() {
+        return Err(bad("an alert takes a chart_id or a dashboard_id, not both"));
+    }
+
     for r in body.recipients {
         validate_recipient(r).map_err(|m| bad(&m))?;
     }
@@ -203,11 +209,16 @@ pub fn to_new(body: &WriteBody<'_>, creator: Option<Uuid>) -> Result<NewSchedule
             .validator_config
             .cloned()
             .unwrap_or_else(|| serde_json::json!({})),
-        chart_id: (!is_alert).then_some(body.chart_id).flatten(),
-        dashboard_id: (!is_alert).then_some(body.dashboard_id).flatten(),
-        report_format: (!is_alert)
-            .then(|| body.report_format.map(|f| f.as_str().to_string()))
-            .flatten(),
+        // An alert MAY now carry a target: when it fires, the mail attaches a
+        // rendering of that chart or dashboard alongside the triggering rows,
+        // which is what Superset does behind `ALERTS_ATTACH_REPORTS`. Reports
+        // still require exactly one; for an alert it is optional decoration.
+        chart_id: body.chart_id,
+        dashboard_id: body.dashboard_id,
+        // Kept on an alert too — it is the format of the optional attachment.
+        // Only meaningful alongside a target, which `render_alert_attachment`
+        // checks before it renders anything.
+        report_format: body.report_format.map(|f| f.as_str().to_string()),
         custom_width: body.custom_width,
         custom_height: body.custom_height,
         grace_period_s: grace,
@@ -507,16 +518,39 @@ mod tests {
     }
 
     #[test]
-    fn the_other_types_block_is_dropped_rather_than_persisted() {
-        // An alert body that still carries a chart_id (because the editor was
-        // switched between tabs) must not write that chart_id — it would trip
-        // the report CHECK from the alert path.
+    fn an_alert_may_carry_a_target_for_its_attachment() {
+        // It used to be nulled out, on the belief that an alert with a
+        // chart_id would trip the report CHECK. It does not:
+        // `schedule_report_needs_target` is guarded by `type <> 'report'`.
+        // Superset allows the same thing behind ALERTS_ATTACH_REPORTS, and it
+        // is what lets a fired alert mail a picture rather than only numbers.
         let mut b = alert_body();
-        b.chart_id = Some(Uuid::new_v4());
+        let chart = Uuid::new_v4();
+        b.chart_id = Some(chart);
         b.report_format = Some(ReportFormat::Png);
         let n = to_new(&WriteBody::from(&b), Some(Uuid::new_v4())).unwrap();
-        assert_eq!(n.chart_id, None);
-        assert_eq!(n.report_format, None);
+        assert_eq!(n.chart_id, Some(chart));
+        assert_eq!(n.report_format.as_deref(), Some("png"));
+    }
+
+    #[test]
+    fn an_alert_naming_both_targets_is_rejected() {
+        // Optional does not mean ambiguous: the renderer has to know which
+        // object it is capturing.
+        let mut b = alert_body();
+        b.chart_id = Some(Uuid::new_v4());
+        b.dashboard_id = Some(Uuid::new_v4());
+        let err = to_new(&WriteBody::from(&b), Some(Uuid::new_v4())).unwrap_err();
+        assert!(err.to_string().contains("not both"), "{err}");
+    }
+
+    #[test]
+    fn an_alerts_query_block_still_wins_over_a_reports() {
+        // The alert-only fields survive and the report-only requirement does
+        // not apply — only the target is now shared between the two types.
+        let b = alert_body();
+        let n = to_new(&WriteBody::from(&b), Some(Uuid::new_v4())).unwrap();
+        assert!(n.sql.is_some() && n.database_id.is_some() && n.validator_type.is_some());
     }
 
     #[test]

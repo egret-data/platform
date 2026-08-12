@@ -517,7 +517,7 @@ impl AutomationRunner {
                 to,
                 subject: &content.subject,
                 body: content.body.clone(),
-                attachment: content.attachment.clone(),
+                attachments: content.attachment.clone().into_iter().collect(),
             },
         )
         .await
@@ -596,6 +596,63 @@ impl AutomationRunner {
         }
     }
 
+    /// Render an alert's optional chart/dashboard, if it names one.
+    ///
+    /// Returns `None` — never an error — when the alert has no target, no
+    /// image format, or the render fails. An alert exists to tell someone that
+    /// a number moved; losing that message because a screenshot did not come
+    /// back would be the worse failure, so the picture is best-effort and the
+    /// reason lands in the log.
+    async fn render_alert_attachment(&self, s: &Schedule) -> Option<email::Attachment> {
+        let (kind, object_id) = report_target(s)?;
+        // Only the image formats make sense here; the rows already ride along
+        // as CSV, so `csv`/`text` on an alert would attach them twice.
+        let format = match s.report_format.as_deref().and_then(ReportFormat::parse) {
+            Some(f @ (ReportFormat::Png | ReportFormat::Pdf)) => f,
+            _ => return None,
+        };
+        let owner = self.resolve_owner(s.id).await.ok()?;
+        let token = self
+            .render_tokens
+            .mint(kind, object_id, owner, RENDER_TOKEN_TTL)
+            .await
+            .ok()?;
+        let url = format!(
+            "{}/embed/print/{kind}/{object_id}?t={token}",
+            self.public_url.trim_end_matches('/')
+        );
+        let (width, height) = match (s.custom_width, s.custom_height) {
+            (Some(w), Some(h)) if w > 0 && h > 0 => (w as u32, h as u32),
+            _ => default_size(kind),
+        };
+        let bytes = match self
+            .renderer
+            .render(RenderRequest {
+                url,
+                width,
+                height,
+                format: format.as_str().to_string(),
+                scale: 2,
+            })
+            .await
+        {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(schedule = %s.id, error = %e, "automation: alert attachment render failed");
+                return None;
+            }
+        };
+        let (ext, content_type) = match format {
+            ReportFormat::Png => ("png", "image/png"),
+            _ => ("pdf", "application/pdf"),
+        };
+        Some(email::Attachment {
+            filename: format!("{}.{ext}", slugify(&s.name)),
+            content_type: content_type.into(),
+            bytes,
+        })
+    }
+
     /// One mail to all of this schedule's email recipients.
     ///
     /// A workspace with no SMTP configured is a REPORTED failure, not a silent
@@ -649,6 +706,19 @@ impl AutomationRunner {
         };
         let csv = email::rows_to_csv(&columns, &eval.rows);
 
+        let mut attachments = vec![email::Attachment {
+            filename: format!("{}.csv", slugify(&s.name)),
+            content_type: "text/csv".into(),
+            bytes: csv.into_bytes(),
+        }];
+        // An alert may also name a chart or dashboard. When it does, the mail
+        // carries a rendering of it beside the numbers — the recipient sees
+        // WHAT moved, not only that something did. A render failure must not
+        // lose the alert itself, so it is logged and the mail goes without.
+        if let Some(extra) = self.render_alert_attachment(s).await {
+            attachments.push(extra);
+        }
+
         email::send(
             &config,
             password,
@@ -656,11 +726,7 @@ impl AutomationRunner {
                 to,
                 subject: &subject,
                 body,
-                attachment: Some(email::Attachment {
-                    filename: format!("{}.csv", slugify(&s.name)),
-                    content_type: "text/csv".into(),
-                    bytes: csv.into_bytes(),
-                }),
+                attachments,
             },
         )
         .await

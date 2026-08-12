@@ -757,7 +757,12 @@ async fn the_type_of_an_existing_schedule_cannot_be_changed_by_an_update() {
     .await;
     assert_eq!(s, StatusCode::OK, "got {after}");
     assert_eq!(after["type"], "alert", "type must be immutable");
-    assert!(after["report_format"].is_null());
+    // `report_format` is NO LONGER a proxy for "the report block was dropped":
+    // an alert may legitimately carry one now, as the format of its optional
+    // attachment. What still proves the type did not flip is that the
+    // alert-only block survived — a report cannot hold these.
+    assert!(!after["sql"].is_null(), "the alert kept its query: {after}");
+    assert!(!after["validator_type"].is_null());
 }
 
 #[tokio::test]

@@ -7,6 +7,7 @@ import {
 import { useDatabases } from "@/api/databases";
 import { useDashboards } from "@/api/dashboards";
 import { useCharts } from "@/api/charts";
+import { useWorkspaceMembers } from "@/api/members";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -43,6 +44,10 @@ export function ScheduleEditor({
   const { data: databases } = useDatabases(ws);
   const { data: dashboards } = useDashboards(ws);
   const { data: charts } = useCharts(ws);
+  // Owners are USERS: an alert runs the query with an owner's permissions, and
+  // a group has no identity to run as.
+  const { data: members } = useWorkspaceMembers(ws);
+  const userMembers = (members ?? []).filter((m) => m.principal_type === "user");
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -58,6 +63,15 @@ export function ScheduleEditor({
   const [targetId, setTargetId] = useState("");
   const [reportFormat, setReportFormat] = useState("png");
   const [emails, setEmails] = useState("");
+  const [emailSubject, setEmailSubject] = useState("");
+  const [owners, setOwners] = useState<string[]>([]);
+  const [gracePeriod, setGracePeriod] = useState("14400");
+  const [workingTimeout, setWorkingTimeout] = useState("3600");
+  const [logRetention, setLogRetention] = useState("90");
+  const [customWidth, setCustomWidth] = useState("");
+  const [customHeight, setCustomHeight] = useState("");
+  /** Alerts only: attach a rendering of this chart/dashboard when it fires. */
+  const [attachTarget, setAttachTarget] = useState(false);
   const [webhooks, setWebhooks] = useState("");
   /**
    * Which webhook URLs already have an HMAC signing secret.
@@ -94,6 +108,14 @@ export function ScheduleEditor({
       setTargetId(existing.dashboard_id);
     }
     setReportFormat(existing.report_format ?? "png");
+    setEmailSubject(existing.email_subject ?? "");
+    setOwners(existing.owners.map((o) => o.user_id));
+    setGracePeriod(String(existing.grace_period_s ?? 14400));
+    setWorkingTimeout(String(existing.working_timeout_s ?? 3600));
+    setLogRetention(String(existing.log_retention_days ?? 90));
+    setCustomWidth(existing.custom_width == null ? "" : String(existing.custom_width));
+    setCustomHeight(existing.custom_height == null ? "" : String(existing.custom_height));
+    setAttachTarget(Boolean(existing.chart_id || existing.dashboard_id));
     setEmails(
       existing.recipients
         .filter((r) => r.kind === "email")
@@ -147,6 +169,13 @@ export function ScheduleEditor({
       ...urls.map((url) => ({ kind: "webhook" as const, config: { url } })),
     ];
 
+    // An empty number field means "use the default", not zero — the server
+    // would reject 0 for the timers and silently disable retention.
+    const num = (v: string, fallback: number) => {
+      const n = Number(v.trim());
+      return v.trim() === "" || !Number.isFinite(n) ? fallback : n;
+    };
+
     const shared = {
       name,
       description,
@@ -154,6 +183,13 @@ export function ScheduleEditor({
       crontab,
       timezone,
       recipients,
+      owners,
+      email_subject: emailSubject.trim() || null,
+      grace_period_s: num(gracePeriod, 14400),
+      working_timeout_s: num(workingTimeout, 3600),
+      log_retention_days: num(logRetention, 90),
+      custom_width: customWidth.trim() ? num(customWidth, 0) : null,
+      custom_height: customHeight.trim() ? num(customHeight, 0) : null,
     };
 
     // Only the type's own block is sent. The server drops the other one anyway,
@@ -175,6 +211,16 @@ export function ScheduleEditor({
           validatorType === "operator"
             ? { op, threshold: Number(threshold) }
             : {},
+        // Optional on an alert: when set, the fired mail attaches a rendering
+        // of this object beside the triggering rows.
+        ...(attachTarget
+          ? {
+              report_format: reportFormat,
+              ...(targetKind === "dashboard"
+                ? { dashboard_id: defaultTarget || null }
+                : { chart_id: defaultTarget || null }),
+            }
+          : { chart_id: null, dashboard_id: null }),
       };
     }
     return {
@@ -303,6 +349,59 @@ export function ScheduleEditor({
               <option value="operator">Value meets a comparison</option>
             </select>
           </div>
+          <div className="flex flex-col gap-1.5 border-t pt-3">
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="sched-attach"
+                checked={attachTarget}
+                onCheckedChange={(v) => setAttachTarget(v === true)}
+              />
+              <Label htmlFor="sched-attach" className="text-sm font-normal">
+                Attach a chart or dashboard when it fires
+              </Label>
+            </div>
+            {attachTarget && (
+              <div className="mt-1 flex flex-col gap-2 pl-6">
+                <select
+                  aria-label="Attachment object type"
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                  value={targetKind}
+                  onChange={(e) => {
+                    setTargetKind(e.target.value as "dashboard" | "chart");
+                    setTargetId("");
+                  }}
+                >
+                  <option value="dashboard">A dashboard</option>
+                  <option value="chart">A chart</option>
+                </select>
+                <select
+                  aria-label="Attachment object"
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                  value={defaultTarget}
+                  onChange={(e) => setTargetId(e.target.value)}
+                >
+                  {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  aria-label="Attachment format"
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                  value={reportFormat}
+                  onChange={(e) => setReportFormat(e.target.value)}
+                >
+                  <option value="png">PNG image</option>
+                  <option value="pdf">PDF</option>
+                </select>
+                <p className="text-xs text-muted-foreground">
+                  The triggering rows are always attached as CSV. This adds a picture of the
+                  object beside them; if it cannot be rendered the alert still sends.
+                </p>
+              </div>
+            )}
+          </div>
           {validatorType === "operator" && (
             <div className="flex gap-2">
               <select
@@ -413,6 +512,20 @@ export function ScheduleEditor({
       <section className="flex flex-col gap-3">
         <h3 className="text-sm font-medium">Notification</h3>
         <div className="flex flex-col gap-1.5">
+          <Label htmlFor="sched-subject">Email subject</Label>
+          <Input
+            id="sched-subject"
+            value={emailSubject}
+            onChange={(e) => setEmailSubject(e.target.value)}
+            placeholder={
+              isAlert ? `[egret] ${name || "name"} triggered` : `[egret] ${name || "name"}`
+            }
+          />
+          <p className="text-xs text-muted-foreground">
+            Leave blank to use the default shown above.
+          </p>
+        </div>
+        <div className="flex flex-col gap-1.5">
           <Label htmlFor="sched-emails">Email recipients</Label>
           <Input
             id="sched-emails"
@@ -440,6 +553,96 @@ export function ScheduleEditor({
           </p>
         </div>
       </section>
+
+      <details className="rounded-md border border-input">
+        <summary className="cursor-pointer px-3 py-2 text-sm font-medium">Advanced</summary>
+        <div className="flex flex-col gap-3 border-t px-3 py-3">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="sched-owners">Owners</Label>
+            <select
+              id="sched-owners"
+              multiple
+              size={Math.min(5, Math.max(3, userMembers.length))}
+              className="rounded-md border border-input bg-background px-2 py-1 text-sm"
+              value={owners}
+              onChange={(e) =>
+                setOwners(Array.from(e.target.selectedOptions).map((o) => o.value))
+              }
+            >
+              {userMembers.map((m) => (
+                <option key={m.principal_id} value={m.principal_id}>
+                  {m.principal_name ?? m.principal_id}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-muted-foreground">
+              The query runs with an owner&apos;s permissions. Leave empty and you become the
+              owner; naming several keeps it running when one person leaves.
+            </p>
+          </div>
+
+          <div className="flex gap-2">
+            <div className="flex flex-1 flex-col gap-1.5">
+              <Label htmlFor="sched-grace">Grace period (seconds)</Label>
+              <Input
+                id="sched-grace"
+                value={gracePeriod}
+                onChange={(e) => setGracePeriod(e.target.value)}
+                inputMode="numeric"
+              />
+            </div>
+            <div className="flex flex-1 flex-col gap-1.5">
+              <Label htmlFor="sched-timeout">Working timeout (seconds)</Label>
+              <Input
+                id="sched-timeout"
+                value={workingTimeout}
+                onChange={(e) => setWorkingTimeout(e.target.value)}
+                inputMode="numeric"
+              />
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            After firing, an alert stays quiet for the grace period so a condition that stays
+            true does not mail every tick. The working timeout is when a run that never
+            finished is reclaimed.
+          </p>
+
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="sched-retention">Run log retention (days)</Label>
+            <Input
+              id="sched-retention"
+              value={logRetention}
+              onChange={(e) => setLogRetention(e.target.value)}
+              inputMode="numeric"
+            />
+          </div>
+
+          {(!isAlert || attachTarget) && (
+            <div className="flex gap-2">
+              <div className="flex flex-1 flex-col gap-1.5">
+                <Label htmlFor="sched-width">Image width (px)</Label>
+                <Input
+                  id="sched-width"
+                  value={customWidth}
+                  onChange={(e) => setCustomWidth(e.target.value)}
+                  placeholder="default"
+                  inputMode="numeric"
+                />
+              </div>
+              <div className="flex flex-1 flex-col gap-1.5">
+                <Label htmlFor="sched-height">Image height (px)</Label>
+                <Input
+                  id="sched-height"
+                  value={customHeight}
+                  onChange={(e) => setCustomHeight(e.target.value)}
+                  placeholder="default"
+                  inputMode="numeric"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      </details>
 
       <div className="flex justify-end gap-2">
         <Button type="button" variant="ghost" onClick={onDone}>

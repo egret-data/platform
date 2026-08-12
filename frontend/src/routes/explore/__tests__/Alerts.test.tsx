@@ -175,6 +175,45 @@ describe("Alerts & Reports list", () => {
     expect(body.active).toBe(true);
   });
 
+  it("lets an alert carry a chart attachment, which the model used to strip", async () => {
+    // Superset allows this behind ALERTS_ATTACH_REPORTS; egret's model used to
+    // null out chart_id/dashboard_id on every alert, so a fired alert could
+    // only ever send CSV rows and never a picture.
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole("button", { name: /\+ alert/i }));
+    await user.type(screen.getByLabelText(/^name$/i), "with picture");
+    await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await user.click(screen.getByLabelText(/attach a chart or dashboard/i));
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const body = createMutate.mock.calls[0][0];
+    expect(body.type).toBe("alert");
+    expect(body.report_format).toBe("png");
+    // Exactly one target, as the validator requires on either type.
+    expect(Boolean(body.chart_id) !== Boolean(body.dashboard_id)).toBe(true);
+  });
+
+  it("sends the advanced fields the editor previously had no way to set", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole("button", { name: /\+ alert/i }));
+    await user.type(screen.getByLabelText(/^name$/i), "tuned");
+    await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await user.type(screen.getByLabelText(/email subject/i), "Orders are down");
+    await user.clear(screen.getByLabelText(/grace period/i));
+    await user.type(screen.getByLabelText(/grace period/i), "600");
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const body = createMutate.mock.calls[0][0];
+    expect(body.email_subject).toBe("Orders are down");
+    expect(body.grace_period_s).toBe(600);
+    // Blank stays blank rather than becoming 0, which the server rejects.
+    expect(body.working_timeout_s).toBe(3600);
+  });
+
   it("sends a report body with a target rather than alert fields", async () => {
     const user = userEvent.setup();
     renderPage();

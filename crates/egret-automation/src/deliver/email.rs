@@ -85,9 +85,9 @@ pub struct EmailMessage<'a> {
     pub to: &'a [String],
     pub subject: &'a str,
     pub body: String,
-    /// The triggering rows (alerts) or the rendered/exported report, when
-    /// there is one to send.
-    pub attachment: Option<Attachment>,
+    /// The triggering rows (alerts), the rendered/exported report, or both —
+    /// an alert with a chart attached sends its numbers AND its picture.
+    pub attachments: Vec<Attachment>,
 }
 
 /// Build the `lettre` transport for `config`.
@@ -137,21 +137,24 @@ pub fn build(config: &SmtpConfig, msg: &EmailMessage<'_>) -> Result<Message, Ema
         .header(ContentType::TEXT_PLAIN)
         .body(msg.body.clone());
 
-    match &msg.attachment {
-        None => builder
+    if msg.attachments.is_empty() {
+        return builder
             .singlepart(text)
-            .map_err(|e| EmailError::Build(e.to_string())),
-        Some(a) => {
-            let content_type = a.content_type.parse::<ContentType>().map_err(|_| {
-                EmailError::Build(format!("invalid content type: {}", a.content_type))
-            })?;
-            let attachment =
-                LettreAttachment::new(a.filename.clone()).body(a.bytes.clone(), content_type);
-            builder
-                .multipart(MultiPart::mixed().singlepart(text).singlepart(attachment))
-                .map_err(|e| EmailError::Build(e.to_string()))
-        }
+            .map_err(|e| EmailError::Build(e.to_string()));
     }
+    let mut mixed = MultiPart::mixed().singlepart(text);
+    for a in &msg.attachments {
+        let content_type = a
+            .content_type
+            .parse::<ContentType>()
+            .map_err(|_| EmailError::Build(format!("invalid content type: {}", a.content_type)))?;
+        mixed = mixed.singlepart(
+            LettreAttachment::new(a.filename.clone()).body(a.bytes.clone(), content_type),
+        );
+    }
+    builder
+        .multipart(mixed)
+        .map_err(|e| EmailError::Build(e.to_string()))
 }
 
 /// Build and send.
@@ -215,7 +218,7 @@ mod tests {
             to: &["on-call@example.com".to_string()],
             subject: "[alert] orders",
             body: "value 7".into(),
-            attachment: None,
+            attachments: Vec::new(),
         };
         let built = build(&config("starttls", false), &msg).unwrap();
         let raw = String::from_utf8(built.formatted()).unwrap();
@@ -235,7 +238,7 @@ mod tests {
             to: &["x@example.com".to_string()],
             subject: "s",
             body: "b".into(),
-            attachment: None,
+            attachments: Vec::new(),
         };
         let raw = String::from_utf8(build(&c, &msg).unwrap().formatted()).unwrap();
         assert!(raw.contains("From: alerts@example.com"), "{raw}");
@@ -249,11 +252,11 @@ mod tests {
             to: &["x@example.com".to_string()],
             subject: "s",
             body: "value 7".into(),
-            attachment: Some(Attachment {
+            attachments: vec![Attachment {
                 filename: "orders.csv".into(),
                 content_type: "text/csv".into(),
                 bytes: b"\"n\"\n\"7\"\n".to_vec(),
-            }),
+            }],
         };
         let raw =
             String::from_utf8(build(&config("none", false), &msg).unwrap().formatted()).unwrap();
@@ -268,7 +271,7 @@ mod tests {
             to: &["not an address".to_string()],
             subject: "s",
             body: "b".into(),
-            attachment: None,
+            attachments: Vec::new(),
         };
         assert!(matches!(
             build(&config("none", false), &msg),
@@ -310,7 +313,7 @@ mod tests {
             to: &[],
             subject: "s",
             body: "b".into(),
-            attachment: None,
+            attachments: Vec::new(),
         };
         assert!(send(&config("none", false), None, &msg).await.is_ok());
     }
