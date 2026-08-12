@@ -28,6 +28,10 @@ reset-testdata:
 seed-demo:
     ./deploy/seed-demo-catalog.sh
 
+# Seed Alerts & Reports demo data (10 schedules covering every UI state) into a workspace.
+seed-alerts ws="demo":
+    ./deploy/seed-alerts.sh {{ws}}
+
 # Run the server
 serve:
     cargo run -p egret-bin -- serve
