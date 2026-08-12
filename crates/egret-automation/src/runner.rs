@@ -215,6 +215,13 @@ impl AutomationRunner {
         if !eval.fired {
             return Ok(Outcome::NotFired { value: eval.value });
         }
+        // Opted-in silence: the condition held but the query returned nothing
+        // to show, so there is no mail worth sending. Recorded as `noop` — the
+        // run log still says it ran, which is the difference between this and
+        // a scheduler that quietly stopped.
+        if s.skip_if_empty && eval.rows.as_array().is_none_or(|r| r.is_empty()) {
+            return Ok(Outcome::NotFired { value: eval.value });
+        }
         // Fired — but recently enough that the user has already been told.
         if in_grace(&self.db, s.id, s.grace_period_s)
             .await
@@ -517,6 +524,12 @@ impl AutomationRunner {
                 to,
                 subject: &content.subject,
                 body: content.body.clone(),
+                html: Some(email::notification_html(
+                    &s.name,
+                    s.message.as_deref(),
+                    &content.body,
+                    &self.object_url(s, &self.workspace_slug(s.workspace_id).await),
+                )),
                 attachments: content.attachment.clone().into_iter().collect(),
             },
         )
@@ -593,6 +606,33 @@ impl AutomationRunner {
         match first_error {
             Some(e) => Err(e),
             None => Ok(()),
+        }
+    }
+
+    /// The workspace slug, for building a user-facing URL. A schedule always
+    /// belongs to a workspace, so a miss here means the row vanished under us.
+    async fn workspace_slug(&self, ws: uuid::Uuid) -> String {
+        sqlx::query_scalar::<_, String>("SELECT slug FROM workspaces WHERE id = $1")
+            .bind(ws)
+            .fetch_optional(&self.db.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    /// The URL a recipient can follow back to the thing that mailed them.
+    ///
+    /// A notification that says a number moved and gives no way to look is a
+    /// dead end — Superset's mail ends in a call-to-action for exactly this
+    /// reason. Falls back to the workspace's alert list when the schedule has
+    /// no chart or dashboard of its own.
+    fn object_url(&self, s: &Schedule, ws_slug: &str) -> String {
+        let base = self.public_url.trim_end_matches('/');
+        match report_target(s) {
+            Some(("chart", id)) => format!("{base}/explore/{ws_slug}/charts/{id}"),
+            Some(("dashboard", id)) => format!("{base}/explore/{ws_slug}/dashboards/{id}"),
+            _ => format!("{base}/explore/{ws_slug}/alerts"),
         }
     }
 
@@ -725,6 +765,12 @@ impl AutomationRunner {
             &EmailMessage {
                 to,
                 subject: &subject,
+                html: Some(email::notification_html(
+                    &s.name,
+                    s.message.as_deref(),
+                    &body,
+                    &self.object_url(s, &self.workspace_slug(s.workspace_id).await),
+                )),
                 body,
                 attachments,
             },

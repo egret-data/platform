@@ -47,6 +47,8 @@ pub struct WriteBody<'a> {
     pub working_timeout_s: Option<i32>,
     pub log_retention_days: Option<i32>,
     pub email_subject: Option<&'a str>,
+    pub message: Option<&'a str>,
+    pub skip_if_empty: bool,
     pub owners: &'a [Uuid],
     pub recipients: &'a [RecipientInput],
 }
@@ -73,6 +75,8 @@ impl<'a> From<&'a CreateSchedule> for WriteBody<'a> {
             working_timeout_s: b.working_timeout_s,
             log_retention_days: b.log_retention_days,
             email_subject: b.email_subject.as_deref(),
+            message: b.message.as_deref(),
+            skip_if_empty: b.skip_if_empty,
             owners: &b.owners,
             recipients: &b.recipients,
         }
@@ -102,6 +106,8 @@ pub fn update_body<'a>(b: &'a UpdateSchedule, stored_type: ScheduleType) -> Writ
         working_timeout_s: b.working_timeout_s,
         log_retention_days: b.log_retention_days,
         email_subject: b.email_subject.as_deref(),
+        message: b.message.as_deref(),
+        skip_if_empty: b.skip_if_empty,
         owners: &b.owners,
         recipients: &b.recipients,
     }
@@ -225,6 +231,8 @@ pub fn to_new(body: &WriteBody<'_>, creator: Option<Uuid>) -> Result<NewSchedule
         working_timeout_s: working,
         log_retention_days: retention,
         email_subject: body.email_subject.map(str::to_string),
+        message: body.message.map(str::to_string),
+        skip_if_empty: body.skip_if_empty,
         owners,
         recipients: body
             .recipients
@@ -404,6 +412,8 @@ pub fn detail_dto(s: &Schedule, owners: &[Owner], recipients: &[Recipient]) -> S
         working_timeout_s: s.working_timeout_s,
         log_retention_days: s.log_retention_days,
         email_subject: s.email_subject.clone(),
+        message: s.message.clone(),
+        skip_if_empty: s.skip_if_empty,
         owners: owners.iter().map(owner_dto).collect(),
         recipients: recipients
             .iter()

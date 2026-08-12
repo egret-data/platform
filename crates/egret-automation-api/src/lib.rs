@@ -258,6 +258,12 @@ pub struct ScheduleDetailDto {
     pub working_timeout_s: i32,
     pub log_retention_days: i32,
     pub email_subject: Option<String>,
+    /// A user-authored note carried into the notification body. Distinct from
+    /// `description`, which is the line the LIST shows.
+    pub message: Option<String>,
+    /// Metabase's `skip_if_empty`: send nothing when the run produced no rows.
+    #[serde(default)]
+    pub skip_if_empty: bool,
 
     pub owners: Vec<OwnerDto>,
     pub recipients: Vec<RecipientDto>,
@@ -309,6 +315,12 @@ pub struct CreateSchedule {
     pub log_retention_days: Option<i32>,
     #[serde(default)]
     pub email_subject: Option<String>,
+    /// A user-authored note carried into the notification body. Distinct from
+    /// `description`, which is the line the LIST shows.
+    pub message: Option<String>,
+    /// Metabase's `skip_if_empty`: send nothing when the run produced no rows.
+    #[serde(default)]
+    pub skip_if_empty: bool,
 
     /// Owner user ids. Empty means "the creator", resolved server-side — a
     /// schedule with no owner has no identity to run as (§5.2).
@@ -359,6 +371,12 @@ pub struct UpdateSchedule {
     pub log_retention_days: Option<i32>,
     #[serde(default)]
     pub email_subject: Option<String>,
+    /// A user-authored note carried into the notification body. Distinct from
+    /// `description`, which is the line the LIST shows.
+    pub message: Option<String>,
+    /// Metabase's `skip_if_empty`: send nothing when the run produced no rows.
+    #[serde(default)]
+    pub skip_if_empty: bool,
 
     #[serde(default)]
     pub owners: Vec<Uuid>,

@@ -8,6 +8,15 @@ import { useDatabases } from "@/api/databases";
 import { useDashboards } from "@/api/dashboards";
 import { useCharts } from "@/api/charts";
 import { useWorkspaceMembers } from "@/api/members";
+import {
+  DEFAULT_SCHEDULE,
+  WEEKDAYS,
+  fromCron,
+  localTimezone,
+  timezones,
+  toCron,
+  type StructuredSchedule,
+} from "@/lib/cronSchedule";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -52,7 +61,19 @@ export function ScheduleEditor({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [crontab, setCrontab] = useState("0 9 * * *");
-  const [timezone, setTimezone] = useState("UTC");
+  const [timezone, setTimezone] = useState(localTimezone);
+  /**
+   * The picker's own state, and whether we are using it at all.
+   *
+   * `rawCron` is not a power-user preference toggle — it is what an expression
+   * outside the picker's vocabulary FORCES. Editing a `0 9 * * 1-5` schedule
+   * through dropdowns would silently rewrite when the mail arrives, so the
+   * editor drops to the raw field and says why.
+   */
+  const [sched, setSched] = useState<StructuredSchedule>(DEFAULT_SCHEDULE);
+  const [rawCron, setRawCron] = useState(false);
+  const [message, setMessage] = useState("");
+  const [skipIfEmpty, setSkipIfEmpty] = useState(false);
   const [active, setActive] = useState(true);
   const [sql, setSql] = useState("");
   const [databaseId, setDatabaseId] = useState("");
@@ -93,6 +114,11 @@ export function ScheduleEditor({
     setDescription(existing.description ?? "");
     setCrontab(existing.crontab);
     setTimezone(existing.timezone);
+    const parsed = fromCron(existing.crontab);
+    setSched(parsed ?? DEFAULT_SCHEDULE);
+    setRawCron(parsed === null);
+    setMessage(existing.message ?? "");
+    setSkipIfEmpty(existing.skip_if_empty ?? false);
     setActive(existing.active);
     setSql(existing.sql ?? "");
     setDatabaseId(existing.database_id ?? "");
@@ -180,11 +206,13 @@ export function ScheduleEditor({
       name,
       description,
       active,
-      crontab,
+      crontab: rawCron ? crontab : toCron(sched),
       timezone,
       recipients,
       owners,
       email_subject: emailSubject.trim() || null,
+      message: message.trim() || null,
+      skip_if_empty: skipIfEmpty,
       grace_period_s: num(gracePeriod, 14400),
       working_timeout_s: num(workingTimeout, 3600),
       log_retention_days: num(logRetention, 90),
@@ -483,30 +511,195 @@ export function ScheduleEditor({
 
       <section className="flex flex-col gap-3">
         <h3 className="text-sm font-medium">Schedule</h3>
-        <div className="flex gap-2">
-          <div className="flex flex-1 flex-col gap-1.5">
-            <Label htmlFor="sched-cron">Cron expression</Label>
-            <Input
-              id="sched-cron"
-              value={crontab}
-              onChange={(e) => setCrontab(e.target.value)}
-              placeholder="0 9 * * *"
-            />
-          </div>
-          <div className="flex flex-1 flex-col gap-1.5">
-            <Label htmlFor="sched-tz">Timezone</Label>
-            <Input
-              id="sched-tz"
-              value={timezone}
-              onChange={(e) => setTimezone(e.target.value)}
-              placeholder="UTC"
-            />
-          </div>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Five fields, as in crontab: minute hour day-of-month month day-of-week. Evaluated in
-          the timezone above.
-        </p>
+
+        {rawCron ? (
+          <>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="sched-cron">Cron expression</Label>
+              <Input
+                id="sched-cron"
+                value={crontab}
+                onChange={(e) => setCrontab(e.target.value)}
+                placeholder="0 9 * * *"
+              />
+              <p className="text-xs text-muted-foreground">
+                Five fields, as in crontab: minute hour day-of-month month day-of-week.
+              </p>
+            </div>
+            <div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={() => {
+                  const parsed = fromCron(crontab);
+                  if (parsed) setSched(parsed);
+                  setRawCron(false);
+                }}
+              >
+                Use the simple picker
+              </Button>
+              {fromCron(crontab) === null && (
+                <span className="ml-1 text-xs text-muted-foreground">
+                  (this expression can&apos;t be shown in the picker — switching will change it)
+                </span>
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="sched-period">Repeat</Label>
+                <select
+                  id="sched-period"
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                  value={sched.period}
+                  onChange={(e) =>
+                    setSched({ ...sched, period: e.target.value as StructuredSchedule["period"] })
+                  }
+                >
+                  <option value="minutes">Every N minutes</option>
+                  <option value="hourly">Hourly</option>
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </div>
+
+              {sched.period === "minutes" && (
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="sched-every">Every</Label>
+                  <select
+                    id="sched-every"
+                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                    value={sched.every}
+                    onChange={(e) => setSched({ ...sched, every: Number(e.target.value) })}
+                  >
+                    {[1, 2, 5, 10, 15, 20, 30].map((n) => (
+                      <option key={n} value={n}>{n} minutes</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {sched.period === "hourly" && (
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="sched-every">Every</Label>
+                  <select
+                    id="sched-every"
+                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                    value={sched.every}
+                    onChange={(e) => setSched({ ...sched, every: Number(e.target.value) })}
+                  >
+                    {[1, 2, 3, 4, 6, 8, 12].map((n) => (
+                      <option key={n} value={n}>{n === 1 ? "hour" : `${n} hours`}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {sched.period === "weekly" && (
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="sched-weekday">On</Label>
+                  <select
+                    id="sched-weekday"
+                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                    value={sched.weekday}
+                    onChange={(e) => setSched({ ...sched, weekday: Number(e.target.value) })}
+                  >
+                    {WEEKDAYS.map((d, i) => (
+                      <option key={d} value={i}>{d}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {sched.period === "monthly" && (
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="sched-day">On day</Label>
+                  <select
+                    id="sched-day"
+                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                    value={sched.day}
+                    onChange={(e) => setSched({ ...sched, day: Number(e.target.value) })}
+                  >
+                    {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
+                      <option key={d} value={d}>{d}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {sched.period !== "minutes" && (
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="sched-time">At</Label>
+                  <div className="flex items-center gap-1">
+                    {sched.period !== "hourly" && (
+                      <>
+                        <select
+                          id="sched-time"
+                          aria-label="Hour"
+                          className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                          value={sched.hour}
+                          onChange={(e) => setSched({ ...sched, hour: Number(e.target.value) })}
+                        >
+                          {Array.from({ length: 24 }, (_, h) => h).map((h) => (
+                            <option key={h} value={h}>{String(h).padStart(2, "0")}</option>
+                          ))}
+                        </select>
+                        <span className="text-sm text-muted-foreground">:</span>
+                      </>
+                    )}
+                    <select
+                      aria-label="Minute"
+                      className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                      value={sched.minute}
+                      onChange={(e) => setSched({ ...sched, minute: Number(e.target.value) })}
+                    >
+                      {[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map((m) => (
+                        <option key={m} value={m}>{String(m).padStart(2, "0")}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="sched-tz">Timezone</Label>
+              <select
+                id="sched-tz"
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                value={timezone}
+                onChange={(e) => setTimezone(e.target.value)}
+              >
+                {/* A stored zone the browser does not list (an older egret, or a
+                    newer IANA name) must stay selectable, or opening the editor
+                    would silently move the schedule to another timezone. */}
+                {!timezones().includes(timezone) && <option value={timezone}>{timezone}</option>}
+                {timezones().map((z) => (
+                  <option key={z} value={z}>{z}</option>
+                ))}
+              </select>
+            </div>
+
+            <p className="text-xs text-muted-foreground">
+              Runs <code>{toCron(sched)}</code> in {timezone}.{" "}
+              <button
+                type="button"
+                className="underline underline-offset-2"
+                onClick={() => {
+                  setCrontab(toCron(sched));
+                  setRawCron(true);
+                }}
+              >
+                Write the cron expression instead
+              </button>
+            </p>
+          </>
+        )}
       </section>
 
       <section className="flex flex-col gap-3">
@@ -524,6 +717,29 @@ export function ScheduleEditor({
           <p className="text-xs text-muted-foreground">
             Leave blank to use the default shown above.
           </p>
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="sched-message">Message</Label>
+          <Textarea
+            id="sched-message"
+            rows={3}
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            placeholder="Anything the recipient should know — why this exists, who to ask."
+          />
+          <p className="text-xs text-muted-foreground">
+            Shown at the top of the notification, above the result. Plain text.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="sched-skip-empty"
+            checked={skipIfEmpty}
+            onCheckedChange={(v) => setSkipIfEmpty(v === true)}
+          />
+          <Label htmlFor="sched-skip-empty" className="text-sm font-normal">
+            Don&apos;t send when there are no rows
+          </Label>
         </div>
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="sched-emails">Email recipients</Label>

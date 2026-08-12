@@ -46,6 +46,14 @@ export interface CreateSchedule {
   /** @nullable */
   email_subject?: string | null;
   /**
+     * A user-authored note carried into the notification body. Distinct from
+     * `description`, which is the line the LIST shows.
+     * @nullable
+     */
+  message?: string | null;
+  /** Metabase's `skip_if_empty`: send nothing when the run produced no rows. */
+  skip_if_empty?: boolean;
+  /**
      * Owner user ids. Empty means "the creator", resolved server-side — a
      * schedule with no owner has no identity to run as (§5.2).
      */

@@ -791,6 +791,7 @@ async fn smtp_test(
             body: "This is a test message from egret. If you are reading it, this \
                    workspace's SMTP settings work.\n"
                 .into(),
+            html: None,
             attachments: Vec::new(),
         },
     )

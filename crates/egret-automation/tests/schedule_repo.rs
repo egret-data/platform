@@ -99,6 +99,8 @@ fn alert(f: &Fixture, name: &str) -> NewSchedule {
         working_timeout_s: 3600,
         log_retention_days: 90,
         email_subject: None,
+        message: None,
+        skip_if_empty: false,
         owners: vec![f.user],
         recipients: vec![(
             "email".into(),

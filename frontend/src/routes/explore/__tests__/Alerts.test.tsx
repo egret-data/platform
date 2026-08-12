@@ -156,8 +156,10 @@ describe("Alerts & Reports list", () => {
     await user.click(screen.getByRole("button", { name: /\+ alert/i }));
 
     await user.type(screen.getByLabelText(/^name$/i), "Revenue dip");
-    await user.clear(screen.getByLabelText(/cron/i));
-    await user.type(screen.getByLabelText(/cron/i), "*/5 * * * *");
+    // The picker is the default path now; "every 5 minutes" is a dropdown
+    // choice rather than an expression the user has to know how to write.
+    await user.selectOptions(screen.getByLabelText(/repeat/i), "minutes");
+    await user.selectOptions(screen.getByLabelText(/^every$/i), "5");
     await user.type(screen.getByLabelText(/sql/i), "SELECT count(*) FROM orders");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
 
@@ -212,6 +214,35 @@ describe("Alerts & Reports list", () => {
     expect(body.grace_period_s).toBe(600);
     // Blank stays blank rather than becoming 0, which the server rejects.
     expect(body.working_timeout_s).toBe(3600);
+  });
+
+  it("keeps the raw cron field for an expression the picker cannot express", async () => {
+    // `0 9 * * 1-5` has a weekday RANGE. Showing it as dropdowns would mean
+    // rewriting it, which changes when the mail arrives — so the editor opens
+    // on the raw field instead and the round trip is lossless.
+    const user = userEvent.setup();
+    scheduleMock.mockReturnValue({
+      data: {
+        ...row(),
+        crontab: "0 9 * * 1-5",
+        sql: "SELECT 1",
+        database_id: "db1",
+        validator_type: "not_null",
+        validator_config: {},
+        recipients: [],
+      },
+      isLoading: false,
+    });
+    renderPage();
+
+    await user.click(screen.getByRole("button", { name: /actions for/i }));
+    await user.click(await screen.findByRole("menuitem", { name: /edit/i }));
+    const cron = await screen.findByLabelText(/cron expression/i);
+    expect(cron).toHaveValue("0 9 * * 1-5");
+
+    await user.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(updateMutate).toHaveBeenCalled());
+    expect(updateMutate.mock.calls[0][0].body.crontab).toBe("0 9 * * 1-5");
   });
 
   it("sends a report body with a target rather than alert fields", async () => {

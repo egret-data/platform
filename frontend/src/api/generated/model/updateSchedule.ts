@@ -43,6 +43,14 @@ export interface UpdateSchedule {
   log_retention_days?: number | null;
   /** @nullable */
   email_subject?: string | null;
+  /**
+     * A user-authored note carried into the notification body. Distinct from
+     * `description`, which is the line the LIST shows.
+     * @nullable
+     */
+  message?: string | null;
+  /** Metabase's `skip_if_empty`: send nothing when the run produced no rows. */
+  skip_if_empty?: boolean;
   owners?: string[];
   recipients?: RecipientInput[];
 }
