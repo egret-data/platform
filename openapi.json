@@ -27287,7 +27287,7 @@
           "columns": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ColumnMeta"
             }
           },
           "rows": {

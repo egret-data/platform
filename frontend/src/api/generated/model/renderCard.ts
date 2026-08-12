@@ -5,12 +5,13 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { ColumnMeta } from './columnMeta';
 
 export interface RenderCard {
   chart_id: string;
   title: string;
   viz_type: string;
   params: unknown;
-  columns: string[];
+  columns: ColumnMeta[];
   rows: unknown[][];
 }

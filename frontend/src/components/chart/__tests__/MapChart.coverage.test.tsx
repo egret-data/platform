@@ -61,8 +61,14 @@ const pinParams = (extra: Record<string, unknown> = {}): AnyChartParams => ({
 
 /** Renders and waits out the asynchronous geojson import — until it lands there is no extent, and
  *  every reader is required to treat that as "no opinion" rather than "outside". */
-async function draw(rows: unknown[][], extra: Record<string, unknown> = {}) {
-  const view = render(<MapChart columns={COLUMNS} rows={rows} params={pinParams(extra)} />);
+async function draw(
+  rows: unknown[][],
+  extra: Record<string, unknown> = {},
+  onFinished?: () => void,
+) {
+  const view = render(
+    <MapChart columns={COLUMNS} rows={rows} params={pinParams(extra)} onFinished={onFinished} />,
+  );
   // Once the placeholder is gone the extent is available: `indexRegionExtent` runs inside the same
   // `.then` as `indexRegionNames` and BEFORE the `forceUpdate` that clears "Loading map…", so
   // there is no render in which the map is ready and its extent is not. The assertions below
@@ -141,6 +147,29 @@ describe("MapChart — a pin map accounts for its own rows", () => {
     // And it does NOT say they are outside the map, which would send the reader to change the map
     // and get the same empty result.
     expect(container.textContent).not.toContain("outside the US states map");
+  });
+
+  /**
+   * THE `onFinished` GAP THE REPORT RENDERER FOUND. `pinProblem`'s message — "the other way
+   * round" above — is a REPLACEMENT for the chart, the same as "No data" or "Couldn't load the
+   * map", not an error: nothing threw, the card is accounting for its own rows exactly the way
+   * `pinNote`'s sibling case does. A print page (`routes/print/PrintObject.tsx`) that never hears
+   * `onFinished` for this state would wait forever, since it has no chart to report ECharts'
+   * `finished` event and no timer fallback by design.
+   *
+   * Deliberately treated as READY, not FAILED: it is the same category as `ChartRenderer`'s own
+   * empty-result branches (`EmptyState`) and the sankey's cycle message (`sankeyIssue`) — a valid,
+   * final, non-error presentation the print page is meant to capture and show the report's reader,
+   * not a defect that should abort the run.
+   */
+  it("still reports finished when nothing on the card is plottable at all", async () => {
+    const onFinished = vi.fn();
+    await draw(
+      [["San Francisco", -122.4194, 37.7749], ["Denver", -104.9903, 39.7392]],
+      {},
+      onFinished,
+    );
+    expect(onFinished).toHaveBeenCalled();
   });
 
   /** A REGION MAP IS UNTOUCHED. It has no coordinates to count, and a note under a choropleth

@@ -21,6 +21,7 @@ use serde::Serialize;
 use crate::error::AutomationError;
 use crate::render::token::RenderGrant;
 use crate::routes::AutomationState;
+use egret_core::tabular::ColumnMeta;
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct RenderCard {
@@ -28,7 +29,15 @@ pub struct RenderCard {
     pub title: String,
     pub viz_type: String,
     pub params: serde_json::Value,
-    pub columns: Vec<String>,
+    // The engine's own name + type per column, not names alone — the print
+    // page (`PrintObject.tsx`) needs the SAME type a live chart gets from
+    // `ChartRenderer`'s callers to format a date axis, a numeric column that
+    // happens to hold a numeric STRING, or a column whose first sampled row
+    // is null. Guessing from cell values (which an earlier revision of this
+    // page did, client-side) is exactly the silent-drift risk this module's
+    // own header comment warns about for SQL compilation; the same argument
+    // applies to formatting.
+    pub columns: Vec<ColumnMeta>,
     pub rows: Vec<Vec<serde_json::Value>>,
 }
 
@@ -167,7 +176,7 @@ async fn render_chart_card(
         title: chart.name.clone(),
         viz_type: chart.viz_type.clone(),
         params: chart.params.clone(),
-        columns: result.columns.into_iter().map(|c| c.name).collect(),
+        columns: result.columns,
         rows: result.rows,
     })
 }

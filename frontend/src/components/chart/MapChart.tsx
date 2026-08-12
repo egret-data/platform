@@ -21,9 +21,10 @@ export function MapChart({ columns, rows, params, metricTypes = {}, onValueClick
   onValueClick?: (ctx: DrillContext, x: number, y: number) => void;
   /** See `EChartsRenderer`'s own doc comment. Forwarded to it on the happy path below; fired
    *  directly from the early returns that never reach ECharts at all (an error, an unregistered
-   *  region, an empty result) — every one of those IS a finished draw, just not one ECharts drew.
-   *  The "still loading the geojson" state deliberately does NOT fire it: a print page waiting on
-   *  this card has more drawing coming and must keep waiting for it. */
+   *  region, an empty result, an unplottable pin result — see `problem` below) — every one of
+   *  those IS a finished draw, just not one ECharts drew. The "still loading the geojson" state
+   *  deliberately does NOT fire it: a print page waiting on this card has more drawing coming and
+   *  must keep waiting for it. */
   onFinished?: () => void;
 }) {
   const map = vizConfig<MapConfig>("map", params);
@@ -64,18 +65,6 @@ export function MapChart({ columns, rows, params, metricTypes = {}, onValueClick
     };
   }, [def]);
 
-  // The two TERMINAL non-drawing states — "no map" and "no data" — count as finished for the same
-  // reason a chart's own empty state does: nothing further is coming. "Loading map…" deliberately
-  // does NOT fire it: `forceUpdate` above re-renders once the geojson lands, and a print page
-  // waiting on this card must keep waiting through that, not declare it done early.
-  useEffect(() => {
-    if (error || (ready && rows.length === 0)) onFinished?.();
-  }, [error, ready, rows.length, onFinished]);
-
-  if (error) return <div className="flex h-full items-center justify-center text-sm text-destructive">Couldn't load the map</div>;
-  if (!ready) return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading map…</div>;
-  if (rows.length === 0) return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>;
-
   const cfg: MapBuildConfig = {
     echartsName: def.echartsName,
     type: map.type,
@@ -95,7 +84,11 @@ export function MapChart({ columns, rows, params, metricTypes = {}, onValueClick
     longitude: map.longitude,
     label: map.label,
     // Undefined until the geojson has been indexed, which is a state this render CAN be in on a
-    // cached map; every reader treats undefined as "no opinion" rather than "outside".
+    // cached map (including every render before `ready`); every reader treats undefined as "no
+    // opinion" rather than "outside" — and `pinProblem` below is one such reader: `bucketOf`
+    // (echarts/options/map.ts) only uses `extent` to split an already-drawable pin between
+    // "plotted" and "offMap", both of which count toward `drawnPins`, so whether a pin is
+    // drawable AT ALL — the question `pinProblem` answers — never depends on it being indexed yet.
     extent: isPin ? regionExtent(def.key) : undefined,
     tooltipColumns: map.tooltipColumns,
     // The extra columns print through the dataset's own column formats — the same `formatValue`
@@ -115,18 +108,40 @@ export function MapChart({ columns, rows, params, metricTypes = {}, onValueClick
    * WHAT THE CARD CAN AND CANNOT SHOW, decided BEFORE the chart is built — Metabase's
    * `checkRenderable`, and the same seam `ChartRenderer` puts `sankeyProblem` on.
    *
+   * Computed here, ABOVE the `error`/`!ready`/`rows.length === 0` early returns below (moved up
+   * from where this used to sit, after them) so the `useEffect` right after this block can fire
+   * `onFinished` for `problem` too — a fourth terminal, non-drawing state that a fixed-wait-free
+   * print page must not wait on forever. Safe to hoist: as the `extent` comment above establishes,
+   * `problem`'s truthiness cannot change once the geojson finishes loading, so computing it before
+   * `ready` settles is not computing it with different information, only earlier.
+   *
    * TWO PRESENTATIONS BECAUSE THERE ARE TWO SITUATIONS, and neither is a new one for this file.
    * A card that cannot draw anything is REPLACED by a sentence — which is exactly what the three
-   * early returns directly above already do for "Couldn't load the map", "Loading map…" and
-   * "No data", so `pinProblem` joins that list rather than inventing a presentation. A card that
-   * draws but is not showing every row keeps its pins and gains a line underneath, because
-   * replacing it would throw away the pins that are right in order to complain about the ones
-   * that are not. `pinProblem` and `pinNote` are mutually exclusive by construction, so the card
-   * can never say both.
+   * early returns below already do for "Couldn't load the map", "Loading map…" and "No data", so
+   * `pinProblem` joins that list rather than inventing a presentation. A card that draws but is
+   * not showing every row keeps its pins and gains a line underneath, because replacing it would
+   * throw away the pins that are right in order to complain about the ones that are not.
+   * `pinProblem` and `pinNote` are mutually exclusive by construction, so the card can never say
+   * both.
    */
   const coverage = isPin ? pinCoverage(columns, rows, cfg) : undefined;
   const problem = coverage && pinProblem(coverage, def.label);
   const note = coverage && pinNote(coverage, def.label);
+
+  // The FOUR terminal non-drawing states — "no map", "no data" and now "nothing plottable" — count
+  // as finished for the same reason a chart's own empty state does: nothing further is coming.
+  // "Loading map…" deliberately does NOT fire it, and `problem` is gated on `ready` too even
+  // though its VALUE is already final before then (see the comment above `extent` in `cfg`): what
+  // matters for `onFinished` is not when the answer is knowable but when it matches what is
+  // actually PAINTED, and the screen still reads "Loading map…" until `ready` flips. Firing early
+  // here would tell a print page the card is done while a loading message is what gets captured.
+  useEffect(() => {
+    if (error || (ready && (rows.length === 0 || problem))) onFinished?.();
+  }, [error, ready, rows.length, problem, onFinished]);
+
+  if (error) return <div className="flex h-full items-center justify-center text-sm text-destructive">Couldn't load the map</div>;
+  if (!ready) return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Loading map…</div>;
+  if (rows.length === 0) return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>;
   if (problem) {
     return (
       <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">

@@ -35,7 +35,12 @@ beforeEach(() => {
   Object.defineProperty(document, "fonts", { value: { ready: Promise.resolve() }, configurable: true });
   payloadMock.mockResolvedValue({
     kind: "dashboard", id: "d1", title: "Ops",
-    cards: [{ chart_id: "c1", title: "A", viz_type: "bar", params: {}, columns: ["n"], rows: [[1]] }],
+    // `columns` is `ColumnMeta[]` (name + engine type), not bare names — matches the real
+    // `RenderCard` contract now that the backend carries real column metadata through.
+    cards: [{
+      chart_id: "c1", title: "A", viz_type: "bar", params: {},
+      columns: [{ name: "n", type: "double" }], rows: [[1]],
+    }],
   });
 });
 

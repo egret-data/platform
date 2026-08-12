@@ -355,10 +355,13 @@ async fn the_payload_is_returned_once_for_a_valid_token(pool: sqlx::PgPool) {
         "cards carry their own data: {body}"
     );
     // The claim under test: the rows are the ENGINE's rows, carried through
-    // to the response byte-for-byte — not merely "some array".
+    // to the response byte-for-byte — not merely "some array". Columns carry
+    // the engine's name AND type (not names alone): the print page needs the
+    // real type to format a column the same way the live chart would, and a
+    // names-only column list is exactly the drift this asserts against.
     assert_eq!(
         v["cards"][0]["columns"],
-        serde_json::json!(["orderpriority"])
+        serde_json::json!([{"name": "orderpriority", "type": "varchar"}])
     );
     assert_eq!(
         v["cards"][0]["rows"],

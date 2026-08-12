@@ -1,11 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { fetchRenderPayload } from "@/api/render";
 import type { RenderCard, RenderPayload } from "@/api/generated/model";
 import type { AnyChartParams, VizType } from "@/api/charts";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
-import type { ResultColumn } from "@/components/chart/ChartTable";
 
 declare global {
   interface Window {
@@ -21,37 +20,22 @@ declare global {
   }
 }
 
-/**
- * `RenderCard.columns` is a bare list of names — the render payload carries no column TYPES, only
- * what a raw `SELECT` returned. `ChartRenderer` needs a type per column to decide numeric vs.
- * temporal vs. text formatting, so one is inferred here from the first non-null cell seen in that
- * column. This is a print-only approximation (a card whose first sampled value is, say, a numeric
- * string typed as `varchar` would format looser than the original chart did) — good enough for a
- * report thumbnail, and not a new problem to solve in the route that turns the flag on.
- */
-function inferColumnType(rows: unknown[][], index: number): string {
-  for (const row of rows) {
-    const v = row[index];
-    if (v == null) continue;
-    if (typeof v === "number") return "double";
-    if (typeof v === "boolean") return "boolean";
-    return "varchar";
-  }
-  return "varchar";
-}
-
-function toResultColumns(card: RenderCard): ResultColumn[] {
-  return card.columns.map((name, i) => ({ name, type: inferColumnType(card.rows, i) }));
-}
-
 /** One card's chart, wrapped in its own error boundary — one bad chart marks the whole page
- *  failed (via `onError`) rather than leaving `onFinished` uncalled and the page hung forever. */
+ *  failed (via `onError`) rather than leaving `onFinished` uncalled and the page hung forever.
+ *
+ *  `card.columns` is the engine's own `ColumnMeta[]` (name + type), carried through unmodified
+ *  from `RenderCard` — the same shape `ChartRenderer`'s `columns` prop wants (`ResultColumn` is
+ *  `{ name, type }`). Nothing here guesses a type from sampled cell values: an earlier revision
+ *  of this page did, and a numeric-string column, a column whose first row is null, or (worst)
+ *  any temporal column all formatted differently from the same chart on its dashboard. The fix is
+ *  the backend carrying real column metadata (`crates/egret-automation/src/render/payload.rs`),
+ *  not smarter guessing here — if `columns` is ever missing a type, that is a payload bug to
+ *  surface, not paper over with a client-side fallback. */
 function PrintCard({ card, onFinished, onError }: {
   card: RenderCard;
   onFinished: () => void;
   onError: () => void;
 }) {
-  const columns = useMemo(() => toResultColumns(card), [card]);
   return (
     <div className="mb-8 break-inside-avoid rounded border border-gray-200 bg-white p-4">
       <h2 className="mb-2 text-base font-medium text-black">{card.title}</h2>
@@ -60,7 +44,7 @@ function PrintCard({ card, onFinished, onError }: {
           <ChartRenderer
             vizType={card.viz_type as VizType}
             params={card.params as AnyChartParams}
-            columns={columns}
+            columns={card.columns}
             rows={card.rows}
             onFinished={onFinished}
           />
