@@ -260,6 +260,7 @@ export * from './setDatasetCertification';
 export * from './setFeatures';
 export * from './setFeaturesFeatures';
 export * from './setFolder';
+export * from './setFolderBody';
 export * from './setNotebookWarehouse';
 export * from './setPermissionsInput';
 export * from './setPlatformRoles';

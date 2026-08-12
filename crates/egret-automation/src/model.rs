@@ -342,6 +342,7 @@ pub fn summary_dto(
     s: &Schedule,
     owners: &HashMap<Uuid, Vec<Owner>>,
     can_manage: bool,
+    bookmarked: bool,
 ) -> ScheduleSummaryDto {
     ScheduleSummaryDto {
         id: s.id.to_string(),
@@ -360,6 +361,9 @@ pub fn summary_dto(
             .unwrap_or_default(),
         updated_at: s.updated_at,
         can_manage,
+        bookmarked,
+        folder_id: s.folder_id.map(|v| v.to_string()),
+        deleted_at: s.deleted_at,
     }
 }
 

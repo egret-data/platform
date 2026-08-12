@@ -207,6 +207,12 @@ pub struct ScheduleSummaryDto {
     /// session's `permissions` carries PLATFORM grants only, so a UI that
     /// guessed would show a reader destructive controls that 403 on click.
     pub can_manage: bool,
+    /// Whether the CALLER has starred this one — per-user, unlike `can_manage`.
+    pub bookmarked: bool,
+    /// The folder this row is grouped under, or `None` for "Uncategorized".
+    pub folder_id: Option<String>,
+    /// Set only in the trash view; `None` for a live schedule.
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// A schedule owner. The owner is a security-relevant field, not decoration:

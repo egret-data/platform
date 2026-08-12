@@ -4,7 +4,7 @@
 //! would silently escape the module gate.
 
 use axum::extract::{FromRef, Path, Query, State};
-use axum::routing::{get, post, put};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use egret_auth::session::SessionService;
 use egret_core::Error;
@@ -99,6 +99,13 @@ pub fn automation_router() -> Router<AutomationState> {
         .route("/ws/{workspace}/alerts/{id}/runs", get(runs))
         .route("/ws/{workspace}/alerts/{id}/run", post(run_now))
         .route("/ws/{workspace}/alerts/{id}/active", put(set_active))
+        .route("/ws/{workspace}/alerts/{id}/trash", post(trash))
+        .route("/ws/{workspace}/alerts/{id}/restore", post(restore))
+        .route("/ws/{workspace}/alerts/{id}/folder", patch(set_folder))
+        .route(
+            "/ws/{workspace}/alerts/{id}/bookmark",
+            post(bookmark_add).delete(bookmark_remove),
+        )
         .route(
             "/ws/{workspace}/notifications/smtp",
             get(smtp_get).put(smtp_put).delete(smtp_delete),
@@ -122,6 +129,11 @@ pub fn automation_router() -> Router<AutomationState> {
         runs,
         run_now,
         set_active,
+        trash,
+        restore,
+        set_folder,
+        bookmark_add,
+        bookmark_remove,
         smtp_get,
         smtp_put,
         smtp_delete,
@@ -147,6 +159,7 @@ pub fn automation_router() -> Router<AutomationState> {
         crate::deliver::smtp_config::TlsMode,
         SmtpTestBody,
         SetActiveBody,
+        SetFolderBody,
         crate::render::payload::RenderPayload,
         crate::render::payload::RenderCard,
     ))
@@ -158,6 +171,9 @@ pub struct ListQuery {
     /// Narrow to one tab. Omitted returns both.
     #[serde(rename = "type")]
     ty: Option<ScheduleType>,
+    /// Show the trash bin (soft-deleted rows) instead of the live list.
+    #[serde(default)]
+    trashed: bool,
 }
 
 #[derive(utoipa::IntoParams)]
@@ -180,11 +196,16 @@ async fn list(
 ) -> Result<Json<Vec<ScheduleSummaryDto>>, AutomationApiError> {
     let rows = st
         .schedules
-        .list(ctx.workspace_id.0, q.ty.map(|t| t.as_str()))
+        .list(
+            ctx.workspace_id.0,
+            q.ty.map(|t| t.as_str()),
+            ctx.principal.user_id.0,
+            q.trashed,
+        )
         .await
         .map_err(AutomationApiError::from)?;
     // One batched owner query for the whole page, not one per row.
-    let ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let ids: Vec<Uuid> = rows.iter().map(|(s, _)| s.id).collect();
     let owners = st
         .schedules
         .owners_for(&ids)
@@ -198,7 +219,7 @@ async fn list(
         .is_ok();
     Ok(Json(
         rows.iter()
-            .map(|r| summary_dto(r, &owners, can_manage))
+            .map(|(s, bookmarked)| summary_dto(s, &owners, can_manage, *bookmarked))
             .collect(),
     ))
 }
@@ -471,7 +492,144 @@ async fn set_active(
         .map_err(AutomationApiError::from)?;
     // The caller just passed `alert:manage` above, so `can_manage` is `true`
     // for this response — same reasoning `list` uses for every row.
-    Ok(Json(summary_dto(&row, &owners, true)))
+    Ok(Json(summary_dto(&row, &owners, true, false)))
+}
+
+/// Move to the trash (soft delete), so the list keeps a Restore path and the
+/// scheduler stops claiming it — `deleted_at IS NULL` is part of the claim
+/// predicate, not merely a display filter.
+#[utoipa::path(
+    post, path = "/api/ws/{workspace}/alerts/{id}/trash", tag = "alerts",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "Schedule id")),
+    responses(
+        (status = 200, description = "Moved to the trash", body = egret_core::Ack),
+        (status = 401, body = egret_core::http::ErrorBody, description = "Not authenticated"),
+        (status = 403, body = egret_core::http::ErrorBody, description = "Needs alert:manage"),
+        (status = 404, body = egret_core::http::ErrorBody, description = "No such schedule here"),
+        (status = 500, body = egret_core::http::ErrorBody, description = "Internal error"),
+    ),
+)]
+async fn trash(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<egret_core::Ack>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+    ack(st.schedules.set_trashed(ctx.workspace_id.0, id, true).await)
+}
+
+#[utoipa::path(
+    post, path = "/api/ws/{workspace}/alerts/{id}/restore", tag = "alerts",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "Schedule id")),
+    responses(
+        (status = 200, description = "Restored from the trash", body = egret_core::Ack),
+        (status = 401, body = egret_core::http::ErrorBody, description = "Not authenticated"),
+        (status = 403, body = egret_core::http::ErrorBody, description = "Needs alert:manage"),
+        (status = 404, body = egret_core::http::ErrorBody, description = "No such schedule here"),
+        (status = 500, body = egret_core::http::ErrorBody, description = "Internal error"),
+    ),
+)]
+async fn restore(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<egret_core::Ack>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+    ack(st
+        .schedules
+        .set_trashed(ctx.workspace_id.0, id, false)
+        .await)
+}
+
+/// `false` from a workspace-scoped write means the id belongs to another
+/// workspace (or nothing), which is a 404 — never a 403, which would confirm
+/// the id exists.
+fn ack(r: Result<bool, AutomationError>) -> Result<Json<egret_core::Ack>, AutomationApiError> {
+    match r.map_err(AutomationApiError::from)? {
+        true => Ok(Json(egret_core::Ack { ok: true })),
+        false => Err(AutomationError::NotFound("schedule".into()).into()),
+    }
+}
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+struct SetFolderBody {
+    /// `null` moves the schedule back to Uncategorized.
+    folder_id: Option<Uuid>,
+}
+
+#[utoipa::path(
+    patch, path = "/api/ws/{workspace}/alerts/{id}/folder", tag = "alerts",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "Schedule id")),
+    request_body = SetFolderBody,
+    responses(
+        (status = 200, description = "Moved", body = egret_core::Ack),
+        (status = 401, body = egret_core::http::ErrorBody, description = "Not authenticated"),
+        (status = 403, body = egret_core::http::ErrorBody, description = "Needs alert:manage"),
+        (status = 404, body = egret_core::http::ErrorBody, description = "No such schedule here"),
+        (status = 500, body = egret_core::http::ErrorBody, description = "Internal error"),
+    ),
+)]
+async fn set_folder(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    Json(body): Json<SetFolderBody>,
+) -> Result<Json<egret_core::Ack>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+    ack(st
+        .schedules
+        .set_folder(ctx.workspace_id.0, id, body.folder_id)
+        .await)
+}
+
+/// A bookmark is the CALLER's own, so it needs no `alert:manage` — a viewer
+/// may star what they can read.
+#[utoipa::path(
+    post, path = "/api/ws/{workspace}/alerts/{id}/bookmark", tag = "alerts",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "Schedule id")),
+    responses(
+        (status = 200, description = "Bookmarked for the caller", body = egret_core::Ack),
+        (status = 401, body = egret_core::http::ErrorBody, description = "Not authenticated"),
+        (status = 500, body = egret_core::http::ErrorBody, description = "Internal error"),
+    ),
+)]
+async fn bookmark_add(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<egret_core::Ack>, AutomationApiError> {
+    st.schedules
+        .add_bookmark(ctx.principal.user_id.0, id)
+        .await
+        .map_err(AutomationApiError::from)?;
+    Ok(Json(egret_core::Ack { ok: true }))
+}
+
+#[utoipa::path(
+    delete, path = "/api/ws/{workspace}/alerts/{id}/bookmark", tag = "alerts",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "Schedule id")),
+    responses(
+        (status = 200, description = "Bookmark removed for the caller", body = egret_core::Ack),
+        (status = 401, body = egret_core::http::ErrorBody, description = "Not authenticated"),
+        (status = 500, body = egret_core::http::ErrorBody, description = "Internal error"),
+    ),
+)]
+async fn bookmark_remove(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<egret_core::Ack>, AutomationApiError> {
+    st.schedules
+        .remove_bookmark(ctx.principal.user_id.0, id)
+        .await
+        .map_err(AutomationApiError::from)?;
+    Ok(Json(egret_core::Ack { ok: true }))
 }
 
 /// Read a schedule with its owners and recipients, or 404.

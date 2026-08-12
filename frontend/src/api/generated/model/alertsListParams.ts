@@ -12,4 +12,8 @@ export type AlertsListParams = {
  * Narrow to one tab. Omitted returns both.
  */
 type?: null | ScheduleType;
+/**
+ * Show the trash bin (soft-deleted rows) instead of the live list.
+ */
+trashed?: boolean;
 };

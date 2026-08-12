@@ -60,8 +60,20 @@ pub struct Schedule {
     pub log_retention_days: i32,
     pub email_subject: Option<String>,
 
+    pub folder_id: Option<Uuid>,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+
     pub created_by: Option<Uuid>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// `list`'s row: a schedule plus the viewer's bookmark flag, flattened so one
+/// query answers both.
+#[derive(sqlx::FromRow)]
+struct ScheduleWithBookmark {
+    #[sqlx(flatten)]
+    schedule: Schedule,
+    bookmarked: bool,
 }
 
 /// A schedule owner, joined to the user's email for display. The owner is a
@@ -129,7 +141,8 @@ pub struct NewSchedule {
 const COLS: &str = "id, workspace_id, type, name, description, active, crontab, timezone, \
      next_run_at, database_id, sql, validator_type, validator_config, last_eval_at, last_state, \
      last_value, chart_id, dashboard_id, report_format, custom_width, custom_height, \
-     grace_period_s, working_timeout_s, log_retention_days, email_subject, created_by, updated_at";
+     grace_period_s, working_timeout_s, log_retention_days, email_subject, folder_id, deleted_at, \
+     created_by, updated_at";
 
 impl ScheduleRepo {
     pub fn new(db: Db, secrets: egret_secrets::SecretStore) -> Self {
@@ -305,17 +318,108 @@ impl ScheduleRepo {
     }
 
     /// Schedules in `ws`, optionally narrowed to one `type` (the two list tabs).
-    pub async fn list(&self, ws: Uuid, ty: Option<&str>) -> Result<Vec<Schedule>, AutomationError> {
-        sqlx::query_as(&format!(
-            "SELECT {COLS} FROM automation.schedules \
-             WHERE workspace_id = $1 AND ($2::text IS NULL OR type = $2) \
+    /// Schedules in `ws`, optionally narrowed to one `type` (the two list tabs).
+    ///
+    /// `trashed` selects the trash bin instead of the live list, and the
+    /// per-user `bookmarked` flag rides along so the star column costs no extra
+    /// query — the same shape `ChartRepo::list` uses.
+    pub async fn list(
+        &self,
+        ws: Uuid,
+        ty: Option<&str>,
+        viewer: Uuid,
+        trashed: bool,
+    ) -> Result<Vec<(Schedule, bool)>, AutomationError> {
+        let pred = if trashed {
+            "deleted_at IS NOT NULL"
+        } else {
+            "deleted_at IS NULL"
+        };
+        let rows: Vec<ScheduleWithBookmark> = sqlx::query_as(&format!(
+            "SELECT {COLS}, \
+             EXISTS (SELECT 1 FROM analytics.bookmarks b \
+                      WHERE b.user_id = $3 AND b.entity_type = 'alert' \
+                        AND b.entity_id = schedules.id) AS bookmarked \
+             FROM automation.schedules \
+             WHERE workspace_id = $1 AND ($2::text IS NULL OR type = $2) AND {pred} \
              ORDER BY updated_at DESC"
         ))
         .bind(ws)
         .bind(ty)
+        .bind(viewer)
         .fetch_all(&self.db.pool)
         .await
-        .map_err(AutomationError::from_db)
+        .map_err(AutomationError::from_db)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.schedule, r.bookmarked))
+            .collect())
+    }
+
+    /// Soft-delete (`trashed = true`) or restore. Scoped to the workspace, so a
+    /// foreign id is a no-op rather than a cross-tenant write.
+    pub async fn set_trashed(
+        &self,
+        ws: Uuid,
+        id: Uuid,
+        trashed: bool,
+    ) -> Result<bool, AutomationError> {
+        let sql = if trashed {
+            "UPDATE automation.schedules SET deleted_at = now() WHERE id=$1 AND workspace_id=$2"
+        } else {
+            "UPDATE automation.schedules SET deleted_at = NULL WHERE id=$1 AND workspace_id=$2"
+        };
+        let done = sqlx::query(sql)
+            .bind(id)
+            .bind(ws)
+            .execute(&self.db.pool)
+            .await
+            .map_err(AutomationError::from_db)?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    pub async fn set_folder(
+        &self,
+        ws: Uuid,
+        id: Uuid,
+        folder: Option<Uuid>,
+    ) -> Result<bool, AutomationError> {
+        let done = sqlx::query(
+            "UPDATE automation.schedules SET folder_id=$3 WHERE id=$1 AND workspace_id=$2",
+        )
+        .bind(id)
+        .bind(ws)
+        .bind(folder)
+        .execute(&self.db.pool)
+        .await
+        .map_err(AutomationError::from_db)?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    pub async fn add_bookmark(&self, user: Uuid, id: Uuid) -> Result<(), AutomationError> {
+        sqlx::query(
+            "INSERT INTO analytics.bookmarks (user_id, entity_type, entity_id) \
+             VALUES ($1,'alert',$2) ON CONFLICT (user_id, entity_type, entity_id) DO NOTHING",
+        )
+        .bind(user)
+        .bind(id)
+        .execute(&self.db.pool)
+        .await
+        .map_err(AutomationError::from_db)?;
+        Ok(())
+    }
+
+    pub async fn remove_bookmark(&self, user: Uuid, id: Uuid) -> Result<(), AutomationError> {
+        sqlx::query(
+            "DELETE FROM analytics.bookmarks \
+             WHERE user_id=$1 AND entity_type='alert' AND entity_id=$2",
+        )
+        .bind(user)
+        .bind(id)
+        .execute(&self.db.pool)
+        .await
+        .map_err(AutomationError::from_db)?;
+        Ok(())
     }
 
     pub async fn get(&self, ws: Uuid, id: Uuid) -> Result<Option<Schedule>, AutomationError> {

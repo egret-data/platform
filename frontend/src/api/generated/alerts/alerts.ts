@@ -25,13 +25,16 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  Ack,
   AlertsListParams,
   CreateSchedule,
+  ErrorBody,
   RenderPayload,
   RunDto,
   ScheduleDetailDto,
   ScheduleSummaryDto,
   SetActiveBody,
+  SetFolderBody,
   SmtpConfigBody,
   SmtpConfigDto,
   SmtpTestBody,
@@ -783,6 +786,395 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getAlertsSetActiveMutationOptions(options), queryClient);
     }
+    export type alertsBookmarkAddResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type alertsBookmarkAddResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type alertsBookmarkAddResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type alertsBookmarkAddResponseSuccess = (alertsBookmarkAddResponse200) & {
+  headers: Headers;
+};
+export type alertsBookmarkAddResponseError = (alertsBookmarkAddResponse401 | alertsBookmarkAddResponse500) & {
+  headers: Headers;
+};
+
+export type alertsBookmarkAddResponse = (alertsBookmarkAddResponseSuccess | alertsBookmarkAddResponseError)
+
+export const getAlertsBookmarkAddUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/alerts/${encodeURIComponent(id)}/bookmark`
+}
+
+/**
+ * @summary A bookmark is the CALLER's own, so it needs no `alert:manage` — a viewer
+may star what they can read.
+ */
+export const alertsBookmarkAdd = async (workspace: string,
+    id: string, options?: RequestInit): Promise<alertsBookmarkAddResponse> => {
+
+  return customInstance<alertsBookmarkAddResponse>(getAlertsBookmarkAddUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getAlertsBookmarkAddMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsBookmarkAdd>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof alertsBookmarkAdd>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['alertsBookmarkAdd'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof alertsBookmarkAdd>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  alertsBookmarkAdd(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AlertsBookmarkAddMutationResult = NonNullable<Awaited<ReturnType<typeof alertsBookmarkAdd>>>
+
+    export type AlertsBookmarkAddMutationError = ErrorBody
+
+    /**
+ * @summary A bookmark is the CALLER's own, so it needs no `alert:manage` — a viewer
+may star what they can read.
+ */
+export const useAlertsBookmarkAdd = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsBookmarkAdd>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof alertsBookmarkAdd>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getAlertsBookmarkAddMutationOptions(options), queryClient);
+    }
+    export type alertsBookmarkRemoveResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type alertsBookmarkRemoveResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type alertsBookmarkRemoveResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type alertsBookmarkRemoveResponseSuccess = (alertsBookmarkRemoveResponse200) & {
+  headers: Headers;
+};
+export type alertsBookmarkRemoveResponseError = (alertsBookmarkRemoveResponse401 | alertsBookmarkRemoveResponse500) & {
+  headers: Headers;
+};
+
+export type alertsBookmarkRemoveResponse = (alertsBookmarkRemoveResponseSuccess | alertsBookmarkRemoveResponseError)
+
+export const getAlertsBookmarkRemoveUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/alerts/${encodeURIComponent(id)}/bookmark`
+}
+
+export const alertsBookmarkRemove = async (workspace: string,
+    id: string, options?: RequestInit): Promise<alertsBookmarkRemoveResponse> => {
+
+  return customInstance<alertsBookmarkRemoveResponse>(getAlertsBookmarkRemoveUrl(workspace,id),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getAlertsBookmarkRemoveMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsBookmarkRemove>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof alertsBookmarkRemove>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['alertsBookmarkRemove'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof alertsBookmarkRemove>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  alertsBookmarkRemove(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AlertsBookmarkRemoveMutationResult = NonNullable<Awaited<ReturnType<typeof alertsBookmarkRemove>>>
+
+    export type AlertsBookmarkRemoveMutationError = ErrorBody
+
+    export const useAlertsBookmarkRemove = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsBookmarkRemove>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof alertsBookmarkRemove>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getAlertsBookmarkRemoveMutationOptions(options), queryClient);
+    }
+    export type alertsSetFolderResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type alertsSetFolderResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type alertsSetFolderResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type alertsSetFolderResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type alertsSetFolderResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type alertsSetFolderResponseSuccess = (alertsSetFolderResponse200) & {
+  headers: Headers;
+};
+export type alertsSetFolderResponseError = (alertsSetFolderResponse401 | alertsSetFolderResponse403 | alertsSetFolderResponse404 | alertsSetFolderResponse500) & {
+  headers: Headers;
+};
+
+export type alertsSetFolderResponse = (alertsSetFolderResponseSuccess | alertsSetFolderResponseError)
+
+export const getAlertsSetFolderUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/alerts/${encodeURIComponent(id)}/folder`
+}
+
+export const alertsSetFolder = async (workspace: string,
+    id: string,
+    setFolderBody: SetFolderBody, options?: RequestInit): Promise<alertsSetFolderResponse> => {
+
+  return customInstance<alertsSetFolderResponse>(getAlertsSetFolderUrl(workspace,id),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setFolderBody)
+  }
+);}
+
+
+
+
+
+export const getAlertsSetFolderMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsSetFolder>>, TError,{workspace: string;id: string;data: SetFolderBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof alertsSetFolder>>, TError,{workspace: string;id: string;data: SetFolderBody}, TContext> => {
+
+const mutationKey = ['alertsSetFolder'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof alertsSetFolder>>, {workspace: string;id: string;data: SetFolderBody}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  alertsSetFolder(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AlertsSetFolderMutationResult = NonNullable<Awaited<ReturnType<typeof alertsSetFolder>>>
+    export type AlertsSetFolderMutationBody = SetFolderBody
+    export type AlertsSetFolderMutationError = ErrorBody
+
+    export const useAlertsSetFolder = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsSetFolder>>, TError,{workspace: string;id: string;data: SetFolderBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof alertsSetFolder>>,
+        TError,
+        {workspace: string;id: string;data: SetFolderBody},
+        TContext
+      > => {
+      return useMutation(getAlertsSetFolderMutationOptions(options), queryClient);
+    }
+    export type alertsRestoreResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type alertsRestoreResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type alertsRestoreResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type alertsRestoreResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type alertsRestoreResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type alertsRestoreResponseSuccess = (alertsRestoreResponse200) & {
+  headers: Headers;
+};
+export type alertsRestoreResponseError = (alertsRestoreResponse401 | alertsRestoreResponse403 | alertsRestoreResponse404 | alertsRestoreResponse500) & {
+  headers: Headers;
+};
+
+export type alertsRestoreResponse = (alertsRestoreResponseSuccess | alertsRestoreResponseError)
+
+export const getAlertsRestoreUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/alerts/${encodeURIComponent(id)}/restore`
+}
+
+export const alertsRestore = async (workspace: string,
+    id: string, options?: RequestInit): Promise<alertsRestoreResponse> => {
+
+  return customInstance<alertsRestoreResponse>(getAlertsRestoreUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getAlertsRestoreMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsRestore>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof alertsRestore>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['alertsRestore'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof alertsRestore>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  alertsRestore(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AlertsRestoreMutationResult = NonNullable<Awaited<ReturnType<typeof alertsRestore>>>
+
+    export type AlertsRestoreMutationError = ErrorBody
+
+    export const useAlertsRestore = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsRestore>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof alertsRestore>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getAlertsRestoreMutationOptions(options), queryClient);
+    }
     export type alertsRunNowResponse200 = {
   data: RunDto
   status: 200
@@ -998,7 +1390,117 @@ export function useAlertsRuns<TData = Awaited<ReturnType<typeof alertsRuns>>, TE
 
 
 
-export type alertsSmtpGetResponse200 = {
+export type alertsTrashResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type alertsTrashResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type alertsTrashResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type alertsTrashResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type alertsTrashResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type alertsTrashResponseSuccess = (alertsTrashResponse200) & {
+  headers: Headers;
+};
+export type alertsTrashResponseError = (alertsTrashResponse401 | alertsTrashResponse403 | alertsTrashResponse404 | alertsTrashResponse500) & {
+  headers: Headers;
+};
+
+export type alertsTrashResponse = (alertsTrashResponseSuccess | alertsTrashResponseError)
+
+export const getAlertsTrashUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/alerts/${encodeURIComponent(id)}/trash`
+}
+
+/**
+ * @summary Move to the trash (soft delete), so the list keeps a Restore path and the
+scheduler stops claiming it — `deleted_at IS NULL` is part of the claim
+predicate, not merely a display filter.
+ */
+export const alertsTrash = async (workspace: string,
+    id: string, options?: RequestInit): Promise<alertsTrashResponse> => {
+
+  return customInstance<alertsTrashResponse>(getAlertsTrashUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getAlertsTrashMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsTrash>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof alertsTrash>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['alertsTrash'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof alertsTrash>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  alertsTrash(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AlertsTrashMutationResult = NonNullable<Awaited<ReturnType<typeof alertsTrash>>>
+
+    export type AlertsTrashMutationError = ErrorBody
+
+    /**
+ * @summary Move to the trash (soft delete), so the list keeps a Restore path and the
+scheduler stops claiming it — `deleted_at IS NULL` is part of the claim
+predicate, not merely a display filter.
+ */
+export const useAlertsTrash = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsTrash>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof alertsTrash>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getAlertsTrashMutationOptions(options), queryClient);
+    }
+    export type alertsSmtpGetResponse200 = {
   data: SmtpConfigDto
   status: 200
 }

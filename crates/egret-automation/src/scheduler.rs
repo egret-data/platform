@@ -27,7 +27,8 @@ use crate::repo::Schedule;
 const COLS: &str = "id, workspace_id, type, name, description, active, crontab, timezone, \
      next_run_at, database_id, sql, validator_type, validator_config, last_eval_at, last_state, \
      last_value, chart_id, dashboard_id, report_format, custom_width, custom_height, \
-     grace_period_s, working_timeout_s, log_retention_days, email_subject, created_by, updated_at";
+     grace_period_s, working_timeout_s, log_retention_days, email_subject, folder_id, deleted_at, \
+     created_by, updated_at";
 
 /// Take up to `limit` schedules that are due, marking each `working`.
 ///
@@ -43,6 +44,7 @@ pub async fn claim_due(
          WHERE id IN ( \
            SELECT id FROM automation.schedules \
             WHERE active \
+              AND deleted_at IS NULL \
               AND next_run_at IS NOT NULL \
               AND next_run_at <= now() \
               AND ( \
@@ -231,6 +233,29 @@ mod tests {
             claimed[0].last_state.as_deref(),
             Some("working"),
             "claiming marks the row so no other replica takes it"
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_trashed_schedule_is_never_claimed(pool: sqlx::PgPool) {
+        // Trash is a soft delete, so the row is still `active` with a due
+        // `next_run_at` — nothing about it stops the ticker except the
+        // `deleted_at IS NULL` term in the claim. Without that term a schedule
+        // the user believes they deleted keeps firing and keeps emailing.
+        let db = Db { pool };
+        let live = seed(&db, "live", true).await;
+        let binned = seed(&db, "binned", true).await;
+        sqlx::query("UPDATE automation.schedules SET deleted_at = now() WHERE id = $1")
+            .bind(binned)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+
+        let claimed = claim_due(&db.pool, 10).await.unwrap();
+        assert_eq!(
+            claimed.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![live],
+            "a trashed schedule must not be claimed"
         );
     }
 

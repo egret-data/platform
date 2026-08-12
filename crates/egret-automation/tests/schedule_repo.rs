@@ -182,9 +182,9 @@ async fn list_returns_only_the_given_workspaces_schedules() {
     theirs.database_id = Some(other_ws_database(&f).await);
     f.repo.create(f.other_ws, &theirs, None).await.unwrap();
 
-    let mine = f.repo.list(f.ws, None).await.unwrap();
+    let mine = f.repo.list(f.ws, None, f.user, false).await.unwrap();
     assert_eq!(mine.len(), 1);
-    assert_eq!(mine[0].workspace_id, f.ws);
+    assert_eq!(mine[0].0.workspace_id, f.ws);
 }
 
 #[tokio::test]
@@ -195,9 +195,17 @@ async fn list_filters_by_type_for_the_two_tabs() {
         .await
         .unwrap();
 
-    let alerts = f.repo.list(f.ws, Some("alert")).await.unwrap();
+    let alerts = f
+        .repo
+        .list(f.ws, Some("alert"), f.user, false)
+        .await
+        .unwrap();
     assert_eq!(alerts.len(), 1);
-    let reports = f.repo.list(f.ws, Some("report")).await.unwrap();
+    let reports = f
+        .repo
+        .list(f.ws, Some("report"), f.user, false)
+        .await
+        .unwrap();
     assert!(reports.is_empty(), "the Reports tab must not show alerts");
 }
 
@@ -435,7 +443,12 @@ async fn a_create_that_violates_a_check_constraint_leaves_nothing_behind() {
     .await
     .unwrap();
     assert_eq!(owners, 0);
-    assert!(f.repo.list(f.ws, None).await.unwrap().is_empty());
+    assert!(f
+        .repo
+        .list(f.ws, None, f.user, false)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────

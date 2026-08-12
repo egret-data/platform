@@ -348,6 +348,17 @@ pub static PERMISSIONS: &[Permission] = &[
         "Create, edit, and delete scheduled alerts and reports",
         Scope::Workspace
     ),
+    // Reading the list is otherwise implied by workspace membership plus the
+    // `alerts` entitlement. This exists because the generic folder router keys
+    // off a per-kind READ permission (`kind_perms`), and without one a viewer
+    // would be denied the folder list and lose the grouping the page is built
+    // around. Every other foldered entity has the same pair.
+    perm!(
+        "alert:read",
+        "Alerts & Reports",
+        "View scheduled alerts and reports",
+        Scope::Workspace
+    ),
     perm!(
         "workspace:manage_members",
         "Workspaces",
