@@ -892,7 +892,7 @@ Expected: FAIL to compile (`render::client` missing).
 
 - [ ] **Step 3: Implement the client and the report branch**
 
-`client.rs` posts to `{renderer_url}/render` with a timeout below the renderer's own. In
+`client.rs` posts to `{renderer_url}/render` with a timeout ABOVE the renderer's own (client 30s vs the renderer's 20s readiness budget). Spec §6 fixes this direction: the RENDERER's timeout sits below the CALLER's, so egret receives the renderer's clean error response instead of aborting a live render mid-flight. An earlier draft of this line said the opposite and was wrong. In
 `runner.rs`, `evaluate_and_deliver` gains a report branch **before** the alert branch:
 
 ```rust
