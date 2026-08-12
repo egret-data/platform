@@ -1042,3 +1042,39 @@ check actually showed, including anything it found. Commit.
   called out in the step rather than left to be discovered at compile time.
 - Gap found and fixed during this review: `prune_expired` was produced by Task 2 and called by
   nobody. It is now wired into the tick in Task 6 Step 3.
+
+
+---
+
+## Outcome — all 8 tasks done, live-verified 2026-08-12
+
+Executed via superpowers:subagent-driven-development, a fresh implementer per task with a
+spec-and-quality review after each. Ledger: `.superpowers/sdd/2026-08-12-report-renderer-plan/`.
+
+**The live check passed.** A scheduled `png` report on a real dashboard delivered a 2400x1600,
+46,616-byte PNG by email: title, a fully-drawn bar chart with four bars at proportions matching a
+live StarRocks query, gridlines, axis labels in a real font. No login page, no blank frame, no
+missing glyphs. And the readiness flag was proven load-bearing — with
+`RENDER_READY_TIMEOUT_MS=1` the run recorded `error` and NO image was delivered.
+
+**Five of eight tasks needed a review fix round, and two defects were in THESE PLANNING DOCUMENTS,
+not in anyone's code:**
+
+1. `page.waitForFunction(fn, {timeout})` silently ignores the timeout — Playwright's signature is
+   `(fn, arg, options)`, so the options object was taken as `arg` and every wait fell back to the
+   30s default. The configured timeout was decorative. Caught by an implementer noticing a 500ms
+   budget took 30.5s.
+2. This plan told the render client to time out BELOW the renderer's, which is backwards — spec §6
+   has the renderer's below the caller's, so egret receives a clean error instead of aborting a
+   live render. An implementer followed the spec over the plan and said so. Corrected in
+   `e6b2d5ce`.
+
+Reviews also caught, in code: a success test that could not fail (bypassing an existing
+`QueryRunner` seam), a print page GUESSING column types with no temporal branch (date axes would
+have rendered as raw text in emailed reports), and a CRITICAL token leak — `page.goto` outside the
+sanitising boundary meant a routine connection failure returned Playwright's raw error, embedding
+the full URL and its token, into both the log and the HTTP response.
+
+**Not done:** the kind/helm path was never exercised end to end. Task 7 was verified with
+`helm template` only, and the live check ran locally against the same containers. Deploying to a
+real cluster remains unproven.
