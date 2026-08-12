@@ -4,6 +4,9 @@ backend:
 frontend:
   image: { repository: egret-frontend, tag: dev, pullPolicy: IfNotPresent }
   nodePort: 30080
+renderer:
+  image: { repository: egret-renderer, tag: dev, pullPolicy: IfNotPresent }
+  replicas: 1
 ingress:
   enabled: false
   host: egret.localtest.me

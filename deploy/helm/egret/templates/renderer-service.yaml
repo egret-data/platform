@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Service
+metadata: { name: {{ include "egret.fullname" . }}-renderer, namespace: {{ .Release.Namespace }} }
+spec:
+  # ClusterIP only, deliberately: this service screenshots authenticated pages
+  # using a single-use render token baked into the URL, so it must never be
+  # reachable from outside the cluster. No Ingress rule, no NodePort.
+  type: ClusterIP
+  selector: { app: egret-renderer }
+  ports: [{ port: 8080, targetPort: 8080 }]
