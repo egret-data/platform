@@ -54,6 +54,12 @@ impl egret_analytics_api::engine_token::EngineTokenMinter for NoMinter {
 struct FakeEngine {
     columns: Vec<&'static str>,
     rows: Vec<Vec<serde_json::Value>>,
+    /// Every statement this engine was asked to run.
+    ///
+    /// Without it a test can only assert that rows came back, which they do
+    /// whether or not the resolved dashboard filters were merged onto the
+    /// saved spec — the exact defect this path exists to fix would pass.
+    seen_sql: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 #[async_trait::async_trait]
@@ -65,6 +71,7 @@ impl QueryRunner for FakeEngine {
         _identity: &RunIdentity,
         _limit: Option<usize>,
     ) -> Result<TabularResult, String> {
+        self.seen_sql.lock().unwrap().push(_sql.to_string());
         Ok(TabularResult {
             columns: self
                 .columns
@@ -82,13 +89,14 @@ impl QueryRunner for FakeEngine {
     }
 }
 
-fn fake_engine() -> FakeEngine {
+fn fake_engine(seen_sql: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> FakeEngine {
     FakeEngine {
         columns: vec!["orderpriority"],
         rows: vec![
             vec![serde_json::json!("1-URGENT")],
             vec![serde_json::json!("2-HIGH")],
         ],
+        seen_sql,
     }
 }
 
@@ -98,6 +106,7 @@ struct Fx {
     dashboard: Uuid,
     owner: Uuid,
     admin_tok: String,
+    seen_sql: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl Fx {
@@ -123,6 +132,7 @@ async fn mk_user(db: &Db, tag: &str) -> Uuid {
 }
 
 async fn setup(pool: sqlx::PgPool) -> Fx {
+    let seen_sql: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
     let db = Db { pool };
     let owner = mk_user(&db, "rp_owner").await;
     let slug = format!("rp-{}", Uuid::new_v4().simple());
@@ -266,7 +276,7 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
         databases: databases.clone(),
         users: egret_auth::users::UserRepo::new(db.clone()),
         minter: Arc::new(NoMinter),
-        query: Arc::new(fake_engine()),
+        query: Arc::new(fake_engine(seen_sql.clone())),
         resolver: Arc::new(egret_automation::deliver::destination::SystemResolver),
         policy: egret_automation::deliver::destination::SsrfPolicy::default(),
         smtp: smtp.clone(),
@@ -302,17 +312,45 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
         databases,
         users: egret_auth::users::UserRepo::new(db.clone()),
         engine_minter: Arc::new(NoMinter),
-        query: Arc::new(fake_engine()),
+        query: Arc::new(fake_engine(seen_sql.clone())),
         runner,
     };
 
     Fx {
-        app: automation_router().with_state(st),
+        // Both routers, as the server mounts them — `render_router` is separate
+        // so it can be mounted WITHOUT the CSRF layer, not because it is a
+        // different service.
+        app: automation_router()
+            .merge(egret_automation::render_router())
+            .with_state(st),
         render_tokens,
         dashboard: dashboard.id,
         owner,
         admin_tok,
+        seen_sql,
     }
+}
+
+async fn post_data(fx: &Fx, token: &str, body: serde_json::Value) -> (StatusCode, String) {
+    let res = fx
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/render/data")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8(bytes.to_vec()).unwrap())
 }
 
 async fn get_payload(fx: &Fx, token: &str) -> (StatusCode, String) {
@@ -378,44 +416,229 @@ async fn get_payload_with_cookie(fx: &Fx, session_tok: &str) -> (StatusCode, Str
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn the_payload_is_returned_once_for_a_valid_token(pool: sqlx::PgPool) {
-    // The print page's only request. It must arrive complete — spec AND data —
-    // because the page makes no second call. Unconditional: the engine is
-    // faked (see `FakeEngine` above), so there is no environment-dependent
-    // branch here.
+async fn the_payload_describes_the_object_and_the_data_call_returns_its_rows(pool: sqlx::PgPool) {
+    // The render is two steps now. Step one hands the page the saved specs and
+    // the dashboard's parameters so it can resolve them with the SAME code the
+    // interactive dashboard uses; step two returns the rows for the filters it
+    // resolved. Unconditional: the engine is faked (see `FakeEngine` above),
+    // so there is no environment-dependent branch here.
     let fx = setup(pool).await;
     let token = fx.mint_for_dashboard().await;
+
     let (s, body) = get_payload(&fx, &token).await;
     assert_eq!(s, StatusCode::OK, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["kind"], "dashboard");
+    let cards = v["cards"].as_array().unwrap();
+    assert!(!cards.is_empty(), "no cards to render: {body}");
+    // Step one must NOT carry rows — if it did, the parameters could not
+    // affect them, which is the whole defect this path fixes.
     assert!(
-        !v["cards"].as_array().unwrap().is_empty(),
-        "cards carry their own data: {body}"
+        cards[0].get("rows").is_none(),
+        "step one ran the query before the filters existed: {body}"
     );
-    // The claim under test: the rows are the ENGINE's rows, carried through
-    // to the response byte-for-byte — not merely "some array". Columns carry
-    // the engine's name AND type (not names alone): the print page needs the
-    // real type to format a column the same way the live chart would, and a
-    // names-only column list is exactly the drift this asserts against.
+    assert!(
+        v.get("parameters").is_some(),
+        "the page cannot resolve filters it was never given: {body}"
+    );
+    let chart_id = cards[0]["chart_id"].as_str().unwrap().to_string();
+
+    let (s, body) = post_data(
+        &fx,
+        &token,
+        serde_json::json!([{"chart_id": chart_id, "filters": [], "temporal_units": {}}]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    // The rows are the ENGINE's rows, carried through byte-for-byte — not
+    // merely "some array". Columns carry the engine's name AND type: the print
+    // page needs the real type to format a column the way the live chart
+    // would, and a names-only list is exactly the drift this asserts against.
     assert_eq!(
-        v["cards"][0]["columns"],
+        v[0]["columns"],
         serde_json::json!([{"name": "orderpriority", "type": "varchar"}])
     );
     assert_eq!(
-        v["cards"][0]["rows"],
+        v[0]["rows"],
         serde_json::json!([["1-URGENT"], ["2-HIGH"]]),
         "{body}"
     );
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_replayed_token_is_refused(pool: sqlx::PgPool) {
-    // Single use, end to end: the SECOND fetch of the same page fails.
+async fn the_token_survives_the_describe_step_and_dies_on_the_data_step(pool: sqlx::PgPool) {
+    // The envelope moved, deliberately: step one is metadata and may be
+    // repeated inside the token's ~60s life, step two hands over rows and is
+    // the one that burns it. A page that could re-fetch its data would be a
+    // data tap; a page that cannot re-read a title would simply be fragile.
     let fx = setup(pool).await;
     let token = fx.mint_for_dashboard().await;
+
     assert_eq!(get_payload(&fx, &token).await.0, StatusCode::OK);
-    assert_eq!(get_payload(&fx, &token).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        get_payload(&fx, &token).await.0,
+        StatusCode::OK,
+        "describing the object must not spend the token"
+    );
+
+    let (s, body) = get_payload(&fx, &token).await;
+    let chart_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["cards"][0]
+        ["chart_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let req = serde_json::json!([{"chart_id": chart_id}]);
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(post_data(&fx, &token, req.clone()).await.0, StatusCode::OK);
+    assert_eq!(
+        post_data(&fx, &token, req).await.0,
+        StatusCode::NOT_FOUND,
+        "the rows were handed out twice"
+    );
+    assert_eq!(
+        get_payload(&fx, &token).await.0,
+        StatusCode::NOT_FOUND,
+        "the spent token still describes the object"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_resolved_filter_reaches_the_compiled_sql(pool: sqlx::PgPool) {
+    // THE defect this two-step render exists to fix. Before it, the payload
+    // compiled each card from its saved spec alone, so a dashboard's filters —
+    // even its own defaults — never reached the query and the emailed image
+    // showed different numbers from the page it claimed to be.
+    //
+    // Asserted on the SQL the engine was handed, not on the rows: the fake
+    // returns the same rows whatever it is asked, exactly as a real engine
+    // would return the same rows for two queries that happened to match. Only
+    // the statement itself distinguishes "the filter was applied" from "the
+    // filter was dropped".
+    let fx = setup(pool).await;
+    let token = fx.mint_for_dashboard().await;
+    let (_, body) = get_payload(&fx, &token).await;
+    let chart_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["cards"][0]
+        ["chart_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (s, body) = post_data(
+        &fx,
+        &token,
+        serde_json::json!([{
+            "chart_id": chart_id,
+            "filters": [{"col": "orderpriority", "op": "eq", "value": "1-URGENT"}],
+        }]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+
+    let sql = fx.seen_sql.lock().unwrap().clone();
+    let last = sql.last().expect("the engine was asked something");
+    assert!(
+        last.contains("1-URGENT"),
+        "the resolved filter never reached the query: {last}"
+    );
+    assert!(
+        last.contains("orderpriority"),
+        "the filter landed on the wrong column: {last}"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_filter_on_a_column_the_dataset_does_not_have_is_refused(pool: sqlx::PgPool) {
+    // The filters come from a browser, so the column has to be checked against
+    // the dataset rather than trusted — `compile_chart_sql` -> `find_column`.
+    // Without it, whoever holds a render token could predicate on any column,
+    // running as the schedule's owner.
+    let fx = setup(pool).await;
+    let token = fx.mint_for_dashboard().await;
+    let (_, body) = get_payload(&fx, &token).await;
+    let chart_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["cards"][0]
+        ["chart_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (s, body) = post_data(
+        &fx,
+        &token,
+        serde_json::json!([{
+            "chart_id": chart_id,
+            "filters": [{"col": "no_such_column", "op": "eq", "value": "x"}],
+        }]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        fx.seen_sql.lock().unwrap().is_empty(),
+        "a rejected filter still reached the engine"
+    );
+}
+
+/// Why the render routes are mounted on a router of their own.
+///
+/// `POST /render/data` cannot live behind the CSRF layer: double-submit CSRF
+/// defends requests the browser authenticates AMBIENTLY, and there is nothing
+/// ambient here — the renderer sends a bearer token this code sets, and has no
+/// cookie to echo back. Behind the layer the call is refused before it reaches
+/// the handler, which is exactly what shipped: every real report failed with
+/// the renderer reporting only "the print page reported a failure", because
+/// these tests mount the router DIRECTLY and never see the layer.
+///
+/// The composition itself lives in `egret-server`; this pins the reason, so
+/// anyone folding the two routers back together fails here first.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_data_call_cannot_live_behind_the_csrf_layer(pool: sqlx::PgPool) {
+    let fx = setup(pool).await;
+    let token = fx.mint_for_dashboard().await;
+
+    let layered = fx
+        .app
+        .clone()
+        .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer));
+    let res = layered
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/render/data")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from("[]"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "the layer let a cookie-less POST through, so this test no longer says anything"
+    );
+
+    // The same request, on the router as it is actually mounted.
+    assert_eq!(
+        post_data(&fx, &token, serde_json::json!([])).await.0,
+        StatusCode::OK
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_chart_outside_the_render_is_refused(pool: sqlx::PgPool) {
+    // The token authorises ONE object. Without this the body would choose what
+    // runs, and a report on a harmless dashboard would read any chart in the
+    // workspace as the schedule's owner.
+    let fx = setup(pool).await;
+    let token = fx.mint_for_dashboard().await;
+    let (s, body) = post_data(
+        &fx,
+        &token,
+        serde_json::json!([{"chart_id": uuid::Uuid::new_v4()}]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("not part of this render"), "{body}");
 }
 
 #[sqlx::test(migrations = "../../migrations")]

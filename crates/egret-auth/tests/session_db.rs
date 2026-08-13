@@ -158,6 +158,13 @@ async fn validate_slides_last_seen_and_idle_expiry() {
             .await
             .unwrap();
 
+    // Postgres `now()` is the TRANSACTION timestamp, and `create` and
+    // `validate` are two of them. On a loaded machine — a full `cargo test
+    // --workspace`, which is when this was seen — they can land on the same
+    // microsecond, and a strictly-forward assertion then fails for a reason
+    // that has nothing to do with sliding. Not a weaker assertion (`>=` would
+    // pass whether or not the update happens); a guaranteed gap instead.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     assert!(svc.validate(&issued.token).await.unwrap().is_some());
 
     let (last_seen_after, idle_after): (DateTime<Utc>, DateTime<Utc>) =

@@ -21,7 +21,7 @@ pub use error::{AutomationApiError, AutomationError};
 pub use repo::{
     NewSchedule, Owner, Recipient, Schedule, ScheduleRepo, ScheduleRun, WEBHOOK_SECRET_KIND,
 };
-pub use routes::{automation_router, AutomationState};
+pub use routes::{automation_router, render_router, AutomationState};
 
 /// This seam's OpenAPI document, merged into the top-level doc by
 /// `egret-server` — the per-crate `openapi()` convention every annotated seam

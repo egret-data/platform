@@ -12,4 +12,19 @@ export interface RenderPayload {
   id: string;
   title: string;
   cards: RenderCard[];
+  /**
+     * The dashboard's parameter definitions, verbatim. The print page resolves
+     * them to filters with `applyParamsToChart` — the SAME module the
+     * interactive dashboard uses — and sends the result back to
+     * [`run_cards`].
+     *
+     * Ported to Rust instead, this would be a second implementation of six
+     * text operators, relative date windows and month/quarter/year arithmetic
+     * that must agree with the first one exactly, forever. When they drifted,
+     * the emailed image would quietly stop matching the dashboard — which is
+     * the bug this whole path exists to fix.
+     *
+     * `null` for a chart report: a chart has no parameters.
+     */
+  parameters: unknown;
 }

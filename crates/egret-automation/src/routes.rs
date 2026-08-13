@@ -103,6 +103,31 @@ impl FromRef<AutomationState> for Authorizer {
     }
 }
 
+/// The renderer's two endpoints, kept OUT of `automation_router`.
+///
+/// Not workspace-scoped and deliberately not under `/ws/{workspace}`: the
+/// caller is a headless browser with no session, so there is no workspace to
+/// put in front and no cookie to scope. The render token is the whole
+/// credential.
+///
+/// Mounted WITHOUT the CSRF layer, for the reason the layer exists at all.
+/// Double-submit CSRF defends requests the browser authenticates AMBIENTLY —
+/// it attaches the cookie whether or not the page meant to. Nothing is
+/// ambient here: the token travels in an `Authorization` header this code
+/// sets, so a cross-site page cannot make an authenticated request in the
+/// first place, and requiring a CSRF cookie the renderer can never have would
+/// simply make `POST /render/data` impossible.
+///
+/// Found by running a real report: the integration tests call this router
+/// directly, so the layer they never mount rejected every POST in production
+/// with `csrf check failed` and the page reported a failure the renderer could
+/// only describe as "the print page reported a failure".
+pub fn render_router() -> Router<AutomationState> {
+    Router::new()
+        .route("/render/payload", get(render_payload))
+        .route("/render/data", post(render_data))
+}
+
 pub fn automation_router() -> Router<AutomationState> {
     Router::new()
         .route("/ws/{workspace}/alerts", get(list).post(create))
@@ -125,11 +150,6 @@ pub fn automation_router() -> Router<AutomationState> {
             get(smtp_get).put(smtp_put).delete(smtp_delete),
         )
         .route("/ws/{workspace}/notifications/smtp/test", post(smtp_test))
-        // NOT workspace-scoped, and deliberately not under `/ws/{workspace}`:
-        // the caller (the headless renderer) has no session to put a workspace
-        // in front of. It is authenticated by the render token alone — see
-        // `render_payload` below.
-        .route("/render/payload", get(render_payload))
 }
 
 #[derive(utoipa::OpenApi)]
@@ -175,6 +195,8 @@ pub fn automation_router() -> Router<AutomationState> {
         SetActiveBody,
         SetFolderBody,
         crate::render::payload::RenderPayload,
+        crate::render::payload::RenderCardRequest,
+        crate::render::payload::RenderCardData,
         crate::render::payload::RenderCard,
     ))
 )]
@@ -847,7 +869,7 @@ async fn smtp_test(
 #[utoipa::path(
     get, path = "/api/render/payload", tag = "alerts",
     responses(
-        (status = 200, description = "Everything the print page needs: the object's spec and every card's already-executed rows", body = crate::render::payload::RenderPayload),
+        (status = 200, description = "What is being rendered: the object's title, each card's saved spec and param mappings, and the dashboard's parameters. No rows — see POST /render/data", body = crate::render::payload::RenderPayload),
         (status = 401, description = "No render token"),
         (status = 404, description = "Token unknown, expired, or already used"),
     ),
@@ -861,13 +883,56 @@ async fn render_payload(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or(AutomationApiError::from(egret_core::Error::Unauthorized))?;
+    // `peek`, not `redeem`: this step hands out titles and saved specs so the
+    // page can resolve the dashboard's parameters. The ROWS are what costs the
+    // token — see `render_data` below.
     let grant = st
         .render_tokens
-        .redeem(token)
+        .peek(token)
         .await
         .map_err(AutomationApiError::from)?;
     let payload = crate::render::payload::build(&st, &grant)
         .await
         .map_err(AutomationApiError::from)?;
     Ok(Json(payload))
+}
+
+/// Run the render's cards with the filters the page resolved.
+///
+/// Step two, and the one that SPENDS the token: `redeem` deletes the row in the
+/// same statement that reads it, so the rows are handed over exactly once.
+///
+/// The body carries FILTERS, never a query. They are merged onto each card's
+/// saved spec by `payload::run_cards`, exactly as `db_card_run` does for the
+/// interactive dashboard, and every column is checked against the dataset by
+/// `compile_chart_sql`. The chart ids are checked against the object the token
+/// names, so a token for one dashboard cannot run another's chart.
+#[utoipa::path(
+    post, path = "/render/data", tag = "alerts",
+    request_body = Vec<crate::render::payload::RenderCardRequest>,
+    responses(
+        (status = 200, description = "The rows for each requested card", body = Vec<crate::render::payload::RenderCardData>),
+        (status = 400, body = egret_core::http::ErrorBody, description = "A card outside this render, or an invalid filter"),
+        (status = 401, body = egret_core::http::ErrorBody, description = "Missing or spent render token"),
+    ),
+)]
+async fn render_data(
+    State(st): State<AutomationState>,
+    headers: axum::http::HeaderMap,
+    Json(reqs): Json<Vec<crate::render::payload::RenderCardRequest>>,
+) -> Result<Json<Vec<crate::render::payload::RenderCardData>>, AutomationApiError> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(AutomationApiError::from(egret_core::Error::Unauthorized))?;
+    let grant = st
+        .render_tokens
+        .redeem(token)
+        .await
+        .map_err(AutomationApiError::from)?;
+    let cards = crate::render::payload::run_cards(&st, &grant, &reqs)
+        .await
+        .map_err(AutomationApiError::from)?;
+    Ok(Json(cards))
 }

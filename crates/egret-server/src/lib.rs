@@ -225,8 +225,18 @@ pub fn build_router(state: AppState) -> Router {
         let group = Router::new()
             .nest("/api", egret_automation::automation_router())
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
-            .with_state(automation);
+            .with_state(automation.clone());
         router = router.merge(group);
+
+        // The renderer's endpoints, WITHOUT the CSRF layer — they carry a
+        // bearer token rather than a cookie, so there is no ambient credential
+        // for CSRF to protect, and the headless browser has no cookie to echo.
+        // See `render_router`'s own comment for what shipping this inside the
+        // layered group actually did.
+        let render = Router::new()
+            .nest("/api", egret_automation::render_router())
+            .with_state(automation);
+        router = router.merge(render);
     }
 
     if let Some(notebook) = state.notebook.clone() {
