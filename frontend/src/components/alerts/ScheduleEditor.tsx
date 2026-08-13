@@ -30,16 +30,16 @@ import { toast } from "sonner";
 export const FORM_ID = "schedule-editor";
 
 /** The sections the editor is split across, in nav order. */
-export type SectionKey = "general" | "what" | "schedule" | "notification" | "advanced";
+export type SectionKey = "general" | "what" | "schedule" | "notification";
 
 export const SECTIONS: { key: SectionKey; label: (isAlert: boolean) => string }[] = [
   { key: "general", label: () => "General" },
   { key: "what", label: (a) => (a ? "Condition" : "Contents") },
   { key: "schedule", label: () => "Schedule" },
   { key: "notification", label: () => "Notification" },
-  { key: "advanced", label: () => "Advanced" },
 ];
 import { ConfigSection } from "@/components/form/ConfigSection";
+import { TagCombobox } from "@/components/ui/tag-combobox";
 import { DestinationList } from "./DestinationList";
 import { toDestinations, toRecipients, type Destination } from "./destinations";
 import { SUBJECT_TOKENS, renderSubject } from "@/lib/subjectTemplate";
@@ -233,6 +233,12 @@ export function ScheduleEditor({
   }, [error]);
 
   const isAlert = type === "alert";
+  /** A stored owner is a user id; a chip has to show the person. An id with no
+   *  matching member is shown as itself rather than hidden — a former member
+   *  still owns the schedule, and silently dropping them from the field would
+   *  delete them on the next save. */
+  const memberName = (id: string) =>
+    userMembers.find((m) => m.principal_id === id)?.principal_name ?? id;
   const defaultTarget =
     targetId || (targetKind === "dashboard" ? dashboards?.[0]?.id : charts?.[0]?.id) || "";
 
@@ -407,7 +413,7 @@ export function ScheduleEditor({
       <ConfigSection
         level={2}
         title="General"
-        description="What this is called, and whether it runs at all."
+        description="What this is called, who owns it, and whether it runs at all."
       >
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="sched-name">Name</Label>
@@ -424,6 +430,43 @@ export function ScheduleEditor({
             value={description}
             onChange={(e) => setDescription(e.target.value)}
           />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          {/* No `htmlFor`: the control is a combobox, not an element with an
+              id, and it carries its own `aria-label`. A label pointing at an
+              id that no longer exists is worse than none — it silently stops
+              focusing anything. */}
+          <span className="text-sm font-medium">Owners</span>
+          {/* A picker, not a `<select multiple>`. The raw control was tolerable
+              while it sat in an Advanced tab nobody opened; in General it is
+              the third thing you see, and it cannot show who is selected
+              without scrolling a grey box. `creatable` is off — an owner has
+              to be a member of this workspace, so a typed string is never a
+              valid one. */}
+          <TagCombobox
+            values={owners}
+            onChange={setOwners}
+            ariaLabel="Owners"
+            placeholder={owners.length ? "Add another owner…" : "Search people…"}
+            creatable={false}
+            queryKey={["alerts", "owner-suggest", ws]}
+            labelFor={(id) => memberName(id)}
+            suggest={async (q) => {
+              const needle = q.trim().toLowerCase();
+              return userMembers
+                .filter((m) =>
+                  needle ? (m.principal_name ?? m.principal_id).toLowerCase().includes(needle) : true,
+                )
+                .map((m) => ({
+                  value: m.principal_id,
+                  label: m.principal_name ?? m.principal_id,
+                }));
+            }}
+          />
+          <p className="text-xs text-muted-foreground">
+            The query runs with an owner&apos;s permissions. Leave empty and you become the
+            owner; naming several keeps it running when one person leaves.
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <Checkbox
@@ -820,6 +863,49 @@ export function ScheduleEditor({
             </p>
           </>
         )}
+
+        {/* The timers live HERE, not in an "Advanced" tab of their own — they
+            are all statements about WHEN, which is what this section is. That
+            is also how Superset divides it, and splitting them out left this
+            section with two fields and the General one with three. */}
+        <div className="flex gap-2 border-t pt-4">
+          <div className="flex flex-1 flex-col gap-1.5">
+            <Label htmlFor="sched-grace">Grace period (seconds)</Label>
+            <Input
+              id="sched-grace"
+              value={gracePeriod}
+              onChange={(e) => setGracePeriod(e.target.value)}
+              inputMode="numeric"
+            />
+          </div>
+          <div className="flex flex-1 flex-col gap-1.5">
+            <Label htmlFor="sched-timeout">Working timeout (seconds)</Label>
+            <Input
+              id="sched-timeout"
+              value={workingTimeout}
+              onChange={(e) => setWorkingTimeout(e.target.value)}
+              inputMode="numeric"
+            />
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          After firing, an alert stays quiet for the grace period so a condition that stays
+          true does not mail every tick. The working timeout is when a run that never
+          finished is reclaimed.
+        </p>
+
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="sched-retention">Run log retention (days)</Label>
+          <Input
+            id="sched-retention"
+            value={logRetention}
+            onChange={(e) => setLogRetention(e.target.value)}
+            inputMode="numeric"
+          />
+          <p className="text-xs text-muted-foreground">
+            How long a finished run stays in the log before it is pruned.
+          </p>
+        </div>
       </ConfigSection>
       )}
 
@@ -951,6 +1037,28 @@ export function ScheduleEditor({
                   <p className="text-xs text-muted-foreground">
                     If it cannot be rendered the alert still sends, with the rows alone.
                   </p>
+                  <div className="flex gap-2">
+                    <div className="flex flex-1 flex-col gap-1.5">
+                      <Label htmlFor="sched-width">Image width (px)</Label>
+                      <Input
+                        id="sched-width"
+                        value={customWidth}
+                        onChange={(e) => setCustomWidth(e.target.value)}
+                        placeholder="default"
+                        inputMode="numeric"
+                      />
+                    </div>
+                    <div className="flex flex-1 flex-col gap-1.5">
+                      <Label htmlFor="sched-height">Image height (px)</Label>
+                      <Input
+                        id="sched-height"
+                        value={customHeight}
+                        onChange={(e) => setCustomHeight(e.target.value)}
+                        placeholder="default"
+                        inputMode="numeric"
+                      />
+                    </div>
+                  </div>
                 </div>
               )}
             </>
@@ -990,100 +1098,6 @@ export function ScheduleEditor({
       </ConfigSection>
       )}
 
-      {section === "advanced" && (
-      <ConfigSection
-        level={2}
-        title="Advanced"
-        description="Ownership, the timers that govern re-firing and stuck runs, and how long the run log is kept."
-      >
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-owners">Owners</Label>
-            <select
-              id="sched-owners"
-              multiple
-              size={Math.min(5, Math.max(3, userMembers.length))}
-              className="rounded-md border border-input bg-background px-2 py-1 text-sm"
-              value={owners}
-              onChange={(e) =>
-                setOwners(Array.from(e.target.selectedOptions).map((o) => o.value))
-              }
-            >
-              {userMembers.map((m) => (
-                <option key={m.principal_id} value={m.principal_id}>
-                  {m.principal_name ?? m.principal_id}
-                </option>
-              ))}
-            </select>
-            <p className="text-xs text-muted-foreground">
-              The query runs with an owner&apos;s permissions. Leave empty and you become the
-              owner; naming several keeps it running when one person leaves.
-            </p>
-          </div>
-
-          <div className="flex gap-2">
-            <div className="flex flex-1 flex-col gap-1.5">
-              <Label htmlFor="sched-grace">Grace period (seconds)</Label>
-              <Input
-                id="sched-grace"
-                value={gracePeriod}
-                onChange={(e) => setGracePeriod(e.target.value)}
-                inputMode="numeric"
-              />
-            </div>
-            <div className="flex flex-1 flex-col gap-1.5">
-              <Label htmlFor="sched-timeout">Working timeout (seconds)</Label>
-              <Input
-                id="sched-timeout"
-                value={workingTimeout}
-                onChange={(e) => setWorkingTimeout(e.target.value)}
-                inputMode="numeric"
-              />
-            </div>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            After firing, an alert stays quiet for the grace period so a condition that stays
-            true does not mail every tick. The working timeout is when a run that never
-            finished is reclaimed.
-          </p>
-
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-retention">Run log retention (days)</Label>
-            <Input
-              id="sched-retention"
-              value={logRetention}
-              onChange={(e) => setLogRetention(e.target.value)}
-              inputMode="numeric"
-            />
-          </div>
-
-          {(!isAlert || attachTarget) && (
-            <div className="flex gap-2">
-              <div className="flex flex-1 flex-col gap-1.5">
-                <Label htmlFor="sched-width">Image width (px)</Label>
-                <Input
-                  id="sched-width"
-                  value={customWidth}
-                  onChange={(e) => setCustomWidth(e.target.value)}
-                  placeholder="default"
-                  inputMode="numeric"
-                />
-              </div>
-              <div className="flex flex-1 flex-col gap-1.5">
-                <Label htmlFor="sched-height">Image height (px)</Label>
-                <Input
-                  id="sched-height"
-                  value={customHeight}
-                  onChange={(e) => setCustomHeight(e.target.value)}
-                  placeholder="default"
-                  inputMode="numeric"
-                />
-              </div>
-            </div>
-          )}
-        </div>
-      </ConfigSection>
-      )}
 
     </form>
   );

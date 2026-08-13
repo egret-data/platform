@@ -8,7 +8,6 @@ import {
   Globe,
   Send,
   Settings2,
-  SlidersHorizontal,
 } from "lucide-react";
 import { useSchedule, type ScheduleType } from "@/api/alerts";
 import {
@@ -33,7 +32,6 @@ const SECTION_ICONS: Record<SectionKey, typeof Bell> = {
   what: Filter,
   schedule: CalendarClock,
   notification: Send,
-  advanced: SlidersHorizontal,
 };
 
 /**
