@@ -2,13 +2,17 @@ import { defineConfig, configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
 
+// `import.meta.dirname` rather than `__dirname`: Vite 8's native config loader cannot
+// see CJS globals, and warns that it will become the default in a future major.
+const here = import.meta.dirname;
+
 export default defineConfig({
   plugins: [react()],
-  resolve: { alias: { "@": path.resolve(__dirname, "src") } },
+  resolve: { alias: { "@": path.resolve(here, "src") } },
   // `frontend/` carries its own lockfile, so Vite infers it as the workspace root and refuses
   // to load anything above it — which is where the harness script lives. Test-only config; the
   // dev/build server (vite.config.ts) keeps the default.
-  server: { fs: { allow: [path.resolve(__dirname, "..")] } },
+  server: { fs: { allow: [path.resolve(here, "..")] } },
   test: {
     environment: "jsdom",
     globals: true,

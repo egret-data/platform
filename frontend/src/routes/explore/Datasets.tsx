@@ -75,7 +75,8 @@ export default function Datasets() {
       return hay.includes(q);
     });
     r = [...r].sort((a, b) => {
-      let cmp = 0;
+      // No initializer: every branch below assigns, and eslint 10 flags the dead one.
+      let cmp: number;
       if (sort.key === "name") cmp = a.name.localeCompare(b.name);
       else if (sort.key === "column_count") cmp = a.column_count - b.column_count;
       else cmp = a.updated_at.localeCompare(b.updated_at);

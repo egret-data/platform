@@ -55,7 +55,8 @@ export default function Charts() {
       return [c.name, vizLabel(c.viz_type)].join(" ").toLowerCase().includes(q);
     });
     r = [...r].sort((a, b) => {
-      let cmp = 0;
+      // No initializer: every branch below assigns, and eslint 10 flags the dead one.
+      let cmp: number;
       if (sort.key === "name") cmp = a.name.localeCompare(b.name);
       else if (sort.key === "viz_type") cmp = vizLabel(a.viz_type).localeCompare(vizLabel(b.viz_type));
       else cmp = a.updated_at.localeCompare(b.updated_at);

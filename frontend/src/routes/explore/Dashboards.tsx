@@ -58,7 +58,8 @@ export default function Dashboards() {
       return d.name.toLowerCase().includes(q);
     });
     r = [...r].sort((a, b) => {
-      let cmp = 0;
+      // No initializer: every branch below assigns, and eslint 10 flags the dead one.
+      let cmp: number;
       if (sort.key === "name") cmp = a.name.localeCompare(b.name);
       else if (sort.key === "card_count") cmp = a.card_count - b.card_count;
       else cmp = a.updated_at.localeCompare(b.updated_at);

@@ -72,6 +72,9 @@ vi.mock("@monaco-editor/react", () => ({
     // doesn't trigger React's "setState while rendering a different component"
     // warning, and (b) a re-render caused by that very setState doesn't wipe
     // monacoStub's captured commands/listener before the test can use them.
+    // This IS a component — an anonymous arrow assigned to the mock's `default`,
+    // so the rule sees a function named "default" and cannot recognise it as one.
+    // eslint-disable-next-line react-hooks/rules-of-hooks
     useEffect(() => {
       monacoStub.reset();
       onMount?.(editor, monaco);

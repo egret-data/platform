@@ -22,6 +22,22 @@ export default tseslint.config(
     },
     rules: {
       ...reactHooks.configs.recommended.rules,
+      // eslint-plugin-react-hooks 7 folded the React Compiler's static analysis into
+      // `recommended`, and those rules land as errors on code written years before
+      // them: 63 set-state-in-effect, 46 refs, and a handful more. Fixing them means
+      // restructuring effects across the app — real work, but product work, not part
+      // of moving the linter to ESLint 10. They are warnings so the backlog is
+      // visible and CI stays honest about what actually regressed; drop each one back
+      // to its default as its call sites are cleaned up.
+      //
+      // `rules-of-hooks` deliberately stays an error. It fires exactly twice, both
+      // false positives, and both carry a targeted disable naming the reason.
+      'react-hooks/set-state-in-effect': 'warn',
+      'react-hooks/refs': 'warn',
+      'react-hooks/immutability': 'warn',
+      'react-hooks/static-components': 'warn',
+      'react-hooks/use-memo': 'warn',
+      'react-hooks/purity': 'warn',
       // react-refresh: conflicts with shadcn/cva pattern that exports
       // both a component and its variants helper from the same file.
       // Off across the board since Egret uses shadcn extensively.

@@ -35,6 +35,10 @@ let registered = false;
 /** Register only the ECharts modules this app uses (tree-shaken). Idempotent. */
 export function registerEChartsModules() {
   if (registered) return;
+  // Not React's `use` hook — this is echarts/core's module registration, imported
+  // above. eslint-plugin-react-hooks 7 matches the bare identifier and cannot tell
+  // the two apart.
+  // eslint-disable-next-line react-hooks/rules-of-hooks
   use([
     SVGRenderer,
     BarChart, LineChart, ScatterChart, SunburstChart, GaugeChart, FunnelChart, BoxplotChart, SankeyChart, MapChart,

@@ -3,9 +3,12 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
+// See vitest.config.ts — Vite 8's native config loader has no CJS `__dirname`.
+const here = import.meta.dirname;
+
 export default defineConfig(({ mode }) => ({
   plugins: [react(), tailwindcss()],
-  resolve: { alias: { "@": path.resolve(__dirname, "src") } },
+  resolve: { alias: { "@": path.resolve(here, "src") } },
   // react-grid-layout (via react-draggable) reads `process.env`, which isn't defined
   // in the browser under Vite — it throws on drag. Provide NODE_ENV (for prod
   // dead-code elimination) and an empty fallback for any other process.env reads.
