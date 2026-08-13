@@ -6,6 +6,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ScheduleRun, ScheduleSummary } from "@/api/alerts";
 
+// `vi.hoisted`: the mock factory is lifted above every `const`, so a plain
+// top-level spy is not initialised yet when the factory runs.
+const { toastSuccess } = vi.hoisted(() => ({ toastSuccess: vi.fn() }));
+vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: vi.fn() } }));
+
 const schedulesMock = vi.fn();
 const scheduleMock = vi.fn(
   (): { data: unknown; isLoading: boolean } => ({ data: undefined, isLoading: false }),
@@ -186,6 +191,20 @@ describe("Alerts & Reports editor page", () => {
     expect(body.grace_period_s).toBe(600);
     // Blank stays blank rather than becoming 0, which the server rejects.
     expect(body.working_timeout_s).toBe(3600);
+  });
+
+  it("acknowledges a save, rather than navigating away in silence", async () => {
+    // Saving leaves the page, so with no toast the write lands with no
+    // acknowledgement at all — every other mutation in this app says what it
+    // did, and a silent success reads as a lost click.
+    const user = userEvent.setup();
+    renderEditor();
+    await user.type(screen.getByLabelText(/^name$/i), "acknowledged");
+    await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
   });
 
   it("keeps the raw cron field for an expression the picker cannot express", async () => {

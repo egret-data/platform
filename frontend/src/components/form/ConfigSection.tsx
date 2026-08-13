@@ -10,18 +10,29 @@ export function ConfigSection({
   title,
   description,
   docsUrl,
+  level = 3,
   children,
 }: {
   title: string;
   description?: string;
   docsUrl?: string;
+  /**
+   * Heading level, so the document outline stays sequential.
+   *
+   * Defaults to 3, which is right where these sit under a page h1 AND an h2
+   * (EngineDetail's tabs). A page that puts them directly under its h1 passes
+   * 2 — otherwise the outline jumps h1 → h3, which a screen-reader user
+   * navigating by heading hears as a missing level.
+   */
+  level?: 2 | 3;
   children: ReactNode;
 }) {
+  const Heading = level === 2 ? "h2" : "h3";
   return (
     <section className="rounded-lg border p-4 space-y-4">
       <div className="space-y-1">
         <div className="flex items-center gap-1.5">
-          <h3 className="text-sm font-medium">{title}</h3>
+          <Heading className="text-sm font-medium">{title}</Heading>
           {docsUrl ? (
             <a
               href={docsUrl}

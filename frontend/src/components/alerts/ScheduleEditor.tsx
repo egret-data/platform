@@ -24,6 +24,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AlertCircle } from "lucide-react";
+import { toast } from "sonner";
 
 /** The form's id, so the page header's Save button can submit it from outside. */
 export const FORM_ID = "schedule-editor";
@@ -333,6 +334,10 @@ export function ScheduleEditor({
       } else {
         await create.mutateAsync(body as never);
       }
+      // Saving navigates back to the list, so without this the write lands with
+      // no acknowledgement at all — every other mutation in this app says what
+      // it did, and a silent success reads as a lost click.
+      toast.success(scheduleId ? "Saved" : `${isAlert ? "Alert" : "Report"} created`);
       onDone();
     } catch (err) {
       // The server's message names the field to fix ("an alert needs sql",
@@ -369,6 +374,7 @@ export function ScheduleEditor({
       )}
 
       <ConfigSection
+        level={2}
         title="General"
         description="What this is called, and whether it runs at all."
       >
@@ -403,6 +409,7 @@ export function ScheduleEditor({
 
       {isAlert ? (
         <ConfigSection
+          level={2}
           title="Alert condition"
           description="The query to run, and what about its result makes this fire."
         >
@@ -529,6 +536,7 @@ export function ScheduleEditor({
         </ConfigSection>
       ) : (
         <ConfigSection
+          level={2}
           title="Contents"
           description="Which object to deliver, and in what format."
         >
@@ -639,7 +647,11 @@ export function ScheduleEditor({
         </ConfigSection>
       )}
 
-      <ConfigSection title="Schedule" description="When it runs, in which timezone.">
+      <ConfigSection
+        level={2}
+        title="Schedule"
+        description="When it runs, in which timezone."
+      >
 
         {rawCron ? (
           <>
@@ -832,6 +844,7 @@ export function ScheduleEditor({
       </ConfigSection>
 
       <ConfigSection
+        level={2}
         title="Notification"
         description="Who hears about it, through which channels, and what the message says."
       >
