@@ -42,6 +42,11 @@ deps:
     user: egret
     password: egret
     db: egret
+  # A mail catcher, so the dev stack can READ a report's email instead of
+  # assuming it. Never for a real deployment — see deps-mailpit.yaml.
+  mailpit:
+    enabled: true
+    image: axllent/mailpit:latest
   minio:
     image: minio/minio:latest
     mcImage: minio/mc:latest

@@ -19,11 +19,20 @@
 \else
   \set ws demo
 \endif
+-- Where the seeded SMTP row points. `localhost` suits the docker-compose
+-- stack; a cluster needs the service name, because localhost there is the
+-- egret pod itself.
+\if :{?smtp_host}
+\else
+  \set smtp_host localhost
+\endif
 SELECT set_config('seed.ws', :'ws', false);
+SELECT set_config('seed.smtp_host', :'smtp_host', false);
 
 DO $seed$
 DECLARE
   ws_slug  text := current_setting('seed.ws');
+  smtp_host text := current_setting('seed.smtp_host');
   ws       uuid;
   owner_id uuid;
   db       uuid;
@@ -297,11 +306,14 @@ BEGIN
      NULL, NULL, now() - interval '18 hours' + interval '7 seconds');
 
   ------------------------------------------------------------------- SMTP ----
-  -- Points at mailpit from `deploy/docker-compose.dev.yml`. No username, so no
-  -- vault row is needed and `smtp_auth_is_complete` is satisfied.
+  -- Points at mailpit. The HOST is a parameter because the answer differs by
+  -- stack: `localhost` for `deploy/docker-compose.dev.yml`, the service name
+  -- inside a cluster. Hardcoding `localhost` meant every kind run had someone
+  -- editing this row by hand, which is not a seed.
+  -- No username, so no vault row is needed and `smtp_auth_is_complete` holds.
   INSERT INTO automation.smtp_config
     (workspace_id, host, port, username, from_address, from_name, tls_mode, password_secret_id, updated_by)
-  VALUES (ws, 'localhost', 1025, NULL, 'alerts@egret.local', 'egret alerts', 'none', NULL, owner_id)
+  VALUES (ws, smtp_host, 1025, NULL, 'alerts@egret.local', 'egret alerts', 'none', NULL, owner_id)
   ON CONFLICT (workspace_id) DO UPDATE
      SET host = EXCLUDED.host, port = EXCLUDED.port, from_address = EXCLUDED.from_address,
          from_name = EXCLUDED.from_name, tls_mode = EXCLUDED.tls_mode, updated_at = now();

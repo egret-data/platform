@@ -1,0 +1,44 @@
+{{/* `default dict` so an upgrade with --reuse-values from a release predating
+     this key renders instead of nil-pointering — which is exactly how this
+     template first failed. */}}
+{{- if and .Values.deps.enabled ((.Values.deps.mailpit | default dict).enabled) }}
+# A mail catcher for the dev stack, so a report's email can be READ rather than
+# assumed. Declared here because it was not: it existed on the kind cluster as a
+# hand-created pod nobody could reproduce, while `deploy/seed-alerts.sql` pointed
+# the demo workspace's SMTP at `localhost:1025` — right for docker-compose, wrong
+# in a cluster, so someone had to edit the row by hand every time.
+#
+# Gated on `deps.enabled` like postgres and minio: a real deployment brings its
+# own relay, and a catcher that silently swallowed production mail would be the
+# worst possible default.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mailpit
+  namespace: {{ .Release.Namespace }}
+  labels: { app: mailpit }
+spec:
+  containers:
+    - name: mailpit
+      image: {{ .Values.deps.mailpit.image }}
+      ports:
+        - { name: smtp, containerPort: 1025 }
+        - { name: http, containerPort: 8025 }
+      readinessProbe:
+        tcpSocket: { port: 1025 }
+        initialDelaySeconds: 2
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mailpit
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: mailpit }
+  ports:
+    - { name: smtp, port: 1025, targetPort: 1025 }
+    - { name: http, port: 8025, targetPort: 8025 }
+{{- end }}
