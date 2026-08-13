@@ -11024,7 +11024,7 @@
         "tags": [
           "alerts"
         ],
-        "summary": "A bookmark is the CALLER's own, so it needs no `alert:manage` — a viewer\nmay star what they can read.",
+        "summary": "A bookmark is the CALLER's own, so it needs no `alert:manage` — a viewer\nmay star what they can READ, which is now a permission that exists and is\ntherefore checked rather than described.",
         "operationId": "bookmark_add",
         "parameters": [
           {

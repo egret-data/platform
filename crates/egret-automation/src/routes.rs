@@ -28,6 +28,20 @@ use crate::repo::ScheduleRepo;
 /// `WsContext` has already enforced by the time a handler runs.
 const MANAGE: &str = "alert:manage";
 
+/// Reading a schedule.
+///
+/// Added by migration 0113 and, until now, checked NOWHERE on alerts — the
+/// generic folder router was its only consumer, so a permission whose whole
+/// name says "may view alerts" granted nothing on the alerts themselves.
+/// Meanwhile `detail` and `runs` had no gate at all: workspace membership plus
+/// the `alerts` entitlement was enough to read any schedule's SQL, its
+/// database, its recipient addresses, and the engine errors in its run log.
+///
+/// Held by all three seeded workspace roles (`ws_viewer`, `ws_editor`,
+/// `ws_admin`), so ordinary members keep the access they had. A workspace
+/// using a hand-made role predating 0113 will need it granted.
+const READ: &str = "alert:read";
+
 /// How many runs the drawer asks for. Bounded server-side so a client cannot
 /// turn the run log into an unpaged table scan.
 const RUNS_LIMIT: i64 = 100;
@@ -194,6 +208,9 @@ async fn list(
     WsContext(ctx): WsContext,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<ScheduleSummaryDto>>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, READ)
+        .await
+        .map_err(AutomationApiError::from)?;
     let rows = st
         .schedules
         .list(
@@ -265,6 +282,9 @@ async fn detail(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<ScheduleDetailDto>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, READ)
+        .await
+        .map_err(AutomationApiError::from)?;
     load_detail(&st, ctx.workspace_id.0, id).await
 }
 
@@ -379,6 +399,9 @@ async fn runs(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<Vec<RunDto>>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, READ)
+        .await
+        .map_err(AutomationApiError::from)?;
     // The schedule must be visible in this workspace before its runs are, or
     // the child would leak the existence of a parent that 404s.
     if st
@@ -589,7 +612,8 @@ async fn set_folder(
 }
 
 /// A bookmark is the CALLER's own, so it needs no `alert:manage` — a viewer
-/// may star what they can read.
+/// may star what they can READ, which is now a permission that exists and is
+/// therefore checked rather than described.
 #[utoipa::path(
     post, path = "/api/ws/{workspace}/alerts/{id}/bookmark", tag = "alerts",
     params(WorkspacePath, ("id" = Uuid, Path, description = "Schedule id")),
@@ -604,6 +628,9 @@ async fn bookmark_add(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<egret_core::Ack>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, READ)
+        .await
+        .map_err(AutomationApiError::from)?;
     st.schedules
         .add_bookmark(ctx.principal.user_id.0, id)
         .await
@@ -625,6 +652,11 @@ async fn bookmark_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<egret_core::Ack>, AutomationApiError> {
+    // Deliberately NOT gated on READ, unlike `bookmark_add`. This deletes a row
+    // about the caller and nobody else; if someone loses `alert:read` while a
+    // bookmark exists, refusing to let them clear it strands a star they can
+    // neither see nor remove. Adding is gated because bookmarking something you
+    // cannot read is a (weak) test for whether it exists.
     st.schedules
         .remove_bookmark(ctx.principal.user_id.0, id)
         .await
