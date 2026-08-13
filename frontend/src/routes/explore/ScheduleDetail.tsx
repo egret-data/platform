@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DetailFact } from "@/components/layout/DetailFact";
+import { RunLogTable } from "@/components/alerts/RunLogTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { StateBadge } from "./Alerts";
@@ -220,6 +221,25 @@ export default function ScheduleDetail() {
             <Button type="submit" form={FORM_ID} disabled={busy}>
               {isNew ? "Create" : "Save"}
             </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Below the actions, because it is not part of the form: the rows above
+          are what you CHANGE, these are what happened. It answers the question
+          the header's badge raises — an "Error" chip with no error on the same
+          screen sends you to the list to open a dialog for it — and it is why
+          a short section like General no longer ends in half a screen of
+          white. A slice, not the log: the drawer on the list is still where
+          the whole history lives. */}
+      {!isNew && !isError && id && (
+        <div className="mt-6">
+          <h2 className="text-sm font-medium">Recent runs</h2>
+          <p className="mb-2 text-xs text-muted-foreground">
+            The last five, newest first.
+          </p>
+          <div className="rounded-lg border px-4 py-1">
+            <RunLogTable ws={ws} scheduleId={id} limit={5} />
           </div>
         </div>
       )}

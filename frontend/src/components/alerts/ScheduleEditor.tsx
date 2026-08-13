@@ -415,21 +415,28 @@ export function ScheduleEditor({
         title="General"
         description="What this is called, who owns it, and whether it runs at all."
       >
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-name">Name</Label>
-          <Input
-            id="sched-name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-          />
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-desc">Description</Label>
-          <Input
-            id="sched-desc"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
+        {/* Two up. Both are single-line inputs holding a handful of words, and
+            a full-width row each left the section mostly white space with the
+            fields stretched past any length they will ever hold. The pair that
+            keeps its own row below is Owners, whose helper line is long enough
+            to unbalance a cell beside it. */}
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="sched-name">Name</Label>
+            <Input
+              id="sched-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="sched-desc">Description</Label>
+            <Input
+              id="sched-desc"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </div>
         </div>
         <div className="flex flex-col gap-1.5">
           {/* No `htmlFor`: the control is a combobox, not an element with an
@@ -868,8 +875,11 @@ export function ScheduleEditor({
             are all statements about WHEN, which is what this section is. That
             is also how Superset divides it, and splitting them out left this
             section with two fields and the General one with three. */}
-        <div className="flex gap-2 border-t pt-4">
-          <div className="flex flex-1 flex-col gap-1.5">
+        {/* Three up: every one is a number answering "how long", and one short
+            numeric field per full-width row is most of what made this section
+            look empty. */}
+        <div className="grid grid-cols-1 gap-4 border-t pt-4 sm:grid-cols-3">
+          <div className="flex flex-col gap-1.5">
             <Label htmlFor="sched-grace">Grace period (seconds)</Label>
             <Input
               id="sched-grace"
@@ -878,7 +888,7 @@ export function ScheduleEditor({
               inputMode="numeric"
             />
           </div>
-          <div className="flex flex-1 flex-col gap-1.5">
+          <div className="flex flex-col gap-1.5">
             <Label htmlFor="sched-timeout">Working timeout (seconds)</Label>
             <Input
               id="sched-timeout"
@@ -887,25 +897,21 @@ export function ScheduleEditor({
               inputMode="numeric"
             />
           </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="sched-retention">Run log retention (days)</Label>
+            <Input
+              id="sched-retention"
+              value={logRetention}
+              onChange={(e) => setLogRetention(e.target.value)}
+              inputMode="numeric"
+            />
+          </div>
         </div>
         <p className="text-xs text-muted-foreground">
           After firing, an alert stays quiet for the grace period so a condition that stays
           true does not mail every tick. The working timeout is when a run that never
-          finished is reclaimed.
+          finished is reclaimed, and retention is how long a finished run stays in the log.
         </p>
-
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-retention">Run log retention (days)</Label>
-          <Input
-            id="sched-retention"
-            value={logRetention}
-            onChange={(e) => setLogRetention(e.target.value)}
-            inputMode="numeric"
-          />
-          <p className="text-xs text-muted-foreground">
-            How long a finished run stays in the log before it is pruned.
-          </p>
-        </div>
       </ConfigSection>
       )}
 

@@ -539,6 +539,42 @@ describe("Alerts & Reports editor page", () => {
     expect(screen.queryByRole("button", { name: "data-team" })).not.toBeInTheDocument();
   });
 
+  it("shows recent runs under the form, so the badge's question has an answer", async () => {
+    // The header says "Error". Without the runs on the same screen the only
+    // way to read the error is to go back to the list and open a dialog.
+    runsMock.mockReturnValue({
+      data: [
+        {
+          id: "r1",
+          state: "error",
+          started_at: "2026-08-11T09:00:00Z",
+          ended_at: "2026-08-11T09:00:02Z",
+          value: null,
+          error: "line 1:8: Column 'oops' cannot be resolved",
+          notification_sent_at: null,
+        },
+      ] as ScheduleRun[],
+      isLoading: false,
+    });
+    scheduleMock.mockReturnValue({
+      data: { ...row({ last_state: "error" }), sql: "SELECT 1", recipients: [], targets: [] },
+      isLoading: false,
+    });
+    renderEditor("/explore/eng/alerts/s1");
+
+    expect(await screen.findByRole("heading", { name: /recent runs/i })).toBeInTheDocument();
+    expect(screen.getByText(/cannot be resolved/i)).toBeInTheDocument();
+  });
+
+  it("shows no runs panel on a schedule that does not exist yet", async () => {
+    // There is nothing to have run, and an empty "Recent runs" card on the
+    // create page is a promise the page cannot keep.
+    renderEditor();
+
+    expect(await screen.findByRole("heading", { name: /new alert/i })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /recent runs/i })).not.toBeInTheDocument();
+  });
+
   it("heads the page with what the schedule IS, before any field", async () => {
     // The three questions a reader has before editing anything: is it on,
     // when does it run, and in which timezone. The crontab is humanised —
