@@ -77,6 +77,49 @@ const GATE_CALLS: &[&str] = &[
     "require_object(",
 ];
 
+/// Functions that exist ONLY to map a route parameter to the permission keys a
+/// gate call then uses, so the literal never appears on a gate line.
+///
+/// The generic folder router is the case: `kind_perms("alerts")` returns
+/// `("alert", "alert:read", "alert:manage")`, and the handler gates with
+/// `authz::require(&*st.pdp, &ctx, read)` — a variable. Every literal in such a
+/// function is a key that IS enforced; without this the scan reports
+/// `alert:read` (and would report any future kind added the same way) as
+/// enforced nowhere, which is a false alarm on a test whose whole value is that
+/// it does not cry wolf.
+///
+/// Deliberately a NAMED list rather than "any tuple of permission literals":
+/// the point of the test is that a key nobody gates is caught, and a rule broad
+/// enough to match any table would let a genuinely dead key hide in one.
+const PERM_TABLE_FNS: &[&str] = &["fn kind_perms("];
+
+/// Permission literals inside the body of a `PERM_TABLE_FNS` function.
+///
+/// The body is taken from the `fn` line to the first line that closes it at
+/// column 0 (`}`), which is how every function in these files is formatted.
+fn perm_table_literals(src: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut inside = false;
+    for line in src.lines() {
+        if !inside {
+            inside = PERM_TABLE_FNS.iter().any(|f| line.contains(f));
+            continue;
+        }
+        if line == "}" {
+            inside = false;
+            continue;
+        }
+        out.extend(
+            line.split('"')
+                .skip(1)
+                .step_by(2)
+                .filter(|s| is_resource_action_shaped(s))
+                .map(str::to_string),
+        );
+    }
+    out
+}
+
 /// Pull every `"resource:action"`-shaped quoted literal out of a line, but
 /// only from lines that actually invoke one of `GATE_CALLS` — avoids false
 /// hits from unrelated string literals (error messages, etc.) elsewhere in
@@ -143,7 +186,7 @@ fn references_ident_as_word(line: &str, ident: &str) -> bool {
 /// gate-call line resolved back to their defining literal.
 fn enforced_in_file(src: &str) -> HashSet<String> {
     let consts: Vec<(String, String)> = src.lines().filter_map(perm_const_def).collect();
-    let mut out = HashSet::new();
+    let mut out = perm_table_literals(src);
     for line in src.lines() {
         if !GATE_CALLS.iter().any(|g| line.contains(g)) {
             continue;

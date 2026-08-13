@@ -30,16 +30,19 @@ import { toast } from "sonner";
 export const FORM_ID = "schedule-editor";
 
 /** The sections the editor is split across, in nav order. */
-export type SectionKey = "general" | "what" | "schedule" | "notification" | "advanced";
+export type SectionKey = "general" | "what" | "schedule" | "notification";
 
 export const SECTIONS: { key: SectionKey; label: (isAlert: boolean) => string }[] = [
   { key: "general", label: () => "General" },
   { key: "what", label: (a) => (a ? "Condition" : "Contents") },
   { key: "schedule", label: () => "Schedule" },
   { key: "notification", label: () => "Notification" },
-  { key: "advanced", label: () => "Advanced" },
 ];
 import { ConfigSection } from "@/components/form/ConfigSection";
+import { TagCombobox } from "@/components/ui/tag-combobox";
+import { DestinationList } from "./DestinationList";
+import { toDestinations, toRecipients, type Destination } from "./destinations";
+import { SUBJECT_TOKENS, renderSubject } from "@/lib/subjectTemplate";
 
 /**
  * The create/edit form for one schedule.
@@ -120,8 +123,17 @@ export function ScheduleEditor({
   /** Reports only: additional objects delivered in the same message. */
   const [extraTargets, setExtraTargets] = useState<string[]>([]);
   const [reportFormat, setReportFormat] = useState("png");
-  const [emails, setEmails] = useState("");
+  /**
+   * Every destination this schedule delivers to, in order.
+   *
+   * One list rather than an email field + a slack field + a webhook textarea:
+   * the server has always stored `recipients` as a list of `{kind, config}`
+   * and delivered to all of them, so the flat form was the only thing making
+   * "two Slack channels" impossible. See `./destinations.ts`.
+   */
+  const [destinations, setDestinations] = useState<Destination[]>([]);
   const [emailSubject, setEmailSubject] = useState("");
+  const [messageFooter, setMessageFooter] = useState("");
   const [owners, setOwners] = useState<string[]>([]);
   const [gracePeriod, setGracePeriod] = useState("14400");
   const [workingTimeout, setWorkingTimeout] = useState("3600");
@@ -130,19 +142,6 @@ export function ScheduleEditor({
   const [customHeight, setCustomHeight] = useState("");
   /** Alerts only: attach a rendering of this chart/dashboard when it fires. */
   const [attachTarget, setAttachTarget] = useState(false);
-  const [webhooks, setWebhooks] = useState("");
-  const [slackChannel, setSlackChannel] = useState("");
-  const [slackToken, setSlackToken] = useState("");
-  const [slackHasToken, setSlackHasToken] = useState(false);
-  /**
-   * Which webhook URLs already have an HMAC signing secret.
-   *
-   * The secret itself is never sent to a browser — it lives in the vault and
-   * the server reports only `has_secret`. Keeping the SERVER responsible for
-   * carrying it across a save (absent means keep, per `vault_secrets`) is why
-   * this form can send a bare `{ url }` without unsigning anything.
-   */
-  const [signedUrls, setSignedUrls] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
 
   // Populate from the loaded schedule when editing. Keyed on the row's id so
@@ -158,6 +157,7 @@ export function ScheduleEditor({
     setSched(parsed ?? DEFAULT_SCHEDULE);
     setRawCron(parsed === null);
     setMessage(existing.message ?? "");
+    setMessageFooter(existing.message_footer ?? "");
     setSkipIfEmpty(existing.skip_if_empty ?? false);
     setActive(existing.active);
     setSql(existing.sql ?? "");
@@ -191,24 +191,7 @@ export function ScheduleEditor({
     setCustomWidth(existing.custom_width == null ? "" : String(existing.custom_width));
     setCustomHeight(existing.custom_height == null ? "" : String(existing.custom_height));
     setAttachTarget(Boolean(existing.chart_id || existing.dashboard_id));
-    setEmails(
-      existing.recipients
-        .filter((r) => r.kind === "email")
-        .flatMap((r) => ((r.config as { addresses?: string[] }).addresses ?? []))
-        .join(", "),
-    );
-    const hooks = existing.recipients
-      .filter((r) => r.kind === "webhook")
-      .map((r) => r.config as { url?: string; has_secret?: boolean })
-      .filter((c): c is { url: string; has_secret?: boolean } => Boolean(c.url));
-    setWebhooks(hooks.map((c) => c.url).join("\n"));
-    const sl = existing.recipients.find((r) => r.kind === "slack")?.config as
-      | { channel?: string; has_token?: boolean }
-      | undefined;
-    setSlackChannel(sl?.channel ?? "");
-    setSlackHasToken(Boolean(sl?.has_token));
-    setSlackToken("");
-    setSignedUrls(new Set(hooks.filter((c) => c.has_secret).map((c) => c.url)));
+    setDestinations(toDestinations(existing.recipients));
   }, [existing]);
 
   /**
@@ -219,50 +202,51 @@ export function ScheduleEditor({
    * must be http(s)") is off-screen and pressing Save looks like it did
    * nothing at all. Applies to every validation error, not only webhooks.
    */
+  /**
+   * Put a placeholder where the caret is, not at the end.
+   *
+   * Appending looked right until it was clicked: "Weekly overview" + the
+   * button produced `Weekly overview{{date}}`, which SENDS as
+   * "Weekly overview2026-08-13" with no separator. And a subject like
+   * "Orders — {{date}} — EU" is an ordinary thing to want, which an
+   * append-only button cannot write at all.
+   */
+  const subjectRef = useRef<HTMLInputElement>(null);
+  const insertToken = (token: string) => {
+    const el = subjectRef.current;
+    const text = `{{${token}}}`;
+    const at = el?.selectionStart ?? emailSubject.length;
+    const to = el?.selectionEnd ?? emailSubject.length;
+    const next = emailSubject.slice(0, at) + text + emailSubject.slice(to);
+    setEmailSubject(next);
+    // Focus and caret are restored after the value lands, so typing continues
+    // where the placeholder ended rather than jumping to the start.
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(at + text.length, at + text.length);
+    });
+  };
+
   const errorRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (error) errorRef.current?.scrollIntoView({ block: "nearest" });
   }, [error]);
 
   const isAlert = type === "alert";
+  /** A stored owner is a user id; a chip has to show the person. An id with no
+   *  matching member is shown as itself rather than hidden — a former member
+   *  still owns the schedule, and silently dropping them from the field would
+   *  delete them on the next save. */
+  const memberName = (id: string) =>
+    userMembers.find((m) => m.principal_id === id)?.principal_name ?? id;
   const defaultTarget =
     targetId || (targetKind === "dashboard" ? dashboards?.[0]?.id : charts?.[0]?.id) || "";
 
   function buildBody() {
-    const addresses = emails
-      .split(",")
-      .map((e) => e.trim())
-      .filter(Boolean);
-    // One URL per line, not comma-separated like the addresses above: a comma
-    // is legal inside a URL's query string.
-    const urls = webhooks
-      .split("\n")
-      .map((u) => u.trim())
-      .filter(Boolean);
-
-    // Every destination the schedule has, in one list — the update REPLACES
-    // the recipient set, so a kind missing from this array is a kind deleted.
-    const recipients = [
-      ...(addresses.length ? [{ kind: "email" as const, config: { addresses } }] : []),
-      // The URL alone. A `secret` key absent from the body means "keep the one
-      // already stored for this URL" (`ScheduleRepo::vault_secrets`), so the
-      // browser never has to hold a credential to avoid destroying it.
-      ...urls.map((url) => ({ kind: "webhook" as const, config: { url } })),
-      // Same three-way rule as the webhook secret: an absent `token` keeps the
-      // stored one, so the browser never has to hold a credential in order to
-      // avoid destroying it.
-      ...(slackChannel.trim()
-        ? [
-            {
-              kind: "slack" as const,
-              config: {
-                channel: slackChannel.trim(),
-                ...(slackToken.trim() ? { token: slackToken.trim() } : {}),
-              },
-            },
-          ]
-        : []),
-    ];
+    // The update REPLACES the recipient set, so a destination missing from
+    // this array is a destination deleted. Credentials follow the three-way
+    // rule — see `toRecipients`.
+    const recipients = toRecipients(destinations);
 
     // An empty number field means "use the default", not zero — the server
     // would reject 0 for the timers and silently disable retention.
@@ -281,6 +265,7 @@ export function ScheduleEditor({
       owners,
       email_subject: emailSubject.trim() || null,
       message: message.trim() || null,
+      message_footer: messageFooter.trim() || null,
       skip_if_empty: skipIfEmpty,
       grace_period_s: num(gracePeriod, 14400),
       working_timeout_s: num(workingTimeout, 3600),
@@ -405,16 +390,16 @@ export function ScheduleEditor({
   }, [current, existing, scheduleId, name, onDirtyChange]);
 
   return (
-    /* ONE column, bounded to a readable measure. Two columns were tried and are
-       wrong for this form: a grid pads a short section out to the height of the
-       tall one beside it, and CSS `columns` fights `flex` and clips. A
-       twenty-field form reads better as one column anyway — the eye never has
-       to decide which side continues the thought. */
-    <form
-      id={FORM_ID}
-      onSubmit={submit}
-      className="flex max-w-3xl flex-col gap-4"
-    >
+    /* ONE column, and NO width of its own — the PAGE sets the measure, so the
+       header, the tab bar, this form and the action row all share one edge.
+       When the form carried its own `max-w-3xl` it ended short of the tabs
+       above it, which reads as a rendering fault rather than a choice.
+
+       Two columns were tried and are wrong for this form: a grid pads a short
+       section out to the height of the tall one beside it, and CSS `columns`
+       fights `flex` and clips. A twenty-field form reads better as one column
+       anyway — the eye never has to decide which side continues the thought. */
+    <form id={FORM_ID} onSubmit={submit} className="flex flex-col gap-4">
       {error && (
         <div ref={errorRef}>
           <Alert variant="destructive">
@@ -428,23 +413,67 @@ export function ScheduleEditor({
       <ConfigSection
         level={2}
         title="General"
-        description="What this is called, and whether it runs at all."
+        description="What this is called, who owns it, and whether it runs at all."
       >
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-name">Name</Label>
-          <Input
-            id="sched-name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-          />
+        {/* Two up. Both are single-line inputs holding a handful of words, and
+            a full-width row each left the section mostly white space with the
+            fields stretched past any length they will ever hold. The pair that
+            keeps its own row below is Owners, whose helper line is long enough
+            to unbalance a cell beside it. */}
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="sched-name">Name</Label>
+            <Input
+              id="sched-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="sched-desc">Description</Label>
+            <Input
+              id="sched-desc"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </div>
         </div>
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-desc">Description</Label>
-          <Input
-            id="sched-desc"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
+          {/* No `htmlFor`: the control is a combobox, not an element with an
+              id, and it carries its own `aria-label`. A label pointing at an
+              id that no longer exists is worse than none — it silently stops
+              focusing anything. */}
+          <span className="text-sm font-medium">Owners</span>
+          {/* A picker, not a `<select multiple>`. The raw control was tolerable
+              while it sat in an Advanced tab nobody opened; in General it is
+              the third thing you see, and it cannot show who is selected
+              without scrolling a grey box. `creatable` is off — an owner has
+              to be a member of this workspace, so a typed string is never a
+              valid one. */}
+          <TagCombobox
+            values={owners}
+            onChange={setOwners}
+            ariaLabel="Owners"
+            placeholder={owners.length ? "Add another owner…" : "Search people…"}
+            creatable={false}
+            queryKey={["alerts", "owner-suggest", ws]}
+            labelFor={(id) => memberName(id)}
+            suggest={async (q) => {
+              const needle = q.trim().toLowerCase();
+              return userMembers
+                .filter((m) =>
+                  needle ? (m.principal_name ?? m.principal_id).toLowerCase().includes(needle) : true,
+                )
+                .map((m) => ({
+                  value: m.principal_id,
+                  label: m.principal_name ?? m.principal_id,
+                }));
+            }}
           />
+          <p className="text-xs text-muted-foreground">
+            The query runs with an owner&apos;s permissions. Leave empty and you become the
+            owner; naming several keeps it running when one person leaves.
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <Checkbox
@@ -532,59 +561,6 @@ export function ScheduleEditor({
               />
             </div>
           )}
-          <div className="flex flex-col gap-1.5 border-t pt-3">
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="sched-attach"
-                checked={attachTarget}
-                onCheckedChange={(v) => setAttachTarget(v === true)}
-              />
-              <Label htmlFor="sched-attach" className="text-sm font-normal">
-                Attach a chart or dashboard when it fires
-              </Label>
-            </div>
-            {attachTarget && (
-              <div className="mt-1 flex flex-col gap-2 pl-6">
-                <select
-                  aria-label="Attachment object type"
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                  value={targetKind}
-                  onChange={(e) => {
-                    setTargetKind(e.target.value as "dashboard" | "chart");
-                    setTargetId("");
-                  }}
-                >
-                  <option value="dashboard">A dashboard</option>
-                  <option value="chart">A chart</option>
-                </select>
-                <select
-                  aria-label="Attachment object"
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                  value={defaultTarget}
-                  onChange={(e) => setTargetId(e.target.value)}
-                >
-                  {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
-                    <option key={o.id} value={o.id}>
-                      {o.name}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  aria-label="Attachment format"
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                  value={reportFormat}
-                  onChange={(e) => setReportFormat(e.target.value)}
-                >
-                  <option value="png">PNG image</option>
-                  <option value="pdf">PDF</option>
-                </select>
-                <p className="text-xs text-muted-foreground">
-                  The triggering rows are always attached as CSV. This adds a picture of the
-                  object beside them; if it cannot be rendered the alert still sends.
-                </p>
-              </div>
-            )}
-          </div>
         </ConfigSection>
       ) : (
         <ConfigSection
@@ -894,6 +870,48 @@ export function ScheduleEditor({
             </p>
           </>
         )}
+
+        {/* The timers live HERE, not in an "Advanced" tab of their own — they
+            are all statements about WHEN, which is what this section is. That
+            is also how Superset divides it, and splitting them out left this
+            section with two fields and the General one with three. */}
+        {/* Three up: every one is a number answering "how long", and one short
+            numeric field per full-width row is most of what made this section
+            look empty. */}
+        <div className="grid grid-cols-1 gap-4 border-t pt-4 sm:grid-cols-3">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="sched-grace">Grace period (seconds)</Label>
+            <Input
+              id="sched-grace"
+              value={gracePeriod}
+              onChange={(e) => setGracePeriod(e.target.value)}
+              inputMode="numeric"
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="sched-timeout">Working timeout (seconds)</Label>
+            <Input
+              id="sched-timeout"
+              value={workingTimeout}
+              onChange={(e) => setWorkingTimeout(e.target.value)}
+              inputMode="numeric"
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="sched-retention">Run log retention (days)</Label>
+            <Input
+              id="sched-retention"
+              value={logRetention}
+              onChange={(e) => setLogRetention(e.target.value)}
+              inputMode="numeric"
+            />
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          After firing, an alert stays quiet for the grace period so a condition that stays
+          true does not mail every tick. The working timeout is when a run that never
+          finished is reclaimed, and retention is how long a finished run stays in the log.
+        </p>
       </ConfigSection>
       )}
 
@@ -903,33 +921,176 @@ export function ScheduleEditor({
         title="Notification"
         description="Who hears about it, through which channels, and what the message says."
       >
+        {/* Destinations first, content second: "who am I telling" is the
+            question a person answers before "what does it say", and the
+            content fields below describe the email that the Email
+            destination produces. */}
+        <DestinationList value={destinations} onChange={setDestinations} />
+
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="sched-subject">Email subject</Label>
           <Input
             id="sched-subject"
+            ref={subjectRef}
             value={emailSubject}
             onChange={(e) => setEmailSubject(e.target.value)}
             placeholder={
               isAlert ? `[egret] ${name || "name"} triggered` : `[egret] ${name || "name"}`
             }
           />
+          {/* A subject fixed for every edition collapses thirty mails into
+              one thread and nobody can find yesterday's, which is why the
+              placeholders exist and why the preview is here rather than in a
+              tooltip. */}
           <p className="text-xs text-muted-foreground">
-            Leave blank to use the default shown above.
+            Leave blank to use the default shown above. Placeholders:{" "}
+            {SUBJECT_TOKENS.map((t, i) => (
+              <span key={t.token}>
+                {i > 0 && ", "}
+                <button
+                  type="button"
+                  className="font-mono underline hover:text-foreground"
+                  onClick={() => insertToken(t.token)}
+                  title={`Insert ${t.hint}`}
+                >{`{{${t.token}}}`}</button>
+              </span>
+            ))}
+            .
           </p>
+          {emailSubject.includes("{{") && (
+            <p className="text-xs text-muted-foreground">
+              Sends as{" "}
+              <span className="font-medium text-foreground">
+                {renderSubject(emailSubject, name || "name")}
+              </span>
+            </p>
+          )}
         </div>
+
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-message">Message</Label>
+          <Label htmlFor="sched-message">Opening note</Label>
           <Textarea
             id="sched-message"
-            rows={3}
+            rows={2}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             placeholder="Anything the recipient should know — why this exists, who to ask."
           />
           <p className="text-xs text-muted-foreground">
-            Shown at the top of the notification, above the result. Plain text.
+            Above the result, at the top of the notification. Plain text.
           </p>
         </div>
+
+        {/* Between the two notes, because that is where the delivered object
+            physically lands in the mail — "opening note / closing note" reads
+            as two adjacent boxes otherwise.
+
+            For an alert this is also WHERE THE CONTROL BELONGS. It used to sit
+            at the foot of the Condition section, which is about the query and
+            the firing rule; a user looking for "can I send the chart too?"
+            never looked there and concluded the feature did not exist. */}
+        <div className="rounded-md border border-dashed px-3 py-3">
+          {isAlert ? (
+            <>
+              <p className="text-center text-xs text-muted-foreground">
+                The triggering rows go here, always attached as CSV.
+              </p>
+              <div className="mt-2 flex items-center gap-2">
+                <Checkbox
+                  id="sched-attach"
+                  checked={attachTarget}
+                  onCheckedChange={(v) => setAttachTarget(v === true)}
+                />
+                <Label htmlFor="sched-attach" className="text-sm font-normal">
+                  Also show a chart or dashboard
+                </Label>
+              </div>
+              {attachTarget && (
+                <div className="mt-2 flex flex-col gap-2 pl-6">
+                  <select
+                    aria-label="Attachment object type"
+                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                    value={targetKind}
+                    onChange={(e) => {
+                      setTargetKind(e.target.value as "dashboard" | "chart");
+                      setTargetId("");
+                    }}
+                  >
+                    <option value="dashboard">A dashboard</option>
+                    <option value="chart">A chart</option>
+                  </select>
+                  <select
+                    aria-label="Attachment object"
+                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                    value={defaultTarget}
+                    onChange={(e) => setTargetId(e.target.value)}
+                  >
+                    {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.name}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    aria-label="Attachment format"
+                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                    value={reportFormat}
+                    onChange={(e) => setReportFormat(e.target.value)}
+                  >
+                    <option value="png">PNG image, shown here in the message</option>
+                    <option value="pdf">PDF, as a file</option>
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    If it cannot be rendered the alert still sends, with the rows alone.
+                  </p>
+                  <div className="flex gap-2">
+                    <div className="flex flex-1 flex-col gap-1.5">
+                      <Label htmlFor="sched-width">Image width (px)</Label>
+                      <Input
+                        id="sched-width"
+                        value={customWidth}
+                        onChange={(e) => setCustomWidth(e.target.value)}
+                        placeholder="default"
+                        inputMode="numeric"
+                      />
+                    </div>
+                    <div className="flex flex-1 flex-col gap-1.5">
+                      <Label htmlFor="sched-height">Image height (px)</Label>
+                      <Input
+                        id="sched-height"
+                        value={customHeight}
+                        onChange={(e) => setCustomHeight(e.target.value)}
+                        placeholder="default"
+                        inputMode="numeric"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <p className="text-center text-xs text-muted-foreground">
+              {reportFormat === "png"
+                ? "The rendered image goes here, inside the message."
+                : "The report goes here — csv and pdf arrive as a file, text is shown inline."}
+            </p>
+          )}
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="sched-message-footer">Closing note</Label>
+          <Textarea
+            id="sched-message-footer"
+            rows={2}
+            value={messageFooter}
+            onChange={(e) => setMessageFooter(e.target.value)}
+            placeholder="What to do about it — who to contact, where to look next."
+          />
+          <p className="text-xs text-muted-foreground">
+            Below the result, before the link back to egret. Plain text.
+          </p>
+        </div>
+
         <div className="flex items-center gap-2">
           <Checkbox
             id="sched-skip-empty"
@@ -940,156 +1101,9 @@ export function ScheduleEditor({
             Don&apos;t send when there are no rows
           </Label>
         </div>
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-emails">Email recipients</Label>
-          <Input
-            id="sched-emails"
-            value={emails}
-            onChange={(e) => setEmails(e.target.value)}
-            placeholder="on-call@example.com, team@example.com"
-          />
-          <p className="text-xs text-muted-foreground">
-            Comma separated. Sending needs workspace SMTP, which is configured separately.
-          </p>
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-slack">Slack channel</Label>
-          <div className="flex gap-2">
-            <Input
-              id="sched-slack"
-              className="flex-1"
-              value={slackChannel}
-              onChange={(e) => setSlackChannel(e.target.value)}
-              placeholder="#data-alerts"
-            />
-            <Input
-              aria-label="Slack bot token"
-              className="flex-1"
-              type="password"
-              autoComplete="new-password"
-              value={slackToken}
-              onChange={(e) => setSlackToken(e.target.value)}
-              placeholder={slackHasToken ? "Unchanged" : "xoxb-…"}
-            />
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {slackHasToken
-              ? "A bot token is stored. Leave it blank to keep it."
-              : "Needs a bot token with chat:write, and the bot invited to the channel."}
-          </p>
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-webhooks">Webhook URLs</Label>
-          <Textarea
-            id="sched-webhooks"
-            rows={2}
-            value={webhooks}
-            onChange={(e) => setWebhooks(e.target.value)}
-            placeholder="https://hooks.example.com/egret"
-          />
-          <p className="text-xs text-muted-foreground">
-            One per line, http(s). Each fires a POST with the run's result.
-            {signedUrls.size > 0 &&
-              ` ${signedUrls.size === 1 ? "One is" : `${signedUrls.size} are`} HMAC-signed; the secret is stored server-side and kept on save.`}
-          </p>
-        </div>
       </ConfigSection>
       )}
 
-      {section === "advanced" && (
-      <ConfigSection
-        level={2}
-        title="Advanced"
-        description="Ownership, the timers that govern re-firing and stuck runs, and how long the run log is kept."
-      >
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-owners">Owners</Label>
-            <select
-              id="sched-owners"
-              multiple
-              size={Math.min(5, Math.max(3, userMembers.length))}
-              className="rounded-md border border-input bg-background px-2 py-1 text-sm"
-              value={owners}
-              onChange={(e) =>
-                setOwners(Array.from(e.target.selectedOptions).map((o) => o.value))
-              }
-            >
-              {userMembers.map((m) => (
-                <option key={m.principal_id} value={m.principal_id}>
-                  {m.principal_name ?? m.principal_id}
-                </option>
-              ))}
-            </select>
-            <p className="text-xs text-muted-foreground">
-              The query runs with an owner&apos;s permissions. Leave empty and you become the
-              owner; naming several keeps it running when one person leaves.
-            </p>
-          </div>
-
-          <div className="flex gap-2">
-            <div className="flex flex-1 flex-col gap-1.5">
-              <Label htmlFor="sched-grace">Grace period (seconds)</Label>
-              <Input
-                id="sched-grace"
-                value={gracePeriod}
-                onChange={(e) => setGracePeriod(e.target.value)}
-                inputMode="numeric"
-              />
-            </div>
-            <div className="flex flex-1 flex-col gap-1.5">
-              <Label htmlFor="sched-timeout">Working timeout (seconds)</Label>
-              <Input
-                id="sched-timeout"
-                value={workingTimeout}
-                onChange={(e) => setWorkingTimeout(e.target.value)}
-                inputMode="numeric"
-              />
-            </div>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            After firing, an alert stays quiet for the grace period so a condition that stays
-            true does not mail every tick. The working timeout is when a run that never
-            finished is reclaimed.
-          </p>
-
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sched-retention">Run log retention (days)</Label>
-            <Input
-              id="sched-retention"
-              value={logRetention}
-              onChange={(e) => setLogRetention(e.target.value)}
-              inputMode="numeric"
-            />
-          </div>
-
-          {(!isAlert || attachTarget) && (
-            <div className="flex gap-2">
-              <div className="flex flex-1 flex-col gap-1.5">
-                <Label htmlFor="sched-width">Image width (px)</Label>
-                <Input
-                  id="sched-width"
-                  value={customWidth}
-                  onChange={(e) => setCustomWidth(e.target.value)}
-                  placeholder="default"
-                  inputMode="numeric"
-                />
-              </div>
-              <div className="flex flex-1 flex-col gap-1.5">
-                <Label htmlFor="sched-height">Image height (px)</Label>
-                <Input
-                  id="sched-height"
-                  value={customHeight}
-                  onChange={(e) => setCustomHeight(e.target.value)}
-                  placeholder="default"
-                  inputMode="numeric"
-                />
-              </div>
-            </div>
-          )}
-        </div>
-      </ConfigSection>
-      )}
 
     </form>
   );

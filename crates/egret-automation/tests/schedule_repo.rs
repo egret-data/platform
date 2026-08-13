@@ -100,6 +100,7 @@ fn alert(f: &Fixture, name: &str) -> NewSchedule {
         log_retention_days: 90,
         email_subject: None,
         message: None,
+        message_footer: None,
         skip_if_empty: false,
         targets: vec![],
         owners: vec![f.user],
@@ -320,8 +321,10 @@ async fn update_recomputes_next_run_at_when_the_crontab_changes() {
     let before = made.next_run_at.expect("set on create");
 
     let mut changed = alert(&f, "retimed");
-    // Every minute — the next run must move much closer than tomorrow 09:00.
+    // Every minute, so the recomputed value must land on the NEXT minute
+    // boundary — within 60s of now, whatever `before` happened to be.
     changed.crontab = "* * * * *".into();
+    let sent_at = chrono::Utc::now();
     let after = f
         .repo
         .update(f.ws, made.id, &changed, None)
@@ -331,9 +334,17 @@ async fn update_recomputes_next_run_at_when_the_crontab_changes() {
         .next_run_at
         .expect("still set");
 
+    // NOT `after < before`. That assertion failed for exactly one minute a day
+    // and did so on 2026-08-13: the fixture's `0 9 * * *` gives 09:00:00, and
+    // at 08:59:xx "every minute" gives 09:00:00 too, so the two were equal and
+    // the run was red for a reason that had nothing to do with the change
+    // under test. Assert the property the update actually promises — the new
+    // expression governs — rather than an inequality that is only usually a
+    // consequence of it.
     assert!(
-        after < before,
-        "a more frequent crontab must move next_run_at earlier: {after} vs {before}"
+        after > sent_at && after <= sent_at + chrono::Duration::seconds(61),
+        "the new crontab must govern: {after} is not within a minute of {sent_at} \
+         (before was {before})"
     );
 }
 

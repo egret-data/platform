@@ -21,6 +21,7 @@ import {
 } from "./generated/alerts/alerts";
 import type {
   CreateSchedule,
+  RecipientDto,
   RunDto,
   ScheduleDetailDto,
   ScheduleSummaryDto,
@@ -33,6 +34,7 @@ export type RunState = "success" | "working" | "error" | "noop" | "grace";
 export type ScheduleSummary = ScheduleSummaryDto;
 export type ScheduleDetail = ScheduleDetailDto;
 export type ScheduleRun = RunDto;
+export type Recipient = RecipientDto;
 
 /**
  * Schedules in a workspace, optionally narrowed to one tab.

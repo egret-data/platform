@@ -24454,6 +24454,13 @@
             ],
             "description": "A user-authored note carried into the notification body. Distinct from\n`description`, which is the line the LIST shows."
           },
+          "message_footer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The closing note, rendered UNDER the result — `message` opens the\nnotification, this one closes it, and an inline image sits between them.\nDefaulted, so a client written before 0116 keeps working unchanged."
+          },
           "skip_if_empty": {
             "type": "boolean",
             "description": "Metabase's `skip_if_empty`: send nothing when the run produced no rows."
@@ -28481,6 +28488,13 @@
             ],
             "description": "A user-authored note carried into the notification body. Distinct from\n`description`, which is the line the LIST shows."
           },
+          "message_footer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The closing note, rendered UNDER the result — `message` opens the\nnotification, this one closes it, and an inline image sits between them.\nDefaulted, so a client written before 0116 keeps working unchanged."
+          },
           "skip_if_empty": {
             "type": "boolean",
             "description": "Metabase's `skip_if_empty`: send nothing when the run produced no rows."
@@ -30165,6 +30179,13 @@
               "null"
             ],
             "description": "A user-authored note carried into the notification body. Distinct from\n`description`, which is the line the LIST shows."
+          },
+          "message_footer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The closing note, rendered UNDER the result — `message` opens the\nnotification, this one closes it, and an inline image sits between them.\nDefaulted, so a client written before 0116 keeps working unchanged."
           },
           "skip_if_empty": {
             "type": "boolean",

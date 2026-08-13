@@ -272,6 +272,11 @@ pub struct ScheduleDetailDto {
     /// A user-authored note carried into the notification body. Distinct from
     /// `description`, which is the line the LIST shows.
     pub message: Option<String>,
+    /// The closing note, rendered UNDER the result — `message` opens the
+    /// notification, this one closes it, and an inline image sits between them.
+    /// Defaulted, so a client written before 0116 keeps working unchanged.
+    #[serde(default)]
+    pub message_footer: Option<String>,
     /// Metabase's `skip_if_empty`: send nothing when the run produced no rows.
     #[serde(default)]
     pub skip_if_empty: bool,
@@ -333,6 +338,11 @@ pub struct CreateSchedule {
     /// A user-authored note carried into the notification body. Distinct from
     /// `description`, which is the line the LIST shows.
     pub message: Option<String>,
+    /// The closing note, rendered UNDER the result — `message` opens the
+    /// notification, this one closes it, and an inline image sits between them.
+    /// Defaulted, so a client written before 0116 keeps working unchanged.
+    #[serde(default)]
+    pub message_footer: Option<String>,
     /// Metabase's `skip_if_empty`: send nothing when the run produced no rows.
     #[serde(default)]
     pub skip_if_empty: bool,
@@ -393,6 +403,11 @@ pub struct UpdateSchedule {
     /// A user-authored note carried into the notification body. Distinct from
     /// `description`, which is the line the LIST shows.
     pub message: Option<String>,
+    /// The closing note, rendered UNDER the result — `message` opens the
+    /// notification, this one closes it, and an inline image sits between them.
+    /// Defaulted, so a client written before 0116 keeps working unchanged.
+    #[serde(default)]
+    pub message_footer: Option<String>,
     /// Metabase's `skip_if_empty`: send nothing when the run produced no rows.
     #[serde(default)]
     pub skip_if_empty: bool,
@@ -460,7 +475,11 @@ mod tests {
         ] {
             assert_eq!(RunState::parse(v.as_str()), Some(v));
         }
-        for v in [RecipientKind::Email, RecipientKind::Webhook] {
+        for v in [
+            RecipientKind::Email,
+            RecipientKind::Webhook,
+            RecipientKind::Slack,
+        ] {
             assert_eq!(RecipientKind::parse(v.as_str()), Some(v));
         }
     }
@@ -473,7 +492,11 @@ mod tests {
         assert_eq!(RunState::parse("sucess"), None);
         assert_eq!(ValidatorType::parse("notnull"), None);
         assert_eq!(ReportFormat::parse("jpeg"), None);
-        assert_eq!(RecipientKind::parse("slack"), None);
+        // `slack` USED to be the unknown here. It became a real kind in #484,
+        // and neither this line nor the round-trip list above was updated — so
+        // the crate has been red on main ever since, invisible to per-crate
+        // runs. The negative case now uses a spelling nothing will ever add.
+        assert_eq!(RecipientKind::parse("carrier_pigeon"), None);
     }
 
     /// The JSON spellings must match the stored spellings, or the wire and the

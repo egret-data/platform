@@ -75,54 +75,6 @@ pub async fn backfill_basic_auth_credentials(db: &Db, secrets: &SecretStore) -> 
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use egret_secrets::Crypto;
-
-    async fn test_secrets() -> Option<(Db, SecretStore)> {
-        let url = std::env::var("DATABASE_URL").ok()?;
-        let db = Db::connect(&url, 5).await.expect("connect");
-        db.migrate().await.expect("migrate");
-        let crypto = Crypto::new(&[7u8; 32]).unwrap();
-        let secrets = SecretStore::new(db.clone(), Some(crypto));
-        Some((db, secrets))
-    }
-
-    #[tokio::test]
-    async fn backfill_converts_opaque_to_basic_auth_idempotently() {
-        let Some((_db, secrets)) = test_secrets().await else {
-            eprintln!("skip: no DATABASE_URL");
-            return;
-        };
-        let vault_ref = secrets
-            .put_typed(
-                "workspace_secret",
-                egret_secrets::secret_type::OPAQUE,
-                &std::collections::BTreeMap::from([("value".to_string(), "pw".to_string())]),
-            )
-            .await
-            .unwrap();
-        assert!(convert_one(&secrets, vault_ref, "ak").await.unwrap());
-        let typed = secrets.get_typed(vault_ref).await.unwrap();
-        assert_eq!(typed.r#type, egret_secrets::secret_type::BASIC_AUTH);
-        assert_eq!(typed.data.get("username").unwrap(), "ak");
-        assert_eq!(typed.data.get("password").unwrap(), "pw");
-        // idempotent: already basic-auth -> no-op.
-        assert!(!convert_one(&secrets, vault_ref, "ak").await.unwrap());
-        // empty identity -> skipped.
-        let v2 = secrets
-            .put_typed(
-                "workspace_secret",
-                egret_secrets::secret_type::OPAQUE,
-                &std::collections::BTreeMap::from([("value".to_string(), "x".to_string())]),
-            )
-            .await
-            .unwrap();
-        assert!(!convert_one(&secrets, v2, "").await.unwrap());
-    }
-}
-
 /// One-shot boot backfill: move any CLEARTEXT webhook signing secret out of
 /// `automation.schedule_recipients.config` and into the vault, leaving a
 /// `secret_id` reference. Idempotent; a no-op once converged.
@@ -171,4 +123,52 @@ pub async fn backfill_webhook_secrets(db: &Db, secrets: &SecretStore) -> anyhow:
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egret_secrets::Crypto;
+
+    async fn test_secrets() -> Option<(Db, SecretStore)> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let db = Db::connect(&url, 5).await.expect("connect");
+        db.migrate().await.expect("migrate");
+        let crypto = Crypto::new(&[7u8; 32]).unwrap();
+        let secrets = SecretStore::new(db.clone(), Some(crypto));
+        Some((db, secrets))
+    }
+
+    #[tokio::test]
+    async fn backfill_converts_opaque_to_basic_auth_idempotently() {
+        let Some((_db, secrets)) = test_secrets().await else {
+            eprintln!("skip: no DATABASE_URL");
+            return;
+        };
+        let vault_ref = secrets
+            .put_typed(
+                "workspace_secret",
+                egret_secrets::secret_type::OPAQUE,
+                &std::collections::BTreeMap::from([("value".to_string(), "pw".to_string())]),
+            )
+            .await
+            .unwrap();
+        assert!(convert_one(&secrets, vault_ref, "ak").await.unwrap());
+        let typed = secrets.get_typed(vault_ref).await.unwrap();
+        assert_eq!(typed.r#type, egret_secrets::secret_type::BASIC_AUTH);
+        assert_eq!(typed.data.get("username").unwrap(), "ak");
+        assert_eq!(typed.data.get("password").unwrap(), "pw");
+        // idempotent: already basic-auth -> no-op.
+        assert!(!convert_one(&secrets, vault_ref, "ak").await.unwrap());
+        // empty identity -> skipped.
+        let v2 = secrets
+            .put_typed(
+                "workspace_secret",
+                egret_secrets::secret_type::OPAQUE,
+                &std::collections::BTreeMap::from([("value".to_string(), "x".to_string())]),
+            )
+            .await
+            .unwrap();
+        assert!(!convert_one(&secrets, v2, "").await.unwrap());
+    }
 }

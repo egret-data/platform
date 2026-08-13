@@ -52,6 +52,17 @@ vi.mock("@/api/dashboards", () => ({
 vi.mock("@/api/charts", () => ({
   useCharts: () => ({ data: [{ id: "c1", name: "Revenue" }] }),
 }));
+// Owners are picked from workspace members, and a chip must show the PERSON
+// rather than the user id it is stored as.
+vi.mock("@/api/members", () => ({
+  useWorkspaceMembers: () => ({
+    data: [
+      { principal_id: "u1", principal_type: "user", principal_name: "on-call@t.local" },
+      { principal_id: "u2", principal_type: "user", principal_name: "analyst@t.local" },
+      { principal_id: "g1", principal_type: "group", principal_name: "data-team" },
+    ],
+  }),
+}));
 
 import ScheduleDetail from "@/routes/explore/ScheduleDetail";
 import { ScheduleEditor } from "@/components/alerts/ScheduleEditor";
@@ -107,9 +118,18 @@ function renderEditor(path = "/explore/eng/alerts/new") {
 }
 
 /** Click through to a section — the form is five panels now, so a test fills
- *  fields the same way a person does. */
+ *  fields the same way a person does.
+ *
+ *  `role: "tab"`, not "button": the section nav is a real tablist, which is
+ *  what makes arrow-key navigation and the `aria-selected` state work. */
 async function goTo(user: ReturnType<typeof userEvent.setup>, label: RegExp) {
-  await user.click(screen.getByRole("button", { name: label }));
+  await user.click(screen.getByRole("tab", { name: label }));
+}
+
+/** Add a delivery method through the menu, the way a person does. */
+async function addDestination(user: ReturnType<typeof userEvent.setup>, kind: RegExp) {
+  await user.click(screen.getByRole("button", { name: /add delivery method/i }));
+  await user.click(await screen.findByRole("menuitem", { name: kind }));
 }
 
 /** A saved alert delivering to both an inbox and a signed webhook. */
@@ -188,7 +208,10 @@ describe("Alerts & Reports editor page", () => {
     await user.type(screen.getByLabelText(/^name$/i), "with picture");
     await goTo(user, /^condition$/i);
     await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
-    await user.click(screen.getByLabelText(/attach a chart or dashboard/i));
+    // The control lives in Notification, not Condition: it decides what is IN
+    // the message, and at the foot of the query section nobody found it.
+    await goTo(user, /^notification$/i);
+    await user.click(screen.getByLabelText(/also show a chart or dashboard/i));
     await user.click(screen.getByRole("button", { name: /^create$/i }));
 
     await waitFor(() => expect(createMutate).toHaveBeenCalled());
@@ -199,7 +222,7 @@ describe("Alerts & Reports editor page", () => {
     expect(Boolean(body.chart_id) !== Boolean(body.dashboard_id)).toBe(true);
   });
 
-  it("sends the advanced fields the editor previously had no way to set", async () => {
+  it("sends the timers and retention the editor previously had no way to set", async () => {
     const user = userEvent.setup();
     renderEditor();
     await user.type(screen.getByLabelText(/^name$/i), "tuned");
@@ -207,7 +230,10 @@ describe("Alerts & Reports editor page", () => {
     await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
     await goTo(user, /^notification$/i);
     await user.type(screen.getByLabelText(/email subject/i), "Orders are down");
-    await goTo(user, /^advanced$/i);
+    // The timers moved out of an "Advanced" tab and into Schedule, where the
+    // rest of the WHEN lives — Superset's division, and the reason the tab is
+    // gone entirely rather than merely renamed.
+    await goTo(user, /^schedule$/i);
     await user.clear(screen.getByLabelText(/grace period/i));
     await user.type(screen.getByLabelText(/grace period/i), "600");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
@@ -424,7 +450,7 @@ describe("Alerts & Reports editor page", () => {
     renderEditor("/explore/eng/alerts/new?type=report&kind=dashboard&object=d2");
 
     expect(await screen.findByRole("heading", { name: /new report/i })).toBeInTheDocument();
-    await userEvent.setup().click(screen.getByRole("button", { name: /^contents$/i }));
+    await userEvent.setup().click(screen.getByRole("tab", { name: /^contents$/i }));
     expect(screen.getByLabelText(/^dashboard$/i)).toHaveValue("d2");
   });
 
@@ -435,7 +461,8 @@ describe("Alerts & Reports editor page", () => {
     await goTo(user, /^condition$/i);
     await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
     await goTo(user, /^notification$/i);
-    await user.type(screen.getByLabelText(/slack channel/i), "#data-alerts");
+    await addDestination(user, /^slack$/i);
+    await user.type(screen.getByLabelText(/^channel$/i), "#data-alerts");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
 
     await waitFor(() => expect(createMutate).toHaveBeenCalled());
@@ -446,6 +473,246 @@ describe("Alerts & Reports editor page", () => {
     // No token typed means "keep whatever is stored" — the browser must not
     // invent an empty one, which the server reads as "remove it".
     expect(slack.config.token).toBeUndefined();
+  });
+
+  it("has four sections, and no Advanced", async () => {
+    // The split follows Superset's: owners belong with the name, and the
+    // timers belong with the schedule, because both are statements about the
+    // thing beside them. An "Advanced" tab is where fields go when nobody
+    // decided where they belong — it left General with three fields and
+    // Schedule with two.
+    renderEditor();
+
+    const tabs = await screen.findAllByRole("tab");
+    expect(tabs.map((t) => t.textContent)).toEqual([
+      "General",
+      "Condition",
+      "Schedule",
+      "Notification",
+    ]);
+  });
+
+  it("keeps owners with the name and the timers with the schedule", async () => {
+    const user = userEvent.setup();
+    renderEditor();
+
+    // Owners: General, beside what the thing is called.
+    expect(screen.getByLabelText(/owners/i)).toBeInTheDocument();
+    // Timers: Schedule, beside when it runs.
+    await goTo(user, /^schedule$/i);
+    expect(screen.getByLabelText(/grace period/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/working timeout/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/run log retention/i)).toBeInTheDocument();
+  });
+
+  it("shows an owner as a person, and keeps them through a no-op save", async () => {
+    // Stored as a user id, read by a human. A chip of UUIDs is not a list of
+    // people — and since the update REPLACES the owner set, a field that
+    // could not render them would be one Save away from dropping them.
+    const user = userEvent.setup();
+    scheduleMock.mockReturnValue({
+      data: { ...row(), sql: "SELECT 1", recipients: [], targets: [] },
+      isLoading: false,
+    });
+    renderEditor("/explore/eng/alerts/s1");
+
+    expect(await screen.findByText("on-call@t.local")).toBeInTheDocument();
+    const recipientsIgnored = await saveExisting(user);
+    expect(recipientsIgnored).toBeDefined();
+    expect(updateMutate.mock.calls[0][0].body.owners).toEqual(["u1"]);
+  });
+
+  it("offers only people as owners, never groups", async () => {
+    // A schedule runs its query as ONE identity. A group has no credentials
+    // to delegate, so offering it would create a schedule that cannot run.
+    renderEditor();
+
+    // Focus, not click: Radix's popover trigger opens on the input's own
+    // focus handler, and a jsdom click on the wrapper does not deliver the
+    // pointer events the trigger listens for.
+    screen.getByLabelText(/owners/i).focus();
+    // The suggestion list is a Radix popover fed by a react-query lookup, so
+    // it lands a tick or two after the click.
+    expect(
+      await screen.findByRole("button", { name: "analyst@t.local" }, { timeout: 3000 }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "data-team" })).not.toBeInTheDocument();
+  });
+
+  it("shows recent runs under the form, so the badge's question has an answer", async () => {
+    // The header says "Error". Without the runs on the same screen the only
+    // way to read the error is to go back to the list and open a dialog.
+    runsMock.mockReturnValue({
+      data: [
+        {
+          id: "r1",
+          state: "error",
+          started_at: "2026-08-11T09:00:00Z",
+          ended_at: "2026-08-11T09:00:02Z",
+          value: null,
+          error: "line 1:8: Column 'oops' cannot be resolved",
+          notification_sent_at: null,
+        },
+      ] as ScheduleRun[],
+      isLoading: false,
+    });
+    scheduleMock.mockReturnValue({
+      data: { ...row({ last_state: "error" }), sql: "SELECT 1", recipients: [], targets: [] },
+      isLoading: false,
+    });
+    renderEditor("/explore/eng/alerts/s1");
+
+    expect(await screen.findByRole("heading", { name: /recent runs/i })).toBeInTheDocument();
+    expect(screen.getByText(/cannot be resolved/i)).toBeInTheDocument();
+  });
+
+  it("shows no runs panel on a schedule that does not exist yet", async () => {
+    // There is nothing to have run, and an empty "Recent runs" card on the
+    // create page is a promise the page cannot keep.
+    renderEditor();
+
+    expect(await screen.findByRole("heading", { name: /new alert/i })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /recent runs/i })).not.toBeInTheDocument();
+  });
+
+  it("heads the page with what the schedule IS, before any field", async () => {
+    // The three questions a reader has before editing anything: is it on,
+    // when does it run, and in which timezone. The crontab is humanised —
+    // "0 9 * * *" is not an answer to "when does it run".
+    scheduleMock.mockReturnValue({
+      data: { ...row(), sql: "SELECT 1", recipients: [], targets: [] },
+      isLoading: false,
+    });
+    renderEditor("/explore/eng/alerts/s1");
+
+    expect(await screen.findByRole("heading", { name: /orders dropped/i })).toBeInTheDocument();
+    expect(screen.getByText(/every day at 09:00/i)).toBeInTheDocument();
+    expect(screen.getByText("UTC")).toBeInTheDocument();
+    // Active, so the badge reports how the last run went.
+    expect(screen.getByText(/success/i)).toBeInTheDocument();
+  });
+
+  it("says Paused rather than reporting the last run, when it is paused", async () => {
+    // "Why has this not fired?" is the question a paused schedule has to
+    // answer, and a green Success badge on a schedule that will never run
+    // again answers it wrongly.
+    scheduleMock.mockReturnValue({
+      data: { ...row({ active: false }), sql: "SELECT 1", recipients: [], targets: [] },
+      isLoading: false,
+    });
+    renderEditor("/explore/eng/alerts/s1");
+
+    expect(await screen.findByText(/paused/i)).toBeInTheDocument();
+    expect(screen.queryByText(/success/i)).not.toBeInTheDocument();
+  });
+
+  it("delivers to several destinations of the same kind", async () => {
+    // The flat form had one Slack field and one email field, so "post to
+    // #data AND #exec" was not expressible — even though the server has
+    // always stored recipients as a list and delivered to all of them.
+    const user = userEvent.setup();
+    renderEditor();
+    await user.type(screen.getByLabelText(/^name$/i), "two channels");
+    await goTo(user, /^condition$/i);
+    await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await goTo(user, /^notification$/i);
+
+    await addDestination(user, /^slack$/i);
+    await addDestination(user, /^slack$/i);
+    const channels = screen.getAllByLabelText(/^channel$/i);
+    expect(channels).toHaveLength(2);
+    await user.type(channels[0], "#data");
+    await user.type(channels[1], "#exec");
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const slack = createMutate.mock.calls[0][0].recipients.filter(
+      (r: { kind: string }) => r.kind === "slack",
+    );
+    expect(slack.map((r: { config: { channel: string } }) => r.config.channel)).toEqual([
+      "#data",
+      "#exec",
+    ]);
+  });
+
+  it("removing a destination drops it from the saved set", async () => {
+    // The update REPLACES the recipient set, so removal is the absence of a
+    // row — which makes it worth pinning that the row really does disappear
+    // and does not merely stop rendering.
+    const user = userEvent.setup();
+    withWebhook();
+    renderEditor("/explore/eng/alerts/s1");
+
+    await screen.findByRole("heading", { name: /orders dropped/i });
+    await goTo(user, /^notification$/i);
+    expect(screen.getByDisplayValue("https://hooks.example.com/egret/1")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /remove webhook destination/i }));
+    const recipients = await saveExisting(user);
+
+    expect(recipients.filter((r) => r.kind === "webhook")).toHaveLength(0);
+    // The email it sat beside is untouched.
+    expect(recipients.filter((r) => r.kind === "email")).toHaveLength(1);
+  });
+
+  it("carries a subject placeholder to the server verbatim", async () => {
+    // The substitution happens at SEND time, in the schedule's own timezone —
+    // a browser-rendered date would freeze the day the subject was written
+    // into every future edition.
+    const user = userEvent.setup();
+    renderEditor();
+    await user.type(screen.getByLabelText(/^name$/i), "daily orders");
+    await goTo(user, /^condition$/i);
+    await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await goTo(user, /^notification$/i);
+    // `{{` is userEvent's escape for a literal brace, so the template is
+    // pasted rather than typed — otherwise the field receives `Orders {date}}`
+    // and the assertion below passes for the wrong reason.
+    await user.click(screen.getByLabelText(/email subject/i));
+    await user.paste("Orders {{date}}");
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    expect(createMutate.mock.calls[0][0].email_subject).toBe("Orders {{date}}");
+  });
+
+  it("inserts a subject placeholder at the caret, not glued to the end", async () => {
+    // Appending looked fine in the diff and wrong the moment it was clicked:
+    // "Weekly overview" + the button gave `Weekly overview{{date}}`, which
+    // SENDS as "Weekly overview2026-08-13" — no space, one run-on word.
+    const user = userEvent.setup();
+    renderEditor();
+    await user.type(screen.getByLabelText(/^name$/i), "placement");
+    await goTo(user, /^condition$/i);
+    await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await goTo(user, /^notification$/i);
+
+    const subject = screen.getByLabelText(/email subject/i) as HTMLInputElement;
+    await user.click(subject);
+    await user.paste("Orders  - EU");
+    // Caret between the two spaces, where a person would put it.
+    subject.setSelectionRange(7, 7);
+    await user.click(screen.getByRole("button", { name: "{{date}}" }));
+
+    expect(subject.value).toBe("Orders {{date}} - EU");
+  });
+
+  it("sends the opening and closing notes as separate fields", async () => {
+    // Two columns, not one: the picture is rendered BETWEEN them, so merging
+    // them would put the whole note on one side of it.
+    const user = userEvent.setup();
+    renderEditor();
+    await user.type(screen.getByLabelText(/^name$/i), "topped and tailed");
+    await goTo(user, /^condition$/i);
+    await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await goTo(user, /^notification$/i);
+    await user.type(screen.getByLabelText(/opening note/i), "Why you get this.");
+    await user.type(screen.getByLabelText(/closing note/i), "Ask #data.");
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const body = createMutate.mock.calls[0][0];
+    expect(body.message).toBe("Why you get this.");
+    expect(body.message_footer).toBe("Ask #data.");
   });
 
   it("surfaces the server's validation message instead of a generic failure", async () => {

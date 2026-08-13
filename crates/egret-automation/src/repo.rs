@@ -64,6 +64,8 @@ pub struct Schedule {
     pub email_subject: Option<String>,
 
     pub message: Option<String>,
+    /// The closing note, under the result. `message` is the opening one.
+    pub message_footer: Option<String>,
     pub skip_if_empty: bool,
 
     pub folder_id: Option<Uuid>,
@@ -150,6 +152,8 @@ pub struct NewSchedule {
     pub email_subject: Option<String>,
 
     pub message: Option<String>,
+    /// The closing note, under the result. `message` is the opening one.
+    pub message_footer: Option<String>,
     pub skip_if_empty: bool,
 
     pub owners: Vec<Uuid>,
@@ -162,7 +166,7 @@ pub struct NewSchedule {
 const COLS: &str = "id, workspace_id, type, name, description, active, crontab, timezone, \
      next_run_at, database_id, sql, validator_type, validator_config, last_eval_at, last_state, \
      last_value, chart_id, dashboard_id, report_format, custom_width, custom_height, \
-     grace_period_s, working_timeout_s, log_retention_days, email_subject, message, \
+     grace_period_s, working_timeout_s, log_retention_days, email_subject, message, message_footer, \
      skip_if_empty, folder_id, deleted_at, created_by, updated_at";
 
 impl ScheduleRepo {
@@ -345,8 +349,8 @@ impl ScheduleRepo {
               database_id, sql, validator_type, validator_config, \
               chart_id, dashboard_id, report_format, custom_width, custom_height, \
               grace_period_s, working_timeout_s, log_retention_days, email_subject, \
-              message, skip_if_empty, created_by, updated_by) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$24) \
+              message, message_footer, skip_if_empty, created_by, updated_by) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$25) \
              RETURNING {COLS}"
         ))
         .bind(ws)
@@ -371,6 +375,7 @@ impl ScheduleRepo {
         .bind(new.log_retention_days)
         .bind(&new.email_subject)
         .bind(&new.message)
+        .bind(&new.message_footer)
         .bind(new.skip_if_empty)
         .bind(actor.map(|u| u.0))
         .fetch_one(&mut *tx)
@@ -536,8 +541,8 @@ impl ScheduleRepo {
                database_id=$9, sql=$10, validator_type=$11, validator_config=$12, \
                chart_id=$13, dashboard_id=$14, report_format=$15, custom_width=$16, \
                custom_height=$17, grace_period_s=$18, working_timeout_s=$19, \
-               log_retention_days=$20, email_subject=$21, message=$22, skip_if_empty=$23, \
-               updated_by=$24, updated_at=now() \
+               log_retention_days=$20, email_subject=$21, message=$22, message_footer=$23, \
+               skip_if_empty=$24, updated_by=$25, updated_at=now() \
              WHERE id=$1 AND workspace_id=$2 RETURNING {COLS}"
         ))
         .bind(id)
@@ -562,6 +567,7 @@ impl ScheduleRepo {
         .bind(new.log_retention_days)
         .bind(&new.email_subject)
         .bind(&new.message)
+        .bind(&new.message_footer)
         .bind(new.skip_if_empty)
         .bind(actor.map(|u| u.0))
         .fetch_optional(&mut *tx)

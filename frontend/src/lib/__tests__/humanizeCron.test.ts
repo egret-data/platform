@@ -65,14 +65,33 @@ describe("humanizeCrontab", () => {
     expect(humanizeCrontab(raw)).toBe(raw);
   });
 
-  it("falls back to the raw expression for an hour step", () => {
-    const raw = "0 */2 * * *";
-    expect(humanizeCrontab(raw)).toBe(raw);
-  });
+  // NOTE: an hour step used to fall back, deliberately. It is now described —
+  // see "reads an hourly step with a minute offset" below, which replaces this
+  // case, and the sibling test that pins what still stays raw. Kept as a
+  // comment rather than deleted so the change of mind is visible: the shape
+  // reached the page header, where a raw expression is the only statement of
+  // when the schedule runs.
 
   it("falls back to the raw expression for a minute list", () => {
     const raw = "0,30 9 * * *";
     expect(humanizeCrontab(raw)).toBe(raw);
+  });
+
+  it("reads an hourly step with a minute offset", () => {
+    // `15 */6 * * *` fires 00:15, 06:15, 12:15, 18:15 — the shape the seeded
+    // schedules use, and the one the page header showed raw.
+    expect(humanizeCrontab("15 */6 * * *")).toBe("Every 6 hours, at minute 15");
+    expect(humanizeCrontab("0 */2 * * *")).toBe("Every 2 hours, at minute 0");
+    expect(humanizeCrontab("30 */1 * * *")).toBe("Every hour at minute 30");
+  });
+
+  it("will not describe an hourly step it has not been proven against", () => {
+    // A step crossed with a weekday list, a non-numeric minute, or a step
+    // outside the hour range: each stays raw rather than guessing, because
+    // this text tells someone when their mail arrives.
+    for (const raw of ["15 */6 * * 1-5", "*/5 */6 * * *", "15 */0 * * *", "15 */24 * * *"]) {
+      expect(humanizeCrontab(raw)).toBe(raw);
+    }
   });
 
   it("falls back to the raw expression for an out-of-range field count", () => {

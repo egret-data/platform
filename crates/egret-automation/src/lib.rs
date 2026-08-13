@@ -14,6 +14,7 @@ mod repo;
 mod routes;
 pub mod runner;
 pub mod scheduler;
+pub mod subject;
 pub mod validator;
 
 pub use error::{AutomationApiError, AutomationError};

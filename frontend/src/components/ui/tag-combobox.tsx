@@ -21,6 +21,12 @@ export interface TagComboboxProps {
   creatable?: boolean;
   /** aria-label on the input. */
   ariaLabel?: string;
+  /**
+   * How to render a chip when the VALUE is not what a person should read —
+   * an owner is stored by user id, and a row of UUIDs is not a list of people.
+   * Defaults to the value itself.
+   */
+  labelFor?: (value: string) => string;
 }
 
 export function TagCombobox({
@@ -31,6 +37,7 @@ export function TagCombobox({
   placeholder,
   creatable = true,
   ariaLabel,
+  labelFor,
 }: TagComboboxProps) {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState(false);
@@ -72,10 +79,10 @@ export function TagCombobox({
               key={v}
               className="inline-flex items-center gap-1 rounded bg-secondary px-1.5 py-0.5 text-xs text-secondary-foreground"
             >
-              {v}
+              {labelFor ? labelFor(v) : v}
               <button
                 type="button"
-                aria-label={`remove ${v}`}
+                aria-label={`remove ${labelFor ? labelFor(v) : v}`}
                 onClick={(e) => {
                   e.stopPropagation();
                   remove(v);
