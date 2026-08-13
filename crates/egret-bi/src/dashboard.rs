@@ -164,7 +164,7 @@ impl DashboardRepo {
             "INSERT INTO analytics.dashboards (workspace_id, name, description, created_by) \
              VALUES ($1,$2,$3,$4) RETURNING {COLS}"
         );
-        sqlx::query_as::<_, Dashboard>(&sql)
+        sqlx::query_as::<_, Dashboard>(sqlx::AssertSqlSafe(sql))
             .bind(workspace_id)
             .bind(name)
             .bind(description)
@@ -176,7 +176,7 @@ impl DashboardRepo {
 
     pub async fn get(&self, id: Uuid) -> Result<Option<Dashboard>, BiError> {
         let sql = format!("SELECT {COLS} FROM analytics.dashboards WHERE id = $1");
-        Ok(sqlx::query_as::<_, Dashboard>(&sql)
+        Ok(sqlx::query_as::<_, Dashboard>(sqlx::AssertSqlSafe(sql))
             .bind(id)
             .fetch_optional(&self.db.pool)
             .await?)
@@ -199,7 +199,7 @@ impl DashboardRepo {
              (SELECT count(*) FROM analytics.dashboard_cards c WHERE c.dashboard_id = dashboards.id) AS card_count \
              FROM analytics.dashboards WHERE workspace_id = $1 AND {pred} ORDER BY updated_at DESC"
         );
-        let rows = sqlx::query_as::<_, DashboardWithCount>(&sql)
+        let rows = sqlx::query_as::<_, DashboardWithCount>(sqlx::AssertSqlSafe(sql))
             .bind(workspace_id)
             .fetch_all(&self.db.pool)
             .await?;
@@ -368,7 +368,7 @@ impl DashboardRepo {
              EXISTS (SELECT 1 FROM analytics.bookmarks b WHERE b.user_id = $2 AND b.entity_type='dashboard' AND b.entity_id = dashboards.id) AS bookmarked \
              FROM analytics.dashboards WHERE workspace_id = $1 AND {pred} ORDER BY updated_at DESC"
         );
-        let rows = sqlx::query_as::<_, DashboardWithCountBm>(&sql)
+        let rows = sqlx::query_as::<_, DashboardWithCountBm>(sqlx::AssertSqlSafe(sql))
             .bind(workspace_id)
             .bind(user)
             .fetch_all(&self.db.pool)
@@ -384,7 +384,7 @@ impl DashboardRepo {
         let sql = format!(
             "SELECT {CARD_COLS} FROM analytics.dashboard_cards WHERE dashboard_id = $1 ORDER BY ordinal, grid_row, grid_col"
         );
-        Ok(sqlx::query_as::<_, DashboardCard>(&sql)
+        Ok(sqlx::query_as::<_, DashboardCard>(sqlx::AssertSqlSafe(sql))
             .bind(dashboard_id)
             .fetch_all(&self.db.pool)
             .await?)
@@ -608,10 +608,10 @@ impl DashboardRepo {
         let src_cards = self.cards(src_id).await?;
 
         let mut tx = self.db.pool.begin().await?;
-        let copy: Dashboard = sqlx::query_as::<_, Dashboard>(&format!(
+        let copy: Dashboard = sqlx::query_as::<_, Dashboard>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO analytics.dashboards (workspace_id, name, description, parameters, created_by, width) \
              VALUES ($1,$2,$3,$4,$5,$6) RETURNING {COLS}"
-        ))
+        )))
         .bind(src.workspace_id)
         .bind(format!("{} (copy)", src.name))
         .bind(&src.description)
@@ -717,11 +717,11 @@ impl DashboardRepo {
         at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<DashboardRevision, BiError> {
         let mut tx = self.db.pool.begin().await?;
-        let rev = sqlx::query_as::<_, DashboardRevision>(&format!(
+        let rev = sqlx::query_as::<_, DashboardRevision>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO analytics.dashboard_revisions \
              (dashboard_id, created_by, kind, snapshot, created_at) \
              VALUES ($1,$2,$3,$4, COALESCE($5, now())) RETURNING {REV_COLS}"
-        ))
+        )))
         .bind(dashboard_id)
         .bind(created_by)
         .bind(kind)
@@ -754,11 +754,13 @@ impl DashboardRepo {
             "SELECT {REV_COLS} FROM analytics.dashboard_revisions \
              WHERE dashboard_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2"
         );
-        Ok(sqlx::query_as::<_, DashboardRevision>(&sql)
-            .bind(dashboard_id)
-            .bind(limit.clamp(1, MAX_REVISIONS_PER_DASHBOARD))
-            .fetch_all(&self.db.pool)
-            .await?)
+        Ok(
+            sqlx::query_as::<_, DashboardRevision>(sqlx::AssertSqlSafe(sql))
+                .bind(dashboard_id)
+                .bind(limit.clamp(1, MAX_REVISIONS_PER_DASHBOARD))
+                .fetch_all(&self.db.pool)
+                .await?,
+        )
     }
 
     /// One revision, SCOPED to its dashboard. The scope is the point: an unscoped `WHERE id = $1`
@@ -772,11 +774,13 @@ impl DashboardRepo {
         let sql = format!(
             "SELECT {REV_COLS} FROM analytics.dashboard_revisions WHERE dashboard_id = $1 AND id = $2"
         );
-        Ok(sqlx::query_as::<_, DashboardRevision>(&sql)
-            .bind(dashboard_id)
-            .bind(revision_id)
-            .fetch_optional(&self.db.pool)
-            .await?)
+        Ok(
+            sqlx::query_as::<_, DashboardRevision>(sqlx::AssertSqlSafe(sql))
+                .bind(dashboard_id)
+                .bind(revision_id)
+                .fetch_optional(&self.db.pool)
+                .await?,
+        )
     }
 
     /// How many revisions a dashboard has. Used to decide whether a baseline is still owed.

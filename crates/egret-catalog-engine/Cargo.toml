@@ -38,10 +38,8 @@ lakekeeper-io = { git = "https://github.com/lakekeeper/lakekeeper", rev = "79165
 egret-config = { workspace = true }
 egret-metastore = { workspace = true }
 # The embedded-catalog RBAC store (the former `egret-catalog` crate, merged in
-# by E3d-1) lives in `src/store/` and runs its SQL on the egret-side sqlx-0.8
-# pool exposed by `egret_metastore::Db`, addressed through the renamed `sqlx08`
-# dependency below (kept distinct from this crate's sqlx-0.9 lakekeeper surface).
-# The `CatalogPort` it implements + the leaf DTOs it maps to.
+# by E3d-1) lives in `src/store/` and runs its SQL on the pool exposed by
+# `egret_metastore::Db`. The `CatalogPort` it implements + the leaf DTOs it maps to.
 egret-catalog-api = { workspace = true }
 # The mini machine-IdP `ClientVerifier`/`VerifiedClient` the store implements.
 egret-machine-idp = { workspace = true }
@@ -103,28 +101,12 @@ http.workspace = true
 # uuid anyway, but declared explicitly.
 uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 url = { workspace = true }
-# NB: sqlx 0.9 (NOT egret's workspace 0.8) so the `PgPool` we build is the same
-# type lakekeeper's migrator accepts — the two sqlx majors have incompatible
-# `Pool<Postgres>` types and won't unify across the crate boundary.
-sqlx = { version = "0.9", default-features = false, features = [
-    "runtime-tokio",
-    "tls-rustls",
-    "postgres",
-    "migrate",
-] }
-# The egret-side sqlx-0.8 surface, renamed so it coexists with the sqlx-0.9
-# dep above (two semver-incompatible majors = two distinct crates). The merged
-# `store` module's runtime queries and `FromRow` impls go through this alias;
-# `egret_metastore::Db.pool` is a 0.8.x `PgPool`, and Cargo unifies this to the
-# SAME 0.8.x, so `sqlx08::query(..).fetch_one(&db.pool)` type-checks. Feature set
-# mirrors the workspace `sqlx` (what the former `egret-catalog` crate resolved),
-# minus `migrate` which the store never calls.
-sqlx08 = { package = "sqlx", version = "0.8", default-features = false, features = [
-    "runtime-tokio-rustls",
-    "postgres",
-    "uuid",
-    "chrono",
-] }
+# One sqlx, the workspace's. This crate used to declare sqlx 0.9 here (to match
+# lakekeeper's migrator) alongside a `sqlx08` alias for egret's own pool, because
+# the workspace was still on 0.8 and `Pool<Postgres>` does not unify across two
+# semver-incompatible majors. The workspace is on 0.9 now, so both sides of that
+# seam are the same type and the alias is gone.
+sqlx = { workspace = true }
 
 [dev-dependencies]
 # Self dev-dependency so the crate's integration tests (`tests/*.rs`) link the

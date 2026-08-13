@@ -193,13 +193,15 @@ impl CatalogTagRepo {
     ) -> Result<Vec<CatalogTagAssignment>, BiApiError> {
         let sql =
             list_select("cta.warehouse_id = $1 AND cta.schema_name = $2 AND cta.table_name = $3");
-        Ok(sqlx::query_as::<_, CatalogTagAssignment>(&sql)
-            .bind(warehouse_id)
-            .bind(schema)
-            .bind(table)
-            .fetch_all(&self.db.pool)
-            .await
-            .map_err(crate::error::BiError::from)?)
+        Ok(
+            sqlx::query_as::<_, CatalogTagAssignment>(sqlx::AssertSqlSafe(sql))
+                .bind(warehouse_id)
+                .bind(schema)
+                .bind(table)
+                .fetch_all(&self.db.pool)
+                .await
+                .map_err(crate::error::BiError::from)?,
+        )
     }
 
     /// Every catalog-tag assignment in a warehouse, as `{schema, table, column,
@@ -209,11 +211,13 @@ impl CatalogTagRepo {
         warehouse_id: Uuid,
     ) -> Result<Vec<CatalogTagAssignment>, BiApiError> {
         let sql = list_select("cta.warehouse_id = $1");
-        Ok(sqlx::query_as::<_, CatalogTagAssignment>(&sql)
-            .bind(warehouse_id)
-            .fetch_all(&self.db.pool)
-            .await
-            .map_err(crate::error::BiError::from)?)
+        Ok(
+            sqlx::query_as::<_, CatalogTagAssignment>(sqlx::AssertSqlSafe(sql))
+                .bind(warehouse_id)
+                .fetch_all(&self.db.pool)
+                .await
+                .map_err(crate::error::BiError::from)?,
+        )
     }
 }
 

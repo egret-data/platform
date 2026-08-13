@@ -66,7 +66,7 @@ impl ChartRepo {
             "INSERT INTO analytics.charts (workspace_id, dataset_id, name, description, viz_type, params, created_by) \
              VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING {COLS}"
         );
-        sqlx::query_as::<_, Chart>(&sql)
+        sqlx::query_as::<_, Chart>(sqlx::AssertSqlSafe(sql))
             .bind(workspace_id)
             .bind(dataset_id)
             .bind(name)
@@ -81,7 +81,7 @@ impl ChartRepo {
 
     pub async fn get(&self, id: Uuid) -> Result<Option<Chart>, BiError> {
         let sql = format!("SELECT {COLS} FROM analytics.charts WHERE id = $1");
-        Ok(sqlx::query_as::<_, Chart>(&sql)
+        Ok(sqlx::query_as::<_, Chart>(sqlx::AssertSqlSafe(sql))
             .bind(id)
             .fetch_optional(&self.db.pool)
             .await?)
@@ -91,7 +91,7 @@ impl ChartRepo {
         let sql = format!(
             "SELECT {COLS} FROM analytics.charts WHERE workspace_id = $1 ORDER BY updated_at DESC"
         );
-        Ok(sqlx::query_as::<_, Chart>(&sql)
+        Ok(sqlx::query_as::<_, Chart>(sqlx::AssertSqlSafe(sql))
             .bind(workspace_id)
             .fetch_all(&self.db.pool)
             .await?)
@@ -115,7 +115,7 @@ impl ChartRepo {
              EXISTS (SELECT 1 FROM analytics.bookmarks b WHERE b.user_id = $2 AND b.entity_type='chart' AND b.entity_id = charts.id) AS bookmarked \
              FROM analytics.charts WHERE workspace_id = $1 AND {pred} ORDER BY updated_at DESC"
         );
-        let rows = sqlx::query_as::<_, ChartWithBm>(&sql)
+        let rows = sqlx::query_as::<_, ChartWithBm>(sqlx::AssertSqlSafe(sql))
             .bind(workspace_id)
             .bind(user)
             .fetch_all(&self.db.pool)
@@ -248,7 +248,7 @@ impl ChartRepo {
             "INSERT INTO analytics.charts (workspace_id, dataset_id, name, description, viz_type, params, created_by, folder_id) \
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING {COLS}"
         );
-        let c = sqlx::query_as::<_, Chart>(&sql)
+        let c = sqlx::query_as::<_, Chart>(sqlx::AssertSqlSafe(sql))
             .bind(src.workspace_id)
             .bind(src.dataset_id)
             .bind(&name)

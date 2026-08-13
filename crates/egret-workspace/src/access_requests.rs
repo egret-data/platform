@@ -76,10 +76,10 @@ impl AccessRequestRepo {
         role: &str,
         reason: &str,
     ) -> Result<AccessRequest> {
-        sqlx::query_as::<_, AccessRequest>(&format!(
+        sqlx::query_as::<_, AccessRequest>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO access_requests (requester_id, workspace_id, requested_role, reason) \
              VALUES ($1, $2, $3, $4) RETURNING {REQUEST_COLS}"
-        ))
+        )))
         .bind(requester_id.0)
         .bind(workspace_id.0)
         .bind(role)
@@ -138,9 +138,9 @@ impl AccessRequestRepo {
 
     /// Fetch a single request by id.
     pub async fn get(&self, id: Uuid) -> Result<Option<AccessRequest>> {
-        sqlx::query_as::<_, AccessRequest>(&format!(
+        sqlx::query_as::<_, AccessRequest>(sqlx::AssertSqlSafe(format!(
             "SELECT {REQUEST_COLS} FROM access_requests WHERE id = $1"
-        ))
+        )))
         .bind(id)
         .fetch_optional(&self.db.pool)
         .await
@@ -163,9 +163,9 @@ impl AccessRequestRepo {
         by: UserId,
     ) -> Result<()> {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
-        let row = sqlx::query_as::<_, AccessRequest>(&format!(
+        let row = sqlx::query_as::<_, AccessRequest>(sqlx::AssertSqlSafe(format!(
             "SELECT {REQUEST_COLS} FROM access_requests WHERE id = $1 FOR UPDATE"
-        ))
+        )))
         .bind(id)
         .fetch_optional(&mut *tx)
         .await

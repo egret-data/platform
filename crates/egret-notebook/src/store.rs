@@ -163,14 +163,16 @@ impl NotebookStore {
         } else {
             "deleted_at IS NULL"
         };
-        let rows = sqlx::query_as::<_, NotebookListRow>(&format!(
+        // AssertSqlSafe: `NB_COLS` is a module const and `pred` is one of the two
+        // `'static` literals chosen just above. Every value is bound.
+        let rows = sqlx::query_as::<_, NotebookListRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {NB_COLS}, \
              EXISTS (SELECT 1 FROM analytics.bookmarks b WHERE b.user_id=$2 \
                  AND b.entity_type='notebook' AND b.entity_id=notebooks.id) AS bookmarked \
              FROM analytics.notebooks \
              WHERE workspace_id=$1 AND {pred} \
              ORDER BY updated_at DESC"
-        ))
+        )))
         .bind(ws)
         .bind(viewer)
         .fetch_all(&self.db.pool)
@@ -187,9 +189,9 @@ impl NotebookStore {
         &self,
         id: Uuid,
     ) -> Result<Option<(NotebookSummary, Uuid)>, NotebookApiError> {
-        let row = sqlx::query_as::<_, NotebookRow>(&format!(
+        let row = sqlx::query_as::<_, NotebookRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {NB_COLS} FROM analytics.notebooks WHERE id=$1"
-        ))
+        )))
         .bind(id)
         .fetch_optional(&self.db.pool)
         .await?;

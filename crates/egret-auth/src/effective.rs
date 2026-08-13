@@ -7,6 +7,26 @@ use uuid::Uuid;
 
 use crate::roles::db_err; // reuse the existing error mapper
 
+/// The shared principal-name projection used by all three `who_can_access`
+/// layers: COALESCE(user email, group name).
+///
+/// A macro rather than a `const` so callers can `concat!` a WHERE clause onto it
+/// and still get a `&'static str`. That matters since sqlx 0.9: `query_as` now
+/// takes `SqlSafeStr`, which only `&'static str` implements, so building these
+/// with `format!` would require asserting they are injection-free. Composed this
+/// way the compiler establishes it instead — there is no runtime string at all.
+macro_rules! principal_select {
+    () => {
+        "SELECT ag.principal_type, ag.principal_id, \
+                   COALESCE(u.email::text, g.name) AS principal_name, \
+                   r.name AS access, ag.effect \
+              FROM access_grants ag \
+              JOIN roles r ON r.id = ag.role_id \
+              LEFT JOIN users u  ON u.id = ag.principal_id AND ag.principal_type = 'user' \
+              LEFT JOIN groups g ON g.id = ag.principal_id AND ag.principal_type = 'group'"
+    };
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct EffectiveAccess {
     pub principal: PrincipalInfo,
@@ -282,7 +302,10 @@ impl AccessResolver {
                     "SELECT o.name::text, w.slug FROM analytics.{table} o \
                      JOIN workspaces w ON w.id = o.workspace_id WHERE o.id = $1"
                 );
-                sqlx::query_as::<_, (Option<String>, Option<String>)>(&sql)
+                // AssertSqlSafe: audited. `table` is `object_table`'s `&'static str`
+                // from a closed match — the caller's `kind` is matched against, never
+                // spliced — and `id` is bound. Nothing here is caller-controlled text.
+                sqlx::query_as::<_, (Option<String>, Option<String>)>(sqlx::AssertSqlSafe(sql))
                     .bind(id)
                     .fetch_optional(&self.db.pool)
                     .await
@@ -409,25 +432,20 @@ impl AccessResolver {
                JOIN workspaces w ON w.id = o.workspace_id \
               WHERE o.id = $1"
         );
-        let (name, ws_id, ws_slug): (Option<String>, Uuid, String) = sqlx::query_as(&sql)
-            .bind(id)
-            .fetch_optional(&self.db.pool)
-            .await
-            .map_err(db_err)?
-            .ok_or_else(|| egret_core::Error::NotFound(format!("{kind}: {id}")))?;
-
-        // Shared principal-name projection: COALESCE(user email, group name).
-        let principal_select = "SELECT ag.principal_type, ag.principal_id, \
-                   COALESCE(u.email::text, g.name) AS principal_name, \
-                   r.name AS access, ag.effect \
-              FROM access_grants ag \
-              JOIN roles r ON r.id = ag.role_id \
-              LEFT JOIN users u  ON u.id = ag.principal_id AND ag.principal_type = 'user' \
-              LEFT JOIN groups g ON g.id = ag.principal_id AND ag.principal_type = 'group'";
+        // AssertSqlSafe: audited — same reason as `objects` above, the only spliced
+        // value is `object_table`'s `'static` literal.
+        let (name, ws_id, ws_slug): (Option<String>, Uuid, String) =
+            sqlx::query_as(sqlx::AssertSqlSafe(sql))
+                .bind(id)
+                .fetch_optional(&self.db.pool)
+                .await
+                .map_err(db_err)?
+                .ok_or_else(|| egret_core::Error::NotFound(format!("{kind}: {id}")))?;
 
         // 1. Direct object grants on THIS object.
-        let direct: Vec<WhoRow> = sqlx::query_as(&format!(
-            "{principal_select} WHERE ag.scope_type = 'object' AND ag.scope_id = $1 \
+        let direct: Vec<WhoRow> = sqlx::query_as(concat!(
+            principal_select!(),
+            " WHERE ag.scope_type = 'object' AND ag.scope_id = $1 \
               AND (ag.expires_at IS NULL OR ag.expires_at > now())"
         ))
         .bind(id)
@@ -436,8 +454,9 @@ impl AccessResolver {
         .map_err(db_err)?;
 
         // 2. Workspace-role holders on THIS object's OWN workspace (cascade).
-        let workspace: Vec<WhoRow> = sqlx::query_as(&format!(
-            "{principal_select} WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 \
+        let workspace: Vec<WhoRow> = sqlx::query_as(concat!(
+            principal_select!(),
+            " WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 \
               AND (ag.expires_at IS NULL OR ag.expires_at > now())"
         ))
         .bind(ws_id)
@@ -446,9 +465,9 @@ impl AccessResolver {
         .map_err(db_err)?;
 
         // 3. Platform admins (superusers — reach every object).
-        let platform: Vec<WhoRow> = sqlx::query_as(&format!(
-            "{principal_select} \
-              WHERE ag.scope_type = 'platform' AND r.name = 'platform_admin' AND ag.effect = 'allow' \
+        let platform: Vec<WhoRow> = sqlx::query_as(concat!(
+            principal_select!(),
+            " WHERE ag.scope_type = 'platform' AND r.name = 'platform_admin' AND ag.effect = 'allow' \
                 AND (ag.expires_at IS NULL OR ag.expires_at > now())"
         ))
         .fetch_all(&self.db.pool)

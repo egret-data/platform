@@ -48,7 +48,7 @@ async fn seed_ws_grant(db: &Db, user: UserId, ws: WorkspaceId, expires_expr: &st
          SELECT 'user', $2, r.id, 'workspace', $1, {expires_expr} FROM roles r \
          WHERE r.scope = 'workspace' AND r.name = 'ws_admin'"
     );
-    sqlx::query(&sql)
+    sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(ws.0)
         .bind(user.0)
         .execute(&db.pool)

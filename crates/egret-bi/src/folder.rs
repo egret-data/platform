@@ -44,7 +44,7 @@ impl FolderRepo {
         let sql = format!(
             "SELECT {COLS} FROM analytics.folders WHERE workspace_id=$1 AND entity_type=$2 ORDER BY name"
         );
-        Ok(sqlx::query_as::<_, Folder>(&sql)
+        Ok(sqlx::query_as::<_, Folder>(sqlx::AssertSqlSafe(sql))
             .bind(workspace_id)
             .bind(entity_type)
             .fetch_all(&self.db.pool)
@@ -62,7 +62,7 @@ impl FolderRepo {
             "INSERT INTO analytics.folders (workspace_id, entity_type, name, created_by) \
              VALUES ($1,$2,$3,$4) RETURNING {COLS}"
         );
-        sqlx::query_as::<_, Folder>(&sql)
+        sqlx::query_as::<_, Folder>(sqlx::AssertSqlSafe(sql))
             .bind(workspace_id)
             .bind(entity_type)
             .bind(name)
@@ -74,7 +74,7 @@ impl FolderRepo {
 
     pub async fn rename(&self, id: Uuid, name: &str) -> Result<Option<Folder>, BiError> {
         let sql = format!("UPDATE analytics.folders SET name=$2 WHERE id=$1 RETURNING {COLS}");
-        sqlx::query_as::<_, Folder>(&sql)
+        sqlx::query_as::<_, Folder>(sqlx::AssertSqlSafe(sql))
             .bind(id)
             .bind(name)
             .fetch_optional(&self.db.pool)

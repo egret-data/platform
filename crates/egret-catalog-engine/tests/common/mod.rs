@@ -25,7 +25,7 @@ pub async fn seed_workspace(s: &CatalogStore) -> Uuid {
 pub async fn seed_workspace_with_slug(s: &CatalogStore) -> (Uuid, String) {
     let id = Uuid::new_v4();
     let slug = format!("ws_{}", id.simple());
-    sqlx08::query("INSERT INTO workspaces (id, slug, name, status) VALUES ($1, $2, $3, 'active')")
+    sqlx::query("INSERT INTO workspaces (id, slug, name, status) VALUES ($1, $2, $3, 'active')")
         .bind(id)
         .bind(&slug)
         .bind(&slug)
