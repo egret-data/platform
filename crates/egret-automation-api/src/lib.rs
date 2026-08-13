@@ -272,6 +272,11 @@ pub struct ScheduleDetailDto {
     /// A user-authored note carried into the notification body. Distinct from
     /// `description`, which is the line the LIST shows.
     pub message: Option<String>,
+    /// The closing note, rendered UNDER the result — `message` opens the
+    /// notification, this one closes it, and an inline image sits between them.
+    /// Defaulted, so a client written before 0116 keeps working unchanged.
+    #[serde(default)]
+    pub message_footer: Option<String>,
     /// Metabase's `skip_if_empty`: send nothing when the run produced no rows.
     #[serde(default)]
     pub skip_if_empty: bool,
@@ -333,6 +338,11 @@ pub struct CreateSchedule {
     /// A user-authored note carried into the notification body. Distinct from
     /// `description`, which is the line the LIST shows.
     pub message: Option<String>,
+    /// The closing note, rendered UNDER the result — `message` opens the
+    /// notification, this one closes it, and an inline image sits between them.
+    /// Defaulted, so a client written before 0116 keeps working unchanged.
+    #[serde(default)]
+    pub message_footer: Option<String>,
     /// Metabase's `skip_if_empty`: send nothing when the run produced no rows.
     #[serde(default)]
     pub skip_if_empty: bool,
@@ -393,6 +403,11 @@ pub struct UpdateSchedule {
     /// A user-authored note carried into the notification body. Distinct from
     /// `description`, which is the line the LIST shows.
     pub message: Option<String>,
+    /// The closing note, rendered UNDER the result — `message` opens the
+    /// notification, this one closes it, and an inline image sits between them.
+    /// Defaulted, so a client written before 0116 keeps working unchanged.
+    #[serde(default)]
+    pub message_footer: Option<String>,
     /// Metabase's `skip_if_empty`: send nothing when the run produced no rows.
     #[serde(default)]
     pub skip_if_empty: bool,

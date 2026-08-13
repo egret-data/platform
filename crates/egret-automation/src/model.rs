@@ -48,6 +48,7 @@ pub struct WriteBody<'a> {
     pub log_retention_days: Option<i32>,
     pub email_subject: Option<&'a str>,
     pub message: Option<&'a str>,
+    pub message_footer: Option<&'a str>,
     pub skip_if_empty: bool,
     pub targets: &'a [egret_automation_api::TargetInput],
     pub owners: &'a [Uuid],
@@ -77,6 +78,7 @@ impl<'a> From<&'a CreateSchedule> for WriteBody<'a> {
             log_retention_days: b.log_retention_days,
             email_subject: b.email_subject.as_deref(),
             message: b.message.as_deref(),
+            message_footer: b.message_footer.as_deref(),
             skip_if_empty: b.skip_if_empty,
             targets: &b.targets,
             owners: &b.owners,
@@ -109,6 +111,7 @@ pub fn update_body<'a>(b: &'a UpdateSchedule, stored_type: ScheduleType) -> Writ
         log_retention_days: b.log_retention_days,
         email_subject: b.email_subject.as_deref(),
         message: b.message.as_deref(),
+        message_footer: b.message_footer.as_deref(),
         skip_if_empty: b.skip_if_empty,
         targets: &b.targets,
         owners: &b.owners,
@@ -134,6 +137,11 @@ pub fn to_new(body: &WriteBody<'_>, creator: Option<Uuid>) -> Result<NewSchedule
     }
     // Rejects an unparseable crontab AND an unknown IANA zone.
     crate::cron::validate(body.crontab, body.timezone)?;
+    // A subject placeholder is checked HERE, while its author is on the form.
+    // Deferring it to send time would turn a typo into a lost notification.
+    if let Some(subject) = body.email_subject {
+        crate::subject::validate(subject).map_err(|m| bad(&m))?;
+    }
 
     match body.ty {
         ScheduleType::Alert => {
@@ -235,6 +243,7 @@ pub fn to_new(body: &WriteBody<'_>, creator: Option<Uuid>) -> Result<NewSchedule
         log_retention_days: retention,
         email_subject: body.email_subject.map(str::to_string),
         message: body.message.map(str::to_string),
+        message_footer: body.message_footer.map(str::to_string),
         skip_if_empty: body.skip_if_empty,
         targets: body
             .targets
@@ -437,6 +446,7 @@ pub fn detail_dto(
         log_retention_days: s.log_retention_days,
         email_subject: s.email_subject.clone(),
         message: s.message.clone(),
+        message_footer: s.message_footer.clone(),
         skip_if_empty: s.skip_if_empty,
         targets: targets
             .iter()

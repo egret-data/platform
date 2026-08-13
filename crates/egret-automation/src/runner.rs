@@ -376,11 +376,22 @@ impl AutomationRunner {
         };
         Ok(ReportContent {
             subject: report_subject(s),
-            body: format!("The report \"{}\" is attached.\n", s.name),
+            body: match format {
+                // A PNG is shown IN the body, so "attached" would be a lie in
+                // the plain-text alternative a text-only client reads.
+                ReportFormat::Png => format!("The report \"{}\" is below.\n", s.name),
+                _ => format!("The report \"{}\" is attached.\n", s.name),
+            },
             attachment: Some(Attachment {
                 filename: format!("{}.{ext}", slugify(&s.name)),
                 content_type: content_type.into(),
                 bytes,
+                inline_cid: match format {
+                    ReportFormat::Png => Some(REPORT_IMAGE_CID.to_string()),
+                    // A multi-page PDF has no `cid:` rendering — every client
+                    // would show a broken image where the pages should be.
+                    _ => None,
+                },
             }),
         })
     }
@@ -460,6 +471,7 @@ impl AutomationRunner {
                         filename: format!("{}.csv", slugify(&s.name)),
                         content_type: "text/csv".into(),
                         bytes: csv.into_bytes(),
+                        inline_cid: None,
                     }),
                 })
             }
@@ -572,12 +584,17 @@ impl AutomationRunner {
                 to,
                 subject: &content.subject,
                 body: content.body.clone(),
-                html: Some(email::notification_html(
-                    &s.name,
-                    s.message.as_deref(),
-                    &content.body,
-                    &self.object_url(s, &self.workspace_slug(s.workspace_id).await),
-                )),
+                html: Some(email::notification_html(&email::NotificationBody {
+                    title: &s.name,
+                    header: s.message.as_deref(),
+                    footer: s.message_footer.as_deref(),
+                    summary: &content.body,
+                    image_cid: content
+                        .attachment
+                        .as_ref()
+                        .and_then(|a| a.inline_cid.as_deref()),
+                    url: &self.object_url(s, &self.workspace_slug(s.workspace_id).await),
+                })),
                 attachments: content.attachment.clone().into_iter().collect(),
             },
         )
@@ -780,6 +797,7 @@ impl AutomationRunner {
             filename: format!("{}.{ext}", slugify(&s.name)),
             content_type: content_type.into(),
             bytes,
+            inline_cid: matches!(format, ReportFormat::Png).then(|| REPORT_IMAGE_CID.to_string()),
         })
     }
 
@@ -806,10 +824,7 @@ impl AutomationRunner {
             .await
             .map_err(|e| e.to_string())?;
 
-        let subject = s
-            .email_subject
-            .clone()
-            .unwrap_or_else(|| format!("[egret] {} triggered", s.name));
+        let subject = render_subject(s, &format!("[egret] {} triggered", s.name));
         let value = eval
             .value
             .map(|v| v.to_string())
@@ -840,6 +855,7 @@ impl AutomationRunner {
             filename: format!("{}.csv", slugify(&s.name)),
             content_type: "text/csv".into(),
             bytes: csv.into_bytes(),
+            inline_cid: None,
         }];
         // An alert may also name a chart or dashboard. When it does, the mail
         // carries a rendering of it beside the numbers — the recipient sees
@@ -855,12 +871,14 @@ impl AutomationRunner {
             &EmailMessage {
                 to,
                 subject: &subject,
-                html: Some(email::notification_html(
-                    &s.name,
-                    s.message.as_deref(),
-                    &body,
-                    &self.object_url(s, &self.workspace_slug(s.workspace_id).await),
-                )),
+                html: Some(email::notification_html(&email::NotificationBody {
+                    title: &s.name,
+                    header: s.message.as_deref(),
+                    footer: s.message_footer.as_deref(),
+                    summary: &body,
+                    image_cid: attachments.iter().find_map(|a| a.inline_cid.as_deref()),
+                    url: &self.object_url(s, &self.workspace_slug(s.workspace_id).await),
+                })),
                 body,
                 attachments,
             },
@@ -922,9 +940,23 @@ struct ReportContent {
 /// "report" rather than "triggered": a report always delivers, so "triggered"
 /// would misdescribe every send.
 fn report_subject(s: &Schedule) -> String {
-    s.email_subject
-        .clone()
-        .unwrap_or_else(|| format!("[egret] {} report", s.name))
+    render_subject(s, &format!("[egret] {} report", s.name))
+}
+
+/// `Content-ID` for the picture shown inside the notification body. One value
+/// because a notification carries at most one rendered image; the body's
+/// `cid:` reference and the part's header must agree, so they read it from
+/// here rather than each spelling it out.
+const REPORT_IMAGE_CID: &str = "egret-render";
+
+/// The subject a run actually sends: the user's template with its `{{date}}`
+/// style placeholders filled in, or `default` when they set none.
+///
+/// Rendered in the schedule's own timezone — see [`crate::subject`]. Unknown
+/// placeholders cannot reach here: `to_new` rejects them on save.
+fn render_subject(s: &Schedule, default: &str) -> String {
+    let template = s.email_subject.as_deref().unwrap_or(default);
+    crate::subject::render(template, &s.name, chrono::Utc::now(), &s.timezone)
 }
 
 /// A small plain-text table — the thing a report's `text` format promises:

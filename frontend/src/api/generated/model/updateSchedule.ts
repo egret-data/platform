@@ -50,6 +50,13 @@ export interface UpdateSchedule {
      * @nullable
      */
   message?: string | null;
+  /**
+     * The closing note, rendered UNDER the result — `message` opens the
+     * notification, this one closes it, and an inline image sits between them.
+     * Defaulted, so a client written before 0116 keeps working unchanged.
+     * @nullable
+     */
+  message_footer?: string | null;
   /** Metabase's `skip_if_empty`: send nothing when the run produced no rows. */
   skip_if_empty?: boolean;
   /**

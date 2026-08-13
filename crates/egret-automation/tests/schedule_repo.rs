@@ -100,6 +100,7 @@ fn alert(f: &Fixture, name: &str) -> NewSchedule {
         log_retention_days: 90,
         email_subject: None,
         message: None,
+        message_footer: None,
         skip_if_empty: false,
         targets: vec![],
         owners: vec![f.user],

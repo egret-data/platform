@@ -112,6 +112,12 @@ async function goTo(user: ReturnType<typeof userEvent.setup>, label: RegExp) {
   await user.click(screen.getByRole("button", { name: label }));
 }
 
+/** Add a delivery method through the menu, the way a person does. */
+async function addDestination(user: ReturnType<typeof userEvent.setup>, kind: RegExp) {
+  await user.click(screen.getByRole("button", { name: /add delivery method/i }));
+  await user.click(await screen.findByRole("menuitem", { name: kind }));
+}
+
 /** A saved alert delivering to both an inbox and a signed webhook. */
 function withWebhook() {
   scheduleMock.mockReturnValue({
@@ -435,7 +441,8 @@ describe("Alerts & Reports editor page", () => {
     await goTo(user, /^condition$/i);
     await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
     await goTo(user, /^notification$/i);
-    await user.type(screen.getByLabelText(/slack channel/i), "#data-alerts");
+    await addDestination(user, /^slack$/i);
+    await user.type(screen.getByLabelText(/^channel$/i), "#data-alerts");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
 
     await waitFor(() => expect(createMutate).toHaveBeenCalled());
@@ -446,6 +453,115 @@ describe("Alerts & Reports editor page", () => {
     // No token typed means "keep whatever is stored" — the browser must not
     // invent an empty one, which the server reads as "remove it".
     expect(slack.config.token).toBeUndefined();
+  });
+
+  it("delivers to several destinations of the same kind", async () => {
+    // The flat form had one Slack field and one email field, so "post to
+    // #data AND #exec" was not expressible — even though the server has
+    // always stored recipients as a list and delivered to all of them.
+    const user = userEvent.setup();
+    renderEditor();
+    await user.type(screen.getByLabelText(/^name$/i), "two channels");
+    await goTo(user, /^condition$/i);
+    await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await goTo(user, /^notification$/i);
+
+    await addDestination(user, /^slack$/i);
+    await addDestination(user, /^slack$/i);
+    const channels = screen.getAllByLabelText(/^channel$/i);
+    expect(channels).toHaveLength(2);
+    await user.type(channels[0], "#data");
+    await user.type(channels[1], "#exec");
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const slack = createMutate.mock.calls[0][0].recipients.filter(
+      (r: { kind: string }) => r.kind === "slack",
+    );
+    expect(slack.map((r: { config: { channel: string } }) => r.config.channel)).toEqual([
+      "#data",
+      "#exec",
+    ]);
+  });
+
+  it("removing a destination drops it from the saved set", async () => {
+    // The update REPLACES the recipient set, so removal is the absence of a
+    // row — which makes it worth pinning that the row really does disappear
+    // and does not merely stop rendering.
+    const user = userEvent.setup();
+    withWebhook();
+    renderEditor("/explore/eng/alerts/s1");
+
+    await screen.findByRole("heading", { name: /orders dropped/i });
+    await goTo(user, /^notification$/i);
+    expect(screen.getByDisplayValue("https://hooks.example.com/egret/1")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /remove webhook destination/i }));
+    const recipients = await saveExisting(user);
+
+    expect(recipients.filter((r) => r.kind === "webhook")).toHaveLength(0);
+    // The email it sat beside is untouched.
+    expect(recipients.filter((r) => r.kind === "email")).toHaveLength(1);
+  });
+
+  it("carries a subject placeholder to the server verbatim", async () => {
+    // The substitution happens at SEND time, in the schedule's own timezone —
+    // a browser-rendered date would freeze the day the subject was written
+    // into every future edition.
+    const user = userEvent.setup();
+    renderEditor();
+    await user.type(screen.getByLabelText(/^name$/i), "daily orders");
+    await goTo(user, /^condition$/i);
+    await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await goTo(user, /^notification$/i);
+    // `{{` is userEvent's escape for a literal brace, so the template is
+    // pasted rather than typed — otherwise the field receives `Orders {date}}`
+    // and the assertion below passes for the wrong reason.
+    await user.click(screen.getByLabelText(/email subject/i));
+    await user.paste("Orders {{date}}");
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    expect(createMutate.mock.calls[0][0].email_subject).toBe("Orders {{date}}");
+  });
+
+  it("inserts a subject placeholder at the caret, not glued to the end", async () => {
+    // Appending looked fine in the diff and wrong the moment it was clicked:
+    // "Weekly overview" + the button gave `Weekly overview{{date}}`, which
+    // SENDS as "Weekly overview2026-08-13" — no space, one run-on word.
+    const user = userEvent.setup();
+    renderEditor();
+    await user.type(screen.getByLabelText(/^name$/i), "placement");
+    await goTo(user, /^condition$/i);
+    await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await goTo(user, /^notification$/i);
+
+    const subject = screen.getByLabelText(/email subject/i) as HTMLInputElement;
+    await user.click(subject);
+    await user.paste("Orders  - EU");
+    // Caret between the two spaces, where a person would put it.
+    subject.setSelectionRange(7, 7);
+    await user.click(screen.getByRole("button", { name: "{{date}}" }));
+
+    expect(subject.value).toBe("Orders {{date}} - EU");
+  });
+
+  it("sends the opening and closing notes as separate fields", async () => {
+    // Two columns, not one: the picture is rendered BETWEEN them, so merging
+    // them would put the whole note on one side of it.
+    const user = userEvent.setup();
+    renderEditor();
+    await user.type(screen.getByLabelText(/^name$/i), "topped and tailed");
+    await goTo(user, /^condition$/i);
+    await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await goTo(user, /^notification$/i);
+    await user.type(screen.getByLabelText(/opening note/i), "Why you get this.");
+    await user.type(screen.getByLabelText(/closing note/i), "Ask #data.");
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const body = createMutate.mock.calls[0][0];
+    expect(body.message).toBe("Why you get this.");
+    expect(body.message_footer).toBe("Ask #data.");
   });
 
   it("surfaces the server's validation message instead of a generic failure", async () => {

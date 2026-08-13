@@ -40,6 +40,9 @@ export const SECTIONS: { key: SectionKey; label: (isAlert: boolean) => string }[
   { key: "advanced", label: () => "Advanced" },
 ];
 import { ConfigSection } from "@/components/form/ConfigSection";
+import { DestinationList } from "./DestinationList";
+import { toDestinations, toRecipients, type Destination } from "./destinations";
+import { SUBJECT_TOKENS, renderSubject } from "@/lib/subjectTemplate";
 
 /**
  * The create/edit form for one schedule.
@@ -120,8 +123,17 @@ export function ScheduleEditor({
   /** Reports only: additional objects delivered in the same message. */
   const [extraTargets, setExtraTargets] = useState<string[]>([]);
   const [reportFormat, setReportFormat] = useState("png");
-  const [emails, setEmails] = useState("");
+  /**
+   * Every destination this schedule delivers to, in order.
+   *
+   * One list rather than an email field + a slack field + a webhook textarea:
+   * the server has always stored `recipients` as a list of `{kind, config}`
+   * and delivered to all of them, so the flat form was the only thing making
+   * "two Slack channels" impossible. See `./destinations.ts`.
+   */
+  const [destinations, setDestinations] = useState<Destination[]>([]);
   const [emailSubject, setEmailSubject] = useState("");
+  const [messageFooter, setMessageFooter] = useState("");
   const [owners, setOwners] = useState<string[]>([]);
   const [gracePeriod, setGracePeriod] = useState("14400");
   const [workingTimeout, setWorkingTimeout] = useState("3600");
@@ -130,19 +142,6 @@ export function ScheduleEditor({
   const [customHeight, setCustomHeight] = useState("");
   /** Alerts only: attach a rendering of this chart/dashboard when it fires. */
   const [attachTarget, setAttachTarget] = useState(false);
-  const [webhooks, setWebhooks] = useState("");
-  const [slackChannel, setSlackChannel] = useState("");
-  const [slackToken, setSlackToken] = useState("");
-  const [slackHasToken, setSlackHasToken] = useState(false);
-  /**
-   * Which webhook URLs already have an HMAC signing secret.
-   *
-   * The secret itself is never sent to a browser — it lives in the vault and
-   * the server reports only `has_secret`. Keeping the SERVER responsible for
-   * carrying it across a save (absent means keep, per `vault_secrets`) is why
-   * this form can send a bare `{ url }` without unsigning anything.
-   */
-  const [signedUrls, setSignedUrls] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
 
   // Populate from the loaded schedule when editing. Keyed on the row's id so
@@ -158,6 +157,7 @@ export function ScheduleEditor({
     setSched(parsed ?? DEFAULT_SCHEDULE);
     setRawCron(parsed === null);
     setMessage(existing.message ?? "");
+    setMessageFooter(existing.message_footer ?? "");
     setSkipIfEmpty(existing.skip_if_empty ?? false);
     setActive(existing.active);
     setSql(existing.sql ?? "");
@@ -191,24 +191,7 @@ export function ScheduleEditor({
     setCustomWidth(existing.custom_width == null ? "" : String(existing.custom_width));
     setCustomHeight(existing.custom_height == null ? "" : String(existing.custom_height));
     setAttachTarget(Boolean(existing.chart_id || existing.dashboard_id));
-    setEmails(
-      existing.recipients
-        .filter((r) => r.kind === "email")
-        .flatMap((r) => ((r.config as { addresses?: string[] }).addresses ?? []))
-        .join(", "),
-    );
-    const hooks = existing.recipients
-      .filter((r) => r.kind === "webhook")
-      .map((r) => r.config as { url?: string; has_secret?: boolean })
-      .filter((c): c is { url: string; has_secret?: boolean } => Boolean(c.url));
-    setWebhooks(hooks.map((c) => c.url).join("\n"));
-    const sl = existing.recipients.find((r) => r.kind === "slack")?.config as
-      | { channel?: string; has_token?: boolean }
-      | undefined;
-    setSlackChannel(sl?.channel ?? "");
-    setSlackHasToken(Boolean(sl?.has_token));
-    setSlackToken("");
-    setSignedUrls(new Set(hooks.filter((c) => c.has_secret).map((c) => c.url)));
+    setDestinations(toDestinations(existing.recipients));
   }, [existing]);
 
   /**
@@ -219,6 +202,31 @@ export function ScheduleEditor({
    * must be http(s)") is off-screen and pressing Save looks like it did
    * nothing at all. Applies to every validation error, not only webhooks.
    */
+  /**
+   * Put a placeholder where the caret is, not at the end.
+   *
+   * Appending looked right until it was clicked: "Weekly overview" + the
+   * button produced `Weekly overview{{date}}`, which SENDS as
+   * "Weekly overview2026-08-13" with no separator. And a subject like
+   * "Orders — {{date}} — EU" is an ordinary thing to want, which an
+   * append-only button cannot write at all.
+   */
+  const subjectRef = useRef<HTMLInputElement>(null);
+  const insertToken = (token: string) => {
+    const el = subjectRef.current;
+    const text = `{{${token}}}`;
+    const at = el?.selectionStart ?? emailSubject.length;
+    const to = el?.selectionEnd ?? emailSubject.length;
+    const next = emailSubject.slice(0, at) + text + emailSubject.slice(to);
+    setEmailSubject(next);
+    // Focus and caret are restored after the value lands, so typing continues
+    // where the placeholder ended rather than jumping to the start.
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(at + text.length, at + text.length);
+    });
+  };
+
   const errorRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (error) errorRef.current?.scrollIntoView({ block: "nearest" });
@@ -229,40 +237,10 @@ export function ScheduleEditor({
     targetId || (targetKind === "dashboard" ? dashboards?.[0]?.id : charts?.[0]?.id) || "";
 
   function buildBody() {
-    const addresses = emails
-      .split(",")
-      .map((e) => e.trim())
-      .filter(Boolean);
-    // One URL per line, not comma-separated like the addresses above: a comma
-    // is legal inside a URL's query string.
-    const urls = webhooks
-      .split("\n")
-      .map((u) => u.trim())
-      .filter(Boolean);
-
-    // Every destination the schedule has, in one list — the update REPLACES
-    // the recipient set, so a kind missing from this array is a kind deleted.
-    const recipients = [
-      ...(addresses.length ? [{ kind: "email" as const, config: { addresses } }] : []),
-      // The URL alone. A `secret` key absent from the body means "keep the one
-      // already stored for this URL" (`ScheduleRepo::vault_secrets`), so the
-      // browser never has to hold a credential to avoid destroying it.
-      ...urls.map((url) => ({ kind: "webhook" as const, config: { url } })),
-      // Same three-way rule as the webhook secret: an absent `token` keeps the
-      // stored one, so the browser never has to hold a credential in order to
-      // avoid destroying it.
-      ...(slackChannel.trim()
-        ? [
-            {
-              kind: "slack" as const,
-              config: {
-                channel: slackChannel.trim(),
-                ...(slackToken.trim() ? { token: slackToken.trim() } : {}),
-              },
-            },
-          ]
-        : []),
-    ];
+    // The update REPLACES the recipient set, so a destination missing from
+    // this array is a destination deleted. Credentials follow the three-way
+    // rule — see `toRecipients`.
+    const recipients = toRecipients(destinations);
 
     // An empty number field means "use the default", not zero — the server
     // would reject 0 for the timers and silently disable retention.
@@ -281,6 +259,7 @@ export function ScheduleEditor({
       owners,
       email_subject: emailSubject.trim() || null,
       message: message.trim() || null,
+      message_footer: messageFooter.trim() || null,
       skip_if_empty: skipIfEmpty,
       grace_period_s: num(gracePeriod, 14400),
       working_timeout_s: num(workingTimeout, 3600),
@@ -903,33 +882,92 @@ export function ScheduleEditor({
         title="Notification"
         description="Who hears about it, through which channels, and what the message says."
       >
+        {/* Destinations first, content second: "who am I telling" is the
+            question a person answers before "what does it say", and the
+            content fields below describe the email that the Email
+            destination produces. */}
+        <DestinationList value={destinations} onChange={setDestinations} />
+
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="sched-subject">Email subject</Label>
           <Input
             id="sched-subject"
+            ref={subjectRef}
             value={emailSubject}
             onChange={(e) => setEmailSubject(e.target.value)}
             placeholder={
               isAlert ? `[egret] ${name || "name"} triggered` : `[egret] ${name || "name"}`
             }
           />
+          {/* A subject fixed for every edition collapses thirty mails into
+              one thread and nobody can find yesterday's, which is why the
+              placeholders exist and why the preview is here rather than in a
+              tooltip. */}
           <p className="text-xs text-muted-foreground">
-            Leave blank to use the default shown above.
+            Leave blank to use the default shown above. Placeholders:{" "}
+            {SUBJECT_TOKENS.map((t, i) => (
+              <span key={t.token}>
+                {i > 0 && ", "}
+                <button
+                  type="button"
+                  className="font-mono underline hover:text-foreground"
+                  onClick={() => insertToken(t.token)}
+                  title={`Insert ${t.hint}`}
+                >{`{{${t.token}}}`}</button>
+              </span>
+            ))}
+            .
           </p>
+          {emailSubject.includes("{{") && (
+            <p className="text-xs text-muted-foreground">
+              Sends as{" "}
+              <span className="font-medium text-foreground">
+                {renderSubject(emailSubject, name || "name")}
+              </span>
+            </p>
+          )}
         </div>
+
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-message">Message</Label>
+          <Label htmlFor="sched-message">Opening note</Label>
           <Textarea
             id="sched-message"
-            rows={3}
+            rows={2}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             placeholder="Anything the recipient should know — why this exists, who to ask."
           />
           <p className="text-xs text-muted-foreground">
-            Shown at the top of the notification, above the result. Plain text.
+            Above the result, at the top of the notification. Plain text.
           </p>
         </div>
+
+        {/* Between the two notes, and only in the mail — this is not a field
+            but a statement of where the delivered object lands, because
+            "opening note / closing note" reads as two adjacent boxes
+            otherwise. */}
+        <p className="rounded-md border border-dashed px-3 py-2 text-center text-xs text-muted-foreground">
+          {isAlert
+            ? "The triggering rows go here, with a picture of the attached chart when there is one."
+            : reportFormat === "png"
+              ? "The rendered image goes here, inside the message."
+              : "The report goes here — csv and pdf arrive as a file, text is shown inline."}
+        </p>
+
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="sched-message-footer">Closing note</Label>
+          <Textarea
+            id="sched-message-footer"
+            rows={2}
+            value={messageFooter}
+            onChange={(e) => setMessageFooter(e.target.value)}
+            placeholder="What to do about it — who to contact, where to look next."
+          />
+          <p className="text-xs text-muted-foreground">
+            Below the result, before the link back to egret. Plain text.
+          </p>
+        </div>
+
         <div className="flex items-center gap-2">
           <Checkbox
             id="sched-skip-empty"
@@ -939,59 +977,6 @@ export function ScheduleEditor({
           <Label htmlFor="sched-skip-empty" className="text-sm font-normal">
             Don&apos;t send when there are no rows
           </Label>
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-emails">Email recipients</Label>
-          <Input
-            id="sched-emails"
-            value={emails}
-            onChange={(e) => setEmails(e.target.value)}
-            placeholder="on-call@example.com, team@example.com"
-          />
-          <p className="text-xs text-muted-foreground">
-            Comma separated. Sending needs workspace SMTP, which is configured separately.
-          </p>
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-slack">Slack channel</Label>
-          <div className="flex gap-2">
-            <Input
-              id="sched-slack"
-              className="flex-1"
-              value={slackChannel}
-              onChange={(e) => setSlackChannel(e.target.value)}
-              placeholder="#data-alerts"
-            />
-            <Input
-              aria-label="Slack bot token"
-              className="flex-1"
-              type="password"
-              autoComplete="new-password"
-              value={slackToken}
-              onChange={(e) => setSlackToken(e.target.value)}
-              placeholder={slackHasToken ? "Unchanged" : "xoxb-…"}
-            />
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {slackHasToken
-              ? "A bot token is stored. Leave it blank to keep it."
-              : "Needs a bot token with chat:write, and the bot invited to the channel."}
-          </p>
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="sched-webhooks">Webhook URLs</Label>
-          <Textarea
-            id="sched-webhooks"
-            rows={2}
-            value={webhooks}
-            onChange={(e) => setWebhooks(e.target.value)}
-            placeholder="https://hooks.example.com/egret"
-          />
-          <p className="text-xs text-muted-foreground">
-            One per line, http(s). Each fires a POST with the run's result.
-            {signedUrls.size > 0 &&
-              ` ${signedUrls.size === 1 ? "One is" : `${signedUrls.size} are`} HMAC-signed; the secret is stored server-side and kept on save.`}
-          </p>
         </div>
       </ConfigSection>
       )}
