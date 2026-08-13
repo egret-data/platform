@@ -39,6 +39,8 @@ describe("delivery destinations", () => {
     ]);
     expect(toRecipients(rows)).toEqual([
       { kind: "webhook", config: { url: "https://h.example/1" } },
+      // Never a token: the editor has no field for one, and an absent key
+      // leaves a legacy per-recipient credential exactly where it is.
       { kind: "slack", config: { channel: "#data" } },
     ]);
   });

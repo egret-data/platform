@@ -470,9 +470,13 @@ describe("Alerts & Reports editor page", () => {
       (r: { kind: string }) => r.kind === "slack",
     );
     expect(slack.config.channel).toBe("#data-alerts");
-    // No token typed means "keep whatever is stored" — the browser must not
-    // invent an empty one, which the server reads as "remove it".
-    expect(slack.config.token).toBeUndefined();
+    // The editor has no token field at all now: the bot token belongs to the
+    // WORKSPACE (Settings -> Notifications), so three channels no longer mean
+    // the same credential pasted three times. An absent `token` also still
+    // means "keep whatever this recipient has", which is what leaves a
+    // pre-workspace-app destination's own token untouched.
+    expect(slack.config).toEqual({ channel: "#data-alerts" });
+    expect(screen.queryByLabelText(/bot token/i)).not.toBeInTheDocument();
   });
 
   it("has four sections, and no Advanced", async () => {

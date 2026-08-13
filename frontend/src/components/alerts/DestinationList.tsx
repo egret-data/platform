@@ -90,32 +90,21 @@ export function DestinationList({
 
             {d.kind === "slack" && (
               <div className="flex flex-col gap-1.5">
-                <div className="flex gap-2">
-                  <div className="flex flex-1 flex-col gap-1.5">
-                    <Label htmlFor={`dest-${d.id}`}>Channel</Label>
-                    <Input
-                      id={`dest-${d.id}`}
-                      value={d.channel}
-                      onChange={(e) => patch(d.id, { channel: e.target.value })}
-                      placeholder="#data-alerts"
-                    />
-                  </div>
-                  <div className="flex flex-1 flex-col gap-1.5">
-                    <Label htmlFor={`dest-${d.id}-token`}>Bot token</Label>
-                    <Input
-                      id={`dest-${d.id}-token`}
-                      type="password"
-                      autoComplete="new-password"
-                      value={d.token}
-                      onChange={(e) => patch(d.id, { token: e.target.value })}
-                      placeholder={d.hasToken ? "Unchanged" : "xoxb-…"}
-                    />
-                  </div>
-                </div>
+                <Label htmlFor={`dest-${d.id}`}>Channel</Label>
+                <Input
+                  id={`dest-${d.id}`}
+                  value={d.channel}
+                  onChange={(e) => patch(d.id, { channel: e.target.value })}
+                  placeholder="#data-alerts"
+                />
+                {/* No token field. The bot token belongs to the WORKSPACE, like
+                    its SMTP relay — posting to three channels used to mean
+                    pasting the same credential three times and rotating it in
+                    three places. */}
                 <p className="text-xs text-muted-foreground">
                   {d.hasToken
-                    ? "A bot token is stored. Leave it blank to keep it."
-                    : "Needs chat:write, and the bot invited to the channel."}
+                    ? "This destination still carries its own token, from before the workspace app existed. It keeps working; new ones use the workspace's."
+                    : "Uses the workspace's Slack app, set in Settings → Notifications. The bot needs chat:write and an invite to the channel."}
                 </p>
               </div>
             )}

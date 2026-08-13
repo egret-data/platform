@@ -268,6 +268,8 @@ export * from './setNotebookWarehouse';
 export * from './setPermissionsInput';
 export * from './setPlatformRoles';
 export * from './setWorkspacesBody';
+export * from './slackConfigBody';
+export * from './slackConfigDto';
 export * from './smtpConfigBody';
 export * from './smtpConfigDto';
 export * from './smtpTestBody';

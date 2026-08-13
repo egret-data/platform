@@ -9,6 +9,9 @@ const smtpMock = vi.fn();
 const saveMutate = vi.fn().mockResolvedValue({});
 const testMutate = vi.fn().mockResolvedValue({ ok: true, sent_to: ["a@b.c"] });
 const deleteMutate = vi.fn().mockResolvedValue({});
+const slackMock = vi.fn();
+const slackSave = vi.fn().mockResolvedValue({});
+const slackRemove = vi.fn().mockResolvedValue({});
 
 vi.mock("@/api/notifications", async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
@@ -17,6 +20,11 @@ vi.mock("@/api/notifications", async (orig) => ({
     save: { mutateAsync: saveMutate, isPending: false },
     sendTest: { mutateAsync: testMutate, isPending: false },
     remove: { mutateAsync: deleteMutate, isPending: false },
+  }),
+  useSlackConfig: () => slackMock(),
+  useSlackMutations: () => ({
+    save: { mutateAsync: slackSave, isPending: false },
+    remove: { mutateAsync: slackRemove, isPending: false },
   }),
 }));
 
@@ -54,6 +62,8 @@ function renderPage() {
 beforeEach(() => {
   vi.clearAllMocks();
   smtpMock.mockReturnValue({ data: CONFIGURED, isLoading: false, isError: false });
+  // Unconfigured by default — the ordinary starting state of a workspace.
+  slackMock.mockReturnValue({ data: undefined, isLoading: false, isError: false });
 });
 
 describe("Workspace settings — Notifications", () => {
@@ -136,5 +146,53 @@ describe("Workspace settings — Notifications", () => {
     smtpMock.mockReturnValue({ data: undefined, isLoading: false, isError: true });
     renderPage();
     expect(screen.getByRole("button", { name: /send test/i })).toBeDisabled();
+  });
+
+  it("sends the slack token only when the user typed one", async () => {
+    // The field can never render a stored token, so a blank box must not be a
+    // silent delete — the same three-way rule as the SMTP password. Saving the
+    // default channel alone would otherwise disable every Slack delivery in
+    // the workspace.
+    slackMock.mockReturnValue({
+      data: { has_token: true, default_channel: "#ops", updated_at: "2026-08-11T09:00:00Z" },
+      isLoading: false,
+      isError: false,
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole("button", { name: /save slack settings/i }));
+    await waitFor(() => expect(slackSave).toHaveBeenCalled());
+    expect(slackSave.mock.calls[0][0]).toEqual({ default_channel: "#ops" });
+    expect(slackSave.mock.calls[0][0].token).toBeUndefined();
+
+    await user.type(screen.getByLabelText(/bot token/i), "xoxb-new");
+    await user.click(screen.getByRole("button", { name: /save slack settings/i }));
+    await waitFor(() => expect(slackSave).toHaveBeenCalledTimes(2));
+    expect(slackSave.mock.calls[1][0]).toEqual({
+      token: "xoxb-new",
+      default_channel: "#ops",
+    });
+  });
+
+  it("says whether a slack token is stored, without rendering it", () => {
+    // `has_token` is the only thing the server reports — there is no token
+    // field on the DTO at all — so the page must say "stored" from that alone.
+    slackMock.mockReturnValue({
+      data: { has_token: true, default_channel: null, updated_at: "2026-08-11T09:00:00Z" },
+      isLoading: false,
+      isError: false,
+    });
+    renderPage();
+
+    const field = screen.getByLabelText(/bot token/i) as HTMLInputElement;
+    expect(field.value).toBe("");
+    expect(field.placeholder).toMatch(/unchanged/i);
+    expect(screen.getByText(/a token is stored/i)).toBeInTheDocument();
+  });
+
+  it("offers no remove until a slack app exists", () => {
+    renderPage();
+    expect(screen.queryByRole("button", { name: /remove slack app/i })).not.toBeInTheDocument();
   });
 });

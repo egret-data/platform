@@ -11,9 +11,9 @@ data:
   EGRET_CATALOG__WAREHOUSE: "s3://{{ .Values.deps.minio.bucket }}"
   EGRET_CATALOG__PUBLIC_URL: "http://egret.{{ .Release.Namespace }}.svc.cluster.local:8080"
   EGRET_OIDC__ENABLED: "{{ .Values.oidc.enabled }}"
-  EGRET_OIDC__ISSUER_URL: "http://{{ .Values.ingress.host }}/auth/realms/{{ .Values.oidc.realm }}"
+  EGRET_OIDC__ISSUER_URL: "{{ include "egret.externalUrl" . }}/auth/realms/{{ .Values.oidc.realm }}"
   EGRET_OIDC__CLIENT_ID: "{{ .Values.oidc.clientId }}"
-  EGRET_OIDC__REDIRECT_URL: "http://{{ .Values.ingress.host }}/api/auth/oidc/callback"
+  EGRET_OIDC__REDIRECT_URL: "{{ include "egret.externalUrl" . }}/api/auth/oidc/callback"
   EGRET_RANGER__ENABLED: "{{ .Values.ranger.enabled }}"
   EGRET_RANGER__AUTH_TOKEN: ""
   EGRET_ADMIN_EMAIL: "{{ .Values.admin.email }}"
@@ -23,4 +23,4 @@ data:
   # What a PERSON opens from a notification. Distinct from PUBLIC_URL above,
   # which is the in-cluster address the renderer resolves — a mail linking
   # there is a dead end in the recipient's inbox.
-  EGRET_AUTOMATION__BROWSER_URL: "http://{{ .Values.ingress.host }}"
+  EGRET_AUTOMATION__BROWSER_URL: "{{ include "egret.externalUrl" . }}"

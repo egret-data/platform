@@ -29,8 +29,8 @@ seed-demo:
     ./deploy/seed-demo-catalog.sh
 
 # Seed Alerts & Reports demo data (10 schedules covering every UI state) into a workspace.
-seed-alerts ws="demo":
-    ./deploy/seed-alerts.sh {{ws}}
+seed-alerts ws="demo" smtp_host="localhost":
+    ./deploy/seed-alerts.sh {{ws}} {{smtp_host}}
 
 # Run the server
 serve:

@@ -60,6 +60,8 @@ pub struct AutomationState {
     pub authz: Authorizer,
     pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
     pub smtp: SmtpConfigRepo,
+    /// The workspace's Slack app — one bot token for every channel it posts to.
+    pub slack_config: crate::deliver::slack_config::SlackConfigRepo,
     /// Per-render credentials (P4): mints/redeems the single-use tokens the
     /// print page's renderer authenticates with. See `render::token`.
     pub render_tokens: crate::render::token::RenderTokenRepo,
@@ -150,6 +152,10 @@ pub fn automation_router() -> Router<AutomationState> {
             get(smtp_get).put(smtp_put).delete(smtp_delete),
         )
         .route("/ws/{workspace}/notifications/smtp/test", post(smtp_test))
+        .route(
+            "/ws/{workspace}/notifications/slack",
+            get(slack_get).put(slack_put).delete(slack_delete),
+        )
 }
 
 #[derive(utoipa::OpenApi)]
@@ -172,6 +178,9 @@ pub fn automation_router() -> Router<AutomationState> {
         smtp_put,
         smtp_delete,
         smtp_test,
+        slack_get,
+        slack_put,
+        slack_delete,
         render_payload
     ),
     components(schemas(
@@ -194,6 +203,8 @@ pub fn automation_router() -> Router<AutomationState> {
         SmtpTestBody,
         SetActiveBody,
         SetFolderBody,
+        crate::deliver::slack_config::SlackConfigDto,
+        crate::deliver::slack_config::SlackConfigBody,
         crate::render::payload::RenderPayload,
         crate::render::payload::RenderCardRequest,
         crate::render::payload::RenderCardData,
@@ -866,6 +877,79 @@ async fn smtp_test(
 /// `WsContext` extractor here, so an ordinary session cookie authenticates
 /// nothing on this route — widening it to sessions would make it a second,
 /// unaudited read path for any chart or dashboard.
+/// The workspace's Slack app.
+///
+/// Gated on `SMTP_MANAGE` — the same permission as the relay, and for the same
+/// reason: a bot token is workspace administration, not alert authoring. An
+/// editor who may write a schedule still may not swap the credential every
+/// schedule posts with.
+#[utoipa::path(
+    get, path = "/api/ws/{workspace}/notifications/slack", tag = "alerts",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "The workspace's Slack app", body = crate::deliver::slack_config::SlackConfigDto),
+        (status = 404, description = "Not configured"),
+    ),
+)]
+async fn slack_get(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<crate::deliver::slack_config::SlackConfigDto>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, SMTP_MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+    let cfg = st
+        .slack_config
+        .get(ctx.workspace_id.0)
+        .await
+        .map_err(AutomationApiError::from)?
+        .ok_or_else(|| {
+            AutomationApiError::from(AutomationError::NotFound("slack config".into()))
+        })?;
+    // The DTO has no token field at all — see its docs.
+    Ok(Json(crate::deliver::slack_config::to_dto(&cfg)))
+}
+
+#[utoipa::path(
+    put, path = "/api/ws/{workspace}/notifications/slack", tag = "alerts",
+    params(WorkspacePath), request_body = crate::deliver::slack_config::SlackConfigBody,
+    responses((status = 200, description = "Saved", body = crate::deliver::slack_config::SlackConfigDto)),
+)]
+async fn slack_put(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+    Json(body): Json<crate::deliver::slack_config::SlackConfigBody>,
+) -> Result<Json<crate::deliver::slack_config::SlackConfigDto>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, SMTP_MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+    let cfg = st
+        .slack_config
+        .upsert(ctx.workspace_id.0, &body, Some(ctx.principal.user_id.0))
+        .await
+        .map_err(AutomationApiError::from)?;
+    Ok(Json(crate::deliver::slack_config::to_dto(&cfg)))
+}
+
+#[utoipa::path(
+    delete, path = "/api/ws/{workspace}/notifications/slack", tag = "alerts",
+    params(WorkspacePath),
+    responses((status = 200, description = "Removed", body = egret_core::Ack)),
+)]
+async fn slack_delete(
+    State(st): State<AutomationState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<egret_core::Ack>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, SMTP_MANAGE)
+        .await
+        .map_err(AutomationApiError::from)?;
+    st.slack_config
+        .delete(ctx.workspace_id.0)
+        .await
+        .map_err(AutomationApiError::from)?;
+    Ok(Json(egret_core::Ack { ok: true }))
+}
+
 #[utoipa::path(
     get, path = "/api/render/payload", tag = "alerts",
     responses(

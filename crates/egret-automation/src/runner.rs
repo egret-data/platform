@@ -59,6 +59,9 @@ pub struct AutomationRunner {
     pub resolver: Arc<dyn Resolver>,
     pub policy: SsrfPolicy,
     pub smtp: SmtpConfigRepo,
+    /// The WORKSPACE's Slack app. A recipient names a channel; the credential
+    /// belongs to the workspace, like its SMTP relay.
+    pub slack_config: crate::deliver::slack_config::SlackConfigRepo,
     /// `csv`/`text` reports execute the chart's own saved spec — never the
     /// renderer — through the same `compile_chart_sql` seam the render-payload
     /// endpoint uses (`render::payload`), so a report can never diverge from
@@ -702,7 +705,19 @@ impl AutomationRunner {
             let Some(channel) = r.config.get("channel").and_then(|v| v.as_str()) else {
                 continue;
             };
-            let Some(token) = self.schedules.resolve_slack_token(&r.config).await else {
+            // The recipient's OWN token first, then the workspace's.
+            //
+            // Not merely a preference order — it is what makes migration 0118
+            // safe. Every slack recipient used to carry a token, and the
+            // backfill could only adopt ONE of them per workspace; reading the
+            // recipient's first means a destination whose token differed keeps
+            // delivering with exactly the credential it always used. New
+            // recipients carry none and fall through to the shared one.
+            let token = match self.schedules.resolve_slack_token(&r.config).await {
+                Some(t) => Some(t),
+                None => self.slack_config.resolve_token(s.workspace_id).await,
+            };
+            let Some(token) = token else {
                 first_error.get_or_insert_with(|| slack::SlackError::NoToken.to_string());
                 continue;
             };

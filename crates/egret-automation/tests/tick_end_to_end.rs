@@ -192,6 +192,10 @@ async fn setup(pool: sqlx::PgPool, value: serde_json::Value, fail: bool, webhook
                 db.clone(),
                 egret_secrets::SecretStore::new(db.clone(), None),
             ),
+            slack_config: egret_automation::deliver::slack_config::SlackConfigRepo::new(
+                db.clone(),
+                egret_secrets::SecretStore::new(db.clone(), None),
+            ),
             charts: egret_bi::ChartRepo::new(db.clone()),
             datasets: egret_bi::DatasetRepo::new(db.clone()),
             render_tokens: egret_automation::render::token::RenderTokenRepo::new(db.clone()),

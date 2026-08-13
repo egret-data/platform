@@ -2,7 +2,13 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { AlertCircle, CheckCircle2, Mail } from "lucide-react";
 
-import { useSmtpConfig, useSmtpMutations, type TlsMode } from "@/api/notifications";
+import {
+  useSlackConfig,
+  useSlackMutations,
+  useSmtpConfig,
+  useSmtpMutations,
+  type TlsMode,
+} from "@/api/notifications";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -233,7 +239,127 @@ export default function Notifications() {
           &ldquo;configured correctly&rdquo; before an alert needs to fire.
         </p>
       </form>
+
+      <SlackSection ws={ws} />
     </div>
+  );
+}
+
+/**
+ * The workspace's Slack app.
+ *
+ * One bot token for every channel the workspace posts to. It used to live on
+ * each destination, so three channels meant the same credential pasted three
+ * times, rotated in three places and sitting in three vault rows — the same
+ * argument that put the SMTP password here rather than on each schedule.
+ */
+function SlackSection({ ws }: { ws: string }) {
+  const { data, isLoading } = useSlackConfig(ws);
+  const { save, remove } = useSlackMutations(ws);
+  const [token, setToken] = useState("");
+  const [channel, setChannel] = useState("");
+  const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+  useEffect(() => {
+    setChannel(data?.default_channel ?? "");
+  }, [data]);
+
+  const onSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setMsg(null);
+    try {
+      // The token is sent ONLY when typed: absent means "keep the stored one",
+      // because this field can never render it and a blank box must not be a
+      // silent delete.
+      await save.mutateAsync({
+        ...(token.trim() ? { token: token.trim() } : {}),
+        default_channel: channel.trim() || null,
+      });
+      setToken("");
+      setMsg({ kind: "ok", text: "Slack settings saved." });
+    } catch (err) {
+      setMsg({ kind: "err", text: messageOf(err, "Could not save Slack settings.") });
+    }
+  };
+
+  return (
+    <form onSubmit={onSave} className="flex flex-col gap-4 border-t pt-6">
+      <div>
+        <h2 className="text-base font-medium">Slack</h2>
+        <p className="text-sm text-muted-foreground">
+          One bot app for the workspace. A schedule&rsquo;s Slack destination names a channel;
+          the credential lives here.
+        </p>
+      </div>
+
+      {msg && (
+        <Alert variant={msg.kind === "err" ? "destructive" : undefined}>
+          {msg.kind === "err" ? (
+            <AlertCircle className="h-4 w-4" />
+          ) : (
+            <CheckCircle2 className="h-4 w-4" />
+          )}
+          <AlertDescription>{msg.text}</AlertDescription>
+        </Alert>
+      )}
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="slack-token">Bot token</Label>
+          <Input
+            id="slack-token"
+            type="password"
+            autoComplete="new-password"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            placeholder={data?.has_token ? "Unchanged" : "xoxb-…"}
+          />
+          <p className="text-xs text-muted-foreground">
+            {data?.has_token
+              ? "A token is stored. Leave blank to keep it."
+              : "Needs chat:write, and the bot invited to each channel."}
+          </p>
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="slack-channel">Default channel</Label>
+          <Input
+            id="slack-channel"
+            value={channel}
+            onChange={(e) => setChannel(e.target.value)}
+            placeholder="#data-alerts"
+          />
+          <p className="text-xs text-muted-foreground">Optional. Shown as a hint when adding a destination.</p>
+        </div>
+      </div>
+
+      <div className="flex gap-2">
+        {/* Named, not just "Save": there are two forms on this page, and two
+            buttons reading "Save" are ambiguous to anyone navigating by
+            control name rather than by eye. */}
+        <Button type="submit" disabled={save.isPending || isLoading}>
+          {save.isPending ? "Saving…" : "Save Slack settings"}
+        </Button>
+        {data?.has_token && (
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={remove.isPending}
+            onClick={async () => {
+              setMsg(null);
+              try {
+                await remove.mutateAsync();
+                setToken("");
+                setMsg({ kind: "ok", text: "Slack settings removed." });
+              } catch (err) {
+                setMsg({ kind: "err", text: messageOf(err, "Could not remove.") });
+              }
+            }}
+          >
+            Remove Slack app
+          </Button>
+        )}
+      </div>
+    </form>
   );
 }
 

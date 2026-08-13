@@ -18,7 +18,7 @@ type RecipientInput = { kind: "email" | "slack" | "webhook"; config: Record<stri
  */
 export type Destination =
   | { id: string; kind: "email"; addresses: string }
-  | { id: string; kind: "slack"; channel: string; token: string; hasToken: boolean }
+  | { id: string; kind: "slack"; channel: string; hasToken: boolean }
   | { id: string; kind: "webhook"; url: string; secret: string; hasSecret: boolean; clear: boolean };
 
 export type DestinationKind = Destination["kind"];
@@ -47,7 +47,7 @@ export function emptyDestination(kind: DestinationKind): Destination {
     case "email":
       return { id, kind, addresses: "" };
     case "slack":
-      return { id, kind, channel: "", token: "", hasToken: false };
+      return { id, kind, channel: "", hasToken: false };
     case "webhook":
       return { id, kind, url: "", secret: "", hasSecret: false, clear: false };
   }
@@ -73,7 +73,8 @@ export function toDestinations(recipients: Recipient[]): Destination[] {
           id,
           kind: "slack",
           channel: typeof c.channel === "string" ? c.channel : "",
-          token: "",
+          // Reported, not edited: a destination predating the workspace app
+          // still carries its own token, and the row says so.
           hasToken: c.has_token === true,
         },
       ];
@@ -122,12 +123,11 @@ export function toRecipients(destinations: Destination[]): RecipientInput[] {
     if (d.kind === "slack") {
       const channel = d.channel.trim();
       if (!channel) return [];
-      return [
-        {
-          kind: "slack" as const,
-          config: { channel, ...(d.token.trim() ? { token: d.token.trim() } : {}) },
-        },
-      ];
+      // Channel only. The token is the WORKSPACE's now (Settings →
+      // Notifications), and an absent `token` key means "keep whatever this
+      // recipient already has" server-side — which is what preserves a
+      // pre-workspace-app destination's own credential untouched.
+      return [{ kind: "slack" as const, config: { channel } }];
     }
     const url = d.url.trim();
     if (!url) return [];
