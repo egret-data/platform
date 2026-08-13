@@ -107,9 +107,12 @@ function renderEditor(path = "/explore/eng/alerts/new") {
 }
 
 /** Click through to a section — the form is five panels now, so a test fills
- *  fields the same way a person does. */
+ *  fields the same way a person does.
+ *
+ *  `role: "tab"`, not "button": the section nav is a real tablist, which is
+ *  what makes arrow-key navigation and the `aria-selected` state work. */
 async function goTo(user: ReturnType<typeof userEvent.setup>, label: RegExp) {
-  await user.click(screen.getByRole("button", { name: label }));
+  await user.click(screen.getByRole("tab", { name: label }));
 }
 
 /** Add a delivery method through the menu, the way a person does. */
@@ -433,7 +436,7 @@ describe("Alerts & Reports editor page", () => {
     renderEditor("/explore/eng/alerts/new?type=report&kind=dashboard&object=d2");
 
     expect(await screen.findByRole("heading", { name: /new report/i })).toBeInTheDocument();
-    await userEvent.setup().click(screen.getByRole("button", { name: /^contents$/i }));
+    await userEvent.setup().click(screen.getByRole("tab", { name: /^contents$/i }));
     expect(screen.getByLabelText(/^dashboard$/i)).toHaveValue("d2");
   });
 
@@ -456,6 +459,37 @@ describe("Alerts & Reports editor page", () => {
     // No token typed means "keep whatever is stored" — the browser must not
     // invent an empty one, which the server reads as "remove it".
     expect(slack.config.token).toBeUndefined();
+  });
+
+  it("heads the page with what the schedule IS, before any field", async () => {
+    // The three questions a reader has before editing anything: is it on,
+    // when does it run, and in which timezone. The crontab is humanised —
+    // "0 9 * * *" is not an answer to "when does it run".
+    scheduleMock.mockReturnValue({
+      data: { ...row(), sql: "SELECT 1", recipients: [], targets: [] },
+      isLoading: false,
+    });
+    renderEditor("/explore/eng/alerts/s1");
+
+    expect(await screen.findByRole("heading", { name: /orders dropped/i })).toBeInTheDocument();
+    expect(screen.getByText(/every day at 09:00/i)).toBeInTheDocument();
+    expect(screen.getByText("UTC")).toBeInTheDocument();
+    // Active, so the badge reports how the last run went.
+    expect(screen.getByText(/success/i)).toBeInTheDocument();
+  });
+
+  it("says Paused rather than reporting the last run, when it is paused", async () => {
+    // "Why has this not fired?" is the question a paused schedule has to
+    // answer, and a green Success badge on a schedule that will never run
+    // again answers it wrongly.
+    scheduleMock.mockReturnValue({
+      data: { ...row({ active: false }), sql: "SELECT 1", recipients: [], targets: [] },
+      isLoading: false,
+    });
+    renderEditor("/explore/eng/alerts/s1");
+
+    expect(await screen.findByText(/paused/i)).toBeInTheDocument();
+    expect(screen.queryByText(/success/i)).not.toBeInTheDocument();
   });
 
   it("delivers to several destinations of the same kind", async () => {

@@ -384,16 +384,16 @@ export function ScheduleEditor({
   }, [current, existing, scheduleId, name, onDirtyChange]);
 
   return (
-    /* ONE column, bounded to a readable measure. Two columns were tried and are
-       wrong for this form: a grid pads a short section out to the height of the
-       tall one beside it, and CSS `columns` fights `flex` and clips. A
-       twenty-field form reads better as one column anyway — the eye never has
-       to decide which side continues the thought. */
-    <form
-      id={FORM_ID}
-      onSubmit={submit}
-      className="flex max-w-3xl flex-col gap-4"
-    >
+    /* ONE column, and NO width of its own — the PAGE sets the measure, so the
+       header, the tab bar, this form and the action row all share one edge.
+       When the form carried its own `max-w-3xl` it ended short of the tabs
+       above it, which reads as a rendering fault rather than a choice.
+
+       Two columns were tried and are wrong for this form: a grid pads a short
+       section out to the height of the tall one beside it, and CSS `columns`
+       fights `flex` and clips. A twenty-field form reads better as one column
+       anyway — the eye never has to decide which side continues the thought. */
+    <form id={FORM_ID} onSubmit={submit} className="flex flex-col gap-4">
       {error && (
         <div ref={errorRef}>
           <Alert variant="destructive">

@@ -32,6 +32,22 @@ export function humanizeCrontab(expr: string): string {
     return n === 1 ? "Every minute" : `Every ${n} minutes`;
   }
 
+  // "Every N hours, at minute M" — `15 */6 * * *` fires at 00:15, 06:15,
+  // 12:15, 18:15. Added because this shape is in the shipped seed data and
+  // showed as a raw expression in the page header, where the reader has no
+  // other statement of when the thing runs. Restricted to a bare weekday
+  // wildcard: `*/6` hours crossed with a weekday list is a shape this has not
+  // been proven against.
+  const everyNHours = hour.match(/^\*\/(\d+)$/);
+  if (everyNHours && dow === "*") {
+    const n = Number(everyNHours[1]);
+    const at = singleInt(minute, 0, 59);
+    if (n < 1 || n > 23 || at === null) return raw;
+    return n === 1
+      ? `Every hour at minute ${at}`
+      : `Every ${n} hours, at minute ${at}`;
+  }
+
   // Everything below needs a single numeric minute and hour — the "daily"
   // and "weekly" forms.
   const m = singleInt(minute, 0, 59);

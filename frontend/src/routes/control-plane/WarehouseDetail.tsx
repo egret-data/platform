@@ -116,6 +116,7 @@ import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DetailFact } from "@/components/layout/DetailFact";
 
 const CONSUMER_TYPES = ["engine", "notebook", "external"] as const;
 
@@ -345,8 +346,8 @@ function WarehouseSummary({
           </div>
 
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-            <Fact icon={Building2} label="Workspace" value={wsName ?? "—"} />
-            <Fact
+            <DetailFact icon={Building2} label="Workspace" value={wsName ?? "—"} />
+            <DetailFact
               icon={HardDrive}
               label="Storage"
               value={storageName ?? "—"}
@@ -380,32 +381,6 @@ function WarehouseSummary({
             </div>
           ))}
         </div>
-    </div>
-  );
-}
-
-function Fact({
-  icon: Icon,
-  label,
-  value,
-  to,
-}: {
-  icon: typeof Building2;
-  label: string;
-  value: string;
-  to?: string;
-}) {
-  return (
-    <div className="flex items-center gap-1.5 text-muted-foreground">
-      <Icon className="h-4 w-4" />
-      <span className="text-xs uppercase tracking-wide">{label}</span>
-      {to ? (
-        <Link to={to} className="text-foreground hover:text-primary hover:underline">
-          {value}
-        </Link>
-      ) : (
-        <span className="text-foreground">{value}</span>
-      )}
     </div>
   );
 }

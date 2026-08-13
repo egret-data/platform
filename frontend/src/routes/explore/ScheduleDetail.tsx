@@ -1,5 +1,15 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import {
+  Bell,
+  CalendarClock,
+  FileBarChart,
+  Filter,
+  Globe,
+  Send,
+  Settings2,
+  SlidersHorizontal,
+} from "lucide-react";
 import { useSchedule, type ScheduleType } from "@/api/alerts";
 import {
   FORM_ID,
@@ -8,9 +18,23 @@ import {
   type SectionKey,
 } from "@/components/alerts/ScheduleEditor";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DetailFact } from "@/components/layout/DetailFact";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { StateBadge } from "./Alerts";
+import { humanizeCrontab } from "@/lib/humanizeCron";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
+
+/** The icon each section carries in the tab bar, in `SECTIONS` order. */
+const SECTION_ICONS: Record<SectionKey, typeof Bell> = {
+  general: Settings2,
+  what: Filter,
+  schedule: CalendarClock,
+  notification: Send,
+  advanced: SlidersHorizontal,
+};
 
 /**
  * The create/edit page for one schedule.
@@ -20,6 +44,13 @@ import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
  * a dialog — where one is used at all — only asks for a name. Alerts were the
  * exception, and after the depth pass the form carries roughly twenty fields,
  * which no modal reads well.
+ *
+ * The frame is `WarehouseDetail`'s: an icon tile, the name, a state badge, a
+ * strip of facts, then horizontal tabs. That page is where this app decided
+ * what a detail page looks like, and a schedule is the same kind of thing — an
+ * object with a status and several panels of configuration. The facts are the
+ * three questions a reader has before editing anything: is it on, when does it
+ * run, and how did it go last time.
  *
  * Being a route brings one obligation a modal did not have: someone can
  * navigate away mid-edit, so the unsaved-changes guard is armed here.
@@ -41,6 +72,7 @@ export default function ScheduleDetail() {
       ? "report"
       : "alert"
     : ((existing?.type as ScheduleType) ?? "alert");
+  const isAlert = type === "alert";
 
   const prefillKind = params.get("kind");
   const prefill: { kind: "chart" | "dashboard"; object: string } | undefined =
@@ -77,13 +109,61 @@ export default function ScheduleDetail() {
   const heading = isNew
     ? `New ${type === "report" ? "report" : "alert"}`
     : (existing?.name ?? "…");
+  const Icon = isAlert ? Bell : FileBarChart;
 
   return (
-    <div className="mx-auto max-w-6xl p-4">
+    // `4xl`, not `6xl`: with the section nav now horizontal there is no column
+    // beside the form to fill, and a 1150px-wide single-column form is past a
+    // readable measure. Everything on the page shares this one edge.
+    <div className="mx-auto max-w-4xl p-4">
       <Link className="text-sm text-muted-foreground hover:underline" to={backHref}>
         ← Alerts &amp; Reports
       </Link>
-      <h1 className="mb-4 mt-1 truncate text-lg font-semibold">{heading}</h1>
+
+      <div className="mt-1 mb-4 min-w-0 space-y-3">
+        <div className="flex items-center gap-3">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <Icon className="h-6 w-6" />
+          </div>
+          <div className="min-w-0">
+            <h1 className="truncate text-2xl font-semibold leading-tight">{heading}</h1>
+            {/* Paused is the state that explains "why has this not fired?", so
+                it earns the badge over the run state; an active schedule shows
+                how its last run went instead, which is the other half of that
+                question. A schedule that does not exist yet has neither. */}
+            {!isNew && existing && (
+              <div className="mt-1">
+                {existing.active ? (
+                  <StateBadge state={existing.last_state} />
+                ) : (
+                  <Badge variant="outline" className="gap-1 border-muted-foreground/30">
+                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground" />
+                    Paused
+                  </Badge>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {!isNew && existing && (
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+            <DetailFact
+              icon={Icon}
+              label="Type"
+              value={isAlert ? "Alert" : "Report"}
+              to={backHref}
+            />
+            <DetailFact
+              icon={CalendarClock}
+              label="Runs"
+              value={humanizeCrontab(existing.crontab)}
+              title={existing.crontab}
+            />
+            <DetailFact icon={Globe} label="Timezone" value={existing.timezone} />
+          </div>
+        )}
+      </div>
 
       {isError ? (
         <Alert variant="destructive">
@@ -94,36 +174,25 @@ export default function ScheduleDetail() {
       ) : !isNew && isLoading ? (
         <ListSkeleton rows={6} cols={2} />
       ) : (
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[13rem_minmax(0,1fr)]">
-          {/* The settings-hub shape this app already uses (WorkspaceSettings):
-              a vertical section nav that turns a long scroll into five short
-              panels, and puts the spare width to work instead of leaving it
-              blank beside a narrow column. */}
-          <nav
-            aria-label="Sections"
-            className="flex gap-1 overflow-x-auto lg:sticky lg:top-0 lg:flex-col lg:self-start lg:overflow-visible"
-          >
+        // Horizontal tabs, the shape `WarehouseDetail` uses. One `TabsContent`
+        // holding the whole form rather than one per section: the editor is a
+        // SINGLE form element whose state lives in it, and splitting it across
+        // five panels would unmount the fields on every tab change. The test
+        // "keeps what you typed when you move between sections" is what pins
+        // that, and it fails if this is split.
+        <Tabs value={section} onValueChange={(v) => setSection(v as SectionKey)}>
+          <TabsList>
             {SECTIONS.map((s) => {
-              const active = s.key === section;
+              const SIcon = SECTION_ICONS[s.key];
               return (
-                <button
-                  key={s.key}
-                  type="button"
-                  aria-current={active ? "page" : undefined}
-                  onClick={() => setSection(s.key)}
-                  className={`shrink-0 rounded-md px-3 py-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                    active
-                      ? "bg-primary/10 font-medium text-primary"
-                      : "text-muted-foreground hover:bg-accent hover:text-foreground"
-                  }`}
-                >
-                  {s.label(type === "alert")}
-                </button>
+                <TabsTrigger key={s.key} value={s.key}>
+                  <SIcon className="h-4 w-4" />
+                  {s.label(isAlert)}
+                </TabsTrigger>
               );
             })}
-          </nav>
-
-          <div className="min-w-0">
+          </TabsList>
+          <TabsContent value={section} className="mt-4">
             <ScheduleEditor
               ws={ws}
               type={type}
@@ -135,8 +204,8 @@ export default function ScheduleDetail() {
               onBusyChange={setBusy}
               onDone={done}
             />
-          </div>
-        </div>
+          </TabsContent>
+        </Tabs>
       )}
 
       {/* NOT sticky. `sticky bottom-0` pins to the scrollport edge, which sits
