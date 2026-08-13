@@ -5,13 +5,24 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
-import type { ColumnMeta } from './columnMeta';
 
+/**
+ * One card's IDENTITY and query shape — no rows.
+ *
+ * Step one of the render. The page needs the saved spec to resolve the
+ * dashboard's parameters against it, which it cannot do if the server has
+ * already run the query.
+ */
 export interface RenderCard {
   chart_id: string;
   title: string;
   viz_type: string;
   params: unknown;
-  columns: ColumnMeta[];
-  rows: unknown[][];
+  /**
+     * `dashboard_cards.options.paramMappings`: parameter id -> the column on
+     * THIS card it filters. A parameter with no mapping here does not apply to
+     * this card, which is why the mapping travels per card rather than once
+     * for the dashboard.
+     */
+  param_mappings: unknown;
 }

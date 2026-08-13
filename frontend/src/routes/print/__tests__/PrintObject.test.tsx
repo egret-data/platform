@@ -7,7 +7,11 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import PrintObject from "@/routes/print/PrintObject";
 
 const payloadMock = vi.fn();
-vi.mock("@/api/render", () => ({ fetchRenderPayload: (...a: unknown[]) => payloadMock(...a) }));
+const dataMock = vi.fn();
+vi.mock("@/api/render", () => ({
+  fetchRenderPayload: (...a: unknown[]) => payloadMock(...a),
+  fetchRenderData: (...a: unknown[]) => dataMock(...a),
+}));
 
 // One chart that never reports `finished`, to prove the flag waits for it.
 // The brief's own test mocks `@/components/chart/ChartRender`, but the real component that
@@ -30,18 +34,29 @@ function renderPrint() {
 }
 
 beforeEach(() => {
+  // Call history accumulates across tests otherwise, so `mock.calls[0]` would
+  // be a PREVIOUS test's request — which is how this file first "passed" the
+  // parameter test in isolation and failed it in the suite.
+  payloadMock.mockClear();
+  dataMock.mockClear();
   finishHandlers = [];
   (window as never as Record<string, unknown>).__EGRET_PRINT_READY__ = undefined;
   Object.defineProperty(document, "fonts", { value: { ready: Promise.resolve() }, configurable: true });
+  // Step one describes the object; the rows arrive from step two. The split is
+  // what lets the page resolve the dashboard's parameters BEFORE the query runs.
   payloadMock.mockResolvedValue({
     kind: "dashboard", id: "d1", title: "Ops",
-    // `columns` is `ColumnMeta[]` (name + engine type), not bare names — matches the real
-    // `RenderCard` contract now that the backend carries real column metadata through.
+    parameters: [],
     cards: [{
-      chart_id: "c1", title: "A", viz_type: "bar", params: {},
-      columns: [{ name: "n", type: "double" }], rows: [[1]],
+      chart_id: "c1", title: "A", viz_type: "bar",
+      params: { spec: { filters: [] } }, param_mappings: {},
     }],
   });
+  // `columns` is `ColumnMeta[]` (name + engine type), not bare names — matches the real
+  // `RenderCardData` contract now that the backend carries real column metadata through.
+  dataMock.mockResolvedValue([
+    { chart_id: "c1", columns: [{ name: "n", type: "double" }], rows: [[1]] },
+  ]);
 });
 
 it("does not signal ready while a chart has not finished", async () => {
@@ -76,4 +91,56 @@ it("marks failure rather than readiness when the payload fetch fails", async () 
   await waitFor(() =>
     expect((window as never as Record<string, unknown>).__EGRET_PRINT_FAILED__).toBe(true));
   expect((window as never as Record<string, unknown>).__EGRET_PRINT_READY__).toBeUndefined();
+});
+
+it("resolves the dashboard's parameter defaults into the data request", async () => {
+  // The whole point of the two-step render. Before it, the payload compiled
+  // each card from its saved spec alone, so a dashboard's filters never
+  // reached the query and the emailed image showed different numbers from the
+  // page it claimed to be. A scheduled report has nobody at the keyboard, so
+  // the values are the parameters' DEFAULTS — the dashboard as it looks when
+  // you open it, which is what the recipient sees if they follow the link.
+  payloadMock.mockResolvedValue({
+    kind: "dashboard", id: "d1", title: "Ops",
+    parameters: [
+      { id: "p1", slug: "priority", type: "text", operator: "is", default: "1-URGENT" },
+    ],
+    cards: [{
+      chart_id: "c1", title: "A", viz_type: "bar",
+      params: { spec: { filters: [] } },
+      param_mappings: { p1: "orderpriority" },
+    }],
+  });
+
+  renderPrint();
+  await waitFor(() => expect(dataMock).toHaveBeenCalled());
+  const [, cards] = dataMock.mock.calls[0];
+  expect(cards).toEqual([
+    {
+      chart_id: "c1",
+      filters: [{ col: "orderpriority", op: "eq", value: "1-URGENT" }],
+      temporal_units: {},
+    },
+  ]);
+});
+
+it("asks for nothing extra when a parameter is not mapped to the card", async () => {
+  // A parameter with no mapping does not apply to that card — which is why the
+  // mapping travels per card. Sending it anyway would filter a chart the
+  // dashboard itself leaves alone.
+  payloadMock.mockResolvedValue({
+    kind: "dashboard", id: "d1", title: "Ops",
+    parameters: [
+      { id: "p1", slug: "priority", type: "text", operator: "is", default: "1-URGENT" },
+    ],
+    cards: [{
+      chart_id: "c1", title: "A", viz_type: "bar",
+      params: { spec: { filters: [] } },
+      param_mappings: {},
+    }],
+  });
+
+  renderPrint();
+  await waitFor(() => expect(dataMock).toHaveBeenCalled());
+  expect(dataMock.mock.calls[0][1][0].filters).toEqual([]);
 });

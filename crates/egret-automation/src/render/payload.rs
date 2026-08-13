@@ -17,18 +17,35 @@
 //! claims to show.
 
 use serde::Serialize;
+use uuid::Uuid;
 
 use crate::error::AutomationError;
 use crate::render::token::RenderGrant;
 use crate::routes::AutomationState;
 use egret_core::tabular::ColumnMeta;
 
+/// One card's IDENTITY and query shape — no rows.
+///
+/// Step one of the render. The page needs the saved spec to resolve the
+/// dashboard's parameters against it, which it cannot do if the server has
+/// already run the query.
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct RenderCard {
     pub chart_id: String,
     pub title: String,
     pub viz_type: String,
     pub params: serde_json::Value,
+    /// `dashboard_cards.options.paramMappings`: parameter id -> the column on
+    /// THIS card it filters. A parameter with no mapping here does not apply to
+    /// this card, which is why the mapping travels per card rather than once
+    /// for the dashboard.
+    pub param_mappings: serde_json::Value,
+}
+
+/// One card's DATA. Step two, once the page has resolved the filters.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct RenderCardData {
+    pub chart_id: String,
     // The engine's own name + type per column, not names alone — the print
     // page (`PrintObject.tsx`) needs the SAME type a live chart gets from
     // `ChartRenderer`'s callers to format a date axis, a numeric column that
@@ -41,12 +58,44 @@ pub struct RenderCard {
     pub rows: Vec<Vec<serde_json::Value>>,
 }
 
+/// What the page asks for in step two: the resolved dashboard-parameter
+/// filters for one card.
+///
+/// The same shape as `egret_bi`'s `CardRunBody`, and merged the same way —
+/// onto the card's SAVED spec, never replacing it. A client supplies FILTERS,
+/// never a query: each `col` is checked against the dataset's real columns by
+/// `compile_chart_sql` -> `chartquery::build` -> `find_column`, and each
+/// temporal unit against the `TemporalUnit` enum. Accepting a whole spec here
+/// would let whoever holds a render token run arbitrary SQL as the schedule's
+/// owner.
+#[derive(Debug, Clone, Default, serde::Deserialize, utoipa::ToSchema)]
+pub struct RenderCardRequest {
+    pub chart_id: Uuid,
+    #[serde(default)]
+    pub filters: Vec<egret_bi::chartquery::Filter>,
+    #[serde(default)]
+    pub temporal_units: std::collections::HashMap<String, String>,
+}
+
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct RenderPayload {
     pub kind: String,
     pub id: String,
     pub title: String,
     pub cards: Vec<RenderCard>,
+    /// The dashboard's parameter definitions, verbatim. The print page resolves
+    /// them to filters with `applyParamsToChart` — the SAME module the
+    /// interactive dashboard uses — and sends the result back to
+    /// [`run_cards`].
+    ///
+    /// Ported to Rust instead, this would be a second implementation of six
+    /// text operators, relative date windows and month/quarter/year arithmetic
+    /// that must agree with the first one exactly, forever. When they drifted,
+    /// the emailed image would quietly stop matching the dashboard — which is
+    /// the bug this whole path exists to fix.
+    ///
+    /// `null` for a chart report: a chart has no parameters.
+    pub parameters: serde_json::Value,
 }
 
 /// Assemble the full payload for whatever the grant names.
@@ -75,12 +124,13 @@ async fn build_chart(
         .await
         .map_err(bi_err)?
         .ok_or_else(|| AutomationError::NotFound("chart".into()))?;
-    let card = render_chart_card(st, grant, &chart).await?;
     Ok(RenderPayload {
         kind: "chart".into(),
         id: chart.id.to_string(),
         title: chart.name.clone(),
-        cards: vec![card],
+        cards: vec![card_spec(&chart, serde_json::Value::Null)],
+        // A chart is not on a dashboard, so nothing parameterises it.
+        parameters: serde_json::Value::Null,
     })
 }
 
@@ -109,7 +159,12 @@ async fn build_dashboard(
             .await
             .map_err(bi_err)?
             .ok_or_else(|| AutomationError::NotFound("chart".into()))?;
-        cards.push(render_chart_card(st, grant, &chart).await?);
+        let mappings = dc
+            .options
+            .get("paramMappings")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        cards.push(card_spec(&chart, mappings));
     }
 
     Ok(RenderPayload {
@@ -117,22 +172,99 @@ async fn build_dashboard(
         id: dash.id.to_string(),
         title: dash.name.clone(),
         cards,
+        parameters: dash.parameters.clone(),
     })
+}
+
+fn card_spec(chart: &egret_bi::Chart, param_mappings: serde_json::Value) -> RenderCard {
+    RenderCard {
+        chart_id: chart.id.to_string(),
+        title: chart.name.clone(),
+        viz_type: chart.viz_type.clone(),
+        params: chart.params.clone(),
+        param_mappings,
+    }
+}
+
+/// Step two: run every card the page asks for, with the filters it resolved.
+///
+/// One call for the whole page rather than one per card, so the token is spent
+/// exactly once and the render still cannot become a data tap.
+pub async fn run_cards(
+    st: &AutomationState,
+    grant: &RenderGrant,
+    reqs: &[RenderCardRequest],
+) -> Result<Vec<RenderCardData>, AutomationError> {
+    // Which charts this grant actually covers. Without it, a token for
+    // dashboard A would run any chart id the caller cared to name — the token
+    // authorises ONE object, and that has to be enforced here rather than
+    // assumed from the payload the page was handed.
+    let allowed = allowed_charts(st, grant).await?;
+
+    let mut out = Vec::with_capacity(reqs.len());
+    for req in reqs {
+        if !allowed.contains(&req.chart_id) {
+            return Err(AutomationError::BadRequest(format!(
+                "chart {} is not part of this render",
+                req.chart_id
+            )));
+        }
+        let chart = st
+            .charts
+            .get(req.chart_id)
+            .await
+            .map_err(bi_err)?
+            .ok_or_else(|| AutomationError::NotFound("chart".into()))?;
+        out.push(run_card(st, grant, &chart, req).await?);
+    }
+    Ok(out)
+}
+
+async fn allowed_charts(
+    st: &AutomationState,
+    grant: &RenderGrant,
+) -> Result<std::collections::HashSet<Uuid>, AutomationError> {
+    match grant.kind.as_str() {
+        "chart" => Ok(std::iter::once(grant.object_id).collect()),
+        "dashboard" => Ok(st
+            .dashboards
+            .cards(grant.object_id)
+            .await
+            .map_err(bi_err)?
+            .iter()
+            .filter_map(|c| c.chart_id)
+            .collect()),
+        other => Err(AutomationError::Internal(format!(
+            "render token names an unknown object kind: {other}"
+        ))),
+    }
 }
 
 /// Compile the chart's SAVED spec exactly the way `charts/{id}/data` does
 /// (`egret_bi::compile_chart_sql`), then execute it as the token's OWNER
 /// (`owner_identity`) — never as a service identity.
-async fn render_chart_card(
+async fn run_card(
     st: &AutomationState,
     grant: &RenderGrant,
     chart: &egret_bi::Chart,
-) -> Result<RenderCard, AutomationError> {
-    let spec: egret_bi::chartquery::QuerySpec =
+    req: &RenderCardRequest,
+) -> Result<RenderCardData, AutomationError> {
+    let mut spec: egret_bi::chartquery::QuerySpec =
         serde_json::from_value(chart.params.get("spec").cloned().ok_or_else(|| {
             AutomationError::BadRequest(format!("chart {} has no runnable query", chart.id))
         })?)
         .map_err(|_| AutomationError::BadRequest(format!("chart {} spec invalid", chart.id)))?;
+
+    // EXTEND, never replace — the same merge `db_card_run` performs for the
+    // interactive dashboard, so a report and the page it mirrors compile the
+    // same query. An unknown column or temporal unit is rejected downstream by
+    // `chartquery::build`.
+    spec.filters.extend(req.filters.iter().cloned());
+    if !req.temporal_units.is_empty() {
+        for (col, unit) in &req.temporal_units {
+            spec.temporal_units.insert(col.clone(), unit.clone());
+        }
+    }
 
     let (sql, database_id) = egret_bi::compile_chart_sql(
         &st.datasets,
@@ -171,11 +303,8 @@ async fn render_chart_card(
         .await
         .map_err(|e| AutomationError::Internal(format!("query failed: {e}")))?;
 
-    Ok(RenderCard {
+    Ok(RenderCardData {
         chart_id: chart.id.to_string(),
-        title: chart.name.clone(),
-        viz_type: chart.viz_type.clone(),
-        params: chart.params.clone(),
         columns: result.columns,
         rows: result.rows,
     })

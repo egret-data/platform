@@ -821,7 +821,8 @@ export const getAlertsBookmarkAddUrl = (workspace: string,
 
 /**
  * @summary A bookmark is the CALLER's own, so it needs no `alert:manage` — a viewer
-may star what they can read.
+may star what they can READ, which is now a permission that exists and is
+therefore checked rather than described.
  */
 export const alertsBookmarkAdd = async (workspace: string,
     id: string, options?: RequestInit): Promise<alertsBookmarkAddResponse> => {
@@ -872,7 +873,8 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     /**
  * @summary A bookmark is the CALLER's own, so it needs no `alert:manage` — a viewer
-may star what they can read.
+may star what they can READ, which is now a permission that exists and is
+therefore checked rather than described.
  */
 export const useAlertsBookmarkAdd = <TError = ErrorBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof alertsBookmarkAdd>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}

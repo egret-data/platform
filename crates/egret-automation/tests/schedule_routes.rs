@@ -45,6 +45,20 @@ struct Fx {
     viewer_tok: String,
     database: Uuid,
     db: Db,
+    /// The workspace behind `slug`, and the service that mints a session for a
+    /// principal a test creates itself.
+    ws: Uuid,
+    sessions: egret_auth::session::SessionService,
+}
+
+impl Fx {
+    async fn token_for(&self, user: Uuid) -> String {
+        self.sessions
+            .create(egret_core::ids::UserId(user), "test", "127.0.0.1")
+            .await
+            .expect("create session")
+            .token
+    }
 }
 
 async fn mk_user(db: &Db, tag: &str) -> Uuid {
@@ -224,6 +238,8 @@ async fn setup() -> Option<Fx> {
         editor_tok: tok.pop().unwrap(),
         database,
         db,
+        ws,
+        sessions,
     })
 }
 
@@ -1137,6 +1153,175 @@ async fn an_unauthenticated_request_is_rejected() {
 /// Same rule, and the same assertion style, as the SMTP password (P3): checked
 /// against the RAW body of every response that carries a schedule, because a
 /// secret nested inside `config` still satisfies a `v["secret"].is_none()`.
+fn alert_with_slack(fx: &Fx, name: &str, token: &str) -> String {
+    serde_json::json!({
+        "type": "alert",
+        "name": name,
+        "active": true,
+        "crontab": "0 9 * * *",
+        "timezone": "UTC",
+        "database_id": fx.database,
+        "sql": "SELECT count(*) FROM orders",
+        "validator_type": "not_null",
+        "recipients": [{
+            "kind": "slack",
+            "config": {"channel": "#data-alerts", "token": token},
+        }],
+    })
+    .to_string()
+}
+
+/// A workspace member holding a bespoke role with NO alert permissions.
+///
+/// Deliberately a new role rather than revoking `alert:read` from `ws_viewer`:
+/// these tests share one database, and the first version of this test did
+/// exactly that — it passed once, left the seeded role permanently stripped,
+/// and failed on every run afterwards while also breaking anything else using
+/// that database. A test that mutates shared reference data has to put it
+/// back, and one that panics mid-way never does.
+async fn member_without_alert_perms(db: &Db, ws: Uuid) -> String {
+    let user = mk_user(db, "noalert").await;
+    let role: Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (scope, name, description) \
+         VALUES ('workspace', $1, 'test: workspace member with no alert permissions') \
+         RETURNING id",
+    )
+    .bind(format!("ws_test_noalert_{}", Uuid::new_v4().simple()))
+    .fetch_one(&db.pool)
+    .await
+    .expect("create role");
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'workspace', $3)",
+    )
+    .bind(user)
+    .bind(role)
+    .bind(ws)
+    .execute(&db.pool)
+    .await
+    .expect("grant");
+    user.to_string()
+}
+
+/// Reading a schedule needs `alert:read`.
+///
+/// Until this gate existed, `detail` and `runs` had NO authorization check at
+/// all: workspace membership plus the `alerts` entitlement handed out the SQL,
+/// the database id, the recipient addresses and the engine errors in the run
+/// log. Every write was gated on `alert:manage`; the reads were gated on
+/// nothing, and `alert:read` — added by migration 0113 for the folder router —
+/// was checked nowhere on alerts.
+#[tokio::test]
+async fn reading_a_schedule_needs_alert_read() {
+    let fx = fixture!();
+
+    let (s, created) = req_raw(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_with_webhook(&fx, "gated", "s3cret")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "create failed: {created}");
+    let id = serde_json::from_str::<serde_json::Value>(&created).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // A viewer holds `alert:read` (0113 granted it to all three seeded roles),
+    // so the access ordinary members already had is unchanged.
+    for path in [
+        format!("/ws/{}/alerts", fx.slug),
+        format!("/ws/{}/alerts/{id}", fx.slug),
+        format!("/ws/{}/alerts/{id}/runs", fx.slug),
+    ] {
+        let (s, body) = req_raw(&fx, &fx.viewer_tok, "GET", &path, None).await;
+        assert_eq!(s, StatusCode::OK, "viewer denied {path}: {body}");
+    }
+
+    // A member of the SAME workspace whose role carries no alert permissions is
+    // refused. That is the measurement that matters: membership plus the
+    // `alerts` entitlement was all these routes ever required, so a principal
+    // who has both and still cannot read is proof the permission is the gate.
+    let outsider = member_without_alert_perms(&fx.db, fx.ws).await;
+    let outsider_tok = fx.token_for(outsider.parse().unwrap()).await;
+    for path in [
+        format!("/ws/{}/alerts", fx.slug),
+        format!("/ws/{}/alerts/{id}", fx.slug),
+        format!("/ws/{}/alerts/{id}/runs", fx.slug),
+    ] {
+        let (s, body) = req_raw(&fx, &outsider_tok, "GET", &path, None).await;
+        assert_eq!(
+            s,
+            StatusCode::FORBIDDEN,
+            "a member without alert:read still read {path}: {body}"
+        );
+        assert!(
+            !body.contains("SELECT count(*)"),
+            "the refusal still carried the SQL: {body}"
+        );
+    }
+}
+
+/// A slack bot token is a credential, and must report itself exactly the way a
+/// webhook secret does.
+///
+/// It did not: `redact_recipient_config` special-cased webhooks and returned
+/// every other kind verbatim, so a slack recipient shipped `token_id` — the
+/// vault reference the webhook branch deliberately hides — and never shipped
+/// `has_token`, which the editor reads to decide whether to say a token is
+/// stored. The editor therefore always claimed none was.
+#[tokio::test]
+async fn a_slack_token_reports_itself_like_a_webhook_secret() {
+    const TOKEN: &str = "xoxb-not-in-any-response";
+    let fx = fixture!();
+
+    let (s, created) = req_raw(
+        &fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_with_slack(&fx, "to slack", TOKEN)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "create failed: {created}");
+    let id = serde_json::from_str::<serde_json::Value>(&created).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (s, got) = req_raw(
+        &fx,
+        &fx.editor_tok,
+        "GET",
+        &format!("/ws/{}/alerts/{id}", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    // Asserted against the RAW body: a token nested inside `config` still
+    // satisfies a struct-field check.
+    assert!(!got.contains(TOKEN), "the response leaks the token: {got}");
+    assert!(
+        !got.contains("token_id"),
+        "the response hands out the vault reference: {got}"
+    );
+
+    let v: serde_json::Value = serde_json::from_str(&got).unwrap();
+    let slack = v["recipients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "slack")
+        .expect("the slack recipient survived");
+    assert_eq!(slack["config"]["channel"], "#data-alerts");
+    assert_eq!(
+        slack["config"]["has_token"], true,
+        "the editor cannot tell a token is stored: {got}"
+    );
+}
+
 /// `secret_id` is withheld too — a vault reference is not a thing the editor
 /// needs, and handing one out invites a fetch nobody intended.
 #[tokio::test]

@@ -28,6 +28,20 @@ use crate::repo::ScheduleRepo;
 /// `WsContext` has already enforced by the time a handler runs.
 const MANAGE: &str = "alert:manage";
 
+/// Reading a schedule.
+///
+/// Added by migration 0113 and, until now, checked NOWHERE on alerts — the
+/// generic folder router was its only consumer, so a permission whose whole
+/// name says "may view alerts" granted nothing on the alerts themselves.
+/// Meanwhile `detail` and `runs` had no gate at all: workspace membership plus
+/// the `alerts` entitlement was enough to read any schedule's SQL, its
+/// database, its recipient addresses, and the engine errors in its run log.
+///
+/// Held by all three seeded workspace roles (`ws_viewer`, `ws_editor`,
+/// `ws_admin`), so ordinary members keep the access they had. A workspace
+/// using a hand-made role predating 0113 will need it granted.
+const READ: &str = "alert:read";
+
 /// How many runs the drawer asks for. Bounded server-side so a client cannot
 /// turn the run log into an unpaged table scan.
 const RUNS_LIMIT: i64 = 100;
@@ -89,6 +103,31 @@ impl FromRef<AutomationState> for Authorizer {
     }
 }
 
+/// The renderer's two endpoints, kept OUT of `automation_router`.
+///
+/// Not workspace-scoped and deliberately not under `/ws/{workspace}`: the
+/// caller is a headless browser with no session, so there is no workspace to
+/// put in front and no cookie to scope. The render token is the whole
+/// credential.
+///
+/// Mounted WITHOUT the CSRF layer, for the reason the layer exists at all.
+/// Double-submit CSRF defends requests the browser authenticates AMBIENTLY —
+/// it attaches the cookie whether or not the page meant to. Nothing is
+/// ambient here: the token travels in an `Authorization` header this code
+/// sets, so a cross-site page cannot make an authenticated request in the
+/// first place, and requiring a CSRF cookie the renderer can never have would
+/// simply make `POST /render/data` impossible.
+///
+/// Found by running a real report: the integration tests call this router
+/// directly, so the layer they never mount rejected every POST in production
+/// with `csrf check failed` and the page reported a failure the renderer could
+/// only describe as "the print page reported a failure".
+pub fn render_router() -> Router<AutomationState> {
+    Router::new()
+        .route("/render/payload", get(render_payload))
+        .route("/render/data", post(render_data))
+}
+
 pub fn automation_router() -> Router<AutomationState> {
     Router::new()
         .route("/ws/{workspace}/alerts", get(list).post(create))
@@ -111,11 +150,6 @@ pub fn automation_router() -> Router<AutomationState> {
             get(smtp_get).put(smtp_put).delete(smtp_delete),
         )
         .route("/ws/{workspace}/notifications/smtp/test", post(smtp_test))
-        // NOT workspace-scoped, and deliberately not under `/ws/{workspace}`:
-        // the caller (the headless renderer) has no session to put a workspace
-        // in front of. It is authenticated by the render token alone — see
-        // `render_payload` below.
-        .route("/render/payload", get(render_payload))
 }
 
 #[derive(utoipa::OpenApi)]
@@ -161,6 +195,8 @@ pub fn automation_router() -> Router<AutomationState> {
         SetActiveBody,
         SetFolderBody,
         crate::render::payload::RenderPayload,
+        crate::render::payload::RenderCardRequest,
+        crate::render::payload::RenderCardData,
         crate::render::payload::RenderCard,
     ))
 )]
@@ -194,6 +230,9 @@ async fn list(
     WsContext(ctx): WsContext,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<ScheduleSummaryDto>>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, READ)
+        .await
+        .map_err(AutomationApiError::from)?;
     let rows = st
         .schedules
         .list(
@@ -265,6 +304,9 @@ async fn detail(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<ScheduleDetailDto>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, READ)
+        .await
+        .map_err(AutomationApiError::from)?;
     load_detail(&st, ctx.workspace_id.0, id).await
 }
 
@@ -379,6 +421,9 @@ async fn runs(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<Vec<RunDto>>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, READ)
+        .await
+        .map_err(AutomationApiError::from)?;
     // The schedule must be visible in this workspace before its runs are, or
     // the child would leak the existence of a parent that 404s.
     if st
@@ -589,7 +634,8 @@ async fn set_folder(
 }
 
 /// A bookmark is the CALLER's own, so it needs no `alert:manage` — a viewer
-/// may star what they can read.
+/// may star what they can READ, which is now a permission that exists and is
+/// therefore checked rather than described.
 #[utoipa::path(
     post, path = "/api/ws/{workspace}/alerts/{id}/bookmark", tag = "alerts",
     params(WorkspacePath, ("id" = Uuid, Path, description = "Schedule id")),
@@ -604,6 +650,9 @@ async fn bookmark_add(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<egret_core::Ack>, AutomationApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, READ)
+        .await
+        .map_err(AutomationApiError::from)?;
     st.schedules
         .add_bookmark(ctx.principal.user_id.0, id)
         .await
@@ -625,6 +674,11 @@ async fn bookmark_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<egret_core::Ack>, AutomationApiError> {
+    // Deliberately NOT gated on READ, unlike `bookmark_add`. This deletes a row
+    // about the caller and nobody else; if someone loses `alert:read` while a
+    // bookmark exists, refusing to let them clear it strands a star they can
+    // neither see nor remove. Adding is gated because bookmarking something you
+    // cannot read is a (weak) test for whether it exists.
     st.schedules
         .remove_bookmark(ctx.principal.user_id.0, id)
         .await
@@ -815,7 +869,7 @@ async fn smtp_test(
 #[utoipa::path(
     get, path = "/api/render/payload", tag = "alerts",
     responses(
-        (status = 200, description = "Everything the print page needs: the object's spec and every card's already-executed rows", body = crate::render::payload::RenderPayload),
+        (status = 200, description = "What is being rendered: the object's title, each card's saved spec and param mappings, and the dashboard's parameters. No rows — see POST /render/data", body = crate::render::payload::RenderPayload),
         (status = 401, description = "No render token"),
         (status = 404, description = "Token unknown, expired, or already used"),
     ),
@@ -829,13 +883,56 @@ async fn render_payload(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or(AutomationApiError::from(egret_core::Error::Unauthorized))?;
+    // `peek`, not `redeem`: this step hands out titles and saved specs so the
+    // page can resolve the dashboard's parameters. The ROWS are what costs the
+    // token — see `render_data` below.
     let grant = st
         .render_tokens
-        .redeem(token)
+        .peek(token)
         .await
         .map_err(AutomationApiError::from)?;
     let payload = crate::render::payload::build(&st, &grant)
         .await
         .map_err(AutomationApiError::from)?;
     Ok(Json(payload))
+}
+
+/// Run the render's cards with the filters the page resolved.
+///
+/// Step two, and the one that SPENDS the token: `redeem` deletes the row in the
+/// same statement that reads it, so the rows are handed over exactly once.
+///
+/// The body carries FILTERS, never a query. They are merged onto each card's
+/// saved spec by `payload::run_cards`, exactly as `db_card_run` does for the
+/// interactive dashboard, and every column is checked against the dataset by
+/// `compile_chart_sql`. The chart ids are checked against the object the token
+/// names, so a token for one dashboard cannot run another's chart.
+#[utoipa::path(
+    post, path = "/render/data", tag = "alerts",
+    request_body = Vec<crate::render::payload::RenderCardRequest>,
+    responses(
+        (status = 200, description = "The rows for each requested card", body = Vec<crate::render::payload::RenderCardData>),
+        (status = 400, body = egret_core::http::ErrorBody, description = "A card outside this render, or an invalid filter"),
+        (status = 401, body = egret_core::http::ErrorBody, description = "Missing or spent render token"),
+    ),
+)]
+async fn render_data(
+    State(st): State<AutomationState>,
+    headers: axum::http::HeaderMap,
+    Json(reqs): Json<Vec<crate::render::payload::RenderCardRequest>>,
+) -> Result<Json<Vec<crate::render::payload::RenderCardData>>, AutomationApiError> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(AutomationApiError::from(egret_core::Error::Unauthorized))?;
+    let grant = st
+        .render_tokens
+        .redeem(token)
+        .await
+        .map_err(AutomationApiError::from)?;
+    let cards = crate::render::payload::run_cards(&st, &grant, &reqs)
+        .await
+        .map_err(AutomationApiError::from)?;
+    Ok(Json(cards))
 }

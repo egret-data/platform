@@ -358,23 +358,42 @@ fn validate_recipient(r: &RecipientInput) -> Result<(), String> {
 /// named, and anything else in the row — including a cleartext `secret` left by
 /// a row written before this existed — is dropped rather than passed through.
 fn redact_recipient_config(kind: &str, config: &serde_json::Value) -> serde_json::Value {
-    if kind != "webhook" {
-        return config.clone();
-    }
+    // An ALLOW-LIST per kind, not "webhook gets special treatment". The webhook
+    // branch was the only one, so a slack recipient went out verbatim — which
+    // meant the response carried `token_id`, the vault reference the webhook
+    // branch deliberately hides behind `has_secret`, and never carried
+    // `has_token`, which the editor reads to decide whether to say "a token is
+    // stored". The two credential paths now report themselves the same way.
+    let get = |k: &str| config.get(k).cloned().unwrap_or(serde_json::Value::Null);
     let mut out = serde_json::Map::new();
-    out.insert(
-        "url".into(),
-        config
-            .get("url")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
-    );
-    out.insert(
-        "has_secret".into(),
-        serde_json::Value::Bool(
-            config.get("secret_id").is_some() || config.get("secret").is_some(),
-        ),
-    );
+    match kind {
+        "webhook" => {
+            out.insert("url".into(), get("url"));
+            out.insert(
+                "has_secret".into(),
+                serde_json::Value::Bool(
+                    config.get("secret_id").is_some() || config.get("secret").is_some(),
+                ),
+            );
+        }
+        "slack" => {
+            out.insert("channel".into(), get("channel"));
+            out.insert(
+                "has_token".into(),
+                serde_json::Value::Bool(
+                    config.get("token_id").is_some() || config.get("token").is_some(),
+                ),
+            );
+        }
+        "email" => {
+            out.insert("addresses".into(), get("addresses"));
+        }
+        // A kind this build does not know: emit nothing rather than pass an
+        // unreviewed object through. A future kind is one that has not been
+        // read for credentials yet, and defaulting to disclosure is how the
+        // slack case happened.
+        _ => {}
+    }
     serde_json::Value::Object(out)
 }
 

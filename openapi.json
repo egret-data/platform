@@ -10393,7 +10393,7 @@
         "operationId": "render_payload",
         "responses": {
           "200": {
-            "description": "Everything the print page needs: the object's spec and every card's already-executed rows",
+            "description": "What is being rendered: the object's title, each card's saved spec and param mappings, and the dashboard's parameters. No rows — see POST /render/data",
             "content": {
               "application/json": {
                 "schema": {
@@ -11024,7 +11024,7 @@
         "tags": [
           "alerts"
         ],
-        "summary": "A bookmark is the CALLER's own, so it needs no `alert:manage` — a viewer\nmay star what they can read.",
+        "summary": "A bookmark is the CALLER's own, so it needs no `alert:manage` — a viewer\nmay star what they can READ, which is now a permission that exists and is\ntherefore checked rather than described.",
         "operationId": "bookmark_add",
         "parameters": [
           {
@@ -27830,13 +27830,13 @@
       },
       "RenderCard": {
         "type": "object",
+        "description": "One card's IDENTITY and query shape — no rows.\n\nStep one of the render. The page needs the saved spec to resolve the\ndashboard's parameters against it, which it cannot do if the server has\nalready run the query.",
         "required": [
           "chart_id",
           "title",
           "viz_type",
           "params",
-          "columns",
-          "rows"
+          "param_mappings"
         ],
         "properties": {
           "chart_id": {
@@ -27849,6 +27849,23 @@
             "type": "string"
           },
           "params": {},
+          "param_mappings": {
+            "description": "`dashboard_cards.options.paramMappings`: parameter id -> the column on\nTHIS card it filters. A parameter with no mapping here does not apply to\nthis card, which is why the mapping travels per card rather than once\nfor the dashboard."
+          }
+        }
+      },
+      "RenderCardData": {
+        "type": "object",
+        "description": "One card's DATA. Step two, once the page has resolved the filters.",
+        "required": [
+          "chart_id",
+          "columns",
+          "rows"
+        ],
+        "properties": {
+          "chart_id": {
+            "type": "string"
+          },
           "columns": {
             "type": "array",
             "items": {
@@ -27864,13 +27881,42 @@
           }
         }
       },
+      "RenderCardRequest": {
+        "type": "object",
+        "description": "What the page asks for in step two: the resolved dashboard-parameter\nfilters for one card.\n\nThe same shape as `egret_bi`'s `CardRunBody`, and merged the same way —\nonto the card's SAVED spec, never replacing it. A client supplies FILTERS,\nnever a query: each `col` is checked against the dataset's real columns by\n`compile_chart_sql` -> `chartquery::build` -> `find_column`, and each\ntemporal unit against the `TemporalUnit` enum. Accepting a whole spec here\nwould let whoever holds a render token run arbitrary SQL as the schedule's\nowner.",
+        "required": [
+          "chart_id"
+        ],
+        "properties": {
+          "chart_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "filters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Filter"
+            }
+          },
+          "temporal_units": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "RenderPayload": {
         "type": "object",
         "required": [
           "kind",
           "id",
           "title",
-          "cards"
+          "cards",
+          "parameters"
         ],
         "properties": {
           "kind": {
@@ -27887,6 +27933,9 @@
             "items": {
               "$ref": "#/components/schemas/RenderCard"
             }
+          },
+          "parameters": {
+            "description": "The dashboard's parameter definitions, verbatim. The print page resolves\nthem to filters with `applyParamsToChart` — the SAME module the\ninteractive dashboard uses — and sends the result back to\n[`run_cards`].\n\nPorted to Rust instead, this would be a second implementation of six\ntext operators, relative date windows and month/quarter/year arithmetic\nthat must agree with the first one exactly, forever. When they drifted,\nthe emailed image would quietly stop matching the dashboard — which is\nthe bug this whole path exists to fix.\n\n`null` for a chart report: a chart has no parameters."
           }
         }
       },

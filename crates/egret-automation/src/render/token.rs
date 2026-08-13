@@ -64,6 +64,33 @@ impl RenderTokenRepo {
         Ok(token)
     }
 
+    /// Read the grant WITHOUT spending the token.
+    ///
+    /// The render is two steps — the page asks what the object is, computes the
+    /// dashboard's parameter filters with the same code the interactive
+    /// dashboard uses, then asks for the rows — so the first step cannot be the
+    /// one that burns the credential. What this step returns is metadata: an
+    /// object's title and its charts' saved specs. The ROWS still cost the
+    /// token, which is where the envelope in this module's doc comment
+    /// actually bites.
+    pub async fn peek(&self, token: &str) -> Result<RenderGrant, AutomationError> {
+        let row: Option<(String, Uuid, Uuid)> = sqlx::query_as(
+            "SELECT kind, object_id, owner_id FROM automation.render_tokens \
+             WHERE token_hash = $1 AND expires_at > now()",
+        )
+        .bind(hash(token))
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(AutomationError::from_db)?;
+
+        row.map(|(kind, object_id, owner_id)| RenderGrant {
+            kind,
+            object_id,
+            owner_id,
+        })
+        .ok_or_else(|| AutomationError::NotFound("render token".into()))
+    }
+
     /// Redeem once. The row is DELETED by the same statement that reads it, so
     /// two concurrent redemptions cannot both succeed — a `used_at` flag would
     /// leave exactly that race open.
