@@ -59,7 +59,7 @@ export function DashboardActionsMenu({ ws, dash, trashed, folders, canManage = t
       <DropdownMenuItem
         onClick={() =>
           nav(
-            `/explore/${ws}/alerts?new=report&kind=dashboard&object=${dash.id}`,
+            `/explore/${ws}/alerts/new?type=report&kind=dashboard&object=${dash.id}`,
           )
         }
       >
