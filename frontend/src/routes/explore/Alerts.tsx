@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Bell, FolderPlus, ListChecks, Search, Star, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -27,13 +27,6 @@ import { groupByFolder, useCollapsed } from "@/components/explore/folders";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { ScheduleEditor } from "@/components/alerts/ScheduleEditor";
 import { ScheduleActionsMenu } from "@/components/alerts/ScheduleActionsMenu";
 import { RunLogDrawer } from "@/components/alerts/RunLogDrawer";
 import { humanizeCrontab } from "@/lib/humanizeCron";
@@ -77,6 +70,7 @@ type SortKey = "name" | "last_state" | "next_run_at";
 
 export default function Alerts() {
   const ws = useParams().workspace!;
+  const nav = useNavigate();
 
   // The tab lives in the URL so a report list can be linked, bookmarked and
   // reached with the back button — `?type=report`.
@@ -114,21 +108,6 @@ export default function Alerts() {
   } = useFolderMutations(ws, "alerts");
   const collapse = useCollapsed(`folders:${ws}:alerts`);
 
-  /**
-   * `?new=report&kind=dashboard&object=<id>` opens the editor on a new
-   * schedule already pointed at that object — what the Subscribe item on a
-   * dashboard or chart links to. Read once on mount and then cleared from the
-   * URL, so a refresh does not reopen a dialog the user closed.
-   */
-  const [editing, setEditing] = useState<{ id: string | null } | null>(() =>
-    params.get("new") ? { id: null } : null,
-  );
-  const prefill = useMemo((): { kind: "chart" | "dashboard"; object: string } | undefined => {
-    const kind = params.get("kind");
-    const object = params.get("object");
-    if (kind !== "chart" && kind !== "dashboard") return undefined;
-    return { kind, object: object ?? "" };
-  }, [params]);
   const [runLogFor, setRunLogFor] = useState<ScheduleSummary | null>(null);
   const [pendingDelete, setPendingDelete] = useState<ScheduleSummary | null>(null);
   const [onlyBookmarked, setOnlyBookmarked] = useState(false);
@@ -234,9 +213,10 @@ export default function Alerts() {
     bulk.clear();
   }
 
+  const newHref = `/explore/${ws}/alerts/new${tab === "report" ? "?type=report" : ""}`;
   const newButton = canManage ? (
-    <Button onClick={() => setEditing({ id: null })}>
-      + {typeLabel === "alert" ? "Alert" : "Report"}
+    <Button asChild>
+      <Link to={newHref}>+ {typeLabel === "alert" ? "Alert" : "Report"}</Link>
     </Button>
   ) : null;
 
@@ -328,7 +308,7 @@ export default function Alerts() {
           running={runNow.isPending}
           folders={folders}
           onRunLog={setRunLogFor}
-          onEdit={(x) => setEditing({ id: x.id })}
+          onEdit={(x) => nav(`/explore/${ws}/alerts/${x.id}`)}
           onTrash={(x) =>
             trash
               .mutateAsync(x.id)
@@ -606,8 +586,8 @@ export default function Alerts() {
               : "A report delivers a chart or dashboard on a schedule."}
           </p>
           {canManage && (
-            <Button className="mt-3" onClick={() => setEditing({ id: null })}>
-              Create your first {typeLabel}
+            <Button asChild className="mt-3">
+              <Link to={newHref}>Create your first {typeLabel}</Link>
             </Button>
           )}
         </div>
@@ -648,38 +628,6 @@ export default function Alerts() {
           else guard(createFolder.mutateAsync(name).then(() => toast.success("Folder created")));
         }}
       />
-
-      {editing && (
-        <Dialog open onOpenChange={(o) => !o && setEditing(null)}>
-          <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
-            <DialogHeader>
-              <DialogTitle>{editing.id ? `Edit ${typeLabel}` : `New ${typeLabel}`}</DialogTitle>
-            </DialogHeader>
-            <ScheduleEditor
-              ws={ws}
-              type={tab}
-              scheduleId={editing.id}
-              prefill={editing.id ? undefined : prefill}
-              onDone={() => {
-                setEditing(null);
-                // Drop the deep-link params so closing and reopening the page
-                // does not resurrect the dialog.
-                if (params.get("new")) {
-                  setParams(
-                    (p) => {
-                      p.delete("new");
-                      p.delete("kind");
-                      p.delete("object");
-                      return p;
-                    },
-                    { replace: true },
-                  );
-                }
-              }}
-            />
-          </DialogContent>
-        </Dialog>
-      )}
 
       {runLogFor && (
         <RunLogDrawer ws={ws} schedule={runLogFor} onClose={() => setRunLogFor(null)} />

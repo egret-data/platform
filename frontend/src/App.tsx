@@ -27,6 +27,7 @@ import Charts from "@/routes/explore/Charts";
 import ChartExplore from "@/routes/explore/ChartExplore";
 import Dashboards from "@/routes/explore/Dashboards";
 import Alerts from "@/routes/explore/Alerts";
+import ScheduleDetail from "@/routes/explore/ScheduleDetail";
 import Notifications from "@/routes/explore/settings/Notifications";
 import DashboardView from "@/routes/explore/DashboardView";
 import Notebooks from "@/routes/explore/Notebooks";
@@ -111,6 +112,23 @@ function ExploreRoutes() {
             element={
               <RequireFeature feature="alerts">
                 <Alerts />
+              </RequireFeature>
+            }
+          />
+          {/* `new` before `:id`, or the literal would be captured as an id. */}
+          <Route
+            path="alerts/new"
+            element={
+              <RequireFeature feature="alerts">
+                <ScheduleDetail />
+              </RequireFeature>
+            }
+          />
+          <Route
+            path="alerts/:id"
+            element={
+              <RequireFeature feature="alerts">
+                <ScheduleDetail />
               </RequireFeature>
             }
           />

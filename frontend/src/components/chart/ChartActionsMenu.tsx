@@ -41,7 +41,7 @@ export function ChartActionsMenu({ ws, chart, trashed, folders, onDuplicate, onM
       <DropdownMenuItem
         onClick={() =>
           nav(
-            `/explore/${ws}/alerts?new=report&kind=chart&object=${chart.id}`,
+            `/explore/${ws}/alerts/new?type=report&kind=chart&object=${chart.id}`,
           )
         }
       >

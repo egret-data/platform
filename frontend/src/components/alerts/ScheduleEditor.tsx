@@ -42,6 +42,7 @@ export function ScheduleEditor({
   type,
   scheduleId,
   prefill,
+  onDirtyChange,
   onDone,
 }: {
   ws: string;
@@ -49,6 +50,9 @@ export function ScheduleEditor({
   scheduleId: string | null;
   /** A target chosen elsewhere — the Subscribe item on a dashboard or chart. */
   prefill?: { kind: "chart" | "dashboard"; object: string };
+  /** Lets the hosting PAGE arm its unsaved-changes guard. A dialog did not need
+   *  one; a route can be navigated away from mid-edit. */
+  onDirtyChange?: (dirty: boolean) => void;
   onDone: () => void;
 }) {
   const { data: existing } = useSchedule(ws, scheduleId);
@@ -334,7 +338,16 @@ export function ScheduleEditor({
   const pending = create.isPending || update.isPending;
 
   return (
-    <form onSubmit={submit} className="flex flex-col gap-5">
+    /* ONE column, bounded to a readable measure. Two columns were tried and are
+       wrong for this form: a grid pads a short section out to the height of the
+       tall one beside it, and CSS `columns` fights `flex` and clips. A
+       twenty-field form reads better as one column anyway — the eye never has
+       to decide which side continues the thought. */
+    <form
+      onSubmit={submit}
+      onChange={() => onDirtyChange?.(true)}
+      className="flex max-w-3xl flex-col gap-5"
+    >
       {error && (
         <div ref={errorRef}>
           <Alert variant="destructive">
