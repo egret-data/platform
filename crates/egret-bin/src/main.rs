@@ -1366,6 +1366,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             db.clone(),
             secrets.clone(),
         ),
+        slack_config: egret_automation::deliver::slack_config::SlackConfigRepo::new(
+            db.clone(),
+            secrets.clone(),
+        ),
         charts: egret_bi::ChartRepo::new(db.clone()),
         datasets: egret_bi::DatasetRepo::new(db.clone()),
         render_tokens: egret_automation::render::token::RenderTokenRepo::new(db.clone()),
@@ -1390,6 +1394,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         authz: Authorizer::new(db.clone()),
         pdp: pdp.clone(),
         smtp: egret_automation::deliver::smtp_config::SmtpConfigRepo::new(
+            db.clone(),
+            secrets.clone(),
+        ),
+        slack_config: egret_automation::deliver::slack_config::SlackConfigRepo::new(
             db.clone(),
             secrets.clone(),
         ),

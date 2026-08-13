@@ -131,6 +131,13 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
         resolver: Arc::new(egret_automation::deliver::destination::SystemResolver),
         policy: egret_automation::deliver::destination::SsrfPolicy::default(),
         smtp: smtp.clone(),
+        slack_config: egret_automation::deliver::slack_config::SlackConfigRepo::new(
+            db.clone(),
+            egret_secrets::SecretStore::new(
+                db.clone(),
+                Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+            ),
+        ),
         charts: egret_bi::ChartRepo::new(db.clone()),
         datasets: egret_bi::DatasetRepo::new(db.clone()),
         render_tokens: RenderTokenRepo::new(db.clone()),
@@ -142,6 +149,13 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
     });
     let st = AutomationState {
         db: db.clone(),
+        slack_config: egret_automation::deliver::slack_config::SlackConfigRepo::new(
+            db.clone(),
+            egret_secrets::SecretStore::new(
+                db.clone(),
+                Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+            ),
+        ),
         schedules: ScheduleRepo::new(
             db.clone(),
             // Crypto-enabled: `SecretStore::new(db, None)` cannot ENCRYPT, so a
@@ -415,4 +429,77 @@ async fn deleting_the_config_makes_it_unconfigured_again(pool: sqlx::PgPool) {
     assert_eq!(s, StatusCode::OK);
     let (s, _) = req(&fx, &fx.admin_tok, "GET", &path(&fx), None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+fn slack_path(fx: &Fx) -> String {
+    format!("/ws/{}/notifications/slack", fx.slug)
+}
+
+/// The workspace's Slack app: one token for every channel it posts to.
+///
+/// Before this, every slack recipient carried its own bot token — three
+/// channels meant the same credential pasted three times, rotated in three
+/// places and sitting in three vault rows.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_workspace_slack_token_is_stored_and_never_returned(pool: sqlx::PgPool) {
+    const TOKEN: &str = "xoxb-workspace-app-token";
+    let fx = setup(pool).await;
+
+    let body = serde_json::json!({"token": TOKEN, "default_channel": "#general"}).to_string();
+    let (s, put_body) = req(&fx, &fx.admin_tok, "PUT", &slack_path(&fx), Some(&body)).await;
+    assert_eq!(s, StatusCode::OK, "{put_body}");
+    // Asserted on the RAW body: a token nested in a sub-object still satisfies
+    // a struct-field check.
+    assert!(
+        !put_body.contains(TOKEN),
+        "the PUT echoed the token: {put_body}"
+    );
+
+    let (s, get_body) = req(&fx, &fx.admin_tok, "GET", &slack_path(&fx), None).await;
+    assert_eq!(s, StatusCode::OK, "{get_body}");
+    assert!(
+        !get_body.contains(TOKEN),
+        "the GET leaks the token: {get_body}"
+    );
+    assert!(
+        !get_body.contains("token_secret_id"),
+        "the GET hands out the vault reference: {get_body}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&get_body).unwrap();
+    assert_eq!(v["has_token"], true);
+    assert_eq!(v["default_channel"], "#general");
+}
+
+/// An empty field must not wipe the credential.
+///
+/// The editor cannot render a stored token, so its blank field means "keep" —
+/// the same three-way rule as the SMTP password. Saving the default channel
+/// alone must not silently disable every Slack delivery in the workspace.
+#[sqlx::test(migrations = "../../migrations")]
+async fn saving_slack_without_a_token_keeps_the_stored_one(pool: sqlx::PgPool) {
+    let fx = setup(pool).await;
+
+    let first = serde_json::json!({"token": "xoxb-original"}).to_string();
+    let (s, body) = req(&fx, &fx.admin_tok, "PUT", &slack_path(&fx), Some(&first)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+
+    let second = serde_json::json!({"default_channel": "#moved"}).to_string();
+    let (s, body) = req(&fx, &fx.admin_tok, "PUT", &slack_path(&fx), Some(&second)).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["has_token"], true, "the token was dropped: {body}");
+    assert_eq!(v["default_channel"], "#moved");
+}
+
+/// A first write with no token is refused rather than stored.
+///
+/// A config row whose whole purpose is to hold a credential, holding none, is
+/// a workspace that looks configured and silently cannot deliver.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_first_slack_save_without_a_token_is_refused(pool: sqlx::PgPool) {
+    let fx = setup(pool).await;
+    let body = serde_json::json!({"default_channel": "#general"}).to_string();
+    let (s, out) = req(&fx, &fx.admin_tok, "PUT", &slack_path(&fx), Some(&body)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{out}");
+    assert!(out.contains("token"), "{out}");
 }

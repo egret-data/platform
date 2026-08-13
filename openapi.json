@@ -10389,7 +10389,6 @@
         "tags": [
           "alerts"
         ],
-        "summary": "The print page's ONE request. Deliberately token-only: there is no\n`WsContext` extractor here, so an ordinary session cookie authenticates\nnothing on this route — widening it to sessions would make it a second,\nunaudited read path for any chart or dashboard.",
         "operationId": "render_payload",
         "responses": {
           "200": {
@@ -19913,6 +19912,110 @@
         }
       }
     },
+    "/api/ws/{workspace}/notifications/slack": {
+      "get": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "The print page's ONE request. Deliberately token-only: there is no\n`WsContext` extractor here, so an ordinary session cookie authenticates\nnothing on this route — widening it to sessions would make it a second,\nunaudited read path for any chart or dashboard.\nThe workspace's Slack app.",
+        "description": "Gated on `SMTP_MANAGE` — the same permission as the relay, and for the same\nreason: a bot token is workspace administration, not alert authoring. An\neditor who may write a schedule still may not swap the credential every\nschedule posts with.",
+        "operationId": "slack_get",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The workspace's Slack app",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlackConfigDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not configured"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "slack_put",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SlackConfigBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SlackConfigDto"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "alerts"
+        ],
+        "operationId": "slack_delete",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/notifications/smtp": {
       "get": {
         "tags": [
@@ -29042,6 +29145,48 @@
               "type": "string",
               "format": "uuid"
             }
+          }
+        }
+      },
+      "SlackConfigBody": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Three-way, like SMTP's password: absent keeps the stored token, `\"\"` is\nrejected (a config with no token cannot deliver, so there is nothing\nsensible to store), a value replaces it. Required on first write."
+          },
+          "default_channel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "SlackConfigDto": {
+        "type": "object",
+        "description": "What a client may see. There is no token field — not a redacted one, an\nABSENT one, so no future serializer can start including it by accident.",
+        "required": [
+          "has_token",
+          "updated_at"
+        ],
+        "properties": {
+          "default_channel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "has_token": {
+            "type": "boolean",
+            "description": "Always true when a row exists: `token_secret_id` is NOT NULL. It is\nreported anyway so the editor's \"a token is stored\" line reads the same\nfield on both credential paths — see `redact_recipient_config`."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },

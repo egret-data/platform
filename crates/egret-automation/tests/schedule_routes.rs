@@ -175,6 +175,13 @@ async fn setup() -> Option<Fx> {
         resolver: Arc::new(egret_automation::deliver::destination::SystemResolver),
         policy: egret_automation::deliver::destination::SsrfPolicy::default(),
         smtp: smtp.clone(),
+        slack_config: egret_automation::deliver::slack_config::SlackConfigRepo::new(
+            db.clone(),
+            egret_secrets::SecretStore::new(
+                db.clone(),
+                Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+            ),
+        ),
         charts: egret_bi::ChartRepo::new(db.clone()),
         datasets: egret_bi::DatasetRepo::new(db.clone()),
         render_tokens: RenderTokenRepo::new(db.clone()),
@@ -186,6 +193,13 @@ async fn setup() -> Option<Fx> {
     });
     let st = AutomationState {
         db: db.clone(),
+        slack_config: egret_automation::deliver::slack_config::SlackConfigRepo::new(
+            db.clone(),
+            egret_secrets::SecretStore::new(
+                db.clone(),
+                Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+            ),
+        ),
         schedules: ScheduleRepo::new(
             db.clone(),
             // Crypto-enabled: `SecretStore::new(db, None)` cannot ENCRYPT, so a

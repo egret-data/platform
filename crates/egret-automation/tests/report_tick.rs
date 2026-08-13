@@ -147,6 +147,10 @@ fn runner(
             db.clone(),
             egret_secrets::SecretStore::new(db.clone(), None),
         ),
+        slack_config: egret_automation::deliver::slack_config::SlackConfigRepo::new(
+            db.clone(),
+            egret_secrets::SecretStore::new(db.clone(), None),
+        ),
         charts,
         datasets,
         render_tokens: RenderTokenRepo::new(db.clone()),

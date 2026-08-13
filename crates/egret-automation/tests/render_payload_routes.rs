@@ -280,6 +280,13 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
         resolver: Arc::new(egret_automation::deliver::destination::SystemResolver),
         policy: egret_automation::deliver::destination::SsrfPolicy::default(),
         smtp: smtp.clone(),
+        slack_config: egret_automation::deliver::slack_config::SlackConfigRepo::new(
+            db.clone(),
+            egret_secrets::SecretStore::new(
+                db.clone(),
+                Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+            ),
+        ),
         charts: charts.clone(),
         datasets: datasets.clone(),
         render_tokens: render_tokens.clone(),
@@ -291,6 +298,13 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
     });
     let st = AutomationState {
         db: db.clone(),
+        slack_config: egret_automation::deliver::slack_config::SlackConfigRepo::new(
+            db.clone(),
+            egret_secrets::SecretStore::new(
+                db.clone(),
+                Some(egret_secrets::Crypto::new(&[9u8; 32]).unwrap()),
+            ),
+        ),
         schedules: ScheduleRepo::new(
             db.clone(),
             // Crypto-enabled: `SecretStore::new(db, None)` cannot ENCRYPT, so a
