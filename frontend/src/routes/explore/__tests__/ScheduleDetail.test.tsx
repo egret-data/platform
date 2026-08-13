@@ -194,7 +194,10 @@ describe("Alerts & Reports editor page", () => {
     await user.type(screen.getByLabelText(/^name$/i), "with picture");
     await goTo(user, /^condition$/i);
     await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
-    await user.click(screen.getByLabelText(/attach a chart or dashboard/i));
+    // The control lives in Notification, not Condition: it decides what is IN
+    // the message, and at the foot of the query section nobody found it.
+    await goTo(user, /^notification$/i);
+    await user.click(screen.getByLabelText(/also show a chart or dashboard/i));
     await user.click(screen.getByRole("button", { name: /^create$/i }));
 
     await waitFor(() => expect(createMutate).toHaveBeenCalled());

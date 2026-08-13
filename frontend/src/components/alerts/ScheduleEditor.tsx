@@ -511,59 +511,6 @@ export function ScheduleEditor({
               />
             </div>
           )}
-          <div className="flex flex-col gap-1.5 border-t pt-3">
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="sched-attach"
-                checked={attachTarget}
-                onCheckedChange={(v) => setAttachTarget(v === true)}
-              />
-              <Label htmlFor="sched-attach" className="text-sm font-normal">
-                Attach a chart or dashboard when it fires
-              </Label>
-            </div>
-            {attachTarget && (
-              <div className="mt-1 flex flex-col gap-2 pl-6">
-                <select
-                  aria-label="Attachment object type"
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                  value={targetKind}
-                  onChange={(e) => {
-                    setTargetKind(e.target.value as "dashboard" | "chart");
-                    setTargetId("");
-                  }}
-                >
-                  <option value="dashboard">A dashboard</option>
-                  <option value="chart">A chart</option>
-                </select>
-                <select
-                  aria-label="Attachment object"
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                  value={defaultTarget}
-                  onChange={(e) => setTargetId(e.target.value)}
-                >
-                  {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
-                    <option key={o.id} value={o.id}>
-                      {o.name}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  aria-label="Attachment format"
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                  value={reportFormat}
-                  onChange={(e) => setReportFormat(e.target.value)}
-                >
-                  <option value="png">PNG image</option>
-                  <option value="pdf">PDF</option>
-                </select>
-                <p className="text-xs text-muted-foreground">
-                  The triggering rows are always attached as CSV. This adds a picture of the
-                  object beside them; if it cannot be rendered the alert still sends.
-                </p>
-              </div>
-            )}
-          </div>
         </ConfigSection>
       ) : (
         <ConfigSection
@@ -942,17 +889,79 @@ export function ScheduleEditor({
           </p>
         </div>
 
-        {/* Between the two notes, and only in the mail — this is not a field
-            but a statement of where the delivered object lands, because
-            "opening note / closing note" reads as two adjacent boxes
-            otherwise. */}
-        <p className="rounded-md border border-dashed px-3 py-2 text-center text-xs text-muted-foreground">
-          {isAlert
-            ? "The triggering rows go here, with a picture of the attached chart when there is one."
-            : reportFormat === "png"
-              ? "The rendered image goes here, inside the message."
-              : "The report goes here — csv and pdf arrive as a file, text is shown inline."}
-        </p>
+        {/* Between the two notes, because that is where the delivered object
+            physically lands in the mail — "opening note / closing note" reads
+            as two adjacent boxes otherwise.
+
+            For an alert this is also WHERE THE CONTROL BELONGS. It used to sit
+            at the foot of the Condition section, which is about the query and
+            the firing rule; a user looking for "can I send the chart too?"
+            never looked there and concluded the feature did not exist. */}
+        <div className="rounded-md border border-dashed px-3 py-3">
+          {isAlert ? (
+            <>
+              <p className="text-center text-xs text-muted-foreground">
+                The triggering rows go here, always attached as CSV.
+              </p>
+              <div className="mt-2 flex items-center gap-2">
+                <Checkbox
+                  id="sched-attach"
+                  checked={attachTarget}
+                  onCheckedChange={(v) => setAttachTarget(v === true)}
+                />
+                <Label htmlFor="sched-attach" className="text-sm font-normal">
+                  Also show a chart or dashboard
+                </Label>
+              </div>
+              {attachTarget && (
+                <div className="mt-2 flex flex-col gap-2 pl-6">
+                  <select
+                    aria-label="Attachment object type"
+                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                    value={targetKind}
+                    onChange={(e) => {
+                      setTargetKind(e.target.value as "dashboard" | "chart");
+                      setTargetId("");
+                    }}
+                  >
+                    <option value="dashboard">A dashboard</option>
+                    <option value="chart">A chart</option>
+                  </select>
+                  <select
+                    aria-label="Attachment object"
+                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                    value={defaultTarget}
+                    onChange={(e) => setTargetId(e.target.value)}
+                  >
+                    {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.name}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    aria-label="Attachment format"
+                    className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                    value={reportFormat}
+                    onChange={(e) => setReportFormat(e.target.value)}
+                  >
+                    <option value="png">PNG image, shown here in the message</option>
+                    <option value="pdf">PDF, as a file</option>
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    If it cannot be rendered the alert still sends, with the rows alone.
+                  </p>
+                </div>
+              )}
+            </>
+          ) : (
+            <p className="text-center text-xs text-muted-foreground">
+              {reportFormat === "png"
+                ? "The rendered image goes here, inside the message."
+                : "The report goes here — csv and pdf arrive as a file, text is shown inline."}
+            </p>
+          )}
+        </div>
 
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="sched-message-footer">Closing note</Label>
