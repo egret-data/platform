@@ -100,6 +100,12 @@ describe("Alerts & Reports list", () => {
     expect(screen.getByText("on-call@t.local")).toBeInTheDocument();
   });
 
+  it("opens the editor from the row's name, like every sibling list", async () => {
+    renderPage();
+    const name = screen.getByRole("link", { name: "Orders dropped" });
+    expect(name).toHaveAttribute("href", "/explore/eng/alerts/s1");
+  });
+
   it("asks the server for one type per tab, rather than filtering in the browser", async () => {
     const user = userEvent.setup();
     renderPage();

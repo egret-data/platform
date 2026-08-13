@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ConfigSection } from "./config/ConfigSection";
+import { ConfigSection } from "@/components/form/ConfigSection";
 import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
 import { FieldLabel } from "./config/FieldLabel";
 import { RawJsonField } from "./config/RawJsonField";

@@ -1,6 +1,6 @@
 import { EngineConfigReliability } from "../EngineConfigReliability";
 import type { EngineConfigForm } from "../useEngineConfigForm";
-import { ConfigSection } from "./ConfigSection";
+import { ConfigSection } from "@/components/form/ConfigSection";
 import {
   eventListenerCatalog,
   eventListenerCatalogByKey,

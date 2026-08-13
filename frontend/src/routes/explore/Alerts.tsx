@@ -254,7 +254,18 @@ export default function Alerts() {
             </Button>
           )}
           <span className="min-w-0">
-            <span className="font-medium">{s.name}</span>
+            {/* The name opens the editor, the way every sibling list opens its
+                object. In the trash there is nothing to edit, so it stays text. */}
+            {showTrash ? (
+              <span className="font-medium">{s.name}</span>
+            ) : (
+              <Link
+                className="font-medium hover:underline"
+                to={`/explore/${ws}/alerts/${s.id}`}
+              >
+                {s.name}
+              </Link>
+            )}
             {s.description && (
               <span className="block truncate text-xs text-muted-foreground">{s.description}</span>
             )}

@@ -5,7 +5,7 @@ import type { Group, Selector, SessionRule } from "@/api/controlPlane";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ConfigSection } from "./config/ConfigSection";
+import { ConfigSection } from "@/components/form/ConfigSection";
 
 // ── raw key→value editor helpers ─────────────────────────────────────────────
 

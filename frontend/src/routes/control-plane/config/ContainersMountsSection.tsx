@@ -19,7 +19,7 @@ import {
   recordToKv,
 } from "../EngineResourceGroups";
 import type { RoleForm } from "../useEngineConfigForm";
-import { ConfigSection } from "./ConfigSection";
+import { ConfigSection } from "@/components/form/ConfigSection";
 import { ConfigTable, ConfigTableRow } from "./ConfigTable";
 import { RawJsonField } from "./RawJsonField";
 import { numOrUndef } from "./podEditors";

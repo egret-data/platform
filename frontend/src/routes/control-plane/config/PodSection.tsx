@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { type Kv, KeyValueEditor } from "../EngineResourceGroups";
-import { ConfigSection } from "./ConfigSection";
+import { ConfigSection } from "@/components/form/ConfigSection";
 import { ConfigTable, ConfigTableRow } from "./ConfigTable";
 import { RawJsonField } from "./RawJsonField";
 import { SELECT_NONE, numOrUndef } from "./podEditors";

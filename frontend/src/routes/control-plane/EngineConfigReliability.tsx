@@ -13,7 +13,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { ConfigSection } from "./config/ConfigSection";
+import { ConfigSection } from "@/components/form/ConfigSection";
 import { ConfigTable, ConfigTableRow } from "./config/ConfigTable";
 import { PropertyValue } from "./config/PropertyField";
 import { knownProperties } from "./config/knownProperties";

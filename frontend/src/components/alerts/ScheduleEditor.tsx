@@ -24,6 +24,22 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AlertCircle } from "lucide-react";
+import { toast } from "sonner";
+
+/** The form's id, so the page header's Save button can submit it from outside. */
+export const FORM_ID = "schedule-editor";
+
+/** The sections the editor is split across, in nav order. */
+export type SectionKey = "general" | "what" | "schedule" | "notification" | "advanced";
+
+export const SECTIONS: { key: SectionKey; label: (isAlert: boolean) => string }[] = [
+  { key: "general", label: () => "General" },
+  { key: "what", label: (a) => (a ? "Condition" : "Contents") },
+  { key: "schedule", label: () => "Schedule" },
+  { key: "notification", label: () => "Notification" },
+  { key: "advanced", label: () => "Advanced" },
+];
+import { ConfigSection } from "@/components/form/ConfigSection";
 
 /**
  * The create/edit form for one schedule.
@@ -42,7 +58,10 @@ export function ScheduleEditor({
   type,
   scheduleId,
   prefill,
+  section,
+  onSectionChange,
   onDirtyChange,
+  onBusyChange,
   onDone,
 }: {
   ws: string;
@@ -50,9 +69,16 @@ export function ScheduleEditor({
   scheduleId: string | null;
   /** A target chosen elsewhere — the Subscribe item on a dashboard or chart. */
   prefill?: { kind: "chart" | "dashboard"; object: string };
+  /** Which section to show. The form keeps ALL its state either way — only the
+   *  rendering is narrowed, so switching never loses a typed value. */
+  section: SectionKey;
+  /** Used to jump to the section holding a field the user must fix. */
+  onSectionChange?: (s: SectionKey) => void;
   /** Lets the hosting PAGE arm its unsaved-changes guard. A dialog did not need
    *  one; a route can be navigated away from mid-edit. */
   onDirtyChange?: (dirty: boolean) => void;
+  /** The submit is in flight — the page's Save button disables on this. */
+  onBusyChange?: (busy: boolean) => void;
   onDone: () => void;
 }) {
   const { data: existing } = useSchedule(ws, scheduleId);
@@ -317,6 +343,14 @@ export function ScheduleEditor({
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    // `required` cannot be used here: a section the user is not looking at is
+    // unmounted, and the browser refuses to submit while silently failing to
+    // focus a control it cannot see. Check it ourselves and take them there.
+    if (!name.trim()) {
+      onSectionChange?.("general");
+      setError("A name is required.");
+      return;
+    }
     const body = buildBody();
     try {
       if (scheduleId) {
@@ -326,6 +360,10 @@ export function ScheduleEditor({
       } else {
         await create.mutateAsync(body as never);
       }
+      // Saving navigates back to the list, so without this the write lands with
+      // no acknowledgement at all — every other mutation in this app says what
+      // it did, and a silent success reads as a lost click.
+      toast.success(scheduleId ? "Saved" : `${isAlert ? "Alert" : "Report"} created`);
       onDone();
     } catch (err) {
       // The server's message names the field to fix ("an alert needs sql",
@@ -336,6 +374,35 @@ export function ScheduleEditor({
   }
 
   const pending = create.isPending || update.isPending;
+  useEffect(() => {
+    onBusyChange?.(pending);
+  }, [pending, onBusyChange]);
+
+  /**
+   * Dirtiness by COMPARISON, not by listening for change events.
+   *
+   * A `change` handler on the form marks it dirty the moment Radix's Select and
+   * Checkbox dispatch their own events during hydration — so merely opening a
+   * schedule and leaving raised the unsaved-changes prompt. Snapshotting the
+   * body and comparing is what ChartExplore and DatasetDetail already do.
+   */
+  const baseline = useRef<string | null>(null);
+  const current = JSON.stringify(buildBody());
+  useEffect(() => {
+    if (baseline.current === null) {
+      // Wait for hydration to LAND before snapshotting. The effect above sets
+      // the fields from `existing`, but its `setState` calls only take effect
+      // on the next render — snapshot too early and the loaded values read as
+      // edits, so the page would warn about unsaved changes on the way out of
+      // a schedule nobody touched.
+      if (scheduleId && existing && name !== existing.name) return;
+      if (scheduleId && !existing) return;
+      baseline.current = current;
+      onDirtyChange?.(false);
+      return;
+    }
+    onDirtyChange?.(current !== baseline.current);
+  }, [current, existing, scheduleId, name, onDirtyChange]);
 
   return (
     /* ONE column, bounded to a readable measure. Two columns were tried and are
@@ -344,9 +411,9 @@ export function ScheduleEditor({
        twenty-field form reads better as one column anyway — the eye never has
        to decide which side continues the thought. */
     <form
+      id={FORM_ID}
       onSubmit={submit}
-      onChange={() => onDirtyChange?.(true)}
-      className="flex max-w-3xl flex-col gap-5"
+      className="flex max-w-3xl flex-col gap-4"
     >
       {error && (
         <div ref={errorRef}>
@@ -357,15 +424,18 @@ export function ScheduleEditor({
         </div>
       )}
 
-      <section className="flex flex-col gap-3">
-        <h3 className="text-sm font-medium">General</h3>
+      {section === "general" && (
+      <ConfigSection
+        level={2}
+        title="General"
+        description="What this is called, and whether it runs at all."
+      >
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="sched-name">Name</Label>
           <Input
             id="sched-name"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            required
           />
         </div>
         <div className="flex flex-col gap-1.5">
@@ -386,11 +456,15 @@ export function ScheduleEditor({
             Active
           </Label>
         </div>
-      </section>
+      </ConfigSection>
+      )}
 
-      {isAlert ? (
-        <section className="flex flex-col gap-3">
-          <h3 className="text-sm font-medium">Alert condition</h3>
+      {section === "what" && (isAlert ? (
+        <ConfigSection
+          level={2}
+          title="Alert condition"
+          description="The query to run, and what about its result makes this fire."
+        >
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="sched-db">Database</Label>
             <select
@@ -437,6 +511,27 @@ export function ScheduleEditor({
               <option value="operator">Value meets a comparison</option>
             </select>
           </div>
+          {validatorType === "operator" && (
+            <div className="flex gap-2">
+              <select
+                aria-label="Operator"
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                value={op}
+                onChange={(e) => setOp(e.target.value)}
+              >
+                {["<", "<=", ">", ">=", "==", "!="].map((o) => (
+                  <option key={o} value={o}>
+                    {o}
+                  </option>
+                ))}
+              </select>
+              <Input
+                aria-label="Threshold"
+                value={threshold}
+                onChange={(e) => setThreshold(e.target.value)}
+              />
+            </div>
+          )}
           <div className="flex flex-col gap-1.5 border-t pt-3">
             <div className="flex items-center gap-2">
               <Checkbox
@@ -490,31 +585,13 @@ export function ScheduleEditor({
               </div>
             )}
           </div>
-          {validatorType === "operator" && (
-            <div className="flex gap-2">
-              <select
-                aria-label="Operator"
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                value={op}
-                onChange={(e) => setOp(e.target.value)}
-              >
-                {["<", "<=", ">", ">=", "==", "!="].map((o) => (
-                  <option key={o} value={o}>
-                    {o}
-                  </option>
-                ))}
-              </select>
-              <Input
-                aria-label="Threshold"
-                value={threshold}
-                onChange={(e) => setThreshold(e.target.value)}
-              />
-            </div>
-          )}
-        </section>
+        </ConfigSection>
       ) : (
-        <section className="flex flex-col gap-3">
-          <h3 className="text-sm font-medium">Contents</h3>
+        <ConfigSection
+          level={2}
+          title="Contents"
+          description="Which object to deliver, and in what format."
+        >
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="sched-target-kind">Deliver</Label>
             <select
@@ -619,11 +696,15 @@ export function ScheduleEditor({
                 : "PNG and PDF are produced by the rendering service; CSV and text are read straight from the query."}
             </p>
           </div>
-        </section>
-      )}
+        </ConfigSection>
+      ))}
 
-      <section className="flex flex-col gap-3">
-        <h3 className="text-sm font-medium">Schedule</h3>
+      {section === "schedule" && (
+      <ConfigSection
+        level={2}
+        title="Schedule"
+        description="When it runs, in which timezone."
+      >
 
         {rawCron ? (
           <>
@@ -813,10 +894,15 @@ export function ScheduleEditor({
             </p>
           </>
         )}
-      </section>
+      </ConfigSection>
+      )}
 
-      <section className="flex flex-col gap-3">
-        <h3 className="text-sm font-medium">Notification</h3>
+      {section === "notification" && (
+      <ConfigSection
+        level={2}
+        title="Notification"
+        description="Who hears about it, through which channels, and what the message says."
+      >
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="sched-subject">Email subject</Label>
           <Input
@@ -907,11 +993,16 @@ export function ScheduleEditor({
               ` ${signedUrls.size === 1 ? "One is" : `${signedUrls.size} are`} HMAC-signed; the secret is stored server-side and kept on save.`}
           </p>
         </div>
-      </section>
+      </ConfigSection>
+      )}
 
-      <details className="rounded-md border border-input">
-        <summary className="cursor-pointer px-3 py-2 text-sm font-medium">Advanced</summary>
-        <div className="flex flex-col gap-3 border-t px-3 py-3">
+      {section === "advanced" && (
+      <ConfigSection
+        level={2}
+        title="Advanced"
+        description="Ownership, the timers that govern re-firing and stuck runs, and how long the run log is kept."
+      >
+        <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="sched-owners">Owners</Label>
             <select
@@ -997,16 +1088,9 @@ export function ScheduleEditor({
             </div>
           )}
         </div>
-      </details>
+      </ConfigSection>
+      )}
 
-      <div className="flex justify-end gap-2">
-        <Button type="button" variant="ghost" onClick={onDone}>
-          Cancel
-        </Button>
-        <Button type="submit" disabled={pending}>
-          {scheduleId ? "Save" : "Create"}
-        </Button>
-      </div>
     </form>
   );
 }
