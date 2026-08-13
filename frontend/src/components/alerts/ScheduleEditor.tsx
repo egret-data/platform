@@ -28,6 +28,17 @@ import { toast } from "sonner";
 
 /** The form's id, so the page header's Save button can submit it from outside. */
 export const FORM_ID = "schedule-editor";
+
+/** The sections the editor is split across, in nav order. */
+export type SectionKey = "general" | "what" | "schedule" | "notification" | "advanced";
+
+export const SECTIONS: { key: SectionKey; label: (isAlert: boolean) => string }[] = [
+  { key: "general", label: () => "General" },
+  { key: "what", label: (a) => (a ? "Condition" : "Contents") },
+  { key: "schedule", label: () => "Schedule" },
+  { key: "notification", label: () => "Notification" },
+  { key: "advanced", label: () => "Advanced" },
+];
 import { ConfigSection } from "@/components/form/ConfigSection";
 
 /**
@@ -47,6 +58,8 @@ export function ScheduleEditor({
   type,
   scheduleId,
   prefill,
+  section,
+  onSectionChange,
   onDirtyChange,
   onBusyChange,
   onDone,
@@ -56,6 +69,11 @@ export function ScheduleEditor({
   scheduleId: string | null;
   /** A target chosen elsewhere — the Subscribe item on a dashboard or chart. */
   prefill?: { kind: "chart" | "dashboard"; object: string };
+  /** Which section to show. The form keeps ALL its state either way — only the
+   *  rendering is narrowed, so switching never loses a typed value. */
+  section: SectionKey;
+  /** Used to jump to the section holding a field the user must fix. */
+  onSectionChange?: (s: SectionKey) => void;
   /** Lets the hosting PAGE arm its unsaved-changes guard. A dialog did not need
    *  one; a route can be navigated away from mid-edit. */
   onDirtyChange?: (dirty: boolean) => void;
@@ -325,6 +343,14 @@ export function ScheduleEditor({
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    // `required` cannot be used here: a section the user is not looking at is
+    // unmounted, and the browser refuses to submit while silently failing to
+    // focus a control it cannot see. Check it ourselves and take them there.
+    if (!name.trim()) {
+      onSectionChange?.("general");
+      setError("A name is required.");
+      return;
+    }
     const body = buildBody();
     try {
       if (scheduleId) {
@@ -352,6 +378,32 @@ export function ScheduleEditor({
     onBusyChange?.(pending);
   }, [pending, onBusyChange]);
 
+  /**
+   * Dirtiness by COMPARISON, not by listening for change events.
+   *
+   * A `change` handler on the form marks it dirty the moment Radix's Select and
+   * Checkbox dispatch their own events during hydration — so merely opening a
+   * schedule and leaving raised the unsaved-changes prompt. Snapshotting the
+   * body and comparing is what ChartExplore and DatasetDetail already do.
+   */
+  const baseline = useRef<string | null>(null);
+  const current = JSON.stringify(buildBody());
+  useEffect(() => {
+    if (baseline.current === null) {
+      // Wait for hydration to LAND before snapshotting. The effect above sets
+      // the fields from `existing`, but its `setState` calls only take effect
+      // on the next render — snapshot too early and the loaded values read as
+      // edits, so the page would warn about unsaved changes on the way out of
+      // a schedule nobody touched.
+      if (scheduleId && existing && name !== existing.name) return;
+      if (scheduleId && !existing) return;
+      baseline.current = current;
+      onDirtyChange?.(false);
+      return;
+    }
+    onDirtyChange?.(current !== baseline.current);
+  }, [current, existing, scheduleId, name, onDirtyChange]);
+
   return (
     /* ONE column, bounded to a readable measure. Two columns were tried and are
        wrong for this form: a grid pads a short section out to the height of the
@@ -361,7 +413,6 @@ export function ScheduleEditor({
     <form
       id={FORM_ID}
       onSubmit={submit}
-      onChange={() => onDirtyChange?.(true)}
       className="flex max-w-3xl flex-col gap-4"
     >
       {error && (
@@ -373,6 +424,7 @@ export function ScheduleEditor({
         </div>
       )}
 
+      {section === "general" && (
       <ConfigSection
         level={2}
         title="General"
@@ -384,7 +436,6 @@ export function ScheduleEditor({
             id="sched-name"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            required
           />
         </div>
         <div className="flex flex-col gap-1.5">
@@ -406,8 +457,9 @@ export function ScheduleEditor({
           </Label>
         </div>
       </ConfigSection>
+      )}
 
-      {isAlert ? (
+      {section === "what" && (isAlert ? (
         <ConfigSection
           level={2}
           title="Alert condition"
@@ -645,8 +697,9 @@ export function ScheduleEditor({
             </p>
           </div>
         </ConfigSection>
-      )}
+      ))}
 
+      {section === "schedule" && (
       <ConfigSection
         level={2}
         title="Schedule"
@@ -842,7 +895,9 @@ export function ScheduleEditor({
           </>
         )}
       </ConfigSection>
+      )}
 
+      {section === "notification" && (
       <ConfigSection
         level={2}
         title="Notification"
@@ -939,15 +994,15 @@ export function ScheduleEditor({
           </p>
         </div>
       </ConfigSection>
+      )}
 
-      <details className="rounded-lg border">
-        <summary className="cursor-pointer p-4 text-sm font-medium">
-          Advanced
-          <span className="ml-2 font-normal text-muted-foreground">
-            owners, timers, retention, image size
-          </span>
-        </summary>
-        <div className="flex flex-col gap-4 border-t p-4">
+      {section === "advanced" && (
+      <ConfigSection
+        level={2}
+        title="Advanced"
+        description="Ownership, the timers that govern re-firing and stuck runs, and how long the run log is kept."
+      >
+        <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="sched-owners">Owners</Label>
             <select
@@ -1033,7 +1088,8 @@ export function ScheduleEditor({
             </div>
           )}
         </div>
-      </details>
+      </ConfigSection>
+      )}
 
     </form>
   );

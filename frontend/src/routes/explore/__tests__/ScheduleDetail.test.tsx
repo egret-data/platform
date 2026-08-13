@@ -54,6 +54,21 @@ vi.mock("@/api/charts", () => ({
 }));
 
 import ScheduleDetail from "@/routes/explore/ScheduleDetail";
+import { ScheduleEditor } from "@/components/alerts/ScheduleEditor";
+
+/** Mounts the editor alone so the dirty signal can be observed directly. */
+function ScheduleEditorProbe({ onDirty }: { onDirty: (d: boolean) => void }) {
+  return (
+    <ScheduleEditor
+      ws="eng"
+      type="alert"
+      scheduleId="s1"
+      section="general"
+      onDirtyChange={onDirty}
+      onDone={() => {}}
+    />
+  );
+}
 
 function row(over: Partial<ScheduleSummary> = {}): ScheduleSummary {
   return {
@@ -89,6 +104,12 @@ function renderEditor(path = "/explore/eng/alerts/new") {
       </TooltipProvider>
     </QueryClientProvider>,
   );
+}
+
+/** Click through to a section — the form is five panels now, so a test fills
+ *  fields the same way a person does. */
+async function goTo(user: ReturnType<typeof userEvent.setup>, label: RegExp) {
+  await user.click(screen.getByRole("button", { name: label }));
 }
 
 /** A saved alert delivering to both an inbox and a signed webhook. */
@@ -135,11 +156,13 @@ describe("Alerts & Reports editor page", () => {
     renderEditor();
 
     await user.type(screen.getByLabelText(/^name$/i), "Revenue dip");
+    await goTo(user, /^condition$/i);
+    await user.type(screen.getByLabelText(/sql/i), "SELECT count(*) FROM orders");
+    await goTo(user, /^schedule$/i);
     // The picker is the default path now; "every 5 minutes" is a dropdown
     // choice rather than an expression the user has to know how to write.
     await user.selectOptions(screen.getByLabelText(/repeat/i), "minutes");
     await user.selectOptions(screen.getByLabelText(/^every$/i), "5");
-    await user.type(screen.getByLabelText(/sql/i), "SELECT count(*) FROM orders");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
 
     await waitFor(() => expect(createMutate).toHaveBeenCalled());
@@ -163,6 +186,7 @@ describe("Alerts & Reports editor page", () => {
     const user = userEvent.setup();
     renderEditor();
     await user.type(screen.getByLabelText(/^name$/i), "with picture");
+    await goTo(user, /^condition$/i);
     await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
     await user.click(screen.getByLabelText(/attach a chart or dashboard/i));
     await user.click(screen.getByRole("button", { name: /^create$/i }));
@@ -179,8 +203,11 @@ describe("Alerts & Reports editor page", () => {
     const user = userEvent.setup();
     renderEditor();
     await user.type(screen.getByLabelText(/^name$/i), "tuned");
+    await goTo(user, /^condition$/i);
     await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await goTo(user, /^notification$/i);
     await user.type(screen.getByLabelText(/email subject/i), "Orders are down");
+    await goTo(user, /^advanced$/i);
     await user.clear(screen.getByLabelText(/grace period/i));
     await user.type(screen.getByLabelText(/grace period/i), "600");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
@@ -200,11 +227,80 @@ describe("Alerts & Reports editor page", () => {
     const user = userEvent.setup();
     renderEditor();
     await user.type(screen.getByLabelText(/^name$/i), "acknowledged");
+    await goTo(user, /^condition$/i);
     await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
 
     await waitFor(() => expect(createMutate).toHaveBeenCalled());
     await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+  });
+
+  it("does not claim unsaved changes on a schedule nobody edited", async () => {
+    // A sanity check, NOT a regression guard for the bug that prompted it: the
+    // guard used to key on any `change` event reaching the form, and Radix's
+    // Select and Checkbox fire their own during hydration in a REAL browser.
+    // jsdom does not, so this test passes with the old code too — verified by
+    // restoring it and watching this still pass. The bug was found by Playwright
+    // hanging on a beforeunload dialog, and only a browser can catch it again.
+    const onDirty: boolean[] = [];
+    scheduleMock.mockReturnValue({
+      data: {
+        ...row(),
+        sql: "SELECT 1",
+        database_id: "db1",
+        validator_type: "not_null",
+        validator_config: {},
+        recipients: [],
+      },
+      isLoading: false,
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <MemoryRouter initialEntries={["/explore/eng/alerts/s1"]}>
+            <Routes>
+              <Route
+                path="/explore/:workspace/alerts/:id"
+                element={
+                  <ScheduleEditorProbe onDirty={(d) => onDirty.push(d)} />
+                }
+              />
+            </Routes>
+          </MemoryRouter>
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+
+    await screen.findByDisplayValue("Orders dropped");
+    await waitFor(() => expect(onDirty.length).toBeGreaterThan(0));
+    expect(onDirty.some(Boolean)).toBe(false);
+  });
+
+  it("keeps typed values when you move between sections", async () => {
+    // The panels unmount, so the values have to live in the form's state, not
+    // in the DOM. If this breaks, a user loses everything they typed the moment
+    // they look at another section.
+    const user = userEvent.setup();
+    renderEditor();
+    await user.type(screen.getByLabelText(/^name$/i), "survives");
+    await goTo(user, /^schedule$/i);
+    await goTo(user, /^general$/i);
+    expect(screen.getByLabelText(/^name$/i)).toHaveValue("survives");
+  });
+
+  it("jumps to the section holding the field you must fix", async () => {
+    // `required` cannot do this job: a control in an unmounted section is not
+    // focusable, so the browser blocks the submit and says nothing at all.
+    const user = userEvent.setup();
+    renderEditor();
+    await goTo(user, /^notification$/i);
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    expect(await screen.findByText(/a name is required/i)).toBeInTheDocument();
+    // ...and it took us back to where the name lives.
+    expect(screen.getByLabelText(/^name$/i)).toBeInTheDocument();
+    expect(createMutate).not.toHaveBeenCalled();
   });
 
   it("keeps the raw cron field for an expression the picker cannot express", async () => {
@@ -224,7 +320,7 @@ describe("Alerts & Reports editor page", () => {
       },
       isLoading: false,
     });
-    renderEditor("/explore/eng/alerts/s1");
+    renderEditor("/explore/eng/alerts/s1?section=schedule");
     const cron = await screen.findByLabelText(/cron expression/i);
     expect(cron).toHaveValue("0 9 * * 1-5");
 
@@ -238,6 +334,7 @@ describe("Alerts & Reports editor page", () => {
     renderEditor("/explore/eng/alerts/new?type=report");
 
     await user.type(screen.getByLabelText(/^name$/i), "Weekly ops");
+    await goTo(user, /^contents$/i);
     await user.click(screen.getByRole("button", { name: /^create$/i }));
 
     await waitFor(() => expect(createMutate).toHaveBeenCalled());
@@ -255,6 +352,7 @@ describe("Alerts & Reports editor page", () => {
     const user = userEvent.setup();
     renderEditor("/explore/eng/alerts/new?type=report");
     await user.type(screen.getByLabelText(/^name$/i), "weekly pack");
+    await goTo(user, /^contents$/i);
     await user.selectOptions(screen.getByLabelText(/^format$/i), "png");
     await user.click(screen.getByRole("button", { name: /add another/i }));
     await user.click(screen.getByRole("button", { name: /^create$/i }));
@@ -279,6 +377,7 @@ describe("Alerts & Reports editor page", () => {
     const user = userEvent.setup();
     renderEditor();
     await user.type(screen.getByLabelText(/^name$/i), "no db");
+    await goTo(user, /^condition$/i);
     await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
 
@@ -325,6 +424,7 @@ describe("Alerts & Reports editor page", () => {
     renderEditor("/explore/eng/alerts/new?type=report&kind=dashboard&object=d2");
 
     expect(await screen.findByRole("heading", { name: /new report/i })).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole("button", { name: /^contents$/i }));
     expect(screen.getByLabelText(/^dashboard$/i)).toHaveValue("d2");
   });
 
@@ -332,7 +432,9 @@ describe("Alerts & Reports editor page", () => {
     const user = userEvent.setup();
     renderEditor();
     await user.type(screen.getByLabelText(/^name$/i), "to slack");
+    await goTo(user, /^condition$/i);
     await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await goTo(user, /^notification$/i);
     await user.type(screen.getByLabelText(/slack channel/i), "#data-alerts");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
 
@@ -353,6 +455,7 @@ describe("Alerts & Reports editor page", () => {
     );
     renderEditor();
     await user.type(screen.getByLabelText(/^name$/i), "x");
+    await goTo(user, /^condition$/i);
     await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
 
