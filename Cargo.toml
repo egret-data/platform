@@ -96,17 +96,42 @@ rand = "0.8"
 sha2 = "0.10"
 base64 = "0.22"
 hex = "0.4"
-axum-extra = { version = "0.10", features = ["cookie"] }
+# `cookie-private` moves onto the workspace entry: egret-auth and egret-bin used
+# to declare their own `axum-extra = "0.10"` WITH this feature, which is both why
+# a second axum-extra stayed in the tree and why egret-workspace compiled at all —
+# it takes the workspace entry (cookie only) and got `cookie::Key` by feature
+# unification from its siblings. 0.12 gates `Key` behind cookie-signed/-private,
+# so `PrivateCookieJar` needs it named here, once.
+axum-extra = { version = "0.12", features = ["cookie", "cookie-private"] }
 async-trait = "0.1"
 openidconnect = "4"
-jsonwebtoken = "9"
+# 10.x, not the newest 11: 10.4 is what lakekeeper's `limes` (and gcloud-auth,
+# jwks_client_rs) resolve to, so this is the version that leaves ONE jsonwebtoken
+# in the tree. 11 would reintroduce the duplicate it is here to remove.
+jsonwebtoken = "10"
 rsa = { version = "0.9", features = ["sha2"] }
 egret-machine-idp = { path = "crates/egret-machine-idp" }
+# Held at 0.12 — NOT stale. `openidconnect` implements `AsyncHttpClient` for
+# reqwest 0.12's `Client` specifically, and every published openidconnect
+# (through 4.0.1, the newest) depends on `reqwest ^0.12`. On 0.13 the OIDC
+# discovery and code-exchange calls in egret-auth/src/oidc.rs stop compiling.
+#
+# This is why reqwest 0.12 and 0.13 both appear in the tree: lakekeeper's
+# `gcloud-metadata` is on 0.13 and we cannot follow it until openidconnect does.
+# Revisit when openidconnect ships a reqwest-0.13 release.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies"] }
 mysql_async = { version = "0.34", default-features = false, features = ["default-rustls"] }
 testcontainers = "0.23"
-kube = { version = "0.99", features = ["client", "runtime", "derive", "ws"] }
-k8s-openapi = { version = "0.24", features = ["latest"] }
+# kube 2 / k8s-openapi 0.26 — the versions lakekeeper's `limes` already pulls in,
+# so the tree holds one of each instead of two. (kube 4 is newer still, but limes
+# is git-pinned to 2, so following `latest` would put the duplicate straight back.)
+kube = { version = "2", features = ["client", "runtime", "derive", "ws"] }
+# `v1_32` rather than `latest`. k8s-openapi's build script refuses to run with two
+# Kubernetes-version features enabled, and `limes` enables `v1_32` — `latest` on
+# 0.26 means v1_34, so the two unify into a hard build failure. Pinning v1_32 is
+# also a no-op for the API we compile against: `latest` on the previous
+# k8s-openapi 0.24 WAS v1_32, that being the newest it supported.
+k8s-openapi = { version = "0.26", features = ["v1_32"] }
 cedar-policy = "4.11.2"
 arc-swap = "1"
 rcgen = { version = "0.13", default-features = false, features = ["pem", "crypto", "ring"] }
