@@ -47,6 +47,9 @@ pub struct WriteBody<'a> {
     pub working_timeout_s: Option<i32>,
     pub log_retention_days: Option<i32>,
     pub email_subject: Option<&'a str>,
+    pub message: Option<&'a str>,
+    pub skip_if_empty: bool,
+    pub targets: &'a [egret_automation_api::TargetInput],
     pub owners: &'a [Uuid],
     pub recipients: &'a [RecipientInput],
 }
@@ -73,6 +76,9 @@ impl<'a> From<&'a CreateSchedule> for WriteBody<'a> {
             working_timeout_s: b.working_timeout_s,
             log_retention_days: b.log_retention_days,
             email_subject: b.email_subject.as_deref(),
+            message: b.message.as_deref(),
+            skip_if_empty: b.skip_if_empty,
+            targets: &b.targets,
             owners: &b.owners,
             recipients: &b.recipients,
         }
@@ -102,6 +108,9 @@ pub fn update_body<'a>(b: &'a UpdateSchedule, stored_type: ScheduleType) -> Writ
         working_timeout_s: b.working_timeout_s,
         log_retention_days: b.log_retention_days,
         email_subject: b.email_subject.as_deref(),
+        message: b.message.as_deref(),
+        skip_if_empty: b.skip_if_empty,
+        targets: &b.targets,
         owners: &b.owners,
         recipients: &b.recipients,
     }
@@ -155,6 +164,12 @@ pub fn to_new(body: &WriteBody<'_>, creator: Option<Uuid>) -> Result<NewSchedule
         }
     }
 
+    // A target is optional on an alert, but "both" is meaningless on either
+    // type — the renderer has to know which object it is capturing.
+    if body.ty == ScheduleType::Alert && body.chart_id.is_some() && body.dashboard_id.is_some() {
+        return Err(bad("an alert takes a chart_id or a dashboard_id, not both"));
+    }
+
     for r in body.recipients {
         validate_recipient(r).map_err(|m| bad(&m))?;
     }
@@ -203,17 +218,29 @@ pub fn to_new(body: &WriteBody<'_>, creator: Option<Uuid>) -> Result<NewSchedule
             .validator_config
             .cloned()
             .unwrap_or_else(|| serde_json::json!({})),
-        chart_id: (!is_alert).then_some(body.chart_id).flatten(),
-        dashboard_id: (!is_alert).then_some(body.dashboard_id).flatten(),
-        report_format: (!is_alert)
-            .then(|| body.report_format.map(|f| f.as_str().to_string()))
-            .flatten(),
+        // An alert MAY now carry a target: when it fires, the mail attaches a
+        // rendering of that chart or dashboard alongside the triggering rows,
+        // which is what Superset does behind `ALERTS_ATTACH_REPORTS`. Reports
+        // still require exactly one; for an alert it is optional decoration.
+        chart_id: body.chart_id,
+        dashboard_id: body.dashboard_id,
+        // Kept on an alert too — it is the format of the optional attachment.
+        // Only meaningful alongside a target, which `render_alert_attachment`
+        // checks before it renders anything.
+        report_format: body.report_format.map(|f| f.as_str().to_string()),
         custom_width: body.custom_width,
         custom_height: body.custom_height,
         grace_period_s: grace,
         working_timeout_s: working,
         log_retention_days: retention,
         email_subject: body.email_subject.map(str::to_string),
+        message: body.message.map(str::to_string),
+        skip_if_empty: body.skip_if_empty,
+        targets: body
+            .targets
+            .iter()
+            .map(|t| (t.kind.clone(), t.object_id))
+            .collect(),
         owners,
         recipients: body
             .recipients
@@ -277,6 +304,17 @@ fn validate_recipient(r: &RecipientInput) -> Result<(), String> {
                 if !s.contains('@') || s.starts_with('@') || s.ends_with('@') {
                     return Err(format!("not an email address: {s}"));
                 }
+            }
+            Ok(())
+        }
+        RecipientKind::Slack => {
+            let channel = r
+                .config
+                .get("channel")
+                .and_then(|v| v.as_str())
+                .ok_or("a slack recipient needs a \"channel\"")?;
+            if channel.trim().is_empty() {
+                return Err("a slack channel cannot be empty".into());
             }
             Ok(())
         }
@@ -367,7 +405,12 @@ pub fn summary_dto(
     }
 }
 
-pub fn detail_dto(s: &Schedule, owners: &[Owner], recipients: &[Recipient]) -> ScheduleDetailDto {
+pub fn detail_dto(
+    s: &Schedule,
+    owners: &[Owner],
+    recipients: &[Recipient],
+    targets: &[crate::repo::Target],
+) -> ScheduleDetailDto {
     ScheduleDetailDto {
         id: s.id.to_string(),
         ty: ScheduleType::parse(&s.r#type).unwrap_or(ScheduleType::Alert),
@@ -393,6 +436,15 @@ pub fn detail_dto(s: &Schedule, owners: &[Owner], recipients: &[Recipient]) -> S
         working_timeout_s: s.working_timeout_s,
         log_retention_days: s.log_retention_days,
         email_subject: s.email_subject.clone(),
+        message: s.message.clone(),
+        skip_if_empty: s.skip_if_empty,
+        targets: targets
+            .iter()
+            .map(|t| egret_automation_api::TargetInput {
+                kind: t.kind.clone(),
+                object_id: t.object_id,
+            })
+            .collect(),
         owners: owners.iter().map(owner_dto).collect(),
         recipients: recipients
             .iter()
@@ -507,16 +559,39 @@ mod tests {
     }
 
     #[test]
-    fn the_other_types_block_is_dropped_rather_than_persisted() {
-        // An alert body that still carries a chart_id (because the editor was
-        // switched between tabs) must not write that chart_id — it would trip
-        // the report CHECK from the alert path.
+    fn an_alert_may_carry_a_target_for_its_attachment() {
+        // It used to be nulled out, on the belief that an alert with a
+        // chart_id would trip the report CHECK. It does not:
+        // `schedule_report_needs_target` is guarded by `type <> 'report'`.
+        // Superset allows the same thing behind ALERTS_ATTACH_REPORTS, and it
+        // is what lets a fired alert mail a picture rather than only numbers.
         let mut b = alert_body();
-        b.chart_id = Some(Uuid::new_v4());
+        let chart = Uuid::new_v4();
+        b.chart_id = Some(chart);
         b.report_format = Some(ReportFormat::Png);
         let n = to_new(&WriteBody::from(&b), Some(Uuid::new_v4())).unwrap();
-        assert_eq!(n.chart_id, None);
-        assert_eq!(n.report_format, None);
+        assert_eq!(n.chart_id, Some(chart));
+        assert_eq!(n.report_format.as_deref(), Some("png"));
+    }
+
+    #[test]
+    fn an_alert_naming_both_targets_is_rejected() {
+        // Optional does not mean ambiguous: the renderer has to know which
+        // object it is capturing.
+        let mut b = alert_body();
+        b.chart_id = Some(Uuid::new_v4());
+        b.dashboard_id = Some(Uuid::new_v4());
+        let err = to_new(&WriteBody::from(&b), Some(Uuid::new_v4())).unwrap_err();
+        assert!(err.to_string().contains("not both"), "{err}");
+    }
+
+    #[test]
+    fn an_alerts_query_block_still_wins_over_a_reports() {
+        // The alert-only fields survive and the report-only requirement does
+        // not apply — only the target is now shared between the two types.
+        let b = alert_body();
+        let n = to_new(&WriteBody::from(&b), Some(Uuid::new_v4())).unwrap();
+        assert!(n.sql.is_some() && n.database_id.is_some() && n.validator_type.is_some());
     }
 
     #[test]

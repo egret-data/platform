@@ -26,6 +26,9 @@ pub struct ScheduleRepo {
 /// back to what issued it.
 pub const WEBHOOK_SECRET_KIND: &str = "automation_webhook_secret";
 
+/// `secrets.kind` for a Slack bot token.
+pub const SLACK_TOKEN_KIND: &str = "automation_slack_token";
+
 /// A schedule row, as stored. The type-dependent columns are `Option` because
 /// one table holds both alerts and reports; which ones must be present is
 /// pinned by migration 0110's CHECK constraints.
@@ -60,6 +63,9 @@ pub struct Schedule {
     pub log_retention_days: i32,
     pub email_subject: Option<String>,
 
+    pub message: Option<String>,
+    pub skip_if_empty: bool,
+
     pub folder_id: Option<Uuid>,
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 
@@ -84,6 +90,15 @@ pub struct Owner {
     pub schedule_id: Uuid,
     pub user_id: Uuid,
     pub email: String,
+}
+
+/// One object a report delivers. A report may have several; an alert has at
+/// most one, and keeps it in the schedule's own columns.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Target {
+    pub kind: String,
+    pub object_id: Uuid,
+    pub ordinal: i32,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -134,15 +149,21 @@ pub struct NewSchedule {
     pub log_retention_days: i32,
     pub email_subject: Option<String>,
 
+    pub message: Option<String>,
+    pub skip_if_empty: bool,
+
     pub owners: Vec<Uuid>,
     pub recipients: Vec<(String, serde_json::Value)>,
+    /// Extra delivery targets, in page order. Empty means "use the single
+    /// target in `chart_id`/`dashboard_id`", which is every pre-0115 row.
+    pub targets: Vec<(String, Uuid)>,
 }
 
 const COLS: &str = "id, workspace_id, type, name, description, active, crontab, timezone, \
      next_run_at, database_id, sql, validator_type, validator_config, last_eval_at, last_state, \
      last_value, chart_id, dashboard_id, report_format, custom_width, custom_height, \
-     grace_period_s, working_timeout_s, log_retention_days, email_subject, folder_id, deleted_at, \
-     created_by, updated_at";
+     grace_period_s, working_timeout_s, log_retention_days, email_subject, message, \
+     skip_if_empty, folder_id, deleted_at, created_by, updated_at";
 
 impl ScheduleRepo {
     pub fn new(db: Db, secrets: egret_secrets::SecretStore) -> Self {
@@ -174,17 +195,20 @@ impl ScheduleRepo {
         let mut stored: HashMap<String, Uuid> = HashMap::new();
         if let Some(id) = existing {
             for r in self.recipients_for(id).await? {
-                if r.kind != "webhook" {
-                    continue;
-                }
-                let url = r.config.get("url").and_then(|v| v.as_str());
-                let sid = r
-                    .config
-                    .get("secret_id")
+                // Keyed by the destination's own identity — a webhook by URL,
+                // a slack recipient by channel — so "absent means keep" can
+                // find the credential that belongs to it.
+                let (key, secret) = match r.kind.as_str() {
+                    "webhook" => (r.config.get("url"), r.config.get("secret_id")),
+                    "slack" => (r.config.get("channel"), r.config.get("token_id")),
+                    _ => continue,
+                };
+                let key = key.and_then(|v| v.as_str());
+                let sid = secret
                     .and_then(|v| v.as_str())
                     .and_then(|s| Uuid::parse_str(s).ok());
-                if let (Some(url), Some(sid)) = (url, sid) {
-                    stored.insert(url.to_string(), sid);
+                if let (Some(key), Some(sid)) = (key, sid) {
+                    stored.insert(key.to_string(), sid);
                 }
             }
         }
@@ -192,6 +216,36 @@ impl ScheduleRepo {
         let mut out = Vec::with_capacity(recipients.len());
         let mut kept: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
         for (kind, config) in recipients {
+            // Slack's bot token is a credential exactly like a webhook signing
+            // secret: the row keeps a reference, never the value. Keyed by
+            // channel, so "absent means keep" works the same way.
+            if kind == "slack" {
+                let channel = config
+                    .get("channel")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let token_id = match config.get("token").and_then(|v| v.as_str()) {
+                    Some("") => None,
+                    Some(t) => Some(
+                        self.secrets
+                            .put(SLACK_TOKEN_KIND, t)
+                            .await
+                            .map_err(|e| AutomationError::BadRequest(e.to_string()))?,
+                    ),
+                    None => stored.get(&channel).copied(),
+                };
+                if let Some(id) = token_id {
+                    kept.insert(id);
+                }
+                let mut cfg = serde_json::Map::new();
+                cfg.insert("channel".into(), serde_json::Value::String(channel));
+                if let Some(id) = token_id {
+                    cfg.insert("token_id".into(), serde_json::Value::String(id.to_string()));
+                }
+                out.push((kind.clone(), serde_json::Value::Object(cfg)));
+                continue;
+            }
             if kind != "webhook" {
                 out.push((kind.clone(), config.clone()));
                 continue;
@@ -239,8 +293,17 @@ impl ScheduleRepo {
     /// The one place a webhook signing secret becomes plaintext, called at
     /// delivery time by the runner.
     pub async fn resolve_webhook_secret(&self, config: &serde_json::Value) -> Option<String> {
+        self.resolve_secret(config, "secret_id").await
+    }
+
+    /// The Slack bot token for one recipient, from the vault.
+    pub async fn resolve_slack_token(&self, config: &serde_json::Value) -> Option<String> {
+        self.resolve_secret(config, "token_id").await
+    }
+
+    async fn resolve_secret(&self, config: &serde_json::Value, key: &str) -> Option<String> {
         let id = config
-            .get("secret_id")
+            .get(key)
             .and_then(|v| v.as_str())
             .and_then(|s| Uuid::parse_str(s).ok())?;
         match self.secrets.get(id).await {
@@ -282,8 +345,8 @@ impl ScheduleRepo {
               database_id, sql, validator_type, validator_config, \
               chart_id, dashboard_id, report_format, custom_width, custom_height, \
               grace_period_s, working_timeout_s, log_retention_days, email_subject, \
-              created_by, updated_by) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$22) \
+              message, skip_if_empty, created_by, updated_by) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$24) \
              RETURNING {COLS}"
         ))
         .bind(ws)
@@ -307,12 +370,14 @@ impl ScheduleRepo {
         .bind(new.working_timeout_s)
         .bind(new.log_retention_days)
         .bind(&new.email_subject)
+        .bind(&new.message)
+        .bind(new.skip_if_empty)
         .bind(actor.map(|u| u.0))
         .fetch_one(&mut *tx)
         .await
         .map_err(AutomationError::from_db)?;
 
-        write_children(&mut tx, row.id, &new.owners, &recipients).await?;
+        write_children(&mut tx, row.id, &new.owners, &recipients, &new.targets).await?;
         tx.commit().await.map_err(AutomationError::from_db)?;
         Ok(row)
     }
@@ -396,6 +461,18 @@ impl ScheduleRepo {
         Ok(done.rows_affected() > 0)
     }
 
+    /// Extra targets for one schedule, in page order.
+    pub async fn targets_for(&self, id: Uuid) -> Result<Vec<Target>, AutomationError> {
+        sqlx::query_as(
+            "SELECT kind, object_id, ordinal FROM automation.schedule_targets \
+             WHERE schedule_id = $1 ORDER BY ordinal, kind",
+        )
+        .bind(id)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(AutomationError::from_db)
+    }
+
     pub async fn add_bookmark(&self, user: Uuid, id: Uuid) -> Result<(), AutomationError> {
         sqlx::query(
             "INSERT INTO analytics.bookmarks (user_id, entity_type, entity_id) \
@@ -459,7 +536,8 @@ impl ScheduleRepo {
                database_id=$9, sql=$10, validator_type=$11, validator_config=$12, \
                chart_id=$13, dashboard_id=$14, report_format=$15, custom_width=$16, \
                custom_height=$17, grace_period_s=$18, working_timeout_s=$19, \
-               log_retention_days=$20, email_subject=$21, updated_by=$22, updated_at=now() \
+               log_retention_days=$20, email_subject=$21, message=$22, skip_if_empty=$23, \
+               updated_by=$24, updated_at=now() \
              WHERE id=$1 AND workspace_id=$2 RETURNING {COLS}"
         ))
         .bind(id)
@@ -483,6 +561,8 @@ impl ScheduleRepo {
         .bind(new.working_timeout_s)
         .bind(new.log_retention_days)
         .bind(&new.email_subject)
+        .bind(&new.message)
+        .bind(new.skip_if_empty)
         .bind(actor.map(|u| u.0))
         .fetch_optional(&mut *tx)
         .await
@@ -510,7 +590,12 @@ impl ScheduleRepo {
             .execute(&mut *tx)
             .await
             .map_err(AutomationError::from_db)?;
-        write_children(&mut tx, id, &new.owners, &recipients).await?;
+        sqlx::query("DELETE FROM automation.schedule_targets WHERE schedule_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(AutomationError::from_db)?;
+        write_children(&mut tx, id, &new.owners, &recipients, &new.targets).await?;
         tx.commit().await.map_err(AutomationError::from_db)?;
 
         // Only once the row committed: had the write failed, the old secret is
@@ -659,6 +744,7 @@ async fn write_children(
     schedule_id: Uuid,
     owners: &[Uuid],
     recipients: &[(String, serde_json::Value)],
+    targets: &[(String, Uuid)],
 ) -> Result<(), AutomationError> {
     for owner in owners {
         sqlx::query(
@@ -667,6 +753,32 @@ async fn write_children(
         )
         .bind(schedule_id)
         .bind(owner)
+        .execute(&mut **tx)
+        .await
+        .map_err(AutomationError::from_db)?;
+    }
+    for (i, (kind, object_id)) in targets.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO automation.schedule_targets (schedule_id, kind, object_id, ordinal) \
+             VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+        )
+        .bind(schedule_id)
+        .bind(kind)
+        .bind(object_id)
+        .bind(i as i32)
+        .execute(&mut **tx)
+        .await
+        .map_err(AutomationError::from_db)?;
+    }
+    for (i, (kind, object_id)) in targets.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO automation.schedule_targets (schedule_id, kind, object_id, ordinal) \
+             VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+        )
+        .bind(schedule_id)
+        .bind(kind)
+        .bind(object_id)
+        .bind(i as i32)
         .execute(&mut **tx)
         .await
         .map_err(AutomationError::from_db)?;

@@ -654,10 +654,16 @@ async fn load_detail(
         .recipients_for(id)
         .await
         .map_err(AutomationApiError::from)?;
+    let targets = st
+        .schedules
+        .targets_for(id)
+        .await
+        .map_err(AutomationApiError::from)?;
     Ok(Json(detail_dto(
         &row,
         owners.get(&id).map(Vec::as_slice).unwrap_or(&[]),
         &recipients,
+        &targets,
     )))
 }
 
@@ -791,7 +797,8 @@ async fn smtp_test(
             body: "This is a test message from egret. If you are reading it, this \
                    workspace's SMTP settings work.\n"
                 .into(),
-            attachment: None,
+            html: None,
+            attachments: Vec::new(),
         },
     )
     .await

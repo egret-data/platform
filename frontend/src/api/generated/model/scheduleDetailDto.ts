@@ -10,6 +10,7 @@ import type { RecipientDto } from './recipientDto';
 import type { ReportFormat } from './reportFormat';
 import type { RunState } from './runState';
 import type { ScheduleType } from './scheduleType';
+import type { TargetInput } from './targetInput';
 import type { ValidatorType } from './validatorType';
 
 /**
@@ -51,6 +52,19 @@ export interface ScheduleDetailDto {
   log_retention_days: number;
   /** @nullable */
   email_subject?: string | null;
+  /**
+     * A user-authored note carried into the notification body. Distinct from
+     * `description`, which is the line the LIST shows.
+     * @nullable
+     */
+  message?: string | null;
+  /** Metabase's `skip_if_empty`: send nothing when the run produced no rows. */
+  skip_if_empty?: boolean;
+  /**
+     * Objects a REPORT delivers, in page order. Empty falls back to the
+     * single `chart_id`/`dashboard_id`, which is every pre-0115 row.
+     */
+  targets?: TargetInput[];
   owners: OwnerDto[];
   recipients: RecipientDto[];
   /** @nullable */

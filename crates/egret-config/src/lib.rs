@@ -183,6 +183,15 @@ pub struct AutomationConfig {
     /// renderer's navigation would time out trying to reach an address only a
     /// browser outside the cluster can resolve.
     pub public_url: String,
+    /// Base URL a PERSON can open, for the links in notifications.
+    ///
+    /// Deliberately separate from `public_url` above: that one is what the
+    /// renderer resolves in-cluster, and a mail whose "open this" link points
+    /// at a Service DNS name is a dead end in the recipient's inbox. Falls back
+    /// to `public_url` when unset, which is correct in local dev where the two
+    /// really are the same address.
+    #[serde(default)]
+    pub browser_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,6 +331,7 @@ impl Default for Config {
                 webhook_allow_hosts: vec![],
                 renderer_url: "http://egret-renderer:8080".into(),
                 public_url: "http://egret:8080".into(),
+                browser_url: None,
             },
         }
     }

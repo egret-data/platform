@@ -36,7 +36,13 @@ vi.mock("@/api/databases", () => ({
   useDatabases: () => ({ data: [{ id: "db1", name: "Trino" }] }),
 }));
 vi.mock("@/api/dashboards", () => ({
-  useDashboards: () => ({ data: [{ id: "d1", name: "Ops" }] }),
+  // Two, so a multi-target report has a second object to pick.
+  useDashboards: () => ({
+    data: [
+      { id: "d1", name: "Ops" },
+      { id: "d2", name: "Revenue" },
+    ],
+  }),
 }));
 vi.mock("@/api/charts", () => ({
   useCharts: () => ({ data: [{ id: "c1", name: "Revenue" }] }),
@@ -156,8 +162,10 @@ describe("Alerts & Reports list", () => {
     await user.click(screen.getByRole("button", { name: /\+ alert/i }));
 
     await user.type(screen.getByLabelText(/^name$/i), "Revenue dip");
-    await user.clear(screen.getByLabelText(/cron/i));
-    await user.type(screen.getByLabelText(/cron/i), "*/5 * * * *");
+    // The picker is the default path now; "every 5 minutes" is a dropdown
+    // choice rather than an expression the user has to know how to write.
+    await user.selectOptions(screen.getByLabelText(/repeat/i), "minutes");
+    await user.selectOptions(screen.getByLabelText(/^every$/i), "5");
     await user.type(screen.getByLabelText(/sql/i), "SELECT count(*) FROM orders");
     await user.click(screen.getByRole("button", { name: /^create$/i }));
 
@@ -173,6 +181,74 @@ describe("Alerts & Reports list", () => {
     // The server requires `active` on update and defaults it on create; sending
     // it explicitly keeps the two paths identical.
     expect(body.active).toBe(true);
+  });
+
+  it("lets an alert carry a chart attachment, which the model used to strip", async () => {
+    // Superset allows this behind ALERTS_ATTACH_REPORTS; egret's model used to
+    // null out chart_id/dashboard_id on every alert, so a fired alert could
+    // only ever send CSV rows and never a picture.
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole("button", { name: /\+ alert/i }));
+    await user.type(screen.getByLabelText(/^name$/i), "with picture");
+    await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await user.click(screen.getByLabelText(/attach a chart or dashboard/i));
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const body = createMutate.mock.calls[0][0];
+    expect(body.type).toBe("alert");
+    expect(body.report_format).toBe("png");
+    // Exactly one target, as the validator requires on either type.
+    expect(Boolean(body.chart_id) !== Boolean(body.dashboard_id)).toBe(true);
+  });
+
+  it("sends the advanced fields the editor previously had no way to set", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole("button", { name: /\+ alert/i }));
+    await user.type(screen.getByLabelText(/^name$/i), "tuned");
+    await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await user.type(screen.getByLabelText(/email subject/i), "Orders are down");
+    await user.clear(screen.getByLabelText(/grace period/i));
+    await user.type(screen.getByLabelText(/grace period/i), "600");
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const body = createMutate.mock.calls[0][0];
+    expect(body.email_subject).toBe("Orders are down");
+    expect(body.grace_period_s).toBe(600);
+    // Blank stays blank rather than becoming 0, which the server rejects.
+    expect(body.working_timeout_s).toBe(3600);
+  });
+
+  it("keeps the raw cron field for an expression the picker cannot express", async () => {
+    // `0 9 * * 1-5` has a weekday RANGE. Showing it as dropdowns would mean
+    // rewriting it, which changes when the mail arrives — so the editor opens
+    // on the raw field instead and the round trip is lossless.
+    const user = userEvent.setup();
+    scheduleMock.mockReturnValue({
+      data: {
+        ...row(),
+        crontab: "0 9 * * 1-5",
+        sql: "SELECT 1",
+        database_id: "db1",
+        validator_type: "not_null",
+        validator_config: {},
+        recipients: [],
+      },
+      isLoading: false,
+    });
+    renderPage();
+
+    await user.click(screen.getByRole("button", { name: /actions for/i }));
+    await user.click(await screen.findByRole("menuitem", { name: /edit/i }));
+    const cron = await screen.findByLabelText(/cron expression/i);
+    expect(cron).toHaveValue("0 9 * * 1-5");
+
+    await user.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(updateMutate).toHaveBeenCalled());
+    expect(updateMutate.mock.calls[0][0].body.crontab).toBe("0 9 * * 1-5");
   });
 
   it("sends a report body with a target rather than alert fields", async () => {
@@ -191,6 +267,26 @@ describe("Alerts & Reports list", () => {
     // Exactly one target, and no alert-only fields riding along.
     expect(Boolean(body.dashboard_id) !== Boolean(body.chart_id)).toBe(true);
     expect(body.sql ?? null).toBeNull();
+  });
+
+  it("forces PDF once a report covers more than one object", async () => {
+    // A PNG has no second page. Sending one object of several and letting the
+    // recipient believe that is the whole report is the failure to avoid.
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole("tab", { name: /reports/i }));
+    await user.click(screen.getByRole("button", { name: /\+ report/i }));
+    await user.type(screen.getByLabelText(/^name$/i), "weekly pack");
+    await user.selectOptions(screen.getByLabelText(/^format$/i), "png");
+    await user.click(screen.getByRole("button", { name: /add another/i }));
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const body = createMutate.mock.calls[0][0];
+    expect(body.report_format).toBe("pdf");
+    expect(body.targets).toHaveLength(2);
+    // Page order is the order the editor showed.
+    expect(body.targets[0].object_id).not.toBe(body.targets[1].object_id);
   });
 
   it("omits an absent database rather than sending an empty string", async () => {
@@ -279,6 +375,50 @@ describe("Alerts & Reports list", () => {
     const recipients = await openEditorAndSave(user);
     const hook = recipients.find((r) => r.kind === "webhook");
     expect(hook?.config).toEqual({ url: "https://hooks.example.com/egret/1" });
+  });
+
+  it("opens a prefilled report from a Subscribe deep link", async () => {
+    // The entry point both reference products have and egret did not: you
+    // subscribe FROM the dashboard, not from a page you must already know
+    // exists.
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <MemoryRouter
+            initialEntries={["/explore/eng/alerts?new=report&kind=dashboard&object=d2"]}
+          >
+            <Routes>
+              <Route path="/explore/:workspace/alerts" element={<Alerts />} />
+            </Routes>
+          </MemoryRouter>
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+
+    // The dialog opens on its own, on the Reports tab, pointed at the object.
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/new report/i)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText(/^dashboard$/i)).toHaveValue("d2");
+  });
+
+  it("sends a slack destination as a channel, never a token in the row", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole("button", { name: /\+ alert/i }));
+    await user.type(screen.getByLabelText(/^name$/i), "to slack");
+    await user.type(screen.getByLabelText(/sql/i), "SELECT 1");
+    await user.type(screen.getByLabelText(/slack channel/i), "#data-alerts");
+    await user.click(screen.getByRole("button", { name: /^create$/i }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const slack = createMutate.mock.calls[0][0].recipients.find(
+      (r: { kind: string }) => r.kind === "slack",
+    );
+    expect(slack.config.channel).toBe("#data-alerts");
+    // No token typed means "keep whatever is stored" — the browser must not
+    // invent an empty one, which the server reads as "remove it".
+    expect(slack.config.token).toBeUndefined();
   });
 
   it("surfaces the server's validation message instead of a generic failure", async () => {

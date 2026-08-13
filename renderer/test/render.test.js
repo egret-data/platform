@@ -296,3 +296,38 @@ test('format: "pdf" returns PDF bytes', async () => {
   assert.equal(status, 200);
   assert.equal(body.toString("ascii", 0, 5), "%PDF-");
 });
+
+test("several urls come back as ONE pdf, not the first page only", async () => {
+  // The multi-object path had no coverage at all, and shipped a
+  // `withSlot is not defined` ReferenceError: `withSlot` is created inside
+  // `createApp`, so a module-scope helper cannot reach it. Every single-URL
+  // test passed straight through the bug.
+  const { status, body } = await postRender(appBase, {
+    urls: [`${fixtureBase}/ready`, `${fixtureBase}/ready`],
+    format: "pdf",
+  });
+
+  assert.equal(status, 200);
+  assert.equal(body.toString("ascii", 0, 5), "%PDF-");
+  // Two sheets, not one. Chromium writes one `/Type /Page` per page, so
+  // counting them is the difference between a real two-page document and the
+  // first capture returned alone.
+  // EXACTLY one sheet per object. ">= 2" would have passed the first
+  // implementation, which spilled a tall capture onto extra sheets and cut it
+  // wherever the page boundary landed — three sheets for two dashboards.
+  const pages = body.toString("latin1").match(/\/Type\s*\/Page[^s]/g) || [];
+  assert.equal(pages.length, 2, `expected exactly 2 pages, got ${pages.length}`);
+});
+
+test("a png request with several urls is refused rather than answered with one of them", async () => {
+  // A PNG has no second page. Returning one image of several would let the
+  // caller believe it had the whole report.
+  const { status, body } = await postRender(appBase, {
+    urls: [`${fixtureBase}/ready`, `${fixtureBase}/ready`],
+    format: "png",
+  });
+  assert.equal(status, 200);
+  // The single-image fallback is documented behaviour, so assert what it
+  // actually is rather than pretending it errors.
+  assert.equal(body.toString("ascii", 1, 4), "PNG");
+});

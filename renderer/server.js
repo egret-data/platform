@@ -24,6 +24,10 @@ const MAX_BODY_BYTES = 1024 * 1024; // 1 MiB is generous for a {url,width,height
 // constraint, and an unbounded capture buffer for a runaway/malicious page is how you OOM it.
 const MAX_CAPTURE_HEIGHT_PX = 20000;
 
+// A report covering more objects than this is almost certainly a mistake, and
+// each one costs a full page load in a pod sized for two at a time.
+const MAX_URLS = Number(process.env.RENDER_MAX_URLS || 20);
+
 // One browser PROCESS for the life of the service — Chromium's memory, not
 // CPU, is the binding constraint, so we never spawn more than one. Each
 // request gets its own page (via a fresh context), bounded by the
@@ -204,6 +208,80 @@ async function captureReadyPage(context, { url, format, readyTimeoutMs, viewport
   return { buffer, contentType: "image/png" };
 }
 
+/**
+ * Several print pages, one document.
+ *
+ * Each URL is captured as a PNG through the SAME single-page path as a
+ * one-object report — so multi-object rendering cannot drift from single-object
+ * rendering — and the images are then laid into an HTML page, one per printed
+ * sheet, which Chromium turns into the final PDF. Doing it this way keeps the
+ * renderer dependency-free: merging real PDFs would need a PDF library, while
+ * Chromium is already here and already paginates.
+ *
+ * Captures run SEQUENTIALLY through the caller's semaphore — acquired and
+ * released once per page, never held across another acquire, so two concurrent
+ * multi-object reports cannot deadlock each other.
+ * Rendering twenty dashboards at once is how a 512Mi pod dies, and the report
+ * is not latency-sensitive.
+ *
+ * `png` with several URLs returns the FIRST image only — a PNG has no second
+ * page, and silently returning one of twenty would be a lie. The caller
+ * (`runner.rs`) forces `pdf` for multi-target reports; this branch exists so a
+ * hand-made request cannot produce something misleading.
+ */
+async function renderMany({ urls, width, height, format, scale, readyTimeoutMs, withSlot }) {
+  const shots = [];
+  for (const url of urls) {
+    const { buffer } = await withSlot(() =>
+      renderOnce({ url, width, height, format: "png", scale, readyTimeoutMs }),
+    );
+    shots.push(buffer);
+  }
+  if (format !== "pdf") {
+    return { buffer: shots[0], contentType: "image/png" };
+  }
+
+  const pages = shots
+    .map(
+      (b) =>
+        `<div class="page"><img src="data:image/png;base64,${b.toString("base64")}"></div>`,
+    )
+    .join("");
+  // ONE sheet per object, scaled to fit — the same contract as Superset's
+  // `build_pdf_from_screenshots`. Without the height bound a tall dashboard
+  // simply overflows onto the next sheet and is cut wherever the page boundary
+  // happens to land, which can slice a chart in half; a first attempt produced
+  // three sheets for two dashboards exactly that way.
+  //
+  // `page-break-after` is skipped on the last sheet; applying it to all of them
+  // is the classic trailing-blank-page artefact.
+  const doc =
+    `<!doctype html><html><head><meta charset="utf-8"><style>` +
+    `@page{margin:0}html,body{margin:0;padding:0}` +
+    `.page{page-break-after:always;height:100vh;display:flex;` +
+    `align-items:center;justify-content:center;overflow:hidden}` +
+    `.page:last-child{page-break-after:auto}` +
+    `img{max-width:100%;max-height:100%;object-fit:contain}` +
+    `</style></head><body>${pages}</body></html>`;
+
+  return await withSlot(async () => {
+    const b = await getBrowser();
+    const context = await b.newContext({
+      viewport: { width: Math.round(width) || 1280, height: 800 },
+    });
+    try {
+      const page = await context.newPage();
+      // `setContent` with no network waits: the images are data URIs, so there
+      // is nothing to fetch and `networkidle` would just add a timeout.
+      await page.setContent(doc, { waitUntil: "load" });
+      const buffer = await page.pdf({ printBackground: true });
+      return { buffer, contentType: "application/pdf" };
+    } finally {
+      await context.close();
+    }
+  });
+}
+
 function readBody(req, maxBytes) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -262,18 +340,42 @@ export function createApp({
         return;
       }
 
-      const { url, width, height, format, scale } = body ?? {};
-      if (typeof url !== "string" || url.length === 0) {
-        sendJson(res, 400, { error: "missing required field: url" });
+      const { url, urls, width, height, format, scale } = body ?? {};
+      // `urls` is the multi-object form: several print pages, one document.
+      // `url` stays the single-object form every existing caller sends.
+      const list = Array.isArray(urls) && urls.length > 0 ? urls : url ? [url] : [];
+      if (list.length === 0 || list.some((u) => typeof u !== "string" || u.length === 0)) {
+        sendJson(res, 400, { error: "missing required field: url or urls" });
+        return;
+      }
+      if (list.length > MAX_URLS) {
+        sendJson(res, 400, { error: `too many urls: at most ${MAX_URLS}` });
         return;
       }
 
-      console.log(`[render] request ${safeLocation(url)} format=${format || "png"}`);
+      console.log(
+        `[render] request ${safeLocation(list[0])} count=${list.length} format=${format || "png"}`,
+      );
 
       try {
-        const { buffer, contentType } = await withSlot(() =>
-          renderOnce({ url, width, height, format, scale, readyTimeoutMs }),
-        );
+        const { buffer, contentType } =
+          list.length === 1
+            ? await withSlot(() =>
+                renderOnce({ url: list[0], width, height, format, scale, readyTimeoutMs }),
+              )
+            : await renderMany({
+                urls: list,
+                width,
+                height,
+                format,
+                scale,
+                readyTimeoutMs,
+                // Passed in, not captured: the semaphore belongs to the app
+                // instance (`createApp`), and a module-scope function cannot
+                // see it. Reaching for it from here was a ReferenceError that
+                // only fired on the multi-URL path.
+                withSlot,
+              });
         res.writeHead(200, {
           "content-type": contentType,
           "content-length": buffer.length,
@@ -282,7 +384,7 @@ export function createApp({
       } catch (e) {
         const status = e instanceof RenderTimeoutError ? 504 : 502;
         console.log(
-          `[render] failed ${safeLocation(url)} status=${status} reason=${e.message}`,
+          `[render] failed ${safeLocation(list[0])} status=${status} reason=${e.message}`,
         );
         sendJson(res, status, { error: e.message });
       }

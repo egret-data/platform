@@ -99,6 +99,9 @@ fn alert(f: &Fixture, name: &str) -> NewSchedule {
         working_timeout_s: 3600,
         log_retention_days: 90,
         email_subject: None,
+        message: None,
+        skip_if_empty: false,
+        targets: vec![],
         owners: vec![f.user],
         recipients: vec![(
             "email".into(),
@@ -559,4 +562,58 @@ async fn rotating_a_webhook_secret_deletes_the_old_vault_row() {
         .await
         .unwrap();
     assert_eq!(orphan, 0, "the superseded secret is still in the vault");
+}
+
+/// A report with several targets keeps them, in the order given.
+///
+/// Page order is not cosmetic: a report that reordered itself between runs
+/// makes two copies impossible to compare side by side.
+#[tokio::test]
+async fn a_report_keeps_its_targets_in_page_order() {
+    let f = fixture!();
+    let mut n = alert(&f, "multi");
+    n.r#type = "report".into();
+    n.sql = None;
+    n.database_id = None;
+    n.validator_type = None;
+    n.report_format = Some("pdf".into());
+    let a = Uuid::new_v4();
+    let b = Uuid::new_v4();
+    n.targets = vec![("dashboard".into(), a), ("dashboard".into(), b)];
+
+    let made = f.repo.create(f.ws, &n, None).await.expect("create");
+    let got = f.repo.targets_for(made.id).await.expect("targets");
+    assert_eq!(
+        got.iter().map(|t| t.object_id).collect::<Vec<_>>(),
+        vec![a, b],
+        "targets must come back in the order they were given"
+    );
+    assert_eq!(got[0].ordinal, 0);
+    assert_eq!(got[1].ordinal, 1);
+}
+
+/// An update REPLACES the target list rather than appending to it.
+#[tokio::test]
+async fn updating_a_report_replaces_its_targets() {
+    let f = fixture!();
+    let mut n = alert(&f, "replace-targets");
+    n.r#type = "report".into();
+    n.sql = None;
+    n.database_id = None;
+    n.validator_type = None;
+    n.report_format = Some("pdf".into());
+    n.targets = vec![("dashboard".into(), Uuid::new_v4())];
+    let made = f.repo.create(f.ws, &n, None).await.expect("create");
+
+    let kept = Uuid::new_v4();
+    n.targets = vec![("chart".into(), kept)];
+    f.repo
+        .update(f.ws, made.id, &n, None)
+        .await
+        .expect("update")
+        .expect("still there");
+
+    let got = f.repo.targets_for(made.id).await.unwrap();
+    assert_eq!(got.len(), 1, "the old target must not survive: {got:?}");
+    assert_eq!(got[0].object_id, kept);
 }

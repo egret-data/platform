@@ -36,6 +36,18 @@ export function ChartActionsMenu({ ws, chart, trashed, folders, onDuplicate, onM
         onNewFolder={() => onNewFolder(chart)}
       />
       {onShare && <DropdownMenuItem onClick={() => onShare(chart)}>Share…</DropdownMenuItem>}
+      {/* Discovery: both reference products create a subscription FROM the
+          object, not from a separate page you must already know about. */}
+      <DropdownMenuItem
+        onClick={() =>
+          nav(
+            `/explore/${ws}/alerts?new=report&kind=chart&object=${chart.id}`,
+          )
+        }
+      >
+        Subscribe…
+      </DropdownMenuItem>
+
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={() => onTrash(chart)}>Move to Trash</DropdownMenuItem>
     </RowActionsMenu>

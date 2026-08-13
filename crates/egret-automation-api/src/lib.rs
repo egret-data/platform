@@ -143,6 +143,7 @@ impl RunState {
 pub enum RecipientKind {
     Email,
     Webhook,
+    Slack,
 }
 
 impl RecipientKind {
@@ -150,6 +151,7 @@ impl RecipientKind {
         match self {
             RecipientKind::Email => "email",
             RecipientKind::Webhook => "webhook",
+            RecipientKind::Slack => "slack",
         }
     }
 
@@ -157,9 +159,18 @@ impl RecipientKind {
         match s {
             "email" => Some(RecipientKind::Email),
             "webhook" => Some(RecipientKind::Webhook),
+            "slack" => Some(RecipientKind::Slack),
             _ => None,
         }
     }
+}
+
+/// One object a report delivers.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+pub struct TargetInput {
+    /// `chart` or `dashboard`.
+    pub kind: String,
+    pub object_id: uuid::Uuid,
 }
 
 /// A delivery destination. `config` is kind-dependent — `{"addresses": [...]}`
@@ -258,6 +269,16 @@ pub struct ScheduleDetailDto {
     pub working_timeout_s: i32,
     pub log_retention_days: i32,
     pub email_subject: Option<String>,
+    /// A user-authored note carried into the notification body. Distinct from
+    /// `description`, which is the line the LIST shows.
+    pub message: Option<String>,
+    /// Metabase's `skip_if_empty`: send nothing when the run produced no rows.
+    #[serde(default)]
+    pub skip_if_empty: bool,
+    /// Objects a REPORT delivers, in page order. Empty falls back to the
+    /// single `chart_id`/`dashboard_id`, which is every pre-0115 row.
+    #[serde(default)]
+    pub targets: Vec<TargetInput>,
 
     pub owners: Vec<OwnerDto>,
     pub recipients: Vec<RecipientDto>,
@@ -309,6 +330,16 @@ pub struct CreateSchedule {
     pub log_retention_days: Option<i32>,
     #[serde(default)]
     pub email_subject: Option<String>,
+    /// A user-authored note carried into the notification body. Distinct from
+    /// `description`, which is the line the LIST shows.
+    pub message: Option<String>,
+    /// Metabase's `skip_if_empty`: send nothing when the run produced no rows.
+    #[serde(default)]
+    pub skip_if_empty: bool,
+    /// Objects a REPORT delivers, in page order. Empty falls back to the
+    /// single `chart_id`/`dashboard_id`, which is every pre-0115 row.
+    #[serde(default)]
+    pub targets: Vec<TargetInput>,
 
     /// Owner user ids. Empty means "the creator", resolved server-side — a
     /// schedule with no owner has no identity to run as (§5.2).
@@ -359,6 +390,16 @@ pub struct UpdateSchedule {
     pub log_retention_days: Option<i32>,
     #[serde(default)]
     pub email_subject: Option<String>,
+    /// A user-authored note carried into the notification body. Distinct from
+    /// `description`, which is the line the LIST shows.
+    pub message: Option<String>,
+    /// Metabase's `skip_if_empty`: send nothing when the run produced no rows.
+    #[serde(default)]
+    pub skip_if_empty: bool,
+    /// Objects a REPORT delivers, in page order. Empty falls back to the
+    /// single `chart_id`/`dashboard_id`, which is every pre-0115 row.
+    #[serde(default)]
+    pub targets: Vec<TargetInput>,
 
     #[serde(default)]
     pub owners: Vec<Uuid>,

@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::deliver::destination::{Resolver, SsrfPolicy};
 use crate::deliver::email::{self, Attachment, EmailMessage};
+use crate::deliver::slack;
 use crate::deliver::smtp_config::SmtpConfigRepo;
 use crate::deliver::webhook::{self, WebhookPayload};
 use crate::evaluator::{evaluate, owner_identity, EvalError, QueryRunner};
@@ -74,6 +75,9 @@ pub struct AutomationRunner {
     /// in-cluster Service name, not necessarily this server's user-facing
     /// hostname. See `AutomationConfig::public_url`.
     pub public_url: String,
+    /// Base URL for links a PERSON follows. `public_url` is the renderer's
+    /// in-cluster address; a mail linking there is a dead end in the inbox.
+    pub browser_url: String,
 }
 
 impl AutomationRunner {
@@ -215,6 +219,13 @@ impl AutomationRunner {
         if !eval.fired {
             return Ok(Outcome::NotFired { value: eval.value });
         }
+        // Opted-in silence: the condition held but the query returned nothing
+        // to show, so there is no mail worth sending. Recorded as `noop` — the
+        // run log still says it ran, which is the difference between this and
+        // a scheduler that quietly stopped.
+        if s.skip_if_empty && eval.rows.as_array().is_none_or(|r| r.is_empty()) {
+            return Ok(Outcome::NotFired { value: eval.value });
+        }
         // Fired — but recently enough that the user has already been told.
         if in_grace(&self.db, s.id, s.grace_period_s)
             .await
@@ -290,17 +301,57 @@ impl AutomationRunner {
         owner: uuid::Uuid,
         format: ReportFormat,
     ) -> Result<ReportContent, EvalError> {
-        let (kind, object_id) =
-            report_target(s).ok_or(EvalError::NotRunnable("report has no chart or dashboard"))?;
-        let token = self
-            .render_tokens
-            .mint(kind, object_id, owner, RENDER_TOKEN_TTL)
+        // Several targets, in page order — or the single one in the schedule's
+        // own columns, which is every report written before 0115.
+        let stored = self
+            .schedules
+            .targets_for(s.id)
             .await
             .map_err(|e| EvalError::Query(e.to_string()))?;
-        let url = format!(
-            "{}/embed/print/{kind}/{object_id}?t={token}",
-            self.public_url.trim_end_matches('/')
-        );
+        let targets: Vec<(&'static str, uuid::Uuid)> = if stored.is_empty() {
+            report_target(s)
+                .map(|t| vec![t])
+                .ok_or(EvalError::NotRunnable("report has no chart or dashboard"))?
+        } else {
+            stored
+                .iter()
+                .map(|t| {
+                    let kind: &'static str = if t.kind == "chart" {
+                        "chart"
+                    } else {
+                        "dashboard"
+                    };
+                    (kind, t.object_id)
+                })
+                .collect()
+        };
+
+        // One token PER object: a render token is bound to a single object by
+        // design, so N pages need N of them.
+        let mut urls = Vec::with_capacity(targets.len());
+        for (kind, object_id) in &targets {
+            let token = self
+                .render_tokens
+                .mint(kind, *object_id, owner, RENDER_TOKEN_TTL)
+                .await
+                .map_err(|e| EvalError::Query(e.to_string()))?;
+            urls.push(format!(
+                "{}/embed/print/{kind}/{object_id}?t={token}",
+                self.public_url.trim_end_matches('/')
+            ));
+        }
+        // `kind` still drives the default capture size; the id is already in
+        // the URL list built above.
+        let (kind, _) = targets[0];
+        let url = urls[0].clone();
+        // A PNG has no second page. Rather than send one object of several and
+        // let the recipient believe that is the whole report, several targets
+        // force the multi-page format.
+        let format = if targets.len() > 1 {
+            ReportFormat::Pdf
+        } else {
+            format
+        };
         let (width, height) = match (s.custom_width, s.custom_height) {
             (Some(w), Some(h)) if w > 0 && h > 0 => (w as u32, h as u32),
             _ => default_size(kind),
@@ -309,6 +360,7 @@ impl AutomationRunner {
             .renderer
             .render(RenderRequest {
                 url,
+                urls: if targets.len() > 1 { urls } else { Vec::new() },
                 width,
                 height,
                 format: format.as_str().to_string(),
@@ -439,7 +491,7 @@ impl AutomationRunner {
             .map_err(|e| e.to_string())?;
         let mut first_error = None;
         let mut email_to: Vec<String> = Vec::new();
-        for r in recipients {
+        for r in &recipients {
             if RecipientKind::parse(&r.kind) == Some(RecipientKind::Email) {
                 if let Some(addrs) = r.config.get("addresses").and_then(|v| v.as_array()) {
                     email_to.extend(addrs.iter().filter_map(|a| a.as_str().map(str::to_string)));
@@ -475,6 +527,9 @@ impl AutomationRunner {
                 tracing::warn!(schedule = %s.id, error = %e, "automation: report webhook failed");
                 first_error.get_or_insert(e.to_string());
             }
+        }
+        if let Some(e) = self.deliver_slack(s, &content.body, &recipients).await {
+            first_error.get_or_insert(e);
         }
         if !email_to.is_empty() {
             if let Err(e) = self.send_report_email(s, content, &email_to).await {
@@ -517,7 +572,13 @@ impl AutomationRunner {
                 to,
                 subject: &content.subject,
                 body: content.body.clone(),
-                attachment: content.attachment.clone(),
+                html: Some(email::notification_html(
+                    &s.name,
+                    s.message.as_deref(),
+                    &content.body,
+                    &self.object_url(s, &self.workspace_slug(s.workspace_id).await),
+                )),
+                attachments: content.attachment.clone().into_iter().collect(),
             },
         )
         .await
@@ -543,7 +604,7 @@ impl AutomationRunner {
             .map_err(|e| e.to_string())?;
         let mut first_error = None;
         let mut email_to: Vec<String> = Vec::new();
-        for r in recipients {
+        for r in &recipients {
             if RecipientKind::parse(&r.kind) == Some(RecipientKind::Email) {
                 // Collected rather than sent per-recipient: one message with
                 // several addressees is one connection to the relay, and one
@@ -583,6 +644,16 @@ impl AutomationRunner {
                 first_error.get_or_insert(e.to_string());
             }
         }
+        let value = eval
+            .value
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "(no value)".into());
+        if let Some(e) = self
+            .deliver_slack(s, &format!("Observed value: {value}"), &recipients)
+            .await
+        {
+            first_error.get_or_insert(e);
+        }
         if !email_to.is_empty() {
             if let Err(e) = self.send_email(s, eval, &email_to).await {
                 tracing::warn!(schedule = %s.id, error = %e, "automation: email failed");
@@ -594,6 +665,122 @@ impl AutomationRunner {
             Some(e) => Err(e),
             None => Ok(()),
         }
+    }
+
+    /// Post to every Slack recipient. One message per channel, best-effort in
+    /// the same sense as the rest of delivery: one refusing channel must not
+    /// stop the others or lose the run.
+    async fn deliver_slack(
+        &self,
+        s: &Schedule,
+        summary: &str,
+        recipients: &[crate::repo::Recipient],
+    ) -> Option<String> {
+        let mut first_error: Option<String> = None;
+        let url = self.object_url(s, &self.workspace_slug(s.workspace_id).await);
+        for r in recipients {
+            if RecipientKind::parse(&r.kind) != Some(RecipientKind::Slack) {
+                continue;
+            }
+            let Some(channel) = r.config.get("channel").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(token) = self.schedules.resolve_slack_token(&r.config).await else {
+                first_error.get_or_insert_with(|| slack::SlackError::NoToken.to_string());
+                continue;
+            };
+            let text = slack::message(&s.name, s.message.as_deref(), summary, &url);
+            if let Err(e) = slack::deliver(&token, channel, &text).await {
+                tracing::warn!(schedule = %s.id, error = %e, "automation: slack delivery failed");
+                first_error.get_or_insert(e.to_string());
+            }
+        }
+        first_error
+    }
+
+    /// The workspace slug, for building a user-facing URL. A schedule always
+    /// belongs to a workspace, so a miss here means the row vanished under us.
+    async fn workspace_slug(&self, ws: uuid::Uuid) -> String {
+        sqlx::query_scalar::<_, String>("SELECT slug FROM workspaces WHERE id = $1")
+            .bind(ws)
+            .fetch_optional(&self.db.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    /// The URL a recipient can follow back to the thing that mailed them.
+    ///
+    /// A notification that says a number moved and gives no way to look is a
+    /// dead end — Superset's mail ends in a call-to-action for exactly this
+    /// reason. Falls back to the workspace's alert list when the schedule has
+    /// no chart or dashboard of its own.
+    fn object_url(&self, s: &Schedule, ws_slug: &str) -> String {
+        let base = self.browser_url.trim_end_matches('/');
+        match report_target(s) {
+            Some(("chart", id)) => format!("{base}/explore/{ws_slug}/charts/{id}"),
+            Some(("dashboard", id)) => format!("{base}/explore/{ws_slug}/dashboards/{id}"),
+            _ => format!("{base}/explore/{ws_slug}/alerts"),
+        }
+    }
+
+    /// Render an alert's optional chart/dashboard, if it names one.
+    ///
+    /// Returns `None` — never an error — when the alert has no target, no
+    /// image format, or the render fails. An alert exists to tell someone that
+    /// a number moved; losing that message because a screenshot did not come
+    /// back would be the worse failure, so the picture is best-effort and the
+    /// reason lands in the log.
+    async fn render_alert_attachment(&self, s: &Schedule) -> Option<email::Attachment> {
+        let (kind, object_id) = report_target(s)?;
+        // Only the image formats make sense here; the rows already ride along
+        // as CSV, so `csv`/`text` on an alert would attach them twice.
+        let format = match s.report_format.as_deref().and_then(ReportFormat::parse) {
+            Some(f @ (ReportFormat::Png | ReportFormat::Pdf)) => f,
+            _ => return None,
+        };
+        let owner = self.resolve_owner(s.id).await.ok()?;
+        let token = self
+            .render_tokens
+            .mint(kind, object_id, owner, RENDER_TOKEN_TTL)
+            .await
+            .ok()?;
+        let url = format!(
+            "{}/embed/print/{kind}/{object_id}?t={token}",
+            self.public_url.trim_end_matches('/')
+        );
+        let (width, height) = match (s.custom_width, s.custom_height) {
+            (Some(w), Some(h)) if w > 0 && h > 0 => (w as u32, h as u32),
+            _ => default_size(kind),
+        };
+        let bytes = match self
+            .renderer
+            .render(RenderRequest {
+                url,
+                urls: Vec::new(),
+                width,
+                height,
+                format: format.as_str().to_string(),
+                scale: 2,
+            })
+            .await
+        {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(schedule = %s.id, error = %e, "automation: alert attachment render failed");
+                return None;
+            }
+        };
+        let (ext, content_type) = match format {
+            ReportFormat::Png => ("png", "image/png"),
+            _ => ("pdf", "application/pdf"),
+        };
+        Some(email::Attachment {
+            filename: format!("{}.{ext}", slugify(&s.name)),
+            content_type: content_type.into(),
+            bytes,
+        })
     }
 
     /// One mail to all of this schedule's email recipients.
@@ -649,18 +836,33 @@ impl AutomationRunner {
         };
         let csv = email::rows_to_csv(&columns, &eval.rows);
 
+        let mut attachments = vec![email::Attachment {
+            filename: format!("{}.csv", slugify(&s.name)),
+            content_type: "text/csv".into(),
+            bytes: csv.into_bytes(),
+        }];
+        // An alert may also name a chart or dashboard. When it does, the mail
+        // carries a rendering of it beside the numbers — the recipient sees
+        // WHAT moved, not only that something did. A render failure must not
+        // lose the alert itself, so it is logged and the mail goes without.
+        if let Some(extra) = self.render_alert_attachment(s).await {
+            attachments.push(extra);
+        }
+
         email::send(
             &config,
             password,
             &EmailMessage {
                 to,
                 subject: &subject,
+                html: Some(email::notification_html(
+                    &s.name,
+                    s.message.as_deref(),
+                    &body,
+                    &self.object_url(s, &self.workspace_slug(s.workspace_id).await),
+                )),
                 body,
-                attachment: Some(email::Attachment {
-                    filename: format!("{}.csv", slugify(&s.name)),
-                    content_type: "text/csv".into(),
-                    bytes: csv.into_bytes(),
-                }),
+                attachments,
             },
         )
         .await

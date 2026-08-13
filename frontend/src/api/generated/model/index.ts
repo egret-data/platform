@@ -295,6 +295,7 @@ export * from './tabularDto';
 export * from './tabularResult';
 export * from './tabularResultRowsItemItem';
 export * from './tagDto';
+export * from './targetInput';
 export * from './taskDto';
 export * from './testInput';
 export * from './testOutcome';

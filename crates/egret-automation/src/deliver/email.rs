@@ -85,9 +85,13 @@ pub struct EmailMessage<'a> {
     pub to: &'a [String],
     pub subject: &'a str,
     pub body: String,
-    /// The triggering rows (alerts) or the rendered/exported report, when
-    /// there is one to send.
-    pub attachment: Option<Attachment>,
+    /// Optional HTML alternative. When present the mail is `multipart/alternative`
+    /// so a text-only client still gets `body` — the HTML is an upgrade, never a
+    /// replacement, which is why both are always built.
+    pub html: Option<String>,
+    /// The triggering rows (alerts), the rendered/exported report, or both —
+    /// an alert with a chart attached sends its numbers AND its picture.
+    pub attachments: Vec<Attachment>,
 }
 
 /// Build the `lettre` transport for `config`.
@@ -137,21 +141,32 @@ pub fn build(config: &SmtpConfig, msg: &EmailMessage<'_>) -> Result<Message, Ema
         .header(ContentType::TEXT_PLAIN)
         .body(msg.body.clone());
 
-    match &msg.attachment {
-        None => builder
-            .singlepart(text)
-            .map_err(|e| EmailError::Build(e.to_string())),
-        Some(a) => {
-            let content_type = a.content_type.parse::<ContentType>().map_err(|_| {
-                EmailError::Build(format!("invalid content type: {}", a.content_type))
-            })?;
-            let attachment =
-                LettreAttachment::new(a.filename.clone()).body(a.bytes.clone(), content_type);
-            builder
-                .multipart(MultiPart::mixed().singlepart(text).singlepart(attachment))
-                .map_err(|e| EmailError::Build(e.to_string()))
-        }
+    // `alternative` when there is HTML: same message, two renderings, and the
+    // client picks. Nesting it inside `mixed` below keeps attachments working.
+    let body_part = match &msg.html {
+        None => MultiPart::mixed().singlepart(text),
+        Some(html) => MultiPart::mixed().multipart(
+            MultiPart::alternative().singlepart(text).singlepart(
+                SinglePart::builder()
+                    .header(ContentType::TEXT_HTML)
+                    .body(html.clone()),
+            ),
+        ),
+    };
+
+    let mut mixed = body_part;
+    for a in &msg.attachments {
+        let content_type = a
+            .content_type
+            .parse::<ContentType>()
+            .map_err(|_| EmailError::Build(format!("invalid content type: {}", a.content_type)))?;
+        mixed = mixed.singlepart(
+            LettreAttachment::new(a.filename.clone()).body(a.bytes.clone(), content_type),
+        );
     }
+    builder
+        .multipart(mixed)
+        .map_err(|e| EmailError::Build(e.to_string()))
 }
 
 /// Build and send.
@@ -215,7 +230,8 @@ mod tests {
             to: &["on-call@example.com".to_string()],
             subject: "[alert] orders",
             body: "value 7".into(),
-            attachment: None,
+            html: None,
+            attachments: Vec::new(),
         };
         let built = build(&config("starttls", false), &msg).unwrap();
         let raw = String::from_utf8(built.formatted()).unwrap();
@@ -235,7 +251,8 @@ mod tests {
             to: &["x@example.com".to_string()],
             subject: "s",
             body: "b".into(),
-            attachment: None,
+            html: None,
+            attachments: Vec::new(),
         };
         let raw = String::from_utf8(build(&c, &msg).unwrap().formatted()).unwrap();
         assert!(raw.contains("From: alerts@example.com"), "{raw}");
@@ -249,11 +266,12 @@ mod tests {
             to: &["x@example.com".to_string()],
             subject: "s",
             body: "value 7".into(),
-            attachment: Some(Attachment {
+            html: None,
+            attachments: vec![Attachment {
                 filename: "orders.csv".into(),
                 content_type: "text/csv".into(),
                 bytes: b"\"n\"\n\"7\"\n".to_vec(),
-            }),
+            }],
         };
         let raw =
             String::from_utf8(build(&config("none", false), &msg).unwrap().formatted()).unwrap();
@@ -268,7 +286,8 @@ mod tests {
             to: &["not an address".to_string()],
             subject: "s",
             body: "b".into(),
-            attachment: None,
+            html: None,
+            attachments: Vec::new(),
         };
         assert!(matches!(
             build(&config("none", false), &msg),
@@ -310,8 +329,54 @@ mod tests {
             to: &[],
             subject: "s",
             body: "b".into(),
-            attachment: None,
+            html: None,
+            attachments: Vec::new(),
         };
         assert!(send(&config("none", false), None, &msg).await.is_ok());
     }
+}
+
+/// Wrap a notification in the house HTML: the user's own message first, then
+/// the machine's summary, then a link back to the object.
+///
+/// Kept deliberately small and inline-styled. Mail clients strip `<style>`
+/// blocks and support no cascade worth relying on, so anything richer would
+/// render differently in every inbox — and this is read on a phone more often
+/// than not.
+pub fn notification_html(title: &str, message: Option<&str>, summary: &str, url: &str) -> String {
+    let esc = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    // The user's message is escaped and line-broken, never interpolated as
+    // markup: it is authored by a workspace editor, but the recipient may be
+    // anyone with an inbox.
+    let note = message
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(|m| {
+            format!(
+                "<p style=\"margin:0 0 16px;font-size:15px;line-height:1.5\">{}</p>",
+                esc(m).replace('\n', "<br>")
+            )
+        })
+        .unwrap_or_default();
+
+    format!(
+        "<html><body style=\"margin:0;padding:24px;background:#f6f8f8;\
+           font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#0f1c1f\">\
+         <div style=\"max-width:640px;margin:0 auto;background:#fff;border:1px solid #dce5e6;\
+           border-radius:6px;padding:24px\">\
+         <h1 style=\"margin:0 0 16px;font-size:18px;font-weight:600\">{}</h1>\
+         {}\
+         <p style=\"margin:0 0 20px;font-size:14px;line-height:1.6;color:#5b6e72\">{}</p>\
+         <a href=\"{}\" style=\"display:inline-block;background:#0e7c86;color:#fff;\
+           text-decoration:none;padding:9px 16px;border-radius:4px;font-size:14px\">Open in egret</a>\
+         </div></body></html>",
+        esc(title),
+        note,
+        esc(summary).replace('\n', "<br>"),
+        esc(url)
+    )
 }
