@@ -1373,6 +1373,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             config.automation.renderer_url.clone(),
         )),
         public_url: config.automation.public_url.clone(),
+        // Falls back to `public_url` when unset: in local dev the renderer's
+        // address and the browser's really are the same host.
+        browser_url: config
+            .automation
+            .browser_url
+            .clone()
+            .unwrap_or_else(|| config.automation.public_url.clone()),
     });
 
     let automation = Some(egret_automation::AutomationState {

@@ -218,7 +218,9 @@ async function captureReadyPage(context, { url, format, readyTimeoutMs, viewport
  * renderer dependency-free: merging real PDFs would need a PDF library, while
  * Chromium is already here and already paginates.
  *
- * Captures run SEQUENTIALLY through the same semaphore as everything else.
+ * Captures run SEQUENTIALLY through the caller's semaphore — acquired and
+ * released once per page, never held across another acquire, so two concurrent
+ * multi-object reports cannot deadlock each other.
  * Rendering twenty dashboards at once is how a 512Mi pod dies, and the report
  * is not latency-sensitive.
  *
@@ -227,7 +229,7 @@ async function captureReadyPage(context, { url, format, readyTimeoutMs, viewport
  * (`runner.rs`) forces `pdf` for multi-target reports; this branch exists so a
  * hand-made request cannot produce something misleading.
  */
-async function renderMany({ urls, width, height, format, scale, readyTimeoutMs }) {
+async function renderMany({ urls, width, height, format, scale, readyTimeoutMs, withSlot }) {
   const shots = [];
   for (const url of urls) {
     const { buffer } = await withSlot(() =>
@@ -245,14 +247,21 @@ async function renderMany({ urls, width, height, format, scale, readyTimeoutMs }
         `<div class="page"><img src="data:image/png;base64,${b.toString("base64")}"></div>`,
     )
     .join("");
-  // `page-break-after` on every sheet but the last; a trailing blank page is
-  // the classic artefact of applying it to all of them.
+  // ONE sheet per object, scaled to fit — the same contract as Superset's
+  // `build_pdf_from_screenshots`. Without the height bound a tall dashboard
+  // simply overflows onto the next sheet and is cut wherever the page boundary
+  // happens to land, which can slice a chart in half; a first attempt produced
+  // three sheets for two dashboards exactly that way.
+  //
+  // `page-break-after` is skipped on the last sheet; applying it to all of them
+  // is the classic trailing-blank-page artefact.
   const doc =
     `<!doctype html><html><head><meta charset="utf-8"><style>` +
     `@page{margin:0}html,body{margin:0;padding:0}` +
-    `.page{page-break-after:always;display:block}` +
+    `.page{page-break-after:always;height:100vh;display:flex;` +
+    `align-items:center;justify-content:center;overflow:hidden}` +
     `.page:last-child{page-break-after:auto}` +
-    `img{display:block;width:100%}` +
+    `img{max-width:100%;max-height:100%;object-fit:contain}` +
     `</style></head><body>${pages}</body></html>`;
 
   return await withSlot(async () => {
@@ -354,7 +363,19 @@ export function createApp({
             ? await withSlot(() =>
                 renderOnce({ url: list[0], width, height, format, scale, readyTimeoutMs }),
               )
-            : await renderMany({ urls: list, width, height, format, scale, readyTimeoutMs });
+            : await renderMany({
+                urls: list,
+                width,
+                height,
+                format,
+                scale,
+                readyTimeoutMs,
+                // Passed in, not captured: the semaphore belongs to the app
+                // instance (`createApp`), and a module-scope function cannot
+                // see it. Reaching for it from here was a ReferenceError that
+                // only fired on the multi-URL path.
+                withSlot,
+              });
         res.writeHead(200, {
           "content-type": contentType,
           "content-length": buffer.length,

@@ -277,6 +277,7 @@ async fn setup(pool: sqlx::PgPool) -> Fx {
             "http://127.0.0.1:1".into(),
         )),
         public_url: "https://egret.test".into(),
+        browser_url: "https://egret.test".into(),
     });
     let st = AutomationState {
         db: db.clone(),

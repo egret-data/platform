@@ -20,3 +20,7 @@ data:
   EGRET_LOG__FILTER: "info,egret=debug"
   EGRET_AUTOMATION__RENDERER_URL: "http://{{ include "egret.fullname" . }}-renderer:8080"
   EGRET_AUTOMATION__PUBLIC_URL: "http://{{ include "egret.fullname" . }}-frontend"
+  # What a PERSON opens from a notification. Distinct from PUBLIC_URL above,
+  # which is the in-cluster address the renderer resolves — a mail linking
+  # there is a dead end in the recipient's inbox.
+  EGRET_AUTOMATION__BROWSER_URL: "http://{{ .Values.ingress.host }}"

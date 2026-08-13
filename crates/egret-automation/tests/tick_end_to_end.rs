@@ -197,6 +197,7 @@ async fn setup(pool: sqlx::PgPool, value: serde_json::Value, fail: bool, webhook
             render_tokens: egret_automation::render::token::RenderTokenRepo::new(db.clone()),
             renderer: Arc::new(NeverRenderer),
             public_url: "https://egret.internal".into(),
+            browser_url: "https://egret.internal".into(),
         },
         db,
         ws,

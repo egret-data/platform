@@ -152,6 +152,7 @@ fn runner(
         render_tokens: RenderTokenRepo::new(db.clone()),
         renderer,
         public_url: "https://egret.internal".into(),
+        browser_url: "https://egret.internal".into(),
     }
 }
 

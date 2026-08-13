@@ -75,6 +75,9 @@ pub struct AutomationRunner {
     /// in-cluster Service name, not necessarily this server's user-facing
     /// hostname. See `AutomationConfig::public_url`.
     pub public_url: String,
+    /// Base URL for links a PERSON follows. `public_url` is the renderer's
+    /// in-cluster address; a mail linking there is a dead end in the inbox.
+    pub browser_url: String,
 }
 
 impl AutomationRunner {
@@ -714,7 +717,7 @@ impl AutomationRunner {
     /// reason. Falls back to the workspace's alert list when the schedule has
     /// no chart or dashboard of its own.
     fn object_url(&self, s: &Schedule, ws_slug: &str) -> String {
-        let base = self.public_url.trim_end_matches('/');
+        let base = self.browser_url.trim_end_matches('/');
         match report_target(s) {
             Some(("chart", id)) => format!("{base}/explore/{ws_slug}/charts/{id}"),
             Some(("dashboard", id)) => format!("{base}/explore/{ws_slug}/dashboards/{id}"),
