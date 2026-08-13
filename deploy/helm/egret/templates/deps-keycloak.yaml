@@ -37,7 +37,7 @@ spec:
             - name: KC_HTTP_RELATIVE_PATH
               value: "/auth"
             - name: KC_HOSTNAME
-              value: "http://{{ .Values.ingress.host }}/auth"
+              value: "{{ include "egret.externalUrl" . }}/auth"
             - name: KC_HOSTNAME_STRICT
               value: "false"
             - name: KC_HTTP_ENABLED
