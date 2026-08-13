@@ -1,6 +1,6 @@
 import { EngineRoleConfig } from "../EngineRoleConfig";
 import type { EngineConfigForm } from "../useEngineConfigForm";
-import { ConfigSection } from "./ConfigSection";
+import { ConfigSection } from "@/components/form/ConfigSection";
 import { RolePlacementEditor } from "./PlacementSection";
 
 /**

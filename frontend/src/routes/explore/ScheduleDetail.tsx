@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useSchedule, type ScheduleType } from "@/api/alerts";
-import { ScheduleEditor } from "@/components/alerts/ScheduleEditor";
+import { FORM_ID, ScheduleEditor } from "@/components/alerts/ScheduleEditor";
+import { Button } from "@/components/ui/button";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
@@ -43,6 +44,7 @@ export default function ScheduleDetail() {
       : undefined;
 
   const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
   useUnsavedChangesWarning(dirty);
 
   const backHref = type === "report" ? `${listHref}?type=report` : listHref;
@@ -77,8 +79,27 @@ export default function ScheduleDetail() {
           scheduleId={isNew ? null : (id ?? null)}
           prefill={prefill}
           onDirtyChange={setDirty}
+          onBusyChange={setBusy}
           onDone={done}
         />
+      )}
+
+      {/* NOT sticky. `sticky bottom-0` pins to the scrollport edge, which sits
+          above this layout's own bottom padding, so a band of the form stays
+          visible under the bar however the margins are tuned — tried three
+          ways. A plain row at the end of the page has no such failure, and it
+          is what DatasetDetail does. */}
+      {!isError && (
+        <div className="mt-4 max-w-3xl border-t pt-3">
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" onClick={done}>
+              Cancel
+            </Button>
+            <Button type="submit" form={FORM_ID} disabled={busy}>
+              {isNew ? "Create" : "Save"}
+            </Button>
+          </div>
+        </div>
       )}
     </div>
   );

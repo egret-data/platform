@@ -25,6 +25,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AlertCircle } from "lucide-react";
 
+/** The form's id, so the page header's Save button can submit it from outside. */
+export const FORM_ID = "schedule-editor";
+import { ConfigSection } from "@/components/form/ConfigSection";
+
 /**
  * The create/edit form for one schedule.
  *
@@ -43,6 +47,7 @@ export function ScheduleEditor({
   scheduleId,
   prefill,
   onDirtyChange,
+  onBusyChange,
   onDone,
 }: {
   ws: string;
@@ -53,6 +58,8 @@ export function ScheduleEditor({
   /** Lets the hosting PAGE arm its unsaved-changes guard. A dialog did not need
    *  one; a route can be navigated away from mid-edit. */
   onDirtyChange?: (dirty: boolean) => void;
+  /** The submit is in flight — the page's Save button disables on this. */
+  onBusyChange?: (busy: boolean) => void;
   onDone: () => void;
 }) {
   const { data: existing } = useSchedule(ws, scheduleId);
@@ -336,6 +343,9 @@ export function ScheduleEditor({
   }
 
   const pending = create.isPending || update.isPending;
+  useEffect(() => {
+    onBusyChange?.(pending);
+  }, [pending, onBusyChange]);
 
   return (
     /* ONE column, bounded to a readable measure. Two columns were tried and are
@@ -344,9 +354,10 @@ export function ScheduleEditor({
        twenty-field form reads better as one column anyway — the eye never has
        to decide which side continues the thought. */
     <form
+      id={FORM_ID}
       onSubmit={submit}
       onChange={() => onDirtyChange?.(true)}
-      className="flex max-w-3xl flex-col gap-5"
+      className="flex max-w-3xl flex-col gap-4"
     >
       {error && (
         <div ref={errorRef}>
@@ -357,8 +368,10 @@ export function ScheduleEditor({
         </div>
       )}
 
-      <section className="flex flex-col gap-3">
-        <h3 className="text-sm font-medium">General</h3>
+      <ConfigSection
+        title="General"
+        description="What this is called, and whether it runs at all."
+      >
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="sched-name">Name</Label>
           <Input
@@ -386,11 +399,13 @@ export function ScheduleEditor({
             Active
           </Label>
         </div>
-      </section>
+      </ConfigSection>
 
       {isAlert ? (
-        <section className="flex flex-col gap-3">
-          <h3 className="text-sm font-medium">Alert condition</h3>
+        <ConfigSection
+          title="Alert condition"
+          description="The query to run, and what about its result makes this fire."
+        >
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="sched-db">Database</Label>
             <select
@@ -437,6 +452,27 @@ export function ScheduleEditor({
               <option value="operator">Value meets a comparison</option>
             </select>
           </div>
+          {validatorType === "operator" && (
+            <div className="flex gap-2">
+              <select
+                aria-label="Operator"
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                value={op}
+                onChange={(e) => setOp(e.target.value)}
+              >
+                {["<", "<=", ">", ">=", "==", "!="].map((o) => (
+                  <option key={o} value={o}>
+                    {o}
+                  </option>
+                ))}
+              </select>
+              <Input
+                aria-label="Threshold"
+                value={threshold}
+                onChange={(e) => setThreshold(e.target.value)}
+              />
+            </div>
+          )}
           <div className="flex flex-col gap-1.5 border-t pt-3">
             <div className="flex items-center gap-2">
               <Checkbox
@@ -490,31 +526,12 @@ export function ScheduleEditor({
               </div>
             )}
           </div>
-          {validatorType === "operator" && (
-            <div className="flex gap-2">
-              <select
-                aria-label="Operator"
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                value={op}
-                onChange={(e) => setOp(e.target.value)}
-              >
-                {["<", "<=", ">", ">=", "==", "!="].map((o) => (
-                  <option key={o} value={o}>
-                    {o}
-                  </option>
-                ))}
-              </select>
-              <Input
-                aria-label="Threshold"
-                value={threshold}
-                onChange={(e) => setThreshold(e.target.value)}
-              />
-            </div>
-          )}
-        </section>
+        </ConfigSection>
       ) : (
-        <section className="flex flex-col gap-3">
-          <h3 className="text-sm font-medium">Contents</h3>
+        <ConfigSection
+          title="Contents"
+          description="Which object to deliver, and in what format."
+        >
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="sched-target-kind">Deliver</Label>
             <select
@@ -619,11 +636,10 @@ export function ScheduleEditor({
                 : "PNG and PDF are produced by the rendering service; CSV and text are read straight from the query."}
             </p>
           </div>
-        </section>
+        </ConfigSection>
       )}
 
-      <section className="flex flex-col gap-3">
-        <h3 className="text-sm font-medium">Schedule</h3>
+      <ConfigSection title="Schedule" description="When it runs, in which timezone.">
 
         {rawCron ? (
           <>
@@ -813,10 +829,12 @@ export function ScheduleEditor({
             </p>
           </>
         )}
-      </section>
+      </ConfigSection>
 
-      <section className="flex flex-col gap-3">
-        <h3 className="text-sm font-medium">Notification</h3>
+      <ConfigSection
+        title="Notification"
+        description="Who hears about it, through which channels, and what the message says."
+      >
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="sched-subject">Email subject</Label>
           <Input
@@ -907,11 +925,16 @@ export function ScheduleEditor({
               ` ${signedUrls.size === 1 ? "One is" : `${signedUrls.size} are`} HMAC-signed; the secret is stored server-side and kept on save.`}
           </p>
         </div>
-      </section>
+      </ConfigSection>
 
-      <details className="rounded-md border border-input">
-        <summary className="cursor-pointer px-3 py-2 text-sm font-medium">Advanced</summary>
-        <div className="flex flex-col gap-3 border-t px-3 py-3">
+      <details className="rounded-lg border">
+        <summary className="cursor-pointer p-4 text-sm font-medium">
+          Advanced
+          <span className="ml-2 font-normal text-muted-foreground">
+            owners, timers, retention, image size
+          </span>
+        </summary>
+        <div className="flex flex-col gap-4 border-t p-4">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="sched-owners">Owners</Label>
             <select
@@ -999,14 +1022,6 @@ export function ScheduleEditor({
         </div>
       </details>
 
-      <div className="flex justify-end gap-2">
-        <Button type="button" variant="ghost" onClick={onDone}>
-          Cancel
-        </Button>
-        <Button type="submit" disabled={pending}>
-          {scheduleId ? "Save" : "Create"}
-        </Button>
-      </div>
     </form>
   );
 }

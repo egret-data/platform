@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { EngineConfigForm } from "../useEngineConfigForm";
-import { ConfigSection } from "./ConfigSection";
+import { ConfigSection } from "@/components/form/ConfigSection";
 import { ConfigTable, ConfigTableRow } from "./ConfigTable";
 import { SELECT_NONE } from "./podEditors";
 
