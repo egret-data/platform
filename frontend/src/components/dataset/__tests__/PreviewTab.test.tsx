@@ -1,67 +1,75 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { afterEach, expect, test, vi } from "vitest";
+import { StrictMode } from "react";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
-// Controllable mock of the generated mutation hook. Each test sets `mockState`
-// before rendering; `mockMutate` is asserted for the mount + Refresh calls.
-const mockMutate = vi.fn();
-let mockState: Record<string, unknown> = {};
-
-vi.mock("@/api/generated/datasets/datasets", () => ({
-  useDatasetsDsData: () => ({ mutate: mockMutate, ...mockState }),
-}));
+/**
+ * `fetch` is stubbed — nothing above it is.
+ *
+ * This file used to `vi.mock` the generated `useDatasetsDsData` hook and hand it a
+ * literal `{ isPending: false, data: … }`, which meant every assertion here was
+ * about a state the test itself supplied. The tab could — and did — wedge on
+ * permanent skeletons in the browser with all four cases green, because the
+ * fetch→settle→render lifecycle was never run. Stubbing the global `fetch` leaves
+ * that whole path in place — `apiFetch`'s status handling and `ApiError` mapping
+ * included — and still keeps the tests offline.
+ *
+ * Everything renders under `StrictMode`, which is what `main.tsx` does. That is the
+ * condition the wedge needed: effects run twice in dev, and the old mount-effect +
+ * ref-guard arrangement suppressed the second run and never left `isPending`.
+ */
+const fetchMock = vi.fn();
+vi.stubGlobal("fetch", fetchMock);
 
 import { PreviewTab } from "@/components/dataset/PreviewTab";
 import type { DatasetColumn } from "@/api/datasets";
 
+const jsonOk = (body: unknown) =>
+  new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+
 function renderWithProviders(ui: React.ReactElement) {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
   return render(
-    <QueryClientProvider client={qc}>
-      <MemoryRouter>{ui}</MemoryRouter>
-    </QueryClientProvider>,
+    <StrictMode>
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>{ui}</MemoryRouter>
+      </QueryClientProvider>
+    </StrictMode>,
   );
 }
 
-afterEach(() => {
-  mockMutate.mockReset();
-  mockState = {};
-});
+beforeEach(() => fetchMock.mockReset());
+afterEach(() => vi.clearAllMocks());
 
-test("PreviewTab: success renders column header + cell value and runs on mount", () => {
-  mockState = {
-    isPending: false,
-    isError: false,
-    error: null,
-    data: {
-      status: 200,
-      data: {
-        columns: [{ name: "order_id", type: "bigint" }],
-        rows: [[42]],
-      },
-    },
-  };
+test("PreviewTab: success renders column header + cell value and runs on mount", async () => {
+  fetchMock.mockResolvedValue(jsonOk({ columns: [{ name: "order_id", type: "bigint" }], rows: [[42]] }));
   renderWithProviders(<PreviewTab ws="eng" datasetId="ds1" />);
 
-  // Ran once on mount.
-  expect(mockMutate).toHaveBeenCalledTimes(1);
-  expect(mockMutate).toHaveBeenCalledWith({ workspace: "eng", id: "ds1", data: { limit: 100 } });
-  // Column header + a cell value.
-  expect(screen.getByText("order_id")).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByText("order_id")).toBeInTheDocument());
   expect(screen.getByText("42")).toBeInTheDocument();
+
+  // Hit the right endpoint with the row cap, once.
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  const [path, init] = fetchMock.mock.calls[0];
+  expect(path).toBe("/api/ws/eng/datasets/ds1/data");
+  expect(JSON.parse(init.body as string)).toEqual({ limit: 100 });
 });
 
-test("PreviewTab: applies a column's semantic-layer format to the rendered value", () => {
-  mockState = {
-    isPending: false,
-    isError: false,
-    error: null,
-    data: {
-      status: 200,
-      data: { columns: [{ name: "amount", type: "bigint" }], rows: [[10]] },
-    },
-  };
+test("PreviewTab: leaves the loading state even under StrictMode's double effect", async () => {
+  // The regression this file exists for. Asserting the ABSENCE of the wedge:
+  // the Refresh button must become enabled, which it never did before.
+  fetchMock.mockResolvedValue(jsonOk({ columns: [{ name: "c", type: "text" }], rows: [["v"]] }));
+  renderWithProviders(<PreviewTab ws="eng" datasetId="ds1" />);
+
+  await waitFor(() => expect(screen.getByRole("button", { name: "Refresh" })).toBeEnabled());
+  expect(screen.queryByRole("button", { name: "Loading…" })).not.toBeInTheDocument();
+});
+
+test("PreviewTab: applies a column's semantic-layer format to the rendered value", async () => {
+  fetchMock.mockResolvedValue(jsonOk({ columns: [{ name: "amount", type: "bigint" }], rows: [[10]] }));
   // amount carries a Currency ColumnFormat (as stored by the FormatPicker).
   const columns = [{
     column_name: "amount", data_type: "bigint", type_generic: "numeric", is_temporal: false,
@@ -69,35 +77,41 @@ test("PreviewTab: applies a column's semantic-layer format to the rendered value
     groupby: true, filterable: true, format: JSON.stringify({ number_style: "currency", decimals: 2 }),
   }] as DatasetColumn[];
   renderWithProviders(<PreviewTab ws="eng" datasetId="ds1" columns={columns} />);
+
   // Raw value 10 renders as currency — the format actually takes effect.
-  expect(screen.getByText("$10.00")).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByText("$10.00")).toBeInTheDocument());
 });
 
-test("PreviewTab: error state shows the Alert message", () => {
-  mockState = {
-    isPending: false,
-    isError: true,
-    error: new Error("Access denied"),
-    data: undefined,
-  };
+test("PreviewTab: error state shows the Alert message", async () => {
+  // A real 403 body rather than a rejected promise: `apiFetch` turns it into an
+  // `ApiError` inside react-query's own chain, so there is no stray rejection for
+  // vitest to flag — and this exercises the error mapping the app actually uses.
+  fetchMock.mockResolvedValue(
+    new Response(JSON.stringify({ error: "Access denied" }), {
+      status: 403,
+      headers: { "content-type": "application/json" },
+    }),
+  );
   renderWithProviders(<PreviewTab ws="eng" datasetId="ds1" />);
 
-  expect(screen.getByRole("alert")).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
   expect(screen.getByText("Access denied")).toBeInTheDocument();
 });
 
-test("PreviewTab: Refresh click re-invokes mutate", () => {
-  mockState = {
-    isPending: false,
-    isError: false,
-    error: null,
-    data: { status: 200, data: { columns: [{ name: "c", type: "text" }], rows: [["v"]] } },
-  };
+test("PreviewTab: Refresh click re-runs the request", async () => {
+  fetchMock.mockResolvedValue(jsonOk({ columns: [{ name: "c", type: "text" }], rows: [["v"]] }));
   renderWithProviders(<PreviewTab ws="eng" datasetId="ds1" />);
 
-  // Once from mount.
-  expect(mockMutate).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Refresh" })).toBeEnabled());
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+
   fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-  // Once more from the Refresh click.
-  expect(mockMutate).toHaveBeenCalledTimes(2);
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+});
+
+test("PreviewTab: an empty result says so instead of showing a table", async () => {
+  fetchMock.mockResolvedValue(jsonOk({ columns: [{ name: "c", type: "text" }], rows: [] }));
+  renderWithProviders(<PreviewTab ws="eng" datasetId="ds1" />);
+
+  await waitFor(() => expect(screen.getByText("No rows.")).toBeInTheDocument());
 });
