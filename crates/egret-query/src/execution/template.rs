@@ -118,8 +118,18 @@ mod tests {
             render(Engine::Trino, "AND b = {{b}}", &[p("b", "boolean", "TRUE")]).unwrap(),
             "AND b = true"
         );
-        assert!(render(Engine::Trino, "LIMIT {{n}}", &[p("n", "number", "10; DROP")]).is_err());
-        assert!(render(Engine::Trino, "AND b = {{b}}", &[p("b", "boolean", "maybe")]).is_err());
+        assert!(render(
+            Engine::Trino,
+            "LIMIT {{n}}",
+            &[p("n", "number", "10; DROP")]
+        )
+        .is_err());
+        assert!(render(
+            Engine::Trino,
+            "AND b = {{b}}",
+            &[p("b", "boolean", "maybe")]
+        )
+        .is_err());
     }
 
     #[test]
