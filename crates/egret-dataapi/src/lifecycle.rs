@@ -56,40 +56,55 @@
 //! [`check_single_select`] and [`check_params`] are shape checks over a SCANNER,
 //! not a parser. They are a deny-list, not a proof.
 //!
-//! **The claim here has had to be narrowed three times, so read the narrow
-//! version and distrust any broader-sounding restatement of it.** What is
-//! claimed is:
+//! **The claim here has been wrong four times, each time by being broader than
+//! the code.** Round 3's version — "every lexical form this scanner MODELS is
+//! refused as a home for a `{{param}}`" — was wrong too, and its error is the one
+//! to learn from: it equated *modelling a form* with *modelling it correctly*.
+//! The scanner had a `#` arm, so `#` was on the list; but the arm ended the
+//! comment at a bare CR, which StarRocks does not, and a wrong terminator is
+//! indistinguishable from no model at all.
 //!
-//! > Every lexical form this scanner MODELS — single-quoted literals,
-//! > double-quoted and backtick-quoted identifiers, `--` and `#` line comments,
-//! > `/* … */` block comments, under both entries of [`ESCAPING_READINGS`] — is
-//! > refused as a home for a `{{param}}`, and each is pinned by a test.
+//! So the claim is stated per form and per engine, against the LEXER RULE rather
+//! than the form's name. A `{{param}}` is refused inside:
 //!
-//! What is NOT claimed is the tempting generalisation: "no serve-time caller can
-//! escape a value position". A lexical form the scanner does not model is a form
-//! it cannot check, and it will look exactly like a value position. `#` was
-//! precisely that until this round — and it was reachable by a token holder, not
-//! by the author, because the definition only published on engines where `#` is
-//! a comment in the first place. **Any new comment or quoting syntax must be
-//! added to [`strip_comments_and_strings`] and to the list below; nothing may be
-//! assumed inert because it is unusual.**
+//! | Form | Terminated at | Basis |
+//! |---|---|---|
+//! | `'…'` literal | `''`, or `\` under one of [`ESCAPING_READINGS`] | both readings checked, so neither dialect's rule is assumed |
+//! | `"…"` / `` `…` `` identifier | matching quote, same escape rules | as above |
+//! | `--` comment | LF or CR | Trino `SIMPLE_COMMENT` = `'--' ~[\r\n]*`; StarRocks measured to follow it (4.1.3) |
+//! | `#` comment | LF only — **a bare CR does not close it** | measured on live StarRocks 4.1.3 |
+//! | `/* … */` comment | first `*/` | nesting not modelled; leftovers can only over-reject |
 //!
-//! Known gaps, all currently believed to need `data_api_endpoint:manage` (an
-//! authoring permission) rather than a serve-time token — which is a weaker
-//! statement than it sounds, since that is exactly what was believed about `#`:
+//! Each row is pinned by a test. What is NOT claimed is the generalisation "no
+//! serve-time caller can escape a value position": a form this scanner does not
+//! model — or models with the wrong terminator — looks exactly like a value
+//! position, and there is nothing in the code that would notice. **Adding a form
+//! to [`strip_comments_and_strings`] is half the work; the other half is
+//! establishing its terminator against the engine, by measurement where the
+//! engine can be reached and by its grammar where it cannot, and recording which
+//! of the two it was.**
+//!
+//! Known gaps. All are currently believed to need `data_api_endpoint:manage` (an
+//! authoring permission) rather than a serve-time token — a weaker statement than
+//! it sounds, since that is exactly what was believed about `#` twice:
 //!
 //! * MySQL/StarRocks `/*! … */` executable comments are treated as ordinary block
-//!   comments, so their contents are stripped rather than scanned.
+//!   comments, so their contents are stripped rather than scanned. Measured on
+//!   live StarRocks 4.1.3: `/*!, 2 AS b */`, `/*!50000, …*/` and `/*!00000, …*/`
+//!   all return ONE column, so that engine does not execute them and there is no
+//!   reachable smuggle there today. Kept on the list because it is
+//!   version-dependent and MySQL-family behaviour has historically differed.
 //! * `WITH … DELETE` and `SELECT … INTO OUTFILE` pass the head-word check.
-//! * `--` is treated as a comment with no required trailing whitespace, so
-//!   `SELECT 1 --x; DROP TABLE t` (no newline) is accepted. Immaterial if
-//!   StarRocks follows Presto's `SIMPLE_COMMENT`; a smuggle if it follows
-//!   MySQL's "`--` must be followed by whitespace" rule. Unverified against a
-//!   live StarRocks lexer, so treat it as open.
 //! * `SELECT 1;;` passes, because `trim_end_matches(';')` strips every trailing
 //!   semicolon rather than exactly one.
 //! * A Trino literal ending in a backslash (`'a\'`) is falsely REJECTED, because
 //!   the escaping reading cannot terminate it. Rejection is the safe direction.
+//!
+//! Removed from this list in round 4, having been measured and found NOT to be a
+//! gap: `--` with no trailing whitespace. `SELECT 1 AS a --x AND nonexistent_col`
+//! returns `a=1` on StarRocks 4.1.3, so `SELECT 1 --x; DROP TABLE t` being
+//! accepted is correct behaviour on both engines, not a smuggle. A disclosure
+//! that invents a gap is as wrong as one that hides a real one.
 //!
 //! # What is not validated at all
 //!
@@ -217,22 +232,44 @@ fn strip_comments_and_strings(
     let mut i = 0;
     while i < b.len() {
         match b[i] {
-            // Line comments: `--` on both engines, `#` on MySQL/StarRocks.
+            // `#` — a MySQL-family line comment, ending at LF **only**.
             //
-            // `#` is stripped unconditionally rather than only for a MySQL-family
-            // engine, and over-stripping is free here: Trino has no `#` token at
-            // all, so any statement containing one outside a literal is a syntax
-            // error there and could never have been published anyway.
+            // A bare CR does NOT close it. Measured on live StarRocks 4.1.3, two
+            // shapes one character apart:
             //
-            // Not recognising it was a live serve-time hole, not a cosmetic gap.
-            // `SELECT 1 AS n # {{p}}` looked like a value position to
-            // `check_params`, so it published — and it published ONLY on an engine
-            // where `#` really is a comment, because `describe_as` had to accept
-            // `SELECT 1 AS n # ''` first. `quote_string` does not strip newlines,
-            // so a caller passing "\nUNION ALL SELECT secret FROM other -- " ends
-            // the comment and appends a live UNION. The gate selects for the
-            // engines on which the attack works.
-            c if c == b'#' || (c == b'-' && b.get(i + 1) == Some(&b'-')) => {
+            //   SELECT 1 AS a --x<CR>, nonexistent_col  -> ERROR: cannot resolve
+            //   SELECT 1 AS a  #x<CR>, nonexistent_col  -> a=1
+            //
+            // The first resolves the trailing column, so CR ended the `--`
+            // comment; the second does not, so CR did not end the `#` one. Sharing
+            // an arm with `--` imported a Trino rule into a token Trino does not
+            // have, and that was a real hole: `SELECT 1 AS n #x\r{{p}}` scanned as
+            // if the placeholder were past the comment, so it read as a value
+            // position and published — while on StarRocks the parameter is inside
+            // the comment, and `quote_string` does not strip newlines, so a value
+            // beginning "\nUNION ALL SELECT …" ends the comment and executes.
+            //
+            // Stripped unconditionally rather than only for a MySQL-family engine.
+            // Over-stripping is free because Trino has no `#` token at all — from
+            // `SqlBase.g4`, where nothing lexes `#` and `UNRECOGNIZED : .;` turns
+            // it into a parse error. That premise is GRAMMAR-BASED, not measured:
+            // the local Trino is JWT-gated, so it could not be probed the way
+            // StarRocks was.
+            b'#' => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+                out.push(b' ');
+            }
+            // `--` — a line comment on both engines, ending at CR as well as LF.
+            //
+            // Trino's `SIMPLE_COMMENT` is `'--' ~[\r\n]* '\r'? '\n'?`, and
+            // StarRocks follows it: the CR probe above is one half of the
+            // measurement, and `SELECT 1 AS a --x AND nonexistent_col` returning
+            // `a=1` on 4.1.3 is the other — so `--` needs no trailing whitespace
+            // there either, contrary to MySQL's rule. Both facts fall out of the
+            // same Presto lexer rule rather than being two coincidences.
+            b'-' if b.get(i + 1) == Some(&b'-') => {
                 while i < b.len() && b[i] != b'\n' && b[i] != b'\r' {
                     i += 1;
                 }
@@ -1028,8 +1065,9 @@ mod tests {
     }
 
     /// `#` comments out the rest of the line on MySQL/StarRocks, so a `;` after
-    /// one is not a statement break there — and on Trino, which has no `#` token,
-    /// the statement is a syntax error either way. Stripping it is free.
+    /// one is not a statement break there — and on Trino, which has no `#` token
+    /// at all (`SqlBase.g4`: nothing lexes it, `UNRECOGNIZED : .;`), the statement
+    /// is a syntax error either way. Stripping it is free.
     #[test]
     fn a_hash_starts_a_line_comment() {
         assert!(check_single_select("SELECT 1 # trailing note").is_ok());
@@ -1041,18 +1079,58 @@ mod tests {
         );
     }
 
-    /// Trino's `SIMPLE_COMMENT` is `'--' ~[\r\n]* '\r'? '\n'?`, so a bare CR ends
-    /// the comment there. A scanner that stopped only at LF would swallow the
-    /// rest of the line — including a `;` — into a "comment" Trino has already
-    /// closed.
+    /// **The two line-comment forms have DIFFERENT terminators, and sharing an
+    /// arm between them was a hole.**
+    ///
+    /// Measured on live StarRocks 4.1.3, one character apart:
+    ///
+    /// ```text
+    /// SELECT 1 AS a --x<CR>, nonexistent_col  -> ERROR: cannot resolve  (CR ends `--`)
+    /// SELECT 1 AS a  #x<CR>, nonexistent_col  -> a=1                    (CR does NOT end `#`)
+    /// ```
+    ///
+    /// Ending `#` at CR imported a Trino rule into a token Trino does not have.
+    /// The consequence is not cosmetic: the scanner saw the placeholder in
+    /// `SELECT 1 AS n #x\r{{p}}` as past the comment — a value position — so it
+    /// published, while on StarRocks it is INSIDE the comment, and `quote_string`
+    /// does not strip newlines, so a value starting "\nUNION ALL SELECT …" ends
+    /// the comment and executes.
+    /// The security half, asserted on its own so a regression names it rather
+    /// than tripping over a false-rejection assertion first.
     #[test]
-    fn a_line_comment_ends_at_a_bare_carriage_return() {
+    fn a_carriage_return_does_not_carry_a_parameter_out_of_a_hash_comment() {
+        let p = [param("p", ParamType::String)];
+        assert_eq!(
+            check_params("SELECT 1 AS n #x\r{{p}}", &p),
+            Err(ValidationError::PlaceholderInsideQuotedText("p".into())),
+            "the placeholder is INSIDE the `#` comment on StarRocks, so a value \
+             beginning with a newline ends the comment and executes"
+        );
+        // An LF genuinely does end a `#` comment, so this one is a value position
+        // and must still be accepted — otherwise the assertion above would pass
+        // just as well against a scanner that banned `#` outright.
+        assert_eq!(check_params("SELECT 1 AS n #x\n{{p}}", &p), Ok(()));
+    }
+
+    /// The statement half, and the `--` rule it must not be confused with.
+    #[test]
+    fn a_carriage_return_ends_a_dash_comment_but_not_a_hash_comment() {
+        // `--`: CR terminates, so the `;` after it is a real statement break.
         assert_eq!(
             check_single_select("SELECT 1 --x\r; DROP TABLE t"),
             Err(ValidationError::MultipleStatements)
         );
-        // The ordinary CRLF form still comments out its own line.
-        assert!(check_single_select("SELECT 1 --x\r\nFROM t").is_ok());
+        assert!(
+            check_single_select("SELECT 1 --x\r\nFROM t").is_ok(),
+            "the ordinary CRLF form still comments out its own line"
+        );
+        // `#`: CR does NOT terminate, so everything to the LF is still comment
+        // and the `;` is not a statement break.
+        assert!(
+            check_single_select("SELECT 1 #x\r; DROP TABLE t").is_ok(),
+            "on StarRocks the `;` is inside the comment; treating it as a break \
+             would be a false rejection"
+        );
     }
 
     #[test]
@@ -1067,21 +1145,39 @@ mod tests {
         );
     }
 
+    /// `--` needs NO trailing whitespace, on either engine. Measured on live
+    /// StarRocks 4.1.3: `SELECT 1 AS a --x AND nonexistent_col` returns `a=1`, so
+    /// the unresolvable column was commented out — StarRocks follows Presto's
+    /// `SIMPLE_COMMENT`, not MySQL's "`--` must be followed by whitespace" rule.
+    ///
+    /// This lived in the gaps test for one round, described as a possible
+    /// smuggle. It is not one: accepting `SELECT 1 --x; DROP TABLE t` is CORRECT,
+    /// because the `;` really is inside the comment on both engines. Pinned here
+    /// as right behaviour, since a disclosure that invents a gap is as wrong as
+    /// one that hides a real gap.
+    #[test]
+    fn a_dash_comment_needs_no_trailing_whitespace() {
+        assert!(check_single_select("SELECT 1 --x; DROP TABLE t").is_ok());
+        assert!(check_single_select("SELECT 1 AS a --x AND nonexistent_col").is_ok());
+    }
+
     /// Pins the gaps the module comment discloses, so the disclosure cannot go
     /// stale in either direction: if someone closes one of these, this test fails
     /// and points them at the list that now overstates the gaps. It asserts
     /// current behaviour, NOT that the behaviour is right.
     #[test]
     fn the_disclosed_gaps_are_still_gaps() {
-        // `--` with no required trailing whitespace. Immaterial under Presto's
-        // SIMPLE_COMMENT, a smuggle under MySQL's "must be followed by
-        // whitespace" rule — unverified against a live StarRocks lexer.
-        assert!(check_single_select("SELECT 1 --x; DROP TABLE t").is_ok());
         // `trim_end_matches` strips EVERY trailing semicolon, not exactly one.
         assert!(check_single_select("SELECT 1;;").is_ok());
         // The head-word check looks at one word.
         assert!(check_single_select("WITH t AS (SELECT 1) DELETE FROM u").is_ok());
         assert!(check_single_select("SELECT 1 INTO OUTFILE '/tmp/x'").is_ok());
+        // `/*! … */` is scanned as an ordinary block comment, so its contents are
+        // stripped rather than checked. Harmless on StarRocks 4.1.3, which was
+        // measured NOT to execute executable comments (`/*!, 2 AS b */` and the
+        // `/*!50000 …*/` and `/*!00000 …*/` forms all return one column) — kept
+        // because that is version-dependent.
+        assert!(check_single_select("SELECT 1 /*! ; DROP TABLE t */").is_ok());
     }
 
     /// Non-ASCII must survive the byte-wise scan — a naive `b[i] as char` copy
