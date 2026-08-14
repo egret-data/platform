@@ -657,14 +657,20 @@ scope."
 - Exactly one implementation of string-literal quoting remains in the workspace. Confirm with:
 
 ```bash
-rg -n --type rust "\"''\"" crates/
+grep -rn '"'"''"'"' crates --include='*.rs'
 ```
 
-Expected: exactly two hits, and no others.
-  - `crates/egret-query-api/src/dialect.rs` — the one literal quoter.
-  - `crates/egret-bi/src/schema.rs:165` — inside `like_literal`, which is a `LIKE`-pattern escaper (it also escapes `%` and `_`, and does not wrap in quotes). It stays.
+(`rg` is intercepted by the rtk wrapper in this environment and errors out; use `grep`. An empty result from a broken tool is not a passing check.)
 
-A third hit means a copy that will drift, which is how this bug was born.
+Expected: exactly these 5 lines in 3 files, and nothing in `egret-bi/src/chartquery.rs`:
+
+| Location | Status |
+|---|---|
+| `egret-query-api/src/dialect.rs:23,25` | The one literal quoter. Both arms of the same function. |
+| `egret-bi/src/schema.rs:165` | `like_literal` — a `LIKE`-pattern escaper (also escapes `%` and `_`, does not wrap in quotes). Deliberately stays. |
+| `egret-engine-mgmt/src/engines.rs:3230,3231` | `starrocks_create_service_user_sql` — the known third site, out of scope (see below). |
+
+A hit in `chartquery.rs` means Task 3 did not land. Any hit outside this table is a new copy that will drift, which is how this bug was born.
 
 - Trino behaviour byte-identical to before: `trino_leaves_backslash_alone` and `sql_literal_trino_leaves_backslash_alone` cover the regression on both sites.
 
