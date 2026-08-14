@@ -120,7 +120,7 @@ CREATE TABLE dataapi.clients (
   created_at         timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX dataapi_clients_sa_idx ON dataapi.clients (service_account_id);
-CREATE INDEX dataapi_clients_client_id_idx ON dataapi.clients (client_id);
+-- NO explicit index on client_id: the UNIQUE above already creates one.
 ```
 
 Before writing this, confirm the existing constraint's name — `users_provider_check` is Postgres's default for an inline `CHECK`, but verify rather than assume:
@@ -663,7 +663,7 @@ TTL are pinned by a regression test written before the refactor."
 - Consumes: `dataapi.service_accounts` and `dataapi.clients` (Task 1); `VerifiedClient` (Task 3).
 - Produces:
   - `pub struct NewClient { pub id: Uuid, pub client_id: String, pub client_secret: String }`
-  - `pub async fn ClientStore::create(&self, sa: Uuid, name: &str, expires_at: Option<OffsetDateTime>, by: UserId) -> Result<NewClient>`
+  - `pub async fn ClientStore::create(&self, sa: Uuid, name: &str, expires_at: Option<DateTime<Utc>>, by: UserId) -> Result<NewClient>`
   - `pub async fn ClientStore::revoke(&self, id: Uuid) -> Result<()>`
   - `impl egret_machine_idp::ClientVerifier for ClientStore`
 
@@ -713,7 +713,7 @@ async fn a_revoked_client_does_not_verify() {
 #[tokio::test]
 async fn an_expired_client_does_not_verify() {
     let f = fixture().await;
-    let past = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
+    let past = chrono::DateTime<Utc>::now_utc() - chrono::Duration::hours(1);
     let c = f.clients.create(f.sa, "prod", Some(past), f.admin).await.unwrap();
     assert!(f.clients.verify(&c.client_id, &c.client_secret).await.unwrap().is_none());
 }
@@ -767,7 +767,7 @@ use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt
 use argon2::Argon2;
 use egret_core::{Error, Result, UserId};
 use egret_metastore::Db;
-use time::OffsetDateTime;
+use chrono::DateTime<Utc>;
 use uuid::Uuid;
 
 /// Data API tokens are short-lived: a stateless token cannot be revoked before
@@ -795,7 +795,7 @@ impl ClientStore {
         &self,
         service_account_id: Uuid,
         name: &str,
-        expires_at: Option<OffsetDateTime>,
+        expires_at: Option<DateTime<Utc>>,
         by: UserId,
     ) -> Result<NewClient> {
         use base64::Engine as _;
@@ -853,7 +853,7 @@ impl egret_machine_idp::ClientVerifier for ClientStore {
         client_secret: &str,
     ) -> std::result::Result<Option<egret_machine_idp::VerifiedClient>, egret_machine_idp::IdpError>
     {
-        let row: Option<(Uuid, Uuid, Uuid, String, Option<OffsetDateTime>, Option<OffsetDateTime>)> =
+        let row: Option<(Uuid, Uuid, Uuid, String, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> =
             sqlx::query_as(
                 "SELECT c.id, c.service_account_id, sa.workspace_id, c.client_secret_hash, \
                         c.expires_at, c.revoked_at \
@@ -873,7 +873,7 @@ impl egret_machine_idp::ClientVerifier for ClientStore {
             return Ok(None);
         }
         if let Some(exp) = expires_at {
-            if exp <= OffsetDateTime::now_utc() {
+            if exp <= Utc::now() {
                 return Ok(None);
             }
         }
@@ -1064,10 +1064,10 @@ pub struct ClientDto {
     pub id: Uuid,
     pub name: String,
     pub client_id: String,
-    pub expires_at: Option<OffsetDateTime>,
-    pub last_used_at: Option<OffsetDateTime>,
-    pub revoked_at: Option<OffsetDateTime>,
-    pub created_at: OffsetDateTime,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// The issue response, and the only type in the crate carrying secret material.
