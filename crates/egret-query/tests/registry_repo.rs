@@ -363,3 +363,48 @@ async fn delete_leaves_named_secret() {
         "named secret row must remain after conn delete"
     );
 }
+
+/// The Data API (P3, `migrations/0121_dataapi_endpoints.sql`) FKs
+/// `dataapi.endpoints.database_id` to this table with `ON DELETE RESTRICT`,
+/// deliberately: a published endpoint whose database silently vanished is
+/// worse than the delete being refused. `delete_in_workspace` must turn that
+/// FK violation into a `Conflict`, not let it fall through to `Db(_)`'s
+/// generic 500 — asserted on the VARIANT so a different failure (e.g. the
+/// delete simply erroring for an unrelated reason) cannot satisfy this test.
+///
+/// Inserts directly into `dataapi.endpoints` with raw SQL rather than taking
+/// a dependency on `egret-dataapi`/`egret-dataapi-api`: this crate must not
+/// depend downward on a seam that itself depends on it.
+#[tokio::test]
+async fn delete_conflicts_when_a_dataapi_endpoint_still_references_it() {
+    let Some((r, _ws, db, wid)) = repo_with_db(true).await else {
+        eprintln!("skip");
+        return;
+    };
+    let database = r
+        .create_in_workspace(wid, &input(&uniq("db")), None, None)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO dataapi.endpoints (workspace_id, name, path, database_id, sql) \
+         VALUES ($1, 'blocks delete', '/blocks-delete', $2, 'SELECT 1')",
+    )
+    .bind(wid)
+    .bind(database.id)
+    .execute(&db.pool)
+    .await
+    .expect("seed referencing dataapi endpoint");
+
+    let err = r.delete_in_workspace(wid, database.id).await.unwrap_err();
+    assert!(
+        matches!(err, egret_query::DatabaseError::Conflict(_)),
+        "expected Conflict, got {err:?}"
+    );
+
+    // The database must still exist — the delete was refused, not partially
+    // applied.
+    r.get_in_workspace(wid, database.id)
+        .await
+        .expect("database must still exist after the refused delete");
+}

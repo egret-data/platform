@@ -384,7 +384,24 @@ impl DatabaseRepo {
             .bind(id)
             .bind(workspace_id)
             .execute(&self.db.pool)
-            .await?;
+            .await
+            .map_err(|e| match &e {
+                // The Data API (P3) FK's dataapi.endpoints.database_id to this
+                // table with ON DELETE RESTRICT, deliberately: a published
+                // endpoint's database vanishing silently is worse than the
+                // delete being refused. Map that violation to a 409 the caller
+                // can act on, rather than letting it fall through to `Db(_)`'s
+                // generic 500 — the constraint name is a implementation detail,
+                // not the message.
+                sqlx::Error::Database(d) if d.is_foreign_key_violation() => {
+                    DatabaseError::Conflict(
+                        "database is in use by one or more Data API endpoints; \
+                         remove those endpoints before deleting this database"
+                            .to_string(),
+                    )
+                }
+                _ => DatabaseError::Db(e),
+            })?;
         Ok(())
     }
 
