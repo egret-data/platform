@@ -215,6 +215,58 @@ async fn profile_update_rejects_a_service_account() {
     );
 }
 
+/// Disabling a service account through `PATCH /users/{id}` must WORK.
+///
+/// Spec §6.1 names `users.status <> 'active'` as the way to stop a compromised
+/// service account inside the 600s token window, and `ClientStore::verify`
+/// honours it — but this route is the only thing that can set it. Refusing the
+/// whole PATCH for a service account (rather than just its profile fields) would
+/// delete the documented kill switch while leaving the spec claiming it exists.
+///
+/// Asserted against the DATABASE, not just the status code: a 200 that changed
+/// nothing would look identical from the response.
+#[tokio::test]
+async fn a_service_account_can_be_disabled_through_the_users_route() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin_token = session_for(&f, "svcsurf_admin", true).await;
+    let svc = f
+        .users
+        .insert_service(&unique_email("svc.reporting"), "reporting")
+        .await
+        .expect("insert service account");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &format!("/users/{}", svc.0),
+            &admin_token,
+            Some(serde_json::json!({ "status": "disabled" })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "disabling a service account is the documented kill switch; body={j}"
+    );
+
+    let stored: String = sqlx::query_scalar("SELECT status FROM users WHERE id = $1")
+        .bind(svc.0)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("read status");
+    assert_eq!(
+        stored, "disabled",
+        "the kill switch must actually have been thrown, not merely acknowledged"
+    );
+}
+
 #[tokio::test]
 async fn service_account_is_absent_from_the_users_route() {
     let Some(f) = setup().await else {
