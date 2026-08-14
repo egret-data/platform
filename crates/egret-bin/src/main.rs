@@ -338,6 +338,12 @@ impl egret_policy::EngineBindingReader for EngineBindingReaderImpl {
     }
 }
 
+/// The only `aud` this guard accepts. The machine-IdP signs several audiences
+/// with one key (`CatalogStore` mints `catalog`, `ClientStore` mints
+/// `data-api`), so the audience — not the signature — is what says a token was
+/// meant for the catalog.
+const CATALOG_AUDIENCE: &str = "catalog";
+
 /// egret's authN + authZ guard for the embedded catalog (EB-3). Validates the
 /// egret-issued JWT (authN); the JWT's `warehouse`+`roles` claims + the RBAC
 /// store drive authZ. lakekeeper itself runs on `AllowAllAuthorizer` — egret owns
@@ -372,6 +378,18 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
         let exp = claims.get("exp").and_then(|v| v.as_i64()).unwrap_or(0);
         if exp <= chrono::Utc::now().timestamp() {
             return Err((StatusCode::UNAUTHORIZED, "token expired".to_string()));
+        }
+        // The machine-IdP signs SEVERAL audiences with this one key, and
+        // `verify_with_jwk` sets `validate_aud = false` — so a signature check
+        // alone proves the token came from egret, not that it was meant for the
+        // catalog. Since Data API P2 a `ws_admin` can self-issue a `data-api`
+        // token from the same key; without this the data-plane arms below would
+        // still fail closed (an empty `warehouse` claim matches no warehouse),
+        // but `GET /config` with no `warehouse=` returns `Ok(())` and reaches
+        // lakekeeper. Assert the audience here rather than relying on every
+        // downstream arm to fail closed by accident.
+        if claims.get("aud").and_then(|v| v.as_str()) != Some(CATALOG_AUDIENCE) {
+            return Err((StatusCode::UNAUTHORIZED, "wrong audience".to_string()));
         }
         let token_warehouse = claims
             .get("warehouse")
@@ -1878,5 +1896,70 @@ mod catalog_authz_tests {
             catalog_ns_parts("a%1Fb"),
             vec!["a".to_string(), "b".to_string()]
         );
+    }
+}
+
+/// The catalog guard must reject a token minted for a DIFFERENT audience on the
+/// same signing key.
+///
+/// DB-gated (the guard needs `PgSigningKeyStore`, whose key lives in Postgres);
+/// self-skips without `DATABASE_URL`, like the other DB-backed suites.
+#[cfg(test)]
+mod catalog_guard_audience_tests {
+    use super::{EgretCatalogGuard, CATALOG_AUDIENCE};
+    use egret_catalog_engine::CatalogGuard as _;
+    use egret_machine_idp::SigningKeyStore as _;
+
+    async fn guard() -> Option<EgretCatalogGuard> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let db = egret_metastore::Db::connect(&url, 5)
+            .await
+            .expect("connect");
+        db.migrate().await.expect("migrate");
+        Some(EgretCatalogGuard {
+            keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
+            catalog: egret_catalog_engine::CatalogStore::new(db),
+        })
+    }
+
+    /// Sign a well-formed, unexpired token with the LIVE signing key, carrying
+    /// `aud`. Everything except the audience is valid, so a rejection can only
+    /// be the audience check.
+    async fn token_with_aud(g: &EgretCatalogGuard, aud: &str) -> String {
+        let km = g.keys.active().await.expect("active key");
+        let exp = chrono::Utc::now().timestamp() + 600;
+        egret_machine_idp::sign_claims(
+            &km,
+            &serde_json::json!({ "sub": "c", "aud": aud, "exp": exp }),
+        )
+        .expect("sign")
+    }
+
+    /// `GET /config` with no `warehouse=` is the arm that returns `Ok(())`
+    /// without ever consulting the `warehouse` claim — the one place a
+    /// foreign-audience token reaches lakekeeper if the audience is unchecked.
+    /// Both legs are asserted: without the "before" leg this would pass just as
+    /// well against a guard that rejected everything.
+    #[tokio::test]
+    async fn config_rejects_a_data_api_token_but_accepts_a_catalog_one() {
+        let Some(g) = guard().await else {
+            eprintln!("DATABASE_URL unset — skipping");
+            return;
+        };
+
+        let catalog_tok = token_with_aud(&g, CATALOG_AUDIENCE).await;
+        assert!(
+            g.check("GET", "/config", None, Some(&catalog_tok))
+                .await
+                .is_ok(),
+            "a catalog-audience token must still pass /config"
+        );
+
+        let data_api_tok = token_with_aud(&g, "data-api").await;
+        let err = g
+            .check("GET", "/config", None, Some(&data_api_tok))
+            .await
+            .expect_err("a data-api token must not reach the catalog");
+        assert_eq!(err.0, axum::http::StatusCode::UNAUTHORIZED, "{}", err.1);
     }
 }
