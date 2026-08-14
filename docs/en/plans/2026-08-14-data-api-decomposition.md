@@ -53,6 +53,8 @@ Spec §6.2–6.4, §7, §8.
 
 Depends on P1, P2, P3.
 
+**Read this before writing a single route:** the stored `path` is canonical — exactly one optional leading slash, no trailing slash, and every segment matching `[A-Za-z0-9._~-]+`. `egret_dataapi::endpoints::normalize_path` is the one function that decides this, and **P4 must call it on the INBOUND path too**. axum percent-decodes a `{*path}` wildcard capture, so an inbound path arrives decoded while the stored one was never encoded — a `WHERE path = $1` written without normalising will miss, and the endpoint becomes permanently unreachable. An inbound path that fails the rule cannot match any stored row, so it is a 404, not a 400.
+
 **The risky part to get right:** two things.
 
 First, the row cap. The connector *truncates* at the cap rather than failing — but it already signals this: `Connector::execute` fetches `max_rows + 1` and, if the extra row appears, sets `TabularResult.truncated` and drops it (`crates/egret-query/src/execution/connector/mod.rs:63`). Spec §7 requires Data API to return `400 row_limit_exceeded` instead of serving truncated data, so the serving path checks `truncated` — it must not reimplement the `max_rows + 1` trick, and must not infer overflow by comparing `row_count` to the cap, which cannot distinguish "exactly at the cap" from "over it".
