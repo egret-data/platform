@@ -711,6 +711,16 @@ async fn publish_refuses_an_invalid_definition_without_calling_the_engine() {
             serde_json::json!([{ "name": "p", "type": "string", "location": "query" }]),
             "placeholder inside a block comment",
         ),
+        // `#` is a MySQL/StarRocks line comment. The definition self-selects for
+        // the engines the attack works on — it only publishes if `describe_as`
+        // accepted `SELECT n FROM t # ''` — and `quote_string` does not strip
+        // newlines, so a caller's "\nUNION ALL SELECT secret FROM other -- "
+        // ends the comment and appends a live UNION.
+        (
+            "SELECT n FROM t # {{p}}",
+            serde_json::json!([{ "name": "p", "type": "string", "location": "query" }]),
+            "placeholder inside a hash comment",
+        ),
         // Two statements under the Trino reading of `\`, invisible to a scanner
         // that assumes the StarRocks one.
         (

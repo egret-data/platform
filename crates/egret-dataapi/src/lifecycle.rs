@@ -53,21 +53,53 @@
 //!
 //! # Scope of the SQL checks — what they do NOT claim
 //!
-//! [`check_single_select`] and [`check_params`] are shape checks over a scanner,
-//! not a parser, and they are deliberately not claimed to be a complete
-//! injection or statement-smuggling defence. Known and accepted gaps, all of
-//! which need `data_api_endpoint:manage` (an authoring permission) to reach:
+//! [`check_single_select`] and [`check_params`] are shape checks over a SCANNER,
+//! not a parser. They are a deny-list, not a proof.
 //!
-//! * `#` line comments and MySQL/StarRocks `/*! … */` executable comments are not
-//!   recognised as comments.
+//! **The claim here has had to be narrowed three times, so read the narrow
+//! version and distrust any broader-sounding restatement of it.** What is
+//! claimed is:
+//!
+//! > Every lexical form this scanner MODELS — single-quoted literals,
+//! > double-quoted and backtick-quoted identifiers, `--` and `#` line comments,
+//! > `/* … */` block comments, under both entries of [`ESCAPING_READINGS`] — is
+//! > refused as a home for a `{{param}}`, and each is pinned by a test.
+//!
+//! What is NOT claimed is the tempting generalisation: "no serve-time caller can
+//! escape a value position". A lexical form the scanner does not model is a form
+//! it cannot check, and it will look exactly like a value position. `#` was
+//! precisely that until this round — and it was reachable by a token holder, not
+//! by the author, because the definition only published on engines where `#` is
+//! a comment in the first place. **Any new comment or quoting syntax must be
+//! added to [`strip_comments_and_strings`] and to the list below; nothing may be
+//! assumed inert because it is unusual.**
+//!
+//! Known gaps, all currently believed to need `data_api_endpoint:manage` (an
+//! authoring permission) rather than a serve-time token — which is a weaker
+//! statement than it sounds, since that is exactly what was believed about `#`:
+//!
+//! * MySQL/StarRocks `/*! … */` executable comments are treated as ordinary block
+//!   comments, so their contents are stripped rather than scanned.
 //! * `WITH … DELETE` and `SELECT … INTO OUTFILE` pass the head-word check.
+//! * `--` is treated as a comment with no required trailing whitespace, so
+//!   `SELECT 1 --x; DROP TABLE t` (no newline) is accepted. Immaterial if
+//!   StarRocks follows Presto's `SIMPLE_COMMENT`; a smuggle if it follows
+//!   MySQL's "`--` must be followed by whitespace" rule. Unverified against a
+//!   live StarRocks lexer, so treat it as open.
+//! * `SELECT 1;;` passes, because `trim_end_matches(';')` strips every trailing
+//!   semicolon rather than exactly one.
 //! * A Trino literal ending in a backslash (`'a\'`) is falsely REJECTED, because
 //!   the escaping reading cannot terminate it. Rejection is the safe direction.
 //!
-//! What IS claimed, and tested: no accepted definition lets a *serve-time*
-//! caller — who holds only a Data API token and can supply nothing but parameter
-//! VALUES — reach anything other than a value position. That is the privilege
-//! boundary; the items above sit on the authoring side of it.
+//! # What is not validated at all
+//!
+//! `output`, `limits` and `rate_limit` have **no validation rule anywhere** — not
+//! before the lock, not after it, not at serve time. The post-lock re-validation
+//! ([`EndpointStore::publish`]) did not close that, and cannot: it re-runs
+//! [`validate_definition`], which covers `sql`, `params` and `cache` only. What
+//! those three fields get from the lock is CONSISTENCY — they are frozen from the
+//! same read that was validated — not validation. A nonsensical `max_rows` or an
+//! unknown `output.shape` will be frozen exactly as written.
 
 use egret_core::{Error, Result, UserId};
 use egret_dataapi_api::{
@@ -185,7 +217,22 @@ fn strip_comments_and_strings(
     let mut i = 0;
     while i < b.len() {
         match b[i] {
-            b'-' if b.get(i + 1) == Some(&b'-') => {
+            // Line comments: `--` on both engines, `#` on MySQL/StarRocks.
+            //
+            // `#` is stripped unconditionally rather than only for a MySQL-family
+            // engine, and over-stripping is free here: Trino has no `#` token at
+            // all, so any statement containing one outside a literal is a syntax
+            // error there and could never have been published anyway.
+            //
+            // Not recognising it was a live serve-time hole, not a cosmetic gap.
+            // `SELECT 1 AS n # {{p}}` looked like a value position to
+            // `check_params`, so it published — and it published ONLY on an engine
+            // where `#` really is a comment, because `describe_as` had to accept
+            // `SELECT 1 AS n # ''` first. `quote_string` does not strip newlines,
+            // so a caller passing "\nUNION ALL SELECT secret FROM other -- " ends
+            // the comment and appends a live UNION. The gate selects for the
+            // engines on which the attack works.
+            c if c == b'#' || (c == b'-' && b.get(i + 1) == Some(&b'-')) => {
                 while i < b.len() && b[i] != b'\n' && b[i] != b'\r' {
                     i += 1;
                 }
@@ -621,15 +668,22 @@ impl EndpointStore {
     /// during the describe could set `cache.scope = shared` on a delegated
     /// connection, pass a check that never looked at `cache`, and be frozen —
     /// publishing the one configuration [`check_cache_scope`] exists to make
-    /// unpublishable. `limits`, `rate_limit`, `output`, `method` and `path` went
-    /// through the same gap.
+    /// unpublishable.
     ///
     /// The fix is to re-run the whole PURE validator against `current`, inside
     /// the transaction. It costs no engine call and no extra pool time, and it
     /// makes the rule structural: what is frozen is what was validated, because
-    /// they are now the same read. `delegated` is re-read under the same
-    /// transaction and frozen into the snapshot, so the value validated, the value
-    /// stored, and the value P4 will compare against are all one.
+    /// they are now the same read. `delegated` is re-read on the same transaction
+    /// and frozen into the snapshot, so the value validated and the value stored
+    /// are one (the live column can still move afterwards — see the comment at
+    /// that read, and the module comment on why the frozen witness exists).
+    ///
+    /// `output`, `limits` and `rate_limit` went through the same window, and
+    /// re-validation does NOT fix them — there is no rule for those fields
+    /// anywhere in this crate, so there is nothing for the re-run to check. What
+    /// they gain is consistency: they are frozen from the same read that was
+    /// validated, rather than from a row nobody looked at. See the module
+    /// comment's "What is not validated at all".
     ///
     /// # State
     ///
@@ -665,7 +719,17 @@ impl EndpointStore {
         }
 
         // Same statement as `connection_is_delegated`, issued on the transaction
-        // so the value cannot move between here and the commit.
+        // so the validation below and the value frozen into the snapshot are the
+        // same read.
+        //
+        // That is all it buys. It does NOT pin the column: there is no `FOR SHARE`
+        // on `query.databases` and the isolation level is READ COMMITTED, so a
+        // concurrent flip can commit before this transaction does. Locking it
+        // would not help either, because the flip is equally free the instant
+        // after the commit. That residual is precisely what the frozen
+        // `delegated` witness exists for — P4 compares it against the live column
+        // and refuses a shared cache when they disagree — and it is not something
+        // publish can close on its own.
         let delegated: bool = sqlx::query_scalar(
             "SELECT delegated FROM query.databases WHERE id = $1 AND workspace_id = $2",
         )
@@ -963,6 +1027,20 @@ mod tests {
         assert!(check_single_select(r"SELECT 'a\'b;c' AS s").is_err());
     }
 
+    /// `#` comments out the rest of the line on MySQL/StarRocks, so a `;` after
+    /// one is not a statement break there — and on Trino, which has no `#` token,
+    /// the statement is a syntax error either way. Stripping it is free.
+    #[test]
+    fn a_hash_starts_a_line_comment() {
+        assert!(check_single_select("SELECT 1 # trailing note").is_ok());
+        assert!(check_single_select("SELECT 1 # ; DROP TABLE t\n").is_ok());
+        // ...but only to the end of the line.
+        assert_eq!(
+            check_single_select("SELECT 1 #x\n; DROP TABLE t"),
+            Err(ValidationError::MultipleStatements)
+        );
+    }
+
     /// Trino's `SIMPLE_COMMENT` is `'--' ~[\r\n]* '\r'? '\n'?`, so a bare CR ends
     /// the comment there. A scanner that stopped only at LF would swallow the
     /// rest of the line — including a `;` — into a "comment" Trino has already
@@ -987,6 +1065,23 @@ mod tests {
             check_single_select("SELECT 1 /* ; DROP TABLE t"),
             Err(ValidationError::Unterminated("block comment"))
         );
+    }
+
+    /// Pins the gaps the module comment discloses, so the disclosure cannot go
+    /// stale in either direction: if someone closes one of these, this test fails
+    /// and points them at the list that now overstates the gaps. It asserts
+    /// current behaviour, NOT that the behaviour is right.
+    #[test]
+    fn the_disclosed_gaps_are_still_gaps() {
+        // `--` with no required trailing whitespace. Immaterial under Presto's
+        // SIMPLE_COMMENT, a smuggle under MySQL's "must be followed by
+        // whitespace" rule — unverified against a live StarRocks lexer.
+        assert!(check_single_select("SELECT 1 --x; DROP TABLE t").is_ok());
+        // `trim_end_matches` strips EVERY trailing semicolon, not exactly one.
+        assert!(check_single_select("SELECT 1;;").is_ok());
+        // The head-word check looks at one word.
+        assert!(check_single_select("WITH t AS (SELECT 1) DELETE FROM u").is_ok());
+        assert!(check_single_select("SELECT 1 INTO OUTFILE '/tmp/x'").is_ok());
     }
 
     /// Non-ASCII must survive the byte-wise scan — a naive `b[i] as char` copy
@@ -1020,6 +1115,16 @@ mod tests {
             // Comments too: a value carrying `*/` closes a block comment early.
             "SELECT 1 AS n /* {{p}} */",
             "SELECT 1 AS n -- {{p}}",
+            // `#` is a MySQL/StarRocks line comment, and was NOT modelled — so the
+            // placeholder "survived" stripping and read as a value position. The
+            // definition self-selects for the engines the attack works on: it only
+            // publishes if `describe_as` accepted `SELECT 1 AS n # ''`, i.e. only
+            // where `#` really is a comment. `quote_string` does not strip
+            // newlines, so a caller sending "\nUNION ALL SELECT secret FROM other
+            // -- " ends the comment and appends a live UNION. Serve-time
+            // reachable, by a token holder rather than the author.
+            "SELECT 1 AS n # {{p}}",
+            "SELECT 1 AS n #{{p}}",
         ] {
             assert_eq!(
                 check_params(sql, &p),
