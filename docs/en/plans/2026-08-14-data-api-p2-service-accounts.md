@@ -61,8 +61,8 @@ An earlier draft of this plan invented `dataapi.api_keys`: a bearer key looked u
 - Test: `crates/egret-auth/tests/service_accounts.rs` (create)
 
 **Interfaces:**
-- Consumes: `users` (`migrations/0002_identity.sql:3`), `workspaces` (`migrations/0003_workspace_rbac.sql:1`), `UsersStore` (`crates/egret-auth/src/users.rs:15`).
-- Produces: `pub async fn UsersStore::insert_service(&self, email: &str, name: &str) -> Result<UserId>`.
+- Consumes: `users` (`migrations/0002_identity.sql:3`), `workspaces` (`migrations/0003_workspace_rbac.sql:1`), `UserRepo` (`crates/egret-auth/src/users.rs:15`).
+- Produces: `pub async fn UserRepo::insert_service(&self, email: &str, name: &str) -> Result<UserId>`.
 
 - [ ] **Step 1: Write the migration**
 
@@ -75,7 +75,7 @@ Create `migrations/0119_dataapi_service_accounts.sql`, matching the house style 
 -- deliberate: `access_grants`, Cedar, `ensure_username` (Ranger/Trino
 -- delegation) and audit all key off a user id, so reusing `users` means a
 -- machine principal needs no parallel identity plumbing anywhere. The price is
--- that human-facing user LISTS must exclude it — see `UsersStore::list`.
+-- that human-facing user LISTS must exclude it — see `UserRepo::list`.
 ALTER TABLE users DROP CONSTRAINT users_provider_check;
 ALTER TABLE users ADD CONSTRAINT users_provider_check
   CHECK (provider IN ('local','oidc','service'));
@@ -133,7 +133,7 @@ A `DROP CONSTRAINT` naming a constraint that does not exist fails the whole migr
 
 - [ ] **Step 2: Write the failing tests**
 
-Create `crates/egret-auth/tests/service_accounts.rs`. Follow the fixture pattern of the existing tests in `crates/egret-auth/tests/` — open one and copy how it builds a `Db` and a `UsersStore`.
+Create `crates/egret-auth/tests/service_accounts.rs`. Follow the fixture pattern of the existing tests in `crates/egret-auth/tests/` — open one and copy how it builds a `Db` and a `UserRepo`.
 
 ```rust
 //! A service account is a user row that can never log in.
@@ -141,7 +141,7 @@ Create `crates/egret-auth/tests/service_accounts.rs`. Follow the fixture pattern
 #[tokio::test]
 async fn service_account_cannot_have_a_password() {
     let db = test_db().await;
-    let users = egret_auth::users::UsersStore::new(db.clone());
+    let users = egret_auth::users::UserRepo::new(db.clone());
     let id = users
         .insert_service("svc.reporting@acme.service.egret.local", "reporting")
         .await
@@ -162,7 +162,7 @@ async fn service_account_cannot_have_a_password() {
 #[tokio::test]
 async fn service_accounts_are_absent_from_the_user_list() {
     let db = test_db().await;
-    let users = egret_auth::users::UsersStore::new(db.clone());
+    let users = egret_auth::users::UserRepo::new(db.clone());
     let human = users
         .insert_local("human@acme.test", "human", "hash")
         .await
@@ -186,7 +186,7 @@ async fn service_account_is_still_findable_by_id() {
     // must keep working, or its name cannot be rendered next to its own grants
     // and audit rows.
     let db = test_db().await;
-    let users = egret_auth::users::UsersStore::new(db.clone());
+    let users = egret_auth::users::UserRepo::new(db.clone());
     let svc = users
         .insert_service("svc.y@acme.service.egret.local", "y")
         .await
@@ -267,7 +267,11 @@ Expected: PASS, 3 tests.
 Two mutations, run separately:
 
 1. Remove `WHERE provider <> 'service'` from `list`. Expected: `service_accounts_are_absent_from_the_user_list` FAILS.
-2. Drop the `users_service_has_no_password` constraint from the migration and re-run against a fresh DB (`just reset-testdata`). Expected: `service_account_cannot_have_a_password` FAILS.
+2. Drop the `users_service_has_no_password` constraint from the migration and re-run against a **genuinely fresh database**. Expected: `service_account_cannot_have_a_password` FAILS.
+
+   `just reset-testdata` is NOT sufficient — it wipes data but does not replay migrations, so an already-applied constraint survives it and the mutation silently does nothing. Create a throwaway database and point `DATABASE_URL` at it.
+
+   Also note: `sqlx::migrate!` embeds the migration directory at compile time, so editing a `.sql` file does not necessarily rebuild it. Force a re-embed with `touch crates/egret-metastore/src/lib.rs` before re-running, or you will be testing the previous migration set.
 
 Revert both and confirm green.
 
@@ -284,7 +288,7 @@ access_grants, Cedar, ensure_username and audit need no parallel plumbing
 for machine principals. A DB CHECK — not just the login handler — is what
 guarantees it can never hold a password.
 
-UsersStore::list now excludes them: it feeds the admin Users page and the
+UserRepo::list now excludes them: it feeds the admin Users page and the
 Access console picker. Resolution by id is deliberately unfiltered."
 ```
 
@@ -297,7 +301,7 @@ Access console picker. Resolution by id is deliberately unfiltered."
 - Test: `crates/egret-controlplane/tests/service_account_surfaces.rs` (create)
 
 **Interfaces:**
-- Consumes: `UsersStore::insert_service` and the filtered `list` from Task 1.
+- Consumes: `UserRepo::insert_service` and the filtered `list` from Task 1.
 - Produces: no new public API — behavioural guarantees only.
 
 The sites were enumerated by hand. This table is the whole set, and the split matters more than the filtering.
