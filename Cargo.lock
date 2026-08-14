@@ -2920,7 +2920,6 @@ dependencies = [
  "serde_json",
  "sqlx",
  "thiserror 2.0.20",
- "time",
  "tokio",
  "tower",
  "tracing",

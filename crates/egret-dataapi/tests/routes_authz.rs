@@ -446,6 +446,86 @@ async fn deleting_an_account_takes_its_access_grants_with_it() {
     assert_eq!(users_left, 0);
 }
 
+// ---------- Negative gates ----------
+//
+// One test per handler whose `require(...)` line had nothing watching it. The
+// suite above measures the asymmetry between `:read` and `:manage` and the
+// cross-workspace boundary, but every one of those calls arrives holding SOME
+// permission — so deleting a handler's `require(...)` entirely would not have
+// failed a single one of them. `principal_with(&[])` is a real, authenticated,
+// workspace-member principal holding NO service-account permission: exactly the
+// caller a missing gate lets through.
+
+/// Deleting a service account is the most destructive verb here — it hard-deletes
+/// the principal, its grants and every client it owns.
+#[tokio::test]
+async fn deleting_an_account_requires_manage() {
+    let f = skip_without_db!();
+    let sa = f.create_service_account("reporting").await;
+    let nobody = f.principal_with(&[]).await;
+
+    let (status, body) = f
+        .send(
+            &nobody,
+            "DELETE",
+            &format!("/api/ws/{}/data-api/service-accounts/{sa}", f.ws),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+
+    // And the account really is still there — otherwise a 403 returned AFTER a
+    // successful delete would read the same from outside.
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE id = $1")
+        .bind(sa)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count users");
+    assert_eq!(left, 1, "the refused delete must not have deleted anything");
+}
+
+/// Listing accounts is `:read`. The list names every machine principal in the
+/// workspace, so it is not public to workspace membership.
+#[tokio::test]
+async fn listing_accounts_requires_read() {
+    let f = skip_without_db!();
+    f.create_service_account("reporting").await;
+    let nobody = f.principal_with(&[]).await;
+
+    let (status, body) = f
+        .get_as(
+            &nobody,
+            &format!("/api/ws/{}/data-api/service-accounts", f.ws),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+}
+
+/// Creating an account is `:manage` — it mints a new platform principal.
+#[tokio::test]
+async fn creating_an_account_requires_manage() {
+    let f = skip_without_db!();
+    let nobody = f.principal_with(&[]).await;
+
+    let (status, body) = f
+        .post_as(
+            &nobody,
+            &format!("/api/ws/{}/data-api/service-accounts", f.ws),
+            serde_json::json!({ "name": "Sneaky" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+
+    let made: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dataapi.service_accounts WHERE workspace_id = $1 AND name = 'Sneaky'",
+    )
+    .bind(f.ws_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("count accounts");
+    assert_eq!(made, 0, "the refused create must not have created anything");
+}
+
 /// Revoking is `:manage`, and a client in another workspace is invisible rather
 /// than merely forbidden — the same 404 rule as `scoped_account`.
 #[tokio::test]

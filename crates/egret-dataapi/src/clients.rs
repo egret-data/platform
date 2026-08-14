@@ -10,24 +10,11 @@ use argon2::Argon2;
 use chrono::{DateTime, Utc};
 use egret_core::{Error, Result, UserId};
 use egret_metastore::Db;
-use time::OffsetDateTime;
 use uuid::Uuid;
 
 /// Data API tokens are short-lived: a stateless token cannot be revoked before
 /// it expires, so the exposure window after revoking a client is this long.
 pub const DATA_API_TTL_SECS: u64 = 600;
-
-/// `expires_at` is `time::OffsetDateTime` in the public API (matching the
-/// `ClientVerifier` contract's expectations), but every other timestamp in this
-/// workspace is `chrono::DateTime<Utc>` — sqlx's `chrono` feature is what the
-/// whole tree (including the git-pinned lakekeeper crates) is built against, and
-/// turning on sqlx's `time` feature alongside it makes `sqlx::query_as!`
-/// ambiguous for every OTHER crate's TIMESTAMPTZ columns. So this crate binds
-/// `chrono::DateTime<Utc>` to Postgres like everyone else and converts at the
-/// boundary instead of asking sqlx to speak `time` at all.
-fn offset_to_chrono(o: OffsetDateTime) -> DateTime<Utc> {
-    DateTime::from_timestamp_nanos(o.unix_timestamp_nanos() as i64)
-}
 
 pub struct NewClient {
     pub id: Uuid,
@@ -50,7 +37,7 @@ impl ClientStore {
         &self,
         service_account_id: Uuid,
         name: &str,
-        expires_at: Option<OffsetDateTime>,
+        expires_at: Option<DateTime<Utc>>,
         by: UserId,
     ) -> Result<NewClient> {
         use base64::Engine as _;
@@ -76,7 +63,7 @@ impl ClientStore {
         .bind(name)
         .bind(&client_id)
         .bind(hash)
-        .bind(expires_at.map(offset_to_chrono))
+        .bind(expires_at)
         .bind(by.0)
         .fetch_one(&self.db.pool)
         .await
@@ -114,6 +101,15 @@ impl egret_machine_idp::ClientVerifier for ClientStore {
     /// authentication actually reads the principal's status — without this join
     /// a disabled service account would keep minting `data-api` tokens
     /// indefinitely, and the operator would believe they had stopped it.
+    ///
+    /// `workspaces.status` is read for the same reason, and its absence was
+    /// worse: archiving a workspace is the operator's natural decommission
+    /// action, and every management route runs through `WsContext`, which 404s
+    /// on a non-active workspace. So archiving REMOVED every route that could
+    /// revoke a client while leaving the client itself minting tokens — the
+    /// credential outliving the only surface that could kill it. Authentication
+    /// has to honour the workspace's status itself, because by then nothing else
+    /// can.
     async fn verify(
         &self,
         client_id: &str,
@@ -128,12 +124,14 @@ impl egret_machine_idp::ClientVerifier for ClientStore {
             Option<DateTime<Utc>>,
             Option<DateTime<Utc>>,
             String,
+            String,
         )> = sqlx::query_as(
             "SELECT c.id, c.service_account_id, sa.workspace_id, c.client_secret_hash, \
-                        c.expires_at, c.revoked_at, u.status \
+                        c.expires_at, c.revoked_at, u.status, w.status \
                  FROM dataapi.clients c \
                  JOIN dataapi.service_accounts sa ON sa.user_id = c.service_account_id \
                  JOIN users u ON u.id = sa.user_id \
+                 JOIN workspaces w ON w.id = sa.workspace_id \
                  WHERE c.client_id = $1",
         )
         .bind(client_id)
@@ -141,16 +139,19 @@ impl egret_machine_idp::ClientVerifier for ClientStore {
         .await
         .map_err(|e| egret_machine_idp::IdpError::Db(e.to_string()))?;
 
-        let Some((id, sa, ws, hash, expires_at, revoked_at, status)) = row else {
+        let Some((id, sa, ws, hash, expires_at, revoked_at, status, ws_status)) = row else {
             return Ok(None);
         };
         if revoked_at.is_some() {
             return Ok(None);
         }
         // Checked here rather than in the WHERE clause so it sits with the other
-        // two rejections: one place shows every reason `verify` says no, and all
-        // of them say it the same way.
+        // rejections: one place shows every reason `verify` says no, and all of
+        // them say it the same way.
         if status != "active" {
+            return Ok(None);
+        }
+        if ws_status != "active" {
             return Ok(None);
         }
         if let Some(exp) = expires_at {

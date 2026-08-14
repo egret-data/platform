@@ -145,18 +145,6 @@ pub struct IssueClientInput {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-/// `ClientStore::create` takes `time::OffsetDateTime`; the wire and the rest of
-/// the workspace speak `chrono`. Mirrors `clients::offset_to_chrono` in the
-/// other direction — see its comment for why sqlx's `time` feature is not the
-/// answer.
-fn chrono_to_offset(d: DateTime<Utc>) -> Result<time::OffsetDateTime, DataApiError> {
-    let nanos = d
-        .timestamp_nanos_opt()
-        .ok_or_else(|| Error::InvalidInput("expires_at out of range".into()))?;
-    time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(nanos))
-        .map_err(|e| Error::InvalidInput(format!("expires_at out of range: {e}")))
-}
-
 fn db_err(e: sqlx::Error) -> DataApiError {
     Error::Internal(anyhow::anyhow!("{e}"))
 }
@@ -293,29 +281,56 @@ async fn create_service_account(
 
     // A service account is BOTH rows: the platform-level `users` row (which is
     // what makes it a real principal for Cedar/grants/Ranger/audit) and the
-    // `dataapi.service_accounts` row that binds it to this workspace. If the
-    // second fails — `UNIQUE (workspace_id, name)` — the first is compensated
-    // away rather than left as an orphan user nobody can see or delete.
-    let user_id = st.users.insert_service(&email, name).await?;
-    let inserted: Result<DateTime<Utc>, sqlx::Error> = sqlx::query_scalar(
-        "INSERT INTO dataapi.service_accounts (user_id, workspace_id, name, description, created_by) \
-         VALUES ($1, $2, $3, $4, $5) RETURNING created_at",
-    )
-    .bind(user_id.0)
-    .bind(ctx.workspace_id.0)
-    .bind(name)
-    .bind(&body.description)
-    .bind(ctx.principal.user_id.0)
-    .fetch_one(&st.db.pool)
+    // `dataapi.service_accounts` row that binds it to this workspace. They go in
+    // ONE transaction, so a failed second insert — `UNIQUE (workspace_id, name)`
+    // — rolls the first back rather than needing a compensating delete. The
+    // compensation this replaces was itself a `let _ =`: if it failed (a dropped
+    // connection is exactly when both writes are most likely to be interrupted)
+    // the orphan `users` row stayed, invisible to every list and unreachable by
+    // every delete route, and permanently holding the UNIQUE email that would
+    // make a retry fail too.
+    //
+    // `UserRepo::insert_service` is not used here for the same reason: it runs
+    // on the pool and cannot join this transaction. The CHECK constraint it
+    // documents (`users_service_has_no_password`, 0119) is enforced by the
+    // database, not by that method, so writing the row here loses nothing.
+    let mut tx = st.db.pool.begin().await.map_err(db_err)?;
+    let inserted: Result<(Uuid, DateTime<Utc>), sqlx::Error> = async {
+        let user_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (provider, email, name) VALUES ('service', $1, $2) RETURNING id",
+        )
+        .bind(&email)
+        .bind(name)
+        .fetch_one(&mut *tx)
+        .await?;
+        let created_at: DateTime<Utc> = sqlx::query_scalar(
+            "INSERT INTO dataapi.service_accounts (user_id, workspace_id, name, description, created_by) \
+             VALUES ($1, $2, $3, $4, $5) RETURNING created_at",
+        )
+        .bind(user_id)
+        .bind(ctx.workspace_id.0)
+        .bind(name)
+        .bind(&body.description)
+        .bind(ctx.principal.user_id.0)
+        .fetch_one(&mut *tx)
+        .await?;
+        Ok((user_id, created_at))
+    }
     .await;
 
-    let created_at = match inserted {
-        Ok(t) => t,
+    let (user_id, created_at) = match inserted {
+        Ok(v) => {
+            tx.commit().await.map_err(db_err)?;
+            v
+        }
         Err(e) => {
-            let _ = sqlx::query("DELETE FROM users WHERE id = $1")
-                .bind(user_id.0)
-                .execute(&st.db.pool)
-                .await;
+            // Explicit, though dropping `tx` would also roll back — the rollback
+            // is the whole point of this branch and should not be implicit.
+            let _ = tx.rollback().await;
+            // Either UNIQUE can fire and both mean the same thing to the caller:
+            // this workspace already has that service account. `users.email` is
+            // derived from the name and the workspace slug, so an email
+            // collision IS a name collision seen from the other table.
             return Err(match &e {
                 sqlx::Error::Database(d) if d.is_unique_violation() => {
                     Error::Conflict(format!("service account already exists: {name}"))
@@ -324,6 +339,7 @@ async fn create_service_account(
             });
         }
     };
+    let user_id = UserId(user_id);
 
     Ok((
         StatusCode::CREATED,
@@ -473,10 +489,9 @@ async fn issue_client(
     egret_core::authz::require(&*st.pdp, &ctx, SA_MANAGE).await?;
     // `ctx.workspace_id`, never the path segment — see the module comment.
     let sa = scoped_account(&st, ctx.workspace_id.0, sa).await?;
-    let expires_at = body.expires_at.map(chrono_to_offset).transpose()?;
     let c = st
         .clients
-        .create(sa, &body.name, expires_at, ctx.principal.user_id)
+        .create(sa, &body.name, body.expires_at, ctx.principal.user_id)
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -577,15 +592,5 @@ mod tests {
         assert_eq!(slugify("Nightly ETL"), "nightly-etl");
         assert_eq!(slugify("  a__b  "), "a-b");
         assert_eq!(slugify("!!!"), "");
-    }
-
-    #[test]
-    fn chrono_and_offset_round_trip() {
-        let now = Utc::now();
-        let o = chrono_to_offset(now).expect("in range");
-        assert_eq!(
-            o.unix_timestamp_nanos(),
-            i128::from(now.timestamp_nanos_opt().unwrap())
-        );
     }
 }

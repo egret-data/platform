@@ -125,7 +125,7 @@ async fn a_revoked_client_does_not_verify() {
 #[tokio::test]
 async fn an_expired_client_does_not_verify() {
     let f = skip_without_db!();
-    let past = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
+    let past = chrono::Utc::now() - chrono::Duration::hours(1);
     let c = f
         .clients
         .create(f.sa, "prod", Some(past), f.admin)
@@ -141,14 +141,13 @@ async fn an_expired_client_does_not_verify() {
 
 #[tokio::test]
 async fn a_client_with_a_future_expiry_verifies() {
-    // Positive-direction pin on `offset_to_chrono`: every other test either
-    // passes `expires_at: None` or a PAST instant. Nothing here would catch a
-    // conversion bug that shifts a future expiry into the past (wrong epoch
-    // unit, a sign flip, `from_timestamp_nanos` vs `from_timestamp`) — that
-    // regression would still make `an_expired_client_does_not_verify` pass,
-    // since "wrongly expired" and "expired" look identical from `verify`.
+    // Positive direction on `expires_at`: every other test either passes
+    // `expires_at: None` or a PAST instant. Nothing there would catch a bug that
+    // shifts a future expiry into the past — that regression would still make
+    // `an_expired_client_does_not_verify` pass, since "wrongly expired" and
+    // "expired" look identical from `verify`.
     let f = skip_without_db!();
-    let future = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
+    let future = chrono::Utc::now() + chrono::Duration::hours(1);
     let c = f
         .clients
         .create(f.sa, "prod", Some(future), f.admin)
@@ -202,6 +201,48 @@ async fn a_disabled_service_account_does_not_verify() {
             .unwrap()
             .is_none(),
         "disabling the principal must stop its clients authenticating"
+    );
+}
+
+/// Archiving a workspace must stop its service accounts authenticating.
+///
+/// This is the worse half of the `users.status` story, not a variation on it.
+/// Every management route reaches the Data API through `WsContext`, which 404s
+/// on a workspace that is not active — so archiving REMOVES the only routes that
+/// could revoke a client or disable its principal. If `verify` did not read
+/// `workspaces.status`, the operator's natural decommission action would leave
+/// every credential in that workspace live AND unrevokable, which is the exact
+/// opposite of what archiving looks like it does.
+///
+/// Before/after on the SAME client, so this cannot pass against a `verify` that
+/// rejects everything.
+#[tokio::test]
+async fn a_client_in_an_archived_workspace_does_not_verify() {
+    let f = skip_without_db!();
+    let c = f.clients.create(f.sa, "prod", None, f.admin).await.unwrap();
+    assert!(
+        f.clients
+            .verify(&c.client_id, &c.client_secret)
+            .await
+            .unwrap()
+            .is_some(),
+        "must verify while the workspace is active"
+    );
+
+    sqlx::query("UPDATE workspaces SET status = 'archived' WHERE id = $1")
+        .bind(f.ws)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+
+    assert!(
+        f.clients
+            .verify(&c.client_id, &c.client_secret)
+            .await
+            .unwrap()
+            .is_none(),
+        "archiving the workspace must stop its clients authenticating — \
+         nothing else can, because archiving also removes the revoke route"
     );
 }
 
