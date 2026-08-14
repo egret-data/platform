@@ -25,7 +25,10 @@ impl PrepareRoutine {
 }
 
 impl Routine<Arc<StmtInner>> for PrepareRoutine {
-    fn call<'a>(&'a mut self, conn: &'a mut Conn) -> BoxFuture<'a, crate::Result<Arc<StmtInner>>> {
+    fn call<'a>(self, conn: &'a mut Conn) -> BoxFuture<'a, crate::Result<Arc<StmtInner>>>
+    where
+        Self: 'a,
+    {
         #[cfg(feature = "tracing")]
         let span = info_span!(
             "mysql_async::prepare",
@@ -38,7 +41,7 @@ impl Routine<Arc<StmtInner>> for PrepareRoutine {
             // The statement may contain sensitive data. Restrict to DEBUG.
             span.record(
                 "mysql_async.query.sql",
-                String::from_utf8_lossy(&*self.query).as_ref(),
+                String::from_utf8_lossy(&self.query).as_ref(),
             );
         }
 

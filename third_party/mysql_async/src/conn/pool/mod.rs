@@ -7,19 +7,7 @@
 // modified, or distributed except according to those terms.
 
 use futures_util::FutureExt;
-use keyed_priority_queue::KeyedPriorityQueue;
 use tokio::sync::mpsc;
-
-use std::{
-    borrow::Borrow,
-    cmp::Reverse,
-    collections::VecDeque,
-    hash::{Hash, Hasher},
-    str::FromStr,
-    sync::{atomic, Arc, Mutex},
-    task::{Context, Poll, Waker},
-    time::{Duration, Instant},
-};
 
 use crate::{
     conn::{pool::futures::*, Conn},
@@ -27,11 +15,26 @@ use crate::{
     opts::{Opts, PoolOpts},
     queryable::transaction::{Transaction, TxOpts},
 };
+use std::sync::atomic::Ordering;
+use std::{
+    future::Future,
+    str::FromStr,
+    sync::{atomic, Arc, Mutex},
+    task::{Context, Poll},
+    time::{Duration, Instant},
+};
+
+use in_pool_connections::InPoolConnections;
+pub use metrics::Metrics;
+use waitlist::{QueueId, Waitlist};
 
 mod recycler;
 // this is a really unfortunate name for a module
 pub mod futures;
+mod in_pool_connections;
+mod metrics;
 mod ttl_check_inerval;
+mod waitlist;
 
 /// Connection that is idling in the pool.
 #[derive(Debug)]
@@ -74,7 +77,7 @@ impl From<Conn> for IdlingConn {
 #[derive(Debug)]
 struct Exchange {
     waiting: Waitlist,
-    available: VecDeque<IdlingConn>,
+    available: in_pool_connections::InPoolConnections,
     exist: usize,
     // only used to spawn the recycler the first time we're in async context
     recycler: Option<(mpsc::UnboundedReceiver<Option<Conn>>, PoolOpts)>,
@@ -101,86 +104,10 @@ impl Exchange {
     }
 }
 
-#[derive(Default, Debug)]
-struct Waitlist {
-    queue: KeyedPriorityQueue<QueuedWaker, QueueId>,
-}
-
-impl Waitlist {
-    fn push(&mut self, waker: Waker, queue_id: QueueId) {
-        // The documentation of Future::poll says:
-        //   Note that on multiple calls to poll, only the Waker from
-        //   the Context passed to the most recent call should be
-        //   scheduled to receive a wakeup.
-        //
-        // But the the documentation of KeyedPriorityQueue::push says:
-        //   Adds new element to queue if missing key or replace its
-        //   priority if key exists. In second case doesn’t replace key.
-        //
-        // This means we have to remove first to have the most recent
-        // waker in the queue.
-        self.remove(queue_id);
-        self.queue.push(QueuedWaker { queue_id, waker }, queue_id);
-    }
-
-    fn pop(&mut self) -> Option<Waker> {
-        match self.queue.pop() {
-            Some((qw, _)) => Some(qw.waker),
-            None => None,
-        }
-    }
-
-    fn remove(&mut self, id: QueueId) {
-        self.queue.remove(&id);
-    }
-
-    fn peek_id(&mut self) -> Option<QueueId> {
-        self.queue.peek().map(|(qw, _)| qw.queue_id)
-    }
-}
-
-const QUEUE_END_ID: QueueId = QueueId(Reverse(u64::MAX));
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub(crate) struct QueueId(Reverse<u64>);
-
-impl QueueId {
-    fn next() -> Self {
-        static NEXT_QUEUE_ID: atomic::AtomicU64 = atomic::AtomicU64::new(0);
-        let id = NEXT_QUEUE_ID.fetch_add(1, atomic::Ordering::SeqCst);
-        QueueId(Reverse(id))
-    }
-}
-
-#[derive(Debug)]
-struct QueuedWaker {
-    queue_id: QueueId,
-    waker: Waker,
-}
-
-impl Eq for QueuedWaker {}
-
-impl Borrow<QueueId> for QueuedWaker {
-    fn borrow(&self) -> &QueueId {
-        &self.queue_id
-    }
-}
-
-impl PartialEq for QueuedWaker {
-    fn eq(&self, other: &Self) -> bool {
-        self.queue_id == other.queue_id
-    }
-}
-
-impl Hash for QueuedWaker {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.queue_id.hash(state)
-    }
-}
-
 /// Connection pool data.
 #[derive(Debug)]
 pub struct Inner {
+    metrics: Arc<Metrics>,
     close: atomic::AtomicBool,
     closed: atomic::AtomicBool,
     exchange: Mutex<Exchange>,
@@ -194,6 +121,19 @@ pub struct Inner {
 ///
 /// Note that you will probably want to await [`Pool::disconnect`] before dropping the runtime, as
 /// otherwise you may end up with a number of connections that are not cleanly terminated.
+///
+/// ## Multi-runtime environments
+///
+/// `Pool` must not be shared across independent tokio runtimes. Each `tokio::net::TcpStream`
+/// inside a pooled connection is bound to the I/O driver of the runtime that established it;
+/// connections become invalid when that runtime shuts down. This is most likely to surface
+/// during graceful shutdown, when some runtimes exit before others while pooled connections
+/// are still in circulation. The pool's background tasks ([`Recycler`], TTL interval) are
+/// also spawned on the first runtime to call [`Pool::get_conn`] and do not survive that
+/// runtime's shutdown.
+///
+/// If your framework runs each worker on its own `current_thread` runtime (e.g. actix-server),
+/// create a separate `Pool` per worker rather than sharing one across all workers.
 #[derive(Debug, Clone)]
 pub struct Pool {
     opts: Opts,
@@ -214,21 +154,31 @@ impl Pool {
     {
         let opts = Opts::try_from(opts).unwrap();
         let pool_opts = opts.pool_opts().clone();
+        let metrics = Arc::new(Metrics::default());
         let (tx, rx) = mpsc::unbounded_channel();
         Pool {
             opts,
             inner: Arc::new(Inner {
                 close: false.into(),
                 closed: false.into(),
+                metrics: metrics.clone(),
                 exchange: Mutex::new(Exchange {
-                    available: VecDeque::with_capacity(pool_opts.constraints().max()),
-                    waiting: Waitlist::default(),
+                    available: InPoolConnections::new(
+                        pool_opts.constraints().max(),
+                        metrics.clone(),
+                    ),
+                    waiting: Waitlist::new(metrics),
                     exist: 0,
                     recycler: Some((rx, pool_opts)),
                 }),
             }),
             drop: tx,
         }
+    }
+
+    /// Returns metrics for the connection pool.
+    pub fn metrics(&self) -> Arc<Metrics> {
+        self.inner.metrics.clone()
     }
 
     /// Creates a new pool of connections.
@@ -238,9 +188,8 @@ impl Pool {
     }
 
     /// Async function that resolves to `Conn`.
-    pub fn get_conn(&self) -> GetConn {
-        let reset_connection = self.opts.pool_opts().reset_connection();
-        GetConn::new(self, reset_connection)
+    pub fn get_conn(&self) -> impl Future<Output = Result<Conn>> {
+        get_conn(self.clone())
     }
 
     /// Starts a new transaction.
@@ -252,15 +201,19 @@ impl Pool {
     /// Async function that disconnects this pool from the server and resolves to `()`.
     ///
     /// **Note:** This Future won't resolve until all active connections, taken from it,
-    /// are dropped or disonnected. Also all pending and new `GetConn`'s will resolve to error.
-    pub fn disconnect(self) -> DisconnectPool {
-        DisconnectPool::new(self)
+    /// are dropped or disonnected. Also all pending and new `get_conn()`'s will resolve to error.
+    pub async fn disconnect(self) -> Result<()> {
+        disconnect_pool(self).await
     }
 
     /// A way to return connection taken from a pool.
     fn return_conn(&mut self, conn: Conn) {
         // NOTE: we're not in async context here, so we can't block or return NotReady
         // any and all cleanup work _has_ to be done in the spawned recycler
+        self.inner
+            .metrics
+            .connections_in_use
+            .fetch_sub(1, Ordering::Relaxed);
         self.send_to_recycler(conn);
     }
 
@@ -288,10 +241,16 @@ impl Pool {
     pub(super) fn cancel_connection(&self) {
         let mut exchange = self.inner.exchange.lock().unwrap();
         exchange.exist -= 1;
+        self.inner
+            .metrics
+            .create_failed
+            .fetch_add(1, atomic::Ordering::Relaxed);
+        self.inner
+            .metrics
+            .connection_count
+            .store(exchange.exist, atomic::Ordering::Relaxed);
         // we just enabled the creation of a new connection!
-        if let Some(w) = exchange.waiting.pop() {
-            w.wake();
-        }
+        exchange.waiting.wake();
     }
 
     /// Poll the pool for an available connection.
@@ -324,11 +283,30 @@ impl Pool {
             return Poll::Pending;
         }
 
-        while let Some(IdlingConn { mut conn, .. }) = exchange.available.pop_back() {
+        #[allow(unused_variables)] // `since` is only used when `hdrhistogram` is enabled
+        while let Some(IdlingConn { mut conn, since }) = exchange.available.pop_back() {
             if !conn.expired() {
+                #[cfg(feature = "hdrhistogram")]
+                self.inner
+                    .metrics
+                    .connection_idle_duration
+                    .lock()
+                    .unwrap()
+                    .record(since.elapsed().as_micros() as u64)
+                    .ok();
+                #[cfg(feature = "hdrhistogram")]
+                let metrics = self.metrics();
+                conn.inner.active_since = Instant::now();
                 return Poll::Ready(Ok(GetConnInner::Checking(
                     async move {
                         conn.stream_mut()?.check().await?;
+                        #[cfg(feature = "hdrhistogram")]
+                        metrics
+                            .check_duration
+                            .lock()
+                            .unwrap()
+                            .record(conn.inner.active_since.elapsed().as_micros() as u64)
+                            .ok();
                         Ok(conn)
                     }
                     .boxed(),
@@ -344,8 +322,30 @@ impl Pool {
             // we are allowed to make a new connection, so we will!
             exchange.exist += 1;
 
+            self.inner
+                .metrics
+                .connection_count
+                .store(exchange.exist, atomic::Ordering::Relaxed);
+
+            let opts = self.opts.clone();
+            #[cfg(feature = "hdrhistogram")]
+            let metrics = self.metrics();
+
             return Poll::Ready(Ok(GetConnInner::Connecting(
-                Conn::new(self.opts.clone()).boxed(),
+                async move {
+                    let conn = Conn::new(opts).await;
+                    #[cfg(feature = "hdrhistogram")]
+                    if let Ok(conn) = &conn {
+                        metrics
+                            .connect_duration
+                            .lock()
+                            .unwrap()
+                            .record(conn.inner.active_since.elapsed().as_micros() as u64)
+                            .ok();
+                    }
+                    conn
+                }
+                .boxed(),
             )));
         }
 
@@ -367,6 +367,10 @@ impl Drop for Conn {
         if std::thread::panicking() {
             // Try to decrease the number of existing connections.
             if let Some(pool) = self.inner.pool.take() {
+                pool.inner
+                    .metrics
+                    .connections_in_use
+                    .fetch_sub(1, Ordering::Relaxed);
                 pool.cancel_connection();
             }
 
@@ -391,20 +395,16 @@ mod test {
     use waker_fn::waker_fn;
 
     use std::{
-        cmp::Reverse,
         future::Future,
         pin::pin,
         sync::{Arc, OnceLock},
-        task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+        task::{Context, Poll},
         time::Duration,
     };
 
     use crate::{
-        conn::pool::{Pool, QueueId, Waitlist, QUEUE_END_ID},
-        opts::PoolOpts,
-        prelude::*,
-        test_misc::get_opts,
-        PoolConstraints, Row, TxOpts, Value,
+        conn::pool::Pool, opts::PoolOpts, prelude::*, test_misc::get_opts, PoolConstraints, Row,
+        TxOpts, Value,
     };
 
     macro_rules! conn_ex_field {
@@ -933,7 +933,14 @@ mod test {
         }
         drop(only_conn);
 
-        assert_eq!(0, pool.inner.exchange.lock().unwrap().waiting.queue.len());
+        assert_eq!(0, pool.inner.exchange.lock().unwrap().waiting.len());
+        // metrics should catch up with waiting queue (see #335)
+        assert_eq!(
+            0,
+            pool.metrics()
+                .active_wait_requests
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
     }
 
     #[tokio::test]
@@ -978,40 +985,6 @@ mod test {
             sleep(Duration::from_millis(100)).await;
         }
         Ok(())
-    }
-
-    #[test]
-    fn waitlist_integrity() {
-        const DATA: *const () = &();
-        const NOOP_CLONE_FN: unsafe fn(*const ()) -> RawWaker = |_| RawWaker::new(DATA, &RW_VTABLE);
-        const NOOP_FN: unsafe fn(*const ()) = |_| {};
-        static RW_VTABLE: RawWakerVTable =
-            RawWakerVTable::new(NOOP_CLONE_FN, NOOP_FN, NOOP_FN, NOOP_FN);
-        let w = unsafe { Waker::from_raw(RawWaker::new(DATA, &RW_VTABLE)) };
-
-        let mut waitlist = Waitlist::default();
-        assert_eq!(0, waitlist.queue.len());
-
-        waitlist.push(w.clone(), QueueId(Reverse(4)));
-        waitlist.push(w.clone(), QueueId(Reverse(2)));
-        waitlist.push(w.clone(), QueueId(Reverse(8)));
-        waitlist.push(w.clone(), QUEUE_END_ID);
-        waitlist.push(w.clone(), QueueId(Reverse(10)));
-
-        waitlist.remove(QueueId(Reverse(8)));
-
-        assert_eq!(4, waitlist.queue.len());
-
-        let (_, id) = waitlist.queue.pop().unwrap();
-        assert_eq!(2, id.0 .0);
-        let (_, id) = waitlist.queue.pop().unwrap();
-        assert_eq!(4, id.0 .0);
-        let (_, id) = waitlist.queue.pop().unwrap();
-        assert_eq!(10, id.0 .0);
-        let (_, id) = waitlist.queue.pop().unwrap();
-        assert_eq!(QUEUE_END_ID, id);
-
-        assert_eq!(0, waitlist.queue.len());
     }
 
     #[tokio::test]
@@ -1095,7 +1068,7 @@ mod test {
 
         let queue_len = || {
             let exchange = pool.inner.exchange.lock().unwrap();
-            exchange.waiting.queue.len()
+            exchange.waiting.len()
         };
 
         // Get a connection, so we know the next futures will be
@@ -1152,6 +1125,89 @@ mod test {
         fut3.await;
 
         Ok(())
+    }
+
+    #[cfg(feature = "hdrhistogram")]
+    #[tokio::test]
+    async fn metrics() -> super::Result<()> {
+        let pool = pool_with_one_connection();
+
+        let metrics = pool.metrics();
+        let conn = pool.get_conn().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(conn);
+        pool.get_conn().await.unwrap();
+
+        let max = metrics.connection_active_duration.lock().unwrap().max();
+        // We slept for 100 miliseconds holding a conneciton.
+        assert!(max > 100_000);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connection_in_use_metric() {
+        let pool = pool_with_one_connection();
+        let metrics = pool.metrics();
+
+        let conn = pool.get_conn().await.unwrap();
+        assert_eq!(
+            metrics
+                .connections_in_use
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+
+        drop(conn);
+        assert_eq!(
+            metrics
+                .connections_in_use
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        loop {
+            if metrics
+                .connections_in_pool
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Ensure that we increase the connections in use metric when we get a connection from the pool
+        let conn = pool.get_conn().await.unwrap();
+        assert_eq!(
+            metrics
+                .connections_in_use
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics
+                .connections_in_pool
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+
+        drop(conn);
+        assert_eq!(
+            metrics
+                .connections_in_use
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        loop {
+            if metrics
+                .connections_in_pool
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     #[cfg(feature = "nightly")]
