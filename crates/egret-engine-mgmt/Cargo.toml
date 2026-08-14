@@ -30,6 +30,12 @@ egret-orchestrator.workspace = true
 # `egret_query::DatabaseRepo`. Cycle-checked: egret-query does NOT depend on
 # egret-engine-mgmt, so this edge is acyclic.
 egret-query.workspace = true
+# Dialect-aware SQL literal escaping (`quote_string`). The StarRocks
+# `CREATE USER` DDL below builds single-quoted literals that run as `root` on
+# the FE, so it shares the one workspace implementation of the escaping rule
+# rather than carrying a fourth private copy of it. Pure leaf crate (egret-core,
+# serde, uuid, utoipa) — no cycle, no runtime weight.
+egret-query-api.workspace = true
 # OpenAPI emit (E0·P4b-9): `#[utoipa::path]` on the engines + monitor handlers +
 # co-located `#[derive(utoipa::OpenApi)]` doc structs merged into the top-level
 # API doc via `egret_engine_mgmt::openapi()`.

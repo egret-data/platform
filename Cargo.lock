@@ -2918,6 +2918,7 @@ dependencies = [
  "egret-policy",
  "egret-policy-api",
  "egret-query",
+ "egret-query-api",
  "egret-secrets",
  "egret-storage",
  "futures-util",

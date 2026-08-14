@@ -156,7 +156,7 @@ async fn submit(
     };
     // Substitute {{param}} placeholders with typed, escaped literals (400 on a
     // missing/invalid parameter) before the SQL reaches the engine.
-    let rendered = crate::execution::template::render(&body.sql, &body.params)
+    let rendered = crate::execution::template::render(db.engine, &body.sql, &body.params)
         .map_err(|m| EngineApiError::from(egret_core::Error::InvalidInput(m)))?;
     let id = st
         .jobs

@@ -131,3 +131,53 @@ async fn starrocks_jwt_auth_current_user() {
     eprintln!("current_user = {:?}", r.rows[0][0]);
     assert_eq!(r.row_count, 1);
 }
+
+/// The rendered literal must be inert on a real StarRocks, not merely
+/// inert-looking as a Rust string. Injected, `OR 1=1` would make the count 1.
+#[tokio::test]
+async fn starrocks_rendered_param_cannot_inject() {
+    let Some((h, p)) = parse() else {
+        eprintln!("skip");
+        return;
+    };
+    let c = build_connector(&spec(&h, p));
+    let limits = Limits {
+        max_rows: 10,
+        timeout: Duration::from_secs(30),
+    };
+
+    let sql = template_render_starrocks(
+        "SELECT count(*) AS n FROM (SELECT 'a' AS c) t WHERE t.c = {{c}}",
+        r"\' OR 1=1 -- ",
+    );
+
+    let r = c
+        .execute(&sql, &limits, CancellationToken::new())
+        .await
+        .expect("query must parse and run — a parse error means the literal broke out");
+
+    // 'a' never equals the attacker string, so the only correct answer is 0.
+    // A 1 here means `OR 1=1` executed.
+    assert_eq!(r.rows.len(), 1, "count() returns exactly one row");
+    assert_eq!(
+        r.rows[0][0],
+        serde_json::json!(0),
+        "injected predicate took effect: {sql}"
+    );
+}
+
+fn template_render_starrocks(sql: &str, value: &str) -> String {
+    use egret_query::execution::model::QueryParam;
+    use egret_query::execution::template::render;
+    use egret_query::registry::model::Engine;
+    render(
+        Engine::StarRocks,
+        sql,
+        &[QueryParam {
+            name: "c".into(),
+            ty: "string".into(),
+            value: value.into(),
+        }],
+    )
+    .expect("render must succeed")
+}
