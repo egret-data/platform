@@ -24,26 +24,35 @@ Data API lấp khoảng trống đó: thành viên workspace viết một câu S
 
 ## 3. Điều kiện tiên quyết — escaping tham số hiện không an toàn cho bề mặt công khai
 
-`crates/egret-query/src/execution/template.rs:62` render tham số string như sau:
+Có **hai** helper anh em cùng render một giá trị string thành SQL literal, và cả hai đều mù backslash:
+
+- `literal` — `crates/egret-query/src/execution/template.rs:62` (SQL Lab `{{param}}`)
+- `sql_literal` — `crates/egret-bi/src/chartquery.rs:135` (giá trị filter của chart và dashboard), mà chính doc comment của nó gọi là "the security-critical primitive"
+
+Cả hai đều làm:
 
 ```rust
-_ => Ok(format!("'{}'", p.value.replace('\'', "''"))),
+format!("'{}'", value.replace('\'', "''"))
 ```
 
-Chỉ nhân đôi dấu nháy đơn, **bỏ qua backslash**. StarRocks theo dialect MySQL và mặc định không bật `NO_BACKSLASH_ESCAPES`, nên `\` là ký tự escape và `\'` thoát ra khỏi literal. Trino không bị ảnh hưởng (nó không xử lý backslash escape trong string literal chuẩn).
+Chúng chỉ nhân đôi dấu nháy đơn, **bỏ qua backslash**.
+
+Đây là sự không nhất quán giữa các helper anh em chứ không phải điểm mù: `like_literal` (`crates/egret-bi/src/schema.rs:161`) và `sr_escape_dq` (`crates/egret-engine-mgmt/src/engines.rs:3062`) đều đã escape `\` đúng. `sql_literal` với tới được bằng quyền BI thấp nhất (`CH_READ`), nên hiện tại nó là chỗ phơi nhiễm nhiều hơn trong hai chỗ. StarRocks theo dialect MySQL và mặc định không bật `NO_BACKSLASH_ESCAPES`, nên `\` là ký tự escape và `\'` thoát ra khỏi literal. Trino không bị ảnh hưởng (nó không xử lý backslash escape trong string literal chuẩn).
 
 Hiện tại lỗ hổng này chỉ với tới được bởi người dùng đã xác thực có quyền SQL Lab. Data API sẽ đưa **chính đường render đó ra Internet công khai sau một API key**. Vì vậy bản vá thuộc phạm vi v1, không phải việc làm sau.
 
-Unit test hiện có `string_param_neutralizes_injection` (`template.rs:93`) xanh dù lỗ hổng còn hay đã hết — nó chỉ phủ ca kinh điển `' OR '1'='1`. Đó không phải bằng chứng.
+Unit test hiện có ở cả hai chỗ — `string_param_neutralizes_injection` (`template.rs:93`) và `sql_literal_encodes_by_type` (`chartquery.rs:684`) — đều xanh dù lỗ hổng còn hay đã hết, vì không test nào dùng giá trị có chứa backslash. Chúng không phải bằng chứng.
 
 `Connector::execute` (`crates/egret-query/src/execution/connector/mod.rs:70`) nhận `sql: &str` và không có đường bound parameter, nên không thể sửa bằng cách "cứ dùng prepared statement" mà không đổi trait.
 
-**Bản vá (v1):** tách `literal()` thành escaper theo dialect trong `egret-query`, tham số hóa theo `Engine`:
+**Bản vá (v1):** một escaper theo dialect duy nhất đặt trong **`egret-query-api`**, tham số hóa theo `Engine`, được gọi bởi cả hai chỗ. Đặt ở contract crate thay vì `egret-query` vì `Engine` vốn đã nằm đó và `egret-bi` cũng phụ thuộc vào nó — như vậy giữ được một implementation duy nhất thay vì hai bản có thể trôi khỏi nhau, mà đó chính là cách sự không nhất quán này phát sinh ngay từ đầu. Crate này là leaf thuần (serde, uuid, utoipa, egret-core), còn escaper là thao tác chuỗi thuần túy, nên không kéo theo gì cả.
 
 - **Trino** — chỉ nhân đôi `'` (hành vi hiện tại, vốn đã đúng cho Trino).
 - **StarRocks** — escape `\` → `\\` và `'` → `''`. Nháy đơn được nhân đôi thay vì escape bằng backslash chính là để hai lượt thay thế độc lập với thứ tự: lượt quote không sinh ra backslash nào, lượt backslash không sinh ra quote nào. Nếu dùng dạng `\'` thì lượt backslash bắt buộc phải chạy trước, nếu không nó sẽ phá hỏng phần quote mà lượt kia vừa tạo ra — một sự mong manh đáng được thiết kế cho biến mất thay vì chỉ ghi chú lại.
 
-Vì bản vá nằm trong `egret-query`, SQL Lab được vá bằng chính thay đổi đó.
+Vì bản vá nằm trong contract crate dùng chung, SQL Lab **và** filter của chart/dashboard được vá bằng chính thay đổi đó.
+
+Một chỗ thứ ba, `starrocks_create_service_user_sql` (`crates/egret-engine-mgmt/src/engines.rs:3229`), có cùng lỗ hổng. Hiện tại nó tiềm ẩn vì username mà nó nội suy là hằng số, nên nằm ngoài phạm vi ở đây — nhưng nên vá kèm luôn thay vì để nó thành chỗ tiếp theo bị phát hiện.
 
 **Cố ý hoãn:** bound parameter ở tầng connector. StarRocks (`mysql_async`) hỗ trợ trực tiếp; Trino cần `X-Trino-Prepared-Statement` + `EXECUTE … USING`. Đó là thay đổi trait `Connector` đủ lớn để thành dự án riêng. Escaper theo dialect nằm sau một hàm duy nhất nên thay thế được ở một chỗ.
 

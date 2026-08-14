@@ -7,15 +7,16 @@
 > Spec: `docs/en/specs/2026-08-14-data-api-design.md` §3
 > Part: P1 of 5 — see `docs/en/plans/2026-08-14-data-api-decomposition.md`
 
-**Goal:** make `{{param}}` substitution safe on StarRocks, closing an injection hole that is open in SQL Lab today and would be exposed publicly by Data API.
+**Goal:** make SQL string-literal escaping safe on StarRocks at both sites that produce one, closing an injection hole that is open in SQL Lab and chart/dashboard filters today and would be exposed publicly by Data API.
 
-**Architecture:** `template.rs` currently renders string parameters by doubling `'` only. StarRocks is MySQL-dialect and treats `\` as an escape character, so `\'` breaks out of the literal. Move literal rendering into a new `dialect.rs` keyed on `Engine`, thread the engine through `render()`, and prove the fix with both a unit test that fails against the old code and a live StarRocks test.
+**Architecture:** two sibling helpers — `template::literal` in `egret-query` and `sql_literal` in `egret-bi` — both render a string by doubling `'` only. StarRocks is MySQL-dialect and treats `\` as an escape character, so `\'` breaks out of the literal. Replace both with one `quote_string(engine, value)` in the shared contract crate `egret-query-api`, thread `Engine` through each caller, and prove the fix with unit tests that fail against the old code plus a live StarRocks test.
 
 **Tech Stack:** Rust · sqlx · axum · StarRocks (mysql_async) · Trino.
 
 ## Global Constraints
 
-- This plan ships on its own and must merge **before** Data API P2–P5. It is a security fix with independent value: SQL Lab is patched by the same change.
+- This plan ships on its own and must merge **before** Data API P2–P5. It is a security fix with independent value: SQL Lab and BI filters are patched by the same change.
+- The escaper lives in `egret-query-api`, not `egret-query`. `Engine` already lives there and `egret-bi` already depends on it, so both callers reach one implementation. Two copies are what produced this inconsistency originally — do not create a third.
 - Trino behaviour must not change. Trino does not process backslash escapes in standard string literals; doubling backslashes there would silently corrupt legitimate values (Windows paths, regexes).
 - Quotes are escaped as `''`, never `\'`. This keeps the backslash and quote passes order-independent — the quote pass emits no backslash, the backslash pass emits no quote.
 - Parameters render values only, never identifiers. This plan does not add identifier support.
@@ -26,27 +27,28 @@
 
 | File | Responsibility |
 |---|---|
-| `crates/egret-query/src/execution/dialect.rs` (create) | The only place a SQL string literal is quoted. One function, keyed on `Engine`. |
-| `crates/egret-query/src/execution/template.rs` (modify) | Placeholder scanning + parameter lookup. Delegates literal rendering to `dialect.rs`; no longer knows escaping rules. |
-| `crates/egret-query/src/execution/mod.rs` (modify) | Declare the new `dialect` module. |
+| `crates/egret-query-api/src/dialect.rs` (create) | The only place a SQL string literal is quoted, for the whole workspace. One function, keyed on `Engine`. |
+| `crates/egret-query-api/src/lib.rs` (modify) | Declare and re-export the `dialect` module. |
+| `crates/egret-query/src/execution/template.rs` (modify) | Placeholder scanning + parameter lookup. Delegates literal rendering; no longer knows escaping rules. |
 | `crates/egret-query/src/execution/routes.rs:159` (modify) | Pass `db.engine` into `render()`. `db` is already in scope at line 118. |
 | `crates/egret-query/tests/connector_starrocks.rs` (modify) | Live proof that the escaped literal is inert on a real StarRocks. |
+| `crates/egret-bi/src/chartquery.rs` (modify) | `sql_literal` takes `Engine` and delegates. Both call sites (lines 333, 344) already have `engine` in scope. |
 
 ---
 
 ### Task 1: Dialect-aware literal escaping
 
 **Files:**
-- Create: `crates/egret-query/src/execution/dialect.rs`
-- Modify: `crates/egret-query/src/execution/mod.rs`
+- Create: `crates/egret-query-api/src/dialect.rs`
+- Modify: `crates/egret-query-api/src/lib.rs`
 - Modify: `crates/egret-query/src/execution/template.rs`
 - Modify: `crates/egret-query/src/execution/routes.rs` (line 159)
 - Test: `crates/egret-query/src/execution/template.rs` (inline `#[cfg(test)] mod tests`)
 
 **Interfaces:**
-- Consumes: `crate::registry::model::Engine` (re-exported from `egret_query_api`; variants `Trino`, `StarRocks`), `crate::execution::model::QueryParam` (fields `name: String`, `ty: String`, `value: String`).
+- Consumes: `egret_query_api::Engine` (variants `Trino`, `StarRocks`; reachable inside `egret-query` as `crate::registry::model::Engine`), `crate::execution::model::QueryParam` (fields `name: String`, `ty: String`, `value: String`).
 - Produces:
-  - `pub fn dialect::quote_string(engine: Engine, value: &str) -> String`
+  - `pub fn egret_query_api::quote_string(engine: Engine, value: &str) -> String` — also used by Task 3.
   - `pub fn template::render(engine: Engine, sql: &str, params: &[QueryParam]) -> Result<String, String>` — **signature change**, `engine` is a new first parameter.
 
 - [ ] **Step 1: Write the failing tests**
@@ -166,13 +168,13 @@ Run: `cargo test -p egret-query --lib execution::template`
 
 Expected: compile error — `render` takes 2 arguments but 3 were supplied, and `dialect` does not exist. That compile failure IS the red state; do not proceed until you have seen it.
 
-- [ ] **Step 3: Create the dialect module**
+- [ ] **Step 3: Create the dialect module in the contract crate**
 
-Create `crates/egret-query/src/execution/dialect.rs`:
+Create `crates/egret-query-api/src/dialect.rs`:
 
 ```rust
-//! Dialect-aware SQL literal escaping — the only place a string value becomes a
-//! SQL literal.
+//! Dialect-aware SQL literal escaping — the only place in the workspace where a
+//! string value becomes a SQL literal.
 //!
 //! Trino does not process backslash escapes inside standard string literals, so
 //! doubling `'` is sufficient and doubling `\` would corrupt the value. StarRocks
@@ -183,8 +185,12 @@ Create `crates/egret-query/src/execution/dialect.rs`:
 //! Quotes are escaped as `''` rather than `\'` on purpose: that keeps the two
 //! substitution passes order-independent, because the quote pass emits no
 //! backslash and the backslash pass emits no quote.
+//!
+//! This lives in the contract crate, not in `egret-query`, so that `egret-query`
+//! (SQL Lab) and `egret-bi` (chart/dashboard filters) share one implementation.
+//! Two copies of this rule are what allowed them to drift apart.
 
-use crate::registry::model::Engine;
+use crate::Engine;
 
 /// Quote and escape `value` as a SQL string literal for `engine`.
 pub fn quote_string(engine: Engine, value: &str) -> String {
@@ -198,12 +204,13 @@ pub fn quote_string(engine: Engine, value: &str) -> String {
 }
 ```
 
-- [ ] **Step 4: Declare the module**
+- [ ] **Step 4: Declare and re-export the module**
 
-In `crates/egret-query/src/execution/mod.rs`, add the declaration next to the existing `mod template;` line, keeping the list alphabetical if it already is:
+In `crates/egret-query-api/src/lib.rs`, add near the top of the file, after the existing `pub use egret_core::{ColumnMeta, TabularResult};` line:
 
 ```rust
 pub mod dialect;
+pub use dialect::quote_string;
 ```
 
 - [ ] **Step 5: Thread the engine through `render` and `literal`**
@@ -218,11 +225,11 @@ In `crates/egret-query/src/execution/template.rs`, change the module doc, the `r
 //! engine's dialect, number / boolean → validated), so a parameter value can
 //! never inject SQL.
 //!
-//! Escaping rules live in [`crate::execution::dialect`], not here.
+//! Escaping rules live in [`egret_query_api::dialect`], not here.
 
 use super::model::QueryParam;
-use crate::execution::dialect::quote_string;
 use crate::registry::model::Engine;
+use egret_query_api::quote_string;
 
 /// Render `{{ name }}` placeholders in `sql` using `params`, escaping string
 /// values for `engine`'s dialect. Returns an error naming the first unknown
@@ -313,7 +320,7 @@ Expected: builds clean. If another call site appears, pass the `Engine` it has i
 
 - [ ] **Step 8: Verify the test is real by mutating the implementation**
 
-A test that passes with and without the fix is not evidence — that is exactly how this hole survived the first time. Temporarily change `dialect.rs` so `Engine::StarRocks` uses the Trino arm:
+A test that passes with and without the fix is not evidence — that is exactly how this hole survived the first time. Temporarily change `crates/egret-query-api/src/dialect.rs` so `Engine::StarRocks` uses the Trino arm:
 
 ```rust
         Engine::StarRocks => format!("'{}'", value.replace('\'', "''")),
@@ -328,8 +335,8 @@ Then revert the mutation and re-run to confirm green again.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add crates/egret-query/src/execution/dialect.rs \
-        crates/egret-query/src/execution/mod.rs \
+git add crates/egret-query-api/src/dialect.rs \
+        crates/egret-query-api/src/lib.rs \
         crates/egret-query/src/execution/template.rs \
         crates/egret-query/src/execution/routes.rs
 git commit -m "fix(query): escape backslashes in StarRocks string literals
@@ -420,7 +427,7 @@ fn template_render_starrocks(sql: &str, value: &str) -> String {
 
 Run: `cargo test -p egret-query --test connector_starrocks --no-run`
 
-Expected: compiles. If `template` or `dialect` is private, make the module `pub` in `crates/egret-query/src/execution/mod.rs` (`pub mod template;`) rather than duplicating the escaping logic into the test — a test that reimplements the thing it tests proves nothing.
+Expected: compiles. If `template` is private, make it `pub` in `crates/egret-query/src/execution/mod.rs` (`pub mod template;`) rather than duplicating the escaping logic into the test — a test that reimplements the thing it tests proves nothing.
 
 - [ ] **Step 3: Run against a real StarRocks and verify it passes**
 
@@ -441,7 +448,7 @@ Expected: PASS. If you see "skipping", the env var did not reach the test — a 
 
 - [ ] **Step 4: Verify the test is real by mutating the implementation**
 
-Apply the same mutation as Task 1 Step 8 (`Engine::StarRocks` arm rendering like Trino) and re-run Step 3.
+Apply the same mutation as Task 1 Step 8 (in `crates/egret-query-api/src/dialect.rs`, `Engine::StarRocks` rendering like Trino) and re-run Step 3.
 
 Expected: FAILS, and the failure is either the `assert_eq!` reporting `1` instead of `0`, or the `.expect(...)` on a parse error. Either failure proves the test observes the real behaviour. Revert the mutation and re-run to confirm green.
 
@@ -468,15 +475,188 @@ EGRET_TEST_STARROCKS_URL is set, matching the file's convention."
 
 ---
 
+### Task 3: Close the same hole in BI filter values
+
+**Files:**
+- Modify: `crates/egret-bi/src/chartquery.rs` (`sql_literal` at line 135; call sites at lines 333 and 344)
+- Test: `crates/egret-bi/src/chartquery.rs` (inline `#[cfg(test)] mod tests`)
+
+**Interfaces:**
+- Consumes: `egret_query_api::quote_string` and `egret_query_api::Engine` from Task 1. `egret-bi` already depends on `egret-query-api`, so no `Cargo.toml` change is needed.
+- Produces: `pub(crate) fn sql_literal(engine: Engine, v: &serde_json::Value, type_generic: &str) -> Result<String, BiError>` — **signature change**, `engine` is a new first parameter.
+
+This is the more exposed of the two sites: its own doc comment calls it "the security-critical primitive", and it is reachable with the lowest BI permission (`CH_READ`) through chart and dashboard filter values.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `crates/egret-bi/src/chartquery.rs`, replace the existing `sql_literal_encodes_by_type` test with the version below and add the two new tests after it. Every existing assertion gains an `Engine` argument.
+
+```rust
+    #[test]
+    fn sql_literal_encodes_by_type() {
+        use egret_query_api::Engine;
+        let e = Engine::Trino;
+        assert_eq!(sql_literal(e, &json!(42), "numeric").unwrap(), "42");
+        assert_eq!(sql_literal(e, &json!("42"), "numeric").unwrap(), "42");
+        assert!(sql_literal(e, &json!("nope"), "numeric").is_err());
+        assert_eq!(sql_literal(e, &json!(true), "boolean").unwrap(), "TRUE");
+        assert_eq!(sql_literal(e, &json!("hi"), "string").unwrap(), "'hi'");
+        // injection attempt stays safely quoted
+        assert_eq!(
+            sql_literal(e, &json!("a' OR '1'='1"), "string").unwrap(),
+            "'a'' OR ''1''=''1'"
+        );
+    }
+
+    #[test]
+    fn sql_literal_starrocks_escapes_backslash() {
+        use egret_query_api::Engine;
+        // A dashboard filter value reaches here with only CH_READ. Doubling the
+        // quote alone would render '\'' OR 1=1 -- ', where StarRocks reads \' as a
+        // literal quote and the next ' closes the string.
+        assert_eq!(
+            sql_literal(Engine::StarRocks, &json!(r"\' OR 1=1 -- "), "string").unwrap(),
+            r"'\\'' OR 1=1 -- '"
+        );
+    }
+
+    #[test]
+    fn sql_literal_trino_leaves_backslash_alone() {
+        use egret_query_api::Engine;
+        // Trino has no backslash escape in standard literals; doubling it here
+        // would corrupt ordinary filter values.
+        assert_eq!(
+            sql_literal(Engine::Trino, &json!(r"a\b"), "string").unwrap(),
+            r"'a\b'"
+        );
+    }
+```
+
+- [ ] **Step 2: Run the tests and verify they fail**
+
+Run: `cargo test -p egret-bi --lib chartquery::tests::sql_literal`
+
+Expected: compile error — `sql_literal` takes 2 arguments but 3 were supplied. That compile failure is the red state.
+
+- [ ] **Step 3: Thread `Engine` through `sql_literal`**
+
+In `crates/egret-bi/src/chartquery.rs`, change the signature at line 135 and the fall-through arm that quotes strings. Keep the numeric and boolean arms exactly as they are — they emit no quotes and need no engine.
+
+```rust
+/// Encode a filter value as a SQL literal, validated by the target column's generic type.
+/// Numerics are validated and emitted unquoted; booleans normalized; everything else is
+/// quoted and escaped for `engine`'s dialect. This is the security-critical primitive.
+pub(crate) fn sql_literal(
+    engine: Engine,
+    v: &serde_json::Value,
+    type_generic: &str,
+) -> Result<String, BiError> {
+```
+
+Then replace the final string-quoting arm — the one currently building `format!("'{}'", s.replace('\'', "''"))` — with:
+
+```rust
+        _ => {
+            let s = match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            Ok(egret_query_api::quote_string(engine, &s))
+        }
+```
+
+Add the import at the top of the file if `Engine` is not already in scope:
+
+```rust
+use egret_query_api::Engine;
+```
+
+- [ ] **Step 4: Update both call sites**
+
+Lines 333 and 344 already have `engine` in scope — they pass it to `cast_temporal` on the very same line. Change:
+
+```rust
+                .map(|v| sql_literal(v, tg).map(|l| cast_temporal(engine, c, l)))
+```
+
+to:
+
+```rust
+                .map(|v| sql_literal(engine, v, tg).map(|l| cast_temporal(engine, c, l)))
+```
+
+and:
+
+```rust
+            let lit = cast_temporal(engine, c, sql_literal(&f.value, tg)?);
+```
+
+to:
+
+```rust
+            let lit = cast_temporal(engine, c, sql_literal(engine, &f.value, tg)?);
+```
+
+- [ ] **Step 5: Run the tests and verify they pass**
+
+Run: `cargo test -p egret-bi --lib chartquery`
+
+Expected: PASS. Then check for any call site not covered above:
+
+Run: `cargo build -p egret-bi --all-targets`
+
+Expected: builds clean. As in Task 1, never pass `Engine::Trino` just to make a call site compile.
+
+- [ ] **Step 6: Verify the tests are real by mutating the implementation**
+
+Apply the Task 1 Step 8 mutation again (`Engine::StarRocks` rendering like Trino in `crates/egret-query-api/src/dialect.rs`).
+
+Run: `cargo test -p egret-bi --lib chartquery`
+
+Expected: `sql_literal_starrocks_escapes_backslash` FAILS. Revert and confirm green.
+
+- [ ] **Step 7: Full workspace check**
+
+```bash
+just check
+cargo test -p egret-query -p egret-bi
+```
+
+Expected: fmt clean, clippy clean, both suites green. Run these sequentially, never two workspace suites at once.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add crates/egret-bi/src/chartquery.rs
+git commit -m "fix(bi): escape backslashes in StarRocks filter literals
+
+sql_literal had the same backslash-blind escaping as template.rs, and is
+the more exposed of the two: it is reachable with CH_READ alone through
+chart and dashboard filter values. It now delegates to the shared
+quote_string and takes the engine, which both call sites already had in
+scope."
+```
+
+---
+
 ## Done when
 
-- `cargo test -p egret-query` green, and the StarRocks test green with `EGRET_TEST_STARROCKS_URL` set.
-- Both new tests have been observed to FAIL against a mutated implementation (Task 1 Step 8, Task 2 Step 4). This is the acceptance criterion that matters — green tests alone do not close this out.
+- `cargo test -p egret-query -p egret-bi` green, and the StarRocks test green with `EGRET_TEST_STARROCKS_URL` set.
+- All three new tests have been observed to FAIL against a mutated implementation (Task 1 Step 8, Task 2 Step 4, Task 3 Step 6). This is the acceptance criterion that matters — green tests alone do not close this out.
 - `just check` clean.
-- Trino behaviour byte-identical to before: `trino_leaves_backslash_alone` covers the regression, and no Trino-facing output changed.
+- Exactly one implementation of string-literal quoting remains in the workspace. Confirm with:
+
+```bash
+rg "replace\('\\\\''" crates/
+```
+
+Expected: hits only `crates/egret-query-api/src/dialect.rs`. Any other hit is a third copy waiting to drift.
+
+- Trino behaviour byte-identical to before: `trino_leaves_backslash_alone` and `sql_literal_trino_leaves_backslash_alone` cover the regression on both sites.
 
 ## Not in this plan
 
 - Bound parameters at the connector layer (`Connector::execute` takes `sql: &str`). StarRocks could use `mysql_async` binding directly; Trino needs `X-Trino-Prepared-Statement` + `EXECUTE … USING`. That is a `Connector` trait change and its own project. `quote_string` is a single function so it can be replaced in one place.
 - Identifier parameters (dynamic column / table names). Spec §3 requires these to be `enum` parameters with an allow-list; that lands with the Data API parameter model in P3.
 - `sql_mode = NO_BACKSLASH_ESCAPES` on StarRocks connections. It would be defence in depth, but changing session `sql_mode` alters parsing for every other query on that connection, so it needs its own evaluation rather than a drive-by.
+- `starrocks_create_service_user_sql` (`crates/egret-engine-mgmt/src/engines.rs:3229`) has the same gap and its doc comment notes it runs as **root**. It is latent because the username it interpolates is a constant, so it is not a live vulnerability and not a blocker for Data API. It should get its own small PR rather than being smuggled into this one — but it should not be forgotten, because the next person to make that username dynamic inherits a root-level injection.

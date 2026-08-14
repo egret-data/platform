@@ -22,26 +22,35 @@ Data API closes that gap: a workspace member authors a parameterized SELECT, pub
 
 ## 3. Blocking prerequisite — parameter escaping is unsafe for a public surface
 
-`crates/egret-query/src/execution/template.rs:62` renders string parameters as:
+**Two** sibling helpers render a string value as a SQL literal, and both are backslash-blind:
+
+- `literal` — `crates/egret-query/src/execution/template.rs:62` (SQL Lab `{{param}}`)
+- `sql_literal` — `crates/egret-bi/src/chartquery.rs:135` (chart and dashboard filter values), whose own doc comment calls it "the security-critical primitive"
+
+Both do:
 
 ```rust
-_ => Ok(format!("'{}'", p.value.replace('\'', "''"))),
+format!("'{}'", value.replace('\'', "''"))
 ```
 
-It doubles single quotes only and **ignores backslash**. StarRocks is MySQL-dialect and by default does not set `NO_BACKSLASH_ESCAPES`, so `\` is an escape character and `\'` breaks out of the literal. Trino is unaffected (it does not process backslash escapes in standard string literals).
+They double single quotes only and **ignore backslash**.
+
+This is an inconsistency between siblings rather than a blind spot: `like_literal` (`crates/egret-bi/src/schema.rs:161`) and `sr_escape_dq` (`crates/egret-engine-mgmt/src/engines.rs:3062`) already escape `\` correctly. `sql_literal` is reachable with the lowest BI permission (`CH_READ`), which makes it the more exposed of the two today. StarRocks is MySQL-dialect and by default does not set `NO_BACKSLASH_ESCAPES`, so `\` is an escape character and `\'` breaks out of the literal. Trino is unaffected (it does not process backslash escapes in standard string literals).
 
 Today this is reachable only by an authenticated user with SQL Lab access. Data API would put the same render path **behind an API key on the public internet**. The fix is therefore in v1 scope, not a follow-on.
 
-The existing unit test `string_param_neutralizes_injection` (`template.rs:93`) passes whether or not the hole is present — it only covers the classic `' OR '1'='1` case. It is not evidence.
+The existing unit tests on both sites — `string_param_neutralizes_injection` (`template.rs:93`) and `sql_literal_encodes_by_type` (`chartquery.rs:684`) — pass whether or not the hole is present, because neither uses a test value containing a backslash. They are not evidence.
 
 `Connector::execute` (`crates/egret-query/src/execution/connector/mod.rs:70`) takes `sql: &str` and has no bound-parameter path, so this cannot be fixed by "just using prepared statements" without a trait change.
 
-**Fix (v1):** split `literal()` into a dialect-aware escaper in `egret-query`, parameterized by `Engine`:
+**Fix (v1):** one dialect-aware escaper in **`egret-query-api`**, parameterized by `Engine`, called by both sites. It goes in the contract crate rather than `egret-query` because `Engine` already lives there and `egret-bi` depends on it — that keeps a single implementation instead of two that can drift apart, which is how this inconsistency arose in the first place. The crate is a pure leaf (serde, uuid, utoipa, egret-core), and the escaper is pure string manipulation, so nothing is dragged in.
 
 - **Trino** — double `'` only (current behaviour, which is already correct for Trino).
 - **StarRocks** — escape `\` → `\\` and `'` → `''`. Quotes are doubled rather than backslash-escaped precisely so the two passes are order-independent: the quote pass emits no backslash and the backslash pass emits no quote. Had `\'` been used instead, the backslash pass would have to run first or it would corrupt the quotes the other pass produced — a fragility worth designing out rather than commenting on.
 
-Because the fix lands in `egret-query`, SQL Lab is patched by the same change.
+Because the fix lands in the shared contract crate, SQL Lab **and** chart/dashboard filters are patched by the same change.
+
+A third site, `starrocks_create_service_user_sql` (`crates/egret-engine-mgmt/src/engines.rs:3229`), has the same gap. It is latent today because the username it interpolates is a constant, so it is out of scope here — but it should be fixed alongside rather than left as the next one to be found.
 
 **Deferred, deliberately:** bound parameters at the connector layer. StarRocks (`mysql_async`) supports them directly; Trino needs `X-Trino-Prepared-Statement` + `EXECUTE … USING`. That is a `Connector` trait change large enough to be its own project. The dialect escaper sits behind a single function so it can be replaced in one place.
 
