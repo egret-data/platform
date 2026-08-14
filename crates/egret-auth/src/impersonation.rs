@@ -12,8 +12,10 @@ use crate::users::UserRepo;
 /// Validate that `impersonator` (already known to be an authorized admin for the
 /// intended scope) may target `target_user_id`. Enforces the target-facing
 /// invariants shared by **every** impersonation entry point: not self, reason
-/// non-empty, target exists, and the target is not itself a `platform_admin`
-/// (admins are off-limits so an overlay can never be used to borrow admin power).
+/// non-empty, target exists, the target is not a service account (a machine
+/// principal must never end up inside an interactive session), and the target is
+/// not itself a `platform_admin` (admins are off-limits so an overlay can never
+/// be used to borrow admin power).
 ///
 /// It deliberately does **not** check the caller's own authority (platform-admin
 /// vs ws-admin) — that differs per entry point and the caller enforces it first,
@@ -37,10 +39,22 @@ pub async fn validate_impersonation_target(
         return Err(Error::InvalidInput("reason is required".into()));
     }
     // Target must exist.
-    users
+    let target = users
         .find_by_id(target_user_id)
         .await?
         .ok_or_else(|| Error::InvalidInput("unknown target".into()))?;
+    // Target must be a PERSON. A service account (Data API P2) can never hold an
+    // interactive session — migration 0119's `users_service_has_no_password`
+    // CHECK exists to make that structural — and an overlay is exactly the way
+    // to hand one a session anyway, since it resolves an admin's real session to
+    // the target's `Principal`. It would also make the audit trail read as a
+    // human acting as a machine, which is the reverse of what impersonation is
+    // for. To act as a service account, use its OAuth2 client.
+    if target.provider == "service" {
+        return Err(Error::InvalidInput(
+            "cannot impersonate a service account".into(),
+        ));
+    }
     // Target must NOT itself be a platform admin.
     let target_roles = sessions.platform_roles_of(target_user_id).await?;
     if target_roles.iter().any(|r| r == "platform_admin") {
