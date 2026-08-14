@@ -18,6 +18,9 @@ use uuid::Uuid;
 /// contract crate.
 pub use egret_core::{ColumnMeta, TabularResult};
 
+pub mod dialect;
+pub use dialect::quote_string;
+
 /// Supported query engines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
