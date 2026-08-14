@@ -140,6 +140,35 @@ async fn an_expired_client_does_not_verify() {
 }
 
 #[tokio::test]
+async fn a_client_with_a_future_expiry_verifies() {
+    // Positive-direction pin on `offset_to_chrono`: every other test either
+    // passes `expires_at: None` or a PAST instant. Nothing here would catch a
+    // conversion bug that shifts a future expiry into the past (wrong epoch
+    // unit, a sign flip, `from_timestamp_nanos` vs `from_timestamp`) — that
+    // regression would still make `an_expired_client_does_not_verify` pass,
+    // since "wrongly expired" and "expired" look identical from `verify`.
+    let f = skip_without_db!();
+    let future = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
+    let c = f
+        .clients
+        .create(f.sa, "prod", Some(future), f.admin)
+        .await
+        .unwrap();
+
+    let vc = f
+        .clients
+        .verify(&c.client_id, &c.client_secret)
+        .await
+        .unwrap()
+        .expect("a client with a future expires_at must still verify");
+
+    assert_eq!(vc.audience, "data-api");
+    assert_eq!(vc.ttl_secs, 600);
+    assert_eq!(vc.extra_claims["ws"], f.ws.to_string());
+    assert_eq!(vc.extra_claims["egret_user_id"], f.sa.to_string());
+}
+
+#[tokio::test]
 async fn a_wrong_secret_does_not_verify() {
     let f = skip_without_db!();
     let c = f.clients.create(f.sa, "prod", None, f.admin).await.unwrap();
