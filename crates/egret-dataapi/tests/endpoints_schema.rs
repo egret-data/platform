@@ -133,6 +133,11 @@ fn fixture_snapshot(database_id: Uuid) -> EndpointSnapshot {
             burst: 10,
             per_endpoint_qps: 50,
         },
+        // The witness for the one snapshot-external input: `query.databases.
+        // delegated` is mutable, so P4 has to be able to tell what publish
+        // validated against. `true` here rather than the `false` default, so a
+        // field that failed to round-trip could not pass by accident.
+        delegated: true,
         columns: vec![
             ColumnSpec {
                 name: "id".to_string(),

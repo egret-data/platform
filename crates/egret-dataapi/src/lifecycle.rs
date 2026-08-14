@@ -32,6 +32,17 @@
 //! oversight: a URL is a property of the endpoint object (uniquely constrained,
 //! renameable), whereas behaviour is a property of the version (frozen).
 //!
+//! **The one snapshot-external input P4 must re-check:**
+//! `EndpointSnapshot::delegated` records whether the connection delegated
+//! per-user credentials when the version was published. `query.databases.delegated`
+//! is mutable, and flipping it to `true` after a `cache.scope = shared` version
+//! was published turns a legitimately-published snapshot into the exact
+//! cross-principal leak [`check_cache_scope`] refuses — with no re-validation
+//! anywhere. P4 must compare the frozen value against the live one before serving
+//! from a shared cache, and refuse when they disagree. Everything else in the
+//! snapshot is self-contained; this field is a witness, and a witness nobody
+//! questions is decoration.
+//!
 //! # Why validation runs here and not at serve time
 //!
 //! Every check below refuses a configuration that would otherwise be discovered
@@ -39,6 +50,24 @@
 //! not discovered at all, because leaking one principal's rows to another looks
 //! exactly like a cache hit. Refusing at publish time means the unsafe shape can
 //! never enter `endpoint_versions` in the first place.
+//!
+//! # Scope of the SQL checks — what they do NOT claim
+//!
+//! [`check_single_select`] and [`check_params`] are shape checks over a scanner,
+//! not a parser, and they are deliberately not claimed to be a complete
+//! injection or statement-smuggling defence. Known and accepted gaps, all of
+//! which need `data_api_endpoint:manage` (an authoring permission) to reach:
+//!
+//! * `#` line comments and MySQL/StarRocks `/*! … */` executable comments are not
+//!   recognised as comments.
+//! * `WITH … DELETE` and `SELECT … INTO OUTFILE` pass the head-word check.
+//! * A Trino literal ending in a backslash (`'a\'`) is falsely REJECTED, because
+//!   the escaping reading cannot terminate it. Rejection is the safe direction.
+//!
+//! What IS claimed, and tested: no accepted definition lets a *serve-time*
+//! caller — who holds only a Data API token and can supply nothing but parameter
+//! VALUES — reach anything other than a value position. That is the privilege
+//! boundary; the items above sit on the authoring side of it.
 
 use egret_core::{Error, Result, UserId};
 use egret_dataapi_api::{
@@ -71,6 +100,13 @@ pub enum ValidationError {
     #[error("parameter `{0}` is declared more than once")]
     DuplicateParameter(String),
     #[error(
+        "parameter `{{{{{0}}}}}` is referenced from inside a string literal, a quoted identifier \
+         or a comment. Its value is substituted there as an ALREADY-QUOTED literal, which closes \
+         the enclosing one and lets any caller inject SQL — write the placeholder as an operand \
+         instead, e.g. `LIKE concat('%', {{{{{0}}}}}, '%')`"
+    )]
+    PlaceholderInsideQuotedText(String),
+    #[error(
         "cache.scope = shared is not allowed on a delegated connection: the engine filters rows \
          per principal, so a shared cache would serve one caller's rows to another"
     )]
@@ -94,33 +130,53 @@ impl From<ValidationError> for Error {
 /// rejected, and `SELECT 1 -- ; DROP TABLE t` sails through because the scan
 /// never learns the `;` was commented out. Stripping first answers both.
 ///
-/// # Escaping, and the one place over-eagerness is NOT free
+/// # One scanner cannot serve two dialects — so it is run twice
 ///
-/// P1 established that the engines disagree: on StarRocks a backslash escapes
-/// inside a literal, on Trino it does not (only `''` does). This treats `\` as an
-/// escape on both, so a literal ends too LATE rather than too early — and ending
-/// it too early is what would let a second statement out into the open.
+/// The engines disagree about exactly one thing: inside a literal, StarRocks
+/// treats `\` as an escape and Trino does not (only `''` escapes there). A single
+/// scan has to pick one, and **either pick is exploitable**, in opposite
+/// directions:
 ///
-/// Ending it too late is not free either, though, and the received wisdom that
-/// over-stripping "can only cause a false rejection" is wrong at exactly one
-/// point: if the literal never ends, everything after it disappears from the
-/// scan. `SELECT 'a\' ; DROP TABLE t` is the case — Trino reads `'a\'` as a
-/// complete literal followed by a second statement, while this scanner reads one
-/// unterminated literal running to the end of the input and sees no `;` at all.
-/// So an unterminated quoted region is REFUSED rather than swallowed. That is
-/// also the honest answer on the other reading: if the literal really is
-/// unterminated, the statement is a syntax error on both engines. Both readings
-/// agree on "no", which is the only reason a single scanner can serve two
-/// dialects here. Unterminated block comments are refused for the same reason.
+/// * Reading `\` as an *ordinary character* ends a StarRocks literal early, so
+///   text StarRocks would still be inside a literal for is scanned as structure.
+/// * Reading `\` as an *escape* ends a Trino literal late, so structure Trino
+///   would execute is scanned as text — and text is not scanned at all. That is
+///   the direction that hides a second statement:
+///   `SELECT 'a\' ; DROP TABLE t -- '` closes on the FINAL quote under this
+///   reading, leaving `SELECT ''`, while Trino sees a complete literal `'a\'`,
+///   a separator, and `DROP TABLE t`.
+///
+/// So `backslash_escapes` is a parameter, [`check_single_select`] runs the whole
+/// check under **both** values, and a definition is accepted only if both
+/// readings say the same thing. Nothing is assumed about which engine is behind
+/// the endpoint, and the check does not have to be kept in sync with a dialect
+/// table that would go stale the day a third engine lands. It costs one extra
+/// linear pass, and it over-rejects only SQL whose literals actually contain
+/// `\'` — noted as a deferred false-rejection.
+///
+/// An unterminated quoted region or block comment is refused rather than
+/// swallowed, for the same reason: under the escaping reading an unterminated
+/// literal runs to the end of the input and everything after it disappears from
+/// the scan. Refusing is also the honest answer, since an unterminated literal is
+/// a syntax error on both engines.
+///
+/// A `--` comment ends at `\r` as well as `\n`. Trino's lexer is
+/// `'--' ~[\r\n]* '\r'? '\n'?`, so a bare CR ends the comment there; stopping
+/// only at LF would let `SELECT 1 --x\r; DROP TABLE t` past a scan that never saw
+/// the `;`.
 ///
 /// Double-quoted and backtick-quoted regions are elided as well: they are
 /// identifiers on Trino and (in some modes) strings on StarRocks, and either way
 /// a `;` inside one is not a statement break. Each quoted region is replaced by
-/// `''` rather than deleted, so adjacent tokens do not run together.
+/// `''` rather than deleted, so adjacent tokens do not run together — and so
+/// [`check_params`] can tell that a `{{param}}` fell inside one.
 ///
 /// Nested block comments (which Postgres allows and Trino does not) end at the
 /// first `*/`; the leftovers can only cause a rejection, never an acceptance.
-fn strip_comments_and_strings(sql: &str) -> std::result::Result<String, ValidationError> {
+fn strip_comments_and_strings(
+    sql: &str,
+    backslash_escapes: bool,
+) -> std::result::Result<String, ValidationError> {
     let b = sql.as_bytes();
     // Bytes, not chars: every byte this function branches on is ASCII, and a
     // multi-byte UTF-8 sequence is copied whole (its continuation bytes are all
@@ -130,7 +186,7 @@ fn strip_comments_and_strings(sql: &str) -> std::result::Result<String, Validati
     while i < b.len() {
         match b[i] {
             b'-' if b.get(i + 1) == Some(&b'-') => {
-                while i < b.len() && b[i] != b'\n' {
+                while i < b.len() && b[i] != b'\n' && b[i] != b'\r' {
                     i += 1;
                 }
                 out.push(b' ');
@@ -150,11 +206,7 @@ fn strip_comments_and_strings(sql: &str) -> std::result::Result<String, Validati
                 i += 1;
                 let mut closed = false;
                 while i < b.len() {
-                    if b[i] == b'\\' {
-                        // Over-eager on purpose: see the doc comment. Skipping the
-                        // escaped byte can only extend the literal, never end it —
-                        // and an extension that runs off the end is caught below
-                        // rather than hiding the rest of the statement.
+                    if backslash_escapes && b[i] == b'\\' {
                         i += 2;
                         continue;
                     }
@@ -189,14 +241,35 @@ fn strip_comments_and_strings(sql: &str) -> std::result::Result<String, Validati
         .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
 }
 
+/// The two escaping dialects every scan below must satisfy SIMULTANEOUSLY.
+///
+/// `true` is the StarRocks reading (a backslash escapes inside a literal),
+/// `false` the Trino one. A definition is publishable only if it is safe under
+/// both, because the endpoint's engine can be changed after publish — `database_id`
+/// is editable on the draft, and a connection's engine is not this crate's to pin.
+const ESCAPING_READINGS: [bool; 2] = [true, false];
+
 /// Reject anything that is not exactly one read-only statement.
 ///
 /// This is a shape check, not a parser: it strips comments and string literals,
 /// then looks at what is left. A leading `WITH … SELECT` (CTE) is allowed —
 /// it is the normal way to write a readable analytical query. Anything else
 /// (DML, DDL, `SET`, or a second statement after `;`) is refused.
+///
+/// Run under both entries of [`ESCAPING_READINGS`]; see
+/// [`strip_comments_and_strings`] for why one pass is not enough.
 pub fn check_single_select(sql: &str) -> std::result::Result<(), ValidationError> {
-    let stripped = strip_comments_and_strings(sql)?;
+    for backslash_escapes in ESCAPING_READINGS {
+        check_single_select_under(sql, backslash_escapes)?;
+    }
+    Ok(())
+}
+
+fn check_single_select_under(
+    sql: &str,
+    backslash_escapes: bool,
+) -> std::result::Result<(), ValidationError> {
+    let stripped = strip_comments_and_strings(sql, backslash_escapes)?;
     let trimmed = stripped.trim().trim_end_matches(';').trim();
     if trimmed.contains(';') {
         return Err(ValidationError::MultipleStatements);
@@ -250,6 +323,36 @@ fn placeholders(sql: &str) -> std::result::Result<Vec<String>, ValidationError> 
 /// as one query parameter in OpenAPI while the renderer silently picked the
 /// first — so the type or the `allowed` list a caller is validated against would
 /// depend on declaration order.
+///
+/// # A placeholder must stand where a VALUE stands
+///
+/// The third rule is the one that carries a privilege boundary rather than a
+/// correctness property, and its attacker is not the author: it is any holder of
+/// a Data API token, at serve time, long after this ran.
+///
+/// `template::render` substitutes a placeholder with `quote_string(engine, v)` —
+/// an **already-quoted** literal. That is safe exactly where a literal is what
+/// the grammar expects. Inside an open literal it is the opposite:
+///
+/// ```sql
+/// SELECT * FROM t WHERE a = 'x{{p}}y'
+/// ```
+///
+/// With `p = "' OR 1=1 -- "` this renders to `WHERE a = 'x''' OR 1=1 -- 'y'`,
+/// which tokenises as the literal `x'`, then a LIVE ` OR 1=1 `, then a comment.
+/// A predicate-level break-out on both dialects — no second statement, so
+/// [`check_single_select`] would never have seen it, and neither would any
+/// downstream multi-statement guard. `probe_sql` renders the same template to
+/// `'x''y'`, which describes perfectly, so publish succeeds too.
+///
+/// The test is cheap and total: a placeholder that stands where a value stands
+/// SURVIVES [`strip_comments_and_strings`], and one that does not — because the
+/// quoted region or comment containing it was replaced wholesale — did not stand
+/// there. Comments are covered by the same rule and need it: a value substituted
+/// into `/* {{p}} */` can carry `*/` and close the comment early.
+///
+/// Checked under both entries of [`ESCAPING_READINGS`], because which regions
+/// count as quoted is exactly what the two dialects disagree about.
 pub fn check_params(sql: &str, params: &[ParamSpec]) -> std::result::Result<(), ValidationError> {
     let mut seen: Vec<&str> = Vec::with_capacity(params.len());
     for p in params {
@@ -258,6 +361,11 @@ pub fn check_params(sql: &str, params: &[ParamSpec]) -> std::result::Result<(), 
         }
         seen.push(&p.name);
     }
+    // The RAW scan, matching what `template::render` will do at serve time. A
+    // placeholder inside a literal IS substituted there, so it counts as
+    // referenced — pretending otherwise would report it as an unused parameter
+    // and send the author to delete the declaration rather than move the
+    // placeholder.
     let referenced = placeholders(sql)?;
     for name in &referenced {
         if !seen.contains(&name.as_str()) {
@@ -269,7 +377,33 @@ pub fn check_params(sql: &str, params: &[ParamSpec]) -> std::result::Result<(), 
             return Err(ValidationError::UnreferencedParameter(p.name.clone()));
         }
     }
+    for backslash_escapes in ESCAPING_READINGS {
+        let stripped = strip_comments_and_strings(sql, backslash_escapes)?;
+        // `unwrap_or_default` rather than `?`: stripping only ever removes text,
+        // so it cannot manufacture a placeholder — and if it somehow yielded a
+        // malformed one, "fewer survived" is the answer we want anyway.
+        let survived = placeholders(&stripped).unwrap_or_default();
+        if let Some(name) = first_count_mismatch(&referenced, &survived) {
+            return Err(ValidationError::PlaceholderInsideQuotedText(name));
+        }
+    }
     Ok(())
+}
+
+/// The first name occurring a different number of times in `referenced` than in
+/// `survived`.
+///
+/// Counted rather than compared as sets: `WHERE a = {{q}} OR b = '{{q}}'` has
+/// `q` in both lists, and only the COUNT reveals that one of the two references
+/// was inside a literal.
+fn first_count_mismatch(referenced: &[String], survived: &[String]) -> Option<String> {
+    referenced
+        .iter()
+        .find(|name| {
+            let n = |v: &[String]| v.iter().filter(|x| x == name).count();
+            n(referenced) != n(survived)
+        })
+        .cloned()
 }
 
 /// `Shared` cache is refused on a delegated connection: Ranger filters per
@@ -470,7 +604,7 @@ impl EndpointStore {
     /// The two WRITES — insert the version, repoint the endpoint — are what needs
     /// a transaction, and they are in one.
     ///
-    /// # Why the draft is re-read under a row lock
+    /// # Why the draft is re-read under a row lock, and re-VALIDATED
     ///
     /// `columns` were resolved from the draft as it was BEFORE the describe. If
     /// the author edited `sql` in that window, committing would freeze one
@@ -480,6 +614,31 @@ impl EndpointStore {
     /// `max(version) + 1` cannot produce two rows with the same number (the
     /// `UNIQUE (endpoint_id, version)` would catch that, but as a 500 rather than
     /// as the retryable conflict it is).
+    ///
+    /// Identity on those three fields is NOT enough on its own, and the gap was a
+    /// live hole: the snapshot is built from `current` for **every** field, while
+    /// `validate_definition` ran against the pre-lock draft. So a PATCH landing
+    /// during the describe could set `cache.scope = shared` on a delegated
+    /// connection, pass a check that never looked at `cache`, and be frozen —
+    /// publishing the one configuration [`check_cache_scope`] exists to make
+    /// unpublishable. `limits`, `rate_limit`, `output`, `method` and `path` went
+    /// through the same gap.
+    ///
+    /// The fix is to re-run the whole PURE validator against `current`, inside
+    /// the transaction. It costs no engine call and no extra pool time, and it
+    /// makes the rule structural: what is frozen is what was validated, because
+    /// they are now the same read. `delegated` is re-read under the same
+    /// transaction and frozen into the snapshot, so the value validated, the value
+    /// stored, and the value P4 will compare against are all one.
+    ///
+    /// # State
+    ///
+    /// `disabled` is PRESERVED. Publishing a new version of a deliberately
+    /// disabled endpoint must not put it back in service — that is the same
+    /// surprise [`EndpointStore::rollback`] refuses, and the two rules would
+    /// otherwise disagree for no reason. A `draft` or `live` endpoint becomes
+    /// `live`; taking a disabled one back into service is [`EndpointStore::enable`],
+    /// which is explicit and has its own route.
     pub async fn publish(
         &self,
         workspace: Uuid,
@@ -492,9 +651,9 @@ impl EndpointStore {
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
 
         let current = self.locked(&mut tx, workspace, id).await?;
-        // Only the three inputs the resolved `columns` depend on. Everything else
-        // in the snapshot is taken from `current`, so it is consistent with the
-        // lock by construction.
+        // The three inputs the resolved `columns` depend on. A change to any of
+        // them makes `columns` stale, which no amount of re-validation would
+        // detect — only a fresh describe would, and that is the caller's to retry.
         if current.sql != draft.sql
             || current.database_id != draft.database_id
             || current.params != draft.params
@@ -504,6 +663,22 @@ impl EndpointStore {
                     .into(),
             ));
         }
+
+        // Same statement as `connection_is_delegated`, issued on the transaction
+        // so the value cannot move between here and the commit.
+        let delegated: bool = sqlx::query_scalar(
+            "SELECT delegated FROM query.databases WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(current.database_id)
+        .bind(workspace)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?
+        .ok_or_else(|| Error::NotFound("database".into()))?;
+
+        // The whole pure validator, against the row actually being frozen. See the
+        // doc comment: this is what closes the window, not the identity check above.
+        validate_definition(&current.sql, &current.params, &current.cache, delegated)?;
 
         let snapshot = EndpointSnapshot {
             // The stored path, which `normalize_path` already canonicalised. The
@@ -517,6 +692,7 @@ impl EndpointStore {
             cache: current.cache.clone(),
             limits: current.limits.clone(),
             rate_limit: current.rate_limit.clone(),
+            delegated,
             columns,
         };
         let payload = serde_json::to_value(&snapshot)
@@ -536,14 +712,16 @@ impl EndpointStore {
         .await
         .map_err(db_err)?;
 
-        sqlx::query(
-            "UPDATE dataapi.endpoints SET live_version_id = $1, state = 'live', updated_at = now() \
-             WHERE id = $2 AND workspace_id = $3",
+        let state: String = sqlx::query_scalar(
+            "UPDATE dataapi.endpoints SET live_version_id = $1, \
+               state = CASE WHEN state = 'disabled' THEN 'disabled' ELSE 'live' END, \
+               updated_at = now() \
+             WHERE id = $2 AND workspace_id = $3 RETURNING state",
         )
         .bind(version_id)
         .bind(id)
         .bind(workspace)
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(db_err)?;
 
@@ -551,7 +729,7 @@ impl EndpointStore {
         Ok(DataApiPublishedDto {
             version_id,
             version,
-            state: "live".into(),
+            state,
         })
     }
 
@@ -762,22 +940,45 @@ mod tests {
         assert!(check_single_select("SELECT `a;b` FROM t").is_ok());
     }
 
-    /// The case that disproves "over-stripping can only cause a false
-    /// rejection". Trino reads `'a\'` as a COMPLETE literal (it has no backslash
-    /// escape) followed by a second statement; this scanner, treating `\` as an
-    /// escape so that StarRocks is covered, reads one literal running off the end
-    /// of the input — and would then see no `;` anywhere and accept the smuggle.
-    ///
-    /// Refusing an unterminated quoted region is what closes it, and it is the
-    /// right answer on the other reading too: an unterminated literal is a syntax
-    /// error on both engines. Both dialects agree on "no", which is the only
-    /// reason one scanner can serve both.
+    /// **Neither escaping reading is safe alone, and this is why the scan runs
+    /// twice.** Each payload is a genuine two-statement smuggle under exactly one
+    /// dialect, and invisible to the scanner that assumes the other.
     #[test]
-    fn an_unterminated_literal_cannot_swallow_a_second_statement() {
+    fn a_backslash_smuggle_is_caught_by_the_other_reading() {
+        // Terminating quote appended, so the ESCAPING reading closes on the final
+        // `'` and sees `SELECT ''` — clean. Trino, which has no backslash escape,
+        // reads `'a\'` then `;` then `DROP TABLE t`. Only the non-escaping pass
+        // sees it, which is the whole point of running both.
         assert_eq!(
-            check_single_select(r"SELECT 'a\' ; DROP TABLE t"),
-            Err(ValidationError::Unterminated("quoted literal"))
+            check_single_select(r"SELECT 'a\' ; DROP TABLE t -- '"),
+            Err(ValidationError::MultipleStatements)
         );
+        // The same payload without the trailing quote: caught by the escaping
+        // reading as an unterminated literal, and by the other as two statements.
+        assert!(check_single_select(r"SELECT 'a\' ; DROP TABLE t").is_err());
+        // And the mirror direction: a `;` that is genuinely inside a StarRocks
+        // literal must not be read as a break just because the non-escaping pass
+        // would end the literal early. Both passes must agree, so this is
+        // rejected too — the safe direction, and a documented false rejection.
+        assert!(check_single_select(r"SELECT 'a\'b;c' AS s").is_err());
+    }
+
+    /// Trino's `SIMPLE_COMMENT` is `'--' ~[\r\n]* '\r'? '\n'?`, so a bare CR ends
+    /// the comment there. A scanner that stopped only at LF would swallow the
+    /// rest of the line — including a `;` — into a "comment" Trino has already
+    /// closed.
+    #[test]
+    fn a_line_comment_ends_at_a_bare_carriage_return() {
+        assert_eq!(
+            check_single_select("SELECT 1 --x\r; DROP TABLE t"),
+            Err(ValidationError::MultipleStatements)
+        );
+        // The ordinary CRLF form still comments out its own line.
+        assert!(check_single_select("SELECT 1 --x\r\nFROM t").is_ok());
+    }
+
+    #[test]
+    fn an_unterminated_region_is_refused_rather_than_swallowed() {
         assert_eq!(
             check_single_select("SELECT 'oops"),
             Err(ValidationError::Unterminated("quoted literal"))
@@ -794,11 +995,79 @@ mod tests {
     fn multibyte_text_survives_stripping() {
         assert!(check_single_select("SELECT 'doanh thu' AS \"Doanh thu\" FROM t").is_ok());
         assert_eq!(
-            strip_comments_and_strings("SELECT é /* ; */ FROM t")
+            strip_comments_and_strings("SELECT é /* ; */ FROM t", true)
                 .unwrap()
                 .trim(),
             "SELECT é   FROM t".trim()
         );
+    }
+
+    /// **The serve-time privilege boundary.** A placeholder inside a quoted
+    /// region is substituted there as an ALREADY-QUOTED literal, which closes the
+    /// enclosing one: `WHERE a = 'x{{p}}y'` with `p = "' OR 1=1 -- "` renders to
+    /// `WHERE a = 'x''' OR 1=1 -- 'y'` — literal, then LIVE predicate, then
+    /// comment. No second statement, so `check_single_select` never sees it, and
+    /// `probe_sql` renders it to `'x''y'` which describes perfectly. The attacker
+    /// is any Data API token holder, not the author.
+    #[test]
+    fn a_placeholder_inside_a_quoted_region_is_refused() {
+        let p = [param("p", ParamType::String)];
+        for sql in [
+            "SELECT * FROM t WHERE a = 'x{{p}}y'",
+            "SELECT * FROM t WHERE a LIKE '%{{p}}%'",
+            r#"SELECT "col{{p}}" FROM t"#,
+            "SELECT `col{{p}}` FROM t",
+            // Comments too: a value carrying `*/` closes a block comment early.
+            "SELECT 1 AS n /* {{p}} */",
+            "SELECT 1 AS n -- {{p}}",
+        ] {
+            assert_eq!(
+                check_params(sql, &p),
+                Err(ValidationError::PlaceholderInsideQuotedText("p".into())),
+                "{sql}"
+            );
+        }
+    }
+
+    /// The correct spelling the rejection points at must still publish, or the
+    /// rule above would simply ban parameterized `LIKE`.
+    #[test]
+    fn a_placeholder_in_a_value_position_is_still_accepted() {
+        let p = [param("q", ParamType::String)];
+        for sql in [
+            "SELECT * FROM t WHERE a = {{q}}",
+            "SELECT * FROM t WHERE a LIKE concat('%', {{q}}, '%')",
+            "SELECT * FROM t WHERE a = {{ q }} AND b = 'literal'",
+        ] {
+            assert!(check_params(sql, &p).is_ok(), "{sql}");
+        }
+    }
+
+    /// Counting, not set membership: one safe reference must not vouch for an
+    /// unsafe one with the same name.
+    #[test]
+    fn one_good_reference_does_not_excuse_a_second_bad_one() {
+        assert_eq!(
+            check_params(
+                "SELECT * FROM t WHERE a = {{q}} OR b = 'x{{q}}y'",
+                &[param("q", ParamType::String)]
+            ),
+            Err(ValidationError::PlaceholderInsideQuotedText("q".into()))
+        );
+    }
+
+    /// A placeholder that is outside a literal on the Trino reading but INSIDE
+    /// one on the StarRocks reading must be refused — which only the two-reading
+    /// check can see.
+    #[test]
+    fn a_placeholder_is_checked_under_both_escaping_readings() {
+        // Non-escaping: `'a\'` closes, so `{{p}}` is outside. Escaping: the
+        // literal continues through `{{p}}` to the final quote.
+        assert!(check_params(
+            r"SELECT * FROM t WHERE a = 'a\' || {{p}} || 'b'",
+            &[param("p", ParamType::String)]
+        )
+        .is_err());
     }
 
     #[test]
@@ -938,6 +1207,7 @@ mod tests {
             ValidationError::NotASelect("INSERT".into()),
             ValidationError::MalformedPlaceholder("{{a b}}".into()),
             ValidationError::Unterminated("quoted literal"),
+            ValidationError::PlaceholderInsideQuotedText("p".into()),
             ValidationError::UndeclaredPlaceholder("r".into()),
             ValidationError::UnreferencedParameter("r".into()),
             ValidationError::DuplicateParameter("r".into()),

@@ -50,6 +50,13 @@ enum Describe {
 struct FakePort {
     mode: Mutex<Describe>,
     seen: Mutex<Vec<(Uuid, Uuid, Uuid, String)>>,
+    /// A statement to run DURING `describe_as` — that is, inside the exact
+    /// window between publish's pre-lock read and its transaction. This is how
+    /// the TOCTOU interleaving is produced deterministically, through the real
+    /// route, instead of being simulated by calling the store directly.
+    ///
+    /// Binds `$1` = endpoint id, `$2` = a jsonb value. Fires once.
+    mid_describe: Mutex<Option<(Db, &'static str, Uuid, serde_json::Value)>>,
 }
 
 impl FakePort {
@@ -57,10 +64,21 @@ impl FakePort {
         Self {
             mode: Mutex::new(Describe::Columns(vec![("n", "integer")])),
             seen: Mutex::new(Vec::new()),
+            mid_describe: Mutex::new(None),
         }
     }
     fn set(&self, m: Describe) {
         *self.mode.lock().unwrap() = m;
+    }
+    /// Arrange for `stmt` to run in the middle of the next publish's describe.
+    fn patch_during_next_describe(
+        &self,
+        db: &Db,
+        stmt: &'static str,
+        ep: Uuid,
+        value: serde_json::Value,
+    ) {
+        *self.mid_describe.lock().unwrap() = Some((db.clone(), stmt, ep, value));
     }
     fn last_sql(&self) -> String {
         self.seen
@@ -88,6 +106,17 @@ impl egret_query_api::QueryExecPort for FakePort {
             .lock()
             .unwrap()
             .push((ws, database_id, principal.0, sql.to_string()));
+        // The interleaving: publish has taken its pre-lock read and validated it,
+        // and has not yet opened its transaction.
+        let hook = self.mid_describe.lock().unwrap().take();
+        if let Some((db, stmt, ep, value)) = hook {
+            sqlx::query(stmt)
+                .bind(ep)
+                .bind(&value)
+                .execute(&db.pool)
+                .await
+                .expect("mid-describe patch");
+        }
         match self.mode.lock().unwrap().clone() {
             Describe::Columns(cols) => Ok(cols
                 .into_iter()
@@ -668,6 +697,32 @@ async fn publish_refuses_an_invalid_definition_without_calling_the_engine() {
             serde_json::json!([{ "name": "s", "type": "enum", "location": "query" }]),
             "enum with no allowed list",
         ),
+        // The serve-time privilege boundary: a placeholder inside a literal is
+        // substituted as an already-quoted value, which closes the enclosing
+        // literal and hands any Data API token holder a live predicate. It
+        // carries no second statement, and it describes cleanly as `'x''y'`.
+        (
+            "SELECT * FROM t WHERE a = 'x{{p}}y'",
+            serde_json::json!([{ "name": "p", "type": "string", "location": "query" }]),
+            "placeholder inside a string literal",
+        ),
+        (
+            "SELECT n FROM t /* {{p}} */",
+            serde_json::json!([{ "name": "p", "type": "string", "location": "query" }]),
+            "placeholder inside a block comment",
+        ),
+        // Two statements under the Trino reading of `\`, invisible to a scanner
+        // that assumes the StarRocks one.
+        (
+            r"SELECT 'a\' ; DROP TABLE t -- '",
+            serde_json::json!([]),
+            "backslash smuggle, terminated",
+        ),
+        (
+            "SELECT 1 --x\r; DROP TABLE t",
+            serde_json::json!([]),
+            "second statement after a bare CR",
+        ),
     ] {
         let ep = f
             .create_endpoint(why, &format!("p/{}", Uuid::new_v4().simple()), sql)
@@ -717,6 +772,160 @@ async fn a_shared_cache_is_refused_only_on_a_delegated_connection() {
         StatusCode::OK,
         "the same config is fine when the connection is not delegated: {body}"
     );
+}
+
+/// **The TOCTOU window, driven through the real route.** The identity check
+/// covers only `sql`/`database_id`/`params` — the three inputs `columns` depends
+/// on — while the snapshot is built from the locked read for EVERY field. So an
+/// edit landing during the describe could set `cache.scope = shared` on a
+/// delegated connection and be frozen, publishing exactly the configuration
+/// `check_cache_scope` exists to make unpublishable.
+///
+/// The edit is issued from inside `describe_as`, which is precisely the window.
+/// What closes it is re-running the pure validator against the locked row.
+#[tokio::test]
+async fn an_edit_during_describe_cannot_publish_a_configuration_the_validator_forbids() {
+    let f = skip_without_db!();
+    let delegated_db = insert_database(&f.db, f.ws_id, f.admin, true).await;
+    let ep = f
+        .create_endpoint_on(delegated_db, "toctou", "toctou", "SELECT 1 AS n")
+        .await;
+    // Valid as it stands: per-principal cache on a delegated connection.
+    f.patch_endpoint(
+        ep,
+        serde_json::json!({ "cache": { "enabled": true, "ttl_seconds": 60, "scope": "per_principal" } }),
+    )
+    .await;
+
+    f.port.patch_during_next_describe(
+        &f.db,
+        "UPDATE dataapi.endpoints SET cache = $2 WHERE id = $1",
+        ep,
+        serde_json::json!({ "enabled": true, "ttl_seconds": 60, "scope": "shared" }),
+    );
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the locked row must be re-validated, not just compared: {body}"
+    );
+    assert!(
+        f.versions(ep).await.is_empty(),
+        "and nothing may have been frozen"
+    );
+    assert_eq!(f.state_of(ep).await.0, "draft");
+}
+
+/// The same window, with an edit the identity check DOES cover. Different rule,
+/// different status: stale `columns` are a retryable conflict, not a bad request.
+#[tokio::test]
+async fn an_sql_edit_during_describe_is_a_conflict() {
+    let f = skip_without_db!();
+    let ep = f
+        .create_endpoint("toctou2", "toctou2", "SELECT 1 AS n")
+        .await;
+    f.port.patch_during_next_describe(
+        &f.db,
+        "UPDATE dataapi.endpoints SET sql = $2 #>> '{}' WHERE id = $1",
+        ep,
+        serde_json::json!("SELECT 2 AS n"),
+    );
+
+    let (status, body) = f.publish_raw(ep).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(f.versions(ep).await.is_empty());
+}
+
+/// `query.databases.delegated` is mutable and lives OUTSIDE the snapshot, so a
+/// legitimately published `scope = shared` version becomes a cross-principal
+/// leak the moment its connection is flipped to delegated — with no
+/// re-validation anywhere. Freezing the value publish validated against is what
+/// gives P4 something to compare the live column with.
+#[tokio::test]
+async fn the_snapshot_freezes_the_delegation_mode_it_was_validated_against() {
+    let f = skip_without_db!();
+    let plain = f.create_endpoint("nd", "nd", "SELECT 1 AS n").await;
+    f.publish(plain).await;
+    assert!(
+        !f.live_snapshot(plain).await.delegated,
+        "a non-delegated connection must be recorded as such"
+    );
+
+    let delegated_db = insert_database(&f.db, f.ws_id, f.admin, true).await;
+    let deleg = f
+        .create_endpoint_on(delegated_db, "d", "d", "SELECT 1 AS n")
+        .await;
+    f.publish(deleg).await;
+    assert!(f.live_snapshot(deleg).await.delegated);
+
+    // The scenario the field exists for: a shared cache published while the
+    // connection was NOT delegated, then the connection flips. The snapshot still
+    // says `false`, which is how P4 can tell it must refuse the shared cache.
+    let shared = f.create_endpoint("sh", "sh", "SELECT 1 AS n").await;
+    f.patch_endpoint(
+        shared,
+        serde_json::json!({ "cache": { "enabled": true, "ttl_seconds": 60, "scope": "shared" } }),
+    )
+    .await;
+    f.publish(shared).await;
+    let snap = f.live_snapshot(shared).await;
+    assert!(!snap.delegated);
+    sqlx::query("UPDATE query.databases SET delegated = true WHERE id = $1")
+        .bind(f.database_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("flip delegation");
+    assert!(
+        !f.live_snapshot(shared).await.delegated,
+        "the frozen witness must not follow the live column — it is what P4 \
+         compares AGAINST"
+    );
+    // Undo, so the shared fixture database is left as the other tests expect.
+    sqlx::query("UPDATE query.databases SET delegated = false WHERE id = $1")
+        .bind(f.database_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("restore delegation");
+}
+
+/// `rollback` deliberately does not re-enable a disabled endpoint. `publish` must
+/// not either, or the two rules disagree and the quieter one wins by surprise.
+#[tokio::test]
+async fn publishing_a_disabled_endpoint_does_not_put_it_back_in_service() {
+    let f = skip_without_db!();
+    let ep = f.create_endpoint("rev", "rev", "SELECT 1 AS n").await;
+    f.publish(ep).await;
+    f.send(
+        &f.manager,
+        "POST",
+        &format!("{}/{ep}/disable", f.collection()),
+        None,
+    )
+    .await;
+
+    f.patch_endpoint(ep, serde_json::json!({ "sql": "SELECT 2 AS n" }))
+        .await;
+    let published = f.publish(ep).await;
+    assert_eq!(published["version"], 2, "the version is still minted");
+    assert_eq!(
+        published["state"], "disabled",
+        "and the response says so, rather than claiming live"
+    );
+
+    let (state, live) = f.state_of(ep).await;
+    assert_eq!(state, "disabled", "publishing must not re-enable");
+    assert_eq!(live, Some(f.version_id_of(ep, 2).await), "but v2 is queued");
+    // And the explicit route still works, serving the newly published version.
+    f.send(
+        &f.manager,
+        "POST",
+        &format!("{}/{ep}/enable", f.collection()),
+        None,
+    )
+    .await;
+    assert_eq!(f.state_of(ep).await.0, "live");
+    assert_eq!(f.live_snapshot(ep).await.sql, "SELECT 2 AS n");
 }
 
 /// A parameterized endpoint has to be describable at all. `WHERE r = {{r}}` is
