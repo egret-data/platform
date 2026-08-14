@@ -1,4 +1,4 @@
-# Data API P2 — Service accounts and API keys Implementation Plan
+# Data API P2 — Service accounts and OAuth2 clients Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use
@@ -8,19 +8,29 @@
 > Part: P2 of 5 — see `docs/en/plans/2026-08-14-data-api-decomposition.md`
 > Stacked on: P1 (`fix/dialect-escaping`, PR #504). Branch off P1, do not re-include its code.
 
-**Goal:** an admin can create a workspace-scoped service account, mint an API key for it, and that key verifies — with no endpoint to call yet.
+**Goal:** an admin can create a workspace-scoped service account and an OAuth2 client for it; that client can exchange `client_id`/`client_secret` for a short-lived JWT at the existing `/oauth/token` endpoint.
 
-**Architecture:** a service account is a real row in `users` with `provider = 'service'`, so `access_grants`, Cedar, `ensure_username`, machine-idp and audit all treat it exactly like a user with no parallel plumbing. Its workspace binding and metadata live in a new `dataapi.service_accounts` table; keys live in `dataapi.api_keys`. The cost of reusing `users` is that service accounts must be kept out of human-facing enumeration surfaces — Task 2 does that explicitly and tests it, rather than leaving it as cleanup.
+**Architecture:** a service account is a real row in `users` with `provider = 'service'`, so `access_grants`, Cedar, `ensure_username` (Ranger/Trino delegation) and audit need no parallel plumbing for machine principals. Credentials are **not** a bespoke API-key scheme: egret already runs an OAuth2 `client_credentials` machine-IdP (`crates/egret-machine-idp`) serving Catalog Clients, and this plan generalises it to serve a second audience rather than standing up a second credential system beside it.
 
-**Tech Stack:** Rust (axum, sqlx) · Postgres · SHA-256 (`sha2`) · Cedar PDP.
+**Tech Stack:** Rust (axum, sqlx) · Postgres · JWT (existing `SigningKeyStore` + JWKS) · Argon2 · Cedar PDP.
+
+## Why OAuth2 and not API keys
+
+An earlier draft of this plan invented `dataapi.api_keys`: a bearer key looked up in Postgres on every request. Three facts killed it.
+
+1. **It duplicates working infrastructure.** `crates/egret-machine-idp/src/lib.rs` already serves `POST /oauth/token` (`grant_type=client_credentials`), OIDC discovery, and JWKS. `catalog_clients` (`migrations/0053_embedded_catalog_rbac.sql:30`) already stores `workspace_id`, `client_id`, `client_secret_hash`, `last_used_at` — nearly the table the draft proposed. Rejecting sqlrest's `AppClient` for creating a second identity system, then creating a second *credential* system, is the same mistake one layer down.
+2. **Per-request DB lookup on the hot path.** Key verification meant a `SELECT` per API call. A JWT is verified from JWKS in-process, with no DB round-trip — which matters for a data API under load.
+3. **The hashing argument dissolves.** The draft argued for SHA-256 over Argon2 because ~50–100 ms of KDF per API request is unacceptable. True — but under OAuth2 the secret is verified once, at token issuance, not per request. So this plan uses **Argon2, matching `CatalogStore::verify_client`** (`crates/egret-catalog-engine/src/store/embedded.rs:384`), and the inconsistency disappears.
+
+**The trade-off, stated plainly:** revocation is no longer instant. A revoked client's already-issued token stays valid until `exp`. That is the price of stateless verification — the same property that removes the DB hit is what defers revocation. This plan mitigates it with a short TTL (**600s** for Data API) and does **not** add a per-request revocation check, because doing so would give back the throughput the design was chosen for.
 
 ## Global Constraints
 
+- **The catalog's tokens must not change.** `machine-idp` is generalised, not rewritten. A Catalog Client's token must keep `aud: "catalog"`, its `warehouse` and `roles` claims, and its **3600s** TTL, byte-for-byte. Task 3 pins this with a regression test before touching anything.
 - A service account **must never be able to log in interactively**. The login handler already requires `password_hash.is_some()` (`crates/egret-auth/src/routes.rs:184`), but that is safety by accident — this plan adds a DB-level CHECK so it holds even if a future insert path forgets.
-- **Filter enumeration, never id-keyed joins.** A service account appearing in the admin user list is a defect; a service account's name appearing next to its own grant or audit row is correct. Task 2 lists exactly which sites are which. Do not "helpfully" filter a join.
-- API keys are hashed with **SHA-256, not Argon2**. `crates/egret-auth/src/password.rs` is for user-chosen passwords; a 32-byte random secret needs no brute-force-resistant KDF, and ~50–100 ms of KDF per API request is unacceptable. Compare in constant time.
-- The key secret is returned **exactly once**, at creation. It is never recoverable afterwards.
-- Follow `crates/egret-controlplane/src/access/mod.rs`'s authz idiom: reads and lifecycle gate on a delegatable `require(&*st.pdp, &p, "x:y")`, but **anything that mutates the authorization graph gates on platform admin**. Minting a key for a service account that already holds grants is such a mutation — see Task 4.
+- **Filter enumeration, never id-keyed joins.** A service account in the admin user list is a defect; a service account's name beside its own grant or audit row is correct. Task 2 lists which is which. Do not "helpfully" filter a join.
+- Client secrets are hashed with **Argon2**, matching the catalog. The secret is returned **exactly once**, at creation.
+- Follow `crates/egret-controlplane/src/access/mod.rs`'s authz idiom: reads and lifecycle gate on a delegatable `require(...)`, but anything that mutates the authorization graph gates on platform admin. Creating a client for a service account that already holds grants is such a mutation — see Task 5.
 - Run scoped checks, not `just check` (it runs `cargo test --workspace`). `egret-config::tests::toml_file_is_merged` is a known pre-existing flake.
 - Never run two workspace test suites concurrently.
 
@@ -28,16 +38,18 @@
 
 | File | Responsibility |
 |---|---|
-| `migrations/0119_dataapi_service_accounts.sql` (create) | `users.provider` CHECK extension + the service/no-password CHECK; `dataapi` schema; `service_accounts` and `api_keys` tables. |
+| `migrations/0119_dataapi_service_accounts.sql` (create) | `users.provider` CHECK extension + the service/no-password CHECK; `dataapi` schema; `service_accounts` and `clients` tables. |
 | `crates/egret-auth/src/users.rs` (modify) | `insert_service`; `list` excludes service accounts. |
-| `crates/egret-dataapi-api/src/lib.rs` (create) | Pure-serde DTOs for service accounts and keys. |
-| `crates/egret-dataapi/src/lib.rs` (create) | Crate root; re-exports the store and router. |
-| `crates/egret-dataapi/src/service_accounts.rs` (create) | Store: create / list / disable a service account. |
-| `crates/egret-dataapi/src/keys.rs` (create) | Key mint, hash, verify, revoke. The only place key material is handled. |
-| `crates/egret-dataapi/src/routes.rs` (create) | `management_router()` — the workspace-scoped admin surface. |
-| `crates/egret-core/src/rbac.rs` (modify) | Two new permissions in the catalog. |
+| `crates/egret-controlplane/src/access/mod.rs` (modify) | Refuse service accounts on the human user routes. |
+| `crates/egret-machine-idp/src/lib.rs` (modify) | `VerifiedClient` carries audience + claims + TTL; `IdpState` holds several verifiers. |
+| `crates/egret-catalog-engine/src/store/embedded.rs` (modify) | Its `ClientVerifier` impl fills in the new fields, producing an unchanged catalog token. |
+| `crates/egret-bin/src/main.rs` (modify) | Register both verifiers on `IdpState`. |
+| `crates/egret-dataapi-api/src/lib.rs` (create) | Pure-serde DTOs. |
+| `crates/egret-dataapi/src/clients.rs` (create) | Client store + the Data API `ClientVerifier` impl. |
+| `crates/egret-dataapi/src/routes.rs` (create) | `management_router()` — workspace-scoped admin surface. |
+| `crates/egret-core/src/rbac.rs` (modify) | Two new permissions. |
 | `crates/egret-server/src/lib.rs` (modify) | Mount the router; merge the OpenAPI. |
-| `docs/en/specs/2026-08-14-data-api-design.md` (modify) | §5.1 gains `dataapi.service_accounts`; `api_keys` FK retargeted. |
+| `docs/en/specs/...`, `docs/vi/specs/...` (modify) | §5.1 and §6.1 rewritten for OAuth2. |
 
 ---
 
@@ -49,15 +61,15 @@
 - Test: `crates/egret-auth/tests/service_accounts.rs` (create)
 
 **Interfaces:**
-- Consumes: the existing `users` table (`migrations/0002_identity.sql:3`), `workspaces` (`migrations/0003_workspace_rbac.sql:1`), `UsersStore` (`crates/egret-auth/src/users.rs:15`).
+- Consumes: `users` (`migrations/0002_identity.sql:3`), `workspaces` (`migrations/0003_workspace_rbac.sql:1`), `UsersStore` (`crates/egret-auth/src/users.rs:15`).
 - Produces: `pub async fn UsersStore::insert_service(&self, email: &str, name: &str) -> Result<UserId>`.
 
 - [ ] **Step 1: Write the migration**
 
-Create `migrations/0119_dataapi_service_accounts.sql`. Match the house style of `migrations/0118_automation_slack.sql`: explain *why*, not just what.
+Create `migrations/0119_dataapi_service_accounts.sql`, matching the house style of `migrations/0118_automation_slack.sql` — explain *why*, not just what.
 
 ```sql
--- Data API P2: service accounts and their API keys.
+-- Data API P2: service accounts and their OAuth2 clients.
 --
 -- A service account is a REAL row in `users` with provider = 'service'. That is
 -- deliberate: `access_grants`, Cedar, `ensure_username` (Ranger/Trino
@@ -90,32 +102,36 @@ CREATE TABLE dataapi.service_accounts (
 );
 CREATE INDEX service_accounts_ws_idx ON dataapi.service_accounts (workspace_id);
 
-CREATE TABLE dataapi.api_keys (
+-- OAuth2 client_credentials clients, deliberately shaped like
+-- `catalog.catalog_clients` (0053) — same idea, same machine-IdP, second
+-- audience. N clients per service account, so rotation is mint-new-then-revoke-old.
+CREATE TABLE dataapi.clients (
   id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   service_account_id uuid NOT NULL REFERENCES dataapi.service_accounts(user_id) ON DELETE CASCADE,
   name               text NOT NULL,
-  -- Looked up by prefix, so it must be unique and indexed. The secret itself is
-  -- never stored — only its SHA-256.
-  prefix             text NOT NULL UNIQUE,
-  secret_hash        text NOT NULL,
+  client_id          text NOT NULL UNIQUE,
+  -- Argon2, matching CatalogStore::verify_client. Affordable because it is
+  -- checked once per TOKEN, not once per API request.
+  client_secret_hash text NOT NULL,
   expires_at         timestamptz,
-  last_used_at       timestamptz,
   revoked_at         timestamptz,
+  last_used_at       timestamptz,
   created_by         uuid REFERENCES users(id) ON DELETE SET NULL,
   created_at         timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX api_keys_sa_idx ON dataapi.api_keys (service_account_id);
+CREATE INDEX dataapi_clients_sa_idx ON dataapi.clients (service_account_id);
+CREATE INDEX dataapi_clients_client_id_idx ON dataapi.clients (client_id);
 ```
 
-Before writing this, confirm the existing constraint's name — `users_provider_check` is Postgres's default for an inline `CHECK` on `provider`, but verify rather than assume:
+Before writing this, confirm the existing constraint's name — `users_provider_check` is Postgres's default for an inline `CHECK`, but verify rather than assume:
 
 ```bash
 psql "$DATABASE_URL" -c "\d users" | grep -i check
 ```
 
-If the name differs, use the real one. A `DROP CONSTRAINT` naming a constraint that does not exist fails the whole migration.
+A `DROP CONSTRAINT` naming a constraint that does not exist fails the whole migration.
 
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 2: Write the failing tests**
 
 Create `crates/egret-auth/tests/service_accounts.rs`. Follow the fixture pattern of the existing tests in `crates/egret-auth/tests/` — open one and copy how it builds a `Db` and a `UsersStore`.
 
@@ -187,14 +203,14 @@ Expected: compile error — `insert_service` does not exist. That is the red sta
 
 - [ ] **Step 4: Add `insert_service`**
 
-In `crates/egret-auth/src/users.rs`, directly after `insert_local` (which ends at line 66), add:
+In `crates/egret-auth/src/users.rs`, directly after `insert_local` (which ends at line 66):
 
 ```rust
     /// Insert a service account: a user row that can never log in.
     ///
     /// `password_hash` is deliberately not a parameter — a service account
-    /// authenticates by API key, and `users_service_has_no_password` (migration
-    /// 0119) rejects a row that has one.
+    /// authenticates via an OAuth2 client, and `users_service_has_no_password`
+    /// (migration 0119) rejects a row that has one.
     pub async fn insert_service(&self, email: &str, name: &str) -> Result<UserId> {
         let res = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO users (provider, email, name) \
@@ -216,7 +232,7 @@ In `crates/egret-auth/src/users.rs`, directly after `insert_local` (which ends a
 
 - [ ] **Step 5: Exclude service accounts from `list`**
 
-Still in `crates/egret-auth/src/users.rs`, change `list` (line 67). Only the SQL changes:
+Change `list` (line 67). Only the SQL and the doc comment change:
 
 ```rust
     /// Human users, newest first. Service accounts (`provider = 'service'`) are
@@ -253,7 +269,7 @@ Two mutations, run separately:
 1. Remove `WHERE provider <> 'service'` from `list`. Expected: `service_accounts_are_absent_from_the_user_list` FAILS.
 2. Drop the `users_service_has_no_password` constraint from the migration and re-run against a fresh DB (`just reset-testdata`). Expected: `service_account_cannot_have_a_password` FAILS.
 
-Revert both and confirm green. A test that passes either way is not evidence.
+Revert both and confirm green.
 
 - [ ] **Step 8: Commit**
 
@@ -284,13 +300,13 @@ Access console picker. Resolution by id is deliberately unfiltered."
 - Consumes: `UsersStore::insert_service` and the filtered `list` from Task 1.
 - Produces: no new public API — behavioural guarantees only.
 
-Task 1 filtered the one enumeration query. This task closes the routes that would still let an admin operate on a service account *as if it were a person*, and pins the behaviour with tests. The sites were enumerated by hand; the table below is the whole set, and the split matters more than the filtering.
+The sites were enumerated by hand. This table is the whole set, and the split matters more than the filtering.
 
 | Site | Kind | Action |
 |---|---|---|
 | `egret-auth/src/users.rs:67` `list()` | enumeration | filtered in Task 1 |
-| `access/mod.rs` `POST /users/{id}/password` | mutation | must 400 on a service account |
-| `access/mod.rs` `PATCH /users/{id}` | mutation | must 400 on a service account |
+| `access/mod.rs` `POST /users/{id}/password` | mutation | must 400 |
+| `access/mod.rs` `PATCH /users/{id}` | mutation | must 400 |
 | `egret-workspace/src/access_views.rs:167` | id-keyed `LEFT JOIN` | **leave alone** — renders the grant's principal name |
 | `egret-notebook`, `egret-bi`, `egret-kernel`, `egret-automation` joins on `users` | id-keyed | **leave alone** — all render an owner/actor name |
 
@@ -351,11 +367,11 @@ async fn service_account_is_absent_from_the_users_route() {
 
 Run: `cargo test -p egret-controlplane --test service_account_surfaces`
 
-Expected: the two rejection tests FAIL with 200 (the routes currently accept). The list test should already pass thanks to Task 1 — confirm that it does, and that you understand why, before continuing.
+Expected: the two rejection tests FAIL with 200. The list test should already pass thanks to Task 1 — confirm it does, and that you understand why, before continuing.
 
 - [ ] **Step 3: Reject service accounts in the two mutating handlers**
 
-In `crates/egret-controlplane/src/access/mod.rs`, add this helper next to the other module-level helpers:
+In `crates/egret-controlplane/src/access/mod.rs`, add next to the other module-level helpers:
 
 ```rust
 /// The human-facing user routes operate on people. A service account is a
@@ -383,7 +399,7 @@ Call it as the first line after the authz gate in both `reset_password` and `upd
     refuse_service_account(&st, UserId(id)).await?;
 ```
 
-Check `CpError`'s actual variant names in `crates/egret-controlplane/src/error.rs` and use the real ones — `NotFound`/`BadRequest` above are the expected shape, not a guess you should keep if the enum differs.
+Check `CpError`'s actual variant names in `crates/egret-controlplane/src/error.rs` and use the real ones — `NotFound`/`BadRequest` above are the expected shape, not a guess to keep if the enum differs.
 
 - [ ] **Step 4: Run the tests and verify they pass**
 
@@ -410,241 +426,418 @@ deliberately left unfiltered."
 
 ---
 
-### Task 3: API key mint, verify, revoke
+### Task 3: Generalise the machine-IdP to a second audience
 
 **Files:**
-- Create: `crates/egret-dataapi-api/Cargo.toml`, `crates/egret-dataapi-api/src/lib.rs`
-- Create: `crates/egret-dataapi/Cargo.toml`, `crates/egret-dataapi/src/lib.rs`, `crates/egret-dataapi/src/service_accounts.rs`, `crates/egret-dataapi/src/keys.rs`
-- Modify: `Cargo.toml` (workspace members)
-- Test: `crates/egret-dataapi/src/keys.rs` (inline `#[cfg(test)] mod tests`) and `crates/egret-dataapi/tests/keys_store.rs` (create)
+- Modify: `crates/egret-machine-idp/src/lib.rs`
+- Modify: `crates/egret-catalog-engine/src/store/embedded.rs` (its `ClientVerifier` impl, line 403)
+- Modify: `crates/egret-bin/src/main.rs` (`IdpState` construction, line 1759)
+- Test: `crates/egret-machine-idp/src/lib.rs` (inline tests — a `FakeVerifier` already exists at line 300)
 
 **Interfaces:**
-- Consumes: `dataapi.service_accounts` and `dataapi.api_keys` from Task 1; `egret_metastore::Db`; `egret_core::Error`.
+- Consumes: the existing `ClientVerifier` trait, `IdpState`, `SigningKeyStore`.
 - Produces:
-  - `pub struct MintedKey { pub id: Uuid, pub secret: String }` — `secret` is the full `egt_<prefix>_<secret>` token, returned once.
-  - `pub fn keys::format_key(prefix: &str, secret: &str) -> String`
-  - `pub fn keys::split_key(key: &str) -> Option<(&str, &str)>`
-  - `pub fn keys::hash_secret(secret: &str) -> String`
-  - `pub fn keys::hash_matches(computed: &str, stored: &str) -> bool`
-  - `pub const keys::PREFIX_LEN: usize = 12`
-  - `pub async fn KeyStore::mint(&self, service_account_id: Uuid, name: &str, expires_at: Option<OffsetDateTime>, by: UserId) -> Result<MintedKey>`
-  - `pub async fn KeyStore::verify(&self, presented: &str) -> Result<Option<VerifiedKey>>` where `VerifiedKey { key_id: Uuid, service_account_id: Uuid, workspace_id: Uuid }`
-  - `pub async fn KeyStore::revoke(&self, id: Uuid) -> Result<()>`
+  - `pub struct VerifiedClient { pub client_id: String, pub audience: String, pub extra_claims: serde_json::Map<String, serde_json::Value>, pub ttl_secs: u64 }` — **breaking change** to the struct.
+  - `IdpState.verifiers: Vec<Arc<dyn ClientVerifier>>` — replaces the single `clients` field.
+
+This is the riskiest task in the plan: it touches a crate the catalog depends on. Write the regression test first, and do not proceed until it is green against unmodified code.
+
+- [ ] **Step 1: Pin the catalog's current token shape**
+
+Before changing anything, add a test that captures exactly what a Catalog Client's token contains today. `crates/egret-machine-idp/src/lib.rs:300` already has a `FakeVerifier` — extend the existing inline test module:
+
+```rust
+    /// The catalog's token shape is a published contract with every Iceberg
+    /// client already deployed. This test exists to fail loudly if the
+    /// multi-audience refactor changes it.
+    #[tokio::test]
+    async fn catalog_token_claims_are_unchanged() {
+        let st = test_idp_state_with_catalog_verifier().await;
+        let resp = post_token(&st, "grant_type=client_credentials&client_id=cat1&client_secret=s").await;
+
+        let claims = decode_claims_without_verifying(&resp.access_token);
+        assert_eq!(claims["aud"], "catalog");
+        assert_eq!(claims["sub"], "cat1");
+        assert_eq!(claims["warehouse"], "wh1");
+        assert_eq!(claims["roles"], serde_json::json!(["role1"]));
+        assert_eq!(resp.expires_in, 3600, "catalog TTL must stay 3600");
+    }
+```
+
+Run it against unmodified code. Expected: PASS. If it does not pass, your fixture is wrong — fix it before touching production code, or the regression test is worthless.
+
+- [ ] **Step 2: Write the failing multi-audience test**
+
+```rust
+    #[tokio::test]
+    async fn a_second_verifier_serves_its_own_audience_and_ttl() {
+        // Two verifiers registered; each client resolves through exactly one.
+        let st = test_idp_state_with_two_verifiers().await;
+
+        let cat = post_token(&st, "grant_type=client_credentials&client_id=cat1&client_secret=s").await;
+        assert_eq!(decode_claims_without_verifying(&cat.access_token)["aud"], "catalog");
+        assert_eq!(cat.expires_in, 3600);
+
+        let api = post_token(&st, "grant_type=client_credentials&client_id=api1&client_secret=s").await;
+        let c = decode_claims_without_verifying(&api.access_token);
+        assert_eq!(c["aud"], "data-api");
+        assert_eq!(c["ws"], "11111111-1111-1111-1111-111111111111");
+        assert_eq!(api.expires_in, 600, "Data API TTL is short by design");
+        assert!(c.get("warehouse").is_none(), "catalog claims must not leak in");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_client_is_rejected_by_every_verifier() {
+        let st = test_idp_state_with_two_verifiers().await;
+        let err = post_token_expecting_error(&st, "grant_type=client_credentials&client_id=nope&client_secret=s").await;
+        assert_eq!(err.status, 401);
+        assert_eq!(err.body["error"], "invalid_client");
+    }
+```
+
+Run: `cargo test -p egret-machine-idp`
+
+Expected: compile error — `IdpState` has no `verifiers` field.
+
+- [ ] **Step 3: Generalise `VerifiedClient` and `IdpState`**
+
+In `crates/egret-machine-idp/src/lib.rs`, replace the `VerifiedClient` struct (line 32) and the `clients` field on `IdpState` (line 65):
+
+```rust
+/// A verified machine client. The verifier that matched owns the token's shape:
+/// which `aud` it carries, what audience-specific claims it adds, and how long
+/// it lives. That is what lets one IdP serve the Catalog and the Data API
+/// without either knowing about the other.
+pub struct VerifiedClient {
+    pub client_id: String,
+    /// The JWT `aud`.
+    pub audience: String,
+    /// Merged into the JWT alongside the standard claims. Must not contain
+    /// `iss`, `sub`, `aud` or `exp` — those are the IdP's to set.
+    pub extra_claims: serde_json::Map<String, serde_json::Value>,
+    /// Token lifetime. Catalog: 3600. Data API: 600 — short, because a stateless
+    /// token cannot be revoked before it expires.
+    pub ttl_secs: u64,
+}
+```
+
+```rust
+#[derive(Clone)]
+pub struct IdpState {
+    pub keys: Arc<dyn SigningKeyStore>,
+    /// The egret public root URL used as the JWT `iss` + OIDC issuer.
+    pub issuer: String,
+    /// Tried in order until one recognises the `client_id`. Each owns its own
+    /// audience; a client belongs to exactly one registry.
+    pub verifiers: Vec<Arc<dyn ClientVerifier>>,
+}
+```
+
+- [ ] **Step 4: Build claims from the verifier**
+
+Replace the hardcoded claim block in `token_endpoint` (lines 185-197):
+
+```rust
+    let mut vc = None;
+    for v in &st.verifiers {
+        if let Some(found) = v.verify(&f.client_id, &f.client_secret).await? {
+            vc = Some(found);
+            break;
+        }
+    }
+    let vc = vc.ok_or(IdpError::InvalidClient)?;
+
+    let km = st.keys.active().await?;
+    let exp = chrono::Utc::now().timestamp() as u64 + vc.ttl_secs;
+    let mut claims = serde_json::Map::new();
+    // Audience-specific claims first, so the standard ones below always win —
+    // a verifier must never be able to forge `iss`, `sub`, `aud` or `exp`.
+    claims.extend(vc.extra_claims.clone());
+    claims.insert("iss".into(), st.issuer.trim_end_matches('/').into());
+    claims.insert("sub".into(), vc.client_id.clone().into());
+    claims.insert("aud".into(), vc.audience.clone().into());
+    claims.insert("exp".into(), exp.into());
+
+    let jwt = sign_claims(&km, &serde_json::Value::Object(claims))?;
+    Ok(Json(TokenResp {
+        access_token: jwt,
+        token_type: "Bearer".into(),
+        expires_in: vc.ttl_secs,
+    }))
+```
+
+The insert order is load-bearing: standard claims are written **after** the verifier's, so a buggy or hostile verifier cannot override `sub` or `aud`. Do not "tidy" this by extending last.
+
+- [ ] **Step 5: Update the catalog's verifier**
+
+In `crates/egret-catalog-engine/src/store/embedded.rs:403`, fill in the new fields so the emitted token is unchanged:
+
+```rust
+            Some((warehouse, catalog_role)) => Ok(Some(egret_machine_idp::VerifiedClient {
+                client_id: client_id.to_string(),
+                audience: "catalog".into(),
+                extra_claims: serde_json::json!({
+                    "warehouse": warehouse,
+                    "roles": [catalog_role],
+                })
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+                ttl_secs: 3600,
+            })),
+```
+
+- [ ] **Step 6: Update `IdpState` construction**
+
+In `crates/egret-bin/src/main.rs:1759`, change `clients: <catalog store>` to `verifiers: vec![<catalog store>]`. The Data API verifier joins this list in Task 4.
+
+- [ ] **Step 7: Run the tests and verify they pass**
+
+Run: `cargo test -p egret-machine-idp -p egret-catalog-engine`
+
+Expected: PASS, including `catalog_token_claims_are_unchanged` from Step 1. That test passing after the refactor is the whole point of this task.
+
+- [ ] **Step 8: Verify the tests are real by mutating the implementation**
+
+1. Change the catalog verifier's `ttl_secs` to 600. Expected: `catalog_token_claims_are_unchanged` FAILS on `expires_in`.
+2. Move the `claims.extend(vc.extra_claims)` line to **after** the standard-claim inserts, and make a fake verifier emit `{"sub": "attacker"}`. Expected: a claim-override test FAILS. If you have no test covering this, **write one** — the ordering is a security property and must not rest on a comment.
+
+Revert both.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add crates/egret-machine-idp/src/lib.rs \
+        crates/egret-catalog-engine/src/store/embedded.rs \
+        crates/egret-bin/src/main.rs
+git commit -m "refactor(idp): let the machine-IdP serve several audiences
+
+VerifiedClient now carries its audience, its extra claims and its TTL, so
+a second consumer (Data API) can register a verifier without the catalog
+knowing about it. Standard claims are written after the verifier's, so a
+verifier cannot forge sub or aud.
+
+The catalog's token is unchanged — aud, warehouse, roles and the 3600s
+TTL are pinned by a regression test written before the refactor."
+```
+
+---
+
+### Task 4: Data API clients and their verifier
+
+**Files:**
+- Create: `crates/egret-dataapi-api/{Cargo.toml,src/lib.rs}`, `crates/egret-dataapi/{Cargo.toml,src/lib.rs,src/clients.rs}`
+- Modify: root `Cargo.toml` (workspace members), `crates/egret-bin/src/main.rs`
+- Test: `crates/egret-dataapi/tests/clients_store.rs` (create)
+
+**Interfaces:**
+- Consumes: `dataapi.service_accounts` and `dataapi.clients` (Task 1); `VerifiedClient` (Task 3).
+- Produces:
+  - `pub struct NewClient { pub id: Uuid, pub client_id: String, pub client_secret: String }`
+  - `pub async fn ClientStore::create(&self, sa: Uuid, name: &str, expires_at: Option<OffsetDateTime>, by: UserId) -> Result<NewClient>`
+  - `pub async fn ClientStore::revoke(&self, id: Uuid) -> Result<()>`
+  - `impl egret_machine_idp::ClientVerifier for ClientStore`
 
 - [ ] **Step 1: Create the two crates**
 
-`crates/egret-dataapi-api/Cargo.toml` — a pure leaf, mirroring `crates/egret-query-api/Cargo.toml`'s dependency list (`egret-core`, `serde`, `uuid`, `utoipa`). `crates/egret-dataapi/Cargo.toml` — mirror `crates/egret-query/Cargo.toml`'s shape and add `sha2` and `subtle` (for constant-time comparison) plus `egret-dataapi-api`. Add both to the workspace `members` list in the root `Cargo.toml`, keeping it in the file's existing order.
+`crates/egret-dataapi-api/Cargo.toml` — a pure leaf mirroring `crates/egret-query-api/Cargo.toml` (`egret-core`, `serde`, `uuid`, `utoipa`). `crates/egret-dataapi/Cargo.toml` — mirror `crates/egret-query/Cargo.toml` and add `egret-machine-idp`, `egret-dataapi-api`, `argon2`, `rand`, `base64`. Add both to the workspace `members` list in the root `Cargo.toml`, keeping its existing order.
 
-Check whether `sha2` and `subtle` are already in the workspace dependency table; if so use `.workspace = true`, matching how sibling crates declare deps.
+Use `.workspace = true` for any dep already in the workspace dependency table, matching how sibling crates declare deps.
 
 - [ ] **Step 2: Write the failing tests**
 
-In `crates/egret-dataapi/src/keys.rs`, add:
+Create `crates/egret-dataapi/tests/clients_store.rs`. Build the `Db` the way other integration tests do — copy the fixture shape from `crates/egret-query/tests/registry_repo.rs`.
 
 ```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
+//! Every failure mode of `verify` must be indistinguishable from outside.
+use egret_machine_idp::ClientVerifier;
 
-    #[test]
-    fn key_round_trips_through_format_and_split() {
-        let k = format_key("abc123def456", "s3cr3t");
-        assert_eq!(k, "egt_abc123def456_s3cr3t");
-        assert_eq!(split_key(&k), Some(("abc123def456", "s3cr3t")));
-    }
+#[tokio::test]
+async fn a_new_client_verifies_and_carries_its_workspace() {
+    let f = fixture().await;
+    let c = f.clients.create(f.sa, "prod", None, f.admin).await.unwrap();
 
-    #[test]
-    fn split_rejects_malformed_keys() {
-        assert_eq!(split_key("abc123def456_s3cr3t"), None, "missing egt_ prefix");
-        assert_eq!(split_key("egt_onlyprefix"), None, "no secret segment");
-        assert_eq!(split_key(""), None);
-        assert_eq!(split_key("egt__s3cr3t"), None, "empty prefix");
-        assert_eq!(split_key("egt_abc123def456_"), None, "empty secret");
-    }
+    let vc = f.clients
+        .verify(&c.client_id, &c.client_secret)
+        .await
+        .unwrap()
+        .expect("must verify");
 
-    #[test]
-    fn a_secret_containing_underscores_survives_the_split() {
-        // The secret is base64url, which never contains '_'... except that
-        // base64URL's alphabet DOES include '_'. Splitting on the LAST
-        // underscore would corrupt it; splitting on the first two is what makes
-        // this safe.
-        let k = format_key("abc123def456", "aa_bb_cc");
-        assert_eq!(split_key(&k), Some(("abc123def456", "aa_bb_cc")));
-    }
+    assert_eq!(vc.audience, "data-api");
+    assert_eq!(vc.ttl_secs, 600, "short TTL is the revocation mitigation");
+    assert_eq!(vc.extra_claims["ws"], f.ws.to_string());
+    assert_eq!(vc.extra_claims["egret_user_id"], f.sa.to_string());
+    assert!(
+        vc.extra_claims.get("warehouse").is_none(),
+        "no catalog claims on a data-api token"
+    );
+}
 
-    #[test]
-    fn hash_is_stable_and_differs_per_secret() {
-        assert_eq!(hash_secret("a"), hash_secret("a"));
-        assert_ne!(hash_secret("a"), hash_secret("b"));
-        // SHA-256 hex is 64 chars — a length change means the algorithm changed
-        // and every stored hash just became unverifiable.
-        assert_eq!(hash_secret("a").len(), 64);
-    }
+#[tokio::test]
+async fn a_revoked_client_does_not_verify() {
+    let f = fixture().await;
+    let c = f.clients.create(f.sa, "prod", None, f.admin).await.unwrap();
+    f.clients.revoke(c.id).await.unwrap();
+    assert!(f.clients.verify(&c.client_id, &c.client_secret).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn an_expired_client_does_not_verify() {
+    let f = fixture().await;
+    let past = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
+    let c = f.clients.create(f.sa, "prod", Some(past), f.admin).await.unwrap();
+    assert!(f.clients.verify(&c.client_id, &c.client_secret).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_wrong_secret_does_not_verify() {
+    let f = fixture().await;
+    let c = f.clients.create(f.sa, "prod", None, f.admin).await.unwrap();
+    assert!(f.clients.verify(&c.client_id, "not-the-secret").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn an_unknown_client_id_does_not_verify() {
+    let f = fixture().await;
+    assert!(f.clients.verify("nope", "s").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn deleting_the_service_account_removes_its_clients() {
+    let f = fixture().await;
+    let c = f.clients.create(f.sa, "prod", None, f.admin).await.unwrap();
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(f.sa)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+    // ON DELETE CASCADE reaches dataapi.clients through service_accounts.
+    assert!(f.clients.verify(&c.client_id, &c.client_secret).await.unwrap().is_none());
 }
 ```
 
 - [ ] **Step 3: Run the tests and verify they fail**
 
-Run: `cargo test -p egret-dataapi --lib keys`
+Run: `cargo test -p egret-dataapi`
 
-Expected: compile error — the functions do not exist.
+Expected: compile error — `ClientStore` does not exist.
 
-- [ ] **Step 4: Implement the key primitives**
+- [ ] **Step 4: Implement the store and the verifier**
 
-In `crates/egret-dataapi/src/keys.rs`:
+`crates/egret-dataapi/src/clients.rs`:
 
 ```rust
-//! API key material: format, hash, verify. The ONLY place a key secret is
-//! handled.
+//! Data API OAuth2 clients: create, revoke, and the `ClientVerifier` the
+//! machine-IdP calls at `POST /oauth/token`.
 //!
-//! Keys are hashed with SHA-256, deliberately NOT with
-//! `egret_auth::password`'s Argon2. Argon2 is right for a password a human
-//! chose, because it must survive brute force. A key secret is 32 bytes of
-//! CSPRNG output, so brute force is already infeasible — and paying Argon2's
-//! ~50-100 ms on EVERY API request would make the serving surface unusable.
+//! Argon2 is affordable here because it runs once per TOKEN, not once per API
+//! request — that is the whole reason this is an OAuth2 client and not a bearer
+//! key checked on every call.
 
-use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
-
-/// The prefix length. Long enough to make a lookup collision implausible,
-/// short enough to display in a key list.
-pub const PREFIX_LEN: usize = 12;
-
-/// Assemble the token a caller presents: `egt_<prefix>_<secret>`.
-pub fn format_key(prefix: &str, secret: &str) -> String {
-    format!("egt_{prefix}_{secret}")
-}
-
-/// Split a presented token into `(prefix, secret)`. Returns `None` for anything
-/// malformed — the caller must treat that as an authentication failure, not as
-/// a reason to look anything up.
-///
-/// Splits on the first two separators only: the secret is base64url, whose
-/// alphabet includes `_`, so splitting on the last separator would truncate it.
-pub fn split_key(key: &str) -> Option<(&str, &str)> {
-    let rest = key.strip_prefix("egt_")?;
-    let (prefix, secret) = rest.split_once('_')?;
-    if prefix.is_empty() || secret.is_empty() {
-        return None;
-    }
-    Some((prefix, secret))
-}
-
-/// SHA-256 of the secret, lowercase hex.
-pub fn hash_secret(secret: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(secret.as_bytes());
-    format!("{:x}", h.finalize())
-}
-
-/// Constant-time comparison of a computed hash against a stored one.
-pub fn hash_matches(computed: &str, stored: &str) -> bool {
-    computed.as_bytes().ct_eq(stored.as_bytes()).into()
-}
-```
-
-- [ ] **Step 5: Run the tests and verify they pass**
-
-Run: `cargo test -p egret-dataapi --lib keys`
-
-Expected: PASS, 4 tests.
-
-- [ ] **Step 6: Implement mint / verify / revoke**
-
-Add to the same file. Follow `crates/egret-query/src/registry/repo.rs` for sqlx error-mapping idiom.
-
-```rust
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::Argon2;
 use egret_core::{Error, Result, UserId};
 use egret_metastore::Db;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-/// A freshly minted key. `secret` is the assembled `egt_…` token and is the ONLY
-/// time it exists outside the caller's hands — it is not recoverable.
-pub struct MintedKey {
-    pub id: Uuid,
-    pub secret: String,
-}
+/// Data API tokens are short-lived: a stateless token cannot be revoked before
+/// it expires, so the exposure window after revoking a client is this long.
+pub const DATA_API_TTL_SECS: u64 = 600;
 
-/// What a valid key resolves to. Carries the workspace so the serving surface
-/// (P4) can do its path-workspace check without a second query.
-pub struct VerifiedKey {
-    pub key_id: Uuid,
-    pub service_account_id: Uuid,
-    pub workspace_id: Uuid,
+pub struct NewClient {
+    pub id: Uuid,
+    pub client_id: String,
+    /// Shown once. Not recoverable.
+    pub client_secret: String,
 }
 
 #[derive(Clone)]
-pub struct KeyStore {
+pub struct ClientStore {
     db: Db,
 }
 
-impl KeyStore {
+impl ClientStore {
     pub fn new(db: Db) -> Self {
         Self { db }
     }
 
-    pub async fn mint(
+    pub async fn create(
         &self,
         service_account_id: Uuid,
         name: &str,
         expires_at: Option<OffsetDateTime>,
         by: UserId,
-    ) -> Result<MintedKey> {
+    ) -> Result<NewClient> {
         use base64::Engine as _;
         use rand::RngCore;
 
-        let mut sb = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut sb);
-        let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sb);
+        let mut b = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut b);
+        let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+        let client_id = format!("egret-dataapi-{}", Uuid::new_v4());
 
-        let mut pb = [0u8; 9]; // 9 bytes -> 12 base64url chars, = PREFIX_LEN
-        rand::thread_rng().fill_bytes(&mut pb);
-        let prefix = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pb);
-        debug_assert_eq!(prefix.len(), PREFIX_LEN);
+        let salt = SaltString::generate(&mut rand::thread_rng());
+        let hash = Argon2::default()
+            .hash_password(secret.as_bytes(), &salt)
+            .map_err(|e| Error::Internal(anyhow::anyhow!("hash client secret: {e}")))?
+            .to_string();
 
         let id: Uuid = sqlx::query_scalar(
-            "INSERT INTO dataapi.api_keys \
-               (service_account_id, name, prefix, secret_hash, expires_at, created_by) \
+            "INSERT INTO dataapi.clients \
+               (service_account_id, name, client_id, client_secret_hash, expires_at, created_by) \
              VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
         )
         .bind(service_account_id)
         .bind(name)
-        .bind(&prefix)
-        .bind(hash_secret(&secret))
+        .bind(&client_id)
+        .bind(hash)
         .bind(expires_at)
         .bind(by.0)
         .fetch_one(&self.db.pool)
         .await
-        .map_err(|e| Error::Internal(anyhow::anyhow!("mint api key: {e}")))?;
+        .map_err(|e| Error::Internal(anyhow::anyhow!("create dataapi client: {e}")))?;
 
-        Ok(MintedKey {
-            id,
-            secret: format_key(&prefix, &secret),
-        })
+        Ok(NewClient { id, client_id, client_secret: secret })
     }
 
-    /// Resolve a presented token. Returns `Ok(None)` for every failure mode —
-    /// malformed, unknown, revoked, expired, or wrong secret — so a caller
-    /// cannot tell them apart. Never return a distinguishing error here.
-    pub async fn verify(&self, presented: &str) -> Result<Option<VerifiedKey>> {
-        let Some((prefix, secret)) = split_key(presented) else {
-            return Ok(None);
-        };
+    pub async fn revoke(&self, id: Uuid) -> Result<()> {
+        sqlx::query(
+            "UPDATE dataapi.clients SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL",
+        )
+        .bind(id)
+        .execute(&self.db.pool)
+        .await
+        .map_err(|e| Error::Internal(anyhow::anyhow!("revoke dataapi client: {e}")))?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl egret_machine_idp::ClientVerifier for ClientStore {
+    /// Returns `Ok(None)` for EVERY failure — unknown, revoked, expired, wrong
+    /// secret. A distinguishing error here would be a free oracle for anyone
+    /// probing client ids.
+    async fn verify(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+    ) -> std::result::Result<Option<egret_machine_idp::VerifiedClient>, egret_machine_idp::IdpError>
+    {
         let row: Option<(Uuid, Uuid, Uuid, String, Option<OffsetDateTime>, Option<OffsetDateTime>)> =
             sqlx::query_as(
-                "SELECT k.id, k.service_account_id, sa.workspace_id, k.secret_hash, \
-                        k.expires_at, k.revoked_at \
-                 FROM dataapi.api_keys k \
-                 JOIN dataapi.service_accounts sa ON sa.user_id = k.service_account_id \
-                 WHERE k.prefix = $1",
+                "SELECT c.id, c.service_account_id, sa.workspace_id, c.client_secret_hash, \
+                        c.expires_at, c.revoked_at \
+                 FROM dataapi.clients c \
+                 JOIN dataapi.service_accounts sa ON sa.user_id = c.service_account_id \
+                 WHERE c.client_id = $1",
             )
-            .bind(prefix)
+            .bind(client_id)
             .fetch_optional(&self.db.pool)
             .await
-            .map_err(|e| Error::Internal(anyhow::anyhow!("verify api key: {e}")))?;
+            .map_err(|e| egret_machine_idp::IdpError::Db(e.to_string()))?;
 
-        let Some((key_id, sa, ws, stored, expires_at, revoked_at)) = row else {
+        let Some((id, sa, ws, hash, expires_at, revoked_at)) = row else {
             return Ok(None);
         };
         if revoked_at.is_some() {
@@ -655,201 +848,143 @@ impl KeyStore {
                 return Ok(None);
             }
         }
-        if !hash_matches(&hash_secret(secret), &stored) {
+        let parsed = PasswordHash::new(&hash)
+            .map_err(|e| egret_machine_idp::IdpError::Db(format!("hash parse: {e}")))?;
+        if Argon2::default()
+            .verify_password(client_secret.as_bytes(), &parsed)
+            .is_err()
+        {
             return Ok(None);
         }
-        Ok(Some(VerifiedKey {
-            key_id,
-            service_account_id: sa,
-            workspace_id: ws,
-        }))
-    }
-
-    pub async fn revoke(&self, id: Uuid) -> Result<()> {
-        sqlx::query("UPDATE dataapi.api_keys SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL")
+        let _ = sqlx::query("UPDATE dataapi.clients SET last_used_at = now() WHERE id = $1")
             .bind(id)
             .execute(&self.db.pool)
-            .await
-            .map_err(|e| Error::Internal(anyhow::anyhow!("revoke api key: {e}")))?;
-        Ok(())
+            .await;
+
+        let extra = serde_json::json!({ "ws": ws.to_string(), "egret_user_id": sa.to_string() })
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        Ok(Some(egret_machine_idp::VerifiedClient {
+            client_id: client_id.to_string(),
+            audience: "data-api".into(),
+            extra_claims: extra,
+            ttl_secs: DATA_API_TTL_SECS,
+        }))
     }
 }
 ```
 
-Note `verify` returns `Ok(None)` for **every** failure. Returning a distinguishing error would let a caller separate "unknown prefix" from "bad secret", which is a free oracle for anyone probing.
+- [ ] **Step 5: Register the verifier**
 
-- [ ] **Step 7: Write and run the store integration test**
+In `crates/egret-bin/src/main.rs:1759`, append the Data API store to the `verifiers` vec built in Task 3, after the catalog store.
 
-Create `crates/egret-dataapi/tests/keys_store.rs`. Build the `Db` the way the other integration tests in this repo do — copy the fixture shape from `crates/egret-query/tests/registry_repo.rs`.
+- [ ] **Step 6: Run the tests and verify they pass**
 
-```rust
-//! Every failure mode of `verify` must be indistinguishable from outside.
+Run: `cargo test -p egret-dataapi -p egret-machine-idp`
 
-#[tokio::test]
-async fn a_minted_key_verifies() {
-    let f = fixture().await;
-    let minted = f.keys.mint(f.sa, "k", None, f.admin).await.unwrap();
-    let v = f.keys.verify(&minted.secret).await.unwrap().expect("must verify");
-    assert_eq!(v.service_account_id, f.sa);
-    assert_eq!(v.workspace_id, f.ws);
-    assert_eq!(v.key_id, minted.id);
-}
+Expected: PASS. The machine-IdP suite must stay green — a Data API verifier in the list must not disturb catalog clients.
 
-#[tokio::test]
-async fn a_revoked_key_does_not_verify() {
-    let f = fixture().await;
-    let minted = f.keys.mint(f.sa, "k", None, f.admin).await.unwrap();
-    f.keys.revoke(minted.id).await.unwrap();
-    assert!(f.keys.verify(&minted.secret).await.unwrap().is_none());
-}
+- [ ] **Step 7: Verify the tests are real by mutating the implementation**
 
-#[tokio::test]
-async fn an_expired_key_does_not_verify() {
-    let f = fixture().await;
-    let past = time::OffsetDateTime::now_utc() - time::Duration::hours(1);
-    let minted = f.keys.mint(f.sa, "k", Some(past), f.admin).await.unwrap();
-    assert!(f.keys.verify(&minted.secret).await.unwrap().is_none());
-}
+1. Skip the `revoked_at` check. Expected: `a_revoked_client_does_not_verify` FAILS.
+2. Skip the `expires_at` check. Expected: `an_expired_client_does_not_verify` FAILS.
+3. Change `ttl_secs` to 3600. Expected: `a_new_client_verifies_and_carries_its_workspace` FAILS.
 
-#[tokio::test]
-async fn a_tampered_secret_does_not_verify() {
-    let f = fixture().await;
-    let minted = f.keys.mint(f.sa, "k", None, f.admin).await.unwrap();
-    let (prefix, secret) = egret_dataapi::keys::split_key(&minted.secret).unwrap();
-    // Same valid prefix, one character changed in the secret.
-    let mut bad = secret.to_string();
-    bad.replace_range(0..1, if secret.starts_with('A') { "B" } else { "A" });
-    let tampered = egret_dataapi::keys::format_key(prefix, &bad);
-    assert!(f.keys.verify(&tampered).await.unwrap().is_none());
-}
+Revert each.
 
-#[tokio::test]
-async fn malformed_tokens_do_not_verify() {
-    let f = fixture().await;
-    for bad in ["", "egt_", "egt_abc", "not-a-key", "egt__x"] {
-        assert!(
-            f.keys.verify(bad).await.unwrap().is_none(),
-            "malformed token accepted: {bad:?}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn deleting_the_service_account_removes_its_keys() {
-    let f = fixture().await;
-    let minted = f.keys.mint(f.sa, "k", None, f.admin).await.unwrap();
-    sqlx::query("DELETE FROM users WHERE id = $1")
-        .bind(f.sa)
-        .execute(&f.db.pool)
-        .await
-        .unwrap();
-    // ON DELETE CASCADE reaches api_keys through service_accounts.
-    assert!(f.keys.verify(&minted.secret).await.unwrap().is_none());
-}
-```
-
-Run: `cargo test -p egret-dataapi`
-
-Expected: PASS, 6 tests.
-
-- [ ] **Step 8: Verify the tests are real by mutating the implementation**
-
-Make `verify` skip the `revoked_at` check. Expected: the revoked-key test FAILS. Then make it compare with `==` instead of `hash_matches` — the tests should still pass (constant-time comparison is not observable in a unit test), which is worth noticing: **that property is not test-enforceable here**, so it is protected by the code comment and review, not by the suite. Note this in your report rather than inventing a timing test that would be flaky.
-
-Revert both.
-
-- [ ] **Step 9: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add crates/egret-dataapi-api crates/egret-dataapi Cargo.toml
-git commit -m "feat(dataapi): service-account store and API key mint/verify/revoke
+git add crates/egret-dataapi crates/egret-dataapi-api crates/egret-bin/src/main.rs Cargo.toml
+git commit -m "feat(dataapi): OAuth2 client_credentials clients for service accounts
 
-Keys are egt_<prefix>_<secret>: looked up by an indexed prefix, verified
-by constant-time comparison against a stored SHA-256. Not Argon2 — the
-secret is 32 CSPRNG bytes, so a brute-force-resistant KDF buys nothing
-and would cost ~50-100ms on every API request.
+Registers a second ClientVerifier on the existing machine-IdP rather than
+standing up a parallel credential system. Argon2 matches the catalog and
+is affordable because it runs once per token, not once per API request.
 
-split_key splits on the first two separators because base64url includes
-'_' in its alphabet."
+TTL is 600s: a stateless token cannot be revoked before it expires, so the
+exposure window after revoking a client is bounded by the TTL rather than
+by a per-request DB check."
 ```
 
 ---
 
-### Task 4: Management routes and permissions
+### Task 5: Management routes and permissions
 
 **Files:**
-- Modify: `crates/egret-core/src/rbac.rs`
+- Modify: `crates/egret-core/src/rbac.rs`, `crates/egret-server/src/lib.rs`
 - Create: `crates/egret-dataapi/src/routes.rs`
-- Modify: `crates/egret-dataapi/src/lib.rs`, `crates/egret-server/src/lib.rs`
+- Modify: `crates/egret-dataapi/src/lib.rs`
+- Modify: `docs/en/specs/2026-08-14-data-api-design.md`, `docs/vi/specs/2026-08-14-data-api-design.md`
 - Test: `crates/egret-dataapi/tests/routes_authz.rs` (create)
 
 **Interfaces:**
-- Consumes: `KeyStore` and the service-account store from Task 3.
-- Produces: `pub fn egret_dataapi::management_router() -> Router<DataApiState>` and `pub fn egret_dataapi::openapi() -> utoipa::openapi::OpenApi`.
-
-Routes, all nested under `/api` and workspace-scoped:
+- Consumes: `ClientStore` (Task 4), the service-account store.
+- Produces: `pub fn egret_dataapi::management_router() -> Router<DataApiState>`, `pub fn egret_dataapi::openapi() -> utoipa::openapi::OpenApi`.
 
 ```text
 GET    /api/ws/{ws}/data-api/service-accounts
 POST   /api/ws/{ws}/data-api/service-accounts
 DELETE /api/ws/{ws}/data-api/service-accounts/{id}
-GET    /api/ws/{ws}/data-api/service-accounts/{id}/keys
-POST   /api/ws/{ws}/data-api/service-accounts/{id}/keys      -> returns the secret ONCE
-DELETE /api/ws/{ws}/data-api/keys/{id}
+GET    /api/ws/{ws}/data-api/service-accounts/{id}/clients
+POST   /api/ws/{ws}/data-api/service-accounts/{id}/clients   -> returns the secret ONCE
+DELETE /api/ws/{ws}/data-api/clients/{id}
 ```
 
 - [ ] **Step 1: Add the permissions**
 
-In `crates/egret-core/src/rbac.rs`, next to the existing `secret:*` block (around line 130), add two entries in the same `perm!` form:
+In `crates/egret-core/src/rbac.rs`, next to the `secret:*` block (around line 130), in the same `perm!` form:
 
 ```rust
     perm!(
         "service_account:read",
         "Data API",
-        "View service accounts and their keys (never the secret)",
+        "View service accounts and their OAuth2 clients (never the secret)",
         Scope::Workspace
     ),
     perm!(
         "service_account:manage",
         "Data API",
-        "Create and delete service accounts and mint their API keys",
+        "Create and delete service accounts and issue their OAuth2 clients",
         Scope::Workspace
     ),
 ```
 
-Confirm `Scope::Workspace` is the real variant name by reading the enum; the `secret:*` entries use `Scope::Platform`, so the workspace variant's exact spelling must be checked, not assumed.
+Confirm `Scope::Workspace` is the real variant name by reading the enum — the `secret:*` entries use `Scope::Platform`, so the workspace variant's spelling must be checked, not assumed.
 
 - [ ] **Step 2: Write the failing authz tests**
 
-Create `crates/egret-dataapi/tests/routes_authz.rs`. These are the tests that matter most in this task — mint-a-key is a privilege-granting operation.
+Create `crates/egret-dataapi/tests/routes_authz.rs`. These matter most in this task: issuing a client hands out that account's access.
 
 ```rust
-//! Minting a key for a service account hands out that account's access. These
-//! tests are written from the caller's side: a real non-admin principal, not a
-//! mocked decision.
+//! Issuing a client for a service account hands out that account's access.
+//! Written from the caller's side: a real non-admin principal, not a mocked
+//! decision.
 
 #[tokio::test]
-async fn read_permission_cannot_mint_a_key() {
+async fn read_permission_cannot_issue_a_client() {
     let f = fixture().await;
     let sa = f.create_service_account("reporting").await;
-    // A principal with service_account:read and nothing else.
     let reader = f.principal_with(&["service_account:read"]).await;
 
-    let res = f.post_as(reader, &format!("/api/ws/{}/data-api/service-accounts/{sa}/keys", f.ws),
-                        serde_json::json!({ "name": "k" })).await;
+    let res = f.post_as(reader,
+        &format!("/api/ws/{}/data-api/service-accounts/{sa}/clients", f.ws),
+        serde_json::json!({ "name": "prod" })).await;
 
-    assert_eq!(res.status(), 403, "read must not imply mint");
+    assert_eq!(res.status(), 403, "read must not imply issue");
 }
 
 #[tokio::test]
-async fn a_key_cannot_be_minted_across_workspaces() {
+async fn a_client_cannot_be_issued_across_workspaces() {
     let f = fixture().await;
     let sa = f.create_service_account("reporting").await;   // in f.ws
     let other_ws = f.create_workspace("other").await;
     let manager = f.principal_with_in(&["service_account:manage"], other_ws).await;
 
-    let res = f.post_as(manager, &format!("/api/ws/{other_ws}/data-api/service-accounts/{sa}/keys"),
-                        serde_json::json!({ "name": "k" })).await;
+    let res = f.post_as(manager,
+        &format!("/api/ws/{other_ws}/data-api/service-accounts/{sa}/clients"),
+        serde_json::json!({ "name": "prod" })).await;
 
     assert_eq!(res.status(), 404, "the account does not belong to that workspace");
 }
@@ -861,22 +996,23 @@ async fn the_secret_is_returned_once_and_never_again() {
     let manager = f.principal_with(&["service_account:manage"]).await;
 
     let created: serde_json::Value = f
-        .post_as(manager, &format!("/api/ws/{}/data-api/service-accounts/{sa}/keys", f.ws),
-                 serde_json::json!({ "name": "k" }))
+        .post_as(manager, &format!("/api/ws/{}/data-api/service-accounts/{sa}/clients", f.ws),
+                 serde_json::json!({ "name": "prod" }))
         .await.json().await;
-    assert!(created["secret"].as_str().unwrap().starts_with("egt_"));
+    assert!(created["client_id"].as_str().unwrap().starts_with("egret-dataapi-"));
+    assert!(!created["client_secret"].as_str().unwrap().is_empty());
 
     let listed: serde_json::Value = f
-        .get_as(manager, &format!("/api/ws/{}/data-api/service-accounts/{sa}/keys", f.ws))
+        .get_as(manager, &format!("/api/ws/{}/data-api/service-accounts/{sa}/clients", f.ws))
         .await.json().await;
     assert!(
-        listed[0].get("secret").is_none(),
-        "the key list must never carry secret material"
+        listed[0].get("client_secret").is_none(),
+        "the client list must never carry secret material"
     );
 }
 ```
 
-The cross-workspace test asserts **404, not 403** — consistent with spec §6.2 step 3: a caller must not be able to distinguish "no such account" from "exists elsewhere".
+The cross-workspace test asserts **404, not 403** — consistent with spec §6.2 step 3: a caller must not distinguish "no such account" from "exists elsewhere".
 
 - [ ] **Step 3: Run the tests and verify they fail**
 
@@ -886,35 +1022,38 @@ Expected: compile error — the router does not exist yet.
 
 - [ ] **Step 4: Implement the router**
 
-Write `crates/egret-dataapi/src/routes.rs` following the handler idiom of `crates/egret-controlplane/src/access/mod.rs`: `State(st)`, `Auth(p)`, a `require(...)` gate as the first statement, `utoipa::path` annotations on every handler.
+Write `crates/egret-dataapi/src/routes.rs` following the handler idiom of `crates/egret-controlplane/src/access/mod.rs`: `State(st)`, `Auth(p)`, a `require(...)` gate as the first statement, `utoipa::path` on every handler.
 
-Two DTOs, and the distinction between them is the whole point:
+Two DTOs, and the distinction between them is the point:
 
 ```rust
-/// What a key list returns. There is deliberately NO `secret` field — not a
+/// What a client list returns. There is deliberately NO secret field — not a
 /// skipped one, not an Option. A field that cannot exist cannot leak through a
 /// future serde attribute change.
 #[derive(Serialize, utoipa::ToSchema)]
-pub struct ApiKeyDto {
+pub struct ClientDto {
     pub id: Uuid,
     pub name: String,
-    pub prefix: String,
+    pub client_id: String,
     pub expires_at: Option<OffsetDateTime>,
     pub last_used_at: Option<OffsetDateTime>,
     pub revoked_at: Option<OffsetDateTime>,
     pub created_at: OffsetDateTime,
 }
 
-/// The mint response, and the only type in the crate that carries key material.
+/// The issue response, and the only type in the crate carrying secret material.
 #[derive(Serialize, utoipa::ToSchema)]
-pub struct MintedKeyDto {
+pub struct NewClientDto {
     pub id: Uuid,
-    /// The full `egt_…` token. Shown once; not recoverable afterwards.
-    pub secret: String,
+    pub client_id: String,
+    /// Shown once; not recoverable afterwards.
+    pub client_secret: String,
+    /// Where to exchange these for a token.
+    pub token_endpoint: String,
 }
 ```
 
-The scoping helper every handler calls first, which is what stops the IDOR:
+The scoping helper every handler calls first — this is what stops the IDOR:
 
 ```rust
 /// Resolve a service account and confirm it belongs to the workspace in the
@@ -933,31 +1072,36 @@ async fn scoped_account(st: &DataApiState, ws: Uuid, sa: Uuid) -> Result<Uuid, D
 }
 ```
 
-The mint handler, which is the privileged one:
+The issue handler, which is the privileged one:
 
 ```rust
-async fn mint_key(
+async fn issue_client(
     State(st): State<DataApiState>,
     Auth(p): Auth,
     Path((ws, sa)): Path<(Uuid, Uuid)>,
-    Json(body): Json<MintKeyInput>,
-) -> Result<(StatusCode, Json<MintedKeyDto>), DataApiError> {
-    // `:manage`, never `:read` — minting a key hands out this account's access.
+    Json(body): Json<IssueClientInput>,
+) -> Result<(StatusCode, Json<NewClientDto>), DataApiError> {
+    // `:manage`, never `:read` — issuing a client hands out this account's access.
     egret_core::authz::require_ws(&*st.pdp, &p, ws, "service_account:manage").await?;
     let sa = scoped_account(&st, ws, sa).await?;
-    let minted = st.keys.mint(sa, &body.name, body.expires_at, p.user_id).await?;
+    let c = st.clients.create(sa, &body.name, body.expires_at, p.user_id).await?;
     Ok((
         StatusCode::CREATED,
-        Json(MintedKeyDto { id: minted.id, secret: minted.secret }),
+        Json(NewClientDto {
+            id: c.id,
+            client_id: c.client_id,
+            client_secret: c.client_secret,
+            token_endpoint: format!("{}/oauth/token", st.issuer.trim_end_matches('/')),
+        }),
     ))
 }
 ```
 
-Check the real name and signature of the workspace-scoped authz helper before using `require_ws` — read how an existing workspace-scoped route in `crates/egret-bi/src/routes.rs` gates, and use that, rather than keeping the name above if it differs.
+Check the real name and signature of the workspace-scoped authz helper before using `require_ws` — read how an existing workspace-scoped route in `crates/egret-bi/src/routes.rs` gates, and use that if it differs.
 
 - [ ] **Step 5: Mount it**
 
-In `crates/egret-server/src/lib.rs`, add one `doc.merge(egret_dataapi::openapi());` line to the explicit merge list (the file's note at line 90 says do NOT loop) and nest the router alongside the other workspace-scoped groups.
+In `crates/egret-server/src/lib.rs`, add one `doc.merge(egret_dataapi::openapi());` line to the explicit merge list (the note at line 90 says do NOT loop) and nest the router alongside the other workspace-scoped groups.
 
 - [ ] **Step 6: Run the tests and verify they pass**
 
@@ -967,11 +1111,11 @@ Expected: PASS.
 
 - [ ] **Step 7: Verify each authz gate by mutation**
 
-For each of the three tests, remove the guard it targets and confirm that test — and ideally only that test — goes red:
+For each test, remove the guard it targets and confirm that test — and ideally only that test — goes red:
 
-1. Drop the `require(..., "service_account:manage")` gate on the mint handler → `read_permission_cannot_mint_a_key` FAILS.
-2. Drop the workspace-match check → `a_key_cannot_be_minted_across_workspaces` FAILS.
-3. Add `secret` to the list DTO → `the_secret_is_returned_once_and_never_again` FAILS.
+1. Drop the `require_ws(..., "service_account:manage")` gate → `read_permission_cannot_issue_a_client` FAILS.
+2. Drop the `scoped_account` call → `a_client_cannot_be_issued_across_workspaces` FAILS.
+3. Add `client_secret` to `ClientDto` → `the_secret_is_returned_once_and_never_again` FAILS.
 
 Revert each. A gate whose removal leaves the suite green is not a gate.
 
@@ -979,42 +1123,53 @@ Revert each. A gate whose removal leaves the suite green is not a gate.
 
 ```bash
 cargo fmt --all --check
-cargo clippy -p egret-dataapi -p egret-dataapi-api -p egret-auth -p egret-controlplane -p egret-core --all-targets
-cargo test -p egret-dataapi -p egret-dataapi-api -p egret-auth -p egret-controlplane -p egret-core
+cargo clippy -p egret-dataapi -p egret-dataapi-api -p egret-machine-idp -p egret-catalog-engine -p egret-auth -p egret-controlplane -p egret-core --all-targets
+cargo test -p egret-dataapi -p egret-dataapi-api -p egret-machine-idp -p egret-catalog-engine -p egret-auth -p egret-controlplane -p egret-core
 ```
 
 Run sequentially. Do not use `just check`.
 
 - [ ] **Step 9: Update the spec and commit**
 
-`docs/en/specs/2026-08-14-data-api-design.md` §5.1 currently shows `dataapi.api_keys.service_account_id` referencing `users.id` directly and has no `service_accounts` table. Update it to match what was built, and mirror the change into `docs/vi/specs/2026-08-14-data-api-design.md`. Explain the reason in the spec text: `users` is platform-level, so the workspace binding belongs to the `dataapi` schema rather than to a column on `users` that means nothing for humans.
+`docs/en/specs/2026-08-14-data-api-design.md` §6.1 still describes a bespoke `egt_<prefix>_<secret>` API key hashed with SHA-256, and §5.1 still lists `dataapi.api_keys`. Rewrite both for what was actually built:
+
+- §5.1: `dataapi.service_accounts` + `dataapi.clients`, no `api_keys`.
+- §6.1: OAuth2 `client_credentials` against the existing machine-IdP; Argon2 (affordable because it is per-token, not per-request); 600s TTL; and the revocation trade-off stated plainly.
+- §6.2 step 1: "key → service account" becomes "verify JWT via JWKS → principal + workspace from claims", with the note that this is stateless and costs no DB round-trip.
+
+Mirror every change into `docs/vi/specs/2026-08-14-data-api-design.md`.
 
 ```bash
 git add crates/ docs/ Cargo.toml
-git commit -m "feat(dataapi): workspace-scoped service-account and key routes
+git commit -m "feat(dataapi): workspace-scoped service-account and client routes
 
-Mint gates on service_account:manage, never on :read — minting a key
+Issuing a client gates on service_account:manage, never on :read — it
 hands out that account's access. Every handler checks the account belongs
 to the path workspace and 404s otherwise, so a cross-workspace caller
 cannot distinguish 'absent' from 'not yours'.
 
-The key-list DTO has no secret field at all, rather than a skipped one."
+The client-list DTO has no secret field at all, rather than a skipped one.
+
+Spec §5.1 and §6.1 rewritten: the bespoke API-key scheme is replaced by
+OAuth2 client_credentials on the existing machine-IdP."
 ```
 
 ---
 
 ## Done when
 
-- `cargo test -p egret-dataapi -p egret-dataapi-api -p egret-auth -p egret-controlplane` green, `cargo fmt --all --check` and clippy clean.
-- Every test named in Tasks 1, 2, 3 and 4 has been observed FAILING against its stated mutation. This is the acceptance criterion — green alone does not close this out.
-- An admin can create a service account, mint a key, and `KeyStore::verify` accepts it; revoking makes verification fail.
+- `cargo test` green for all seven crates listed in Task 5 Step 8; `cargo fmt --all --check` and clippy clean.
+- Every test named in Tasks 1–5 has been observed FAILING against its stated mutation. This is the acceptance criterion — green alone does not close this out.
+- **The catalog's token is byte-identical to before**: `catalog_token_claims_are_unchanged` passes, and an Iceberg client authenticating against the embedded catalog still works.
+- An admin can create a service account, issue a client, and exchange `client_id`/`client_secret` at `POST /oauth/token` for a JWT with `aud: "data-api"`, `ws`, and `egret_user_id`. Revoking the client makes the next token request fail.
 - A service account cannot log in, does not appear in `GET /api/control-plane/users`, and still renders by id wherever a principal name is shown.
-- The spec's §5.1 matches the schema that was actually built.
+- Spec §5.1, §6.1 and §6.2 step 1 match what was built, in both languages.
 
 ## Not in this plan
 
-- **Any serving surface.** No endpoint accepts a key yet; P2 ends at `KeyStore::verify` returning a `VerifiedKey`. The `/data-api/v1` router is P4.
+- **Any serving surface.** No endpoint accepts the token yet; P2 ends at `/oauth/token` returning a Data API JWT. Validating that JWT and mapping it to a request is P4.
 - **Endpoint definitions, versioning, publish** — P3.
-- **Granting a service account access to data.** P2 creates the principal; granting it a role through `access_grants`, and granting it in Ranger, are existing flows. Spec §5.3's warning that publishing does not grant data access is surfaced in the UI in P5.
-- **Key rotation as a first-class operation.** Mint-new-then-revoke-old covers it; a dedicated rotate endpoint can wait for a real request.
+- **Granting a service account access to data.** P2 creates the principal and its credential; granting it a role through `access_grants`, and granting it in Ranger, are existing flows. Spec §5.3's warning that publishing does not grant data access is surfaced in the UI in P5.
+- **Instant revocation.** Explicitly rejected: it would require a per-request check and give back the throughput this design was chosen for. The 600s TTL is the bound.
+- **Refresh tokens.** `client_credentials` does not use them — the client re-requests with its credentials. Every OAuth2 library handles this.
 - **Frontend.** P5.
