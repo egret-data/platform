@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import RGL, { type Layout } from "react-grid-layout";
+import RGL, { type LayoutItem, verticalCompactor } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 import "./dashboard-grid.css";
@@ -16,7 +16,7 @@ import { GRID_STROKE_CSS, GRID_STROKE_FALLBACK } from "./grid-stroke";
 
 interface Props {
   editing: boolean;
-  layout: Layout[];
+  layout: LayoutItem[];
   /** Maps a card id to the string the mobile height table keys on — a chart card's viz type,
    *  or the card type for text/heading/link. Supplied by the route, which is the only place
    *  that knows the chart behind a card. */
@@ -24,7 +24,9 @@ interface Props {
   /** Fires whenever the live breakpoint changes. The route needs this to refuse to persist
    *  layout and auto-height changes off the desktop breakpoint. */
   onBreakpointChange: (bp: GridBreakpoint) => void;
-  onLayoutChange: (next: Layout[]) => void;
+  /** `readonly` because that is what react-grid-layout 2 hands the callback (its `Layout`
+   *  IS `readonly LayoutItem[]`). Both consumers only read it. */
+  onLayoutChange: (next: readonly LayoutItem[]) => void;
   onResizeStart: () => void;
   onResizeStop: () => void;
   onDragStart: () => void;
@@ -95,7 +97,7 @@ export function DashboardGridLayout({
   // container has not been measured yet. Anything downstream that decides via React state is one
   // commit too late (RGL's componentDidUpdate runs before this component's effects), so the
   // refusal has to happen here, in the same closure that produced the layout being emitted.
-  const handleLayoutChange = (next: Layout[]) => {
+  const handleLayoutChange = (next: readonly LayoutItem[]) => {
     if (isMobile) return;
     onLayoutChange(next);
   };
@@ -117,15 +119,23 @@ export function DashboardGridLayout({
       <RGL
         className="layout relative z-10"
         width={width}
-        cols={cols}
-        rowHeight={rowHeight}
-        margin={margin}
-        containerPadding={GRID_PADDING}
-        compactType="vertical"
-        isDraggable={editing && !isMobile}
-        isResizable={editing && !isMobile}
-        draggableHandle=".dash-draghandle"
-        draggableCancel=".dash-nodrag"
+        // v2 groups the old flat props into config objects and takes a compactor
+        // function where v1 took `compactType="vertical"`. Same values, new shape —
+        // the legacy adapter under `react-grid-layout/legacy` would accept the v1
+        // props, but it is a deprecation path and this is the only call site.
+        gridConfig={{
+          cols,
+          rowHeight,
+          margin,
+          containerPadding: GRID_PADDING,
+        }}
+        compactor={verticalCompactor}
+        dragConfig={{
+          enabled: editing && !isMobile,
+          handle: ".dash-draghandle",
+          cancel: ".dash-nodrag",
+        }}
+        resizeConfig={{ enabled: editing && !isMobile }}
         layout={effectiveLayout}
         onLayoutChange={handleLayoutChange}
         onResizeStart={onResizeStart}

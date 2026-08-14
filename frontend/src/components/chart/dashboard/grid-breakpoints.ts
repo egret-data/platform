@@ -1,4 +1,4 @@
-import type { Layout } from "react-grid-layout";
+import type { LayoutItem } from "react-grid-layout";
 
 /** Ported from Metabase utils/dashboard_grid.ts:11-26 and grid/utils.ts:21-36.
  *  The two breakpoint numbers are adjacent (752 / 753) because react-grid-layout picks the
@@ -48,12 +48,12 @@ export function mobileHeightFor(kind: string, desktopHeight: number): number {
  *  `kindOf` maps a layout id to the string `mobileHeightFor` keys on. The min/max constraints
  *  are deliberately dropped: they were computed for a 24-column grid and would make RGL clamp
  *  every card back above one column. */
-export function toMobileLayout(layout: Layout[], kindOf: (id: string) => string): Layout[] {
+export function toMobileLayout(layout: LayoutItem[], kindOf: (id: string) => string): LayoutItem[] {
   const ordered = [...layout].sort((a, b) => a.y - b.y || a.x - b.x);
   let y = 0;
   return ordered.map((l) => {
     const h = mobileHeightFor(kindOf(l.i), l.h);
-    const next: Layout = { i: l.i, x: 0, y, w: 1, h, minW: 1, minH: 1 };
+    const next: LayoutItem = { i: l.i, x: 0, y, w: 1, h, minW: 1, minH: 1 };
     y += h;
     return next;
   });
