@@ -103,9 +103,17 @@ impl ClientStore {
 
 #[async_trait::async_trait]
 impl egret_machine_idp::ClientVerifier for ClientStore {
-    /// Returns `Ok(None)` for EVERY failure — unknown, revoked, expired, wrong
-    /// secret. A distinguishing error here would be a free oracle for anyone
-    /// probing client ids.
+    /// Returns `Ok(None)` for EVERY failure — unknown, revoked, expired,
+    /// disabled principal, wrong secret. A distinguishing error here would be a
+    /// free oracle for anyone probing client ids.
+    ///
+    /// The `users.status` check is what makes the documented kill switch real.
+    /// A stateless token cannot be recalled before it expires, so spec §6.1
+    /// tells an operator that the way to stop a compromised client INSIDE the
+    /// 600s window is to disable the principal. That instruction is only true if
+    /// authentication actually reads the principal's status — without this join
+    /// a disabled service account would keep minting `data-api` tokens
+    /// indefinitely, and the operator would believe they had stopped it.
     async fn verify(
         &self,
         client_id: &str,
@@ -119,11 +127,13 @@ impl egret_machine_idp::ClientVerifier for ClientStore {
             String,
             Option<DateTime<Utc>>,
             Option<DateTime<Utc>>,
+            String,
         )> = sqlx::query_as(
             "SELECT c.id, c.service_account_id, sa.workspace_id, c.client_secret_hash, \
-                        c.expires_at, c.revoked_at \
+                        c.expires_at, c.revoked_at, u.status \
                  FROM dataapi.clients c \
                  JOIN dataapi.service_accounts sa ON sa.user_id = c.service_account_id \
+                 JOIN users u ON u.id = sa.user_id \
                  WHERE c.client_id = $1",
         )
         .bind(client_id)
@@ -131,10 +141,16 @@ impl egret_machine_idp::ClientVerifier for ClientStore {
         .await
         .map_err(|e| egret_machine_idp::IdpError::Db(e.to_string()))?;
 
-        let Some((id, sa, ws, hash, expires_at, revoked_at)) = row else {
+        let Some((id, sa, ws, hash, expires_at, revoked_at, status)) = row else {
             return Ok(None);
         };
         if revoked_at.is_some() {
+            return Ok(None);
+        }
+        // Checked here rather than in the WHERE clause so it sits with the other
+        // two rejections: one place shows every reason `verify` says no, and all
+        // of them say it the same way.
+        if status != "active" {
             return Ok(None);
         }
         if let Some(exp) = expires_at {

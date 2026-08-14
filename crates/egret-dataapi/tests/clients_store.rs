@@ -168,6 +168,43 @@ async fn a_client_with_a_future_expiry_verifies() {
     assert_eq!(vc.extra_claims["egret_user_id"], f.sa.to_string());
 }
 
+/// Spec §6.1 tells an operator that the way to stop a compromised client inside
+/// the 600s token window is to disable the PRINCIPAL, since a stateless token
+/// cannot be recalled. That procedure is only real if `verify` reads
+/// `users.status` — otherwise the operator disables the account, believes the
+/// credential is dead, and it keeps minting `data-api` tokens indefinitely.
+///
+/// Asserted as a before/after on the SAME client so the test cannot pass by the
+/// client having been broken all along.
+#[tokio::test]
+async fn a_disabled_service_account_does_not_verify() {
+    let f = skip_without_db!();
+    let c = f.clients.create(f.sa, "prod", None, f.admin).await.unwrap();
+    assert!(
+        f.clients
+            .verify(&c.client_id, &c.client_secret)
+            .await
+            .unwrap()
+            .is_some(),
+        "must verify while the principal is active"
+    );
+
+    sqlx::query("UPDATE users SET status = 'disabled' WHERE id = $1")
+        .bind(f.sa)
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+
+    assert!(
+        f.clients
+            .verify(&c.client_id, &c.client_secret)
+            .await
+            .unwrap()
+            .is_none(),
+        "disabling the principal must stop its clients authenticating"
+    );
+}
+
 #[tokio::test]
 async fn a_wrong_secret_does_not_verify() {
     let f = skip_without_db!();

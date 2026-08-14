@@ -378,6 +378,74 @@ async fn creating_an_account_makes_a_real_principal_bound_to_the_workspace() {
     assert_eq!(bound, f.ws_id);
 }
 
+/// Deleting a service account must take its `access_grants` rows with it.
+///
+/// `access_grants.principal_id` is polymorphic and has NO foreign key to
+/// `users(id)` (migration 0068), and no trigger cleans it — so a bare
+/// `DELETE FROM users` leaves grant rows pointing at a principal that no longer
+/// exists. A service account is the case where this bites hardest: spec §5.3's
+/// whole model is that an admin GRANTS the account a role through
+/// `access_grants`, so the granted state is the normal state at deletion time.
+#[tokio::test]
+async fn deleting_an_account_takes_its_access_grants_with_it() {
+    let f = skip_without_db!();
+    let manager = f.principal_with(Fixture::MANAGER).await;
+    let (status, created) = f
+        .post_as(
+            &manager,
+            &format!("/api/ws/{}/data-api/service-accounts", f.ws),
+            serde_json::json!({ "name": "granted" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let sa: Uuid = created["id"].as_str().expect("id").parse().expect("uuid");
+
+    // Grant it a workspace role, exactly as §5.3 says an admin would.
+    let granted = sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $1, r.id, 'workspace', $2 FROM roles r \
+         WHERE r.scope = 'workspace' AND r.name = 'ws_viewer'",
+    )
+    .bind(sa)
+    .bind(f.ws_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("grant role")
+    .rows_affected();
+    assert_eq!(granted, 1, "ws_viewer must exist and have been granted");
+
+    let (status, body) = f
+        .send(
+            &manager,
+            "DELETE",
+            &format!("/api/ws/{}/data-api/service-accounts/{sa}", f.ws),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let left: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access_grants WHERE principal_type = 'user' AND principal_id = $1",
+    )
+    .bind(sa)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("count grants");
+    assert_eq!(
+        left, 0,
+        "the deleted principal must leave no access_grants rows behind"
+    );
+
+    // And the account itself is genuinely gone, so the assertion above cannot be
+    // satisfied by a delete that silently did nothing at all.
+    let users_left: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE id = $1")
+        .bind(sa)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count users");
+    assert_eq!(users_left, 0);
+}
+
 /// Revoking is `:manage`, and a client in another workspace is invisible rather
 /// than merely forbidden — the same 404 rule as `scoped_account`.
 #[tokio::test]

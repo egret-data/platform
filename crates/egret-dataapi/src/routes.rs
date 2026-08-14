@@ -32,7 +32,7 @@ use chrono::{DateTime, Utc};
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
 use egret_core::http::ErrorBody;
-use egret_core::{Ack, Error, WorkspacePath};
+use egret_core::{Ack, Error, UserId, WorkspacePath};
 use egret_metastore::Db;
 use egret_workspace::context::WsContext;
 use egret_workspace::rbac::Authorizer;
@@ -346,10 +346,11 @@ async fn create_service_account(
         ("id" = Uuid, Path, description = "Service account id (a users.id)"),
     ),
     responses(
-        (status = 200, description = "Service account and all its clients deleted", body = Ack),
+        (status = 200, description = "Service account, its grants and all its clients deleted", body = Ack),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing service_account:manage permission", body = ErrorBody),
         (status = 404, description = "No such service account in this workspace", body = ErrorBody),
+        (status = 409, description = "The account still owns content that has no delete rule", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -360,13 +361,26 @@ async fn delete_service_account(
 ) -> Result<Json<Ack>, DataApiError> {
     egret_core::authz::require(&*st.pdp, &ctx, SA_MANAGE).await?;
     let sa = scoped_account(&st, ctx.workspace_id.0, sa).await?;
+    // `UserRepo::hard_delete`, NOT a raw `DELETE FROM users`. `access_grants`
+    // holds a POLYMORPHIC `principal_id` with no FK to `users(id)` (migration
+    // 0068) and no cleanup trigger, so a bare row delete leaves live-looking
+    // grants behind for a principal that no longer exists. That is not a corner
+    // case here: P2's whole premise (spec §5.3) is that an admin grants the
+    // service account a role through `access_grants`, so this is the ONE
+    // principal type that is nearly always granted before it is deleted.
+    // `hard_delete` sweeps grants, sessions and group memberships in one
+    // transaction and maps a 23503 to a 409.
+    //
+    // `reassign_notebooks_to` is the deleting admin, which is what the parameter
+    // means. For a service account the reassignment matches zero rows —
+    // `notebooks.owner_user_id` is only ever set by an interactive session and a
+    // service account can never log in (`users_service_has_no_password`, 0119) —
+    // so this is a no-op that stays correct if that ever changes.
+    st.users
+        .hard_delete(UserId(sa), ctx.principal.user_id)
+        .await?;
     // Deleting the `users` row cascades through `dataapi.service_accounts` into
     // `dataapi.clients` (migration 0119), so no client outlives its account.
-    sqlx::query("DELETE FROM users WHERE id = $1")
-        .bind(sa)
-        .execute(&st.db.pool)
-        .await
-        .map_err(db_err)?;
     Ok(Json(Ack::ok()))
 }
 

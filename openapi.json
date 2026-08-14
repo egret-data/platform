@@ -14509,7 +14509,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Service account and all its clients deleted",
+            "description": "Service account, its grants and all its clients deleted",
             "content": {
               "application/json": {
                 "schema": {
@@ -14540,6 +14540,16 @@
           },
           "404": {
             "description": "No such service account in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The account still owns content that has no delete rule",
             "content": {
               "application/json": {
                 "schema": {
