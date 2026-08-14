@@ -184,6 +184,10 @@ test.describe("local user management on kind", () => {
     const adminUserId = adminMe.user_id as string;
 
     const { context: userCtx, request: userReq } = await loginAsLocalUser(browser, email, password);
+    // The "" is dead to eslint but load-bearing for tsc: `notebookId` is read after
+    // the try/finally, and without an initializer TypeScript rejects it as possibly
+    // unassigned (the try may not complete).
+    // eslint-disable-next-line no-useless-assignment
     let notebookId = "";
     try {
       const userH = await csrf(userCtx);

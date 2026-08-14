@@ -115,14 +115,19 @@ describe("FormatSection", () => {
     expect(revenueButton).toHaveTextContent("Revenue");
     expect(revenueButton).toHaveTextContent("total_revenue");
 
-    // the other column's collapsed row is untouched
-    const regionButton = screen.getByRole("button", { name: "region Text" });
+    // the other column's collapsed row is untouched.
+    // Anchored regex, not the exact name: jsdom decides whether the row's separate
+    // text nodes join with a space when it computes the accessible name, and jsdom 29
+    // stopped inserting one ("region Text" -> "regionText") without the rendered DOM
+    // changing at all. `^region` pins this to the region row either way — the revenue
+    // row's name starts with "Revenue", so it can never be matched by accident.
+    const regionButton = screen.getByRole("button", { name: /^region/ });
     expect(regionButton).not.toHaveTextContent("Revenue");
 
     // now open the renamed column's panel (making it the "open" column) and confirm
     // the OTHER (closed) row still shows its own name, not the open column's title
     fireEvent.click(revenueButton);
-    expect(screen.getByRole("button", { name: "region Text" })).not.toHaveTextContent("Revenue");
+    expect(screen.getByRole("button", { name: /^region/ })).not.toHaveTextContent("Revenue");
   });
 
   it("treats a whitespace-only title as unset, not as a real (blank-rendering) title", () => {

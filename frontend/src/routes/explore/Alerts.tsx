@@ -135,7 +135,8 @@ export default function Alerts() {
         .includes(q);
     });
     r = [...r].sort((a, b) => {
-      let cmp = 0;
+      // No initializer: every branch below assigns, and eslint 10 flags the dead one.
+      let cmp: number;
       if (sort.key === "name") cmp = a.name.localeCompare(b.name);
       else if (sort.key === "last_state")
         cmp = (a.last_state ?? "").localeCompare(b.last_state ?? "");

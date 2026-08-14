@@ -5,7 +5,11 @@
     "resolveJsonModule": true, "isolatedModules": true, "noEmit": true, "jsx": "react-jsx",
     "strict": true, "noUnusedLocals": true, "noUnusedParameters": true, "noFallthroughCasesInSwitch": true,
     "baseUrl": ".", "paths": { "@/*": ["src/*"] },
-    "types": ["vitest/globals", "@testing-library/jest-dom"]
+    // `node` is listed explicitly as of Vitest 4: v2's `vitest/globals` pulled in
+    // @types/node transitively, v4 does not, and an explicit `types` array excludes
+    // every @types package it does not name. The harness script and the guard tests
+    // that read files off disk need it.
+    "types": ["node", "vitest/globals", "@testing-library/jest-dom"]
   },
   "//": "../scripts/harness is the chart-parity seed script. It lives at the repo root because it is tooling, but it imports the app's viz descriptors through `@/`, so it is type-checked here — an unchecked script rots.",
   "include": ["src", "../scripts/harness"]
