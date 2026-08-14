@@ -30,7 +30,28 @@ pub enum ParamLocation {
     Body,
 }
 
+/// `deny_unknown_fields` on the author-supplied config types.
+///
+/// `#[serde(deny_unknown_fields)]` on the request-body struct does NOT reach a
+/// nested one, and the nested one is where the damage was: posting the
+/// documented-but-wrong `{"rate_limit": {"per_client_qps": 5}}` returned 201
+/// with `per_key_qps` silently defaulted to `0`. A rate limit the author
+/// believes they set and did not is worse than an error.
+///
+/// Applied to the five types an AUTHOR fills in — [`ParamSpec`], [`CacheSpec`],
+/// [`LimitsSpec`], [`RateLimitSpec`], [`OutputSpec`] — and deliberately NOT to
+/// [`EndpointSnapshot`] or [`ColumnSpec`], which the server writes for itself
+/// and where a typo is impossible.
+///
+/// **The cost, stated because it is a real constraint on a persisted format.**
+/// These types are also how a stored `jsonb` column is read back. Adding a field
+/// in some future version and then rolling the binary back would make the older
+/// code refuse to deserialize rows the newer one wrote, as a 500 on read. That is
+/// a loud failure rather than a silent one, and it is the standard price of
+/// strict deserialization; a future field that must be readable by older code has
+/// to be introduced some other way.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ParamSpec {
     pub name: String,
     #[serde(rename = "type")]
@@ -56,6 +77,7 @@ pub enum CacheScope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CacheSpec {
     #[serde(default)]
     pub enabled: bool,
@@ -74,6 +96,7 @@ fn default_scope() -> CacheScope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LimitsSpec {
     #[serde(default = "default_max_rows")]
     pub max_rows: u32,
@@ -88,6 +111,7 @@ fn default_timeout() -> u32 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RateLimitSpec {
     #[serde(default)]
     pub per_key_qps: u32,
@@ -154,6 +178,7 @@ impl From<&egret_core::ColumnMeta> for ColumnSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OutputSpec {
     #[serde(default = "default_shape")]
     pub shape: String, // "objects" | "arrays"

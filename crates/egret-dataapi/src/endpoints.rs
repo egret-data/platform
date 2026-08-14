@@ -161,11 +161,25 @@ impl TryFrom<Row> for DataApiEndpointDto {
 /// diverged from serde's defaults. An absent field is stored as `'{}'::jsonb` and
 /// read back through the same serde defaults, so there is exactly one definition
 /// of "the default" and no Rust-side copy of it to drift.
+/// `deny_unknown_fields`: a misspelled TOP-LEVEL key is a 400 naming the field,
+/// not a silently discarded value. Every field here is either required or
+/// `#[serde(default)]`, so nothing legitimate is refused.
+///
+/// This attribute covers only this struct's own keys — it does not reach a
+/// nested one. The nested config types carry their own; see the note above
+/// `ParamSpec` in `egret-dataapi-api`, which is where the reported case
+/// (`{"rate_limit": {"per_client_qps": 5}}` returning 201 with the limit
+/// defaulted to `0`) is actually refused. Both layers are needed.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateEndpointInput {
     pub name: String,
-    /// Free-form and user-typed; normalised to a single leading slash and no
-    /// trailing slash before it is stored. See [`normalize_path`].
+    /// Free-form and user-typed. **Total-reject, not normalised**: a leading
+    /// slash is optional and one trailing slash is absorbed, but anything else
+    /// out of shape — an empty segment, a `.`/`..` segment, percent-encoding, a
+    /// query string, a fragment, whitespace, a character outside
+    /// `[A-Za-z0-9._~-]`, or a value over [`MAX_PATH_LEN`] bytes — is a 400
+    /// naming the reason. Nothing is silently rewritten. See [`normalize_path`].
     pub path: String,
     /// The connection this endpoint queries. Validated against the CALLER's
     /// workspace by the route before it is stored — it arrives from the request
@@ -205,7 +219,12 @@ pub struct CreateEndpointInput {
 /// `state` and `live_version_id` are NOT here. They are the publish lifecycle,
 /// and a draft edit must never be able to put an endpoint live or repoint what a
 /// live one serves.
+/// `deny_unknown_fields` for the same reason as [`CreateEndpointInput`]: on a
+/// PATCH the failure mode is worse, because a typo'd key looks exactly like
+/// "leave it alone" and the author sees the OLD value persist rather than a
+/// zeroed one.
 #[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateEndpointInput {
     #[serde(default)]
     pub name: Option<String>,
@@ -272,6 +291,18 @@ pub const ALLOWED_METHODS: [&str; 2] = ["GET", "POST"];
 /// but a field that lands before its guard is a hole.
 pub const FOLDER_ENTITY_TYPE: &str = "data_api_endpoint";
 
+/// The longest a stored endpoint path may be, in bytes.
+///
+/// Not a product limit — a limit that already exists further down, made visible.
+/// `path` is a component of the btree index behind
+/// `UNIQUE (workspace_id, method, path)`, and Postgres refuses an index entry
+/// past roughly a third of a page (~2704 bytes at the default 8 kB). Without a
+/// bound here that refusal arrives from the INSERT as an opaque 500; with one it
+/// is a 400 that names the field and the cap. Set well below the real ceiling
+/// rather than tracking it, since it is version- and page-size-dependent, and
+/// far above any genuine API path.
+pub const MAX_PATH_LEN: usize = 512;
+
 /// Canonicalise a user-typed URL path, or say why it cannot be one.
 ///
 /// **Contract for the serving path (P4).** The stored path is the canonical form
@@ -304,6 +335,18 @@ pub const FOLDER_ENTITY_TYPE: &str = "data_api_endpoint";
 /// `Err` carries the reason, which the route returns verbatim as a 400.
 pub fn normalize_path(raw: &str) -> std::result::Result<String, String> {
     let trimmed = raw.trim();
+    // Bounded here, or the btree index behind `UNIQUE (workspace_id, method,
+    // path)` refuses the row instead — Postgres caps an index entry at roughly
+    // 2704 bytes for an 8 kB page, and the failure surfaces as an opaque 500
+    // from the INSERT rather than a 400 the author can act on. The exact cap is
+    // version- and page-size-dependent, so this sits well under it rather than
+    // trying to track it. 512 bytes is far past any real API path.
+    if trimmed.len() > MAX_PATH_LEN {
+        return Err(format!(
+            "path must be at most {MAX_PATH_LEN} bytes (got {})",
+            trimmed.len()
+        ));
+    }
     if let Some(c) = trimmed
         .chars()
         .find(|c| c.is_whitespace() || c.is_control())
@@ -795,6 +838,42 @@ mod tests {
             .contains("empty segment"));
         assert!(normalize_path("/a/../b").unwrap_err().contains("`..`"));
         assert!(normalize_path("/a/:id").unwrap_err().contains(":id"));
+    }
+
+    /// An over-long path is a 400 naming the cap, not the btree index's opaque
+    /// 500 from the INSERT.
+    #[test]
+    fn an_over_long_path_is_refused_with_the_cap_in_the_message() {
+        let long = format!("/{}", "a".repeat(MAX_PATH_LEN));
+        let err = normalize_path(&long).unwrap_err();
+        assert!(err.contains("512"), "the cap must be in the message: {err}");
+        // Charset-legal, so nothing else could have refused it — this fails if
+        // the bound is removed.
+        assert!(long.chars().skip(1).all(|c| c.is_ascii_alphanumeric()));
+        // And exactly at the cap is still accepted, so the bound is not off by
+        // one in the direction that silently shortens the usable space.
+        let at_cap = format!("/{}", "a".repeat(MAX_PATH_LEN - 1));
+        assert_eq!(at_cap.len(), MAX_PATH_LEN);
+        assert!(normalize_path(&at_cap).is_ok());
+    }
+
+    /// A misspelled key must 400 rather than land as a default. `per_client_qps`
+    /// is the exact spelling the spec documented while the field is
+    /// `per_key_qps`, so this is the real reported case, not an invented one.
+    #[test]
+    fn an_unknown_field_is_refused_rather_than_dropped() {
+        let body = r#"{"name":"n","path":"/a","database_id":"00000000-0000-0000-0000-000000000000",
+                       "sql":"SELECT 1","rate_limit":{"per_client_qps":5}}"#;
+        let err = serde_json::from_str::<CreateEndpointInput>(body).unwrap_err();
+        assert!(
+            err.to_string().contains("per_client_qps"),
+            "the error must name the offending key: {err}"
+        );
+        // The PATCH body too, where a dropped key looks like "leave it alone".
+        let err = serde_json::from_str::<UpdateEndpointInput>(r#"{"pth":"/a"}"#).unwrap_err();
+        assert!(err.to_string().contains("pth"), "{err}");
+        // Anti-triviality: the correctly-spelled bodies still deserialize.
+        assert!(serde_json::from_str::<UpdateEndpointInput>(r#"{"path":"/a"}"#).is_ok());
     }
 
     /// Absent vs. explicit `null` must survive deserialization — this is the

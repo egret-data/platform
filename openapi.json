@@ -25247,7 +25247,8 @@
             "$ref": "#/components/schemas/CacheScope",
             "description": "`Shared` is refused at validate time on a delegated connection: Ranger\nfilters per principal, so a shared cache would leak across identities."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CardInput": {
         "type": "object",
@@ -25900,7 +25901,7 @@
       },
       "CreateEndpointInput": {
         "type": "object",
-        "description": "The `POST` body.\n\nThe spec fields are `Option<T>` rather than `#[serde(default)] T` because\n`CacheSpec`/`LimitsSpec`/`RateLimitSpec` deliberately have no `Default` impl —\n`OutputSpec`'s hand-written one exists precisely because a derive would have\ndiverged from serde's defaults. An absent field is stored as `'{}'::jsonb` and\nread back through the same serde defaults, so there is exactly one definition\nof \"the default\" and no Rust-side copy of it to drift.",
+        "description": "The `POST` body.\n\nThe spec fields are `Option<T>` rather than `#[serde(default)] T` because\n`CacheSpec`/`LimitsSpec`/`RateLimitSpec` deliberately have no `Default` impl —\n`OutputSpec`'s hand-written one exists precisely because a derive would have\ndiverged from serde's defaults. An absent field is stored as `'{}'::jsonb` and\nread back through the same serde defaults, so there is exactly one definition\nof \"the default\" and no Rust-side copy of it to drift.\n`deny_unknown_fields`: a misspelled TOP-LEVEL key is a 400 naming the field,\nnot a silently discarded value. Every field here is either required or\n`#[serde(default)]`, so nothing legitimate is refused.\n\nThis attribute covers only this struct's own keys — it does not reach a\nnested one. The nested config types carry their own; see the note above\n`ParamSpec` in `egret-dataapi-api`, which is where the reported case\n(`{\"rate_limit\": {\"per_client_qps\": 5}}` returning 201 with the limit\ndefaulted to `0`) is actually refused. Both layers are needed.",
         "required": [
           "name",
           "path",
@@ -25913,7 +25914,7 @@
           },
           "path": {
             "type": "string",
-            "description": "Free-form and user-typed; normalised to a single leading slash and no\ntrailing slash before it is stored. See [`normalize_path`]."
+            "description": "Free-form and user-typed. **Total-reject, not normalised**: a leading\nslash is optional and one trailing slash is absorbed, but anything else\nout of shape — an empty segment, a `.`/`..` segment, percent-encoding, a\nquery string, a fragment, whitespace, a character outside\n`[A-Za-z0-9._~-]`, or a value over [`MAX_PATH_LEN`] bytes — is a 400\nnaming the reason. Nothing is silently rewritten. See [`normalize_path`]."
           },
           "database_id": {
             "type": "string",
@@ -26001,7 +26002,8 @@
             ],
             "format": "uuid"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "CreateEngineBody": {
         "type": "object",
@@ -28503,7 +28505,8 @@
             "format": "int32",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "ListingDto": {
         "type": "object",
@@ -29316,7 +29319,8 @@
           "naming": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "OwnerDto": {
         "type": "object",
@@ -29343,6 +29347,7 @@
       },
       "ParamSpec": {
         "type": "object",
+        "description": "`deny_unknown_fields` on the author-supplied config types.\n\n`#[serde(deny_unknown_fields)]` on the request-body struct does NOT reach a\nnested one, and the nested one is where the damage was: posting the\ndocumented-but-wrong `{\"rate_limit\": {\"per_client_qps\": 5}}` returned 201\nwith `per_key_qps` silently defaulted to `0`. A rate limit the author\nbelieves they set and did not is worse than an error.\n\nApplied to the five types an AUTHOR fills in — [`ParamSpec`], [`CacheSpec`],\n[`LimitsSpec`], [`RateLimitSpec`], [`OutputSpec`] — and deliberately NOT to\n[`EndpointSnapshot`] or [`ColumnSpec`], which the server writes for itself\nand where a typo is impossible.\n\n**The cost, stated because it is a real constraint on a persisted format.**\nThese types are also how a stored `jsonb` column is read back. Adding a field\nin some future version and then rolling the binary back would make the older\ncode refuse to deserialize rows the newer one wrote, as a 500 on read. That is\na loud failure rather than a silent one, and it is the standard price of\nstrict deserialization; a future field that must be readable by older code has\nto be introduced some other way.",
         "required": [
           "name",
           "type",
@@ -29380,7 +29385,8 @@
           "description": {
             "type": "string"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "ParamType": {
         "type": "string",
@@ -30119,7 +30125,8 @@
             "format": "int32",
             "minimum": 0
           }
-        }
+        },
+        "additionalProperties": false
       },
       "RecipientDto": {
         "type": "object",
@@ -32472,7 +32479,7 @@
       },
       "UpdateEndpointInput": {
         "type": "object",
-        "description": "The `PATCH` body: every field absent means \"leave it alone\".\n\n`folder_id` and `source_ref` are nullable columns, so \"absent\" and \"set to\nnull\" are different requests and a plain `Option<Uuid>` cannot tell them\napart — an author moving an endpoint back to the root would silently get \"no\nchange\". They use [`double_option`], where absent is `None` and an explicit\n`null` is `Some(None)`.\n\n`state` and `live_version_id` are NOT here. They are the publish lifecycle,\nand a draft edit must never be able to put an endpoint live or repoint what a\nlive one serves.",
+        "description": "The `PATCH` body: every field absent means \"leave it alone\".\n\n`folder_id` and `source_ref` are nullable columns, so \"absent\" and \"set to\nnull\" are different requests and a plain `Option<Uuid>` cannot tell them\napart — an author moving an endpoint back to the root would silently get \"no\nchange\". They use [`double_option`], where absent is `None` and an explicit\n`null` is `Some(None)`.\n\n`state` and `live_version_id` are NOT here. They are the publish lifecycle,\nand a draft edit must never be able to put an endpoint live or repoint what a\nlive one serves.\n`deny_unknown_fields` for the same reason as [`CreateEndpointInput`]: on a\nPATCH the failure mode is worse, because a typo'd key looks exactly like\n\"leave it alone\" and the author sees the OLD value persist rather than a\nzeroed one.",
         "properties": {
           "name": {
             "type": [
@@ -32580,7 +32587,8 @@
             ],
             "format": "uuid"
           }
-        }
+        },
+        "additionalProperties": false
       },
       "UpdateNotebook": {
         "type": "object",
