@@ -20,7 +20,14 @@ CREATE TABLE dataapi.endpoints (
   -- published contract with deployed clients.
   path          text NOT NULL,
   method        text NOT NULL DEFAULT 'GET' CHECK (method IN ('GET','POST')),
-  database_id   uuid NOT NULL,
+  -- RESTRICT, not CASCADE or SET NULL (the latter cannot compile against
+  -- NOT NULL anyway): a published endpoint whose database silently vanished
+  -- is broken either way, but RESTRICT is the only choice that does not also
+  -- destroy the endpoint and its published version history along with it.
+  -- Deleting the database has to go through the endpoint's own delete/publish
+  -- lifecycle first. Same reasoning as automation.slack_config (0118) on
+  -- token_secret_id.
+  database_id   uuid NOT NULL REFERENCES query.databases(id) ON DELETE RESTRICT,
   sql           text NOT NULL,
   params        jsonb NOT NULL DEFAULT '[]',
   output        jsonb NOT NULL DEFAULT '{}',

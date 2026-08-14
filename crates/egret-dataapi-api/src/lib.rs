@@ -137,7 +137,7 @@ impl From<&egret_core::ColumnMeta> for ColumnSpec {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 pub struct OutputSpec {
     #[serde(default = "default_shape")]
     pub shape: String, // "objects" | "arrays"
@@ -149,4 +149,37 @@ fn default_shape() -> String {
 }
 fn default_naming() -> String {
     "as_is".into()
+}
+
+// Hand-written, not `#[derive(Default)]`: a derive builds each field from
+// ITS OWN `Default` impl (`String::default()` is `""`), which has nothing to
+// do with the `#[serde(default = "...")]` functions above — a derive here
+// would silently diverge from `serde_json::from_str::<OutputSpec>("{}")` and
+// hand the first caller of `OutputSpec::default()` empty-string output config
+// with no error. Routing through the same functions serde uses makes the two
+// paths structurally unable to disagree.
+impl Default for OutputSpec {
+    fn default() -> Self {
+        Self {
+            shape: default_shape(),
+            naming: default_naming(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins `OutputSpec::default()` to agree with what an absent `output`
+    /// field deserializes to. A `#[derive(Default)]` here would pass every
+    /// other test in this crate while quietly handing callers `{ shape: "",
+    /// naming: "" }` — this is the one assertion that would catch it.
+    #[test]
+    fn default_output_spec_matches_the_serde_default() {
+        let from_empty_json: OutputSpec = serde_json::from_str("{}").unwrap();
+        assert_eq!(OutputSpec::default(), from_empty_json);
+        assert_eq!(OutputSpec::default().shape, "objects");
+        assert_eq!(OutputSpec::default().naming, "as_is");
+    }
 }

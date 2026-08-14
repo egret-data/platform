@@ -2934,6 +2934,7 @@ version = "0.1.0"
 dependencies = [
  "egret-core",
  "serde",
+ "serde_json",
  "utoipa",
  "uuid",
 ]

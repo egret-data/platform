@@ -19,6 +19,10 @@ struct Fixture {
     db: Db,
     admin: Uuid,
     ws: Uuid,
+    /// A real `query.databases` row, granted to `ws`. `endpoints.database_id`
+    /// has a real FK (`endpoints_database_id_fkey`, RESTRICT) as of the fix
+    /// round on this task, so every insert needs a row this can point at.
+    database: Uuid,
 }
 
 async fn fixture() -> Option<Fixture> {
@@ -44,7 +48,23 @@ async fn fixture() -> Option<Fixture> {
     .await
     .expect("workspace");
 
-    Some(Fixture { db, admin, ws })
+    let database: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (workspace_id, name, engine, host, port, created_by) \
+         VALUES ($1, $2, 'trino', 'localhost', 8080, $3) RETURNING id",
+    )
+    .bind(ws)
+    .bind(format!("db-{}", Uuid::new_v4().simple()))
+    .bind(admin)
+    .fetch_one(&db.pool)
+    .await
+    .expect("database");
+
+    Some(Fixture {
+        db,
+        admin,
+        ws,
+        database,
+    })
 }
 
 macro_rules! skip_without_db {
@@ -137,12 +157,15 @@ async fn a_snapshot_round_trips_through_postgres_jsonb_unchanged() {
          RETURNING id",
     )
     .bind(f.ws)
-    .bind(Uuid::new_v4())
+    .bind(f.database)
     .bind(f.admin)
     .fetch_one(&f.db.pool)
     .await
     .expect("insert endpoint draft");
 
+    // The snapshot's own `database_id` is frozen independently of the draft
+    // row's FK — a fresh uuid here is deliberate, proving the snapshot
+    // doesn't need to reference a live `query.databases` row to round-trip.
     let original = fixture_snapshot(Uuid::new_v4());
     let payload = serde_json::to_value(&original).expect("serialize snapshot");
 
@@ -165,5 +188,34 @@ async fn a_snapshot_round_trips_through_postgres_jsonb_unchanged() {
         round_tripped, original,
         "EndpointSnapshot must round-trip through jsonb unchanged — a drifted \
          field here would silently change an already-published contract"
+    );
+}
+
+/// `endpoints.database_id` must be a real FK (`endpoints_database_id_fkey`),
+/// not a bare `uuid NOT NULL`. Without it, nothing stops the column pointing
+/// at a database that never existed — and the dangle would only surface as a
+/// runtime failure in P4's serving path, with no DB-level signal at write
+/// time.
+#[tokio::test]
+async fn an_endpoint_cannot_reference_a_nonexistent_database() {
+    let f = skip_without_db!();
+
+    let err = sqlx::query(
+        "INSERT INTO dataapi.endpoints \
+         (workspace_id, name, path, method, database_id, sql, created_by) \
+         VALUES ($1, 'dangling', '/dangling', 'GET', $2, 'SELECT 1', $3)",
+    )
+    .bind(f.ws)
+    .bind(Uuid::new_v4()) // no such row in query.databases
+    .bind(f.admin)
+    .execute(&f.db.pool)
+    .await
+    .expect_err("insert must be rejected by the database_id FK");
+
+    let db_err = err.as_database_error().expect("a Postgres error");
+    assert_eq!(
+        db_err.constraint(),
+        Some("endpoints_database_id_fkey"),
+        "must fail specifically on the database_id FK, not some other constraint: {db_err}"
     );
 }
