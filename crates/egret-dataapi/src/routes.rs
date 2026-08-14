@@ -24,18 +24,28 @@
 //!    out is strictly more powerful than looking at the list.
 //! 2. **The workspace comes from [`WsContext`], never from the `{workspace}`
 //!    path segment read a second time.** Gating on one and querying with the
-//!    other is exactly how a cross-workspace hole opens. Every handler that
-//!    names a service account or a client resolves it through
-//!    [`scoped_account`] / [`scoped_client`] / [`scoped_endpoint`] first, which
-//!    404 — never 403 — on a workspace mismatch, so a caller cannot distinguish
-//!    "no such account" from "exists, but not yours".
-//! 3. **A `database_id` arriving in a request body is resolved through
-//!    [`scoped_database`] before it is stored.** It is the one identifier here
-//!    that a caller supplies for an object it does not name in the URL, so
-//!    nothing else in the draft path would stop an endpoint pointing at another
-//!    workspace's connection. `describe_as` is workspace-scoped and would refuse
-//!    it at publish time, but by then the reference has been accepted, stored,
-//!    and echoed back to the author as valid.
+//!    other is exactly how a cross-workspace hole opens. A service account or
+//!    client is resolved through [`scoped_account`] / [`scoped_client`] first;
+//!    an endpoint id carries its workspace into [`EndpointStore`], whose every
+//!    statement has the predicate built in. Either way the answer on a mismatch
+//!    is 404, never 403, so a caller cannot distinguish "no such thing" from
+//!    "exists, but not yours".
+//! 3. **Every id arriving in a request BODY is resolved against the caller's
+//!    workspace before it is stored** — [`scoped_database`] for `database_id`,
+//!    [`scoped_folder`] for `folder_id`. These are the identifiers a caller
+//!    supplies for objects it does not name in the URL, so nothing else in the
+//!    draft path constrains them. For `database_id`, `describe_as` is
+//!    workspace-scoped and would refuse it at publish time — but by then the
+//!    reference has been accepted, stored, and echoed back to the author as
+//!    valid. For `folder_id` nothing downstream would refuse it at all.
+//!
+//! Not yet an invariant, and Task 4 must not assume it: **`path` and `method`
+//! are editable on a `state = 'live'` row.** The SQL a live endpoint runs comes
+//! from its frozen snapshot and no draft edit can change that — but the URL it
+//! answers on comes from this row, so a PATCH can move a live endpoint. Nothing
+//! is exploitable today because serving does not exist yet; publishing must
+//! either guard these two fields against a live state or make the move
+//! deliberate.
 
 use axum::extract::{FromRef, Path, State};
 use axum::http::StatusCode;
@@ -58,7 +68,7 @@ use uuid::Uuid;
 use crate::clients::ClientStore;
 use crate::endpoints::{
     normalize_path, CreateEndpointInput, DataApiEndpointDto, EndpointStore, UpdateEndpointInput,
-    ALLOWED_METHODS,
+    ALLOWED_METHODS, FOLDER_ENTITY_TYPE,
 };
 
 /// View the accounts and their clients. Deliberately does NOT imply issuing.
@@ -205,17 +215,11 @@ async fn scoped_client(st: &DataApiState, ws: Uuid, client: Uuid) -> Result<Uuid
     found.ok_or_else(|| Error::NotFound("client".into()))
 }
 
-/// The same containment for an endpoint draft.
-async fn scoped_endpoint(st: &DataApiState, ws: Uuid, id: Uuid) -> Result<Uuid, DataApiError> {
-    let found: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM dataapi.endpoints WHERE id = $1 AND workspace_id = $2")
-            .bind(id)
-            .bind(ws)
-            .fetch_optional(&st.db.pool)
-            .await
-            .map_err(db_err)?;
-    found.ok_or_else(|| Error::NotFound("endpoint".into()))
-}
+// An endpoint id needs no `scoped_endpoint` helper here: `EndpointStore`'s
+// `get`/`update`/`delete` take the workspace and carry `AND workspace_id = $n`
+// in the statement itself, so containment cannot be bypassed by forgetting to
+// call something. See the module comment on `endpoints.rs` for why that layer
+// and not this one.
 
 /// Confirm a `database_id` from a REQUEST BODY belongs to the workspace the
 /// caller was authorized against.
@@ -231,7 +235,7 @@ async fn scoped_endpoint(st: &DataApiState, ws: Uuid, id: Uuid) -> Result<Uuid, 
 ///
 /// `NotFound`, not `Forbidden`: a connection the workspace was never granted must
 /// be indistinguishable from one that does not exist, exactly as `scoped_account`
-/// and `scoped_endpoint` treat their objects.
+/// and `EndpointStore` treat their objects.
 async fn scoped_database(st: &DataApiState, ws: Uuid, database: Uuid) -> Result<(), DataApiError> {
     let found: Option<Uuid> =
         sqlx::query_scalar("SELECT id FROM query.databases WHERE id = $1 AND workspace_id = $2")
@@ -243,6 +247,37 @@ async fn scoped_database(st: &DataApiState, ws: Uuid, database: Uuid) -> Result<
     found
         .map(|_| ())
         .ok_or_else(|| Error::NotFound("database".into()))
+}
+
+/// The same for a `folder_id`, which is the other identifier a caller supplies
+/// in the body for an object it does not name in the URL — and so has exactly
+/// the same failure modes as an unchecked `database_id`.
+///
+/// Unchecked, a `:manage` holder in workspace A could file an endpoint into
+/// workspace B's folder; a folder id that exists nowhere would be a 500 quoting
+/// `endpoints_folder_id_fkey`; and 201-versus-500 would be a free existence
+/// oracle for folder ids in every other workspace.
+///
+/// `entity_type` is checked as well, not only the workspace. `analytics.folders`
+/// is polymorphic with no constraint on the column (0021/0113), so a
+/// workspace-local CHART folder is a perfectly valid uuid here — and an endpoint
+/// filed into one disappears from the endpoint list without ever erroring. The
+/// wrong TYPE reads as `NotFound` too: to an endpoint author, a folder that
+/// cannot hold endpoints is a folder that does not exist.
+async fn scoped_folder(st: &DataApiState, ws: Uuid, folder: Uuid) -> Result<(), DataApiError> {
+    // Same lookup as `egret_bi::folder::FolderRepo::meta`, issued directly rather
+    // than taking a dependency on `egret-bi` — this crate deliberately depends on
+    // no other feature seam.
+    let meta: Option<(Uuid, String)> =
+        sqlx::query_as("SELECT workspace_id, entity_type FROM analytics.folders WHERE id = $1")
+            .bind(folder)
+            .fetch_optional(&st.db.pool)
+            .await
+            .map_err(db_err)?;
+    match meta {
+        Some((owner, etype)) if owner == ws && etype == FOLDER_ENTITY_TYPE => Ok(()),
+        _ => Err(Error::NotFound("folder".into())),
+    }
 }
 
 /// Normalise and validate the `method` an author typed.
@@ -622,7 +657,8 @@ async fn revoke_client(
 //
 // Draft CRUD only. Nothing here writes `state` or `live_version_id`: publishing,
 // rollback and disable are a separate lifecycle, so no amount of editing can put
-// an endpoint live or change what an already-live one serves.
+// an endpoint live, and the SQL a live endpoint runs comes from its frozen
+// snapshot rather than from this row. Its URL does not — see the module comment.
 
 #[utoipa::path(
     get,
@@ -666,8 +702,9 @@ async fn get_endpoint(
     Path((_ws_ignored, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DataApiEndpointDto>, DataApiError> {
     egret_core::authz::require(&*st.pdp, &ctx, EP_READ).await?;
-    let id = scoped_endpoint(&st, ctx.workspace_id.0, id).await?;
-    Ok(Json(st.endpoints.get(id).await?))
+    // `ctx.workspace_id`, never the path segment — and the store, not a guard
+    // here, is what holds it.
+    Ok(Json(st.endpoints.get(ctx.workspace_id.0, id).await?))
 }
 
 #[utoipa::path(
@@ -695,12 +732,15 @@ async fn create_endpoint(
     if body.name.trim().is_empty() {
         return Err(Error::InvalidInput("name must not be empty".into()));
     }
-    let path = normalize_path(&body.path)
-        .ok_or_else(|| Error::InvalidInput("path must not be empty".into()))?;
+    let path = normalize_path(&body.path).map_err(Error::InvalidInput)?;
     let method = checked_method(body.method.as_deref())?;
-    // Before the insert, so a refused database never reaches the FK — and so the
-    // answer is a 404 about a database rather than a 500 about a constraint.
+    // Both before the insert, so a refused reference never reaches its FK — and
+    // so the answer is a 404 about the thing that was wrong rather than a 500
+    // about a constraint.
     scoped_database(&st, ctx.workspace_id.0, body.database_id).await?;
+    if let Some(folder_id) = body.folder_id {
+        scoped_folder(&st, ctx.workspace_id.0, folder_id).await?;
+    }
     let created = st
         .endpoints
         .create(
@@ -740,7 +780,6 @@ async fn update_endpoint(
     Json(mut body): Json<UpdateEndpointInput>,
 ) -> Result<Json<DataApiEndpointDto>, DataApiError> {
     egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
-    let id = scoped_endpoint(&st, ctx.workspace_id.0, id).await?;
 
     if let Some(name) = &body.name {
         if name.trim().is_empty() {
@@ -748,21 +787,23 @@ async fn update_endpoint(
         }
     }
     if let Some(raw) = &body.path {
-        body.path = Some(
-            normalize_path(raw)
-                .ok_or_else(|| Error::InvalidInput("path must not be empty".into()))?,
-        );
+        body.path = Some(normalize_path(raw).map_err(Error::InvalidInput)?);
     }
     if body.method.is_some() {
         body.method = Some(checked_method(body.method.as_deref())?);
     }
-    // A PATCH may repoint the endpoint at a different connection, so the same
-    // containment applies here as on create — and it has to run before the
-    // UPDATE, or a refused database would already have been written.
+    // A PATCH may repoint the endpoint at a different connection or folder, so
+    // the same containment applies here as on create — and it has to run before
+    // the UPDATE, or a refused reference would already have been written.
     if let Some(database_id) = body.database_id {
         scoped_database(&st, ctx.workspace_id.0, database_id).await?;
     }
-    Ok(Json(st.endpoints.update(id, &body).await?))
+    if let Some(Some(folder_id)) = body.folder_id {
+        scoped_folder(&st, ctx.workspace_id.0, folder_id).await?;
+    }
+    Ok(Json(
+        st.endpoints.update(ctx.workspace_id.0, id, &body).await?,
+    ))
 }
 
 #[utoipa::path(
@@ -787,10 +828,11 @@ async fn delete_endpoint(
     Path((_ws_ignored, id)): Path<(String, Uuid)>,
 ) -> Result<Json<Ack>, DataApiError> {
     egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
-    let id = scoped_endpoint(&st, ctx.workspace_id.0, id).await?;
     // `dataapi.endpoint_versions` cascades from the endpoint (0121), so this
-    // takes the published history with it — which is why it is `:manage`.
-    st.endpoints.delete(id).await?;
+    // takes the published history with it — which is why it is `:manage`, and why
+    // the workspace predicate is in the DELETE rather than in a separate lookup
+    // that could go missing.
+    st.endpoints.delete(ctx.workspace_id.0, id).await?;
     Ok(Json(Ack::ok()))
 }
 

@@ -4,16 +4,28 @@
 //! Publishing — freezing a draft into an immutable `dataapi.endpoint_versions`
 //! snapshot — is a separate lifecycle and lives elsewhere; nothing here writes
 //! `state` or `live_version_id`, so no amount of editing can put an endpoint
-//! live or change what an already-published version serves.
+//! live, and a published version's contents are frozen against editing here.
 //!
-//! **Workspace containment lives in the ROUTES, not here.** `get`, `update` and
-//! `delete` take an id that the caller has already resolved through
-//! `routes::scoped_endpoint`, exactly as `ClientStore::revoke` takes an id
-//! already resolved through `scoped_account`. Duplicating the `workspace_id`
-//! predicate into these statements would look safer and be worse: the route's
-//! guard would then be untestable — a cross-workspace test would stay green
-//! after the guard was deleted, because the store had silently covered for it.
-//! One place enforces it, and a test can prove that place is load-bearing.
+//! One thing editing CAN still do to a live endpoint: move it. `path` and
+//! `method` live on this row, not in the snapshot, and nothing below refuses a
+//! PATCH because `state = 'live'`. Publishing must decide whether that is
+//! allowed; it must not assume it is already prevented.
+//!
+//! **Workspace containment lives HERE, in exactly one place: the `WHERE id = $1
+//! AND workspace_id = $2` that every statement below carries.** There is no
+//! route-level pre-check to forget. That is the point — a store method taking a
+//! bare id will happily read, mutate or delete another workspace's row, and the
+//! only thing standing in the way is a human remembering to call a guard first.
+//! Publish, rollback and disable are still to be written against this store, and
+//! a missed call there would be silent and total.
+//!
+//! Enforcing it once, in the layer nothing can bypass, keeps the property that
+//! made the route-level guard attractive: there is a single line to delete, and
+//! deleting it turns the cross-workspace tests red. It also costs one query per
+//! id route instead of two.
+//!
+//! Absence and denial are the same answer — [`Error::NotFound`] — so a caller in
+//! another workspace cannot tell "no such endpoint" from "exists, but not yours".
 
 use chrono::{DateTime, Utc};
 use egret_core::{Error, Result, UserId};
@@ -239,23 +251,111 @@ where
 /// a 500 leaking `endpoints_method_check` at the author.
 pub const ALLOWED_METHODS: [&str; 2] = ["GET", "POST"];
 
-/// Canonicalise a user-typed URL path: one leading slash, no trailing slash.
+/// The `analytics.folders.entity_type` a folder must carry to hold an endpoint.
 ///
-/// This is not cosmetic. `UNIQUE (workspace_id, method, path)` compares TEXT, so
-/// `reports/revenue`, `/reports/revenue` and `/reports/revenue/` are three
-/// distinct rows to Postgres and one route to a client. Without canonicalising
-/// first, the constraint that is supposed to stop two endpoints claiming the same
-/// URL would admit all three, and the collision would only appear when the
-/// serving path had to pick one.
+/// `analytics.folders` is polymorphic and has NO check on `entity_type` (0021,
+/// and 0113 says so explicitly), so nothing at the database level stops an
+/// endpoint being filed into a chart folder — it would then be invisible in the
+/// endpoint list and appear in the chart one. The value follows the convention
+/// the other seams use: the singular object name, as `alert` and `saved_query`
+/// do.
 ///
-/// Returns `None` for anything with no path left after trimming — `""`, `"   "`,
-/// `"/"` — which the route turns into a 400.
-pub fn normalize_path(raw: &str) -> Option<String> {
-    let trimmed = raw.trim().trim_matches('/');
-    if trimmed.is_empty() {
-        return None;
+/// Folders of this type are not creatable yet: `egret-bi`'s generic folder
+/// router maps a URL `kind` to `(entity_type, read_perm, manage_perm)` in
+/// `kind_perms`, and has no entry for endpoints. Adding
+/// `"data_api_endpoints" => ("data_api_endpoint", "data_api_endpoint:read",
+/// "data_api_endpoint:manage")` there is what makes `folder_id` reachable from
+/// the UI. The guard is written first on purpose — an unmatched rule is inert,
+/// but a field that lands before its guard is a hole.
+pub const FOLDER_ENTITY_TYPE: &str = "data_api_endpoint";
+
+/// Canonicalise a user-typed URL path, or say why it cannot be one.
+///
+/// **Contract for the serving path (P4).** The stored path is the canonical form
+/// this function produces: one leading slash, no trailing slash, and every
+/// segment drawn from `[A-Za-z0-9._~-]`. P4 serves at
+/// `/data-api/v1/{ws}/{*path}`, and axum/matchit **percent-decode a wildcard
+/// capture**, so an inbound path arrives already decoded. Route the inbound path
+/// through this same function before looking a row up. Do not compare raw
+/// strings, and do not store a path that has not been through here — if the two
+/// sides disagree about encoding or about a trailing slash, the endpoint is
+/// unreachable and nothing reports why.
+///
+/// **Why this rejects rather than rewrites.** The reason the path must be
+/// canonical at all is that `UNIQUE (workspace_id, method, path)` compares TEXT:
+/// any two spellings of one URL are two rows and one route, and the collision
+/// surfaces only in P4, when serving has to pick one. Normalising the slashes
+/// alone fixes one alias family out of several — dot segments (`/a/../b`),
+/// interior `//`, percent-encoding (`%65` vs `e`, `%2f` vs `%2F`), and query or
+/// fragment characters swallowed into the path all produce the same outcome, and
+/// a partial canonicaliser is the dangerous shape because it looks total.
+/// Rewriting them all correctly means implementing RFC 3986 normalisation;
+/// rejecting them is total, needs nothing, and turns each case into a 400 the
+/// author can read. It costs nothing in expressiveness: `ParamLocation` is
+/// `Query | Body` only, so a path is a LITERAL — there are no path templates for
+/// this charset to get in the way of.
+///
+/// Leading and trailing whitespace is trimmed (it is what a copy-paste brings,
+/// and trimming is itself total); whitespace anywhere else is rejected.
+///
+/// `Err` carries the reason, which the route returns verbatim as a 400.
+pub fn normalize_path(raw: &str) -> std::result::Result<String, String> {
+    let trimmed = raw.trim();
+    if let Some(c) = trimmed
+        .chars()
+        .find(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(format!(
+            "path must not contain whitespace or control characters (found {c:?})"
+        ));
     }
-    Some(format!("/{trimmed}"))
+    // Named individually before the charset check below, which would also catch
+    // them: "path must not be percent-encoded" tells an author what to do, and
+    // "segment `%65` may contain only ..." does not.
+    for (bad, why) in [
+        ('%', "be percent-encoded — store the decoded path"),
+        (
+            '?',
+            "contain a query string; declare query parameters in `params`",
+        ),
+        ('#', "contain a fragment"),
+    ] {
+        if trimmed.contains(bad) {
+            return Err(format!("path must not {why}"));
+        }
+    }
+
+    // At most ONE leading and ONE trailing slash is absorbed — not a run of them.
+    // `trim_matches('/')` would have quietly rewritten `/a//` to `/a` while
+    // `/a//b` was rejected, so the same typo would be an error in one position
+    // and a silent edit in another. Stripping one each leaves every other slash
+    // for the empty-segment check below, which answers all of them the same way.
+    let body = trimmed.strip_prefix('/').unwrap_or(trimmed);
+    let body = body.strip_suffix('/').unwrap_or(body);
+    if body.is_empty() {
+        return Err("path must not be empty".into());
+    }
+
+    let mut out = String::with_capacity(body.len() + 1);
+    for seg in body.split('/') {
+        if seg.is_empty() {
+            return Err("path must not contain an empty segment (`//`)".into());
+        }
+        if seg == "." || seg == ".." {
+            return Err("path must not contain `.` or `..` segments".into());
+        }
+        if !seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '~' | '-'))
+        {
+            return Err(format!(
+                "path segment `{seg}` may contain only letters, digits and . _ ~ -"
+            ));
+        }
+        out.push('/');
+        out.push_str(seg);
+    }
+    Ok(out)
 }
 
 /// Persistence for endpoint drafts.
@@ -287,8 +387,7 @@ impl EndpointStore {
         Self { db }
     }
 
-    /// Every draft in `workspace`. The only method that takes a workspace for a
-    /// READ, because it is the only one with no id to have been resolved first.
+    /// Every draft in `workspace`.
     pub async fn list(&self, workspace: Uuid) -> Result<Vec<DataApiEndpointDto>> {
         let rows: Vec<Row> = sqlx::query_as(concat!(
             "SELECT ",
@@ -302,15 +401,16 @@ impl EndpointStore {
         rows.into_iter().map(DataApiEndpointDto::try_from).collect()
     }
 
-    /// One draft by id. The id must already have been through
-    /// `routes::scoped_endpoint` — see the module comment.
-    pub async fn get(&self, id: Uuid) -> Result<DataApiEndpointDto> {
+    /// One draft, if it belongs to `workspace`. `NotFound` otherwise — see the
+    /// module comment on why the predicate is here and not in the route.
+    pub async fn get(&self, workspace: Uuid, id: Uuid) -> Result<DataApiEndpointDto> {
         let row: Option<Row> = sqlx::query_as(concat!(
             "SELECT ",
             endpoint_cols!(),
-            " FROM dataapi.endpoints WHERE id = $1"
+            " FROM dataapi.endpoints WHERE id = $1 AND workspace_id = $2"
         ))
         .bind(id)
+        .bind(workspace)
         .fetch_optional(&self.db.pool)
         .await
         .map_err(db_err)?;
@@ -318,9 +418,10 @@ impl EndpointStore {
             .try_into()
     }
 
-    /// Insert a draft. `path` must already be normalised and `database_id`
-    /// already confirmed to belong to `workspace`; both are the route's job,
-    /// because both need to answer with an HTTP status this layer does not pick.
+    /// Insert a draft. `path` must already be normalised, and `database_id` and
+    /// `folder_id` already confirmed to belong to `workspace`; those are the
+    /// route's job, because they name OTHER tables and their absence has to be
+    /// answered with an HTTP status this layer does not pick.
     pub async fn create(
         &self,
         workspace: Uuid,
@@ -372,10 +473,17 @@ impl EndpointStore {
     /// column against itself, so this is a single statement with no read-modify-
     /// write window — two concurrent PATCHes of different fields both land.
     ///
-    /// `path` (if present) must already be normalised, and `database_id` (if
-    /// present) already confirmed to belong to the caller's workspace.
+    /// Scoped to `workspace`: a row belonging to anyone else is `NotFound` and is
+    /// never touched, because the predicate is in the statement rather than in a
+    /// guard someone has to remember to call.
+    ///
+    /// `path` (if present) must already be normalised, and `database_id` /
+    /// `folder_id` (if present) already confirmed to belong to `workspace` — those
+    /// name OTHER tables, so their absence has to be answered by the route, which
+    /// is the layer that picks the status code.
     pub async fn update(
         &self,
+        workspace: Uuid,
         id: Uuid,
         input: &UpdateEndpointInput,
     ) -> Result<DataApiEndpointDto> {
@@ -396,7 +504,7 @@ impl EndpointStore {
                folder_id = CASE WHEN $14 THEN $15 ELSE folder_id END, \
                source_ref = CASE WHEN $16 THEN $17 ELSE source_ref END, \
                updated_at = now() \
-             WHERE id = $1 \
+             WHERE id = $1 AND workspace_id = $18 \
              RETURNING ",
             endpoint_cols!()
         ))
@@ -417,6 +525,7 @@ impl EndpointStore {
         .bind(input.folder_id.flatten())
         .bind(input.source_ref.is_some())
         .bind(input.source_ref.flatten())
+        .bind(workspace)
         .fetch_optional(&self.db.pool)
         .await;
         // A `match`, not `map_err`: naming the colliding URL needs a second query,
@@ -425,28 +534,36 @@ impl EndpointStore {
         let row = match res {
             Ok(row) => row,
             Err(e) if is_path_conflict(&e) => {
-                let (method, path) = self.effective_route(id, input).await;
+                let (method, path) = self.effective_route(workspace, id, input).await;
                 return Err(conflict(&method, &path));
             }
             Err(e) => return Err(db_err(e)),
         };
-        // `fetch_optional` rather than `fetch_one`: the row was resolved by
-        // `scoped_endpoint` a moment ago, but a concurrent delete between the two
-        // statements must read as 404, not as an internal error.
+        // `fetch_optional` rather than `fetch_one`: no row means either no such
+        // endpoint or not this workspace's — the SAME answer, deliberately — and
+        // also covers a concurrent delete, which must read as 404 rather than as
+        // an internal error.
         row.ok_or_else(|| Error::NotFound("endpoint".into()))?
             .try_into()
     }
 
     /// The effective method and path an update WOULD have written, for the
     /// conflict message.
-    async fn effective_route(&self, id: Uuid, input: &UpdateEndpointInput) -> (String, String) {
-        let current: Option<(String, String)> =
-            sqlx::query_as("SELECT method, path FROM dataapi.endpoints WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&self.db.pool)
-                .await
-                .ok()
-                .flatten();
+    async fn effective_route(
+        &self,
+        workspace: Uuid,
+        id: Uuid,
+        input: &UpdateEndpointInput,
+    ) -> (String, String) {
+        let current: Option<(String, String)> = sqlx::query_as(
+            "SELECT method, path FROM dataapi.endpoints WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(id)
+        .bind(workspace)
+        .fetch_optional(&self.db.pool)
+        .await
+        .ok()
+        .flatten();
         let (cur_method, cur_path) = current.unwrap_or_default();
         (
             input.method.clone().unwrap_or(cur_method),
@@ -454,18 +571,28 @@ impl EndpointStore {
         )
     }
 
-    /// Delete a draft. The id must already have been through
-    /// `routes::scoped_endpoint`.
+    /// Delete a draft belonging to `workspace`. `NotFound` if it belongs to
+    /// anyone else, and — this is the part a bare `DELETE` gets wrong — the row
+    /// is not deleted either.
     ///
     /// `dataapi.endpoint_versions` cascades from here (0121), so deleting an
     /// endpoint takes its published history with it — which is why the route
-    /// gates this on `:manage` and nothing weaker.
-    pub async fn delete(&self, id: Uuid) -> Result<()> {
-        sqlx::query("DELETE FROM dataapi.endpoints WHERE id = $1")
-            .bind(id)
-            .execute(&self.db.pool)
-            .await
-            .map_err(db_err)?;
+    /// gates this on `:manage` and nothing weaker, and why "deleted the wrong
+    /// workspace's row" is not a recoverable mistake.
+    pub async fn delete(&self, workspace: Uuid, id: Uuid) -> Result<()> {
+        let affected =
+            sqlx::query("DELETE FROM dataapi.endpoints WHERE id = $1 AND workspace_id = $2")
+                .bind(id)
+                .bind(workspace)
+                .execute(&self.db.pool)
+                .await
+                .map_err(db_err)?
+                .rows_affected();
+        // Reported rather than swallowed: a DELETE that matched nothing is the
+        // same event as a GET that found nothing, and must answer the same way.
+        if affected == 0 {
+            return Err(Error::NotFound("endpoint".into()));
+        }
         Ok(())
     }
 }
@@ -487,21 +614,23 @@ mod tests {
 
     #[test]
     fn paths_are_canonicalised_to_one_leading_slash() {
+        for raw in [
+            "reports/revenue",
+            "/reports/revenue",
+            "/reports/revenue/",
+            "reports/revenue/",
+            "  /reports/revenue  ",
+        ] {
+            assert_eq!(
+                normalize_path(raw).as_deref(),
+                Ok("/reports/revenue"),
+                "{raw:?}"
+            );
+        }
+        // The permitted charset, all of it, in one path.
         assert_eq!(
-            normalize_path("reports/revenue").as_deref(),
-            Some("/reports/revenue")
-        );
-        assert_eq!(
-            normalize_path("/reports/revenue").as_deref(),
-            Some("/reports/revenue")
-        );
-        assert_eq!(
-            normalize_path("/reports/revenue/").as_deref(),
-            Some("/reports/revenue")
-        );
-        assert_eq!(
-            normalize_path("  reports/revenue  ").as_deref(),
-            Some("/reports/revenue")
+            normalize_path("a-b/c_d/e.f/g~h/I9").as_deref(),
+            Ok("/a-b/c_d/e.f/g~h/I9")
         );
     }
 
@@ -510,10 +639,65 @@ mod tests {
     /// and `""` would collide with every other empty path in the workspace.
     #[test]
     fn a_path_with_nothing_in_it_is_rejected() {
-        assert_eq!(normalize_path(""), None);
-        assert_eq!(normalize_path("   "), None);
-        assert_eq!(normalize_path("/"), None);
-        assert_eq!(normalize_path("///"), None);
+        for raw in ["", "   ", "/", "///"] {
+            assert!(normalize_path(raw).is_err(), "{raw:?}");
+        }
+    }
+
+    /// Every alias family that would otherwise put two rows behind one URL. The
+    /// slash rule alone handles the last of these; each of the others is a
+    /// separate way to spell the same route, and a canonicaliser that fixed only
+    /// the slashes would look total while admitting all of them.
+    ///
+    /// Percent-encoding is the one that also breaks serving outright: P4 matches
+    /// `/data-api/v1/{ws}/{*path}`, and axum percent-DECODES a wildcard capture,
+    /// so a stored `%65` could never be matched by any request.
+    #[test]
+    fn every_alias_family_is_rejected() {
+        for (raw, why) in [
+            ("/a/../b", "dot-dot segment"),
+            ("/a/./b", "dot segment"),
+            ("/..", "bare dot-dot"),
+            ("/reports//x", "interior double slash"),
+            ("/a//", "double slash before the trailing one"),
+            ("/r%65ports/x", "percent-encoded letter"),
+            ("/reports%2fx", "percent-encoded slash, lower case"),
+            ("/reports%2Fx", "percent-encoded slash, upper case"),
+            ("/reports/x?a=1", "query string"),
+            ("/reports/x#frag", "fragment"),
+            ("/reports/my report", "interior space"),
+            ("/reports/x\ty", "tab"),
+            ("/reports/x\ny", "newline"),
+            ("/reports/x\u{7f}", "control character"),
+            ("/reports/:id", "path template — params are Query|Body only"),
+            ("/reports/{id}", "brace template"),
+            (
+                "/reports/é",
+                "non-ASCII, which a client would percent-encode",
+            ),
+            ("/reports/a b", "space inside a segment"),
+        ] {
+            assert!(
+                normalize_path(raw).is_err(),
+                "{why}: {raw:?} was accepted as {:?}",
+                normalize_path(raw)
+            );
+        }
+    }
+
+    /// The rejection has to say WHICH rule was broken — an author who typed a
+    /// percent sign needs to be told that, not "invalid path".
+    #[test]
+    fn a_rejection_names_the_rule_it_broke() {
+        assert!(normalize_path("/a%20b").unwrap_err().contains("percent"));
+        assert!(normalize_path("/a?b=1").unwrap_err().contains("query"));
+        assert!(normalize_path("/a#b").unwrap_err().contains("fragment"));
+        assert!(normalize_path("/a b").unwrap_err().contains("whitespace"));
+        assert!(normalize_path("/a//b")
+            .unwrap_err()
+            .contains("empty segment"));
+        assert!(normalize_path("/a/../b").unwrap_err().contains("`..`"));
+        assert!(normalize_path("/a/:id").unwrap_err().contains(":id"));
     }
 
     /// Absent vs. explicit `null` must survive deserialization — this is the

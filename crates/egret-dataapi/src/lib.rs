@@ -13,8 +13,10 @@
 //!
 //! P3 Task 3 adds endpoint DRAFTS ([`endpoints`]) on the same surface, gated on
 //! the separate `data_api_endpoint:read`/`:manage` pair. Draft CRUD only —
-//! nothing here writes `state` or `live_version_id`, so editing can neither
-//! publish an endpoint nor change what a published version serves.
+//! nothing here writes `state` or `live_version_id`, so editing cannot publish
+//! an endpoint, and a published version's frozen contents are beyond its reach.
+//! A live endpoint's URL is not — `path`/`method` live on the draft row and have
+//! no state guard yet; see `endpoints`' module comment.
 
 pub mod clients;
 pub mod endpoints;

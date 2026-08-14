@@ -1,19 +1,28 @@
 //! Draft CRUD for Data API endpoints, driven from the caller's side against the
 //! REAL Cedar PDP — a mocked decision would pin the consumer, not the server.
 //!
-//! Three properties this file exists to hold, all of them security properties:
+//! Four properties this file exists to hold:
 //!
 //! 1. `data_api_endpoint:read` cannot author. egret's permissions are FLAT, so
 //!    `:manage` implies no `:read` and `:read` implies no `:manage`; nothing but
 //!    an explicit `require` stands between a reader and a write.
 //! 2. An endpoint in another workspace is 404, never 403 — absence and denial
 //!    must be indistinguishable from outside.
-//! 3. `database_id` arrives in the REQUEST BODY, so a draft could otherwise name
-//!    a connection belonging to some other workspace. Publish (Task 4) resolves
-//!    the schema through `describe_as`, which is workspace-scoped, so the draft
-//!    would fail there — but by then the cross-workspace reference has already
-//!    been accepted, stored, and shown back to the author. It is refused here,
-//!    with the same 404 the endpoint routes use.
+//! 3. `database_id` and `folder_id` arrive in the REQUEST BODY, so a draft could
+//!    otherwise name a connection or a folder belonging to some other workspace.
+//!    Publish (Task 4) resolves the schema through `describe_as`, which is
+//!    workspace-scoped, so a foreign `database_id` would fail there — but by
+//!    then the reference has been accepted, stored, and shown back to the author
+//!    as valid. Nothing downstream would ever refuse a foreign `folder_id` at
+//!    all. Both are refused here, with the same 404, and `folder_id` is checked
+//!    for `entity_type` too — `analytics.folders` is polymorphic, so a local
+//!    CHART folder is a valid uuid that would swallow the endpoint out of its
+//!    own list.
+//! 4. A stored `path` is CANONICAL. Every alias of one URL — dot segments,
+//!    interior `//`, percent-encoding, a query string or fragment — is a 400,
+//!    because each would otherwise be a separate row behind the same route, and
+//!    a percent-encoded one could never be matched at all: P4 serves
+//!    `{*path}` and axum percent-DECODES a wildcard capture.
 //!
 //! DB-gated. Self-skips (passes) when DATABASE_URL is unset, like
 //! `routes_authz.rs` — so check the duration, not just the `ok`.
@@ -172,6 +181,23 @@ impl Fixture {
 
     async fn create_workspace(&self, tag: &str) -> (Uuid, String) {
         insert_workspace(&self.db, self.admin, tag).await
+    }
+
+    /// A real `analytics.folders` row. `entity_type` is a parameter because the
+    /// wrong type is one of the two ways a folder id can be illegitimate here,
+    /// and the guard has to refuse both.
+    async fn create_folder_in(&self, ws: Uuid, entity_type: &str) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO analytics.folders (workspace_id, entity_type, name, created_by) \
+             VALUES ($1, $2, $3, $4) RETURNING id",
+        )
+        .bind(ws)
+        .bind(entity_type)
+        .bind(format!("f-{}", Uuid::new_v4().simple()))
+        .bind(self.admin)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("insert folder")
     }
 
     async fn create_database_in(&self, ws: Uuid) -> Uuid {
@@ -625,6 +651,272 @@ async fn create_refuses_a_database_that_does_not_exist() {
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+}
+
+// ---------- folder_id containment ----------
+//
+// `folder_id` is `database_id`'s twin: an id supplied in the BODY for an object
+// the URL does not name. Unchecked it is worse, because nothing downstream would
+// ever refuse it — an endpoint filed into another workspace's folder simply
+// stays there. `analytics.folders` is polymorphic with no constraint on
+// `entity_type` (0021, restated in 0113), so a workspace-local CHART folder is a
+// valid uuid that would swallow the endpoint out of its own list.
+
+#[tokio::test]
+async fn create_refuses_a_folder_from_another_workspace() {
+    let f = skip_without_db!();
+    let (other_id, _) = f.create_workspace("other").await;
+    let foreign_folder = f.create_folder_in(other_id, "data_api_endpoint").await;
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, body) = f
+        .post_as(
+            &mgr,
+            &f.collection(),
+            serde_json::json!({
+                "name": "filed-away", "path": "/reports/filed",
+                "database_id": f.database_id, "sql": "SELECT 1",
+                "folder_id": foreign_folder
+            }),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "another workspace's folder must be invisible, not merely forbidden. body: {body}"
+    );
+
+    let made: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dataapi.endpoints WHERE workspace_id = $1 AND name = 'filed-away'",
+    )
+    .bind(f.ws_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("count");
+    assert_eq!(made, 0, "the refused create must not have created anything");
+}
+
+/// The wrong `entity_type` is the second half of the guard, and the half a
+/// workspace check alone would miss: this folder IS the caller's, and filing an
+/// endpoint into it would succeed, after which the endpoint is absent from the
+/// endpoint folder list and present in the chart one.
+#[tokio::test]
+async fn create_refuses_a_folder_of_the_wrong_entity_type() {
+    let f = skip_without_db!();
+    let chart_folder = f.create_folder_in(f.ws_id, "chart").await;
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, body) = f
+        .post_as(
+            &mgr,
+            &f.collection(),
+            serde_json::json!({
+                "name": "miscategorised", "path": "/reports/misc",
+                "database_id": f.database_id, "sql": "SELECT 1",
+                "folder_id": chart_folder
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+}
+
+/// A folder id that exists nowhere must be the SAME 404, not a 500 quoting
+/// `endpoints_folder_id_fkey` — otherwise 201-versus-500 is a free existence
+/// oracle for folder ids in every other workspace.
+#[tokio::test]
+async fn create_refuses_a_folder_that_does_not_exist() {
+    let f = skip_without_db!();
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, body) = f
+        .post_as(
+            &mgr,
+            &f.collection(),
+            serde_json::json!({
+                "name": "ghost-folder", "path": "/reports/ghostf",
+                "database_id": f.database_id, "sql": "SELECT 1",
+                "folder_id": Uuid::new_v4()
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+}
+
+#[tokio::test]
+async fn update_refuses_a_folder_from_another_workspace() {
+    let f = skip_without_db!();
+    let id = f
+        .create_endpoint("rev", "/reports/revenue", "SELECT 1")
+        .await;
+    let (other_id, _) = f.create_workspace("other").await;
+    let foreign_folder = f.create_folder_in(other_id, "data_api_endpoint").await;
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, body) = f
+        .patch_as(
+            &mgr,
+            &format!("{}/{id}", f.collection()),
+            serde_json::json!({ "folder_id": foreign_folder }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+
+    let still: Option<Uuid> =
+        sqlx::query_scalar("SELECT folder_id FROM dataapi.endpoints WHERE id = $1")
+            .bind(id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("folder_id");
+    assert_eq!(still, None, "the refused update must not have filed it");
+}
+
+/// The legitimate case must work, or every test above would pass just as well
+/// against a route that refused all folders.
+#[tokio::test]
+async fn a_folder_of_this_workspace_and_type_is_accepted_and_clearable() {
+    let f = skip_without_db!();
+    let folder = f.create_folder_in(f.ws_id, "data_api_endpoint").await;
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, created) = f
+        .post_as(
+            &mgr,
+            &f.collection(),
+            serde_json::json!({
+                "name": "filed", "path": "/reports/filed",
+                "database_id": f.database_id, "sql": "SELECT 1",
+                "folder_id": folder
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    assert_eq!(
+        created["folder_id"].as_str().expect("folder_id"),
+        folder.to_string()
+    );
+    let id: Uuid = created["id"].as_str().expect("id").parse().expect("uuid");
+
+    // An explicit null clears it — the whole reason `folder_id` is a double
+    // option. A plain Option would read this as "leave it alone".
+    let (status, patched) = f
+        .patch_as(
+            &mgr,
+            &format!("{}/{id}", f.collection()),
+            serde_json::json!({ "folder_id": null }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {patched}");
+    assert!(
+        patched["folder_id"].is_null(),
+        "explicit null must clear it: {patched}"
+    );
+}
+
+// ---------- Path validation ----------
+//
+// Every family below is a different spelling of one URL. Stored unvalidated they
+// are separate rows to the UNIQUE constraint and one route to a client, so the
+// constraint whose entire job is to stop that would admit them; percent-encoding
+// is worse still, because P4 matches `{*path}` and axum percent-DECODES a
+// wildcard capture, making the stored form permanently unmatchable.
+
+#[tokio::test]
+async fn every_path_alias_family_is_a_bad_request() {
+    let f = skip_without_db!();
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    for (path, why) in [
+        ("/reports/../revenue", "dot-dot segment"),
+        ("/reports/./revenue", "dot segment"),
+        ("/reports//revenue", "interior double slash"),
+        ("/r%65ports/revenue", "percent-encoded letter"),
+        ("/reports%2frevenue", "percent-encoded slash, lower case"),
+        ("/reports%2Frevenue", "percent-encoded slash, upper case"),
+        ("/reports/revenue?region=us", "query string"),
+        ("/reports/revenue#top", "fragment"),
+        ("/reports/my revenue", "interior space"),
+        ("/reports/rev\tenue", "tab"),
+        ("/reports/{id}", "brace template"),
+        ("/reports/:id", "colon template"),
+    ] {
+        let (status, body) = f
+            .post_as(
+                &mgr,
+                &f.collection(),
+                serde_json::json!({
+                    "name": why, "path": path,
+                    "database_id": f.database_id, "sql": "SELECT 1"
+                }),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{why} ({path:?}) must be refused, not stored. body: {body}"
+        );
+    }
+
+    let stored: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM dataapi.endpoints WHERE workspace_id = $1")
+            .bind(f.ws_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("count");
+    assert_eq!(stored, 0, "not one of them may have been written");
+}
+
+/// PATCH is the other door into the `path` column and must be validated the same
+/// way — otherwise an endpoint created with a clean path could be moved to an
+/// unservable one.
+#[tokio::test]
+async fn a_patch_cannot_move_an_endpoint_to_an_alias_path() {
+    let f = skip_without_db!();
+    let id = f
+        .create_endpoint("rev", "/reports/revenue", "SELECT 1")
+        .await;
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    for path in ["/reports/%2e%2e/x", "/reports//x", "/reports/x?y=1"] {
+        let (status, body) = f
+            .patch_as(
+                &mgr,
+                &format!("{}/{id}", f.collection()),
+                serde_json::json!({ "path": path }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path:?} body: {body}");
+    }
+
+    let unchanged: String = sqlx::query_scalar("SELECT path FROM dataapi.endpoints WHERE id = $1")
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("path");
+    assert_eq!(unchanged, "/reports/revenue");
+}
+
+/// The 400 has to name the rule, or an author staring at a perfectly ordinary
+/// looking URL has nothing to act on.
+#[tokio::test]
+async fn a_refused_path_says_which_rule_it_broke() {
+    let f = skip_without_db!();
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, body) = f
+        .post_as(
+            &mgr,
+            &f.collection(),
+            serde_json::json!({
+                "name": "enc", "path": "/reports/rev%20enue",
+                "database_id": f.database_id, "sql": "SELECT 1"
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("percent"),
+        "the message must name percent-encoding: {body}"
+    );
 }
 
 // ---------- Uniqueness ----------
