@@ -110,6 +110,20 @@ async fn guard_not_last_admin(
     Ok(())
 }
 
+/// The human-facing user routes operate on people. A service account is a
+/// `users` row (Data API P2) but has no password and no editable profile, so
+/// these routes refuse it rather than half-working.
+async fn refuse_service_account(st: &CpState, id: UserId) -> Result<(), CpError> {
+    let u = st.users.find_by_id(id).await?.ok_or(CpError::NotFound)?;
+    if u.provider == "service" {
+        return Err(CpError::BadRequest(
+            "this is a service account; manage it through the Data API service-account routes"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 // ---------- Users ----------
 
 // Renamed in the emitted OpenAPI to `ControlPlaneUserDto`: egret-workspace
@@ -252,6 +266,7 @@ async fn update_user(
     Json(body): Json<UpdateUserInput>,
 ) -> Result<Json<UserDto>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:update").await?;
+    refuse_service_account(&st, UserId(id)).await?;
     let user_id = UserId(id);
     let existing = st
         .users
@@ -375,6 +390,7 @@ async fn reset_password(
     Json(body): Json<ResetPasswordInput>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:update").await?;
+    refuse_service_account(&st, UserId(id)).await?;
     let user_id = UserId(id);
     let user = st
         .users
