@@ -3223,13 +3223,21 @@ fn starrocks_jwt_integration_sql(jwks_url: &str, issuer: &str, audience: &str) -
 /// user (the connection's basic-auth login on the impersonate path — S3-T1's
 /// `StarRocksConnector` logs in as this user, then runs `EXECUTE AS
 /// <session_user>`). `IDENTIFIED BY` takes a single-quoted string literal
-/// (StarRocks/MySQL `CREATE USER` grammar), so both the username and password
-/// are single-quote-escaped — a username/password containing `'` must not be
-/// able to close the literal early and inject DDL (this runs as `root`).
+/// (StarRocks/MySQL `CREATE USER` grammar), so both the username and the
+/// password go through [`egret_query_api::quote_string`] — which supplies the
+/// surrounding quotes and escapes **both** `'` (doubled) and `\`. StarRocks is
+/// MySQL-dialect, so a backslash escapes the character after it: a value
+/// containing `\'` closes a quote-only-escaped literal early and injects DDL
+/// that runs as `root` on the FE. Neither input is a constant — the password is
+/// read back from a mutable stored secret (`ensure_delegator_secret`) on every
+/// call after the first.
 fn starrocks_create_service_user_sql(service_user: &str, password: &str) -> String {
-    let esc_user = service_user.replace('\'', "''");
-    let esc_pw = password.replace('\'', "''");
-    format!("CREATE USER IF NOT EXISTS '{esc_user}'@'%' IDENTIFIED BY '{esc_pw}'")
+    use egret_query_api::{quote_string, Engine as QueryEngine};
+    format!(
+        "CREATE USER IF NOT EXISTS {}@'%' IDENTIFIED BY {}",
+        quote_string(QueryEngine::StarRocks, service_user),
+        quote_string(QueryEngine::StarRocks, password)
+    )
 }
 
 /// Build the `GRANT IMPERSONATE` DDL authorizing the service user to run
@@ -7239,7 +7247,9 @@ mod tests {
     /// [`starrocks_create_service_user_sql`] (S3-T2) renders a `CREATE USER`
     /// statement with a single-quoted `IDENTIFIED BY` password; a `'` in
     /// either the username or password must be escaped (doubled), not close
-    /// the literal early.
+    /// the literal early. StarRocks is MySQL-dialect, so `\` must be escaped
+    /// too — a quote-only escape leaves `\'` able to break out and inject DDL
+    /// that runs as `root`.
     #[test]
     fn starrocks_create_service_user_sql_renders_and_escapes() {
         let sql = starrocks_create_service_user_sql("egret_delegator", "s3cr3t");
@@ -7254,6 +7264,24 @@ mod tests {
         );
         assert!(evil_sql.contains("a''; DROP USER root; --"));
         assert!(evil_sql.contains("p''w"));
+
+        // Backslash payload: the old quote-only escape rendered
+        // `… 'u\'x'@'%' IDENTIFIED BY 'p\' OR 1=1 -- '`, where StarRocks reads
+        // `\'` as an escaped quote, so the literal runs on and `OR 1=1 -- `
+        // lands as SQL. Both `\` and `'` must be escaped.
+        let bs_sql = starrocks_create_service_user_sql(r"u\'x", r"p\' OR 1=1 -- ");
+        assert_eq!(
+            bs_sql,
+            r#"CREATE USER IF NOT EXISTS 'u\\''x'@'%' IDENTIFIED BY 'p\\'' OR 1=1 -- '"#
+        );
+        assert!(
+            !bs_sql.contains(r"'u\'x'"),
+            "backslash-blind username escape present; sql={bs_sql}"
+        );
+        assert!(
+            !bs_sql.contains(r"'p\' OR"),
+            "backslash-blind password escape present; sql={bs_sql}"
+        );
     }
 
     /// [`starrocks_impersonation_grant_sql`] (S3-T2) renders `GRANT
