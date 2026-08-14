@@ -1,5 +1,5 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router-dom";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider } from "@/auth/AuthProvider";
@@ -11,7 +11,7 @@ import { useAuth } from "@/auth/useAuth";
 import { useMyWorkspaces } from "@/api/hooks";
 import { queryClient } from "@/api/queryClient";
 import { RequireFeature } from "@/components/explore/RequireFeature";
-import { useDefaultExplorePath } from "@/hooks/useWorkspaceFeatures";
+import { exploreRedirectTo, useDefaultExplorePath } from "@/hooks/useWorkspaceFeatures";
 import PrintObject from "@/routes/print/PrintObject";
 
 function LoginRoute() {
@@ -85,11 +85,15 @@ function ExploreRoutes() {
   // will immediately bounce off. `ExploreRoutes` is a component, so calling
   // the hook here (unconditionally, on every render) is legal.
   const defaultPath = useDefaultExplorePath();
+  // Absolute, not relative — see `exploreRedirectTo`. A relative target here sent the
+  // catch-all into an endless redirect under react-router 7.
+  const { workspace } = useParams();
+  const redirectTo = exploreRedirectTo(workspace, defaultPath);
   return (
     <RequireWorkspace>
       <AppShell>
         <Routes>
-          <Route index element={<Navigate to={defaultPath} replace />} />
+          <Route index element={<Navigate to={redirectTo} replace />} />
           <Route path="sql-lab" element={<RequireFeature feature="sql_lab"><SqlLab /></RequireFeature>} />
           <Route path="datasets" element={<RequireFeature feature="datasets"><Datasets /></RequireFeature>} />
           <Route path="datasets/:id" element={<RequireFeature feature="datasets"><DatasetDetail /></RequireFeature>} />
@@ -142,7 +146,7 @@ function ExploreRoutes() {
             <Route path="general" element={<WorkspaceGeneral />} />
             <Route path="notifications" element={<Notifications />} />
           </Route>
-          <Route path="*" element={<Navigate to={defaultPath} replace />} />
+          <Route path="*" element={<Navigate to={redirectTo} replace />} />
         </Routes>
       </AppShell>
     </RequireWorkspace>

@@ -43,3 +43,19 @@ export function useDefaultExplorePath(): string {
   const first = EXPLORE_MODULES.find((m) => enabled.includes(m.key));
   return first ? first.path : "settings/members";
 }
+
+/**
+ * Absolute target for the explore index and catch-all redirects.
+ *
+ * ABSOLUTE, and that is the whole point. These redirects used to pass
+ * `useDefaultExplorePath()` straight to `<Navigate>`, which is relative. Under
+ * react-router 6 a relative target inside the `path="*"` route resolved against the
+ * splat route's PATTERN (`/explore/:workspace/`) and landed correctly. react-router 7
+ * resolves it against the matched LOCATION, so `/explore/ws/unknown` redirected to
+ * `/explore/ws/unknown/sql-lab`, which matches `*` again — the path grew a segment per
+ * pass until the browser gave up. Building the target from the workspace makes the
+ * resolution rule irrelevant.
+ */
+export function exploreRedirectTo(workspace: string | undefined, defaultPath: string): string {
+  return `/explore/${workspace ?? ""}/${defaultPath}`;
+}
