@@ -553,23 +553,30 @@ pub(crate) fn sql_literal(
 ) -> Result<String, BiError> {
 ```
 
-Then replace the final string-quoting arm — the one currently building `format!("'{}'", s.replace('\'', "''"))` — with:
+Then change **only line 184**, the last line of the fall-through arm. Leave the surrounding `match` exactly as it is — in particular the `Value::Null` branch, which returns a 400 and must not be lost:
 
 ```rust
         _ => {
             let s = match v {
                 serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => {
+                    return Err(BiError::BadRequest("filter value is null".into()))
+                }
                 other => other.to_string(),
             };
-            Ok(egret_query_api::quote_string(engine, &s))
+            Ok(quote_string(engine, &s))          // was: format!("'{}'", s.replace('\'', "''"))
         }
 ```
 
-Add the import at the top of the file if `Engine` is not already in scope:
+`Engine` is already imported at line 5. Extend that import rather than adding a second one:
 
 ```rust
-use egret_query_api::Engine;
+use egret_query_api::{quote_string, Engine};
 ```
+
+Note the local precedent: `quote_ident(engine, ident)` (`crates/egret-bi/src/schema.rs:186`) already takes the engine and dispatches per dialect. This change makes literals match what identifiers have always done.
+
+**Do not touch `like_literal` (`crates/egret-bi/src/schema.rs:161`).** It looks similar but is a different thing: it escapes a search term for a `LIKE` *pattern* used with `ESCAPE '\'`, so it escapes the wildcards `%` and `_` as well, and it does not wrap the result in quotes — its caller does. Folding it into `quote_string` would break wildcard escaping.
 
 - [ ] **Step 4: Update both call sites**
 
@@ -647,10 +654,14 @@ scope."
 - Exactly one implementation of string-literal quoting remains in the workspace. Confirm with:
 
 ```bash
-rg "replace\('\\\\''" crates/
+rg -n --type rust "\"''\"" crates/
 ```
 
-Expected: hits only `crates/egret-query-api/src/dialect.rs`. Any other hit is a third copy waiting to drift.
+Expected: exactly two hits, and no others.
+  - `crates/egret-query-api/src/dialect.rs` — the one literal quoter.
+  - `crates/egret-bi/src/schema.rs:165` — inside `like_literal`, which is a `LIKE`-pattern escaper (it also escapes `%` and `_`, and does not wrap in quotes). It stays.
+
+A third hit means a copy that will drift, which is how this bug was born.
 
 - Trino behaviour byte-identical to before: `trino_leaves_backslash_alone` and `sql_literal_trino_leaves_backslash_alone` cover the regression on both sites.
 
