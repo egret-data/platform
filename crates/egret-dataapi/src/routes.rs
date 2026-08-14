@@ -898,14 +898,27 @@ async fn delete_endpoint(
     // takes the published history with it — which is why it is `:manage`, and why
     // the workspace predicate is in the DELETE rather than in a separate lookup
     // that could go missing.
-    st.endpoints.delete(ctx.workspace_id.0, id).await?;
+    let gone = st.endpoints.delete(ctx.workspace_id.0, id).await?;
+    // **The only audited route whose subject does not survive it.** `revoke` is a
+    // soft `UPDATE revoked_at` and `disable` keeps the row, so for those the
+    // `resource_id` alone is enough — an auditor joins back to a row that is
+    // still there. Here the endpoint is gone and `endpoint_versions` cascaded
+    // with it, so a bare uuid in the trail would resolve to nothing and record
+    // that SOMETHING was deleted without ever saying which URL stopped being
+    // served. The columns come from the DELETE's own `RETURNING`, so there is no
+    // second query and nothing to race.
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
         Some(ctx.workspace_id.0),
         "data_api_endpoint:delete",
         "data_api_endpoint",
         Some(id.to_string()),
-        serde_json::json!({}),
+        serde_json::json!({
+            "name": gone.name,
+            "path": gone.path,
+            "method": gone.method,
+            "database_id": gone.database_id,
+        }),
     ));
     Ok(Json(Ack::ok()))
 }
@@ -1173,7 +1186,25 @@ async fn enable_endpoint(
     Path((_ws_ignored, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DataApiEndpointDto>, DataApiError> {
     egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
-    Ok(Json(st.endpoints.enable(ctx.workspace_id.0, id).await?))
+    let enabled = st.endpoints.enable(ctx.workspace_id.0, id).await?;
+    // Symmetric with `disable`, and not optional. Auditing one half of a state
+    // machine records that an endpoint stopped serving and never that it started
+    // again — the trail would show a permanently-disabled endpoint answering
+    // requests. `live_version_id` goes with it because enable resumes serving a
+    // version chosen when it was published, and which one that is, is the whole
+    // effect of the call.
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "data_api_endpoint:enable",
+        "data_api_endpoint",
+        Some(id.to_string()),
+        serde_json::json!({
+            "state": enabled.state,
+            "live_version_id": enabled.live_version_id,
+        }),
+    ));
+    Ok(Json(enabled))
 }
 
 #[utoipa::path(

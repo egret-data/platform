@@ -11,7 +11,14 @@
 //! outlives every rotation, every revocation, and the `dataapi.clients` row
 //! itself. It is the one credential lifetime nothing in the product can shorten,
 //! so the assertion checks both the KEY and the secret's VALUE — a rename would
-//! walk straight past a key-only check.
+//! walk straight past a key-only check. [`Fixture::drained`] then applies the
+//! value half to EVERY event of EVERY test, so the guard is crate-wide and not
+//! one assertion on one handler.
+//!
+//! The other property worth naming is
+//! [`deleting_an_endpoint_records_what_it_was`]: `delete` is the one audited
+//! route whose subject does not survive it, so its event is the only record
+//! that the endpoint existed.
 //!
 //! DB-gated. Self-skips (passes) when DATABASE_URL is unset, like every sibling
 //! suite in this crate — so check the DURATION, not just the `ok`.
@@ -75,6 +82,10 @@ struct Fixture {
     /// synchronous `try_send`, so an event is in this queue by the time the
     /// response has been returned — no sleeping, no polling.
     rx: Receiver<AuditEvent>,
+    /// Every client secret this fixture has issued. [`Fixture::drained`] sweeps
+    /// every event against all of them, so the no-secret guard is crate-wide
+    /// rather than one assertion on one handler.
+    secrets: Vec<String>,
 }
 
 struct Caller {
@@ -141,7 +152,7 @@ async fn insert_database(db: &Db, ws: Uuid, owner: Uuid) -> Uuid {
     .expect("insert database")
 }
 
-/// Everything the six audited routes gate on, held by ONE principal so a single
+/// Everything the seven audited routes gate on, held by ONE principal so a single
 /// caller can drive the whole surface. Permissions are flat, so this is the pair
 /// migrations 0120/0122 seed on `ws_admin` for each resource.
 const MANAGER: &[&str] = &[
@@ -209,7 +220,7 @@ async fn fixture() -> Option<Fixture> {
     // drained fast enough" into the same failure.
     let (sink, rx) = AuditSink::new(256);
     let manager = principal_with_in(&db, sink.clone(), MANAGER, ws_id).await;
-    Some(Fixture {
+    let mut f = Fixture {
         db,
         ws,
         ws_id,
@@ -218,7 +229,19 @@ async fn fixture() -> Option<Fixture> {
         manager,
         sink,
         rx,
-    })
+        secrets: Vec::new(),
+    };
+    // Issue one client before any test body runs, and drain its event. Two
+    // things follow: every test starts with a LIVE secret registered, so
+    // `drained`'s sweep is never vacuous even in the tests that never touch a
+    // client; and the sweep is exercised once here on a real issue event, so a
+    // sweep that had been broken into a no-op would not sit unnoticed behind
+    // tests that only ever assert on endpoints.
+    let sa = f.service_account("audit-bootstrap").await;
+    f.issue_client(sa).await;
+    let bootstrap = f.drained();
+    assert_eq!(bootstrap.len(), 1, "bootstrap issue: {bootstrap:?}");
+    Some(f)
 }
 
 macro_rules! skip_without_db {
@@ -282,6 +305,14 @@ impl Fixture {
     /// Everything emitted so far. `Decision` events from the auditing PDP are not
     /// possible here — these tests build a bare `CedarPdp`, not the decorated one
     /// — so anything in the queue is a handler's own mutation.
+    ///
+    /// **Every drained event is swept for every client secret this fixture has
+    /// ever seen**, which is the crate-wide half of the no-secret guard. The
+    /// named assertions in `issuing_a_client_…` pin `issue_client`'s detail
+    /// specifically; this sweep runs on EVERY event of EVERY test, so a future
+    /// emit anywhere in the crate that carried secret material trips it without
+    /// anyone having to remember to add an assertion. `fixture()` issues a client
+    /// before any test body runs precisely so this is never vacuous.
     fn drained(&mut self) -> Vec<Emitted> {
         let mut out = Vec::new();
         while let Ok(ev) = self.rx.try_recv() {
@@ -305,7 +336,40 @@ impl Fixture {
                 other => panic!("unexpected audit event: {other:?}"),
             }
         }
+        for ev in &out {
+            let rendered = ev.detail.to_string();
+            for secret in &self.secrets {
+                assert!(
+                    !rendered.contains(secret.as_str()),
+                    "`{}` carried a live client secret in its audit detail — a secret in an \
+                     append-only table outlives every rotation: {}",
+                    ev.action,
+                    rendered
+                );
+            }
+        }
         out
+    }
+
+    /// Issue a client through the route, RECORDING its secret so every later
+    /// `drained()` sweeps for it. Does not drain: the caller decides whether the
+    /// resulting event is the one under test.
+    async fn issue_client(&mut self, sa: Uuid) -> serde_json::Value {
+        let (status, created) = self
+            .send(
+                "POST",
+                &format!("/api/ws/{}/data-api/service-accounts/{sa}/clients", self.ws),
+                Some(serde_json::json!({ "name": "prod" })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "body: {created}");
+        let secret = created["client_secret"]
+            .as_str()
+            .expect("client_secret")
+            .to_string();
+        assert!(!secret.is_empty(), "the fixture must issue a real secret");
+        self.secrets.push(secret);
+        created
     }
 
     /// Exactly one event, or a failure naming what was actually emitted.
@@ -365,9 +429,18 @@ impl Fixture {
 
 impl Emitted {
     /// The event's shape, minus the detail — asserted as a tuple so a wrong
-    /// action, a wrong resource type and a wrong id all read as one diff.
-    fn shape(&self) -> (&str, &str, Option<&str>) {
+    /// actor, workspace, action, resource type or id all read as one diff.
+    ///
+    /// **Actor and workspace are in here rather than asserted separately** so
+    /// they are pinned for EVERY event, not for the two it occurred to someone
+    /// to check. They are what `mutation_for` stamps, and a handler that passed
+    /// `None` for the workspace or the service account's id for the actor would
+    /// otherwise emit a plausible-looking event that attributes the act to the
+    /// wrong principal.
+    fn shape(&self) -> (Option<Uuid>, Option<Uuid>, &str, &str, Option<&str>) {
         (
+            self.actor,
+            self.workspace_id,
             self.action.as_str(),
             self.resource_type.as_str(),
             self.resource_id.as_deref(),
@@ -382,42 +455,46 @@ impl Emitted {
 /// The mutation that proves this test: add `"client_secret": c.client_secret` to
 /// the `detail` in `issue_client` and both assertions below go red.
 ///
-/// The value check is not redundant with the key check. A future edit that
-/// renamed the field — `secret`, `credential`, or folded it into a "created"
-/// blob — would pass a key-only assertion while writing exactly the same bytes
-/// into an append-only table.
+/// **The two assertions catch strictly different mutations**, which is why both
+/// are here rather than one standing in for the other:
+///
+/// * `"credential": c.client_secret` — the right bytes under a different name.
+///   Caught by the VALUE check (and by [`Fixture::drained`]'s crate-wide sweep,
+///   which is the same check applied everywhere); the key check sails past it.
+/// * `"client_secret": "redacted"` — the right name over harmless bytes. Caught
+///   by the KEY check only; the value check sails past it. A field named
+///   `client_secret` carrying a truncation, a prefix or a hash is still a
+///   credential-shaped column in an append-only table, and is refused on sight.
+///
+/// The secret is base64url, whose alphabet contains nothing JSON escapes, so the
+/// substring test over the rendered detail is exact rather than approximate.
+///
+/// This test pins `issue_client` specifically; `Fixture::drained`'s sweep covers
+/// every other emit in the crate.
 #[tokio::test]
 async fn issuing_a_client_audits_the_client_id_and_never_the_secret() {
     let mut f = skip_without_db!();
     let sa = f.service_account("reporting").await;
 
-    let (status, created) = f
-        .send(
-            "POST",
-            &format!("/api/ws/{}/data-api/service-accounts/{sa}/clients", f.ws),
-            Some(serde_json::json!({ "name": "prod" })),
-        )
-        .await;
-    assert_eq!(status, StatusCode::CREATED, "body: {created}");
-    let secret = created["client_secret"].as_str().expect("client_secret");
-    assert!(!secret.is_empty(), "the fixture must issue a real secret");
-    let client_uuid = created["id"].as_str().expect("id");
+    let created = f.issue_client(sa).await;
+    let secret = created["client_secret"]
+        .as_str()
+        .expect("client_secret")
+        .to_string();
+    let client_uuid = created["id"].as_str().expect("id").to_string();
 
     let ev = f.one_event();
     assert_eq!(
         ev.shape(),
         (
+            Some(f.manager.user),
+            Some(f.ws_id),
             "data_api_client:issue",
             "data_api_client",
-            Some(client_uuid)
-        )
+            Some(client_uuid.as_str()),
+        ),
+        "the actor is the issuing human, never the service account",
     );
-    assert_eq!(
-        ev.actor,
-        Some(f.manager.user),
-        "the issuing human, not the SA"
-    );
-    assert_eq!(ev.workspace_id, Some(f.ws_id));
     // What SHOULD be there — so a detail that leaked nothing because it carried
     // nothing at all cannot pass the two assertions below.
     assert_eq!(
@@ -439,26 +516,19 @@ async fn issuing_a_client_audits_the_client_id_and_never_the_secret() {
     );
     // 2. And the secret's own bytes appear nowhere under any key.
     assert!(
-        !ev.detail.to_string().contains(secret),
+        !ev.detail.to_string().contains(&secret),
         "the secret's VALUE reached the audit detail under some other name: {:?}",
         ev.detail
     );
 }
 
-// ---------- The rest of the six ----------
+// ---------- The rest of the seven ----------
 
 #[tokio::test]
 async fn revoking_a_client_is_audited() {
     let mut f = skip_without_db!();
     let sa = f.service_account("reporting").await;
-    let (status, created) = f
-        .send(
-            "POST",
-            &format!("/api/ws/{}/data-api/service-accounts/{sa}/clients", f.ws),
-            Some(serde_json::json!({ "name": "prod" })),
-        )
-        .await;
-    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let created = f.issue_client(sa).await;
     let client_uuid = created["id"].as_str().expect("id").to_string();
     let _issue = f.one_event();
 
@@ -475,22 +545,30 @@ async fn revoking_a_client_is_audited() {
     assert_eq!(
         ev.shape(),
         (
+            Some(f.manager.user),
+            Some(f.ws_id),
             "data_api_client:revoke",
             "data_api_client",
-            Some(client_uuid.as_str())
+            Some(client_uuid.as_str()),
         )
     );
-    assert_eq!(ev.actor, Some(f.manager.user));
-    assert_eq!(ev.workspace_id, Some(f.ws_id));
+    // Deliberately an empty detail: `ClientStore::revoke` is a soft
+    // `UPDATE revoked_at`, so the `dataapi.clients` row — with its `client_id`,
+    // name and service account — is still there for an auditor to join to. The
+    // hard-delete route is the one that cannot rely on that; see
+    // `deleting_an_endpoint_records_what_it_was`.
+    assert_eq!(ev.detail, serde_json::json!({}));
 }
 
-/// Publish, rollback and disable in one sequence, because the interesting part
-/// is the VERSION each event names: a rollback that recorded the version it left
-/// rather than the one it made live would be worse than no record.
+/// Publish, rollback, disable and enable in one sequence, because the
+/// interesting part is the VERSION each event names: a rollback that recorded
+/// the version it left rather than the one it made live would be worse than no
+/// record.
 #[tokio::test]
 async fn the_publish_lifecycle_is_audited_with_the_version_it_made_live() {
     let mut f = skip_without_db!();
     let ep = f.endpoint("orders", "/orders").await;
+    let eps = ep.to_string();
     let url = f.endpoints_url();
 
     // v1
@@ -507,9 +585,11 @@ async fn the_publish_lifecycle_is_audited_with_the_version_it_made_live() {
     assert_eq!(
         ev.shape(),
         (
+            Some(f.manager.user),
+            Some(f.ws_id),
             "data_api_endpoint:publish",
             "data_api_endpoint",
-            Some(ep.to_string().as_str())
+            Some(eps.as_str()),
         )
     );
     assert_eq!(ev.detail["version"], serde_json::json!(1));
@@ -540,9 +620,11 @@ async fn the_publish_lifecycle_is_audited_with_the_version_it_made_live() {
     assert_eq!(
         ev.shape(),
         (
+            Some(f.manager.user),
+            Some(f.ws_id),
             "data_api_endpoint:rollback",
             "data_api_endpoint",
-            Some(ep.to_string().as_str())
+            Some(eps.as_str()),
         )
     );
     assert_eq!(
@@ -558,24 +640,104 @@ async fn the_publish_lifecycle_is_audited_with_the_version_it_made_live() {
     assert_eq!(
         ev.shape(),
         (
+            Some(f.manager.user),
+            Some(f.ws_id),
             "data_api_endpoint:disable",
             "data_api_endpoint",
-            Some(ep.to_string().as_str())
+            Some(eps.as_str()),
         )
     );
     assert_eq!(ev.detail["state"], serde_json::json!("disabled"));
 
-    let (status, body) = f.send("DELETE", &format!("{url}/{ep}"), None).await;
+    // **The other half of the state machine.** Auditing `disable` alone would
+    // leave the trail showing an endpoint permanently out of service while it
+    // answered requests.
+    let (status, body) = f.send("POST", &format!("{url}/{ep}/enable"), None).await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     let ev = f.one_event();
     assert_eq!(
         ev.shape(),
         (
-            "data_api_endpoint:delete",
+            Some(f.manager.user),
+            Some(f.ws_id),
+            "data_api_endpoint:enable",
             "data_api_endpoint",
-            Some(ep.to_string().as_str())
+            Some(eps.as_str()),
         )
     );
+    assert_eq!(ev.detail["state"], serde_json::json!("live"));
+    assert_eq!(
+        ev.detail["live_version_id"].as_str(),
+        Some(v1_id.as_str()),
+        "enable resumes the version that was live before, and must say which"
+    );
+}
+
+/// **The delete event is the only surviving record of the endpoint.**
+///
+/// Every other audited route leaves its subject behind: `revoke` is a soft
+/// `UPDATE revoked_at`, `disable` keeps the row and its version pointer. This
+/// one is a hard `DELETE` and `dataapi.endpoint_versions` cascades with it, so
+/// after it runs the `resource_id` uuid resolves to nothing. Without the columns
+/// asserted below, an auditor could see that SOMETHING was deleted and never
+/// which URL stopped being served.
+///
+/// Mutation: replace the detail in `delete_endpoint` with `json!({})` — the
+/// three assertions on `path`, `method` and `name` go red.
+#[tokio::test]
+async fn deleting_an_endpoint_records_what_it_was() {
+    let mut f = skip_without_db!();
+    let ep = f.endpoint("legacy orders", "/legacy/orders").await;
+    let eps = ep.to_string();
+    let url = f.endpoints_url();
+
+    // Publish first, so the delete really is destroying a version history and
+    // not just an unused draft — the case where the record matters most.
+    let (status, body) = f
+        .send(
+            "POST",
+            &format!("{url}/{ep}/publish"),
+            Some(serde_json::json!({})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let _publish = f.one_event();
+
+    let (status, body) = f.send("DELETE", &format!("{url}/{ep}"), None).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let ev = f.one_event();
+    assert_eq!(
+        ev.shape(),
+        (
+            Some(f.manager.user),
+            Some(f.ws_id),
+            "data_api_endpoint:delete",
+            "data_api_endpoint",
+            Some(eps.as_str()),
+        )
+    );
+    assert_eq!(
+        ev.detail["path"],
+        serde_json::json!("/legacy/orders"),
+        "the URL that stopped being served is the one thing an auditor needs: {:?}",
+        ev.detail
+    );
+    assert_eq!(ev.detail["method"], serde_json::json!("GET"));
+    assert_eq!(ev.detail["name"], serde_json::json!("legacy orders"));
+    assert_eq!(
+        ev.detail["database_id"].as_str(),
+        Some(f.database_id.to_string().as_str())
+    );
+
+    // And the row really is gone, so the assertions above are about a record of
+    // something destroyed rather than a record beside something still readable.
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM dataapi.endpoints WHERE id = $1")
+        .bind(ep)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count endpoints");
+    assert_eq!(left, 0);
 }
 
 /// **Anti-triviality for every assertion above.** Each of them reads a queue,

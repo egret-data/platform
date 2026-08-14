@@ -106,6 +106,15 @@ impl UserRepo {
     }
 
     /// [`insert_service_with`](Self::insert_service_with) on this repo's pool.
+    ///
+    /// **Its only callers are tests, and that is now correct rather than a
+    /// smell.** Production writes this row inside a transaction (the Data API
+    /// service-account create path) and so calls `insert_service_with` directly;
+    /// the previous round's finding — "zero production callers" — was about a
+    /// second, INLINED copy of the statement, which is gone. This wrapper shares
+    /// that one statement, so a test calling it exercises the write production
+    /// takes. It stays because `egret-auth`'s and `egret-controlplane`'s suites
+    /// have no transaction to hand and should not open one to seed a fixture.
     pub async fn insert_service(&self, email: &str, name: &str) -> Result<UserId> {
         Self::insert_service_with(&self.db.pool, email, name).await
     }

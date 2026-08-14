@@ -32,7 +32,8 @@ pub mod routes;
 
 pub use clients::{ClientStore, NewClient, DATA_API_TTL_SECS};
 pub use endpoints::{
-    CreateEndpointInput, DataApiEndpointDto, EndpointStore, UpdateEndpointInput, ALLOWED_METHODS,
+    CreateEndpointInput, DataApiEndpointDto, DeletedEndpoint, EndpointStore, UpdateEndpointInput,
+    ALLOWED_METHODS,
 };
 pub use lifecycle::{
     check_cache_scope, check_enum_params, check_params, check_single_select, validate,

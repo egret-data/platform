@@ -272,22 +272,27 @@ draft ──validate──> publish(v N) ──> live
 
 **Allowed methods in v1 are `GET` and `POST`, both read-only.** `POST` exists only for parameter payloads too large or too structured for a query string; it carries the same single-SELECT restriction. `PUT`/`PATCH`/`DELETE` are rejected — accepting them would imply a write semantics v1 does not have.
 
-**Six mutations are emitted as `egret-audit` events** — no extra table. `DataApiState` carries the same `AuditSink` every other seam receives, so they land in the one `audit_log` an operator already queries rather than in a Data-API-local trail:
+**Seven mutations are emitted as `egret-audit` events** — no extra table. `DataApiState` carries the same `AuditSink` every other seam receives, so they land in the one `audit_log` an operator already queries rather than in a Data-API-local trail:
 
 | Route | `action` | `resource_type` | `detail` |
 |---|---|---|---|
 | `POST …/endpoints/{id}/publish` | `data_api_endpoint:publish` | `data_api_endpoint` | `version`, `version_id`, `note` |
 | `POST …/endpoints/{id}/rollback` | `data_api_endpoint:rollback` | `data_api_endpoint` | `version`, `version_id` — the version made LIVE, not the `VersionRef` the caller typed |
 | `POST …/endpoints/{id}/disable` | `data_api_endpoint:disable` | `data_api_endpoint` | `state` |
-| `DELETE …/endpoints/{id}` | `data_api_endpoint:delete` | `data_api_endpoint` | — |
+| `POST …/endpoints/{id}/enable` | `data_api_endpoint:enable` | `data_api_endpoint` | `state`, `live_version_id` |
+| `DELETE …/endpoints/{id}` | `data_api_endpoint:delete` | `data_api_endpoint` | `name`, `path`, `method`, `database_id` |
 | `POST …/service-accounts/{id}/clients` | `data_api_client:issue` | `data_api_client` | `client_id`, `service_account_id`, `name`, `expires_at` |
 | `DELETE …/clients/{id}` | `data_api_client:revoke` | `data_api_client` | — |
 
-All six go through `egret_audit::mutation_for`, so the workspace, the acting principal and any impersonator are stamped by construction. `resource_id` is the endpoint or client uuid.
+All seven go through `egret_audit::mutation_for`, so the workspace, the acting principal and any impersonator are stamped by construction. `resource_id` is the endpoint or client uuid.
 
-**A `client_secret` is never in the detail, and that is a rule rather than an omission.** The issue event records `client_id` and the account — which credential was minted, the question an auditor actually asks — and not the secret, which answers none of it. `audit_log` is append-only and read by more people, for longer, than the one-shot issue response ever reaches: a secret written there outlives every rotation, every revocation and the `dataapi.clients` row itself, and is the one credential lifetime nothing in the product can shorten. `crates/egret-dataapi/tests/audit.rs` asserts both that no `client_secret` key is present **and** that the secret's own bytes appear nowhere in the detail, since a renamed field would walk past a key-only check.
+**Why `delete` carries columns and `revoke` does not.** Every audited route but one leaves its subject behind for an auditor to join to: `revoke` is a soft `UPDATE revoked_at`, so the `dataapi.clients` row keeps its `client_id`, name and account; `disable` keeps the endpoint row and its version pointer. `DELETE …/endpoints/{id}` is a hard `DELETE` and `dataapi.endpoint_versions` cascades with it, so its event is the **only surviving record that the endpoint existed** — a bare uuid there would resolve to nothing and say that something was deleted without ever saying which URL stopped being served. The columns come from the `DELETE`'s own `RETURNING`, so there is no second query and nothing to race.
 
-**Two stated gaps, so the list above is not read as more than it is.** `POST …/endpoints/{id}/enable` emits nothing, so an endpoint taken out of service and put back leaves only the `disable` half on the record; and `emit` is a non-blocking `try_send` that drops the event (with a warning) on a full channel, so an audit record is best-effort evidence and never a precondition of the mutation it describes.
+**A `client_secret` is never in the detail, and that is a rule rather than an omission.** The issue event records `client_id` and the account — which credential was minted, the question an auditor actually asks — and not the secret, which answers none of it. `audit_log` is append-only and read by more people, for longer, than the one-shot issue response ever reaches: a secret written there outlives every rotation, every revocation and the `dataapi.clients` row itself, and is the one credential lifetime nothing in the product can shorten. `crates/egret-dataapi/tests/audit.rs` asserts both that no `client_secret` key is present **and** that the secret's own bytes appear nowhere in the detail, since a renamed field would walk past a key-only check; the second half is applied to every event of every test in that file, so it is a crate-wide guard and not one assertion on one handler.
+
+**The table above is the whole audited set, and the rest of the Data API management surface is NOT audited yet.** Stated positively so it cannot be read as a list with one footnote: the four mutating routes that emit nothing today are `POST …/service-accounts` (create), `DELETE …/service-accounts/{id}` (delete), `POST …/endpoints` (create draft) and `PATCH …/endpoints/{id}` (edit draft). The most significant of those is the service-account delete: it hard-deletes a machine principal along with its `access_grants` and every client it owns, and leaves no audit record of having done so. Closing these is not scheduled; it belongs with P5's management UI, where the surface stops changing shape.
+
+**One further honest bound.** `AuditSink::emit` is a non-blocking `try_send` that drops the event (with a warning) on a full channel, so an audit record is best-effort evidence and never a precondition of the mutation it describes.
 
 **Operational caveat that must surface in the UI:** publishing an endpoint does **not** grant data access. Because queries run as the service account under Ranger enforcement, an admin must also grant that service account in Ranger. An endpoint published without that step fails with an engine permission error, which must be mapped to a message saying so rather than leaking the raw engine error.
 
@@ -402,7 +407,7 @@ One stable, machine-readable envelope:
 - `dataapi.access_log` records every call. It is the fastest-growing table in the system: partition monthly plus a retention job, reusing the existing gc-worker pattern from catalog CE6 rather than writing a new one.
 - Management UI statistics (call count, error rate, p50/p95, cache hit rate per endpoint) are computed from `access_log` — the equivalent of sqlrest's `HourCount` / `DateCount` / `NameCount`.
 - `request_id` is propagated to the engine and stored alongside `engine_query_id`, so a slow API call traces back to the exact query on Trino/StarRocks.
-- Publish, rollback, disable, endpoint deletion, client issue and client revocation ARE `egret-audit` events as of P3 — see §5.3 for the exact `action`/`resource_type`/`detail` of each, for why no `client_secret` is ever in a detail, and for the two gaps (`enable` emits nothing; `emit` is best-effort).
+- Publish, rollback, disable, enable, endpoint deletion, client issue and client revocation ARE `egret-audit` events as of P3 — see §5.3 for the exact `action`/`resource_type`/`detail` of each, for why no `client_secret` is ever in a detail, for why the endpoint delete is the one event that must carry columns, and for the four mutating routes that are still not audited.
 
 ## 9. Testing
 

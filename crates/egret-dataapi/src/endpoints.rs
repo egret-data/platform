@@ -646,22 +646,52 @@ impl EndpointStore {
     /// endpoint takes its published history with it — which is why the route
     /// gates this on `:manage` and nothing weaker, and why "deleted the wrong
     /// workspace's row" is not a recoverable mistake.
-    pub async fn delete(&self, workspace: Uuid, id: Uuid) -> Result<()> {
-        let affected =
-            sqlx::query("DELETE FROM dataapi.endpoints WHERE id = $1 AND workspace_id = $2")
-                .bind(id)
-                .bind(workspace)
-                .execute(&self.db.pool)
-                .await
-                .map_err(db_err)?
-                .rows_affected();
+    ///
+    /// **`RETURNING` is why this is not a bare `DELETE`, and it is an audit
+    /// requirement rather than a convenience.** Every other audited route leaves
+    /// its subject behind for an auditor to join to — `revoke` is a soft
+    /// `UPDATE revoked_at`, `disable` keeps the row and the version pointer. This
+    /// one destroys the endpoint AND cascades away every published version, so
+    /// the `data_api_endpoint:delete` event is the only surviving record of the
+    /// thing. Without these columns it would carry a uuid that resolves to
+    /// nothing: an auditor could see that *something* was deleted and never
+    /// which URL stopped being served. `RETURNING` also costs no second query
+    /// and cannot race, since it reads the row the DELETE itself removed.
+    pub async fn delete(&self, workspace: Uuid, id: Uuid) -> Result<DeletedEndpoint> {
+        let row: Option<(String, String, String, Uuid)> = sqlx::query_as(
+            "DELETE FROM dataapi.endpoints WHERE id = $1 AND workspace_id = $2 \
+             RETURNING name, path, method, database_id",
+        )
+        .bind(id)
+        .bind(workspace)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
         // Reported rather than swallowed: a DELETE that matched nothing is the
         // same event as a GET that found nothing, and must answer the same way.
-        if affected == 0 {
-            return Err(Error::NotFound("endpoint".into()));
-        }
-        Ok(())
+        let (name, path, method, database_id) =
+            row.ok_or_else(|| Error::NotFound("endpoint".into()))?;
+        Ok(DeletedEndpoint {
+            name,
+            path,
+            method,
+            database_id,
+        })
     }
+}
+
+/// What a deleted endpoint WAS, captured by [`EndpointStore::delete`]'s
+/// `RETURNING` clause.
+///
+/// Not a response DTO — the route still answers [`egret_core::Ack`]. This exists
+/// so the audit event can name the endpoint that no longer exists to be named,
+/// which is the only reason the columns are read at all.
+#[derive(Debug, Clone)]
+pub struct DeletedEndpoint {
+    pub name: String,
+    pub path: String,
+    pub method: String,
+    pub database_id: Uuid,
 }
 
 /// Serialize an optional spec for binding. `None` binds SQL NULL, which every
