@@ -39,7 +39,7 @@ The existing unit test `string_param_neutralizes_injection` (`template.rs:93`) p
 **Fix (v1):** split `literal()` into a dialect-aware escaper in `egret-query`, parameterized by `Engine`:
 
 - **Trino** — double `'` only (current behaviour, which is already correct for Trino).
-- **StarRocks** — escape `\` → `\\` **first**, then `'` → `''`. Order matters; reversing it re-introduces the hole.
+- **StarRocks** — escape `\` → `\\` and `'` → `''`. Quotes are doubled rather than backslash-escaped precisely so the two passes are order-independent: the quote pass emits no backslash and the backslash pass emits no quote. Had `\'` been used instead, the backslash pass would have to run first or it would corrupt the quotes the other pass produced — a fragility worth designing out rather than commenting on.
 
 Because the fix lands in `egret-query`, SQL Lab is patched by the same change.
 

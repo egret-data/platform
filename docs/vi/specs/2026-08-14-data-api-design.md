@@ -41,7 +41,7 @@ Unit test hiện có `string_param_neutralizes_injection` (`template.rs:93`) xan
 **Bản vá (v1):** tách `literal()` thành escaper theo dialect trong `egret-query`, tham số hóa theo `Engine`:
 
 - **Trino** — chỉ nhân đôi `'` (hành vi hiện tại, vốn đã đúng cho Trino).
-- **StarRocks** — escape `\` → `\\` **trước**, rồi `'` → `''`. Thứ tự quan trọng; đảo lại là lỗ hổng quay về.
+- **StarRocks** — escape `\` → `\\` và `'` → `''`. Nháy đơn được nhân đôi thay vì escape bằng backslash chính là để hai lượt thay thế độc lập với thứ tự: lượt quote không sinh ra backslash nào, lượt backslash không sinh ra quote nào. Nếu dùng dạng `\'` thì lượt backslash bắt buộc phải chạy trước, nếu không nó sẽ phá hỏng phần quote mà lượt kia vừa tạo ra — một sự mong manh đáng được thiết kế cho biến mất thay vì chỉ ghi chú lại.
 
 Vì bản vá nằm trong `egret-query`, SQL Lab được vá bằng chính thay đổi đó.
 
