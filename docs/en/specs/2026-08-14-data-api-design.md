@@ -197,11 +197,10 @@ The four jsonb config columns, and the shape frozen into `endpoint_versions.snap
 // location: query | body        (never path — the path is free-form, §5.2)
 // allowed:  required for enum; the only safe form for an identifier (§3)
 
-// output — response shaping
+// output — response shaping. These two fields are the whole of it; there is
+// no per-column rename or format list.
 { "shape": "objects",            // objects | arrays
-  "naming": "as_is",             // as_is | camel | snake
-  "columns": [ { "source": "total_revenue", "name": "revenue",
-                 "format": "number:2" } ] }
+  "naming": "as_is" }            // as_is | camel | snake
 
 // cache
 { "enabled": true, "ttl_seconds": 60, "scope": "per_principal" }
@@ -210,8 +209,12 @@ The four jsonb config columns, and the shape frozen into `endpoint_versions.snap
 { "max_rows": 10000, "timeout_seconds": 30 }
 
 // rate_limit
-{ "per_client_qps": 5, "burst": 10, "per_endpoint_qps": 50 }
+{ "per_key_qps": 5, "burst": 10, "per_endpoint_qps": 50 }
 ```
+
+**A misspelled key on the request body is a 400, not a silently dropped value.** The endpoint create (`POST`) and update (`PATCH`) bodies carry `#[serde(deny_unknown_fields)]`, and so do the nested config objects `params`, `output`, `cache`, `limits` and `rate_limit`. Both layers are needed: the attribute on the request body does not reach a nested struct, and nested is where the damage was — `{"rate_limit": {"per_client_qps": 5}}`, the spelling an earlier draft of this document specified, used to return 201 with `per_key_qps` defaulted to `0`. A rate limit the author believes they set and did not is worse than an error. Every field is either required or defaulted, so nothing legitimate is refused; the shapes above are the exact spellings.
+
+The two snapshot-internal types, `EndpointSnapshot` and its `columns`, deliberately do **not** carry the attribute: the server writes them for itself, so an author typo is impossible there. Note the cost this buys on the config types — they are also how the stored `jsonb` is read back, so adding a field in a later version and then rolling the binary back makes the older code refuse rows the newer one wrote, as a 500 on read rather than a silent misparse.
 
 ### 5.1.2 Success response
 
@@ -231,7 +234,7 @@ The four jsonb config columns, and the shape frozen into `endpoint_versions.snap
 
 `meta.version` is the published version that served the call — it makes a client-side bug reproducible against the exact snapshot that produced it. `meta.cached` is not cosmetic either: without it, a stale-looking result is indistinguishable from a fresh one during debugging.
 
-`dataapi.endpoints.folder_id` and `dataapi.service_accounts.user_id` / `.workspace_id` are **cross-schema FKs** into `public.folders(id)`, `public.users(id)` and `public.workspaces(id)`. This bends the schema-per-seam ownership rule, but `folders` and `users` are already shared cross-cutting tables and duplicating them would be worse. Accepted and recorded here.
+`dataapi.endpoints.folder_id` and `dataapi.service_accounts.user_id` / `.workspace_id` are **cross-schema FKs** into `analytics.folders(id)`, `public.users(id)` and `public.workspaces(id)`. This bends the schema-per-seam ownership rule, but `folders` and `users` are already shared cross-cutting tables and duplicating them would be worse. Accepted and recorded here.
 
 ### 5.2 Folders are not URL segments
 
@@ -261,7 +264,7 @@ draft ──validate──> publish(v N) ──> live
                     disable  ──> state='disabled', serving returns 404
 ```
 
-**Invariant: the serving path never reads `dataapi.endpoints`.** It reads `endpoint_versions.snapshot` via `live_version_id`, only. This is what makes "editing the SQL does not change behaviour for running clients" true structurally rather than by discipline. If serving read the draft table, versioning would be decoration.
+**Invariant: routing comes from the endpoint row, behaviour comes from the snapshot.** P4 must match an inbound request against `dataapi.endpoints (method, path)` restricted to `state = 'live'`. That pair of columns is the one carrying `UNIQUE (workspace_id, method, path)`, so it is the only place where "two endpoints claiming one URL" is impossible; the snapshot's own `method`/`path` are the record of where a version was published, not a routing key, and routing on them would lose the constraint. Everything that decides what the request **returns** — `sql`, `params`, `output`, `cache`, `limits`, `rate_limit` and the frozen `columns` — is then read from the snapshot reached through `live_version_id`, and from nowhere else. That second half is what makes "editing the SQL does not change behaviour for running clients" true structurally rather than by discipline. If serving took its content from the draft table, versioning would be decoration. §6.2 step 2 is this same flow, per request.
 
 `validate` runs before publish and rejects anything that fails:
 
@@ -269,6 +272,10 @@ draft ──validate──> publish(v N) ──> live
 - Every `{{param}}` resolves to a declared parameter, and every declared parameter is referenced.
 - `describe_as` (§4.3) resolves the output schema, which is frozen into the snapshot.
 - If `cache.scope` is `shared`, the target connection must not be delegated (§6.3).
+
+**The one snapshot-external input P4 must re-check: `delegated`.** `EndpointSnapshot.delegated` records whether the connection delegated per-user credentials at the moment the version was published. `query.databases.delegated` is a **mutable** column: flipping it to `true` after a `cache.scope = shared` version was published turns a legitimately-published snapshot into exactly the cross-principal leak the check above exists to refuse, and nothing re-validates when it moves. **P4 must therefore compare the frozen `delegated` against the live column before serving from a shared cache, and refuse when they disagree.** Every other field in the snapshot is self-contained; this one is a witness, and a witness nobody questions is decoration.
+
+**`output`, `limits` and `rate_limit` are frozen, but they are not validated.** The list above is the whole of validation, and it covers `sql`, `params` and `cache` only — there is no rule for those three fields anywhere: not before the publish lock, not in the re-validation after it, and not at serve time. What they gain from the lock is **consistency**, not validation: they are frozen from the same read that was validated rather than from a row nobody looked at. A nonsensical `max_rows` or an unknown `output.shape` is frozen into the snapshot exactly as written, so **P4 must treat all three as untrusted author input** and bound them itself.
 
 **Allowed methods in v1 are `GET` and `POST`, both read-only.** `POST` exists only for parameter payloads too large or too structured for a query string; it carries the same single-SELECT restriction. `PUT`/`PATCH`/`DELETE` are rejected — accepting them would imply a write semantics v1 does not have.
 
@@ -366,7 +373,7 @@ The cache config therefore carries a `scope`:
 - `per_principal` (default) — the cache key includes `service_account_id`.
 - `shared` — permitted **only when the connection is not delegated**. Checked at validate time, so a misconfiguration cannot be published in the first place.
 
-Placing this check at validate time rather than at runtime means the unsafe configuration never reaches production.
+Placing this check at validate time rather than at runtime means the unsafe **shape** can never enter `endpoint_versions`. That is precisely what publish-time validation guarantees, and it is not the whole problem: `query.databases.delegated` is mutable, so a connection can be flipped to delegated *after* a `shared` version was published, and no re-validation runs when it is. The residual is closed on the serving side, by the frozen witness §5.3 describes — **P4 compares `EndpointSnapshot.delegated` against the live column before serving from a shared cache and refuses when they disagree.**
 
 ### 6.4 Rate limiting
 
@@ -401,6 +408,8 @@ One stable, machine-readable envelope:
 **The serving path applies its own timeout** rather than relying on JobManager. `describe()` (`connector/mod.rs:81`) already carries the identical note — it wraps its own timeout because it is called directly with no outer JobManager. The serving path is likewise direct, so it carries the same obligation.
 
 **Exceeding the row cap is an error, not a silent truncation.** Returning 200 with truncated data is the worst available failure mode for a data API: the client believes it has every row and produces wrong numbers with no signal. `400 row_limit_exceeded`, stating the cap.
+
+**The cap it states is unvalidated author input.** `limits`, `rate_limit` and `output` are frozen into the snapshot with no validation rule anywhere (§5.3), so the serving path must sanity-check `limits.max_rows` and `limits.timeout_seconds` before acting on them rather than assume a published value is sensible. The same applies to `rate_limit` before §6.4's bucket is sized from it, and to `output.shape` / `output.naming` before §5.1.2's response is shaped by them.
 
 ## 8. Observability
 
