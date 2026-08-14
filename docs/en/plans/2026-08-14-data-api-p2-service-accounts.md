@@ -493,7 +493,32 @@ Run it against unmodified code. Expected: PASS. If it does not pass, your fixtur
         assert_eq!(err.status, 401);
         assert_eq!(err.body["error"], "invalid_client");
     }
+
+    /// A verifier supplies `extra_claims`, so it must not be able to overwrite
+    /// the claims that establish WHO the token is for. This is why the standard
+    /// claims are inserted after the verifier's, and it is a security property,
+    /// not a style choice — so it gets a test rather than a comment.
+    #[tokio::test]
+    async fn a_verifier_cannot_forge_the_standard_claims() {
+        let hostile = FakeVerifier::with_extra_claims(serde_json::json!({
+            "sub": "attacker",
+            "aud": "catalog",
+            "iss": "https://evil.example",
+            "exp": 9_999_999_999u64,
+        }));
+        let st = test_idp_state_with(vec![Arc::new(hostile)]).await;
+
+        let resp = post_token(&st, "grant_type=client_credentials&client_id=api1&client_secret=s").await;
+        let c = decode_claims_without_verifying(&resp.access_token);
+
+        assert_eq!(c["sub"], "api1", "sub must come from the verified client id");
+        assert_eq!(c["aud"], "data-api", "aud must come from the verifier's audience field");
+        assert_eq!(c["iss"], st.issuer.trim_end_matches('/'));
+        assert_ne!(c["exp"], 9_999_999_999u64, "exp must be derived from ttl_secs");
+    }
 ```
+
+`FakeVerifier` (line 300) currently returns fixed values; extend it with a `with_extra_claims` constructor so this test can drive it. Keep its existing constructor working so the tests already using it are untouched.
 
 Run: `cargo test -p egret-machine-idp`
 
@@ -600,7 +625,7 @@ Expected: PASS, including `catalog_token_claims_are_unchanged` from Step 1. That
 - [ ] **Step 8: Verify the tests are real by mutating the implementation**
 
 1. Change the catalog verifier's `ttl_secs` to 600. Expected: `catalog_token_claims_are_unchanged` FAILS on `expires_in`.
-2. Move the `claims.extend(vc.extra_claims)` line to **after** the standard-claim inserts, and make a fake verifier emit `{"sub": "attacker"}`. Expected: a claim-override test FAILS. If you have no test covering this, **write one** — the ordering is a security property and must not rest on a comment.
+2. Move the `claims.extend(vc.extra_claims)` line to **after** the standard-claim inserts. Expected: `a_verifier_cannot_forge_the_standard_claims` (Step 2) FAILS on `sub`, `aud` and `exp` together.
 
 Revert both.
 
@@ -1077,14 +1102,18 @@ The issue handler, which is the privileged one:
 ```rust
 async fn issue_client(
     State(st): State<DataApiState>,
-    Auth(p): Auth,
-    Path((ws, sa)): Path<(Uuid, Uuid)>,
+    WsContext(ctx): WsContext,
+    Path(sa): Path<Uuid>,
     Json(body): Json<IssueClientInput>,
 ) -> Result<(StatusCode, Json<NewClientDto>), DataApiError> {
     // `:manage`, never `:read` — issuing a client hands out this account's access.
-    egret_core::authz::require_ws(&*st.pdp, &p, ws, "service_account:manage").await?;
-    let sa = scoped_account(&st, ws, sa).await?;
-    let c = st.clients.create(sa, &body.name, body.expires_at, p.user_id).await?;
+    egret_core::authz::require(&*st.pdp, &ctx, "service_account:manage").await?;
+    // ctx.workspace_id, NEVER a path parameter — see the rule below.
+    let sa = scoped_account(&st, ctx.workspace_id.0, sa).await?;
+    let c = st
+        .clients
+        .create(sa, &body.name, body.expires_at, ctx.principal.user_id)
+        .await?;
     Ok((
         StatusCode::CREATED,
         Json(NewClientDto {
@@ -1097,7 +1126,13 @@ async fn issue_client(
 }
 ```
 
-Check the real name and signature of the workspace-scoped authz helper before using `require_ws` — read how an existing workspace-scoped route in `crates/egret-bi/src/routes.rs` gates, and use that if it differs.
+**The workspace comes from `ctx.workspace_id`, never from a `{ws}` path parameter.** There is no `require_ws` helper in this codebase: `egret_core::authz::require(pdp, target, action)` takes the workspace *from the target*, which is the `WsContext` extractor (see `crates/egret-bi/src/routes.rs:158-163` for the canonical shape). If a handler gates on `ctx` but scopes its query with a separately-extracted path `ws`, the two can disagree — and that divergence is exactly the cross-workspace hole `scoped_account` exists to close. Extract `sa` alone; let `WsContext` own the workspace.
+
+If `Path(sa): Path<Uuid>` mis-binds because the route has two path segments, extract the tuple and **discard** the workspace element rather than using it:
+
+```rust
+    Path((_ws_ignored, sa)): Path<(Uuid, Uuid)>,
+```
 
 - [ ] **Step 5: Mount it**
 
