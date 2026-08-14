@@ -39,10 +39,10 @@ impl SavedQueryRepo {
         description: &str,
         user: Option<UserId>,
     ) -> Result<SavedQuery, BiError> {
-        let row = sqlx::query_as::<_, SavedQuery>(&format!(
+        let row = sqlx::query_as::<_, SavedQuery>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO analytics.saved_queries (workspace_id, database_id, name, sql, description, created_by) \
              VALUES ($1,$2,$3,$4,$5,$6) RETURNING {COLS}"
-        ))
+        )))
         .bind(ws)
         .bind(db_id)
         .bind(name)
@@ -55,9 +55,9 @@ impl SavedQueryRepo {
     }
 
     pub async fn list(&self, ws: Uuid) -> Result<Vec<SavedQuery>, BiError> {
-        let rows = sqlx::query_as::<_, SavedQuery>(&format!(
+        let rows = sqlx::query_as::<_, SavedQuery>(sqlx::AssertSqlSafe(format!(
             "SELECT {COLS} FROM analytics.saved_queries WHERE workspace_id=$1 ORDER BY updated_at DESC"
-        ))
+        )))
         .bind(ws)
         .fetch_all(&self.db.pool)
         .await?;
@@ -65,9 +65,9 @@ impl SavedQueryRepo {
     }
 
     pub async fn get(&self, id: Uuid) -> Result<Option<SavedQuery>, BiError> {
-        let row = sqlx::query_as::<_, SavedQuery>(&format!(
+        let row = sqlx::query_as::<_, SavedQuery>(sqlx::AssertSqlSafe(format!(
             "SELECT {COLS} FROM analytics.saved_queries WHERE id=$1"
-        ))
+        )))
         .bind(id)
         .fetch_optional(&self.db.pool)
         .await?;
@@ -82,8 +82,8 @@ impl SavedQueryRepo {
         description: &str,
         db_id: Option<Uuid>,
     ) -> Result<SavedQuery, BiError> {
-        let row = sqlx::query_as::<_, SavedQuery>(&format!(
-            "UPDATE analytics.saved_queries SET name=$2, sql=$3, description=$4, database_id=$5, updated_at=now() WHERE id=$1 RETURNING {COLS}"))
+        let row = sqlx::query_as::<_, SavedQuery>(sqlx::AssertSqlSafe(format!(
+            "UPDATE analytics.saved_queries SET name=$2, sql=$3, description=$4, database_id=$5, updated_at=now() WHERE id=$1 RETURNING {COLS}")))
             .bind(id).bind(name).bind(sql).bind(description).bind(db_id)
             .fetch_optional(&self.db.pool).await?
             .ok_or_else(|| BiError::NotFound(id.to_string()))?;

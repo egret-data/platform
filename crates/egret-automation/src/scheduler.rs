@@ -39,7 +39,7 @@ pub async fn claim_due(
     exec: impl sqlx::PgExecutor<'_>,
     limit: i64,
 ) -> Result<Vec<Schedule>, AutomationError> {
-    sqlx::query_as(&format!(
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "UPDATE automation.schedules SET last_state = 'working', last_eval_at = now() \
          WHERE id IN ( \
            SELECT id FROM automation.schedules \
@@ -57,7 +57,7 @@ pub async fn claim_due(
             LIMIT $1 \
          ) \
          RETURNING {COLS}"
-    ))
+    )))
     .bind(limit)
     .fetch_all(exec)
     .await

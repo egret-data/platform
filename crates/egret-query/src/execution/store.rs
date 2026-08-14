@@ -103,11 +103,12 @@ impl QueryStore {
     }
 
     pub async fn get(&self, id: Uuid) -> Result<Option<Query>, EngineError> {
-        let row =
-            sqlx::query_as::<_, QueryRow>(&format!("SELECT {COLS} FROM query.queries WHERE id=$1"))
-                .bind(id)
-                .fetch_optional(&self.db.pool)
-                .await?;
+        let row = sqlx::query_as::<_, QueryRow>(sqlx::AssertSqlSafe(format!(
+            "SELECT {COLS} FROM query.queries WHERE id=$1"
+        )))
+        .bind(id)
+        .fetch_optional(&self.db.pool)
+        .await?;
         Ok(row.map(QueryRow::into_query))
     }
 
@@ -117,10 +118,10 @@ impl QueryStore {
         user: Uuid,
         limit: i64,
     ) -> Result<Vec<Query>, EngineError> {
-        let rows = sqlx::query_as::<_, QueryRow>(&format!(
+        let rows = sqlx::query_as::<_, QueryRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {COLS} FROM query.queries WHERE workspace_id=$1 AND user_id=$2 \
              ORDER BY submitted_at DESC LIMIT $3"
-        ))
+        )))
         .bind(ws)
         .bind(user)
         .bind(limit)

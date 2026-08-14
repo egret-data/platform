@@ -143,10 +143,10 @@ impl DatasetRepo {
         };
 
         let mut tx = self.db.pool.begin().await?;
-        let ds = match sqlx::query_as::<_, Dataset>(&format!(
+        let ds = match sqlx::query_as::<_, Dataset>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO analytics.datasets (workspace_id, database_id, name, description, catalog, schema_name, table_name, sql, created_by) \
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING {COLS}"
-        ))
+        )))
         .bind(ws)
         .bind(database_id)
         .bind(name)
@@ -172,11 +172,11 @@ impl DatasetRepo {
     }
 
     pub async fn list(&self, ws: Uuid) -> Result<Vec<(Dataset, i64)>, BiError> {
-        let rows = sqlx::query_as::<_, DatasetWithCount>(&format!(
+        let rows = sqlx::query_as::<_, DatasetWithCount>(sqlx::AssertSqlSafe(format!(
             "SELECT {COLS}, \
              (SELECT count(*) FROM analytics.dataset_columns c WHERE c.dataset_id = datasets.id) AS column_count \
              FROM analytics.datasets WHERE workspace_id = $1 ORDER BY updated_at DESC"
-        ))
+        )))
         .bind(ws)
         .fetch_all(&self.db.pool)
         .await?;
@@ -203,7 +203,7 @@ impl DatasetRepo {
              EXISTS (SELECT 1 FROM analytics.bookmarks b WHERE b.user_id = $2 AND b.entity_type='dataset' AND b.entity_id = datasets.id) AS bookmarked \
              FROM analytics.datasets WHERE workspace_id = $1 AND {pred} ORDER BY updated_at DESC"
         );
-        let rows = sqlx::query_as::<_, DatasetWithBm>(&sql)
+        let rows = sqlx::query_as::<_, DatasetWithBm>(sqlx::AssertSqlSafe(sql))
             .bind(ws)
             .bind(user)
             .fetch_all(&self.db.pool)
@@ -249,9 +249,9 @@ impl DatasetRepo {
     }
 
     pub async fn get(&self, id: Uuid) -> Result<Option<Dataset>, BiError> {
-        Ok(sqlx::query_as::<_, Dataset>(&format!(
+        Ok(sqlx::query_as::<_, Dataset>(sqlx::AssertSqlSafe(format!(
             "SELECT {COLS} FROM analytics.datasets WHERE id = $1"
-        ))
+        )))
         .bind(id)
         .fetch_optional(&self.db.pool)
         .await?)
@@ -280,11 +280,11 @@ impl DatasetRepo {
         description: &str,
         sql: Option<&str>,
     ) -> Result<Dataset, BiError> {
-        let ds = sqlx::query_as::<_, Dataset>(&format!(
+        let ds = sqlx::query_as::<_, Dataset>(sqlx::AssertSqlSafe(format!(
             "UPDATE analytics.datasets SET name=$2, description=$3, \
              sql = CASE WHEN sql IS NULL THEN sql ELSE COALESCE($4, sql) END, \
              updated_at = now() WHERE id=$1 RETURNING {COLS}"
-        ))
+        )))
         .bind(id)
         .bind(name)
         .bind(description)
@@ -308,10 +308,10 @@ impl DatasetRepo {
         // Withdrawal clears the attribution with it: "not certified, by Ana" is a worse answer
         // than saying nothing, and leaving Ana's name on a withdrawn badge misrepresents her.
         let (by, details) = if certified { (by, details) } else { ("", "") };
-        sqlx::query_as::<_, Dataset>(&format!(
+        sqlx::query_as::<_, Dataset>(sqlx::AssertSqlSafe(format!(
             "UPDATE analytics.datasets SET certified=$2, certified_by=$3, \
              certification_details=$4 WHERE id=$1 RETURNING {COLS}"
-        ))
+        )))
         .bind(id)
         .bind(certified)
         .bind(by)

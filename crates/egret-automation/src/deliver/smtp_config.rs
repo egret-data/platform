@@ -133,9 +133,9 @@ impl SmtpConfigRepo {
     }
 
     pub async fn get(&self, ws: Uuid) -> Result<Option<SmtpConfig>, AutomationError> {
-        sqlx::query_as(&format!(
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT {COLS} FROM automation.smtp_config WHERE workspace_id = $1"
-        ))
+        )))
         .bind(ws)
         .fetch_optional(&self.db.pool)
         .await
@@ -171,7 +171,7 @@ impl SmtpConfigRepo {
             ),
         };
 
-        let row: SmtpConfig = sqlx::query_as(&format!(
+        let row: SmtpConfig = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "INSERT INTO automation.smtp_config \
                (workspace_id, host, port, username, from_address, from_name, tls_mode, \
                 password_secret_id, updated_by, updated_at) \
@@ -183,7 +183,7 @@ impl SmtpConfigRepo {
                password_secret_id = EXCLUDED.password_secret_id, \
                updated_by = EXCLUDED.updated_by, updated_at = now() \
              RETURNING {COLS}"
-        ))
+        )))
         .bind(ws)
         .bind(&body.host)
         .bind(body.port)

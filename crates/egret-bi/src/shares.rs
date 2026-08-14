@@ -59,7 +59,7 @@ pub async fn object_ref(db: &Db, kind: &str, id: Uuid) -> Result<ObjectRef, Erro
     } else {
         format!("SELECT folder_id, workspace_id FROM analytics.{table} WHERE id = $1")
     };
-    let row: Option<(Option<Uuid>, Uuid)> = sqlx::query_as(&sql)
+    let row: Option<(Option<Uuid>, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .fetch_optional(&db.pool)
         .await

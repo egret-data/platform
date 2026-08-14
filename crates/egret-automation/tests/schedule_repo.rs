@@ -388,9 +388,10 @@ async fn deleting_a_schedule_takes_its_owners_recipients_and_runs_with_it() {
         "automation.schedule_recipients",
         "automation.schedule_runs",
     ] {
-        let left: i64 = sqlx::query_scalar(&format!(
+        // AssertSqlSafe: `table` iterates the literal array declared just above.
+        let left: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT count(*) FROM {table} WHERE schedule_id = $1"
-        ))
+        )))
         .bind(made.id)
         .fetch_one(&f.db.pool)
         .await

@@ -21,7 +21,7 @@ pub mod pool;
 pub mod recovery;
 /// The embedded-catalog RBAC store (warehouses/roles/grants/Catalog Clients),
 /// merged in from the former `egret-catalog` crate (E3d-1). Runs on the
-/// egret-side sqlx-0.8 pool aliased as `sqlx08`.
+/// egret-side pool, which is now the same sqlx major lakekeeper uses.
 pub mod store;
 pub mod warehouse;
 /// The control-plane catalog admin router (warehouses / roles / grants /

@@ -4,8 +4,9 @@
 //! This module was the standalone `egret-catalog` crate (the store over the
 //! shared `egret_metastore::Db` pool); E3d-1 merged it into
 //! `egret-catalog-engine` so the Catalog seam lives in one crate. The store's
-//! SQL runs on the egret-side **sqlx 0.8** pool, aliased here as `sqlx08` to
-//! coexist with the crate's sqlx 0.9 lakekeeper surface.
+//! SQL runs on `egret_metastore::Db`'s pool — the same sqlx as lakekeeper's,
+//! since the workspace moved to 0.9; this module used to reach it through a
+//! `sqlx08` alias because the two majors could not share a `Pool<Postgres>`.
 pub mod embedded;
 pub mod error;
 /// `CatalogPort` (egret-catalog-api) impl over `CatalogStore` — the E3b seam

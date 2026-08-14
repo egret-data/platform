@@ -343,7 +343,7 @@ impl ScheduleRepo {
             .begin()
             .await
             .map_err(AutomationError::from_db)?;
-        let row: Schedule = sqlx::query_as(&format!(
+        let row: Schedule = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "INSERT INTO automation.schedules \
              (workspace_id, type, name, description, active, crontab, timezone, next_run_at, \
               database_id, sql, validator_type, validator_config, \
@@ -352,7 +352,7 @@ impl ScheduleRepo {
               message, message_footer, skip_if_empty, created_by, updated_by) \
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$25) \
              RETURNING {COLS}"
-        ))
+        )))
         .bind(ws)
         .bind(&new.r#type)
         .bind(&new.name)
@@ -405,7 +405,9 @@ impl ScheduleRepo {
         } else {
             "deleted_at IS NULL"
         };
-        let rows: Vec<ScheduleWithBookmark> = sqlx::query_as(&format!(
+        // AssertSqlSafe: `COLS` is a module const and `pred` is one of the two
+        // `'static` literals chosen just above. Every value is bound.
+        let rows: Vec<ScheduleWithBookmark> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT {COLS}, \
              EXISTS (SELECT 1 FROM analytics.bookmarks b \
                       WHERE b.user_id = $3 AND b.entity_type = 'alert' \
@@ -413,7 +415,7 @@ impl ScheduleRepo {
              FROM automation.schedules \
              WHERE workspace_id = $1 AND ($2::text IS NULL OR type = $2) AND {pred} \
              ORDER BY updated_at DESC"
-        ))
+        )))
         .bind(ws)
         .bind(ty)
         .bind(viewer)
@@ -505,9 +507,9 @@ impl ScheduleRepo {
     }
 
     pub async fn get(&self, ws: Uuid, id: Uuid) -> Result<Option<Schedule>, AutomationError> {
-        sqlx::query_as(&format!(
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT {COLS} FROM automation.schedules WHERE id = $1 AND workspace_id = $2"
-        ))
+        )))
         .bind(id)
         .bind(ws)
         .fetch_optional(&self.db.pool)
@@ -535,7 +537,7 @@ impl ScheduleRepo {
             .begin()
             .await
             .map_err(AutomationError::from_db)?;
-        let row: Option<Schedule> = sqlx::query_as(&format!(
+        let row: Option<Schedule> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "UPDATE automation.schedules SET \
                name=$3, description=$4, active=$5, crontab=$6, timezone=$7, next_run_at=$8, \
                database_id=$9, sql=$10, validator_type=$11, validator_config=$12, \
@@ -544,7 +546,7 @@ impl ScheduleRepo {
                log_retention_days=$20, email_subject=$21, message=$22, message_footer=$23, \
                skip_if_empty=$24, updated_by=$25, updated_at=now() \
              WHERE id=$1 AND workspace_id=$2 RETURNING {COLS}"
-        ))
+        )))
         .bind(id)
         .bind(ws)
         .bind(&new.name)
@@ -633,10 +635,10 @@ impl ScheduleRepo {
         id: Uuid,
         active: bool,
     ) -> Result<Option<Schedule>, AutomationError> {
-        sqlx::query_as(&format!(
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "UPDATE automation.schedules SET active = $3, updated_at = now() \
              WHERE id = $1 AND workspace_id = $2 RETURNING {COLS}"
-        ))
+        )))
         .bind(id)
         .bind(ws)
         .bind(active)

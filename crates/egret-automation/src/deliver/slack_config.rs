@@ -73,9 +73,9 @@ impl SlackConfigRepo {
     }
 
     pub async fn get(&self, ws: Uuid) -> Result<Option<SlackConfig>, AutomationError> {
-        sqlx::query_as(&format!(
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT {COLS} FROM automation.slack_config WHERE workspace_id = $1"
-        ))
+        )))
         .bind(ws)
         .fetch_optional(&self.db.pool)
         .await
@@ -120,7 +120,7 @@ impl SlackConfigRepo {
             .filter(|c| !c.is_empty())
             .map(str::to_string);
 
-        let row: SlackConfig = sqlx::query_as(&format!(
+        let row: SlackConfig = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "INSERT INTO automation.slack_config \
                (workspace_id, token_secret_id, default_channel, updated_by, updated_at) \
              VALUES ($1,$2,$3,$4, now()) \
@@ -129,7 +129,7 @@ impl SlackConfigRepo {
                default_channel = EXCLUDED.default_channel, \
                updated_by = EXCLUDED.updated_by, updated_at = now() \
              RETURNING {COLS}"
-        ))
+        )))
         .bind(ws)
         .bind(token_secret_id)
         .bind(&channel)

@@ -618,24 +618,29 @@ async fn setup_isolated_schema(iso_db: &str) -> Option<Fixture> {
     // On a maintenance connection (the DATABASE_URL's own db), drop any stale
     // backends holding the isolated db open, then DROP+CREATE it fresh. (CREATE/
     // DROP DATABASE cannot run inside a transaction; `sqlx::query` runs the
-    // statement directly on 0.8, so no wrapper is needed.)
+    // statement directly, so no wrapper is needed.)
+    //
+    // AssertSqlSafe below: a database name cannot be a bind parameter, so it has
+    // to be spliced. Every caller of this function passes a hard-coded literal.
     let mut admin = base_opts
         .clone()
         .connect()
         .await
         .expect("connect for isolated-db setup");
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
          WHERE datname = '{iso_db}' AND pid <> pg_backend_pid()"
-    ))
+    )))
     .execute(&mut admin)
     .await
     .ok();
-    sqlx::query(&format!("DROP DATABASE IF EXISTS {iso_db}"))
-        .execute(&mut admin)
-        .await
-        .expect("drop isolated db");
-    sqlx::query(&format!("CREATE DATABASE {iso_db}"))
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE IF EXISTS {iso_db}"
+    )))
+    .execute(&mut admin)
+    .await
+    .expect("drop isolated db");
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {iso_db}")))
         .execute(&mut admin)
         .await
         .expect("create isolated db");

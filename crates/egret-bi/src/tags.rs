@@ -101,7 +101,7 @@ impl TagRepo {
     /// All tags, each with its assignment count, ordered by key.
     pub async fn list(&self) -> Result<Vec<Tag>, BiError> {
         let sql = format!("{SELECT_WITH_COUNT} GROUP BY t.id ORDER BY t.key");
-        Ok(sqlx::query_as::<_, Tag>(&sql)
+        Ok(sqlx::query_as::<_, Tag>(sqlx::AssertSqlSafe(sql))
             .fetch_all(&self.db.pool)
             .await?)
     }
@@ -109,7 +109,7 @@ impl TagRepo {
     /// One tag by id (with its assignment count), or `None`.
     pub async fn get(&self, id: Uuid) -> Result<Option<Tag>, BiError> {
         let sql = format!("{SELECT_WITH_COUNT} WHERE t.id = $1 GROUP BY t.id");
-        Ok(sqlx::query_as::<_, Tag>(&sql)
+        Ok(sqlx::query_as::<_, Tag>(sqlx::AssertSqlSafe(sql))
             .bind(id)
             .fetch_optional(&self.db.pool)
             .await?)
@@ -208,7 +208,7 @@ impl TagRepo {
                  AND this.object_type = $1 AND this.object_id = $2 \
              GROUP BY t.id ORDER BY t.key"
         );
-        Ok(sqlx::query_as::<_, Tag>(&sql)
+        Ok(sqlx::query_as::<_, Tag>(sqlx::AssertSqlSafe(sql))
             .bind(object_type)
             .bind(object_id)
             .fetch_all(&self.db.pool)

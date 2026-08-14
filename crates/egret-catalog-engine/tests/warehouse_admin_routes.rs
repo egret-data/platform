@@ -148,7 +148,7 @@ async fn session_for(f: &Fixture, tag: &str, platform_admin: bool) -> String {
         .await
         .expect("insert user");
     if platform_admin {
-        sqlx08::query(
+        sqlx::query(
             "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
              SELECT 'user', $1, id, 'platform', NULL FROM roles WHERE scope='platform' AND name='platform_admin'",
         )
@@ -177,7 +177,7 @@ async fn session_for_with_permission(f: &Fixture, tag: &str, permission: &str) -
         .expect("insert user");
 
     let role_name = format!("test_role_{}", Uuid::new_v4().simple());
-    let (role_id,): (Uuid,) = sqlx08::query_as(
+    let (role_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO roles (scope, name, description) VALUES ('platform', $1, 'test-only role') \
          RETURNING id",
     )
@@ -186,14 +186,14 @@ async fn session_for_with_permission(f: &Fixture, tag: &str, permission: &str) -
     .await
     .expect("insert role");
 
-    sqlx08::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
         .bind(role_id)
         .bind(permission)
         .execute(&f.db.pool)
         .await
         .expect("grant permission");
 
-    sqlx08::query(
+    sqlx::query(
         "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
          VALUES ('user', $1, $2, 'platform', NULL)",
     )
@@ -382,14 +382,14 @@ impl egret_catalog_engine::WarehouseBrowser for FakeBrowser {
 /// Seed a workspace + storage_connection + warehouse with lakekeeper_warehouse_id set.
 async fn seed_provisioned_warehouse(f: &Fixture) -> Uuid {
     let (ws_id,): (Uuid,) =
-        sqlx08::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
+        sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
             .bind(format!("browse-ws-{}", Uuid::new_v4().simple()))
             .bind("Browse Test Workspace")
             .fetch_one(&f.db.pool)
             .await
             .expect("insert workspace");
 
-    let (storage_id,): (Uuid,) = sqlx08::query_as(
+    let (storage_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
          VALUES ($1, $2, $3, $4) RETURNING id",
     )
@@ -420,14 +420,14 @@ async fn seed_provisioned_warehouse(f: &Fixture) -> Uuid {
 /// Seed a workspace + storage_connection + warehouse WITHOUT lakekeeper_warehouse_id.
 async fn seed_unprovisioned_warehouse(f: &Fixture) -> Uuid {
     let (ws_id,): (Uuid,) =
-        sqlx08::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
+        sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
             .bind(format!("browse-ws-unprov-{}", Uuid::new_v4().simple()))
             .bind("Browse Test Workspace Unprov")
             .fetch_one(&f.db.pool)
             .await
             .expect("insert workspace");
 
-    let (storage_id,): (Uuid,) = sqlx08::query_as(
+    let (storage_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
          VALUES ($1, $2, $3, $4) RETURNING id",
     )
@@ -621,13 +621,13 @@ async fn scoped_permission_warehouses_read_and_create() {
     );
 
     let (ws_id,): (Uuid,) =
-        sqlx08::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
+        sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
             .bind(format!("wh-scoped-ws-{}", Uuid::new_v4().simple()))
             .bind("Scoped Perm Test Workspace")
             .fetch_one(&f.db.pool)
             .await
             .expect("insert workspace");
-    let (storage_id,): (Uuid,) = sqlx08::query_as(
+    let (storage_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
          VALUES ($1, $2, $3, $4) RETURNING id",
     )
