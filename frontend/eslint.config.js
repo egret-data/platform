@@ -38,6 +38,11 @@ export default tseslint.config(
       'react-hooks/static-components': 'warn',
       'react-hooks/use-memo': 'warn',
       'react-hooks/purity': 'warn',
+      // Joined the list when ChartTable moved to react-table 9: the compiler stops
+      // being able to prove the `sortedPosition` memo is preservable once the row
+      // model comes from v9's table object. Same character as the rules above — it
+      // reports a missed optimisation, not a defect.
+      'react-hooks/preserve-manual-memoization': 'warn',
       // react-refresh: conflicts with shadcn/cva pattern that exports
       // both a component and its variants helper from the same file.
       // Off across the board since Egret uses shadcn extensively.

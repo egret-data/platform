@@ -3,7 +3,9 @@ import {
   type ReactNode, type CSSProperties, type MouseEventHandler,
 } from "react";
 import {
-  flexRender, getCoreRowModel, getPaginationRowModel, getSortedRowModel, useReactTable,
+  columnOrderingFeature, columnPinningFeature, columnResizingFeature, columnSizingFeature,
+  columnVisibilityFeature, createCoreRowModel, createPaginatedRowModel, createSortedRowModel,
+  flexRender, rowPaginationFeature, rowSortingFeature, tableFeatures, useTable,
   type ColumnDef, type ColumnSizingState, type SortingState,
 } from "@tanstack/react-table";
 import {
@@ -23,6 +25,31 @@ import { tableCellDrill, type DrillContext } from "./drill";
 import { ResizeHandle, SortButton, ariaSort, MIN_COL_WIDTH } from "./TableHeaderControls";
 
 export interface ResultColumn { name: string; type: string }
+
+/**
+ * react-table 9 no longer ships every feature to every table: a table declares the
+ * ones it uses and the row models that process them, and the resulting object is
+ * also the first type argument to `ColumnDef`. Declared at module scope because the
+ * library asks for it to be static — rebuilding it per render would rebuild the
+ * table's whole feature pipeline on every pass.
+ *
+ * This is the exact set v8 got implicitly: sorting, pagination, and the four column
+ * concerns this table drives from `tableState` (sizing/resizing, visibility, pinning,
+ * ordering). Row *pinning* is deliberately absent — the frozen rows are sliced off
+ * the sorted model by hand further down, which is what v8 did too.
+ */
+const TABLE_FEATURES = tableFeatures({
+  rowSortingFeature,
+  rowPaginationFeature,
+  columnSizingFeature,
+  columnResizingFeature,
+  columnVisibilityFeature,
+  columnPinningFeature,
+  columnOrderingFeature,
+  coreRowModel: createCoreRowModel(),
+  sortedRowModel: createSortedRowModel(),
+  paginatedRowModel: createPaginatedRowModel(),
+});
 
 function SortableHeader({ id, disabled, children, className, style, onClick, label, sort }: {
   id: string; disabled?: boolean; children: ReactNode; className?: string;
@@ -197,7 +224,7 @@ export function ChartTable({
     return caps;
   }, [columns, rows, columnSettings]);
 
-  const cols = useMemo<ColumnDef<unknown[]>[]>(
+  const cols = useMemo<ColumnDef<typeof TABLE_FEATURES, unknown[]>[]>(
     () =>
       columns.map((c, i) => {
         const isNum = isNumericType(c.type);
@@ -275,7 +302,10 @@ export function ChartTable({
    */
   const pinnedCount = Math.max(0, Math.min(tableState.pinnedLeft ?? 0, columns.length));
   const columnPinning = useMemo(
-    () => ({ left: displayOrder.filter((id) => columnVisibility[id] !== false).slice(0, pinnedCount) }),
+    () => ({
+      start: displayOrder.filter((id) => columnVisibility[id] !== false).slice(0, pinnedCount),
+      end: [],
+    }),
     [displayOrder, columnVisibility, pinnedCount],
   );
 
@@ -285,7 +315,8 @@ export function ChartTable({
   const [pageIndex, setPageIndex] = useState(0);
   useEffect(() => { setPageIndex(0); }, [paginationEnabled, pageSize, rows]);
 
-  const table = useReactTable({
+  const table = useTable({
+    features: TABLE_FEATURES,
     data: rows,
     columns: cols,
     state: {
@@ -308,9 +339,12 @@ export function ChartTable({
       const next = typeof updater === "function" ? updater({ pageIndex, pageSize }) : updater;
       setPageIndex(next.pageIndex);
     },
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-    ...(paginationEnabled ? { getPaginationRowModel: getPaginationRowModel() } : {}),
+    // v8 registered the pagination row model ONLY when pagination was on, so
+    // `getRowModel()` returned every row otherwise. v9's feature set is static, so the
+    // same thing is said with `manualPagination`: it tells the table the rows arrive
+    // already paged and to hand them back untouched. Without this, a card with
+    // pagination off would silently render only the default page size.
+    manualPagination: !paginationEnabled,
   });
 
   /**
@@ -480,7 +514,8 @@ export function ChartTable({
   };
 
   // persist widths only when a resize gesture ends
-  const isResizing = table.getState().columnSizingInfo.isResizingColumn;
+  // v9 split resizing out of the sizing slice: `columnSizingInfo` is now `columnResizing`.
+  const isResizing = table.state.columnResizing.isResizingColumn;
   const wasResizing = useRef<string | false>(false);
   useEffect(() => {
     if (wasResizing.current && !isResizing) commitWidths(localSizing);
@@ -526,7 +561,7 @@ export function ChartTable({
   function handleDragEnd(e: DragEndEvent) {
     const { active, over } = e;
     if (!over || active.id === over.id) return;
-    const ids = table.getState().columnOrder.length ? table.getState().columnOrder : columns.map((_, i) => `col_${i}`);
+    const ids = table.state.columnOrder.length ? table.state.columnOrder : columns.map((_, i) => `col_${i}`);
     const from = ids.indexOf(String(active.id));
     const to = ids.indexOf(String(over.id));
     if (from < 0 || to < 0) return;
@@ -574,7 +609,7 @@ export function ChartTable({
                   const meta = h.column.columnDef.meta as { isNum?: boolean; name?: string } | undefined;
                   const isNum = meta?.isNum ?? false;
                   const sized = localSizing[h.column.id] != null;
-                  const pinned = h.column.getIsPinned() === "left";
+                  const pinned = h.column.getIsPinned() === "start";
                   const sorted = h.column.getIsSorted() as "asc" | "desc" | false;
                   const title = String(h.column.columnDef.header ?? meta?.name ?? h.column.id);
                   return (
@@ -587,7 +622,7 @@ export function ChartTable({
                       onClick={h.column.getToggleSortingHandler()}
                       style={{
                         ...(sized ? { width: h.getSize() } : {}),
-                        ...(pinned ? { left: h.column.getStart("left") + (showRowIndex ? ROW_INDEX_WIDTH : 0) } : {}),
+                        ...(pinned ? { left: h.column.getStart("start") + (showRowIndex ? ROW_INDEX_WIDTH : 0) } : {}),
                       }}
                       className={`relative sticky top-0 cursor-pointer select-none border-b border-border/50 bg-accent px-3 py-2 font-medium whitespace-nowrap ${
                         pinned ? "z-30 border-r border-border/50" : "z-10"
@@ -683,7 +718,7 @@ export function ChartTable({
                     const isNum = meta?.isNum ?? false;
                     const bg = cond.bg(cell.getValue(), meta?.name ?? cell.column.id);
                     const sized = localSizing[cell.column.id] != null;
-                    const pinned = cell.column.getIsPinned() === "left";
+                    const pinned = cell.column.getIsPinned() === "start";
                     // A cell that does not move with what is behind it needs an opaque base, or the
                     // rows sliding underneath it are legible straight through — an ordinary cell
                     // carries no background of its own, the row's colour being on the `<tr>`. True
@@ -696,7 +731,7 @@ export function ChartTable({
                         key={cell.id}
                         style={{
                           ...(sized ? { width: cell.column.getSize() } : {}),
-                          ...(pinned ? { left: cell.column.getStart("left") + (showRowIndex ? ROW_INDEX_WIDTH : 0) } : {}),
+                          ...(pinned ? { left: cell.column.getStart("start") + (showRowIndex ? ROW_INDEX_WIDTH : 0) } : {}),
                           ...(isFrozen ? { top: frozenTop } : {}),
                           ...(stuck
                             ? (tint ? { background: `linear-gradient(${tint}, ${tint}), var(--background)` } : {})
