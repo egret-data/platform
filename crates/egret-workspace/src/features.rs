@@ -36,6 +36,7 @@ pub const FEATURE_KEYS: &[&str] = &[
     "dashboards",
     "notebooks",
     "alerts",
+    "data_api",
 ];
 
 /// True if `key` names a module in the catalog.
@@ -166,6 +167,24 @@ pub const FEATURES: &[Feature] = &[
         // before the routes existed, because an unmatched prefix rule is inert
         // while a route that lands before its rule fails OPEN.
         rules: &[prefix("alerts")],
+    },
+    Feature {
+        key: "data_api",
+        label: "Data API",
+        description: "Publish saved queries as HTTP endpoints, called by service accounts.",
+        // Claims the Data API seam's management router (P2 Task 5): service
+        // accounts and the OAuth2 clients that authenticate as them. Declared
+        // with the credential plane rather than waiting for P3's endpoints, for
+        // the same reason `alerts` was declared a phase early — an unmatched
+        // prefix rule is inert, but a route that lands before its rule fails
+        // OPEN, and this particular surface mints credentials.
+        //
+        // The SERVING surface (P4) is deliberately NOT covered: it lives at
+        // `/data-api/v1/{ws}/{path}`, outside `/api/ws/`, and authenticates with
+        // a token rather than a session. Turning the module off stops new
+        // credentials being minted here; stopping traffic is `state='disabled'`
+        // on the endpoint (spec §5.3).
+        rules: &[prefix("data-api")],
     },
 ];
 

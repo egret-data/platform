@@ -64,9 +64,39 @@ impl UserRepo {
         }
     }
 
+    /// Insert a service account: a user row that can never log in.
+    ///
+    /// `password_hash` is deliberately not a parameter — a service account
+    /// authenticates via an OAuth2 client, and `users_service_has_no_password`
+    /// (migration 0119) rejects a row that has one.
+    pub async fn insert_service(&self, email: &str, name: &str) -> Result<UserId> {
+        let res = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO users (provider, email, name) \
+             VALUES ('service', $1, $2) RETURNING id",
+        )
+        .bind(email)
+        .bind(name)
+        .fetch_one(&self.db.pool)
+        .await;
+        match res {
+            Ok(id) => Ok(UserId(id)),
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(
+                egret_core::Error::Conflict(format!("user already exists: {email}")),
+            ),
+            Err(e) => Err(db_err(e)),
+        }
+    }
+
+    /// Human users, newest first. Service accounts (`provider = 'service'`) are
+    /// EXCLUDED: this feeds the admin Users page and the Access console's
+    /// principal picker, where a machine identity is noise at best and gets
+    /// mistaken for a person at worst. Resolution by id (`find_by_id`) is
+    /// deliberately NOT filtered — a service account's name must still render
+    /// next to its own grants and audit rows.
     pub async fn list(&self, limit: i64, offset: i64) -> Result<Vec<User>> {
         let rows = sqlx::query_as::<_, UserRow>(
             "SELECT id, provider, email, name, password_hash, status FROM users \
+             WHERE provider <> 'service' \
              ORDER BY created_at DESC LIMIT $1 OFFSET $2",
         )
         .bind(limit)

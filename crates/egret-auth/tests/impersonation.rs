@@ -381,6 +381,64 @@ async fn validate_disabled_target_falls_through_to_admin() {
     assert!(p.impersonator.is_none());
 }
 
+/// A service account must not be an impersonation target.
+///
+/// Migration 0119's `users_service_has_no_password` CHECK exists to make "a
+/// service account can never hold an interactive session" structural rather than
+/// a property of the login handler. An overlay routes straight around that: it
+/// resolves an ADMIN's real session to the target's `Principal`, so no password
+/// is ever involved. Left unguarded, `validate_impersonation_target` is the one
+/// way to put a machine principal inside a browser session, and the audit trail
+/// would then record a human acting as a machine.
+///
+/// Both legs are asserted — a human target must still validate — so this cannot
+/// pass against a guard that refuses every target.
+#[tokio::test]
+async fn a_service_account_cannot_be_impersonated() {
+    let Some(db) = connect().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    let users = UserRepo::new(db.clone());
+    let sessions = egret_auth::session::SessionService::new(
+        db.clone(),
+        chrono::Duration::hours(8),
+        chrono::Duration::hours(1),
+    );
+    let admin = seed_user(&db).await;
+
+    // A human target passes every other guard in this function, so it isolates
+    // the provider check as the only difference below.
+    let human = seed_user(&db).await;
+    egret_auth::impersonation::validate_impersonation_target(
+        &users,
+        &sessions,
+        admin,
+        human,
+        "debugging",
+    )
+    .await
+    .expect("a human target must still be impersonable");
+
+    let svc = users
+        .insert_service(&unique_email("svc.reporting"), "reporting")
+        .await
+        .expect("insert service account");
+    let err = egret_auth::impersonation::validate_impersonation_target(
+        &users,
+        &sessions,
+        admin,
+        svc,
+        "debugging",
+    )
+    .await
+    .expect_err("a service account must not be impersonable");
+    assert!(
+        matches!(err, egret_core::Error::InvalidInput(_)),
+        "expected InvalidInput, got: {err:?}"
+    );
+}
+
 // ── HTTP endpoint tests: the platform-admin impersonation start/exit surface ──
 //
 // These drive the real routers (`auth_router` + `admin_impersonation_router`) over

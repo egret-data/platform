@@ -2755,6 +2755,7 @@ dependencies = [
  "egret-config",
  "egret-controlplane",
  "egret-core",
+ "egret-dataapi",
  "egret-engine-mgmt",
  "egret-engine-mgmt-api",
  "egret-events",
@@ -2898,6 +2899,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "egret-dataapi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "egret-auth",
+ "egret-core",
+ "egret-dataapi-api",
+ "egret-events",
+ "egret-machine-idp",
+ "egret-metastore",
+ "egret-workspace",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "tower",
+ "tracing",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "egret-dataapi-api"
+version = "0.1.0"
+dependencies = [
+ "egret-core",
+ "serde",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
 name = "egret-engine-mgmt"
 version = "0.1.0"
 dependencies = [
@@ -3027,6 +3067,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
  "utoipa",
  "uuid",
 ]
@@ -3203,6 +3244,7 @@ dependencies = [
  "egret-config",
  "egret-controlplane",
  "egret-core",
+ "egret-dataapi",
  "egret-engine-mgmt",
  "egret-kernel",
  "egret-machine-idp",

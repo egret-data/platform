@@ -28,15 +28,25 @@ pub trait SigningKeyStore: Send + Sync {
     async fn all_public_jwks(&self) -> Result<Vec<serde_json::Value>, IdpError>;
 }
 
-/// A verified Catalog Client: its id + the warehouse/role its token conveys.
+/// A verified machine client. The verifier that matched owns the token's shape:
+/// which `aud` it carries, what audience-specific claims it adds, and how long
+/// it lives. That is what lets one IdP serve the Catalog and the Data API
+/// without either knowing about the other.
 pub struct VerifiedClient {
     pub client_id: String,
-    pub warehouse: String,
-    pub catalog_role: String,
+    /// The JWT `aud`.
+    pub audience: String,
+    /// Merged into the JWT alongside the standard claims. Must not contain
+    /// `iss`, `sub`, `aud` or `exp` — those are the IdP's to set.
+    pub extra_claims: serde_json::Map<String, serde_json::Value>,
+    /// Token lifetime. Catalog: 3600. Data API: 600 — short, because a stateless
+    /// token cannot be revoked before it expires.
+    pub ttl_secs: u64,
 }
 
-/// Verifies a client's `client_id`/`client_secret` against the client registry.
-/// Implemented by `egret-controlplane`'s `CatalogClientStore` (EB-3).
+/// Verifies a client's `client_id`/`client_secret` against one client registry.
+/// Implemented by the Catalog Client registry (`egret-catalog-engine`) and, per
+/// audience, by any other machine-client registry.
 #[async_trait::async_trait]
 pub trait ClientVerifier: Send + Sync {
     async fn verify(
@@ -62,7 +72,9 @@ pub struct IdpState {
     pub keys: Arc<dyn SigningKeyStore>,
     /// The egret public root URL used as the JWT `iss` + OIDC issuer.
     pub issuer: String,
-    pub clients: Arc<dyn ClientVerifier>,
+    /// Tried in order until one recognises the `client_id`. Each owns its own
+    /// audience; a client belongs to exactly one registry.
+    pub verifiers: Vec<Arc<dyn ClientVerifier>>,
 }
 
 /// The mini-IdP router: discovery + JWKS + the client_credentials token endpoint.
@@ -180,26 +192,53 @@ async fn token_endpoint(
     if f.grant_type != "client_credentials" {
         return Err(IdpError::UnsupportedGrant);
     }
-    let vc = st
-        .clients
-        .verify(&f.client_id, &f.client_secret)
-        .await?
-        .ok_or(IdpError::InvalidClient)?;
+    // Try every verifier; do NOT short-circuit on the first `Err`. Verifiers own
+    // independent audiences, so a transient fault in one (e.g. the catalog's DB)
+    // must not 500 a request meant for a different, healthy one. Only once every
+    // verifier has either declined or failed do we decide what to return: a
+    // match wins outright, otherwise an error means "unknown" cannot honestly be
+    // claimed (401 would be a lie), so that beats a clean "no match" (401).
+    let mut vc = None;
+    let mut verifier_errors = Vec::new();
+    for v in &st.verifiers {
+        match v.verify(&f.client_id, &f.client_secret).await {
+            Ok(Some(found)) => {
+                vc = Some(found);
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!(client_id = %f.client_id, error = %e, "client verifier failed");
+                verifier_errors.push(e.to_string());
+            }
+        }
+    }
+    let vc = match vc {
+        Some(vc) => vc,
+        None if !verifier_errors.is_empty() => {
+            return Err(IdpError::VerificationUnavailable(
+                verifier_errors.join("; "),
+            ));
+        }
+        None => return Err(IdpError::InvalidClient),
+    };
+
     let km = st.keys.active().await?;
-    let exp = chrono::Utc::now().timestamp() as u64 + 3600;
-    let claims = serde_json::json!({
-        "iss": st.issuer.trim_end_matches('/'),
-        "sub": vc.client_id,
-        "aud": "catalog",
-        "warehouse": vc.warehouse,
-        "roles": [vc.catalog_role],
-        "exp": exp,
-    });
-    let jwt = sign_claims(&km, &claims)?;
+    let exp = chrono::Utc::now().timestamp() as u64 + vc.ttl_secs;
+    let mut claims = serde_json::Map::new();
+    // Audience-specific claims first, so the standard ones below always win —
+    // a verifier must never be able to forge `iss`, `sub`, `aud` or `exp`.
+    claims.extend(vc.extra_claims.clone());
+    claims.insert("iss".into(), st.issuer.trim_end_matches('/').into());
+    claims.insert("sub".into(), vc.client_id.clone().into());
+    claims.insert("aud".into(), vc.audience.clone().into());
+    claims.insert("exp".into(), exp.into());
+
+    let jwt = sign_claims(&km, &serde_json::Value::Object(claims))?;
     Ok(Json(TokenResp {
         access_token: jwt,
         token_type: "Bearer".into(),
-        expires_in: 3600,
+        expires_in: vc.ttl_secs,
     }))
 }
 
@@ -295,7 +334,58 @@ mod tests {
         }
     }
 
-    struct FakeVerifier;
+    /// A verifier that recognises exactly one client and hands back a token
+    /// shape the test chooses. `new()` behaves like a Catalog Client
+    /// (`cid`/`sec`); `with_extra_claims` behaves like a second-audience client
+    /// (`api1`/`s`) whose `extra_claims` the test controls.
+    struct FakeVerifier {
+        client_id: String,
+        client_secret: String,
+        audience: String,
+        extra_claims: serde_json::Map<String, serde_json::Value>,
+        ttl_secs: u64,
+    }
+
+    impl FakeVerifier {
+        fn new() -> Self {
+            Self {
+                client_id: "cid".into(),
+                client_secret: "sec".into(),
+                audience: "catalog".into(),
+                extra_claims: serde_json::json!({ "warehouse": "eng-wh", "roles": ["engine"] })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+                ttl_secs: 3600,
+            }
+        }
+
+        /// A second-audience verifier whose `extra_claims` the caller supplies —
+        /// used to prove a verifier cannot smuggle standard claims into a token.
+        fn with_extra_claims(extra: serde_json::Value) -> Self {
+            Self {
+                client_id: "api1".into(),
+                client_secret: "s".into(),
+                audience: "data-api".into(),
+                extra_claims: extra.as_object().cloned().unwrap_or_default(),
+                ttl_secs: 600,
+            }
+        }
+    }
+
+    /// A verifier that always errors — stands in for a transient infra fault
+    /// (e.g. the catalog's or the Data API's DB being briefly unreachable).
+    /// Used to prove the `token_endpoint` loop does not short-circuit on the
+    /// first `Err`: independent audiences must not fail each other.
+    struct AlwaysErrorsVerifier;
+
+    #[async_trait::async_trait]
+    impl ClientVerifier for AlwaysErrorsVerifier {
+        async fn verify(&self, _: &str, _: &str) -> Result<Option<VerifiedClient>, IdpError> {
+            Err(IdpError::Db("simulated outage".into()))
+        }
+    }
+
     #[async_trait::async_trait]
     impl ClientVerifier for FakeVerifier {
         async fn verify(
@@ -303,11 +393,12 @@ mod tests {
             client_id: &str,
             client_secret: &str,
         ) -> Result<Option<VerifiedClient>, IdpError> {
-            if client_id == "cid" && client_secret == "sec" {
+            if client_id == self.client_id && client_secret == self.client_secret {
                 Ok(Some(VerifiedClient {
-                    client_id: "cid".into(),
-                    warehouse: "eng-wh".into(),
-                    catalog_role: "engine".into(),
+                    client_id: client_id.to_string(),
+                    audience: self.audience.clone(),
+                    extra_claims: self.extra_claims.clone(),
+                    ttl_secs: self.ttl_secs,
                 }))
             } else {
                 Ok(None)
@@ -320,8 +411,269 @@ mod tests {
         IdpState {
             keys: Arc::new(FakeKeys(km)),
             issuer: "http://localhost:8080".into(),
-            clients: Arc::new(FakeVerifier),
+            verifiers: vec![Arc::new(FakeVerifier::new())],
         }
+    }
+
+    /// Stands in for `egret-catalog-engine`'s `ClientVerifier` impl. That crate
+    /// depends on this one, so its impl cannot be used here — this mirrors it
+    /// and must be kept in lockstep with
+    /// `crates/egret-catalog-engine/src/store/embedded.rs`.
+    struct CatalogLikeVerifier;
+
+    #[async_trait::async_trait]
+    impl ClientVerifier for CatalogLikeVerifier {
+        async fn verify(
+            &self,
+            client_id: &str,
+            client_secret: &str,
+        ) -> Result<Option<VerifiedClient>, IdpError> {
+            if client_id == "cat1" && client_secret == "s" {
+                Ok(Some(VerifiedClient {
+                    client_id: client_id.to_string(),
+                    audience: "catalog".into(),
+                    extra_claims: serde_json::json!({ "warehouse": "wh1", "roles": ["role1"] })
+                        .as_object()
+                        .cloned()
+                        .unwrap(),
+                    ttl_secs: 3600,
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    /// An `IdpState` over an explicit verifier list.
+    async fn test_idp_state_with(verifiers: Vec<Arc<dyn ClientVerifier>>) -> IdpState {
+        let km = generate_rsa_key("kid-t").unwrap();
+        IdpState {
+            keys: Arc::new(FakeKeys(km)),
+            issuer: "http://localhost:8080".into(),
+            verifiers,
+        }
+    }
+
+    /// An `IdpState` serving only the catalog's client registry — the exact
+    /// deployment shape before the Data API existed.
+    async fn test_idp_state_with_catalog_verifier() -> IdpState {
+        test_idp_state_with(vec![Arc::new(CatalogLikeVerifier)]).await
+    }
+
+    /// Catalog + a second audience, registered side by side.
+    async fn test_idp_state_with_two_verifiers() -> IdpState {
+        test_idp_state_with(vec![
+            Arc::new(CatalogLikeVerifier),
+            Arc::new(FakeVerifier::with_extra_claims(serde_json::json!({
+                "ws": "11111111-1111-1111-1111-111111111111",
+            }))),
+        ])
+        .await
+    }
+
+    /// Parse an `application/x-www-form-urlencoded` token request body the way
+    /// axum's `Form` extractor would (fixtures use no percent-escapes).
+    fn parse_token_form(body: &str) -> TokenForm {
+        let mut grant_type = String::new();
+        let mut client_id = String::new();
+        let mut client_secret = String::new();
+        for pair in body.split('&') {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            match k {
+                "grant_type" => grant_type = v.to_string(),
+                "client_id" => client_id = v.to_string(),
+                "client_secret" => client_secret = v.to_string(),
+                other => panic!("unexpected form field {other}"),
+            }
+        }
+        TokenForm {
+            grant_type,
+            client_id,
+            client_secret,
+        }
+    }
+
+    /// Drive `POST /oauth/token` with a form body; panics if the IdP rejects it.
+    async fn post_token(st: &IdpState, body: &str) -> TokenResp {
+        token_endpoint(State(st.clone()), Form(parse_token_form(body)))
+            .await
+            .expect("token endpoint rejected the request")
+            .0
+    }
+
+    struct TokenErr {
+        status: u16,
+        body: serde_json::Value,
+    }
+
+    /// Drive `POST /oauth/token` expecting a rejection, rendered through
+    /// `IntoResponse` so the test sees the real HTTP status + OAuth error body.
+    async fn post_token_expecting_error(st: &IdpState, body: &str) -> TokenErr {
+        let err = token_endpoint(State(st.clone()), Form(parse_token_form(body)))
+            .await
+            .expect_err("token endpoint unexpectedly succeeded");
+        let resp = err.into_response();
+        let status = resp.status().as_u16();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        TokenErr {
+            status,
+            body: serde_json::from_slice(&bytes).unwrap(),
+        }
+    }
+
+    /// Read a JWT's claims without checking its signature — these tests assert
+    /// on the payload the IdP built, which is independent of signing.
+    fn decode_claims_without_verifying(jwt: &str) -> serde_json::Value {
+        use base64::Engine as _;
+        let payload = jwt.split('.').nth(1).expect("jwt has no payload segment");
+        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("jwt payload is not base64url");
+        serde_json::from_slice(&raw).expect("jwt payload is not json")
+    }
+
+    /// The catalog's token shape is a published contract with every Iceberg
+    /// client already deployed. This test exists to fail loudly if the
+    /// multi-audience refactor changes it.
+    #[tokio::test]
+    async fn catalog_token_claims_are_unchanged() {
+        let st = test_idp_state_with_catalog_verifier().await;
+        let resp = post_token(
+            &st,
+            "grant_type=client_credentials&client_id=cat1&client_secret=s",
+        )
+        .await;
+
+        let claims = decode_claims_without_verifying(&resp.access_token);
+        assert_eq!(claims["aud"], "catalog");
+        assert_eq!(claims["sub"], "cat1");
+        assert_eq!(claims["warehouse"], "wh1");
+        assert_eq!(claims["roles"], serde_json::json!(["role1"]));
+        assert_eq!(resp.expires_in, 3600, "catalog TTL must stay 3600");
+    }
+
+    #[tokio::test]
+    async fn a_second_verifier_serves_its_own_audience_and_ttl() {
+        // Two verifiers registered; each client resolves through exactly one.
+        let st = test_idp_state_with_two_verifiers().await;
+
+        let cat = post_token(
+            &st,
+            "grant_type=client_credentials&client_id=cat1&client_secret=s",
+        )
+        .await;
+        assert_eq!(
+            decode_claims_without_verifying(&cat.access_token)["aud"],
+            "catalog"
+        );
+        assert_eq!(cat.expires_in, 3600);
+
+        let api = post_token(
+            &st,
+            "grant_type=client_credentials&client_id=api1&client_secret=s",
+        )
+        .await;
+        let c = decode_claims_without_verifying(&api.access_token);
+        assert_eq!(c["aud"], "data-api");
+        assert_eq!(c["ws"], "11111111-1111-1111-1111-111111111111");
+        assert_eq!(api.expires_in, 600, "Data API TTL is short by design");
+        assert!(
+            c.get("warehouse").is_none(),
+            "catalog claims must not leak in"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_client_is_rejected_by_every_verifier() {
+        let st = test_idp_state_with_two_verifiers().await;
+        let err = post_token_expecting_error(
+            &st,
+            "grant_type=client_credentials&client_id=nope&client_secret=s",
+        )
+        .await;
+        assert_eq!(err.status, 401);
+        assert_eq!(err.body["error"], "invalid_client");
+    }
+
+    /// The verifier loop must not short-circuit on the first `Err`: with a
+    /// failing first verifier and a matching second one, the request must
+    /// still succeed. Before this test existed, `v.verify(...).await?` aborted
+    /// the whole request on the FIRST verifier that errored — harmless with one
+    /// verifier, but once a second (independent) audience is registered, a
+    /// transient fault in one registry would wrongly 500 every request meant
+    /// for the other.
+    #[tokio::test]
+    async fn a_failing_verifier_does_not_block_a_later_match() {
+        let st = test_idp_state_with(vec![
+            Arc::new(AlwaysErrorsVerifier),
+            Arc::new(FakeVerifier::with_extra_claims(serde_json::json!({
+                "ws": "22222222-2222-2222-2222-222222222222",
+            }))),
+        ])
+        .await;
+
+        let resp = post_token(
+            &st,
+            "grant_type=client_credentials&client_id=api1&client_secret=s",
+        )
+        .await;
+        let c = decode_claims_without_verifying(&resp.access_token);
+        assert_eq!(c["aud"], "data-api");
+        assert_eq!(c["ws"], "22222222-2222-2222-2222-222222222222");
+    }
+
+    /// When every verifier errors (none positively found the client valid OR
+    /// invalid), the endpoint must not claim `401 invalid_client` — that would
+    /// assert something it never actually checked. It must surface as a server
+    /// error instead.
+    #[tokio::test]
+    async fn when_every_verifier_errors_the_response_is_a_server_error_not_401() {
+        let st = test_idp_state_with(vec![Arc::new(AlwaysErrorsVerifier)]).await;
+        let err = post_token_expecting_error(
+            &st,
+            "grant_type=client_credentials&client_id=whoever&client_secret=x",
+        )
+        .await;
+        assert_eq!(err.status, 500);
+        assert_eq!(err.body["error"], "server_error");
+    }
+
+    /// A verifier supplies `extra_claims`, so it must not be able to overwrite
+    /// the claims that establish WHO the token is for. This is why the standard
+    /// claims are inserted after the verifier's, and it is a security property,
+    /// not a style choice — so it gets a test rather than a comment.
+    #[tokio::test]
+    async fn a_verifier_cannot_forge_the_standard_claims() {
+        let hostile = FakeVerifier::with_extra_claims(serde_json::json!({
+            "sub": "attacker",
+            "aud": "catalog",
+            "iss": "https://evil.example",
+            "exp": 9_999_999_999u64,
+        }));
+        let st = test_idp_state_with(vec![Arc::new(hostile)]).await;
+
+        let resp = post_token(
+            &st,
+            "grant_type=client_credentials&client_id=api1&client_secret=s",
+        )
+        .await;
+        let c = decode_claims_without_verifying(&resp.access_token);
+
+        assert_eq!(
+            c["sub"], "api1",
+            "sub must come from the verified client id"
+        );
+        assert_eq!(
+            c["aud"], "data-api",
+            "aud must come from the verifier's audience field"
+        );
+        assert_eq!(c["iss"], st.issuer.trim_end_matches('/'));
+        assert_ne!(
+            c["exp"], 9_999_999_999u64,
+            "exp must be derived from ttl_secs"
+        );
     }
 
     #[tokio::test]

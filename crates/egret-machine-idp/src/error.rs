@@ -17,6 +17,12 @@ pub enum IdpError {
     /// Persistence failure.
     #[error("db error: {0}")]
     Db(String),
+    /// Every verifier that recognised the request errored out before any could
+    /// confirm or deny the client — NOT the same as `InvalidClient`, which means
+    /// every verifier positively looked and found nothing. Returning
+    /// `InvalidClient` here would be a lie: validity was never actually checked.
+    #[error("client verification unavailable: {0}")]
+    VerificationUnavailable(String),
 }
 
 impl From<sqlx::Error> for IdpError {

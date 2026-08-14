@@ -1,12 +1,12 @@
 # Data API — design
 
-> **Status:** Design approved, not yet implemented · **Date:** 2026-08-14 · **Reference:** [sqlrest](https://github.com/inrgihc/sqlrest) v1.9.0 (domain model + UX only; no code reuse — sqlrest is Java/Spring, egret is Rust)
+> **Status:** P2 (service accounts + OAuth2 clients + management routes) SHIPPED; P3–P5 not yet implemented · **Date:** 2026-08-14 · **Reference:** [sqlrest](https://github.com/inrgihc/sqlrest) v1.9.0 (domain model + UX only; no code reuse — sqlrest is Java/Spring, egret is Rust)
 
 ## 1. Problem
 
 egret can query Trino and StarRocks interactively (SQL Lab, Explore, dashboards), but has no way to expose a governed query as a **machine-callable HTTP endpoint**. Downstream consumers — internal services, low-code tools, partner integrations — currently have no option except direct engine credentials, which bypasses Ranger row/column policy and leaves no per-consumer audit trail.
 
-Data API closes that gap: a workspace member authors a parameterized SELECT, publishes it at a stable URL, and external clients call it with an API key. Every call runs under a real egret principal, so Ranger enforcement and audit apply unchanged.
+Data API closes that gap: a workspace member authors a parameterized SELECT, publishes it at a stable URL, and external clients call it with an OAuth2 token minted for a service account (§6.1). Every call runs under a real egret principal, so Ranger enforcement and audit apply unchanged.
 
 ## 2. Locked decisions
 
@@ -14,7 +14,7 @@ Data API closes that gap: a workspace member authors a parameterized SELECT, pub
 |---|---|---|
 | Build strategy | Native Rust crate in egret; sqlrest is a **reference** for domain model and UX | One system, one authz model, one UI. Running sqlrest alongside would mean two identity stores, two datastores, two UIs. |
 | Endpoint source | Raw SQL + params is the core; a "Publish as API" shortcut seeds SQL from a Saved Query / Dataset | Raw SQL is the flexible primitive; the shortcut removes the copy-paste step without constraining the model. |
-| Consumer identity | **Service account = a real egret principal** | Queries run through machine-idp → engine token → Ranger. One authz model; audit resolves to a named identity. |
+| Consumer identity | **Service account = a real egret principal**, holding OAuth2 `client_credentials` clients on egret's own machine-IdP | Queries run through machine-idp → engine token → Ranger. One authz model; audit resolves to a named identity. |
 | Read/write | **Read-only (SELECT) in v1** | Narrow attack surface; no transaction/rollback/idempotency design needed. Writes deferred to v2. |
 | v1 scope | Version & rollback · rate limit / quota · response cache · auto-OpenAPI + Try-it | All four selected. |
 | Serving surface | Same process as `egret-server`, but structured to split into its own binary later | Modular-monolith default without foreclosing isolation. |
@@ -37,7 +37,7 @@ They double single quotes only and **ignore backslash**.
 
 This is an inconsistency between siblings rather than a blind spot: `like_literal` (`crates/egret-bi/src/schema.rs:161`) and `sr_escape_dq` (`crates/egret-engine-mgmt/src/engines.rs:3062`) already escape `\` correctly. `sql_literal` is reachable with the lowest BI permission (`CH_READ`), which makes it the more exposed of the two today. StarRocks is MySQL-dialect and by default does not set `NO_BACKSLASH_ESCAPES`, so `\` is an escape character and `\'` breaks out of the literal. Trino is unaffected (it does not process backslash escapes in standard string literals).
 
-Today this is reachable only by an authenticated user with SQL Lab access. Data API would put the same render path **behind an API key on the public internet**. The fix is therefore in v1 scope, not a follow-on.
+Today this is reachable only by an authenticated user with SQL Lab access. Data API would put the same render path **behind a machine credential on the public internet**. The fix is therefore in v1 scope, not a follow-on.
 
 The existing unit tests on both sites — `string_param_neutralizes_injection` (`template.rs:93`) and `sql_literal_encodes_by_type` (`chartquery.rs:684`) — pass whether or not the hole is present, because neither uses a test value containing a backslash. They are not evidence.
 
@@ -63,11 +63,11 @@ A third site, `starrocks_create_service_user_sql` (`crates/egret-engine-mgmt/src
 | Crate | Role |
 |---|---|
 | `egret-dataapi-api` | Leaf contract crate, pure-serde: endpoint definition DTOs, param spec, published snapshot. Consumable by `egret-server` and frontend codegen without pulling in sqlx/axum. |
-| `egret-dataapi` | Seam crate: store (owns the `dataapi` schema), publish lifecycle, service accounts + keys, rate limit, cache, access log, **two routers**. |
+| `egret-dataapi` | Seam crate: store (owns the `dataapi` schema), publish lifecycle, service accounts + their OAuth2 clients, rate limit, cache, access log, **two routers**. |
 
 ### 4.2 Two routers, deliberately disjoint
 
-- `management_router()` → nested under `/api` like every other seam. Session cookie + CSRF + Cedar. Authoring, publishing, key management.
+- `management_router()` → nested under `/api` like every other seam. Session cookie + CSRF + Cedar. Authoring, publishing, service-account and client management.
 - `serving_router()` → nested under `/data-api/v1`. **No cookie, no CSRF**, `Authorization: Bearer` only. A fully separate middleware stack.
 
 This boundary matters more than it looks. CSRF has previously killed a production POST in this codebase with no router-level test able to see it. The serving surface must inherit **no** control-plane middleware implicitly; every layer on it is declared explicitly.
@@ -151,17 +151,35 @@ dataapi.endpoint_versions    -- IMMUTABLE snapshots
   id, endpoint_id, version int, snapshot jsonb, note, created_by, created_at
   UNIQUE (endpoint_id, version)
 
-dataapi.api_keys             -- credentials for the serving surface
-  id, workspace_id, service_account_id (→ users.id),
-  name, prefix text, secret_hash text, expires_at, last_used_at,
-  revoked_at, created_by, created_at
-  UNIQUE (prefix)
+dataapi.service_accounts     -- the workspace binding for a machine principal
+  user_id uuid PK (→ users.id ON DELETE CASCADE),
+  workspace_id, name, description, created_by, created_at
+  UNIQUE (workspace_id, name)
+
+dataapi.clients              -- OAuth2 client_credentials clients (P2, §6.1)
+  id, service_account_id (→ dataapi.service_accounts.user_id ON DELETE CASCADE),
+  name, client_id text UNIQUE, client_secret_hash text,
+  expires_at, revoked_at, last_used_at, created_by, created_at
 
 dataapi.access_log           -- one row per call
-  id, ts, endpoint_id, version, service_account_id, api_key_id,
+  id, ts, endpoint_id, version, service_account_id, client_id,
   status_code, row_count, duration_ms, cache_hit bool,
   engine_query_id, client_ip, error_code
 ```
+
+**Why the workspace binding is its own table rather than a column on `users`.**
+`users` is platform-level, and every other consumer of it — the admin Users
+page, the Access console's principal picker, `find_by_id` for display — would
+have to learn to ignore a workspace column that means nothing for a human. The
+binding lives in `dataapi.service_accounts` instead, and `users` gains only what
+it must: `provider = 'service'`, plus a `CHECK` that a service row can never
+carry a `password_hash`. The login handler already requires one, but that is a
+single code path away from being wrong forever; the constraint is where it
+cannot be forgotten.
+
+`dataapi.clients` is deliberately shaped like `catalog.catalog_clients` (0053) —
+same idea, same machine-IdP, second audience. N clients per service account, so
+rotation is mint-new-then-revoke-old rather than a break-then-fix window.
 
 ### 5.1.1 Config shapes
 
@@ -192,7 +210,7 @@ The four jsonb config columns, and the shape frozen into `endpoint_versions.snap
 { "max_rows": 10000, "timeout_seconds": 30 }
 
 // rate_limit
-{ "per_key_qps": 5, "burst": 10, "per_endpoint_qps": 50 }
+{ "per_client_qps": 5, "burst": 10, "per_endpoint_qps": 50 }
 ```
 
 ### 5.1.2 Success response
@@ -213,7 +231,7 @@ The four jsonb config columns, and the shape frozen into `endpoint_versions.snap
 
 `meta.version` is the published version that served the call — it makes a client-side bug reproducible against the exact snapshot that produced it. `meta.cached` is not cosmetic either: without it, a stale-looking result is indistinguishable from a fresh one during debugging.
 
-`dataapi.endpoints.folder_id` and `dataapi.api_keys.service_account_id` are **cross-schema FKs** into `public.folders(id)` and `public.users(id)`. This bends the schema-per-seam ownership rule, but `folders` and `users` are already shared cross-cutting tables and duplicating them would be worse. Accepted and recorded here.
+`dataapi.endpoints.folder_id` and `dataapi.service_accounts.user_id` / `.workspace_id` are **cross-schema FKs** into `public.folders(id)`, `public.users(id)` and `public.workspaces(id)`. This bends the schema-per-seam ownership rule, but `folders` and `users` are already shared cross-cutting tables and duplicating them would be worse. Accepted and recorded here.
 
 ### 5.2 Folders are not URL segments
 
@@ -254,28 +272,59 @@ draft ──validate──> publish(v N) ──> live
 
 **Allowed methods in v1 are `GET` and `POST`, both read-only.** `POST` exists only for parameter payloads too large or too structured for a query string; it carries the same single-SELECT restriction. `PUT`/`PATCH`/`DELETE` are rejected — accepting them would imply a write semantics v1 does not have.
 
-Publish / rollback / key creation / key revocation are emitted as `egret-audit` events — no extra table.
+Publish and rollback will be emitted as `egret-audit` events — no extra table. **Client issue and client revocation are P3 too, and are not emitted today**: the P2 management routes exist and mint credentials, but `DataApiState` carries no audit sink, so issuing or revoking a client currently leaves no audit record. That is a stated gap, not an oversight to be read past — until P3 wires the sink, the only trace of a credential's life is the `dataapi.clients` row itself (`created_by`, `created_at`, `revoked_at`, `last_used_at`).
 
 **Operational caveat that must surface in the UI:** publishing an endpoint does **not** grant data access. Because queries run as the service account under Ranger enforcement, an admin must also grant that service account in Ranger. An endpoint published without that step fails with an engine permission error, which must be mapped to a message saying so rather than leaking the raw engine error.
 
 ## 6. Auth and request flow
 
-### 6.1 API keys
+### 6.1 Credentials: OAuth2 `client_credentials`, not a bespoke API key
 
-Format `egt_<prefix>_<secret>`: 12-character `prefix` (unique-indexed, used for lookup) and a 32-byte random `secret`, base64url. Stored as `prefix` + `secret_hash`. The secret is shown exactly once, at creation.
+An earlier revision of this spec specified a bespoke key, `egt_<prefix>_<secret>`, hashed with SHA-256 and compared on every request. **That is not what was built, and the reason it was abandoned is worth stating**: egret already runs a machine-IdP (`egret-machine-idp`) that mints signed JWTs for the embedded Iceberg catalog's clients. Inventing a second credential format would have meant a second issuer, a second revocation story, a second thing to get constant-time comparison right in, and no interoperability with any OAuth2 client library.
 
-**Hash with SHA-256; do not use `crates/egret-auth/src/password.rs`.** Argon2 there is right for user-chosen passwords and wrong for API keys: a 32-byte random secret already has sufficient entropy that no brute-force-resistant KDF is needed, while paying ~50–100 ms of KDF on *every* API request is unacceptable. Compare in constant time.
+What ships instead is a **second audience on the existing IdP**:
+
+- A service account owns **N clients** in `dataapi.clients`. Each is a `client_id` (`egret-dataapi-<uuid>`) and a 32-byte random `client_secret`, base64url. The secret is shown exactly once, at creation, and is not recoverable — the management API's list DTO has no secret field *at all*, not a skipped or optional one.
+- The client exchanges those at `POST /oauth/token` (`grant_type=client_credentials`) for a JWT with `aud: "data-api"`, plus `ws` and `egret_user_id` claims. `egret-dataapi`'s `ClientStore` implements the same `ClientVerifier` trait the Catalog's registry does; the IdP holds a list of verifiers and the audiences do not know about each other.
+- Every failure mode of verification — unknown `client_id`, revoked, expired, disabled principal, archived workspace, wrong secret — returns the *same response*. A distinguishing error would be a free oracle for anyone probing client ids. **Two caveats, because "the same response" is narrower than "indistinguishable".** First, the *timing* differs: only a request that gets as far as a wrong secret pays the Argon2 verification, so a wrong secret against a real `client_id` is measurably slower than any rejection that returns before the hash — which distinguishes "this client id exists" from "it does not". Equalising that needs a dummy-hash verify on the early-return paths, and is deliberately not implemented in P2. Second, a *corrupt stored hash* is the one failure that is not `Ok(None)`: `PasswordHash::new` fails, `verify` returns `Err`, and the caller sees a 500 rather than an authentication failure.
+
+**Hashing is Argon2, and the earlier objection to it no longer applies.** The objection was that paying ~50–100 ms of KDF on *every API request* is unacceptable — which is true, and is exactly why the KDF is not on that path. The secret is verified **once per token**, not once per call; the serving surface then validates a JWT signature. Argon2 costs a few tens of milliseconds every 10 minutes per client, and matches `CatalogStore::verify_client` rather than introducing a second hashing scheme.
+
+**The revocation trade-off, stated plainly.** A stateless token cannot be revoked before it expires. Revoking a client sets `revoked_at`, so no *new* token can be minted, but a token already issued stays valid until it expires. `DATA_API_TTL_SECS = 600` is that bound: after revoking, the exposure window is at most 10 minutes. Instant revocation was considered and rejected — it requires a per-request lookup, which gives back precisely the throughput this design was chosen for.
+
+**Be precise about what a "kill switch" buys, because it is easy to overstate.** Four actions stop a compromised client from minting any *further* token, and `verify` honours all four (each is test-covered in `clients_store.rs`): revoking the client (`revoked_at`), disabling the principal (`users.status <> 'active'`), archiving the workspace (`workspaces.status <> 'active'`), and deleting the service account (which cascades to its clients). **None of them recalls a token already issued** — the serving surface validates a JWT statelessly, which is the entire point of §6.2 step 1. The 600s TTL is therefore an irreducible bound, not a worst case that some faster action can beat.
+
+**Why `verify` reads `workspaces.status`, and not just for tidiness.** Archiving a workspace is the operator's natural decommission action, and every Data API management route resolves through `WsContext`, which 404s on a workspace that is not active. Archiving therefore *removes the routes that could revoke a client or disable its principal*. Without the workspace-status check, archiving would leave every credential in that workspace simultaneously **live and unrevokable** — the operator performs the action that most looks like shutting it all down, and gets the exact opposite. Because the recovery surface is gone by then, authentication has to honour the workspace's status itself; nothing else is left to.
+
+Disabling the principal is reachable over the API: `PATCH /api/control-plane/users/{id}` with `{"status":"disabled"}` accepts a service account. Only that route's *profile* fields (name/email) refuse `provider = 'service'` rows — the status branch does not, precisely because it is this kill switch, and it still applies the `user:disable` permission re-check, the last-platform-admin guard, and immediate session revocation.
+
+**Who can mint a credential, and what the upgrade turns on.** `service_account:read` and `service_account:manage` are seeded onto the built-in `ws_admin` role (migration 0120) and stop there — not `ws_editor`, because a service account is a machine principal an admin then grants data access to in Ranger, which is an administrative act rather than an editorial one. State the consequence plainly rather than leaving it to be discovered: `ws_admin` is a single global role row, so that migration reaches **every existing `ws_admin` assignment in every existing workspace at once**, and the `data_api` feature module treats an absent entitlement row as enabled — which is every workspace predating it. So on upgrade, every current workspace admin can immediately mint machine credentials for their workspace, with no operator action and no per-workspace opt-in. That reach is intended, but it appears at upgrade rather than being switched on, so it is disclosed here and in the migration comment. An operator who does not want it must either write a `data_api` entitlement row disabling the module for those workspaces, or remove the two permissions from `ws_admin`.
+
+`client_credentials` has no refresh token, by design: the client re-requests with its credentials. Every OAuth2 library already does this.
+
+**Management surface** (P2, workspace-scoped, session + CSRF like every other `/api/ws/…` group):
+
+```text
+GET    /api/ws/{workspace}/data-api/service-accounts
+POST   /api/ws/{workspace}/data-api/service-accounts
+DELETE /api/ws/{workspace}/data-api/service-accounts/{id}
+GET    /api/ws/{workspace}/data-api/service-accounts/{id}/clients
+POST   /api/ws/{workspace}/data-api/service-accounts/{id}/clients   -> the secret, once
+DELETE /api/ws/{workspace}/data-api/clients/{id}
+```
+
+Two permissions, both `Scope::Workspace` and both seeded on `ws_admin` only (migration 0120): `service_account:read` to view accounts and clients, `service_account:manage` to create, delete and **issue**. Issuing gates on `:manage` and never on `:read` — a client is a bearer credential for that account's data access, so handing one out is strictly more powerful than reading the list. Every handler resolves the account (or client) against the workspace from the `WsContext` extractor, never from a second read of the path segment, and returns **404 rather than 403** on a mismatch — the same rule as §6.2 step 3.
 
 ### 6.2 Per-request chain
 
 ```text
 GET /data-api/v1/{ws}/{path}
  │
- 1. key → service account   (active, not revoked, not expired)   ✗→ 401
+ 1. verify JWT via JWKS → principal + workspace from claims      ✗→ 401
  2. (ws, method, path) → endpoint → live_version_id → snapshot   ✗→ 404
  3. service account's workspace == {ws} in path                  ✗→ 404
  4. Cedar: dataapi:invoke on Object data_api_endpoint:{id}       ✗→ 403
- 5. rate limit (per endpoint and per key)                        ✗→ 429 + Retry-After
+ 5. rate limit (per endpoint and per client)                     ✗→ 429 + Retry-After
  6. cache lookup                                                 hit → return
  7. render params → dialect-safe SQL                             ✗→ 400
  8. machine-idp mints an engine token for the SA
@@ -284,7 +333,9 @@ GET /data-api/v1/{ws}/{path}
 10. shape output → store in cache → access_log → return
 ```
 
-Step 3 returns **404, not 403**, on purpose: a key belonging to another workspace must not be able to distinguish "no such endpoint" from "exists, but you may not call it".
+**Step 1 is stateless and costs no DB round-trip.** The bearer token is a JWT signed by egret's own machine-IdP, so the serving path verifies a signature against JWKS and reads `egret_user_id` and `ws` straight out of the claims — there is no credential lookup, and no Argon2, on the hot path. That is the whole reason §6.1 chose a token exchange over a per-request key. The price is the revocation window §6.1 bounds at 600s.
+
+Step 3 returns **404, not 403**, on purpose: a token belonging to another workspace must not be able to distinguish "no such endpoint" from "exists, but you may not call it". The management API applies the same rule to service accounts and clients (§6.1).
 
 ### 6.3 Cache must be principal-scoped
 
@@ -336,7 +387,7 @@ One stable, machine-readable envelope:
 - `dataapi.access_log` records every call. It is the fastest-growing table in the system: partition monthly plus a retention job, reusing the existing gc-worker pattern from catalog CE6 rather than writing a new one.
 - Management UI statistics (call count, error rate, p50/p95, cache hit rate per endpoint) are computed from `access_log` — the equivalent of sqlrest's `HourCount` / `DateCount` / `NameCount`.
 - `request_id` is propagated to the engine and stored alongside `engine_query_id`, so a slow API call traces back to the exact query on Trino/StarRocks.
-- Publish, rollback, key creation and key revocation are `egret-audit` events.
+- Publish, rollback, client issue and client revocation are to be `egret-audit` events. All four are **P3** — none is emitted as of P2 (§5.3).
 
 ## 9. Testing
 
@@ -361,4 +412,4 @@ Deferred deliberately, each recorded so it is a decision rather than an omission
 - **MCP tool export** (sqlrest's `McpToolEntity`) — natural v2 follow-on once endpoints are stable.
 - **IP allow/deny lists** (sqlrest's `FirewallRulesEntity`) — better solved at ingress than in application code.
 - **Bulk import/export of endpoint definitions** — worth having, not worth blocking v1.
-- **Promoting `dataapi.api_keys` into `egret-auth`** — keys stay in the `dataapi` schema while Data API is the only consumer. When a second surface needs machine credentials, they move up.
+- **Promoting `dataapi.clients` into `egret-auth`** — the client registry stays in the `dataapi` schema while the Data API is its only consumer. The *protocol* is already shared: `egret-machine-idp` verifies both this registry and the Catalog's through one `ClientVerifier` trait. When a third surface needs machine credentials, the storage moves up too.

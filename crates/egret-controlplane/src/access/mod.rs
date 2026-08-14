@@ -110,6 +110,29 @@ async fn guard_not_last_admin(
     Ok(())
 }
 
+/// A service account is a `users` row (Data API P2) with no password and no
+/// editable human profile, so the profile-shaped operations on these routes
+/// refuse it rather than half-working.
+///
+/// Scoped to the PROFILE deliberately. `status` is NOT a profile field: spec
+/// §6.1 names `users.status <> 'active'` as the kill switch for a compromised
+/// service account, and `ClientStore::verify` honours it, but the only API that
+/// can set it is the `status` branch of [`update_user`]. Refusing a service
+/// account for the whole of `PATCH /users/{id}` therefore deleted the documented
+/// kill switch — and with it the `user:disable` re-check, `guard_not_last_admin`
+/// and session revocation that branch already performs. So the refusal covers
+/// name/email and lets `status` through.
+async fn refuse_service_account_profile(st: &CpState, id: UserId) -> Result<(), CpError> {
+    let u = st.users.find_by_id(id).await?.ok_or(CpError::NotFound)?;
+    if u.provider == "service" {
+        return Err(CpError::BadRequest(
+            "this is a service account; manage it through the Data API service-account routes"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 // ---------- Users ----------
 
 // Renamed in the emitted OpenAPI to `ControlPlaneUserDto`: egret-workspace
@@ -260,6 +283,10 @@ async fn update_user(
         .ok_or(CpError::NotFound)?;
 
     if let Some(name) = &body.name {
+        // Only the profile edit is refused for a service account — see
+        // `refuse_service_account_profile`. `status` below stays reachable
+        // because it is the kill switch `ClientStore::verify` reads.
+        refuse_service_account_profile(&st, user_id).await?;
         st.users
             .update_profile(user_id, &existing.email, name)
             .await?;
@@ -375,6 +402,7 @@ async fn reset_password(
     Json(body): Json<ResetPasswordInput>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:update").await?;
+    refuse_service_account_profile(&st, UserId(id)).await?;
     let user_id = UserId(id);
     let user = st
         .users

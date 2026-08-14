@@ -1,6 +1,6 @@
 # Data API — thiết kế
 
-> **Trạng thái:** Đã duyệt thiết kế, chưa triển khai · **Ngày:** 2026-08-14 · **Tham chiếu:** [sqlrest](https://github.com/inrgihc/sqlrest) v1.9.0 (chỉ tham chiếu domain model + UX; không tái sử dụng code — sqlrest là Java/Spring, egret là Rust)
+> **Trạng thái:** P2 (service account + client OAuth2 + route quản trị) ĐÃ SHIP; P3–P5 chưa triển khai · **Ngày:** 2026-08-14 · **Tham chiếu:** [sqlrest](https://github.com/inrgihc/sqlrest) v1.9.0 (chỉ tham chiếu domain model + UX; không tái sử dụng code — sqlrest là Java/Spring, egret là Rust)
 >
 > *Bản tiếng Việt tham chiếu. Bản chuẩn là [docs/en/specs/2026-08-14-data-api-design.md](../../en/specs/2026-08-14-data-api-design.md).*
 
@@ -8,7 +8,7 @@
 
 egret truy vấn được Trino và StarRocks theo kiểu tương tác (SQL Lab, Explore, dashboard), nhưng chưa có cách nào biến một truy vấn đã được quản trị thành **endpoint HTTP cho máy gọi**. Các bên tiêu thụ phía sau — service nội bộ, công cụ low-code, tích hợp đối tác — hiện không có lựa chọn nào ngoài việc dùng thẳng credential của engine, vốn đi vòng qua policy row/column của Ranger và không để lại dấu vết audit theo từng bên tiêu thụ.
 
-Data API lấp khoảng trống đó: thành viên workspace viết một câu SELECT có tham số, publish tại một URL ổn định, client bên ngoài gọi bằng API key. Mọi lời gọi đều chạy dưới một principal thật của egret, nên Ranger và audit vẫn áp dụng nguyên vẹn.
+Data API lấp khoảng trống đó: thành viên workspace viết một câu SELECT có tham số, publish tại một URL ổn định, client bên ngoài gọi bằng token OAuth2 được mint cho một service account (§6.1). Mọi lời gọi đều chạy dưới một principal thật của egret, nên Ranger và audit vẫn áp dụng nguyên vẹn.
 
 ## 2. Các quyết định đã chốt
 
@@ -16,7 +16,7 @@ Data API lấp khoảng trống đó: thành viên workspace viết một câu S
 |---|---|---|
 | Cách xây | Crate Rust native trong egret; sqlrest là **tham chiếu** domain model và UX | Một hệ thống, một mô hình quyền, một UI. Chạy sqlrest song song nghĩa là hai identity store, hai datastore, hai UI. |
 | Nguồn định nghĩa endpoint | SQL thô + tham số là lõi; thêm lối tắt "Publish as API" để seed SQL từ Saved Query / Dataset | SQL thô là nguyên thủy linh hoạt; lối tắt bỏ được bước copy-paste mà không bó buộc mô hình. |
-| Định danh bên tiêu thụ | **Service account = principal thật của egret** | Query đi qua machine-idp → engine token → Ranger. Một mô hình quyền; audit truy về được một danh tính có tên. |
+| Định danh bên tiêu thụ | **Service account = principal thật của egret**, sở hữu các client OAuth2 `client_credentials` trên chính machine-IdP của egret | Query đi qua machine-idp → engine token → Ranger. Một mô hình quyền; audit truy về được một danh tính có tên. |
 | Đọc/ghi | **Chỉ đọc (SELECT) ở v1** | Thu hẹp bề mặt tấn công; không cần thiết kế transaction/rollback/idempotency. Ghi để v2. |
 | Phạm vi v1 | Version & rollback · rate limit / quota · response cache · OpenAPI tự sinh + Try-it | Chọn cả bốn. |
 | Bề mặt phục vụ | Cùng process với `egret-server`, nhưng cấu trúc sao cho tách thành binary riêng được sau | Mặc định modular monolith mà không chặn đường cô lập về sau. |
@@ -39,7 +39,7 @@ Chúng chỉ nhân đôi dấu nháy đơn, **bỏ qua backslash**.
 
 Đây là sự không nhất quán giữa các helper anh em chứ không phải điểm mù: `like_literal` (`crates/egret-bi/src/schema.rs:161`) và `sr_escape_dq` (`crates/egret-engine-mgmt/src/engines.rs:3062`) đều đã escape `\` đúng. `sql_literal` với tới được bằng quyền BI thấp nhất (`CH_READ`), nên hiện tại nó là chỗ phơi nhiễm nhiều hơn trong hai chỗ. StarRocks theo dialect MySQL và mặc định không bật `NO_BACKSLASH_ESCAPES`, nên `\` là ký tự escape và `\'` thoát ra khỏi literal. Trino không bị ảnh hưởng (nó không xử lý backslash escape trong string literal chuẩn).
 
-Hiện tại lỗ hổng này chỉ với tới được bởi người dùng đã xác thực có quyền SQL Lab. Data API sẽ đưa **chính đường render đó ra Internet công khai sau một API key**. Vì vậy bản vá thuộc phạm vi v1, không phải việc làm sau.
+Hiện tại lỗ hổng này chỉ với tới được bởi người dùng đã xác thực có quyền SQL Lab. Data API sẽ đưa **chính đường render đó ra Internet công khai sau một credential cho máy**. Vì vậy bản vá thuộc phạm vi v1, không phải việc làm sau.
 
 Unit test hiện có ở cả hai chỗ — `string_param_neutralizes_injection` (`template.rs:93`) và `sql_literal_encodes_by_type` (`chartquery.rs:684`) — đều xanh dù lỗ hổng còn hay đã hết, vì không test nào dùng giá trị có chứa backslash. Chúng không phải bằng chứng.
 
@@ -65,11 +65,11 @@ Một chỗ thứ ba, `starrocks_create_service_user_sql` (`crates/egret-engine-
 | Crate | Vai trò |
 |---|---|
 | `egret-dataapi-api` | Contract crate lá, pure-serde: DTO định nghĩa endpoint, param spec, published snapshot. Dùng được bởi `egret-server` và frontend codegen mà không kéo theo sqlx/axum. |
-| `egret-dataapi` | Seam crate: store (sở hữu schema `dataapi`), vòng đời publish, service account + key, rate limit, cache, access log, **hai router**. |
+| `egret-dataapi` | Seam crate: store (sở hữu schema `dataapi`), vòng đời publish, service account + các client OAuth2 của chúng, rate limit, cache, access log, **hai router**. |
 
 ### 4.2 Hai router, tách rời có chủ đích
 
-- `management_router()` → nest dưới `/api` như mọi seam khác. Session cookie + CSRF + Cedar. Soạn thảo, publish, quản lý key.
+- `management_router()` → nest dưới `/api` như mọi seam khác. Session cookie + CSRF + Cedar. Soạn thảo, publish, quản lý service account và client.
 - `serving_router()` → nest dưới `/data-api/v1`. **Không cookie, không CSRF**, chỉ `Authorization: Bearer`. Middleware stack tách hẳn.
 
 Ranh giới này quan trọng hơn vẻ ngoài của nó. CSRF từng giết một POST trong production của chính codebase này mà không router-level test nào thấy được. Serving surface **không** được thừa kế ngầm bất kỳ middleware nào của control plane; mọi layer trên nó đều phải khai báo tường minh.
@@ -153,17 +153,25 @@ dataapi.endpoint_versions    -- snapshot BẤT BIẾN
   id, endpoint_id, version int, snapshot jsonb, note, created_by, created_at
   UNIQUE (endpoint_id, version)
 
-dataapi.api_keys             -- credential cho serving surface
-  id, workspace_id, service_account_id (→ users.id),
-  name, prefix text, secret_hash text, expires_at, last_used_at,
-  revoked_at, created_by, created_at
-  UNIQUE (prefix)
+dataapi.service_accounts     -- ràng buộc workspace cho một machine principal
+  user_id uuid PK (→ users.id ON DELETE CASCADE),
+  workspace_id, name, description, created_by, created_at
+  UNIQUE (workspace_id, name)
+
+dataapi.clients              -- client OAuth2 client_credentials (P2, §6.1)
+  id, service_account_id (→ dataapi.service_accounts.user_id ON DELETE CASCADE),
+  name, client_id text UNIQUE, client_secret_hash text,
+  expires_at, revoked_at, last_used_at, created_by, created_at
 
 dataapi.access_log           -- một hàng mỗi lần gọi
-  id, ts, endpoint_id, version, service_account_id, api_key_id,
+  id, ts, endpoint_id, version, service_account_id, client_id,
   status_code, row_count, duration_ms, cache_hit bool,
   engine_query_id, client_ip, error_code
 ```
+
+**Vì sao ràng buộc workspace là bảng riêng chứ không phải một cột trên `users`.** `users` ở tầng platform, và mọi bên tiêu thụ khác của nó — trang Users của admin, principal picker của Access console, `find_by_id` để hiển thị — đều sẽ phải học cách bỏ qua một cột workspace vô nghĩa với con người. Ràng buộc đó nằm ở `dataapi.service_accounts`, còn `users` chỉ nhận đúng phần bắt buộc: `provider = 'service'`, cộng một `CHECK` rằng hàng service không bao giờ mang `password_hash`. Handler login vốn đã đòi có password_hash, nhưng nó chỉ cách sai vĩnh viễn đúng một code path; ràng buộc đặt ở chỗ không thể quên.
+
+`dataapi.clients` được nắn theo đúng hình dạng `catalog.catalog_clients` (0053) — cùng ý tưởng, cùng machine-IdP, audience thứ hai. N client mỗi service account, nên xoay vòng là mint-mới-rồi-thu-hồi-cũ chứ không phải một cửa sổ hỏng-rồi-sửa.
 
 ### 5.1.1 Hình dạng cấu hình
 
@@ -194,7 +202,7 @@ Bốn cột cấu hình jsonb, cũng là hình dạng được đóng băng vào
 { "max_rows": 10000, "timeout_seconds": 30 }
 
 // rate_limit
-{ "per_key_qps": 5, "burst": 10, "per_endpoint_qps": 50 }
+{ "per_client_qps": 5, "burst": 10, "per_endpoint_qps": 50 }
 ```
 
 ### 5.1.2 Response thành công
@@ -215,7 +223,7 @@ Bốn cột cấu hình jsonb, cũng là hình dạng được đóng băng vào
 
 `meta.version` là version đã phục vụ lời gọi đó — nó giúp một bug phía client tái hiện được trên đúng snapshot đã sinh ra nó. `meta.cached` cũng không phải trang trí: thiếu nó thì khi debug không phân biệt được kết quả cũ với kết quả vừa lấy.
 
-`dataapi.endpoints.folder_id` và `dataapi.api_keys.service_account_id` là **FK xuyên schema** trỏ vào `public.folders(id)` và `public.users(id)`. Điều này hơi nghịch với nguyên tắc mỗi seam sở hữu schema riêng, nhưng `folders` và `users` vốn đã là bảng dùng chung xuyên suốt, và nhân bản chúng còn tệ hơn. Chấp nhận và ghi nhận tại đây.
+`dataapi.endpoints.folder_id` và `dataapi.service_accounts.user_id` / `.workspace_id` là **FK xuyên schema** trỏ vào `public.folders(id)`, `public.users(id)` và `public.workspaces(id)`. Điều này hơi nghịch với nguyên tắc mỗi seam sở hữu schema riêng, nhưng `folders` và `users` vốn đã là bảng dùng chung xuyên suốt, và nhân bản chúng còn tệ hơn. Chấp nhận và ghi nhận tại đây.
 
 ### 5.2 Folder không phải là segment của URL
 
@@ -256,28 +264,59 @@ draft ──validate──> publish(v N) ──> live
 
 **Method cho phép ở v1 là `GET` và `POST`, cả hai đều chỉ đọc.** `POST` tồn tại chỉ để nhận payload tham số quá lớn hoặc quá có cấu trúc cho query string; nó chịu cùng ràng buộc một-câu-SELECT. `PUT`/`PATCH`/`DELETE` bị từ chối — chấp nhận chúng sẽ ngụ ý một ngữ nghĩa ghi mà v1 không có.
 
-Publish / rollback / tạo key / thu hồi key được phát ra dưới dạng sự kiện `egret-audit` — không thêm bảng.
+Publish và rollback sẽ được phát ra dưới dạng sự kiện `egret-audit` — không thêm bảng. **Cấp client và thu hồi client cũng thuộc P3, và hiện chưa được phát ra**: các route quản trị P2 đã tồn tại và đã mint credential, nhưng `DataApiState` không mang audit sink nào, nên việc cấp hay thu hồi một client hiện không để lại bản ghi audit. Đây là một khoảng trống được nói rõ, không phải chi tiết để đọc lướt — cho tới khi P3 đấu sink vào, dấu vết duy nhất về vòng đời của một credential là chính dòng `dataapi.clients` (`created_by`, `created_at`, `revoked_at`, `last_used_at`).
 
 **Cảnh báo vận hành phải hiện lên UI:** publish endpoint **không** cấp quyền dữ liệu. Vì query chạy dưới danh nghĩa service account với Ranger enforcement, admin còn phải cấp quyền cho chính service account đó trong Ranger. Endpoint publish mà thiếu bước này sẽ lỗi permission từ engine, và lỗi đó phải được map thành thông báo nói rõ điều này thay vì để lộ raw engine error.
 
 ## 6. Xác thực và luồng request
 
-### 6.1 API key
+### 6.1 Credential: OAuth2 `client_credentials`, không phải API key tự chế
 
-Định dạng `egt_<prefix>_<secret>`: `prefix` 12 ký tự (index unique, dùng để tra cứu) và `secret` 32 byte ngẫu nhiên, base64url. Lưu `prefix` + `secret_hash`. Secret chỉ hiện đúng một lần, lúc tạo.
+Một bản trước của spec này quy định một key tự chế, `egt_<prefix>_<secret>`, hash bằng SHA-256 và so sánh ở mỗi request. **Đó không phải thứ đã được xây, và lý do từ bỏ nó đáng được nói rõ**: egret vốn đã chạy một machine-IdP (`egret-machine-idp`) mint JWT có chữ ký cho các client của Iceberg catalog nhúng. Bịa ra một định dạng credential thứ hai đồng nghĩa với hai issuer, hai câu chuyện thu hồi, hai chỗ phải làm đúng so sánh constant-time, và không tương thích với bất kỳ thư viện OAuth2 nào.
 
-**Hash bằng SHA-256; không dùng `crates/egret-auth/src/password.rs`.** Argon2 ở đó đúng cho mật khẩu người chọn và sai cho API key: secret 32 byte ngẫu nhiên đã đủ entropy nên không cần KDF chống brute-force, trong khi trả ~50–100 ms KDF trên *mỗi* request API là không chấp nhận được. So sánh constant-time.
+Thứ thực sự ship là **một audience thứ hai trên chính IdP sẵn có**:
+
+- Mỗi service account sở hữu **N client** trong `dataapi.clients`. Mỗi client gồm `client_id` (`egret-dataapi-<uuid>`) và `client_secret` 32 byte ngẫu nhiên, base64url. Secret chỉ hiện đúng một lần lúc tạo và không lấy lại được — DTO danh sách của management API **không hề có** trường secret, không phải là trường bị skip hay Option.
+- Client đổi cặp đó tại `POST /oauth/token` (`grant_type=client_credentials`) lấy JWT với `aud: "data-api"`, kèm claim `ws` và `egret_user_id`. `ClientStore` của `egret-dataapi` implement đúng trait `ClientVerifier` mà registry của Catalog đang implement; IdP giữ một danh sách verifier và các audience không biết gì về nhau.
+- Mọi kiểu thất bại khi verify — `client_id` lạ, đã thu hồi, đã hết hạn, principal bị vô hiệu hoá, workspace đã archive, sai secret — đều trả về *cùng một response*. Một lỗi phân biệt được sẽ là oracle miễn phí cho bất kỳ ai dò client id. **Hai lưu ý, vì "cùng một response" hẹp hơn "không phân biệt được".** Thứ nhất, *thời gian* khác nhau: chỉ request đi được tới bước sai secret mới phải trả chi phí verify Argon2, nên một secret sai trên `client_id` có thật sẽ chậm hơn một cách đo được so với mọi kiểu từ chối trả về trước khi hash — và điều đó phân biệt được "client id này tồn tại" với "không tồn tại". Muốn cân bằng lại thì phải verify một dummy hash trên các nhánh trả về sớm, và P2 cố ý chưa làm. Thứ hai, *hash lưu bị hỏng* là thất bại duy nhất không phải `Ok(None)`: `PasswordHash::new` lỗi, `verify` trả `Err`, và caller nhận 500 chứ không phải một lỗi xác thực.
+
+**Hash là Argon2, và phản đối trước đây với nó không còn đúng nữa.** Phản đối đó là trả ~50–100 ms KDF trên *mỗi request API* là không chấp nhận được — điều đó đúng, và chính vì thế KDF không nằm trên đường đó. Secret được verify **một lần mỗi token**, không phải một lần mỗi lời gọi; serving surface sau đó chỉ verify chữ ký JWT. Argon2 tốn vài chục mili-giây mỗi 10 phút cho mỗi client, và khớp với `CatalogStore::verify_client` thay vì đẻ ra một cơ chế hash thứ hai.
+
+**Đánh đổi về thu hồi, nói thẳng.** Một token stateless không thể bị thu hồi trước khi hết hạn. Thu hồi client sẽ set `revoked_at`, nên không token *mới* nào mint được nữa, nhưng token đã cấp vẫn còn hiệu lực tới lúc hết hạn. `DATA_API_TTL_SECS = 600` chính là cận đó: sau khi thu hồi, cửa sổ phơi nhiễm tối đa là 10 phút. Thu hồi tức thì đã được cân nhắc và bị loại — nó đòi một lần tra cứu mỗi request, tức trả lại đúng phần throughput mà thiết kế này được chọn để có.
+
+**Phải nói chính xác một "công tắc tắt" mua được gì, vì chỗ này rất dễ nói quá.** Có bốn thao tác chặn được một client bị lộ mint *thêm* token, và `verify` tôn trọng cả bốn (mỗi thao tác đều có test trong `clients_store.rs`): thu hồi client (`revoked_at`), vô hiệu hoá principal (`users.status <> 'active'`), archive workspace (`workspaces.status <> 'active'`), và xoá service account (cascade xuống các client của nó). **Không thao tác nào thu hồi được token đã cấp** — serving surface verify JWT theo kiểu stateless, đó chính là toàn bộ ý nghĩa của §6.2 bước 1. Vì vậy TTL 600s là một cận không rút ngắn được, không phải trường hợp xấu nhất mà một thao tác nhanh hơn có thể phá.
+
+**Vì sao `verify` phải đọc `workspaces.status`, và không phải chỉ cho gọn.** Archive một workspace là thao tác ngừng hoạt động tự nhiên nhất của người vận hành, mà mọi route quản trị Data API đều đi qua `WsContext` — thứ trả 404 với workspace không còn active. Nghĩa là archive *xoá mất chính những route có thể thu hồi client hoặc vô hiệu hoá principal của nó*. Nếu không kiểm trạng thái workspace, archive sẽ để lại mọi credential trong workspace đó vừa **còn sống vừa không thu hồi được** — người vận hành làm đúng cái thao tác trông giống "tắt hết" nhất, và nhận về điều ngược lại. Vì lúc đó bề mặt khắc phục đã biến mất, chính bước xác thực phải tôn trọng trạng thái workspace; không còn chỗ nào khác làm được.
+
+Vô hiệu hoá principal là thao tác gọi được qua API: `PATCH /api/control-plane/users/{id}` với `{"status":"disabled"}` chấp nhận service account. Chỉ các trường *hồ sơ* của route đó (tên/email) mới từ chối hàng `provider = 'service'` — nhánh status thì không, đúng vì nó chính là công tắc tắt này, và nó vẫn áp dụng kiểm lại quyền `user:disable`, guard platform admin cuối cùng, và thu hồi session ngay lập tức.
+
+**Ai mint được credential, và bản nâng cấp bật sẵn những gì.** `service_account:read` và `service_account:manage` được seed vào role dựng sẵn `ws_admin` (migration 0120) và dừng ở đó — không xuống `ws_editor`, vì service account là một principal máy mà admin sau đó cấp quyền dữ liệu cho trong Ranger, tức một hành vi quản trị chứ không phải biên tập. Phải nói thẳng hệ quả thay vì để người khác tự phát hiện: `ws_admin` là một hàng role toàn cục duy nhất, nên migration đó chạm tới **mọi assignment `ws_admin` đang có, trong mọi workspace đang có, cùng một lúc**, và feature module `data_api` coi việc thiếu hàng entitlement là đang bật — tức là mọi workspace có trước nó. Vậy nên ngay khi nâng cấp, mọi workspace admin hiện tại đều mint được credential máy cho workspace của mình, không cần thao tác nào từ người vận hành và không cần opt-in theo từng workspace. Phạm vi đó là có chủ ý, nhưng nó xuất hiện lúc nâng cấp chứ không phải do ai bật lên, nên được công bố ở đây và trong comment của migration. Người vận hành nếu không muốn thì phải hoặc ghi một hàng entitlement `data_api` tắt module cho các workspace đó, hoặc gỡ hai quyền này khỏi `ws_admin`.
+
+`client_credentials` không có refresh token, đúng theo thiết kế: client cứ xin lại bằng credential của mình. Mọi thư viện OAuth2 đều đã làm vậy sẵn.
+
+**Bề mặt quản trị** (P2, scope theo workspace, session + CSRF như mọi nhóm `/api/ws/…` khác):
+
+```text
+GET    /api/ws/{workspace}/data-api/service-accounts
+POST   /api/ws/{workspace}/data-api/service-accounts
+DELETE /api/ws/{workspace}/data-api/service-accounts/{id}
+GET    /api/ws/{workspace}/data-api/service-accounts/{id}/clients
+POST   /api/ws/{workspace}/data-api/service-accounts/{id}/clients   -> secret, đúng một lần
+DELETE /api/ws/{workspace}/data-api/clients/{id}
+```
+
+Hai permission, đều `Scope::Workspace` và đều chỉ seed cho `ws_admin` (migration 0120): `service_account:read` để xem account và client, `service_account:manage` để tạo, xoá và **cấp client**. Cấp client gate trên `:manage`, không bao giờ trên `:read` — client là credential bearer cho quyền truy cập dữ liệu của account đó, nên phát nó ra mạnh hơn hẳn việc đọc danh sách. Mọi handler đều resolve account (hoặc client) theo workspace lấy từ extractor `WsContext`, không bao giờ đọc lại path segment lần hai, và trả **404 chứ không phải 403** khi không khớp — đúng luật như §6.2 bước 3.
 
 ### 6.2 Chuỗi xử lý mỗi request
 
 ```text
 GET /data-api/v1/{ws}/{path}
  │
- 1. key → service account   (active, chưa revoke, chưa hết hạn)  ✗→ 401
+ 1. verify JWT qua JWKS → principal + workspace từ claims        ✗→ 401
  2. (ws, method, path) → endpoint → live_version_id → snapshot   ✗→ 404
  3. workspace của service account == {ws} trong path             ✗→ 404
  4. Cedar: dataapi:invoke trên Object data_api_endpoint:{id}     ✗→ 403
- 5. rate limit (theo endpoint và theo key)                       ✗→ 429 + Retry-After
+ 5. rate limit (theo endpoint và theo client)                    ✗→ 429 + Retry-After
  6. cache lookup                                                 hit → trả
  7. render params → SQL an toàn theo dialect                     ✗→ 400
  8. machine-idp mint engine token cho SA
@@ -286,7 +325,9 @@ GET /data-api/v1/{ws}/{path}
 10. shape output → lưu cache → access_log → trả
 ```
 
-Bước 3 trả **404 chứ không phải 403** là cố ý: một key thuộc workspace khác không được phép phân biệt "không có endpoint đó" với "có, nhưng anh không được gọi".
+**Bước 1 là stateless và không tốn round-trip DB nào.** Bearer token là JWT do chính machine-IdP của egret ký, nên serving path chỉ verify chữ ký với JWKS rồi đọc thẳng `egret_user_id` và `ws` từ claim — không có tra cứu credential, và không có Argon2, trên hot path. Đó chính là lý do §6.1 chọn đổi token thay vì key kiểm mỗi request. Cái giá là cửa sổ thu hồi mà §6.1 chặn ở 600s.
+
+Bước 3 trả **404 chứ không phải 403** là cố ý: một token thuộc workspace khác không được phép phân biệt "không có endpoint đó" với "có, nhưng anh không được gọi". Management API áp dụng đúng luật đó cho service account và client (§6.1).
 
 ### 6.3 Cache phải scope theo principal
 
@@ -315,7 +356,7 @@ Một envelope ổn định, máy đọc được:
 { "error": { "code": "param_invalid", "message": "...", "request_id": "01J..." } }
 ```
 
-**Không bao giờ trả raw engine error cho caller bên ngoài.** Lỗi Trino/StarRocks mang theo tên bảng, tên cột và đôi khi cả thông tin host — trên một endpoint công khai sau API key thì đó là rò rỉ metadata. Map sang code cố định và ghi chi tiết đầy đủ vào log nội bộ kèm `request_id` để support tra được.
+**Không bao giờ trả raw engine error cho caller bên ngoài.** Lỗi Trino/StarRocks mang theo tên bảng, tên cột và đôi khi cả thông tin host — trên một endpoint công khai sau một credential cho máy thì đó là rò rỉ metadata. Map sang code cố định và ghi chi tiết đầy đủ vào log nội bộ kèm `request_id` để support tra được.
 
 | HTTP | code | Khi nào |
 |---|---|---|
@@ -338,7 +379,7 @@ Một envelope ổn định, máy đọc được:
 - `dataapi.access_log` ghi lại mọi lời gọi. Đây là bảng tăng nhanh nhất hệ thống: partition theo tháng cộng một job dọn theo retention, tái dùng gc-worker pattern có sẵn từ catalog CE6 thay vì viết mới.
 - Thống kê trên management UI (số lần gọi, tỉ lệ lỗi, p50/p95, cache hit rate theo endpoint) tính từ `access_log` — tương đương `HourCount` / `DateCount` / `NameCount` của sqlrest.
 - `request_id` được truyền xuống engine và lưu cạnh `engine_query_id`, để một lời gọi API chậm truy ngược về đúng query trên Trino/StarRocks.
-- Publish, rollback, tạo key và thu hồi key là sự kiện `egret-audit`.
+- Publish, rollback, cấp client và thu hồi client sẽ là sự kiện `egret-audit`. Cả bốn đều thuộc **P3** — chưa cái nào được phát ra tính đến P2 (§5.3).
 
 ## 9. Kiểm thử
 
@@ -363,4 +404,4 @@ Cố ý hoãn, mỗi mục đều được ghi lại để nó là một quyết
 - **Xuất MCP tool** (`McpToolEntity` của sqlrest) — việc tiếp nối tự nhiên ở v2 khi endpoint đã ổn định.
 - **Danh sách IP allow/deny** (`FirewallRulesEntity` của sqlrest) — giải ở tầng ingress tốt hơn trong application code.
 - **Import/export hàng loạt định nghĩa endpoint** — đáng có, nhưng không đáng chặn v1.
-- **Đưa `dataapi.api_keys` lên `egret-auth`** — key ở lại schema `dataapi` chừng nào Data API còn là bên tiêu thụ duy nhất. Khi có bề mặt thứ hai cần credential cho máy, chúng chuyển lên.
+- **Đưa `dataapi.clients` lên `egret-auth`** — registry client ở lại schema `dataapi` chừng nào Data API còn là bên tiêu thụ duy nhất. Bản thân *giao thức* thì đã dùng chung sẵn: `egret-machine-idp` verify cả registry này lẫn của Catalog qua một trait `ClientVerifier`. Khi có bề mặt thứ ba cần credential cho máy, phần lưu trữ cũng chuyển lên.

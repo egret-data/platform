@@ -51,6 +51,9 @@ pub struct AppState {
     pub catalog_engine: Option<axum::Router>,
     /// egret mini machine-IdP (mints Catalog Client tokens); `None` in unit tests.
     pub idp: Option<egret_machine_idp::IdpState>,
+    /// Data API management surface (P2): service accounts and their OAuth2
+    /// clients; `None` in unit tests.
+    pub dataapi: Option<egret_dataapi::DataApiState>,
 }
 
 impl AppState {
@@ -74,6 +77,7 @@ impl AppState {
             engine_mgmt: None,
             catalog_engine: None,
             idp: None,
+            dataapi: None,
         }
     }
 }
@@ -129,6 +133,7 @@ pub fn openapi_doc() -> utoipa::openapi::OpenApi {
     doc.merge(egret_policy::openapi());
     doc.merge(egret_engine_mgmt::openapi());
     doc.merge(egret_machine_idp::openapi());
+    doc.merge(egret_dataapi::openapi());
     doc
 }
 
@@ -316,6 +321,18 @@ pub fn build_router(state: AppState) -> Router {
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(em);
         router = router.merge(ws_group);
+    }
+
+    if let Some(dataapi) = state.dataapi.clone() {
+        // Data API management (P2): workspace-scoped, session-authenticated,
+        // browser-facing — so it sits inside the CSRF layer like every other
+        // `/api/ws/…` group. The SERVING surface (P4) will be a separate,
+        // token-authenticated router with no CSRF, like the catalog's.
+        let group = Router::new()
+            .nest("/api", egret_dataapi::management_router())
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(dataapi);
+        router = router.merge(group);
     }
 
     if let Some(catalog_engine) = state.catalog_engine.clone() {
