@@ -20,6 +20,11 @@ egret-auth.workspace = true
 # workspace a handler acts on comes from here, never from a second read of the
 # path segment.
 egret-workspace.workspace = true
+# The Query seam's LEAF contract crate — `QueryExecPort` (schema resolution for
+# validate-before-publish) plus the shared `Engine`/`Database` vocabulary. This
+# crate must never depend on `egret-query` itself: the whole point of the port
+# is that the Data API can move to its own binary by swapping the impl.
+egret-query-api.workspace = true
 axum.workspace = true
 sqlx.workspace = true
 serde.workspace = true

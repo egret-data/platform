@@ -2914,6 +2914,7 @@ dependencies = [
  "egret-events",
  "egret-machine-idp",
  "egret-metastore",
+ "egret-query-api",
  "egret-workspace",
  "rand 0.8.7",
  "serde",
@@ -3205,6 +3206,7 @@ dependencies = [
 name = "egret-query-api"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "egret-core",
  "serde",
  "utoipa",
