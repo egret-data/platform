@@ -170,6 +170,17 @@ async fn password_reset_rejects_a_service_account() {
         StatusCode::BAD_REQUEST,
         "a service account has no password to reset; body={j}"
     );
+    // `reset_password` also has a pre-existing `provider != "local"` check
+    // (written for SSO/OIDC accounts) that independently 400s a service
+    // account with a DIFFERENT message ("non-local (SSO) account"). Asserting
+    // only the status code would pass even if `refuse_service_account` were
+    // removed entirely. Pin the message so this test actually exercises the
+    // new guard, not the SSO fallback.
+    let msg = j["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("service account"),
+        "expected the service-account guard's message, got: {msg}"
+    );
 }
 
 #[tokio::test]
