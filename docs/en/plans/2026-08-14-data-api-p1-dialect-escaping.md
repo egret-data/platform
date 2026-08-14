@@ -437,14 +437,14 @@ Start the local stack if it is not already up:
 just up
 ```
 
-Then, with the StarRocks URL exported (host:port of the local StarRocks, e.g. `127.0.0.1:9030`):
+**The env var must be a full URL with a scheme.** `parse()` (`connector_starrocks.rs:23`) runs `url::Url::parse(&base).ok()?`, and a URL scheme may not begin with a digit — so a bare `127.0.0.1:9030` fails to parse, returns `None`, and the test **self-skips silently**. A skipped test prints "skip" and exits 0, which looks exactly like a pass in a summary line.
 
 ```bash
-EGRET_TEST_STARROCKS_URL=127.0.0.1:9030 \
+EGRET_TEST_STARROCKS_URL=mysql://root@127.0.0.1:9030 \
   cargo test -p egret-query --test connector_starrocks starrocks_rendered_param_cannot_inject -- --nocapture
 ```
 
-Expected: PASS. If you see "skipping", the env var did not reach the test — a skipped test is not a passing test, so fix the invocation before continuing.
+Expected: PASS, with no "skip" in the output. Read the actual output — do not trust the `test result: ok` line alone, because a self-skipped test also reports ok.
 
 - [ ] **Step 4: Verify the test is real by mutating the implementation**
 
@@ -455,11 +455,14 @@ Expected: FAILS, and the failure is either the `assert_eq!` reporting `1` instea
 - [ ] **Step 5: Full local check**
 
 ```bash
-just check
-cargo test -p egret-query
+cargo fmt --all --check
+cargo clippy -p egret-query -p egret-query-api --all-targets
+cargo test -p egret-query -p egret-query-api
 ```
 
-Expected: fmt clean, clippy clean, egret-query suites green. Note that the StarRocks test self-skips without the env var; that is expected in the default run.
+Expected: fmt clean, clippy clean, suites green. The StarRocks test self-skips without the env var; that is expected in this run.
+
+Do **not** use `just check` here: it runs `cargo test --workspace`, which contradicts this plan's constraint against workspace-wide runs and drags in unrelated suites. The whole-workspace run belongs in the final review, once, not after every task. `egret-config::tests::toml_file_is_merged` is a known pre-existing flake (a `figment::Jail` parallelism race) and is not this plan's to fix.
 
 - [ ] **Step 6: Commit**
 
