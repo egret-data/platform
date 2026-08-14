@@ -24,6 +24,38 @@ pub trait QueryExecPort: Send + Sync {
     /// Used by validate-before-publish to freeze the output shape into the
     /// snapshot, so the published contract cannot drift when the underlying
     /// table changes.
+    ///
+    /// # Scoping — an implementation MUST honour this
+    ///
+    /// `database_id` typically arrives from a request body, so it is
+    /// attacker-controlled. Every implementation **must** verify that
+    /// `database_id` belongs to `ws` before connecting, and report a
+    /// non-belonging or absent id as [`egret_core::Error::NotFound`] — absence
+    /// and denial look identical, so the call cannot be used to probe which
+    /// connections exist in other workspaces. `ws` is a scoping argument, not a
+    /// hint. The port is fail-closed on this by design: a caller that forgets its
+    /// own check is still safe.
+    ///
+    /// The *permission* half is the caller's: the port has no `WorkspaceContext`
+    /// and does not evaluate `query:run`.
+    ///
+    /// # Errors
+    ///
+    /// The distinction matters to the endpoint author and must be preserved:
+    ///
+    /// * [`Error::Forbidden`] — the caller's policy denies the table. This is the
+    ///   reason `principal` exists; never flatten it into `InvalidInput`.
+    /// * [`Error::NotFound`] — the database is not in `ws`, or the relation the
+    ///   SQL names does not exist.
+    /// * [`Error::InvalidInput`] — the SQL is the problem, with the engine's
+    ///   message attached so the author can fix it.
+    /// * [`Error::Internal`] — infrastructure. Never carries engine addresses to
+    ///   the client.
+    ///
+    /// [`Error::Forbidden`]: egret_core::Error::Forbidden
+    /// [`Error::NotFound`]: egret_core::Error::NotFound
+    /// [`Error::InvalidInput`]: egret_core::Error::InvalidInput
+    /// [`Error::Internal`]: egret_core::Error::Internal
     async fn describe_as(
         &self,
         ws: Uuid,

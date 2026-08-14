@@ -131,6 +131,8 @@ struct Fixture {
     st: EngineState,
     ws: Uuid,
     database_id: Uuid,
+    /// A live connection owned by a DIFFERENT workspace, for the scoping test.
+    foreign_database_id: Uuid,
     user: egret_core::UserId,
 }
 
@@ -205,6 +207,32 @@ async fn trino_engine_state() -> Option<Fixture> {
     .await
     .expect("insert trino database");
 
+    // A SECOND workspace owning an otherwise-identical connection. `describe_as`
+    // must refuse this id when asked for it under `ws` — it exists, it is
+    // reachable, it is simply not this workspace's.
+    let other_ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'Port Describe Other', $2, 'active') RETURNING id",
+    )
+    .bind(format!("port-other-{}", Uuid::new_v4().simple()))
+    .bind(uid)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert other workspace");
+    let foreign_database_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name, engine, host, port, options, workspace_id, delegated) \
+         VALUES ($1,'trino',$2,$3,$4,$5,$6) RETURNING id",
+    )
+    .bind(format!("other-{}", Uuid::new_v4().simple()))
+    .bind(trino.host_str().expect("trino host"))
+    .bind(trino.port().unwrap_or(8080) as i32)
+    .bind(&options)
+    .bind(other_ws)
+    .bind(token.is_some())
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert foreign trino database");
+
     let store = QueryStore::new(db.clone());
     let databases = DatabaseRepo::new(
         db.clone(),
@@ -253,6 +281,7 @@ async fn trino_engine_state() -> Option<Fixture> {
         st,
         ws,
         database_id,
+        foreign_database_id,
         user: egret_core::UserId(uid),
     })
 }
@@ -304,4 +333,44 @@ async fn describe_as_rejects_invalid_sql() {
         !msg.contains("forbidden") && !msg.contains("connect"),
         "the engine must have parsed the SQL, not refused the connection: {msg}"
     );
+}
+
+/// The port scopes `database_id` to `ws` itself, so a caller that forgets its own
+/// check is still safe. `database_id` reaches it from a request body — an
+/// unscoped describe would let an endpoint author aim at another workspace's
+/// connection and read its schema.
+///
+/// `NotFound`, not `Forbidden`: absence and denial must be indistinguishable, or
+/// the call becomes an oracle for which connections exist elsewhere.
+#[tokio::test]
+async fn describe_as_refuses_a_database_from_another_workspace() {
+    let Some(f) = trino_engine_state().await else {
+        eprintln!("skip");
+        return;
+    };
+    let port: &dyn QueryExecPort = &f.st;
+
+    // The SQL is perfectly valid and the connection is live — the ONLY reason to
+    // fail is that this database belongs to a different workspace.
+    let err = port
+        .describe_as(
+            f.ws,
+            f.foreign_database_id,
+            f.user,
+            "SELECT 1 AS n, 'x' AS s",
+        )
+        .await
+        .expect_err("a database outside the workspace must not be describable");
+    assert!(
+        matches!(err, egret_core::Error::NotFound(_)),
+        "a foreign database must be NotFound (not Forbidden, which would confirm it exists), got {err:?}"
+    );
+
+    // Control: the same call under the OWNING workspace succeeds, so the refusal
+    // above is the scope check and not a broken fixture.
+    let cols = port
+        .describe_as(f.ws, f.database_id, f.user, "SELECT 1 AS n, 'x' AS s")
+        .await
+        .expect("the workspace's own database still describes");
+    assert_eq!(cols.len(), 2);
 }
