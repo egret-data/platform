@@ -2,7 +2,7 @@
 //! untrusted input and pass through `sql_literal`; identifiers/expressions are
 //! dataset-sourced and trusted.
 
-use egret_query_api::Engine;
+use egret_query_api::{quote_string, Engine};
 use serde::Deserialize;
 
 use crate::dataset::{DatasetColumn, Metric, SourceSpec};
@@ -131,8 +131,12 @@ impl TemporalUnit {
 
 /// Encode a filter value as a SQL literal, validated by the target column's generic type.
 /// Numerics are validated and emitted unquoted; booleans normalized; everything else is
-/// single-quoted with `'` doubled. This is the security-critical primitive.
-pub(crate) fn sql_literal(v: &serde_json::Value, type_generic: &str) -> Result<String, BiError> {
+/// quoted and escaped for `engine`'s dialect. This is the security-critical primitive.
+pub(crate) fn sql_literal(
+    engine: Engine,
+    v: &serde_json::Value,
+    type_generic: &str,
+) -> Result<String, BiError> {
     match type_generic {
         "numeric" => {
             if let Some(n) = v.as_i64() {
@@ -181,7 +185,7 @@ pub(crate) fn sql_literal(v: &serde_json::Value, type_generic: &str) -> Result<S
                 }
                 other => other.to_string(),
             };
-            Ok(format!("'{}'", s.replace('\'', "''")))
+            Ok(quote_string(engine, &s))
         }
     }
 }
@@ -330,7 +334,7 @@ fn render_filter(engine: Engine, columns: &[DatasetColumn], f: &Filter) -> Resul
             }
             let items = arr
                 .iter()
-                .map(|v| sql_literal(v, tg).map(|l| cast_temporal(engine, c, l)))
+                .map(|v| sql_literal(engine, v, tg).map(|l| cast_temporal(engine, c, l)))
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ");
             let kw = if matches!(f.op, FilterOp::In) {
@@ -341,7 +345,7 @@ fn render_filter(engine: Engine, columns: &[DatasetColumn], f: &Filter) -> Resul
             format!("{lhs} {kw} ({items})")
         }
         _ => {
-            let lit = cast_temporal(engine, c, sql_literal(&f.value, tg)?);
+            let lit = cast_temporal(engine, c, sql_literal(engine, &f.value, tg)?);
             let op = match f.op {
                 FilterOp::Eq => "=",
                 FilterOp::Ne => "<>",
@@ -682,25 +686,52 @@ mod tests {
 
     #[test]
     fn sql_literal_encodes_by_type() {
-        assert_eq!(sql_literal(&json!(42), "numeric").unwrap(), "42");
-        assert_eq!(sql_literal(&json!("42"), "numeric").unwrap(), "42");
-        assert!(sql_literal(&json!("nope"), "numeric").is_err());
-        assert_eq!(sql_literal(&json!(true), "boolean").unwrap(), "TRUE");
-        assert_eq!(sql_literal(&json!("hi"), "string").unwrap(), "'hi'");
+        use egret_query_api::Engine;
+        let e = Engine::Trino;
+        assert_eq!(sql_literal(e, &json!(42), "numeric").unwrap(), "42");
+        assert_eq!(sql_literal(e, &json!("42"), "numeric").unwrap(), "42");
+        assert!(sql_literal(e, &json!("nope"), "numeric").is_err());
+        assert_eq!(sql_literal(e, &json!(true), "boolean").unwrap(), "TRUE");
+        assert_eq!(sql_literal(e, &json!("hi"), "string").unwrap(), "'hi'");
         // injection attempt stays safely quoted
         assert_eq!(
-            sql_literal(&json!("a' OR '1'='1"), "string").unwrap(),
+            sql_literal(e, &json!("a' OR '1'='1"), "string").unwrap(),
             "'a'' OR ''1''=''1'"
         );
     }
 
     #[test]
+    fn sql_literal_starrocks_escapes_backslash() {
+        use egret_query_api::Engine;
+        // A dashboard filter value reaches here with only CH_READ. Doubling the
+        // quote alone would render '\'' OR 1=1 -- ', where StarRocks reads \' as a
+        // literal quote and the next ' closes the string.
+        assert_eq!(
+            sql_literal(Engine::StarRocks, &json!(r"\' OR 1=1 -- "), "string").unwrap(),
+            r"'\\'' OR 1=1 -- '"
+        );
+    }
+
+    #[test]
+    fn sql_literal_trino_leaves_backslash_alone() {
+        use egret_query_api::Engine;
+        // Trino has no backslash escape in standard literals; doubling it here
+        // would corrupt ordinary filter values.
+        assert_eq!(
+            sql_literal(Engine::Trino, &json!(r"a\b"), "string").unwrap(),
+            r"'a\b'"
+        );
+    }
+
+    #[test]
     fn sql_literal_rejects_non_finite() {
-        assert!(sql_literal(&json!("inf"), "numeric").is_err());
-        assert!(sql_literal(&json!("nan"), "numeric").is_err());
-        assert!(sql_literal(&json!("infinity"), "numeric").is_err());
+        use egret_query_api::Engine;
+        let e = Engine::Trino;
+        assert!(sql_literal(e, &json!("inf"), "numeric").is_err());
+        assert!(sql_literal(e, &json!("nan"), "numeric").is_err());
+        assert!(sql_literal(e, &json!("infinity"), "numeric").is_err());
         // finite still works
-        assert_eq!(sql_literal(&json!("3.5"), "numeric").unwrap(), "3.5");
+        assert_eq!(sql_literal(e, &json!("3.5"), "numeric").unwrap(), "3.5");
     }
 
     fn col(name: &str, tg: &str, expr: Option<&str>) -> DatasetColumn {
