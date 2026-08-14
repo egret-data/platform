@@ -56,11 +56,30 @@ struct Caller {
     tok: String,
 }
 
+/// A `QueryExecPort` that must never be consulted. Draft CRUD talks to the
+/// engine at no point — validation and `describe` belong to the publish
+/// lifecycle — so a create or a PATCH that reached a coordinator would be a bug
+/// this makes loud instead of slow.
+struct UnreachablePort;
+#[async_trait::async_trait]
+impl egret_query_api::QueryExecPort for UnreachablePort {
+    async fn describe_as(
+        &self,
+        _ws: Uuid,
+        _database_id: Uuid,
+        _principal: egret_core::UserId,
+        _sql: &str,
+    ) -> Result<Vec<egret_core::ColumnMeta>, egret_core::Error> {
+        unreachable!("draft CRUD must never reach the query engine")
+    }
+}
+
 fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
     DataApiState {
         db: db.clone(),
         clients: ClientStore::new(db.clone()),
         endpoints: EndpointStore::new(db.clone()),
+        query: Arc::new(UnreachablePort),
         users: egret_auth::users::UserRepo::new(db.clone()),
         sessions: egret_auth::session::SessionService::new(
             db.clone(),

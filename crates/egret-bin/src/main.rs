@@ -1292,7 +1292,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             900, // 15-min engine-token TTL (revocation granularity — see spec §7)
         ));
 
-    let engine = {
+    // Bound before it is wrapped in the `Option` `AppState` wants, because the
+    // Data API seam needs the same value as an `Arc<dyn QueryExecPort>` (see the
+    // `dataapi` block below) and there must be exactly one `EngineState` behind
+    // both — a second one built from the same repos would work today and drift
+    // the first time either grows state that matters.
+    let engine_state = {
         let storage_cfg = egret_storage::StorageConfig {
             endpoint: config.storage.endpoint.clone(),
             region: config.storage.region.clone(),
@@ -1319,7 +1324,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             limits.clone(),
             config.engine.preview_rows,
         );
-        Some(egret_query::EngineState {
+        egret_query::EngineState {
             store,
             jobs,
             databases: databases.clone(),
@@ -1333,8 +1338,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             pdp: pdp.clone(),
             users: UserRepo::new(db.clone()),
             engine_minter: engine_minter.clone(),
-        })
+        }
     };
+    let engine = Some(engine_state.clone());
 
     let bi = Some(egret_bi::BiState {
         db: db.clone(),
@@ -1793,6 +1799,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         db: db.clone(),
         clients: egret_dataapi::ClientStore::new(db.clone()),
         endpoints: egret_dataapi::EndpointStore::new(db.clone()),
+        // The Query seam as a PORT, so `egret-dataapi` never names `egret-query`:
+        // publish resolves an endpoint's output columns through `describe_as` and
+        // freezes them into the snapshot. This is the one place the concrete
+        // `EngineState` and the trait object meet.
+        query: std::sync::Arc::new(engine_state),
         users: egret_auth::users::UserRepo::new(db.clone()),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),

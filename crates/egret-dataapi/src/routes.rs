@@ -14,6 +14,12 @@
 //! GET    /api/ws/{workspace}/data-api/endpoints/{id}
 //! PATCH  /api/ws/{workspace}/data-api/endpoints/{id}
 //! DELETE /api/ws/{workspace}/data-api/endpoints/{id}
+//! POST   /api/ws/{workspace}/data-api/endpoints/{id}/validate
+//! POST   /api/ws/{workspace}/data-api/endpoints/{id}/publish
+//! POST   /api/ws/{workspace}/data-api/endpoints/{id}/rollback
+//! POST   /api/ws/{workspace}/data-api/endpoints/{id}/disable
+//! POST   /api/ws/{workspace}/data-api/endpoints/{id}/enable
+//! GET    /api/ws/{workspace}/data-api/endpoints/{id}/versions
 //! ```
 //!
 //! Three invariants this module exists to hold, all of them security properties
@@ -39,17 +45,18 @@
 //!    reference has been accepted, stored, and echoed back to the author as
 //!    valid. For `folder_id` nothing downstream would refuse it at all.
 //!
-//! Not yet an invariant, and Task 4 must not assume it: **`path` and `method`
-//! are editable on a `state = 'live'` row.** The SQL a live endpoint runs comes
-//! from its frozen snapshot and no draft edit can change that — but the URL it
-//! answers on comes from this row, so a PATCH can move a live endpoint. Nothing
-//! is exploitable today because serving does not exist yet; publishing must
-//! either guard these two fields against a live state or make the move
-//! deliberate.
+//! **`path` and `method` are editable on a `state = 'live'` row, deliberately.**
+//! Task 4 answered the question this comment used to leave open: a URL is a
+//! property of the endpoint OBJECT — uniquely constrained, renameable — while
+//! behaviour is a property of the frozen version. P4 routes on
+//! `dataapi.endpoints (method, path)` (the pair carrying `UNIQUE (workspace_id,
+//! method, path)`, so two endpoints can never claim one URL) and then serves
+//! entirely from the snapshot. See `lifecycle.rs`' module comment for the full
+//! contract.
 
 use axum::extract::{FromRef, Path, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use egret_auth::session::SessionService;
@@ -70,6 +77,7 @@ use crate::endpoints::{
     normalize_path, CreateEndpointInput, DataApiEndpointDto, EndpointStore, UpdateEndpointInput,
     ALLOWED_METHODS, FOLDER_ENTITY_TYPE,
 };
+use crate::lifecycle::{validate, DataApiEndpointVersionDto, DataApiPublishedDto, VersionRef};
 
 /// View the accounts and their clients. Deliberately does NOT imply issuing.
 const SA_READ: &str = "service_account:read";
@@ -100,6 +108,13 @@ pub struct DataApiState {
     pub workspaces: WorkspaceRepo,
     pub authz: Authorizer,
     pub pdp: Arc<dyn egret_core::authz::Pdp>,
+    /// The Query seam, as a PORT. Publishing resolves an endpoint's output
+    /// columns through `describe_as` and freezes them into the snapshot, so the
+    /// published contract cannot drift when the underlying table changes. Held as
+    /// `Arc<dyn …>` rather than a concrete `EngineState` so this crate never
+    /// depends on `egret-query` and the seam can move to its own binary by
+    /// swapping the implementation.
+    pub query: Arc<dyn egret_query_api::QueryExecPort>,
     /// egret's public root URL — the machine-IdP's `iss`. The `token_endpoint`
     /// handed back with a new client is derived from it so a caller never has to
     /// guess where to exchange the credential.
@@ -836,6 +851,258 @@ async fn delete_endpoint(
     Ok(Json(Ack::ok()))
 }
 
+// ---------- Publish lifecycle (P3 Task 4) ----------
+//
+// The four routes that make versioning real, plus the version list. Everything
+// that decides WHAT a published endpoint returns is frozen by `publish` into
+// `dataapi.endpoint_versions.snapshot`; see `lifecycle.rs` for the contract P4's
+// serving path has to honour.
+
+/// The `POST /publish` body. Every field optional, so `{}` is a valid publish.
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+pub struct PublishEndpointInput {
+    /// Free-form "what changed", stored on the version.
+    #[serde(default)]
+    pub note: String,
+}
+
+/// The `POST /rollback` body: name the version by NUMBER or by ID, not both.
+///
+/// `version` is scoped to the endpoint by construction — version numbers are only
+/// unique within one endpoint's history — so that spelling cannot name another
+/// endpoint's version even in principle. `version_id` is a bare uuid and
+/// therefore CAN, which is precisely why the store's statement carries
+/// `v.endpoint_id = e.id`. Both exist because a UI listing versions has their ids
+/// to hand while a human types a number.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct RollbackEndpointInput {
+    #[serde(default)]
+    pub version: Option<i32>,
+    #[serde(default)]
+    pub version_id: Option<Uuid>,
+}
+
+/// Resolve the draft, its connection's delegation mode, and its output columns.
+///
+/// Shared by `validate` and `publish` so a definition that validates is exactly a
+/// definition that publishes — two separate call sites would be two chances to
+/// drift, and the one that drifted would be discovered by a client.
+async fn validated_draft(
+    st: &DataApiState,
+    ws: Uuid,
+    principal: UserId,
+    id: Uuid,
+) -> Result<(DataApiEndpointDto, Vec<egret_dataapi_api::ColumnSpec>), DataApiError> {
+    let draft = st.endpoints.get(ws, id).await?;
+    let delegated = st
+        .endpoints
+        .connection_is_delegated(ws, draft.database_id)
+        .await?;
+    // `ctx.principal`, not the service account: `describe_as` resolves under the
+    // caller's own identity so a delegated connection applies THEIR policy, and
+    // an author cannot publish a contract over a table they cannot themselves see.
+    let columns = validate(&*st.query, ws, principal, &draft, delegated).await?;
+    Ok((draft, columns))
+}
+
+/// What `POST /validate` answers with.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DataApiValidationDto {
+    /// The output schema `describe` resolved. This is what `publish` would
+    /// freeze, so an author sees the contract before committing to it.
+    pub columns: Vec<egret_dataapi_api::ColumnSpec>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}/validate",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+    ),
+    responses(
+        (status = 200, description = "The definition is publishable; the resolved output schema is returned", body = DataApiValidationDto),
+        (status = 400, description = "Not a single SELECT, a parameter mismatch, an enum without an allowed list, a shared cache on a delegated connection, or SQL the engine rejects", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:manage permission, or the engine's policy denies a table the query names", body = ErrorBody),
+        (status = 404, description = "No such endpoint in this workspace, or the query names a relation that does not exist", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn validate_endpoint(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id)): Path<(String, Uuid)>,
+) -> Result<Json<DataApiValidationDto>, DataApiError> {
+    // `:manage`, not `:read` — this runs a query against the engine under the
+    // caller's identity, which is an authoring action and not a read of metadata.
+    egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
+    let (_, columns) = validated_draft(&st, ctx.workspace_id.0, ctx.principal.user_id, id).await?;
+    Ok(Json(DataApiValidationDto { columns }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}/publish",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+    ),
+    request_body = PublishEndpointInput,
+    responses(
+        (status = 200, description = "A new immutable version was frozen and is now live", body = DataApiPublishedDto),
+        (status = 400, description = "The definition does not validate", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:manage permission, or the engine's policy denies a table", body = ErrorBody),
+        (status = 404, description = "No such endpoint in this workspace", body = ErrorBody),
+        (status = 409, description = "The draft was edited while it was being published", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn publish_endpoint(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id)): Path<(String, Uuid)>,
+    body: Option<Json<PublishEndpointInput>>,
+) -> Result<Json<DataApiPublishedDto>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
+    let note = body.map(|Json(b)| b.note).unwrap_or_default();
+    let ws = ctx.workspace_id.0;
+    // Validation and the describe both run BEFORE any write — see
+    // `EndpointStore::publish` on why that is stronger than wrapping them in the
+    // transaction, not weaker.
+    let (draft, columns) = validated_draft(&st, ws, ctx.principal.user_id, id).await?;
+    Ok(Json(
+        st.endpoints
+            .publish(ws, id, ctx.principal.user_id, &note, &draft, columns)
+            .await?,
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}/rollback",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+    ),
+    request_body = RollbackEndpointInput,
+    responses(
+        (status = 200, description = "The named version is live again", body = DataApiPublishedDto),
+        (status = 400, description = "Name exactly one of `version` or `version_id`", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:manage permission", body = ErrorBody),
+        (status = 404, description = "No such endpoint here, or no such version OF THIS ENDPOINT", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn rollback_endpoint(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id)): Path<(String, Uuid)>,
+    Json(body): Json<RollbackEndpointInput>,
+) -> Result<Json<DataApiPublishedDto>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
+    let target = match (body.version, body.version_id) {
+        (Some(n), None) => VersionRef::Number(n),
+        (None, Some(v)) => VersionRef::Id(v),
+        _ => {
+            return Err(Error::InvalidInput(
+                "name exactly one of `version` (a number) or `version_id` (a uuid)".into(),
+            ))
+        }
+    };
+    Ok(Json(
+        st.endpoints
+            .rollback(ctx.workspace_id.0, id, target)
+            .await?,
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}/disable",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+    ),
+    responses(
+        (status = 200, description = "Stopped serving. The live version pointer is kept, so re-enabling needs no re-publish.", body = DataApiEndpointDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:manage permission", body = ErrorBody),
+        (status = 404, description = "No such endpoint in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn disable_endpoint(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id)): Path<(String, Uuid)>,
+) -> Result<Json<DataApiEndpointDto>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
+    Ok(Json(st.endpoints.disable(ctx.workspace_id.0, id).await?))
+}
+
+/// The other half of `disable`, and the reason `disable` keeps
+/// `live_version_id`: without this route that promise is unfalsifiable, and an
+/// endpoint taken out of service could only come back by publishing a NEW
+/// version — a fresh describe, a new version number, and a fresh chance for the
+/// definition to have drifted in the meantime.
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}/enable",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+    ),
+    responses(
+        (status = 200, description = "Serving again, from the same version that was live before", body = DataApiEndpointDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:manage permission", body = ErrorBody),
+        (status = 404, description = "No such endpoint in this workspace", body = ErrorBody),
+        (status = 409, description = "The endpoint has never been published, so there is nothing to serve", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn enable_endpoint(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id)): Path<(String, Uuid)>,
+) -> Result<Json<DataApiEndpointDto>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
+    Ok(Json(st.endpoints.enable(ctx.workspace_id.0, id).await?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}/versions",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+    ),
+    responses(
+        (status = 200, description = "Published versions, newest first, each with its frozen snapshot", body = Vec<DataApiEndpointVersionDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:read permission", body = ErrorBody),
+        (status = 404, description = "No such endpoint in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_endpoint_versions(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id)): Path<(String, Uuid)>,
+) -> Result<Json<Vec<DataApiEndpointVersionDto>>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_READ).await?;
+    Ok(Json(st.endpoints.versions(ctx.workspace_id.0, id).await?))
+}
+
 /// The Data API management router. Mount under `/api` so the live paths are
 /// `/api/ws/{workspace}/data-api/…` — `WsContext`'s feature gate only recognises
 /// a path beginning `/api/ws/` or `/ws/`, and `egret-server`'s
@@ -868,6 +1135,30 @@ pub fn management_router() -> Router<DataApiState> {
                 .patch(update_endpoint)
                 .delete(delete_endpoint),
         )
+        .route(
+            "/ws/{workspace}/data-api/endpoints/{id}/validate",
+            post(validate_endpoint),
+        )
+        .route(
+            "/ws/{workspace}/data-api/endpoints/{id}/publish",
+            post(publish_endpoint),
+        )
+        .route(
+            "/ws/{workspace}/data-api/endpoints/{id}/rollback",
+            post(rollback_endpoint),
+        )
+        .route(
+            "/ws/{workspace}/data-api/endpoints/{id}/disable",
+            post(disable_endpoint),
+        )
+        .route(
+            "/ws/{workspace}/data-api/endpoints/{id}/enable",
+            post(enable_endpoint),
+        )
+        .route(
+            "/ws/{workspace}/data-api/endpoints/{id}/versions",
+            get(list_endpoint_versions),
+        )
 }
 
 #[derive(utoipa::OpenApi)]
@@ -884,6 +1175,12 @@ pub fn management_router() -> Router<DataApiState> {
         create_endpoint,
         update_endpoint,
         delete_endpoint,
+        validate_endpoint,
+        publish_endpoint,
+        rollback_endpoint,
+        disable_endpoint,
+        enable_endpoint,
+        list_endpoint_versions,
     ),
     components(schemas(
         DataApiServiceAccountDto,
@@ -899,6 +1196,13 @@ pub fn management_router() -> Router<DataApiState> {
         CacheSpec,
         LimitsSpec,
         RateLimitSpec,
+        PublishEndpointInput,
+        RollbackEndpointInput,
+        DataApiValidationDto,
+        DataApiPublishedDto,
+        DataApiEndpointVersionDto,
+        egret_dataapi_api::EndpointSnapshot,
+        egret_dataapi_api::ColumnSpec,
     )),
     tags((name = "data-api", description = "Data API service accounts and OAuth2 clients")),
 )]

@@ -2,14 +2,17 @@
 //!
 //! This module owns the draft half of the split migration 0121 describes.
 //! Publishing — freezing a draft into an immutable `dataapi.endpoint_versions`
-//! snapshot — is a separate lifecycle and lives elsewhere; nothing here writes
-//! `state` or `live_version_id`, so no amount of editing can put an endpoint
-//! live, and a published version's contents are frozen against editing here.
+//! snapshot — is a separate lifecycle and lives in [`crate::lifecycle`]. No
+//! author-facing path here writes `state` or `live_version_id`, so no amount of
+//! editing can put an endpoint live, and a published version's contents are
+//! frozen against editing here. The one exception is [`EndpointStore::set_state`],
+//! which is `pub(crate)` and reachable only from the lifecycle routes.
 //!
 //! One thing editing CAN still do to a live endpoint: move it. `path` and
-//! `method` live on this row, not in the snapshot, and nothing below refuses a
-//! PATCH because `state = 'live'`. Publishing must decide whether that is
-//! allowed; it must not assume it is already prevented.
+//! `method` live on this row and nothing below refuses a PATCH because
+//! `state = 'live'`. That is now a decided contract rather than an open question
+//! — a URL belongs to the endpoint object, behaviour belongs to the frozen
+//! version. See `lifecycle.rs`' module comment for what P4 must do with it.
 //!
 //! **Workspace containment lives HERE, in exactly one place: the `WHERE id = $1
 //! AND workspace_id = $2` that every statement below carries.** There is no
@@ -359,9 +362,13 @@ pub fn normalize_path(raw: &str) -> std::result::Result<String, String> {
 }
 
 /// Persistence for endpoint drafts.
+///
+/// The publish lifecycle ([`crate::lifecycle`]) adds its own statements to this
+/// same store rather than standing up a second one, so there is one place where
+/// `AND workspace_id = $n` either is or is not present.
 #[derive(Clone)]
 pub struct EndpointStore {
-    db: Db,
+    pub(crate) db: Db,
 }
 
 fn db_err(e: sqlx::Error) -> Error {
@@ -411,6 +418,66 @@ impl EndpointStore {
         ))
         .bind(id)
         .bind(workspace)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        row.ok_or_else(|| Error::NotFound("endpoint".into()))?
+            .try_into()
+    }
+
+    /// The same read, inside a transaction and holding a row lock.
+    ///
+    /// Publishing needs this: the output columns it is about to freeze were
+    /// resolved from a draft read moments earlier, and it has to know the row has
+    /// not moved since. `FOR UPDATE` also serialises concurrent publishes of one
+    /// endpoint, which is what makes `max(version) + 1` safe.
+    ///
+    /// `Row` stays private to this module — the lifecycle module gets the parsed
+    /// DTO, so there is still exactly one place that knows the column list.
+    pub(crate) async fn locked(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        workspace: Uuid,
+        id: Uuid,
+    ) -> Result<DataApiEndpointDto> {
+        let row: Option<Row> = sqlx::query_as(concat!(
+            "SELECT ",
+            endpoint_cols!(),
+            " FROM dataapi.endpoints WHERE id = $1 AND workspace_id = $2 FOR UPDATE"
+        ))
+        .bind(id)
+        .bind(workspace)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db_err)?;
+        row.ok_or_else(|| Error::NotFound("endpoint".into()))?
+            .try_into()
+    }
+
+    /// Write `state`, and nothing else.
+    ///
+    /// `pub(crate)` and deliberately not on the PATCH path: [`crate::lifecycle`]
+    /// is the only caller, because moving an endpoint in or out of service is a
+    /// lifecycle action with its own route and its own permission check, not a
+    /// field an author can set by editing a draft. `live_version_id` is untouched
+    /// here — disabling must not throw away what was being served.
+    ///
+    /// `state` is a caller-chosen `&'static str` rather than a bound parameter of
+    /// unknown provenance; the column's CHECK constraint is the backstop.
+    pub(crate) async fn set_state(
+        &self,
+        workspace: Uuid,
+        id: Uuid,
+        state: &'static str,
+    ) -> Result<DataApiEndpointDto> {
+        let row: Option<Row> = sqlx::query_as(concat!(
+            "UPDATE dataapi.endpoints SET state = $3, updated_at = now() \
+             WHERE id = $1 AND workspace_id = $2 RETURNING ",
+            endpoint_cols!()
+        ))
+        .bind(id)
+        .bind(workspace)
+        .bind(state)
         .fetch_optional(&self.db.pool)
         .await
         .map_err(db_err)?;

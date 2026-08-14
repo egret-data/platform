@@ -13,20 +13,33 @@
 //!
 //! P3 Task 3 adds endpoint DRAFTS ([`endpoints`]) on the same surface, gated on
 //! the separate `data_api_endpoint:read`/`:manage` pair. Draft CRUD only —
-//! nothing here writes `state` or `live_version_id`, so editing cannot publish
-//! an endpoint, and a published version's frozen contents are beyond its reach.
-//! A live endpoint's URL is not — `path`/`method` live on the draft row and have
-//! no state guard yet; see `endpoints`' module comment.
+//! nothing in that module writes `state` or `live_version_id`, so editing cannot
+//! publish an endpoint, and a published version's frozen contents are beyond its
+//! reach.
+//!
+//! P3 Task 4 adds the publish [`lifecycle`]: validate, publish, roll back,
+//! disable and re-enable. Publishing freezes the whole definition — including the
+//! output schema resolved through [`egret_query_api::QueryExecPort::describe_as`]
+//! — into an immutable `dataapi.endpoint_versions` snapshot. **That snapshot is
+//! the only thing P4's serving path may read to decide what a request returns**;
+//! `lifecycle`'s module comment carries the full contract, including why routing
+//! is the one thing that still comes from the endpoint row.
 
 pub mod clients;
 pub mod endpoints;
+pub mod lifecycle;
 pub mod routes;
 
 pub use clients::{ClientStore, NewClient, DATA_API_TTL_SECS};
 pub use endpoints::{
     CreateEndpointInput, DataApiEndpointDto, EndpointStore, UpdateEndpointInput, ALLOWED_METHODS,
 };
+pub use lifecycle::{
+    check_cache_scope, check_enum_params, check_params, check_single_select, validate,
+    DataApiEndpointVersionDto, DataApiPublishedDto, ValidationError, VersionRef,
+};
 pub use routes::{
     management_router, openapi, CreateServiceAccountInput, DataApiAdminApi, DataApiClientDto,
     DataApiError, DataApiNewClientDto, DataApiServiceAccountDto, DataApiState, IssueClientInput,
+    PublishEndpointInput, RollbackEndpointInput,
 };
