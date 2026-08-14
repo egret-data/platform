@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { format as formatSql } from "sql-formatter";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+// `Separator` is aliased: `@/components/ui/separator` already exports that name for the
+// visual divider used in the toolbars below, and v4 renamed `PanelResizeHandle` into a
+// collision with it.
+import { Group, Panel, Separator as PanelSeparator } from "react-resizable-panels";
 import { toast } from "sonner";
 import {
   BarChart3, Ban, Check, Command, Database, Download, FileSearch, Keyboard, Loader2, MoreHorizontal, PanelLeftOpen,
@@ -180,8 +183,8 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
   ) : null;
 
   const main = (
-    <PanelGroup direction="vertical">
-      <Panel defaultSize={55} minSize={20}>
+    <Group orientation="vertical">
+      <Panel defaultSize="55%" minSize="20%">
         <div className="flex h-full flex-col">
           {/* Toolbar — grouped, wraps gracefully instead of clipping. */}
           <div className="flex flex-wrap items-center gap-1.5 border-b bg-muted/20 px-2 py-1.5">
@@ -297,8 +300,8 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
             onRun={(sql) => run(sql)} onSelectionChange={setSelectedSql} /></div>
         </div>
       </Panel>
-      <PanelResizeHandle className="h-1.5 bg-border transition-colors hover:bg-primary/60 data-[resize-handle-state=drag]:bg-primary" />
-      <Panel defaultSize={45} minSize={20}>
+      <PanelSeparator className="h-1.5 bg-border transition-colors hover:bg-primary/60 active:bg-primary" />
+      <Panel defaultSize="45%" minSize="20%">
         <Tabs value={tabValue} onValueChange={setTabValue} className="flex h-full flex-col">
           <div className="flex items-center gap-2 border-b px-2 py-1.5">
             <TabsList className="h-8"><TabsTrigger value="results">Results</TabsTrigger><TabsTrigger value="history">History</TabsTrigger><TabsTrigger value="saved">Saved</TabsTrigger><TabsTrigger value="snippets">Snippets</TabsTrigger></TabsList>
@@ -341,7 +344,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
           </TabsContent>
         </Tabs>
       </Panel>
-    </PanelGroup>
+    </Group>
   );
 
   const dialogs = (
@@ -389,15 +392,15 @@ export function SqlTab({ ws, tab, patch, onOpenSaved, onOpenPreview }: {
   }
 
   return (
-    <PanelGroup direction="horizontal" className="h-full">
-      <Panel defaultSize={22} minSize={12} maxSize={40}>
+    <Group orientation="horizontal" className="h-full">
+      <Panel defaultSize="22%" minSize="12%" maxSize="40%">
         <DataPanel ws={ws} dbId={tab.dbId} onDb={(id) => patch({ dbId: id })} onInsert={insert} onWords={setWords} onSchema={setSchema}
           onPreview={(fqn) => onOpenPreview?.({ title: fqn.split(".").pop() ?? fqn, sql: `SELECT * FROM ${fqn} LIMIT 100`, dbId: tab.dbId })}
           onCollapse={() => setPanelCollapsed(true)} />
       </Panel>
-      <PanelResizeHandle className="w-1.5 bg-border transition-colors hover:bg-primary/60 data-[resize-handle-state=drag]:bg-primary" />
-      <Panel defaultSize={78}>{main}</Panel>
+      <PanelSeparator className="w-1.5 bg-border transition-colors hover:bg-primary/60 active:bg-primary" />
+      <Panel defaultSize="78%">{main}</Panel>
       {dialogs}
-    </PanelGroup>
+    </Group>
   );
 }
