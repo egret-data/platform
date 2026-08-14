@@ -19,7 +19,9 @@ interface Props {
   title: string | undefined;
   columns: ResultColumn[];
   rows: unknown[][];
-  containerRef: React.RefObject<HTMLElement>;
+  /** `| null` since React 19: `useRef<T>(null)` now yields `RefObject<T | null>`
+   *  rather than `RefObject<T>`, so every caller's ref would otherwise be rejected. */
+  containerRef: React.RefObject<HTMLElement | null>;
   disabled?: boolean;
   columnSettings?: Record<string, ColumnFormat>;
 }
