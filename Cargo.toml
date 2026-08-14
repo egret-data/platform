@@ -46,7 +46,7 @@ aws-sdk-sts = { version = "1", default-features = false, features = ["default-ht
 aws-sigv4 = { version = "1.2" }
 url = { version = "2", features = ["serde"] }
 http = "1"
-typed-builder = "0.20"
+typed-builder = "0.23"
 # OpenAPI emit (E0·P4): per-crate `#[derive(OpenApi)]` + `ToSchema`, merged in
 # egret-server. utoipa 5 emits OpenAPI 3.1. `preserve_order` keeps property order
 # stable across emits so the committed `openapi.json` diff stays minimal.
@@ -57,12 +57,14 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
-tokio-tungstenite = "0.26"
+tokio-tungstenite = "0.30"
 futures-util = "0.3"
 futures-channel = "0.3"
 bytes = "1"
 axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
+# 0.6, not the newer 0.7: lakekeeper, kube-client, axum-prometheus and reqwest are
+# all on 0.6, so 0.7 buys a second tower-http and nothing else.
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -85,12 +87,16 @@ chrono = { version = "0.4", features = ["serde"] }
 # requires a leading seconds field, which would silently reinterpret every
 # expression a user pastes in. `chrono-tz` resolves the IANA zone a schedule is
 # expressed in, so "09:00 Asia/Ho_Chi_Minh" survives DST rather than drifting.
-croner = "2"
+croner = "3"
 chrono-tz = "0.10"
 # SMTP for alert/report email (P3). rustls to match the rest of the workspace's
 # TLS stack, so there is one certificate story rather than two.
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder", "hostname", "ring"] }
 argon2 = "0.5"
+# 0.10, not 0.11. The 0.10 line is held by `cookie 0.18` (which axum-extra pulls)
+# and by the git-pinned `iceberg` fork — neither ours to move — so 0.11 duplicates
+# the whole RustCrypto cipher stack (aead, aes, cipher, ctr, ghash, inout, polyval,
+# universal-hash) for no dedup at all.
 aes-gcm = "0.10"
 rand = "0.8"
 sha2 = "0.10"
@@ -121,7 +127,7 @@ egret-machine-idp = { path = "crates/egret-machine-idp" }
 # Revisit when openidconnect ships a reqwest-0.13 release.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies"] }
 mysql_async = { version = "0.34", default-features = false, features = ["default-rustls"] }
-testcontainers = "0.23"
+testcontainers = "0.28"
 # kube 2 / k8s-openapi 0.26 — the versions lakekeeper's `limes` already pulls in,
 # so the tree holds one of each instead of two. (kube 4 is newer still, but limes
 # is git-pinned to 2, so following `latest` would put the duplicate straight back.)
@@ -132,9 +138,9 @@ kube = { version = "2", features = ["client", "runtime", "derive", "ws"] }
 # also a no-op for the API we compile against: `latest` on the previous
 # k8s-openapi 0.24 WAS v1_32, that being the newest it supported.
 k8s-openapi = { version = "0.26", features = ["v1_32"] }
-cedar-policy = "4.11.2"
+cedar-policy = "4.12"
 arc-swap = "1"
-rcgen = { version = "0.13", default-features = false, features = ["pem", "crypto", "ring"] }
+rcgen = { version = "0.14", default-features = false, features = ["pem", "crypto", "ring"] }
 
 # Vendored mysql_async: patched to support StarRocks' JWT/OIDC auth-switch
 # (`authentication_openid_connect_client`). See third_party/mysql_async.

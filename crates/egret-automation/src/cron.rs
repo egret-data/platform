@@ -54,9 +54,11 @@ pub fn validate(crontab: &str, timezone: &str) -> Result<(), CronError> {
 }
 
 fn parse(crontab: &str) -> Result<Cron, CronError> {
-    Cron::new(crontab)
-        .parse()
-        .map_err(|e| CronError::InvalidCrontab(e.to_string()))
+    // croner 3 replaced the `Cron::new(pat).parse()` builder with `FromStr`. The
+    // default is still the 5-field crontab (`CronParser::new()`, seconds off),
+    // which is the whole reason this crate was picked — see the test below, which
+    // is what actually holds that.
+    Cron::from_str(crontab).map_err(|e| CronError::InvalidCrontab(e.to_string()))
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 //! AES-256-GCM authenticated encryption for credentials.
 
 use aes_gcm::aead::Aead;
-use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use rand::RngCore;
 
 use crate::error::SecretsError;
@@ -20,10 +20,12 @@ impl Crypto {
                 "master key must be >= 32 bytes".into(),
             ));
         }
-        let key = Key::<Aes256Gcm>::from_slice(&key[..32]);
-        Ok(Self {
-            cipher: Aes256Gcm::new(key),
-        })
+        // `KeyInit::new_from_slice` rather than `Key::from_slice`: generic-array
+        // deprecated `GenericArray::from_slice`, and this constructor never names
+        // GenericArray at all. The length is checked above, so it cannot fail.
+        let cipher = Aes256Gcm::new_from_slice(&key[..32])
+            .map_err(|_| SecretsError::Crypto("master key must be >= 32 bytes".into()))?;
+        Ok(Self { cipher })
     }
 
     /// Encrypt `plaintext` with a fresh random 96-bit nonce.
@@ -31,23 +33,26 @@ impl Crypto {
     pub fn seal(&self, plaintext: &str) -> Result<(Vec<u8>, Vec<u8>), SecretsError> {
         let mut nonce_bytes = [0u8; 12];
         rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
         let ct = self
             .cipher
-            .encrypt(nonce, plaintext.as_bytes())
+            .encrypt(&nonce, plaintext.as_bytes())
             .map_err(|_| SecretsError::Crypto("encryption failed".into()))?;
         Ok((nonce_bytes.to_vec(), ct))
     }
 
     /// Decrypt; fails on a wrong key or tampered ciphertext (GCM auth-tag check).
     pub fn open(&self, nonce: &[u8], ciphertext: &[u8]) -> Result<String, SecretsError> {
-        if nonce.len() != 12 {
-            return Err(SecretsError::Crypto("nonce must be 12 bytes".into()));
-        }
-        let nonce = Nonce::from_slice(nonce);
+        // The `try_into` IS the length check — a 12-byte array or an error, so the
+        // separate `nonce.len() != 12` guard it replaces cannot drift out of sync
+        // with the type. (`Nonce::from_slice` would have panicked on a bad length;
+        // it is also deprecated now.)
+        let nonce: [u8; 12] = nonce
+            .try_into()
+            .map_err(|_| SecretsError::Crypto("nonce must be 12 bytes".into()))?;
         let pt = self
             .cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(&Nonce::from(nonce), ciphertext)
             .map_err(|_| SecretsError::Crypto("decryption failed".into()))?;
         String::from_utf8(pt).map_err(|_| SecretsError::Crypto("non-utf8 plaintext".into()))
     }

@@ -43,7 +43,12 @@ serde.workspace = true
 base64.workspace = true
 rand.workspace = true
 reqwest.workspace = true
-bcrypt = "0.15"
+# 0.15 -> 0.19, taken even though it costs three duplicate crates: its blowfish
+# 0.10 wants cipher 0.5 / inout 0.2 while the aes-gcm 0.10 line stays on cipher
+# 0.4. Everywhere else in this upgrade dedup won, but this is the password-hashing
+# crate and egret-engine-mgmt is its only consumer — four majors of drift is the
+# worse risk. Revisit if aes-gcm ever moves and the split closes on its own.
+bcrypt = "0.19"
 tracing.workspace = true
 kube.workspace = true
 rcgen.workspace = true
@@ -82,5 +87,7 @@ http-body-util = "0.1"
 # binary via workspace feature unification.
 k8s-openapi.workspace = true
 # Parse the generated self-signed cert back to verify SANs in tls_cert's test.
+# 3, not 4: jsonwebtoken, kube-client, rcgen and the vendored mysql_async all
+# depend on pem 3, so 4 only adds a second copy.
 pem = "3"
-x509-parser = "0.16"
+x509-parser = "0.18"
