@@ -5,8 +5,17 @@
 //!
 //! Registers a SECOND verifier on the shared machine-IdP rather than standing
 //! up a parallel credential system — see `egret-catalog-engine`'s `CatalogStore`
-//! for the first. Management routes (create/revoke over HTTP) land in Task 5.
+//! for the first.
+//!
+//! Task 5 adds the workspace-scoped management surface ([`routes`]): create and
+//! delete service accounts, list and issue their clients. Issuing gates on
+//! `service_account:manage`, never `:read`.
 
 pub mod clients;
+pub mod routes;
 
 pub use clients::{ClientStore, NewClient, DATA_API_TTL_SECS};
+pub use routes::{
+    management_router, openapi, CreateServiceAccountInput, DataApiAdminApi, DataApiClientDto,
+    DataApiError, DataApiNewClientDto, DataApiServiceAccountDto, DataApiState, IssueClientInput,
+};

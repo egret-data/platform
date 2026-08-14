@@ -1768,6 +1768,20 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         ],
     });
 
+    // Data API management surface (P2 Task 5). `issuer` is the SAME public root
+    // URL the machine-IdP signs with, so the `token_endpoint` handed back with a
+    // new client points at the endpoint that will actually accept it.
+    let dataapi = Some(egret_dataapi::DataApiState {
+        db: db.clone(),
+        clients: egret_dataapi::ClientStore::new(db.clone()),
+        users: egret_auth::users::UserRepo::new(db.clone()),
+        sessions: sessions.clone(),
+        workspaces: WorkspaceRepo::new(db.clone()),
+        authz: Authorizer::new(db.clone()),
+        pdp: pdp.clone(),
+        issuer: egret_public_url.clone(),
+    });
+
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
@@ -1786,6 +1800,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         engine_mgmt,
         catalog_engine,
         idp,
+        dataapi,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)

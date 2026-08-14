@@ -14,6 +14,7 @@ egret-controlplane.workspace = true
 egret-catalog-engine.workspace = true
 egret-engine-mgmt.workspace = true
 egret-machine-idp.workspace = true
+egret-dataapi.workspace = true
 egret-policy.workspace = true
 egret-query.workspace = true
 egret-bi.workspace = true

@@ -152,6 +152,18 @@ pub static PERMISSIONS: &[Permission] = &[
         Scope::Platform
     ),
     perm!(
+        "service_account:read",
+        "Data API",
+        "View service accounts and their OAuth2 clients (never the secret)",
+        Scope::Workspace
+    ),
+    perm!(
+        "service_account:manage",
+        "Data API",
+        "Create and delete service accounts and issue their OAuth2 clients",
+        Scope::Workspace
+    ),
+    perm!(
         "policy:read",
         "Policies",
         "View Ranger policies",

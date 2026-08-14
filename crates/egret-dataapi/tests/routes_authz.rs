@@ -1,0 +1,418 @@
+//! Issuing a client for a service account hands out that account's access.
+//! Written from the caller's side: a real non-admin principal against the REAL
+//! Cedar PDP, not a mocked decision — a mocked flag pins the consumer, not the
+//! server, and an admin measurement bypasses the check entirely.
+//!
+//! DB-gated. Self-skips (passes) when DATABASE_URL is unset, like
+//! `clients_store.rs`; run with
+//! `DATABASE_URL=postgres://egret:egret@localhost:5432/egret`.
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use egret_dataapi::{management_router, ClientStore, DataApiState};
+use egret_metastore::Db;
+use std::sync::Arc;
+use tower::ServiceExt;
+use uuid::Uuid;
+
+struct Fixture {
+    db: Db,
+    /// The workspace under test, by SLUG — `WsContext` resolves `{workspace}`
+    /// as a slug, so this is what goes in a URL.
+    ws: String,
+    ws_id: Uuid,
+    /// A human admin, used as `created_by`.
+    admin: Uuid,
+}
+
+/// A principal: a router + session token whose PDP already sees its grants.
+/// Both are rebuilt per principal because `CedarPdp` snapshots policies at build
+/// time and a session caches its permission set.
+struct Caller {
+    app: axum::Router,
+    tok: String,
+}
+
+fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
+    DataApiState {
+        db: db.clone(),
+        clients: ClientStore::new(db.clone()),
+        users: egret_auth::users::UserRepo::new(db.clone()),
+        sessions: egret_auth::session::SessionService::new(
+            db.clone(),
+            chrono::Duration::hours(24),
+            chrono::Duration::minutes(60),
+        ),
+        workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
+        authz: egret_workspace::rbac::Authorizer::new(db),
+        pdp,
+        issuer: "https://egret.test".into(),
+    }
+}
+
+async fn insert_user(db: &Db, tag: &str) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO users (provider, email, name, status, password_hash) \
+         VALUES ('local', $1, 'test', 'active', 'x') RETURNING id",
+    )
+    .bind(format!("{tag}_{}@egret.local", Uuid::new_v4().simple()))
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert user")
+}
+
+async fn insert_workspace(db: &Db, owner: Uuid, tag: &str) -> (Uuid, String) {
+    let slug = format!("{tag}-{}", Uuid::new_v4().simple());
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'Data API Test', $2, 'active') RETURNING id",
+    )
+    .bind(&slug)
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert workspace");
+    (id, slug)
+}
+
+async fn fixture() -> Option<Fixture> {
+    let url = std::env::var("DATABASE_URL").ok()?;
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let admin = insert_user(&db, "dataapi_admin").await;
+    let (ws_id, ws) = insert_workspace(&db, admin, "dataapi").await;
+    Some(Fixture {
+        db,
+        ws,
+        ws_id,
+        admin,
+    })
+}
+
+macro_rules! skip_without_db {
+    () => {
+        match fixture().await {
+            Some(f) => f,
+            None => {
+                eprintln!("DATABASE_URL unset — skipping");
+                return;
+            }
+        }
+    };
+}
+
+impl Fixture {
+    /// A service account in `self.ws`: the `users` row plus the workspace
+    /// binding, written directly — these tests are about WHO MAY ISSUE, so the
+    /// account's own creation route is not the subject here.
+    async fn create_service_account(&self, name: &str) -> Uuid {
+        self.create_service_account_in(name, self.ws_id).await
+    }
+
+    async fn create_service_account_in(&self, name: &str, ws: Uuid) -> Uuid {
+        let sa: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (provider, email, name, status) \
+             VALUES ('service', $1, $2, 'active') RETURNING id",
+        )
+        .bind(format!(
+            "svc.{name}.{}@svc.egret.local",
+            Uuid::new_v4().simple()
+        ))
+        .bind(name)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("service account user");
+        sqlx::query(
+            "INSERT INTO dataapi.service_accounts (user_id, workspace_id, name, created_by) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(sa)
+        .bind(ws)
+        .bind(name)
+        .bind(self.admin)
+        .execute(&self.db.pool)
+        .await
+        .expect("service_accounts row");
+        sa
+    }
+
+    async fn create_workspace(&self, tag: &str) -> (Uuid, String) {
+        insert_workspace(&self.db, self.admin, tag).await
+    }
+
+    /// A brand-new, non-admin user holding exactly `perms` in `self.ws`.
+    async fn principal_with(&self, perms: &[&str]) -> Caller {
+        self.principal_with_in(perms, self.ws_id).await
+    }
+
+    /// The realistic manager: `ws_admin` is seeded with BOTH `:read` and
+    /// `:manage` (migration 0120), because egret's permissions are flat and
+    /// `:manage` implies nothing. A manage-only principal is not a role anyone
+    /// holds, so tests that exercise the manage path grant the real pair; the
+    /// asymmetry that matters — read alone cannot ISSUE — is pinned separately
+    /// by `read_permission_cannot_issue_a_client`.
+    const MANAGER: &'static [&'static str] = &["service_account:read", "service_account:manage"];
+
+    /// The same, in an arbitrary workspace — the cross-workspace test needs a
+    /// principal who is a legitimate MANAGER somewhere else.
+    async fn principal_with_in(&self, perms: &[&str], ws: Uuid) -> Caller {
+        let user = insert_user(&self.db, "dataapi_caller").await;
+        let role: Uuid = sqlx::query_scalar(
+            "INSERT INTO roles (scope, name, description) \
+             VALUES ('workspace', $1, 'test') RETURNING id",
+        )
+        .bind(format!("test_dataapi_{}", Uuid::new_v4().simple()))
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("insert role");
+        for p in perms {
+            sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
+                .bind(role)
+                .bind(p)
+                .execute(&self.db.pool)
+                .await
+                .expect("grant perm");
+        }
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             VALUES ('user', $1, $2, 'workspace', $3)",
+        )
+        .bind(user)
+        .bind(role)
+        .bind(ws)
+        .execute(&self.db.pool)
+        .await
+        .expect("grant role");
+
+        let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+            egret_auth::pdp::CedarPdp::build(self.db.clone(), &egret_events::EventBus::new())
+                .await
+                .expect("build CedarPdp"),
+        );
+        let st = build_state(self.db.clone(), pdp);
+        let tok = st
+            .sessions
+            .create(egret_core::ids::UserId(user), "test", "127.0.0.1")
+            .await
+            .expect("create session")
+            .token;
+        // Nested at /api exactly as `egret-server` mounts it, so the paths these
+        // tests drive are the paths production serves.
+        let app = axum::Router::new()
+            .nest("/api", management_router())
+            .with_state(st);
+        Caller { app, tok }
+    }
+
+    async fn send(
+        &self,
+        c: &Caller,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut b = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("Cookie", format!("egret_session={}", c.tok));
+        if body.is_some() {
+            b = b.header("Content-Type", "application/json");
+        }
+        let res = c
+            .app
+            .clone()
+            .oneshot(
+                b.body(
+                    body.map(|v| Body::from(v.to_string()))
+                        .unwrap_or_else(Body::empty),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    async fn post_as(
+        &self,
+        c: &Caller,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        self.send(c, "POST", path, Some(body)).await
+    }
+
+    async fn get_as(&self, c: &Caller, path: &str) -> (StatusCode, serde_json::Value) {
+        self.send(c, "GET", path, None).await
+    }
+}
+
+#[tokio::test]
+async fn read_permission_cannot_issue_a_client() {
+    let f = skip_without_db!();
+    let sa = f.create_service_account("reporting").await;
+    let reader = f.principal_with(&["service_account:read"]).await;
+
+    let (status, _) = f
+        .post_as(
+            &reader,
+            &format!("/api/ws/{}/data-api/service-accounts/{sa}/clients", f.ws),
+            serde_json::json!({ "name": "prod" }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN, "read must not imply issue");
+}
+
+#[tokio::test]
+async fn a_client_cannot_be_issued_across_workspaces() {
+    let f = skip_without_db!();
+    let sa = f.create_service_account("reporting").await; // in f.ws
+    let (other_id, other_ws) = f.create_workspace("other").await;
+    let manager = f.principal_with_in(Fixture::MANAGER, other_id).await;
+
+    let (status, _) = f
+        .post_as(
+            &manager,
+            &format!("/api/ws/{other_ws}/data-api/service-accounts/{sa}/clients"),
+            serde_json::json!({ "name": "prod" }),
+        )
+        .await;
+
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "the account does not belong to that workspace"
+    );
+}
+
+#[tokio::test]
+async fn the_secret_is_returned_once_and_never_again() {
+    let f = skip_without_db!();
+    let sa = f.create_service_account("reporting").await;
+    let manager = f.principal_with(Fixture::MANAGER).await;
+    let path = format!("/api/ws/{}/data-api/service-accounts/{sa}/clients", f.ws);
+
+    let (status, created) = f
+        .post_as(&manager, &path, serde_json::json!({ "name": "prod" }))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    assert!(created["client_id"]
+        .as_str()
+        .expect("client_id")
+        .starts_with("egret-dataapi-"));
+    assert!(!created["client_secret"]
+        .as_str()
+        .expect("client_secret")
+        .is_empty());
+
+    let (status, listed) = f.get_as(&manager, &path).await;
+    assert_eq!(status, StatusCode::OK, "body: {listed}");
+    assert_eq!(listed.as_array().expect("array").len(), 1);
+    assert!(
+        listed[0].get("client_secret").is_none(),
+        "the client list must never carry secret material: {listed}"
+    );
+}
+
+/// The read side must still work for a reader — otherwise
+/// `read_permission_cannot_issue_a_client` would pass just as well against a
+/// router that denied `:read` everything.
+#[tokio::test]
+async fn read_permission_can_still_list() {
+    let f = skip_without_db!();
+    let sa = f.create_service_account("reporting").await;
+    let reader = f.principal_with(&["service_account:read"]).await;
+
+    let (status, body) = f
+        .get_as(
+            &reader,
+            &format!("/api/ws/{}/data-api/service-accounts/{sa}/clients", f.ws),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body.as_array().expect("array").len(), 0);
+}
+
+/// Creating an account is a `:manage` act too, and it must produce BOTH rows:
+/// the `users` principal and the workspace binding. A `users` row alone would be
+/// an identity no workspace owns.
+#[tokio::test]
+async fn creating_an_account_makes_a_real_principal_bound_to_the_workspace() {
+    let f = skip_without_db!();
+    let manager = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, created) = f
+        .post_as(
+            &manager,
+            &format!("/api/ws/{}/data-api/service-accounts", f.ws),
+            serde_json::json!({ "name": "Nightly ETL" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let id: Uuid = created["id"].as_str().expect("id").parse().expect("uuid");
+    assert_eq!(
+        created["email"].as_str().expect("email"),
+        format!("svc.nightly-etl@{}.service.egret.local", f.ws)
+    );
+
+    let provider: String = sqlx::query_scalar("SELECT provider FROM users WHERE id = $1")
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("users row");
+    assert_eq!(provider, "service");
+    let bound: Uuid =
+        sqlx::query_scalar("SELECT workspace_id FROM dataapi.service_accounts WHERE user_id = $1")
+            .bind(id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("service_accounts row");
+    assert_eq!(bound, f.ws_id);
+}
+
+/// Revoking is `:manage`, and a client in another workspace is invisible rather
+/// than merely forbidden — the same 404 rule as `scoped_account`.
+#[tokio::test]
+async fn a_client_cannot_be_revoked_across_workspaces() {
+    let f = skip_without_db!();
+    let sa = f.create_service_account("reporting").await;
+    let manager = f.principal_with(Fixture::MANAGER).await;
+    let (_, created) = f
+        .post_as(
+            &manager,
+            &format!("/api/ws/{}/data-api/service-accounts/{sa}/clients", f.ws),
+            serde_json::json!({ "name": "prod" }),
+        )
+        .await;
+    let client_id: Uuid = created["id"].as_str().expect("id").parse().expect("uuid");
+
+    let (other_id, other_ws) = f.create_workspace("other").await;
+    let outsider = f.principal_with_in(Fixture::MANAGER, other_id).await;
+    let (status, _) = f
+        .send(
+            &outsider,
+            "DELETE",
+            &format!("/api/ws/{other_ws}/data-api/clients/{client_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Still usable: the cross-workspace call must not have revoked it.
+    let (status, listed) = f
+        .get_as(
+            &manager,
+            &format!("/api/ws/{}/data-api/service-accounts/{sa}/clients", f.ws),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(listed[0]["revoked_at"].is_null());
+}

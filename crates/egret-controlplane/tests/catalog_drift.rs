@@ -59,6 +59,10 @@ const EXTRA_FILES: &[&str] = &[
     "../egret-query/src/execution/routes.rs",
     "../egret-query/src/registry/routes.rs",
     "../egret-kernel/src/routes.rs",
+    // `service_account:*` (Data API P2) is gated via `authz::require` in the
+    // Data API seam's management router, using the `SA_READ`/`SA_MANAGE` consts
+    // the scan resolves below.
+    "../egret-dataapi/src/routes.rs",
 ];
 
 /// Gate function names whose permission-key argument (an inline

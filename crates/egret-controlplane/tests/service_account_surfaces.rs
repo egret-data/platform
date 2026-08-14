@@ -52,8 +52,8 @@ async fn setup() -> Option<Fixture> {
         chrono::Duration::minutes(60),
     );
 
-    let crypto = egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef")
-        .expect("build test crypto");
+    let crypto =
+        egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
     let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
     let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
     let (audit, _audit_rx) = egret_audit::AuditSink::new(16);

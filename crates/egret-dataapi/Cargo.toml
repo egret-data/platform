@@ -12,6 +12,14 @@ egret-metastore.workspace = true
 # `ClientStore` implements — a second audience (`data-api`) on the same IdP the
 # Catalog Client registry already registers with.
 egret-machine-idp.workspace = true
+# Management routes (Task 5): `UserRepo::insert_service` mints the service
+# account's `users` row, and `SessionService` is what the `WsContext` extractor
+# authenticates against.
+egret-auth.workspace = true
+# `WsContext` — the extractor that resolves `{workspace}` and membership. The
+# workspace a handler acts on comes from here, never from a second read of the
+# path segment.
+egret-workspace.workspace = true
 axum.workspace = true
 sqlx.workspace = true
 # `ClientStore::create`'s public `expires_at` is `time::OffsetDateTime` (matching
@@ -42,4 +50,6 @@ utoipa.workspace = true
 
 [dev-dependencies]
 tower.workspace = true
-egret-auth.workspace = true
+# `CedarPdp::build` needs an `EventBus` — the route tests run against the REAL
+# PDP, not a mocked decision, so a mis-scoped permission cannot pass.
+egret-events.workspace = true
