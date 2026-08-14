@@ -59,7 +59,7 @@ impl ResultSetMeta {
 /// // second result set will contain an error,
 /// // but the first result set is ok, so this line will pass
 /// conn.query_iter("DO 1; BLABLA;").await?;
-/// // `QueryResult` was dropped withot being consumed
+/// // `QueryResult` was dropped without being consumed
 ///
 /// // driver must cleanup any unconsumed result to perform another query on `conn`,
 /// // so this operation will be performed implicitly, but the unconsumed result
@@ -95,13 +95,13 @@ where
 
     /// Returns `true` if this query result may contain rows.
     ///
-    /// If `false` then no rows possible for this query tesult (e.g. result of an UPDATE query).
+    /// If `false` then no rows possible for this query result (e.g. result of an UPDATE query).
     fn has_rows(&self) -> bool {
         self.conn
             .get_pending_result()
             .map(|pending_result| match pending_result {
-                Some(PendingResult::Pending(meta)) => meta.columns().len() > 0,
-                Some(PendingResult::Taken(meta)) => meta.columns().len() > 0,
+                Some(PendingResult::Pending(meta)) => !meta.columns().is_empty(),
+                Some(PendingResult::Taken(meta)) => !meta.columns().is_empty(),
                 None => false,
             })
             .unwrap_or(false)
@@ -124,21 +124,21 @@ where
 
         if columns.is_empty() {
             // Empty, but not yet consumed result set.
-            self.conn.set_pending_result(None)?;
+            self.conn.as_mut().set_pending_result(None)?;
         } else {
             // Not yet consumed non-empty result set.
-            let packet = match self.conn.read_packet().await {
+            let packet = match self.conn.as_mut().read_packet().await {
                 Ok(packet) => packet,
                 Err(err) => {
                     // Next row contained an error. No more data will follow.
-                    self.conn.set_pending_result(None)?;
+                    self.conn.as_mut().set_pending_result(None)?;
                     return Err(err);
                 }
             };
 
             if P::is_last_result_set_packet(self.conn.capabilities(), &packet) {
                 // `packet` is a result set terminator.
-                self.conn.set_pending_result(None)?;
+                self.conn.as_mut().set_pending_result(None)?;
             } else {
                 // `packet` is a result set row.
                 row = Some(P::read_result_set_row(&packet, columns)?);
@@ -154,7 +154,10 @@ where
     async fn next_set(&mut self) -> crate::Result<bool> {
         if self.conn.more_results_exists() {
             // More data will follow.
-            self.conn.routine(NextSetRoutine::<P>::new()).await?;
+            self.conn
+                .as_mut()
+                .routine(NextSetRoutine::<P>::new())
+                .await?;
         }
         Ok(self.conn.has_pending_result())
     }
@@ -190,7 +193,7 @@ where
     #[doc(hidden)]
     pub async fn next(&mut self) -> Result<Option<Row>> {
         loop {
-            match self.conn.use_pending_result()?.cloned() {
+            match self.conn.as_mut().use_pending_result()?.cloned() {
                 Some(PendingResult::Pending(meta)) => return self.next_row_or_next_set(meta).await,
                 Some(PendingResult::Taken(meta)) => self.skip_taken(meta).await?,
                 None => return Ok(None),
@@ -222,7 +225,7 @@ where
     ///
     /// It is parametrized by `R` and internally calls `R::from_row(Row)` on each row.
     ///
-    /// It will collect rows up to a neares result set boundary. This means that you should call
+    /// It will collect rows up to a nearest result set boundary. This means that you should call
     /// `collect` as many times as result sets in your query result. For example query
     /// `SELECT 'foo'; SELECT 'foo', 'bar';` will produce `QueryResult` with two result sets in it.
     /// One can use `QueryResult::is_empty` to make sure that there is no more result sets.

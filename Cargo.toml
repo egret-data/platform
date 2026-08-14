@@ -126,7 +126,12 @@ egret-machine-idp = { path = "crates/egret-machine-idp" }
 # `gcloud-metadata` is on 0.13 and we cannot follow it until openidconnect does.
 # Revisit when openidconnect ships a reqwest-0.13 release.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies"] }
-mysql_async = { version = "0.34", default-features = false, features = ["default-rustls"] }
+# `default-rustls-ring`, not `default-rustls`: 0.37 redefined the latter to pull
+# aws-lc-rs, and this workspace is ring-only. 0.37's feature set is also leaner
+# than 0.34's `default-rustls` — no bigdecimal/rust_decimal/time/frunk/binlog —
+# which costs nothing here: the StarRocks connector decodes rows through
+# `ColumnType` + `Value::Bytes` and never names those types.
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls-ring"] }
 testcontainers = "0.28"
 # kube 2 / k8s-openapi 0.26 — the versions lakekeeper's `limes` already pulls in,
 # so the tree holds one of each instead of two. (kube 4 is newer still, but limes

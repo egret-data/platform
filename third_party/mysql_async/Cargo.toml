@@ -12,10 +12,11 @@
 [package]
 edition = "2021"
 name = "mysql_async"
-version = "0.34.2"
+version = "0.37.0"
 authors = ["blackbeam <aikorsky@gmail.com>"]
 build = false
 exclude = ["test/*"]
+autolib = false
 autobins = false
 autoexamples = false
 autotests = false
@@ -33,11 +34,63 @@ categories = [
     "asynchronous",
     "database",
 ]
-license = "MIT/Apache-2.0"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/blackbeam/mysql_async"
 
-[profile.bench]
-debug = 2
+[features]
+aws-lc-rs = [
+    "rustls/aws_lc_rs",
+    "tokio-rustls/aws_lc_rs",
+]
+bigdecimal = ["mysql_common/bigdecimal"]
+binlog = ["mysql_common/binlog"]
+chrono = ["mysql_common/chrono"]
+client_ed25519 = ["mysql_common/client_ed25519"]
+client_parsec = ["mysql_common/client_parsec"]
+default = [
+    "flate2/zlib",
+    "derive",
+]
+default-rustls = [
+    "default-rustls-no-provider",
+    "aws-lc-rs",
+]
+default-rustls-no-provider = [
+    "flate2/rust_backend",
+    "derive",
+    "rustls-tls",
+    "tls12",
+]
+default-rustls-ring = [
+    "default-rustls-no-provider",
+    "ring",
+]
+derive = ["mysql_common/derive"]
+frunk = ["mysql_common/frunk"]
+minimal = ["flate2/zlib"]
+minimal-rust = ["flate2/rust_backend"]
+native-tls-tls = [
+    "native-tls",
+    "tokio-native-tls",
+    "pem",
+]
+nightly = []
+ring = [
+    "rustls/ring",
+    "tokio-rustls/ring",
+]
+rust_decimal = ["mysql_common/rust_decimal"]
+rustls-tls = [
+    "rustls",
+    "tokio-rustls",
+    "webpki-roots",
+]
+time = ["mysql_common/time"]
+tls12 = [
+    "rustls/tls12",
+    "tokio-rustls/tls12",
+]
+tracing = ["dep:tracing"]
 
 [lib]
 name = "mysql_async"
@@ -54,8 +107,11 @@ path = "tests/generic.rs"
 [dependencies.bytes]
 version = "1.4"
 
-[dependencies.crossbeam]
-version = "0.8.1"
+[dependencies.crossbeam-queue]
+version = "0.3"
+
+[dependencies.crossbeam-utils]
+version = "0.8.21"
 
 [dependencies.flate2]
 version = "1.0"
@@ -70,14 +126,18 @@ version = "0.3"
 [dependencies.futures-util]
 version = "0.3"
 
+[dependencies.hdrhistogram]
+version = "7.5"
+optional = true
+
 [dependencies.keyed_priority_queue]
 version = "0.4"
 
 [dependencies.lru]
-version = "0.12.0"
+version = "0.18"
 
 [dependencies.mysql_common]
-version = "0.32"
+version = "0.37.1"
 default-features = false
 
 [dependencies.native-tls]
@@ -86,36 +146,28 @@ optional = true
 
 [dependencies.pem]
 version = "3.0"
+optional = true
 
 [dependencies.percent-encoding]
 version = "2.1.0"
 
-[dependencies.pin-project]
-version = "1.0.2"
-
 [dependencies.rand]
-version = "0.8.5"
+version = "0.10"
 
 [dependencies.rustls]
-version = "0.23"
-features = []
+version = "0.23.14"
+features = ["std"]
 optional = true
-
-[dependencies.rustls-pemfile]
-version = "2.1.0"
-optional = true
+default-features = false
 
 [dependencies.serde]
 version = "1"
 
-[dependencies.serde_json]
-version = "1"
-
 [dependencies.socket2]
-version = "0.5.2"
+version = "0.6"
 
 [dependencies.thiserror]
-version = "1.0.4"
+version = "2"
 
 [dependencies.tokio]
 version = "1.0"
@@ -125,6 +177,7 @@ features = [
     "net",
     "time",
     "rt",
+    "sync",
 ]
 
 [dependencies.tokio-native-tls]
@@ -134,6 +187,7 @@ optional = true
 [dependencies.tokio-rustls]
 version = "0.26"
 optional = true
+default-features = false
 
 [dependencies.tokio-util]
 version = "0.7.2"
@@ -149,22 +203,19 @@ optional = true
 default-features = false
 
 [dependencies.twox-hash]
-version = "1"
+version = "2"
+features = ["xxhash64"]
+default-features = false
 
 [dependencies.url]
 version = "2.1"
 
-[dependencies.webpki]
-version = ">=0.22.1"
-features = ["std"]
-optional = true
-
 [dependencies.webpki-roots]
-version = "0.26.1"
+version = "1"
 optional = true
 
 [dev-dependencies.socket2]
-version = "0.5.2"
+version = "0.6"
 features = ["all"]
 
 [dev-dependencies.tempfile]
@@ -181,46 +232,5 @@ features = [
 [dev-dependencies.waker-fn]
 version = "1"
 
-[features]
-bigdecimal = ["mysql_common/bigdecimal"]
-binlog = ["mysql_common/binlog"]
-chrono = ["mysql_common/chrono"]
-default = [
-    "flate2/zlib",
-    "bigdecimal",
-    "rust_decimal",
-    "time",
-    "frunk",
-    "derive",
-    "native-tls-tls",
-    "binlog",
-]
-default-rustls = [
-    "flate2/rust_backend",
-    "bigdecimal",
-    "rust_decimal",
-    "time",
-    "frunk",
-    "derive",
-    "rustls-tls",
-    "binlog",
-]
-derive = ["mysql_common/derive"]
-frunk = ["mysql_common/frunk"]
-minimal = ["flate2/zlib"]
-minimal-rust = ["flate2/rust_backend"]
-native-tls-tls = [
-    "native-tls",
-    "tokio-native-tls",
-]
-nightly = []
-rust_decimal = ["mysql_common/rust_decimal"]
-rustls-tls = [
-    "rustls",
-    "tokio-rustls",
-    "webpki",
-    "webpki-roots",
-    "rustls-pemfile",
-]
-time = ["mysql_common/time"]
-tracing = ["dep:tracing"]
+[profile.bench]
+debug = 2

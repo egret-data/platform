@@ -8,7 +8,7 @@
 
 use futures_util::FutureExt;
 use mysql_common::{
-    constants::MAX_PAYLOAD_LEN,
+    constants::{MariadbCapabilities, MAX_PAYLOAD_LEN},
     io::ParseBuf,
     proto::{Binary, Text},
     row::RowDeserializer,
@@ -31,7 +31,7 @@ use crate::{
     query::AsQuery,
     queryable::query_result::ResultSetMeta,
     tracing_utils::{LevelInfo, LevelTrace, TracingLevel},
-    BoxFuture, Column, Conn, Params, ResultSetStream, Row,
+    BoxFuture, Column, Conn, Connection, Params, ResultSetStream, Row,
 };
 
 pub mod query_result;
@@ -49,6 +49,7 @@ pub trait Protocol: fmt::Debug + Send + Sync + 'static {
             packet[0] == 0xFE && packet.len() < 8
         }
     }
+    fn metadata_skip_possible(conn: &Conn) -> bool;
 }
 
 /// Phantom struct used to specify MySql text protocol.
@@ -70,6 +71,10 @@ impl Protocol for TextProtocol {
             .map(Into::into)
             .map_err(Into::into)
     }
+
+    fn metadata_skip_possible(_conn: &Conn) -> bool {
+        false
+    }
 }
 
 impl Protocol for BinaryProtocol {
@@ -82,6 +87,10 @@ impl Protocol for BinaryProtocol {
             .parse::<RowDeserializer<ServerSide, Binary>>(columns)
             .map(Into::into)
             .map_err(Into::into)
+    }
+
+    fn metadata_skip_possible(conn: &Conn) -> bool {
+        conn.has_mariadb_capabilities(MariadbCapabilities::MARIADB_CLIENT_CACHE_METADATA)
     }
 }
 
@@ -96,8 +105,7 @@ impl Conn {
     pub(crate) async fn clean_dirty(&mut self) -> Result<()> {
         self.drop_result().await?;
         if self.get_tx_status() == TxStatus::RequiresRollback {
-            self.set_tx_status(TxStatus::None);
-            self.exec_drop("ROLLBACK", ()).await?;
+            self.rollback_transaction().await?;
         }
         Ok(())
     }
@@ -175,7 +183,7 @@ pub trait Queryable: Send {
         params: P,
     ) -> BoxFuture<'s, QueryResult<'a, 'static, BinaryProtocol>>
     where
-        Q: StatementLike + 'a,
+        Q: StatementLike + 's,
         P: Into<Params>;
 
     /// Performs the given query and collects the first result set.
@@ -276,6 +284,15 @@ pub trait Queryable: Send {
     /// Executes the given statement for each item in the given params iterator.
     ///
     /// It'll prepare `stmt` (once), if necessary.
+    ///
+    /// # Note
+    ///
+    /// It will use `COM_STMT_BULK_EXECUTE` for MariaDb >= v10.2 if
+    /// `MARIADB_CLIENT_STMT_BULK_OPERATIONS` is enabled by the server. Practically
+    /// this means that the function will error with code 1295 (`ER_UNSUPPORTED_PS`)
+    /// for _non-bulk execution safe_ operations, namely for all operations
+    /// except UPDATE, multi-UPDATE, INSERT, DELETE and REPLACE. Consider not
+    /// using exec batch for operations outside of this list.
     fn exec_batch<'a: 'b, 'b, S, P, I>(&'a mut self, stmt: S, params_iter: I) -> BoxFuture<'b, ()>
     where
         S: StatementLike + 'b,
@@ -444,7 +461,7 @@ pub trait Queryable: Send {
     ) -> BoxFuture<'s, ResultSetStream<'a, 'a, 'static, T, BinaryProtocol>>
     where
         T: Unpin + FromRow + Send + 'static,
-        Q: StatementLike + 'a,
+        Q: StatementLike + 's,
         P: Into<Params> + Send + 's,
     {
         async move {
@@ -503,7 +520,7 @@ impl Queryable for Conn {
         params: P,
     ) -> BoxFuture<'s, QueryResult<'a, 'static, BinaryProtocol>>
     where
-        Q: StatementLike + 'a,
+        Q: StatementLike + 's,
         P: Into<Params>,
     {
         let params = params.into();
@@ -524,11 +541,18 @@ impl Queryable for Conn {
     {
         async move {
             let statement = self.get_statement(stmt).await?;
-            for params in params_iter {
-                self.execute_statement(&statement, params).await?;
-                QueryResult::<BinaryProtocol>::new(&mut *self)
-                    .drop_result()
-                    .await?;
+            if self
+                .has_mariadb_capabilities(MariadbCapabilities::MARIADB_CLIENT_STMT_BULK_OPERATIONS)
+                && statement.num_params() > 0
+            {
+                self.execute_bulk(&statement, params_iter).await?;
+            } else {
+                for params in params_iter {
+                    self.execute_statement(&statement, params).await?;
+                    QueryResult::<BinaryProtocol>::new(&mut *self)
+                        .drop_result()
+                        .await?;
+                }
             }
             Ok(())
         }
@@ -538,7 +562,7 @@ impl Queryable for Conn {
 
 impl Queryable for Transaction<'_> {
     fn ping(&mut self) -> BoxFuture<'_, ()> {
-        self.0.ping()
+        self.0.as_mut().ping()
     }
 
     fn query_iter<'a, Q>(
@@ -548,18 +572,18 @@ impl Queryable for Transaction<'_> {
     where
         Q: AsQuery + 'a,
     {
-        self.0.query_iter(query)
+        self.0.as_mut().query_iter(query)
     }
 
     fn prep<'a, Q>(&'a mut self, query: Q) -> BoxFuture<'a, Statement>
     where
         Q: AsQuery + 'a,
     {
-        self.0.prep(query)
+        self.0.as_mut().prep(query)
     }
 
     fn close(&mut self, stmt: Statement) -> BoxFuture<'_, ()> {
-        self.0.close(stmt)
+        self.0.as_mut().close(stmt)
     }
 
     fn exec_iter<'a: 's, 's, Q, P>(
@@ -568,10 +592,10 @@ impl Queryable for Transaction<'_> {
         params: P,
     ) -> BoxFuture<'s, QueryResult<'a, 'static, BinaryProtocol>>
     where
-        Q: StatementLike + 'a,
+        Q: StatementLike + 's,
         P: Into<Params>,
     {
-        self.0.exec_iter(stmt, params)
+        self.0.as_mut().exec_iter(stmt, params)
     }
 
     fn exec_batch<'a: 'b, 'b, S, P, I>(&'a mut self, stmt: S, params_iter: I) -> BoxFuture<'b, ()>
@@ -581,36 +605,92 @@ impl Queryable for Transaction<'_> {
         I::IntoIter: Send,
         P: Into<Params> + Send,
     {
-        self.0.exec_batch(stmt, params_iter)
+        self.0.as_mut().exec_batch(stmt, params_iter)
+    }
+}
+
+impl<'c, 't: 'c> Queryable for Connection<'c, 't> {
+    #[inline]
+    fn ping(&mut self) -> BoxFuture<'_, ()> {
+        self.as_mut().ping()
+    }
+
+    #[inline]
+    fn query_iter<'a, Q>(
+        &'a mut self,
+        query: Q,
+    ) -> BoxFuture<'a, QueryResult<'a, 'static, TextProtocol>>
+    where
+        Q: AsQuery + 'a,
+    {
+        self.as_mut().query_iter(query)
+    }
+
+    fn prep<'a, Q>(&'a mut self, query: Q) -> BoxFuture<'a, Statement>
+    where
+        Q: AsQuery + 'a,
+    {
+        self.as_mut().prep(query)
+    }
+
+    fn close(&mut self, stmt: Statement) -> BoxFuture<'_, ()> {
+        self.as_mut().close(stmt)
+    }
+
+    fn exec_iter<'a: 's, 's, Q, P>(
+        &'a mut self,
+        stmt: Q,
+        params: P,
+    ) -> BoxFuture<'s, QueryResult<'a, 'static, BinaryProtocol>>
+    where
+        Q: StatementLike + 's,
+        P: Into<Params>,
+    {
+        self.as_mut().exec_iter(stmt, params)
+    }
+
+    fn exec_batch<'a: 'b, 'b, S, P, I>(&'a mut self, stmt: S, params_iter: I) -> BoxFuture<'b, ()>
+    where
+        S: StatementLike + 'b,
+        I: IntoIterator<Item = P> + Send + 'b,
+        I::IntoIter: Send,
+        P: Into<Params> + Send,
+    {
+        self.as_mut().exec_batch(stmt, params_iter)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{error::Result, prelude::*, test_misc::get_opts, Conn};
+    use crate::{prelude::*, test_misc::get_opts, Conn};
 
     #[tokio::test]
-    async fn should_prep() -> Result<()> {
+    async fn should_prep() {
         const NAMED: &str = "SELECT :foo, :bar, :foo";
         const POSITIONAL: &str = "SELECT ?, ?, ?";
 
-        let mut conn = Conn::new(get_opts()).await?;
+        let mut conn = Conn::new(get_opts()).await.unwrap();
 
-        let stmt_named = conn.prep(NAMED).await?;
-        let stmt_positional = conn.prep(POSITIONAL).await?;
+        let stmt_named = conn.prep(NAMED).await.unwrap();
+        let stmt_positional = conn.prep(POSITIONAL).await.unwrap();
 
         let result_stmt_named: Option<(String, u8, String)> = conn
             .exec_first(&stmt_named, params! { "foo" => "bar", "bar" => 42 })
-            .await?;
+            .await
+            .unwrap();
         let result_str_named: Option<(String, u8, String)> = conn
             .exec_first(NAMED, params! { "foo" => "bar", "bar" => 42 })
-            .await?;
+            .await
+            .unwrap();
 
         let result_stmt_positional: Option<(String, u8, String)> = conn
             .exec_first(&stmt_positional, ("bar", 42, "bar"))
-            .await?;
-        let result_str_positional: Option<(String, u8, String)> =
-            conn.exec_first(NAMED, ("bar", 42, "bar")).await?;
+            .await
+            .unwrap();
+        let result_str_positional: Option<(String, u8, String)> = conn
+            .exec_first(NAMED, params! { "foo" => "bar", "bar" => 42 })
+            .await
+            .unwrap();
 
         assert_eq!(
             Some(("bar".to_owned(), 42_u8, "bar".to_owned())),
@@ -620,8 +700,6 @@ mod tests {
         assert_eq!(result_str_named, result_stmt_positional);
         assert_eq!(result_stmt_positional, result_str_positional);
 
-        conn.disconnect().await?;
-
-        Ok(())
+        conn.disconnect().await.unwrap();
     }
 }

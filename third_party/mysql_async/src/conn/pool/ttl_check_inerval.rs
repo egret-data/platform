@@ -7,7 +7,6 @@
 // modified, or distributed except according to those terms.
 
 use futures_util::future::{ok, FutureExt};
-use pin_project::pin_project;
 use tokio::time::{self, Interval};
 
 use std::{
@@ -16,7 +15,7 @@ use std::{
     sync::{atomic::Ordering, Arc},
 };
 
-use super::Inner;
+use super::{in_pool_connections::InPoolConnections, Inner};
 use crate::PoolOpts;
 use futures_core::task::{Context, Poll};
 use std::pin::Pin;
@@ -26,10 +25,8 @@ use std::pin::Pin;
 /// The purpose of this interval is to remove idling connections that both:
 /// * overflows min bound of the pool;
 /// * idles longer then `inactive_connection_ttl`.
-#[pin_project]
 pub(crate) struct TtlCheckInterval {
     inner: Arc<Inner>,
-    #[pin]
     interval: Interval,
     pool_opts: PoolOpts,
 }
@@ -56,8 +53,10 @@ impl TtlCheckInterval {
                 .saturating_sub(self.pool_opts.constraints().min());
 
             let mut to_be_dropped = Vec::<_>::with_capacity(exchange.available.len());
-            let mut kept_available =
-                VecDeque::<_>::with_capacity(self.pool_opts.constraints().max());
+            let mut kept_available = InPoolConnections {
+                connections: VecDeque::<_>::with_capacity(self.pool_opts.constraints().max()),
+                metrics: self.inner.metrics.clone(),
+            };
 
             while let Some(conn) = exchange.available.pop_front() {
                 if conn.expired()
@@ -79,6 +78,10 @@ impl TtlCheckInterval {
             tokio::spawn(idling_conn.conn.disconnect().then(move |_| {
                 let mut exchange = inner.exchange.lock().unwrap();
                 exchange.exist -= 1;
+                inner
+                    .metrics
+                    .connection_count
+                    .store(exchange.exist, Ordering::Relaxed);
                 ok::<_, ()>(())
             }));
         }
@@ -90,7 +93,7 @@ impl Future for TtlCheckInterval {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
-            let _ = futures_core::ready!(self.as_mut().project().interval.poll_tick(cx));
+            let _ = futures_core::ready!(Pin::new(&mut self.interval).poll_tick(cx));
             let close = self.inner.close.load(Ordering::Acquire);
 
             if !close {

@@ -16,7 +16,10 @@ use super::Routine;
 pub struct ChangeUser;
 
 impl Routine<()> for ChangeUser {
-    fn call<'a>(&'a mut self, conn: &'a mut Conn) -> BoxFuture<'a, crate::Result<()>> {
+    fn call<'a>(self, conn: &'a mut Conn) -> BoxFuture<'a, crate::Result<()>>
+    where
+        Self: 'a,
+    {
         #[cfg(feature = "tracing")]
         let span = debug_span!(
             "mysql_async::change_user",
@@ -39,7 +42,7 @@ impl Routine<()> for ChangeUser {
                     UTF8_GENERAL_CI
                 })
                 .with_auth_plugin(Some(conn.inner.auth_plugin.clone()))
-                .with_connect_attributes(None),
+                .with_connect_attributes(conn.opts().connect_attributes().cloned()),
             ))
             .into_owned();
 

@@ -1,5 +1,3 @@
-#![cfg(feature = "rustls-tls")]
-
 use std::sync::Arc;
 
 use rustls::{
@@ -7,12 +5,11 @@ use rustls::{
         danger::{ServerCertVerified, ServerCertVerifier},
         WebPkiServerVerifier,
     },
-    pki_types::{CertificateDer, ServerName},
+    pki_types::{pem, CertificateDer, ServerName},
     ClientConfig, RootCertStore,
 };
 
-use rustls_pemfile::certs;
-use tokio_rustls::TlsConnector;
+pub(crate) use tokio_rustls::TlsConnector;
 
 use crate::{io::Endpoint, Result, SslOpts, TlsError};
 
@@ -23,7 +20,7 @@ impl SslOpts {
         for root_cert in self.root_certs() {
             let root_cert_data = root_cert.read().await?;
             let mut seen = false;
-            for cert in certs(&mut &*root_cert_data) {
+            for cert in pem::SliceIter::<CertificateDer<'_>>::new(&root_cert_data) {
                 seen = true;
                 output.push(cert?);
             }
@@ -35,52 +32,60 @@ impl SslOpts {
 
         Ok(output)
     }
-}
 
-impl Endpoint {
-    pub async fn make_secure(&mut self, domain: String, ssl_opts: SslOpts) -> Result<()> {
-        #[cfg(unix)]
-        if self.is_socket() {
-            // won't secure socket connection
-            return Ok(());
+    pub(crate) async fn build_tls_connector(&self) -> Result<TlsConnector> {
+        let mut root_store = RootCertStore::empty();
+        if !self.disable_built_in_roots() {
+            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().map(|x| x.to_owned()));
         }
 
-        let mut root_store = RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().map(|x| x.to_owned()));
-
-        for cert in ssl_opts.load_root_certs().await? {
+        for cert in self.load_root_certs().await? {
             root_store.add(cert)?;
         }
 
         let config_builder = ClientConfig::builder().with_root_certificates(root_store.clone());
 
-        let mut config = if let Some(identity) = ssl_opts.client_identity() {
+        let mut config = if let Some(identity) = self.client_identity() {
             let (cert_chain, priv_key) = identity.load().await?;
             config_builder.with_client_auth_cert(cert_chain, priv_key)?
         } else {
             config_builder.with_no_client_auth()
         };
 
-        let server_name = ServerName::try_from(domain.as_str())
-            .map_err(|_| webpki::InvalidDnsNameError)?
-            .to_owned();
         let mut dangerous = config.dangerous();
         let web_pki_verifier = WebPkiServerVerifier::builder(Arc::new(root_store))
             .build()
             .map_err(TlsError::from)?;
         let dangerous_verifier = DangerousVerifier::new(
-            ssl_opts.accept_invalid_certs(),
-            ssl_opts.skip_domain_validation(),
+            self.accept_invalid_certs(),
+            self.skip_domain_validation(),
             web_pki_verifier,
         );
         dangerous.set_certificate_verifier(Arc::new(dangerous_verifier));
+        let client_config = Arc::new(config);
+        Ok(TlsConnector::from(client_config))
+    }
+}
+
+impl Endpoint {
+    pub async fn make_secure(
+        &mut self,
+        domain: String,
+        tls_connector: &TlsConnector,
+    ) -> Result<()> {
+        #[cfg(unix)]
+        if self.is_socket() {
+            // won't secure socket connection
+            return Ok(());
+        }
 
         *self = match self {
             Endpoint::Plain(ref mut stream) => {
                 let stream = stream.take().unwrap();
 
-                let client_config = Arc::new(config);
-                let tls_connector = TlsConnector::from(client_config);
+                let server_name = ServerName::try_from(domain.as_str())
+                    .map_err(TlsError::InvalidDnsName)?
+                    .to_owned();
                 let connection = tls_connector.connect(server_name, stream).await?;
 
                 Endpoint::Secure(connection)

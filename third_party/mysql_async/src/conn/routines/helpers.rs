@@ -10,10 +10,10 @@ use mysql_common::{
     value::Value,
 };
 
-use crate::{error::LocalInfileError, queryable::Protocol, Conn, Error};
+use crate::{error::LocalInfileError, queryable::Protocol, Conn, Error, Statement};
 
 impl Conn {
-    /// Helper, that sends all `Value::Bytes` in the given list of paramenters as long data.
+    /// Helper, that sends all `Value::Bytes` in the given list of parameters as long data.
     pub(super) async fn send_long_data<'a, I>(
         &mut self,
         statement_id: u32,
@@ -44,6 +44,7 @@ impl Conn {
     pub(super) async fn read_result_set<P>(
         &mut self,
         is_first_result_set: bool,
+        stmt: Option<&Statement>,
     ) -> crate::Result<()>
     where
         P: Protocol,
@@ -72,7 +73,7 @@ impl Conn {
                 ))))?;
             }
             Some(0xFB) => self.handle_local_infile::<P>(&packet).await?,
-            _ => self.handle_result_set::<P>(&packet).await?,
+            _ => self.handle_result_set::<P>(&packet, stmt).await?,
         }
 
         Ok(())
@@ -122,13 +123,28 @@ impl Conn {
     /// Helper that handles result set packet.
     ///
     /// Requires that `packet` contains non-zero length-encoded integer.
-    pub(super) async fn handle_result_set<P>(&mut self, mut packet: &[u8]) -> crate::Result<()>
+    pub(super) async fn handle_result_set<P>(
+        &mut self,
+        mut packet: &[u8],
+        stmt: Option<&Statement>,
+    ) -> crate::Result<()>
     where
         P: Protocol,
     {
         let column_count = packet.read_lenenc_int()?;
-        let columns = self.read_column_defs(column_count as usize).await?;
-        let meta = P::result_set_meta(Arc::from(columns.into_boxed_slice()));
+        // Reading 1st byte only if metadata skip is not possible, otherwise it can be a part of the first column definition.
+        // Reading column metadata only if it is not skipped - if skip is not possible or if metadata is present.
+        let meta = if !(P::metadata_skip_possible(self) && packet.first() == Some(&0x00)) {
+            let columns = self.read_column_defs(column_count as usize).await?;
+            // Statement must have latest version of the metadata.
+            if let Some(stmt) = stmt {
+                stmt.update_columns_metadata(columns.clone());
+            }
+            P::result_set_meta(Arc::from(columns.into_boxed_slice()))
+        } else {
+            // Since metadata is skipped, stmt must be present.
+            P::result_set_meta(stmt.unwrap().columns())
+        };
         self.set_pending_result(Some(meta))?;
         Ok(())
     }

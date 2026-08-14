@@ -143,6 +143,8 @@ impl<'a> Transaction<'a> {
 
         let mut conn = conn.into();
 
+        conn.as_mut().clean_dirty().await?;
+
         if conn.get_tx_status() != TxStatus::None {
             return Err(DriverError::NestedTransaction.into());
         }
@@ -153,42 +155,55 @@ impl<'a> Transaction<'a> {
 
         if let Some(isolation_level) = isolation_level {
             let query = format!("SET TRANSACTION ISOLATION LEVEL {}", isolation_level);
-            conn.query_drop(query).await?;
+            conn.as_mut().query_drop(query).await?;
         }
 
         if let Some(readonly) = readonly {
             if readonly {
-                conn.query_drop("SET TRANSACTION READ ONLY").await?;
+                conn.as_mut()
+                    .query_drop("SET TRANSACTION READ ONLY")
+                    .await?;
             } else {
-                conn.query_drop("SET TRANSACTION READ WRITE").await?;
+                conn.as_mut()
+                    .query_drop("SET TRANSACTION READ WRITE")
+                    .await?;
             }
         }
 
         if consistent_snapshot {
-            conn.query_drop("START TRANSACTION WITH CONSISTENT SNAPSHOT")
+            conn.as_mut()
+                .query_drop("START TRANSACTION WITH CONSISTENT SNAPSHOT")
                 .await?
         } else {
-            conn.query_drop("START TRANSACTION").await?
+            conn.as_mut().query_drop("START TRANSACTION").await?
         };
 
-        conn.set_tx_status(TxStatus::InTransaction);
+        conn.as_mut().set_tx_status(TxStatus::InTransaction);
         Ok(Transaction(conn))
     }
 
-    /// Performs `COMMIT` query.
-    pub async fn commit(mut self) -> Result<()> {
-        let result = self.0.query_iter("COMMIT").await?;
+    /// Performs `COMMIT` query or returns an error
+    async fn try_commit(&mut self) -> Result<()> {
+        let result = self.0.as_mut().query_iter("COMMIT").await?;
         result.drop_result().await?;
-        self.0.set_tx_status(TxStatus::None);
+        self.0.as_mut().set_tx_status(TxStatus::None);
         Ok(())
+    }
+
+    /// Performs `COMMIT` query or rollbacks when any error occurs and returns the original error.
+    pub async fn commit(mut self) -> Result<()> {
+        match self.try_commit().await {
+            Ok(..) => Ok(()),
+            Err(e) => {
+                self.0.as_mut().rollback_transaction().await.unwrap_or(());
+                Err(e)
+            }
+        }
     }
 
     /// Performs `ROLLBACK` query.
     pub async fn rollback(mut self) -> Result<()> {
-        let result = self.0.query_iter("ROLLBACK").await?;
-        result.drop_result().await?;
-        self.0.set_tx_status(TxStatus::None);
-        Ok(())
+        self.0.as_mut().rollback_transaction().await
     }
 }
 
@@ -203,7 +218,7 @@ impl Deref for Transaction<'_> {
 impl Drop for Transaction<'_> {
     fn drop(&mut self) {
         if self.0.get_tx_status() == TxStatus::InTransaction {
-            self.0.set_tx_status(TxStatus::RequiresRollback);
+            self.0.as_mut().set_tx_status(TxStatus::RequiresRollback);
         }
     }
 }

@@ -23,7 +23,10 @@ impl<P> Routine<()> for NextSetRoutine<P>
 where
     P: Protocol,
 {
-    fn call<'a>(&'a mut self, conn: &'a mut Conn) -> BoxFuture<'a, crate::Result<()>> {
+    fn call<'a>(self, conn: &'a mut Conn) -> BoxFuture<'a, crate::Result<()>>
+    where
+        Self: 'a,
+    {
         #[cfg(feature = "tracing")]
         let span = debug_span!(
             "mysql_async::next_set",
@@ -31,7 +34,9 @@ where
         );
         conn.sync_seq_id();
         let fut = async move {
-            conn.read_result_set::<P>(false).await?;
+            // Cached metadata can be for binary protocol only. With binary we can't have a batch prepared. Multiple results
+            // are only possible with SP call. But with them we won't have metadata skipped(on 2nd or more result).
+            conn.read_result_set::<P>(false, None).await?;
             Ok(())
         };
 
