@@ -50,7 +50,7 @@ The existing unit tests on both sites — `string_param_neutralizes_injection` (
 
 Because the fix lands in the shared contract crate, SQL Lab **and** chart/dashboard filters are patched by the same change.
 
-A third site, `starrocks_create_service_user_sql` (`crates/egret-engine-mgmt/src/engines.rs:3229`), has the same gap. It is latent today because the username it interpolates is a constant, so it is out of scope here — but it should be fixed alongside rather than left as the next one to be found.
+A third site, `starrocks_create_service_user_sql` (`crates/egret-engine-mgmt/src/engines.rs`), had the same gap and is **fixed in the same branch**. An earlier revision of this spec called it latent on the grounds that the username it interpolates is a constant; that reasoning was wrong, because it only covered the username. The password is not a constant: `ensure_delegator_secret` returns `resolve_plaintext(None, id)` on every call after the first, so what gets interpolated is whatever is currently stored in the named secret, not the random value egret originally minted. A stored value containing `\'` breaks out of the literal, and this DDL runs as `root` on the StarRocks FE. It now calls the same `quote_string`, which supplies its own quotes.
 
 **Deferred, deliberately:** bound parameters at the connector layer. StarRocks (`mysql_async`) supports them directly; Trino needs `X-Trino-Prepared-Statement` + `EXECUTE … USING`. That is a `Connector` trait change large enough to be its own project. The dialect escaper sits behind a single function so it can be replaced in one place.
 

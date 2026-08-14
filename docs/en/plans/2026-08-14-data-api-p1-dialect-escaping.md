@@ -662,21 +662,23 @@ grep -rn '"'"''"'"' crates --include='*.rs'
 
 (`rg` is intercepted by the rtk wrapper in this environment and errors out; use `grep`. An empty result from a broken tool is not a passing check.)
 
-Expected: exactly these 5 lines in 3 files, and nothing in `egret-bi/src/chartquery.rs`:
+Expected: exactly these 5 lines in 3 files, and nothing in `egret-bi/src/chartquery.rs` or `egret-engine-mgmt/src/engines.rs`:
 
 | Location | Status |
 |---|---|
 | `egret-query-api/src/dialect.rs:23,25` | The one literal quoter. Both arms of the same function. |
+| `egret-query-api/src/dialect.rs:41,42` | The `quote_string` empty-string test's expected values, not an implementation. |
 | `egret-bi/src/schema.rs:165` | `like_literal` — a `LIKE`-pattern escaper (also escapes `%` and `_`, does not wrap in quotes). Deliberately stays. |
-| `egret-engine-mgmt/src/engines.rs:3230,3231` | `starrocks_create_service_user_sql` — the known third site, out of scope (see below). |
 
-A hit in `chartquery.rs` means Task 3 did not land. Any hit outside this table is a new copy that will drift, which is how this bug was born.
+A hit in `chartquery.rs` means Task 3 did not land. A hit in `engines.rs` means the `starrocks_create_service_user_sql` fix was reverted — it now calls `quote_string`, which supplies its own quotes, so it no longer doubles a quote itself. Any hit outside this table is a new copy that will drift, which is how this bug was born.
 
 - Trino behaviour byte-identical to before: `trino_leaves_backslash_alone` and `sql_literal_trino_leaves_backslash_alone` cover the regression on both sites.
+- The third site, `starrocks_create_service_user_sql` (`crates/egret-engine-mgmt/src/engines.rs`), is fixed too — it was found to be **live, not latent**, so it could not be deferred. An earlier revision of this plan called it latent because the username it interpolates is a constant; that only covered the username. The password is read back from a mutable stored secret — `ensure_delegator_secret` returns `resolve_plaintext(None, id)` on every call after the first — so a stored value containing `\'` breaks out of an `IDENTIFIED BY '…'` literal in DDL that runs as `root` on the FE. It now calls `quote_string` for both inputs (`egret-engine-mgmt` takes `egret-query-api` as a dependency; it is a pure leaf crate and the edge is acyclic). Rendered SQL for ordinary inputs is byte-identical, `@'%'` included, and its test carries a backslash payload that fails against the old code.
+- `quote_string` has direct tests of its own (`cargo test -p egret-query-api` no longer reports `running 0 tests`): both engines against empty, a lone trailing backslash, an all-backslash value, multi-byte UTF-8, the `\' OR 1=1 -- ` payload, and an embedded quote — plus an explicit guard that the Trino arm never doubles a backslash.
 
 ## Not in this plan
 
 - Bound parameters at the connector layer (`Connector::execute` takes `sql: &str`). StarRocks could use `mysql_async` binding directly; Trino needs `X-Trino-Prepared-Statement` + `EXECUTE … USING`. That is a `Connector` trait change and its own project. `quote_string` is a single function so it can be replaced in one place.
 - Identifier parameters (dynamic column / table names). Spec §3 requires these to be `enum` parameters with an allow-list; that lands with the Data API parameter model in P3.
 - `sql_mode = NO_BACKSLASH_ESCAPES` on StarRocks connections. It would be defence in depth, but changing session `sql_mode` alters parsing for every other query on that connection, so it needs its own evaluation rather than a drive-by.
-- `starrocks_create_service_user_sql` (`crates/egret-engine-mgmt/src/engines.rs:3229`) has the same gap and its doc comment notes it runs as **root**. It is latent because the username it interpolates is a constant, so it is not a live vulnerability and not a blocker for Data API. It should get its own small PR rather than being smuggled into this one — but it should not be forgotten, because the next person to make that username dynamic inherits a root-level injection.
+- ~~`starrocks_create_service_user_sql`~~ — **moved into this plan**; see "Done when" above. It was deferred here on the reasoning that the username it interpolates is a constant, which turned out to be wrong: the password is not, so the site was live and had to be fixed in this branch rather than left for a follow-up PR.

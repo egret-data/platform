@@ -52,7 +52,7 @@ Unit test hiện có ở cả hai chỗ — `string_param_neutralizes_injection`
 
 Vì bản vá nằm trong contract crate dùng chung, SQL Lab **và** filter của chart/dashboard được vá bằng chính thay đổi đó.
 
-Một chỗ thứ ba, `starrocks_create_service_user_sql` (`crates/egret-engine-mgmt/src/engines.rs:3229`), có cùng lỗ hổng. Hiện tại nó tiềm ẩn vì username mà nó nội suy là hằng số, nên nằm ngoài phạm vi ở đây — nhưng nên vá kèm luôn thay vì để nó thành chỗ tiếp theo bị phát hiện.
+Một chỗ thứ ba, `starrocks_create_service_user_sql` (`crates/egret-engine-mgmt/src/engines.rs`), có cùng lỗ hổng và **đã được vá trong cùng nhánh này**. Một bản trước của spec gọi nó là tiềm ẩn với lý do username mà nó nội suy là hằng số; lập luận đó sai, vì nó chỉ xét tới username. Password không phải hằng số: `ensure_delegator_secret` trả về `resolve_plaintext(None, id)` ở mọi lần gọi sau lần đầu tiên, nên thứ được nội suy là giá trị đang lưu trong secret có tên đó, không phải giá trị ngẫu nhiên mà egret sinh ra ban đầu. Một giá trị đã lưu có chứa `\'` sẽ thoát ra khỏi literal, và DDL này chạy với quyền `root` trên StarRocks FE. Giờ nó gọi chính `quote_string`, hàm này tự cung cấp cặp nháy bao ngoài.
 
 **Cố ý hoãn:** bound parameter ở tầng connector. StarRocks (`mysql_async`) hỗ trợ trực tiếp; Trino cần `X-Trino-Prepared-Statement` + `EXECUTE … USING`. Đó là thay đổi trait `Connector` đủ lớn để thành dự án riêng. Escaper theo dialect nằm sau một hàm duy nhất nên thay thế được ở một chỗ.
 
