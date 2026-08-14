@@ -711,15 +711,18 @@ async fn publish_refuses_an_invalid_definition_without_calling_the_engine() {
             serde_json::json!([{ "name": "p", "type": "string", "location": "query" }]),
             "placeholder inside a block comment",
         ),
-        // `#` is a MySQL/StarRocks line comment. The definition self-selects for
-        // the engines the attack works on — it only publishes if `describe_as`
-        // accepted `SELECT n FROM t # ''` — and `quote_string` does not strip
-        // newlines, so a caller's "\nUNION ALL SELECT secret FROM other -- "
-        // ends the comment and appends a live UNION.
+        // `#` is not a comment on either engine `Engine` can name (StarRocks
+        // 4.1.3 measured with `mysql -c`: ERROR 1064; Trino: no `#` token), so a
+        // real engine would reject this at describe time anyway. The validator
+        // refuses it first, at no cost, which is what puts the rule in place
+        // ahead of any MySQL-compatible front end that does comment on `#`.
+        // Earlier rounds of this task called it a live serve-time injection —
+        // that came from probing through the bare `mysql` client, which strips
+        // `#…` before the server sees it. See `lifecycle.rs`' scanner comment.
         (
             "SELECT n FROM t # {{p}}",
             serde_json::json!([{ "name": "p", "type": "string", "location": "query" }]),
-            "placeholder inside a hash comment",
+            "placeholder inside a hash region",
         ),
         // Two statements under the Trino reading of `\`, invisible to a scanner
         // that assumes the StarRocks one.
