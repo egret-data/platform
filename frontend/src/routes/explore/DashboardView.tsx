@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Info, LayoutDashboard, Pencil, Star } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { type Layout } from "react-grid-layout";
+import { type LayoutItem } from "react-grid-layout";
 import { useDashboard, useDashboardMutations, useDashboardRevisions, type DashboardCard as Card, type DashboardParameter } from "@/api/dashboards";
 import { useCharts, type Chart, type ChartFilter } from "@/api/charts";
 import { useChartData } from "@/api/useChartData";
@@ -516,7 +516,7 @@ export default function DashboardView() {
   // from them, and drag/resize writes positions straight back into the draft. This keeps
   // every grid item sized from its card (a newly added card is never auto-placed at 1x1).
   const vizKeyOf = (c: DraftCard) => (c.card_type === "chart" ? (chartById.get(c.chart_id ?? "")?.viz_type ?? "") : c.card_type);
-  const layout: Layout[] = visibleCards.map((c) => {
+  const layout: LayoutItem[] = visibleCards.map((c) => {
     const autoH = !!c.options.autoHeight;
     const min = sizeForViz(vizKeyOf(c as DraftCard)).min;
     return {
@@ -545,7 +545,7 @@ export default function DashboardView() {
     });
   }
 
-  function onLayoutChange(next: Layout[]) {
+  function onLayoutChange(next: readonly LayoutItem[]) {
     if (!mayPersistLayout(editing, gridBreakpointRef.current)) return;
     setDraftCards((prev) => {
       const base = prev ?? cardsAsDraft();
