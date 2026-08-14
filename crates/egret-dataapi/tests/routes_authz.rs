@@ -37,6 +37,7 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
     DataApiState {
         db: db.clone(),
         clients: ClientStore::new(db.clone()),
+        endpoints: egret_dataapi::EndpointStore::new(db.clone()),
         users: egret_auth::users::UserRepo::new(db.clone()),
         sessions: egret_auth::session::SessionService::new(
             db.clone(),

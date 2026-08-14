@@ -1,5 +1,5 @@
 //! Workspace-scoped management routes for service accounts and their OAuth2
-//! clients (P2 Task 5).
+//! clients (P2 Task 5), and for endpoint drafts (P3 Task 3).
 //!
 //! ```text
 //! GET    /api/ws/{workspace}/data-api/service-accounts
@@ -8,9 +8,15 @@
 //! GET    /api/ws/{workspace}/data-api/service-accounts/{id}/clients
 //! POST   /api/ws/{workspace}/data-api/service-accounts/{id}/clients
 //! DELETE /api/ws/{workspace}/data-api/clients/{id}
+//!
+//! GET    /api/ws/{workspace}/data-api/endpoints
+//! POST   /api/ws/{workspace}/data-api/endpoints
+//! GET    /api/ws/{workspace}/data-api/endpoints/{id}
+//! PATCH  /api/ws/{workspace}/data-api/endpoints/{id}
+//! DELETE /api/ws/{workspace}/data-api/endpoints/{id}
 //! ```
 //!
-//! Two invariants this module exists to hold, both of them security properties
+//! Three invariants this module exists to hold, all of them security properties
 //! rather than conveniences:
 //!
 //! 1. **Issuing a client gates on `service_account:manage`, never `:read`.** A
@@ -20,9 +26,16 @@
 //!    path segment read a second time.** Gating on one and querying with the
 //!    other is exactly how a cross-workspace hole opens. Every handler that
 //!    names a service account or a client resolves it through
-//!    [`scoped_account`] / [`scoped_client`] first, which 404 — never 403 — on
-//!    a workspace mismatch, so a caller cannot distinguish "no such account"
-//!    from "exists, but not yours".
+//!    [`scoped_account`] / [`scoped_client`] / [`scoped_endpoint`] first, which
+//!    404 — never 403 — on a workspace mismatch, so a caller cannot distinguish
+//!    "no such account" from "exists, but not yours".
+//! 3. **A `database_id` arriving in a request body is resolved through
+//!    [`scoped_database`] before it is stored.** It is the one identifier here
+//!    that a caller supplies for an object it does not name in the URL, so
+//!    nothing else in the draft path would stop an endpoint pointing at another
+//!    workspace's connection. `describe_as` is workspace-scoped and would refuse
+//!    it at publish time, but by then the reference has been accepted, stored,
+//!    and echoed back to the author as valid.
 
 use axum::extract::{FromRef, Path, State};
 use axum::http::StatusCode;
@@ -33,6 +46,7 @@ use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
 use egret_core::http::ErrorBody;
 use egret_core::{Ack, Error, UserId, WorkspacePath};
+use egret_dataapi_api::{CacheSpec, LimitsSpec, OutputSpec, ParamSpec, RateLimitSpec};
 use egret_metastore::Db;
 use egret_workspace::context::WsContext;
 use egret_workspace::rbac::Authorizer;
@@ -42,12 +56,22 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::clients::ClientStore;
+use crate::endpoints::{
+    normalize_path, CreateEndpointInput, DataApiEndpointDto, EndpointStore, UpdateEndpointInput,
+    ALLOWED_METHODS,
+};
 
 /// View the accounts and their clients. Deliberately does NOT imply issuing.
 const SA_READ: &str = "service_account:read";
 /// Create/delete accounts and ISSUE clients. Issuing lives here because a
 /// client hands out that account's access.
 const SA_MANAGE: &str = "service_account:manage";
+
+/// List and inspect endpoint drafts and their versions.
+const EP_READ: &str = "data_api_endpoint:read";
+/// Author endpoints. Flat, like every permission here: it implies no `:read`,
+/// and `:read` implies none of it.
+const EP_MANAGE: &str = "data_api_endpoint:manage";
 
 /// Handler error type. The Data API management surface has no domain-specific
 /// failure mode of its own — every arm is already expressible as an
@@ -60,6 +84,7 @@ pub type DataApiError = Error;
 pub struct DataApiState {
     pub db: Db,
     pub clients: ClientStore,
+    pub endpoints: EndpointStore,
     pub users: UserRepo,
     pub sessions: SessionService,
     pub workspaces: WorkspaceRepo,
@@ -178,6 +203,68 @@ async fn scoped_client(st: &DataApiState, ws: Uuid, client: Uuid) -> Result<Uuid
     .await
     .map_err(db_err)?;
     found.ok_or_else(|| Error::NotFound("client".into()))
+}
+
+/// The same containment for an endpoint draft.
+async fn scoped_endpoint(st: &DataApiState, ws: Uuid, id: Uuid) -> Result<Uuid, DataApiError> {
+    let found: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM dataapi.endpoints WHERE id = $1 AND workspace_id = $2")
+            .bind(id)
+            .bind(ws)
+            .fetch_optional(&st.db.pool)
+            .await
+            .map_err(db_err)?;
+    found.ok_or_else(|| Error::NotFound("endpoint".into()))
+}
+
+/// Confirm a `database_id` from a REQUEST BODY belongs to the workspace the
+/// caller was authorized against.
+///
+/// `query.databases.workspace_id` is `NOT NULL` and ownership is direct, so this
+/// is the same predicate `QueryExecPort::describe_as` runs through
+/// `DatabaseRepo::get_in_workspace`. It is repeated here rather than deferred to
+/// publish because the draft is written first: without it, an author can save an
+/// endpoint naming another workspace's connection, see it echoed back as valid,
+/// and only discover at publish time that it was never usable — having in the
+/// meantime stored one workspace's connection id inside another's endpoint,
+/// where it is readable by anyone with `data_api_endpoint:read` there.
+///
+/// `NotFound`, not `Forbidden`: a connection the workspace was never granted must
+/// be indistinguishable from one that does not exist, exactly as `scoped_account`
+/// and `scoped_endpoint` treat their objects.
+async fn scoped_database(st: &DataApiState, ws: Uuid, database: Uuid) -> Result<(), DataApiError> {
+    let found: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM query.databases WHERE id = $1 AND workspace_id = $2")
+            .bind(database)
+            .bind(ws)
+            .fetch_optional(&st.db.pool)
+            .await
+            .map_err(db_err)?;
+    found
+        .map(|_| ())
+        .ok_or_else(|| Error::NotFound("database".into()))
+}
+
+/// Normalise and validate the `method` an author typed.
+///
+/// Uppercased first, so `get` is the same request as `GET`, then checked against
+/// the set the column's CHECK constraint accepts — otherwise the constraint
+/// answers instead, as a 500 quoting `endpoints_method_check` at someone who
+/// only wanted to know which verbs are allowed.
+fn checked_method(raw: Option<&str>) -> Result<String, DataApiError> {
+    let m = raw.map(|m| m.trim().to_ascii_uppercase());
+    let m = match m {
+        None => return Ok("GET".to_string()),
+        Some(m) => m,
+    };
+    if ALLOWED_METHODS.contains(&m.as_str()) {
+        Ok(m)
+    } else {
+        Err(Error::InvalidInput(format!(
+            "method must be one of {}",
+            ALLOWED_METHODS.join(", ")
+        )))
+    }
 }
 
 /// `users.email` is `citext NOT NULL UNIQUE` and a service account has no
@@ -531,6 +618,182 @@ async fn revoke_client(
     Ok(Json(Ack::ok()))
 }
 
+// ---------- Endpoint drafts (P3 Task 3) ----------
+//
+// Draft CRUD only. Nothing here writes `state` or `live_version_id`: publishing,
+// rollback and disable are a separate lifecycle, so no amount of editing can put
+// an endpoint live or change what an already-live one serves.
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/data-api/endpoints",
+    tag = "data-api",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "Endpoint drafts in the workspace", body = Vec<DataApiEndpointDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_endpoints(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<Vec<DataApiEndpointDto>>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_READ).await?;
+    Ok(Json(st.endpoints.list(ctx.workspace_id.0).await?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+    ),
+    responses(
+        (status = 200, description = "The endpoint draft", body = DataApiEndpointDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:read permission", body = ErrorBody),
+        (status = 404, description = "No such endpoint in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn get_endpoint(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id)): Path<(String, Uuid)>,
+) -> Result<Json<DataApiEndpointDto>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_READ).await?;
+    let id = scoped_endpoint(&st, ctx.workspace_id.0, id).await?;
+    Ok(Json(st.endpoints.get(id).await?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/data-api/endpoints",
+    tag = "data-api",
+    params(WorkspacePath),
+    request_body = CreateEndpointInput,
+    responses(
+        (status = 201, description = "Draft created", body = DataApiEndpointDto),
+        (status = 400, description = "Empty name or path, or an unsupported method", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:manage permission — :read does not imply authoring", body = ErrorBody),
+        (status = 404, description = "No such database in this workspace", body = ErrorBody),
+        (status = 409, description = "Another endpoint already serves that method and path", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn create_endpoint(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Json(body): Json<CreateEndpointInput>,
+) -> Result<(StatusCode, Json<DataApiEndpointDto>), DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
+    if body.name.trim().is_empty() {
+        return Err(Error::InvalidInput("name must not be empty".into()));
+    }
+    let path = normalize_path(&body.path)
+        .ok_or_else(|| Error::InvalidInput("path must not be empty".into()))?;
+    let method = checked_method(body.method.as_deref())?;
+    // Before the insert, so a refused database never reaches the FK — and so the
+    // answer is a 404 about a database rather than a 500 about a constraint.
+    scoped_database(&st, ctx.workspace_id.0, body.database_id).await?;
+    let created = st
+        .endpoints
+        .create(
+            ctx.workspace_id.0,
+            ctx.principal.user_id,
+            &method,
+            &path,
+            &body,
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+    ),
+    request_body = UpdateEndpointInput,
+    responses(
+        (status = 200, description = "Draft updated", body = DataApiEndpointDto),
+        (status = 400, description = "Empty name or path, or an unsupported method", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:manage permission", body = ErrorBody),
+        (status = 404, description = "No such endpoint, or no such database, in this workspace", body = ErrorBody),
+        (status = 409, description = "Another endpoint already serves that method and path", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn update_endpoint(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id)): Path<(String, Uuid)>,
+    Json(mut body): Json<UpdateEndpointInput>,
+) -> Result<Json<DataApiEndpointDto>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
+    let id = scoped_endpoint(&st, ctx.workspace_id.0, id).await?;
+
+    if let Some(name) = &body.name {
+        if name.trim().is_empty() {
+            return Err(Error::InvalidInput("name must not be empty".into()));
+        }
+    }
+    if let Some(raw) = &body.path {
+        body.path = Some(
+            normalize_path(raw)
+                .ok_or_else(|| Error::InvalidInput("path must not be empty".into()))?,
+        );
+    }
+    if body.method.is_some() {
+        body.method = Some(checked_method(body.method.as_deref())?);
+    }
+    // A PATCH may repoint the endpoint at a different connection, so the same
+    // containment applies here as on create — and it has to run before the
+    // UPDATE, or a refused database would already have been written.
+    if let Some(database_id) = body.database_id {
+        scoped_database(&st, ctx.workspace_id.0, database_id).await?;
+    }
+    Ok(Json(st.endpoints.update(id, &body).await?))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/data-api/endpoints/{id}",
+    tag = "data-api",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Endpoint id"),
+    ),
+    responses(
+        (status = 200, description = "Endpoint and its published versions deleted", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing data_api_endpoint:manage permission", body = ErrorBody),
+        (status = 404, description = "No such endpoint in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn delete_endpoint(
+    State(st): State<DataApiState>,
+    WsContext(ctx): WsContext,
+    Path((_ws_ignored, id)): Path<(String, Uuid)>,
+) -> Result<Json<Ack>, DataApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
+    let id = scoped_endpoint(&st, ctx.workspace_id.0, id).await?;
+    // `dataapi.endpoint_versions` cascades from the endpoint (0121), so this
+    // takes the published history with it — which is why it is `:manage`.
+    st.endpoints.delete(id).await?;
+    Ok(Json(Ack::ok()))
+}
+
 /// The Data API management router. Mount under `/api` so the live paths are
 /// `/api/ws/{workspace}/data-api/…` — `WsContext`'s feature gate only recognises
 /// a path beginning `/api/ws/` or `/ws/`, and `egret-server`'s
@@ -553,6 +816,16 @@ pub fn management_router() -> Router<DataApiState> {
             "/ws/{workspace}/data-api/clients/{id}",
             delete(revoke_client),
         )
+        .route(
+            "/ws/{workspace}/data-api/endpoints",
+            get(list_endpoints).post(create_endpoint),
+        )
+        .route(
+            "/ws/{workspace}/data-api/endpoints/{id}",
+            get(get_endpoint)
+                .patch(update_endpoint)
+                .delete(delete_endpoint),
+        )
 }
 
 #[derive(utoipa::OpenApi)]
@@ -564,6 +837,11 @@ pub fn management_router() -> Router<DataApiState> {
         list_clients,
         issue_client,
         revoke_client,
+        list_endpoints,
+        get_endpoint,
+        create_endpoint,
+        update_endpoint,
+        delete_endpoint,
     ),
     components(schemas(
         DataApiServiceAccountDto,
@@ -571,6 +849,14 @@ pub fn management_router() -> Router<DataApiState> {
         DataApiNewClientDto,
         CreateServiceAccountInput,
         IssueClientInput,
+        DataApiEndpointDto,
+        CreateEndpointInput,
+        UpdateEndpointInput,
+        ParamSpec,
+        OutputSpec,
+        CacheSpec,
+        LimitsSpec,
+        RateLimitSpec,
     )),
     tags((name = "data-api", description = "Data API service accounts and OAuth2 clients")),
 )]

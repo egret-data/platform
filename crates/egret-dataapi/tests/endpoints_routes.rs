@@ -1,0 +1,904 @@
+//! Draft CRUD for Data API endpoints, driven from the caller's side against the
+//! REAL Cedar PDP — a mocked decision would pin the consumer, not the server.
+//!
+//! Three properties this file exists to hold, all of them security properties:
+//!
+//! 1. `data_api_endpoint:read` cannot author. egret's permissions are FLAT, so
+//!    `:manage` implies no `:read` and `:read` implies no `:manage`; nothing but
+//!    an explicit `require` stands between a reader and a write.
+//! 2. An endpoint in another workspace is 404, never 403 — absence and denial
+//!    must be indistinguishable from outside.
+//! 3. `database_id` arrives in the REQUEST BODY, so a draft could otherwise name
+//!    a connection belonging to some other workspace. Publish (Task 4) resolves
+//!    the schema through `describe_as`, which is workspace-scoped, so the draft
+//!    would fail there — but by then the cross-workspace reference has already
+//!    been accepted, stored, and shown back to the author. It is refused here,
+//!    with the same 404 the endpoint routes use.
+//!
+//! DB-gated. Self-skips (passes) when DATABASE_URL is unset, like
+//! `routes_authz.rs` — so check the duration, not just the `ok`.
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use egret_dataapi::{management_router, ClientStore, DataApiState, EndpointStore};
+use egret_metastore::Db;
+use std::sync::Arc;
+use tower::ServiceExt;
+use uuid::Uuid;
+
+struct Fixture {
+    db: Db,
+    /// The workspace under test, by SLUG — `WsContext` resolves `{workspace}`
+    /// as a slug, so this is what goes in a URL.
+    ws: String,
+    ws_id: Uuid,
+    /// A human admin, used as `created_by`.
+    admin: Uuid,
+    /// A `query.databases` row owned by `ws_id`. `endpoints.database_id` has a
+    /// real FK (RESTRICT), so every draft needs a row to point at.
+    database_id: Uuid,
+}
+
+/// A principal: a router + session token whose PDP already sees its grants.
+/// Both are rebuilt per principal because `CedarPdp` snapshots policies at build
+/// time and a session caches its permission set.
+struct Caller {
+    app: axum::Router,
+    tok: String,
+}
+
+fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
+    DataApiState {
+        db: db.clone(),
+        clients: ClientStore::new(db.clone()),
+        endpoints: EndpointStore::new(db.clone()),
+        users: egret_auth::users::UserRepo::new(db.clone()),
+        sessions: egret_auth::session::SessionService::new(
+            db.clone(),
+            chrono::Duration::hours(24),
+            chrono::Duration::minutes(60),
+        ),
+        workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
+        authz: egret_workspace::rbac::Authorizer::new(db),
+        pdp,
+        issuer: "https://egret.test".into(),
+    }
+}
+
+async fn insert_user(db: &Db, tag: &str) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO users (provider, email, name, status, password_hash) \
+         VALUES ('local', $1, 'test', 'active', 'x') RETURNING id",
+    )
+    .bind(format!("{tag}_{}@egret.local", Uuid::new_v4().simple()))
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert user")
+}
+
+async fn insert_workspace(db: &Db, owner: Uuid, tag: &str) -> (Uuid, String) {
+    let slug = format!("{tag}-{}", Uuid::new_v4().simple());
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'Data API Test', $2, 'active') RETURNING id",
+    )
+    .bind(&slug)
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert workspace");
+    (id, slug)
+}
+
+async fn insert_database(db: &Db, ws: Uuid, owner: Uuid) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO query.databases (workspace_id, name, engine, host, port, created_by) \
+         VALUES ($1, $2, 'trino', 'localhost', 8080, $3) RETURNING id",
+    )
+    .bind(ws)
+    .bind(format!("db-{}", Uuid::new_v4().simple()))
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert database")
+}
+
+async fn fixture() -> Option<Fixture> {
+    let url = std::env::var("DATABASE_URL").ok()?;
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let admin = insert_user(&db, "dataapi_admin").await;
+    let (ws_id, ws) = insert_workspace(&db, admin, "dataapi").await;
+    let database_id = insert_database(&db, ws_id, admin).await;
+    Some(Fixture {
+        db,
+        ws,
+        ws_id,
+        admin,
+        database_id,
+    })
+}
+
+macro_rules! skip_without_db {
+    () => {
+        match fixture().await {
+            Some(f) => f,
+            None => {
+                eprintln!("DATABASE_URL unset — skipping");
+                return;
+            }
+        }
+    };
+}
+
+impl Fixture {
+    /// The realistic operator. `ws_admin` is seeded with BOTH `:read` and
+    /// `:manage` (migration 0122) because permissions are flat and `:manage`
+    /// implies nothing — a manage-only principal is not a role anyone holds. The
+    /// asymmetry that matters (read alone cannot author) is pinned separately.
+    const MANAGER: &'static [&'static str] =
+        &["data_api_endpoint:read", "data_api_endpoint:manage"];
+
+    /// A draft written straight to the table. Tests about WHO MAY READ an
+    /// endpoint should not depend on the create route also being correct.
+    async fn create_endpoint(&self, name: &str, path: &str, sql: &str) -> Uuid {
+        self.create_endpoint_in(self.ws_id, self.database_id, name, path, sql)
+            .await
+    }
+
+    async fn create_endpoint_in(
+        &self,
+        ws: Uuid,
+        database_id: Uuid,
+        name: &str,
+        path: &str,
+        sql: &str,
+    ) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO dataapi.endpoints \
+               (workspace_id, name, path, method, database_id, sql, created_by) \
+             VALUES ($1, $2, $3, 'GET', $4, $5, $6) RETURNING id",
+        )
+        .bind(ws)
+        .bind(name)
+        .bind(path)
+        .bind(database_id)
+        .bind(sql)
+        .bind(self.admin)
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("insert endpoint draft")
+    }
+
+    async fn create_workspace(&self, tag: &str) -> (Uuid, String) {
+        insert_workspace(&self.db, self.admin, tag).await
+    }
+
+    async fn create_database_in(&self, ws: Uuid) -> Uuid {
+        insert_database(&self.db, ws, self.admin).await
+    }
+
+    /// A brand-new, non-admin user holding exactly `perms` in `self.ws`.
+    async fn principal_with(&self, perms: &[&str]) -> Caller {
+        self.principal_with_in(perms, self.ws_id).await
+    }
+
+    /// The same, in an arbitrary workspace — the cross-workspace tests need a
+    /// principal who is a legitimate MANAGER somewhere else.
+    async fn principal_with_in(&self, perms: &[&str], ws: Uuid) -> Caller {
+        let user = insert_user(&self.db, "dataapi_caller").await;
+        let role: Uuid = sqlx::query_scalar(
+            "INSERT INTO roles (scope, name, description) \
+             VALUES ('workspace', $1, 'test') RETURNING id",
+        )
+        .bind(format!("test_dataapi_ep_{}", Uuid::new_v4().simple()))
+        .fetch_one(&self.db.pool)
+        .await
+        .expect("insert role");
+        for p in perms {
+            sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
+                .bind(role)
+                .bind(p)
+                .execute(&self.db.pool)
+                .await
+                .expect("grant perm");
+        }
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             VALUES ('user', $1, $2, 'workspace', $3)",
+        )
+        .bind(user)
+        .bind(role)
+        .bind(ws)
+        .execute(&self.db.pool)
+        .await
+        .expect("grant role");
+
+        let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+            egret_auth::pdp::CedarPdp::build(self.db.clone(), &egret_events::EventBus::new())
+                .await
+                .expect("build CedarPdp"),
+        );
+        let st = build_state(self.db.clone(), pdp);
+        let tok = st
+            .sessions
+            .create(egret_core::ids::UserId(user), "test", "127.0.0.1")
+            .await
+            .expect("create session")
+            .token;
+        // Nested at /api exactly as `egret-server` mounts it, so the paths these
+        // tests drive are the paths production serves.
+        let app = axum::Router::new()
+            .nest("/api", management_router())
+            .with_state(st);
+        Caller { app, tok }
+    }
+
+    async fn send(
+        &self,
+        c: &Caller,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut b = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("Cookie", format!("egret_session={}", c.tok));
+        if body.is_some() {
+            b = b.header("Content-Type", "application/json");
+        }
+        let res = c
+            .app
+            .clone()
+            .oneshot(
+                b.body(
+                    body.map(|v| Body::from(v.to_string()))
+                        .unwrap_or_else(Body::empty),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    async fn post_as(
+        &self,
+        c: &Caller,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        self.send(c, "POST", path, Some(body)).await
+    }
+
+    async fn patch_as(
+        &self,
+        c: &Caller,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        self.send(c, "PATCH", path, Some(body)).await
+    }
+
+    async fn get_as(&self, c: &Caller, path: &str) -> (StatusCode, serde_json::Value) {
+        self.send(c, "GET", path, None).await
+    }
+
+    fn collection(&self) -> String {
+        format!("/api/ws/{}/data-api/endpoints", self.ws)
+    }
+}
+
+// ---------- Authorization ----------
+
+#[tokio::test]
+async fn read_permission_cannot_create_an_endpoint() {
+    let f = skip_without_db!();
+    let reader = f.principal_with(&["data_api_endpoint:read"]).await;
+
+    let (status, body) = f
+        .post_as(
+            &reader,
+            &f.collection(),
+            serde_json::json!({
+                "name": "rev", "path": "reports/revenue",
+                "database_id": f.database_id, "sql": "SELECT 1"
+            }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN, "read must not imply create");
+
+    // And nothing was written — a 403 returned AFTER the insert would look the
+    // same from outside.
+    let made: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dataapi.endpoints WHERE workspace_id = $1 AND name = 'rev'",
+    )
+    .bind(f.ws_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("count endpoints");
+    assert_eq!(made, 0, "body: {body}");
+}
+
+/// The read side must still work for a reader — otherwise the test above would
+/// pass just as well against a router that denied a reader everything.
+#[tokio::test]
+async fn read_permission_can_still_list_and_get() {
+    let f = skip_without_db!();
+    let id = f
+        .create_endpoint("rev", "/reports/revenue", "SELECT 1")
+        .await;
+    let reader = f.principal_with(&["data_api_endpoint:read"]).await;
+
+    let (status, body) = f.get_as(&reader, &f.collection()).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body.as_array().expect("array").len(), 1);
+
+    let (status, body) = f.get_as(&reader, &format!("{}/{id}", f.collection())).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["id"].as_str().expect("id"), id.to_string());
+}
+
+/// Permissions are FLAT: `:manage` grants nothing on the read routes. Pinned
+/// because it is the trap P2 hit — a test that grants only `:manage` and expects
+/// a list to work gets a 403 and looks like a broken route.
+#[tokio::test]
+async fn manage_permission_alone_cannot_list() {
+    let f = skip_without_db!();
+    f.create_endpoint("rev", "/reports/revenue", "SELECT 1")
+        .await;
+    let manager_only = f.principal_with(&["data_api_endpoint:manage"]).await;
+
+    let (status, body) = f.get_as(&manager_only, &f.collection()).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "permissions are flat — :manage must not imply :read. body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn listing_endpoints_requires_read() {
+    let f = skip_without_db!();
+    f.create_endpoint("rev", "/reports/revenue", "SELECT 1")
+        .await;
+    let nobody = f.principal_with(&[]).await;
+
+    let (status, body) = f.get_as(&nobody, &f.collection()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+}
+
+#[tokio::test]
+async fn getting_an_endpoint_requires_read() {
+    let f = skip_without_db!();
+    let id = f
+        .create_endpoint("rev", "/reports/revenue", "SELECT 1")
+        .await;
+    let nobody = f.principal_with(&[]).await;
+
+    let (status, body) = f.get_as(&nobody, &format!("{}/{id}", f.collection())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+}
+
+#[tokio::test]
+async fn updating_an_endpoint_requires_manage() {
+    let f = skip_without_db!();
+    let id = f
+        .create_endpoint("rev", "/reports/revenue", "SELECT 1")
+        .await;
+    let reader = f.principal_with(&["data_api_endpoint:read"]).await;
+
+    let (status, body) = f
+        .patch_as(
+            &reader,
+            &format!("{}/{id}", f.collection()),
+            serde_json::json!({ "sql": "SELECT 2" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+
+    let sql: String = sqlx::query_scalar("SELECT sql FROM dataapi.endpoints WHERE id = $1")
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("sql");
+    assert_eq!(sql, "SELECT 1", "the refused edit must not have edited");
+}
+
+#[tokio::test]
+async fn deleting_an_endpoint_requires_manage() {
+    let f = skip_without_db!();
+    let id = f
+        .create_endpoint("rev", "/reports/revenue", "SELECT 1")
+        .await;
+    let reader = f.principal_with(&["data_api_endpoint:read"]).await;
+
+    let (status, body) = f
+        .send(&reader, "DELETE", &format!("{}/{id}", f.collection()), None)
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM dataapi.endpoints WHERE id = $1")
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count");
+    assert_eq!(left, 1, "the refused delete must not have deleted anything");
+}
+
+// ---------- Workspace containment ----------
+
+#[tokio::test]
+async fn an_endpoint_cannot_be_read_across_workspaces() {
+    let f = skip_without_db!();
+    let ep = f
+        .create_endpoint("rev", "/reports/revenue", "SELECT 1")
+        .await;
+    let (other_id, other_ws) = f.create_workspace("other").await;
+    let mgr = f.principal_with_in(Fixture::MANAGER, other_id).await;
+
+    let (status, body) = f
+        .get_as(&mgr, &format!("/api/ws/{other_ws}/data-api/endpoints/{ep}"))
+        .await;
+
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "not 403 — absence and denial must look the same. body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn an_endpoint_cannot_be_updated_across_workspaces() {
+    let f = skip_without_db!();
+    let ep = f
+        .create_endpoint("rev", "/reports/revenue", "SELECT 1")
+        .await;
+    let (other_id, other_ws) = f.create_workspace("other").await;
+    let mgr = f.principal_with_in(Fixture::MANAGER, other_id).await;
+
+    let (status, body) = f
+        .patch_as(
+            &mgr,
+            &format!("/api/ws/{other_ws}/data-api/endpoints/{ep}"),
+            serde_json::json!({ "sql": "SELECT 'pwned'" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+
+    let sql: String = sqlx::query_scalar("SELECT sql FROM dataapi.endpoints WHERE id = $1")
+        .bind(ep)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("sql");
+    assert_eq!(sql, "SELECT 1", "the outsider must not have edited it");
+}
+
+#[tokio::test]
+async fn an_endpoint_cannot_be_deleted_across_workspaces() {
+    let f = skip_without_db!();
+    let ep = f
+        .create_endpoint("rev", "/reports/revenue", "SELECT 1")
+        .await;
+    let (other_id, other_ws) = f.create_workspace("other").await;
+    let mgr = f.principal_with_in(Fixture::MANAGER, other_id).await;
+
+    let (status, body) = f
+        .send(
+            &mgr,
+            "DELETE",
+            &format!("/api/ws/{other_ws}/data-api/endpoints/{ep}"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM dataapi.endpoints WHERE id = $1")
+        .bind(ep)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("count");
+    assert_eq!(left, 1, "the outsider must not have deleted it");
+}
+
+/// The list is scoped to the caller's workspace, not merely filtered by the path
+/// segment: an endpoint belonging to another workspace must not appear.
+#[tokio::test]
+async fn the_list_shows_only_this_workspaces_endpoints() {
+    let f = skip_without_db!();
+    f.create_endpoint("mine", "/reports/revenue", "SELECT 1")
+        .await;
+    let (other_id, _) = f.create_workspace("other").await;
+    let other_db = f.create_database_in(other_id).await;
+    f.create_endpoint_in(other_id, other_db, "theirs", "/reports/theirs", "SELECT 2")
+        .await;
+
+    let reader = f.principal_with(&["data_api_endpoint:read"]).await;
+    let (status, body) = f.get_as(&reader, &f.collection()).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let names: Vec<&str> = body
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|e| e["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(names, vec!["mine"], "body: {body}");
+}
+
+// ---------- database_id containment ----------
+//
+// `database_id` comes from the REQUEST BODY. Nothing else in the draft path
+// resolves it, so without an explicit check a draft can name a connection owned
+// by another workspace. `describe_as` (Task 1) is workspace-scoped, so publish
+// would eventually refuse it — but the reference would already be stored and
+// handed back to the author as if it were valid, and the endpoint's own DTO
+// would advertise another workspace's connection id. 404, not 403: the same rule
+// as everywhere else in this feature.
+
+#[tokio::test]
+async fn create_refuses_a_database_from_another_workspace() {
+    let f = skip_without_db!();
+    let (other_id, _) = f.create_workspace("other").await;
+    let foreign_db = f.create_database_in(other_id).await;
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, body) = f
+        .post_as(
+            &mgr,
+            &f.collection(),
+            serde_json::json!({
+                "name": "poach", "path": "/reports/poach",
+                "database_id": foreign_db, "sql": "SELECT 1"
+            }),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a connection this workspace was never granted must be invisible, not merely forbidden. body: {body}"
+    );
+
+    let made: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dataapi.endpoints WHERE workspace_id = $1 AND name = 'poach'",
+    )
+    .bind(f.ws_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("count");
+    assert_eq!(made, 0, "the refused create must not have created anything");
+}
+
+#[tokio::test]
+async fn update_refuses_a_database_from_another_workspace() {
+    let f = skip_without_db!();
+    let id = f
+        .create_endpoint("rev", "/reports/revenue", "SELECT 1")
+        .await;
+    let (other_id, _) = f.create_workspace("other").await;
+    let foreign_db = f.create_database_in(other_id).await;
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, body) = f
+        .patch_as(
+            &mgr,
+            &format!("{}/{id}", f.collection()),
+            serde_json::json!({ "database_id": foreign_db }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+
+    let still: Uuid = sqlx::query_scalar("SELECT database_id FROM dataapi.endpoints WHERE id = $1")
+        .bind(id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("database_id");
+    assert_eq!(
+        still, f.database_id,
+        "the refused update must not have repointed the connection"
+    );
+}
+
+/// The check must not be "any row in query.databases": a database that does not
+/// exist at all is refused the same way, and never reaches the FK as a 500.
+#[tokio::test]
+async fn create_refuses_a_database_that_does_not_exist() {
+    let f = skip_without_db!();
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, body) = f
+        .post_as(
+            &mgr,
+            &f.collection(),
+            serde_json::json!({
+                "name": "ghost", "path": "/reports/ghost",
+                "database_id": Uuid::new_v4(), "sql": "SELECT 1"
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+}
+
+// ---------- Uniqueness ----------
+
+#[tokio::test]
+async fn duplicate_method_and_path_is_a_conflict() {
+    let f = skip_without_db!();
+    f.create_endpoint("a", "/reports/revenue", "SELECT 1").await;
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, body) = f
+        .post_as(
+            &mgr,
+            &f.collection(),
+            serde_json::json!({
+                "name": "b", "path": "reports/revenue",
+                "database_id": f.database_id, "sql": "SELECT 2"
+            }),
+        )
+        .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "the UNIQUE (workspace, method, path) must surface as 409. body: {body}"
+    );
+    // The author has to be told WHICH path collided — a bare "conflict" on a
+    // screen with a dozen drafts is not actionable.
+    let msg = body["error"]
+        .as_str()
+        .or_else(|| body["message"].as_str())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        msg.contains("/reports/revenue"),
+        "the 409 must name the colliding path: {body}"
+    );
+}
+
+/// The UNIQUE is only a duplicate-URL guard if the stored path is CANONICAL.
+/// `reports/revenue` and `/reports/revenue` are the same URL to a client but two
+/// distinct text values to Postgres, so without normalisation the constraint
+/// would happily admit both and P4 would have two endpoints claiming one route.
+#[tokio::test]
+async fn a_path_differing_only_by_its_leading_slash_is_the_same_path() {
+    let f = skip_without_db!();
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, created) = f
+        .post_as(
+            &mgr,
+            &f.collection(),
+            serde_json::json!({
+                "name": "a", "path": "reports/revenue/",
+                "database_id": f.database_id, "sql": "SELECT 1"
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    assert_eq!(
+        created["path"].as_str().expect("path"),
+        "/reports/revenue",
+        "the stored path must be canonical"
+    );
+
+    let (status, body) = f
+        .post_as(
+            &mgr,
+            &f.collection(),
+            serde_json::json!({
+                "name": "b", "path": "/reports/revenue",
+                "database_id": f.database_id, "sql": "SELECT 2"
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+}
+
+/// A different METHOD at the same path is a different endpoint — the UNIQUE is
+/// on the pair, and a 409 here would be wrong.
+#[tokio::test]
+async fn the_same_path_under_a_different_method_is_allowed() {
+    let f = skip_without_db!();
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+    for method in ["GET", "POST"] {
+        let (status, body) = f
+            .post_as(
+                &mgr,
+                &f.collection(),
+                serde_json::json!({
+                    "name": method, "path": "/reports/revenue", "method": method,
+                    "database_id": f.database_id, "sql": "SELECT 1"
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{method} body: {body}");
+    }
+}
+
+#[tokio::test]
+async fn renaming_a_path_onto_an_existing_one_is_a_conflict() {
+    let f = skip_without_db!();
+    f.create_endpoint("a", "/reports/revenue", "SELECT 1").await;
+    let id = f.create_endpoint("b", "/reports/cost", "SELECT 2").await;
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, body) = f
+        .patch_as(
+            &mgr,
+            &format!("{}/{id}", f.collection()),
+            serde_json::json!({ "path": "/reports/revenue" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    let msg = body["error"]
+        .as_str()
+        .or_else(|| body["message"].as_str())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        msg.contains("/reports/revenue"),
+        "the 409 must name the colliding path: {body}"
+    );
+}
+
+// ---------- The draft itself ----------
+
+/// One round trip through every verb, asserting the fields actually persist.
+/// Without this the negative tests above would all pass against a router whose
+/// handlers did nothing at all.
+#[tokio::test]
+async fn a_draft_round_trips_through_create_get_update_and_delete() {
+    let f = skip_without_db!();
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, created) = f
+        .post_as(
+            &mgr,
+            &f.collection(),
+            serde_json::json!({
+                "name": "revenue",
+                "description": "daily revenue",
+                "path": "/reports/revenue",
+                "method": "POST",
+                "database_id": f.database_id,
+                "sql": "SELECT 1",
+                "params": [{
+                    "name": "region", "type": "string", "location": "query",
+                    "required": true, "description": "Region code"
+                }],
+                "output": { "shape": "arrays", "naming": "camel" },
+                "cache": { "enabled": true, "ttl_seconds": 120, "scope": "shared" },
+                "limits": { "max_rows": 500, "timeout_seconds": 15 },
+                "rate_limit": { "per_key_qps": 5, "burst": 10, "per_endpoint_qps": 50 }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    let id: Uuid = created["id"].as_str().expect("id").parse().expect("uuid");
+    assert_eq!(created["state"].as_str(), Some("draft"));
+    assert_eq!(created["method"].as_str(), Some("POST"));
+    assert!(created["live_version_id"].is_null());
+
+    let (status, got) = f.get_as(&mgr, &format!("{}/{id}", f.collection())).await;
+    assert_eq!(status, StatusCode::OK, "body: {got}");
+    assert_eq!(got["name"].as_str(), Some("revenue"));
+    assert_eq!(got["description"].as_str(), Some("daily revenue"));
+    assert_eq!(got["sql"].as_str(), Some("SELECT 1"));
+    assert_eq!(got["params"][0]["name"].as_str(), Some("region"));
+    assert_eq!(got["params"][0]["type"].as_str(), Some("string"));
+    assert_eq!(got["output"]["shape"].as_str(), Some("arrays"));
+    assert_eq!(got["cache"]["scope"].as_str(), Some("shared"));
+    assert_eq!(got["cache"]["ttl_seconds"].as_u64(), Some(120));
+    assert_eq!(got["limits"]["max_rows"].as_u64(), Some(500));
+    assert_eq!(got["rate_limit"]["burst"].as_u64(), Some(10));
+
+    let (status, patched) = f
+        .patch_as(
+            &mgr,
+            &format!("{}/{id}", f.collection()),
+            serde_json::json!({ "sql": "SELECT 2", "limits": { "max_rows": 7 } }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {patched}");
+    assert_eq!(patched["sql"].as_str(), Some("SELECT 2"));
+    assert_eq!(patched["limits"]["max_rows"].as_u64(), Some(7));
+    // Untouched fields survive a partial PATCH.
+    assert_eq!(patched["name"].as_str(), Some("revenue"));
+    assert_eq!(patched["cache"]["ttl_seconds"].as_u64(), Some(120));
+    assert_eq!(patched["params"][0]["name"].as_str(), Some("region"));
+
+    let (status, body) = f
+        .send(&mgr, "DELETE", &format!("{}/{id}", f.collection()), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let (status, _) = f.get_as(&mgr, &format!("{}/{id}", f.collection())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "it really is gone");
+}
+
+/// An unset spec field must come back as its documented default, not as `{}` or
+/// an empty string. The row stores `'{}'::jsonb`, and it is `serde`'s defaults —
+/// not the derive's — that have to fill it in.
+#[tokio::test]
+async fn absent_spec_fields_come_back_as_their_serde_defaults() {
+    let f = skip_without_db!();
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, created) = f
+        .post_as(
+            &mgr,
+            &f.collection(),
+            serde_json::json!({
+                "name": "bare", "path": "/reports/bare",
+                "database_id": f.database_id, "sql": "SELECT 1"
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "body: {created}");
+    assert_eq!(
+        created["method"].as_str(),
+        Some("GET"),
+        "the default method"
+    );
+    assert_eq!(created["output"]["shape"].as_str(), Some("objects"));
+    assert_eq!(created["output"]["naming"].as_str(), Some("as_is"));
+    assert_eq!(created["cache"]["enabled"].as_bool(), Some(false));
+    assert_eq!(created["cache"]["ttl_seconds"].as_u64(), Some(60));
+    assert_eq!(created["cache"]["scope"].as_str(), Some("per_principal"));
+    assert_eq!(created["limits"]["max_rows"].as_u64(), Some(10_000));
+    assert_eq!(created["limits"]["timeout_seconds"].as_u64(), Some(30));
+    assert_eq!(created["params"].as_array().expect("params").len(), 0);
+}
+
+/// A method the CHECK constraint would reject must be a 400 from the route, not
+/// a 500 surfacing a constraint name to the author.
+#[tokio::test]
+async fn an_unsupported_method_is_a_bad_request() {
+    let f = skip_without_db!();
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    let (status, body) = f
+        .post_as(
+            &mgr,
+            &f.collection(),
+            serde_json::json!({
+                "name": "nope", "path": "/reports/nope", "method": "DELETE",
+                "database_id": f.database_id, "sql": "SELECT 1"
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+}
+
+#[tokio::test]
+async fn an_empty_name_or_path_is_a_bad_request() {
+    let f = skip_without_db!();
+    let mgr = f.principal_with(Fixture::MANAGER).await;
+
+    for (name, path) in [("", "/reports/x"), ("x", ""), ("x", "   ")] {
+        let (status, body) = f
+            .post_as(
+                &mgr,
+                &f.collection(),
+                serde_json::json!({
+                    "name": name, "path": path,
+                    "database_id": f.database_id, "sql": "SELECT 1"
+                }),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "name={name:?} path={path:?} body: {body}"
+        );
+    }
+}

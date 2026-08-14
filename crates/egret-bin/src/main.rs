@@ -1792,6 +1792,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let dataapi = Some(egret_dataapi::DataApiState {
         db: db.clone(),
         clients: egret_dataapi::ClientStore::new(db.clone()),
+        endpoints: egret_dataapi::EndpointStore::new(db.clone()),
         users: egret_auth::users::UserRepo::new(db.clone()),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),

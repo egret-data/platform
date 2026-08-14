@@ -10,11 +10,20 @@
 //! Task 5 adds the workspace-scoped management surface ([`routes`]): create and
 //! delete service accounts, list and issue their clients. Issuing gates on
 //! `service_account:manage`, never `:read`.
+//!
+//! P3 Task 3 adds endpoint DRAFTS ([`endpoints`]) on the same surface, gated on
+//! the separate `data_api_endpoint:read`/`:manage` pair. Draft CRUD only —
+//! nothing here writes `state` or `live_version_id`, so editing can neither
+//! publish an endpoint nor change what a published version serves.
 
 pub mod clients;
+pub mod endpoints;
 pub mod routes;
 
 pub use clients::{ClientStore, NewClient, DATA_API_TTL_SECS};
+pub use endpoints::{
+    CreateEndpointInput, DataApiEndpointDto, EndpointStore, UpdateEndpointInput, ALLOWED_METHODS,
+};
 pub use routes::{
     management_router, openapi, CreateServiceAccountInput, DataApiAdminApi, DataApiClientDto,
     DataApiError, DataApiNewClientDto, DataApiServiceAccountDto, DataApiState, IssueClientInput,
