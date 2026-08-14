@@ -10,6 +10,9 @@ serde_json.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
+# Logs each verifier error in the non-short-circuiting `token_endpoint` loop
+# (P2 Task 4) so a failing verifier is never swallowed silently.
+tracing.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
 chrono.workspace = true

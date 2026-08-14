@@ -1759,9 +1759,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let idp = Some(egret_machine_idp::IdpState {
         keys: std::sync::Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone())),
         issuer: egret_public_url.clone(),
-        verifiers: vec![std::sync::Arc::new(
-            egret_catalog_engine::CatalogStore::new(db.clone()),
-        )],
+        verifiers: vec![
+            std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
+            // Data API (P2 Task 4): a second, independent audience on the same
+            // IdP — a service account's client_id/client_secret exchanges here
+            // for an `aud: "data-api"` token instead of `aud: "catalog"`.
+            std::sync::Arc::new(egret_dataapi::ClientStore::new(db.clone())),
+        ],
     });
 
     let app = build_router(AppState {

@@ -1,0 +1,45 @@
+[package]
+name = "egret-dataapi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egret-core = { workspace = true, features = ["http"] }
+egret-dataapi-api.workspace = true
+egret-metastore.workspace = true
+# The mini machine-IdP `ClientVerifier`/`VerifiedClient` this crate's
+# `ClientStore` implements — a second audience (`data-api`) on the same IdP the
+# Catalog Client registry already registers with.
+egret-machine-idp.workspace = true
+axum.workspace = true
+sqlx.workspace = true
+# `ClientStore::create`'s public `expires_at` is `time::OffsetDateTime` (matching
+# the `ClientVerifier` contract's expectations), converted to `chrono::DateTime<Utc>`
+# at the sqlx boundary. Deliberately NOT sqlx's `time` feature: that feature is
+# additive across the whole workspace, and turning it on here would make
+# `sqlx::query_as!` ambiguous for TIMESTAMPTZ columns in every other crate,
+# including the git-pinned lakekeeper crates, which are built against sqlx's
+# `chrono` feature. See `offset_to_chrono` in clients.rs.
+time = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+# Client-secret hashing (create) + verification (the `ClientVerifier` impl).
+# Argon2 matches `CatalogStore::verify_client` — affordable here because it
+# runs once per TOKEN, not once per API request.
+argon2.workspace = true
+# Random client-id/secret material.
+rand.workspace = true
+base64.workspace = true
+utoipa.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+egret-auth.workspace = true

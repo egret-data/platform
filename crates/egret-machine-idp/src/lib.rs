@@ -192,14 +192,36 @@ async fn token_endpoint(
     if f.grant_type != "client_credentials" {
         return Err(IdpError::UnsupportedGrant);
     }
+    // Try every verifier; do NOT short-circuit on the first `Err`. Verifiers own
+    // independent audiences, so a transient fault in one (e.g. the catalog's DB)
+    // must not 500 a request meant for a different, healthy one. Only once every
+    // verifier has either declined or failed do we decide what to return: a
+    // match wins outright, otherwise an error means "unknown" cannot honestly be
+    // claimed (401 would be a lie), so that beats a clean "no match" (401).
     let mut vc = None;
+    let mut verifier_errors = Vec::new();
     for v in &st.verifiers {
-        if let Some(found) = v.verify(&f.client_id, &f.client_secret).await? {
-            vc = Some(found);
-            break;
+        match v.verify(&f.client_id, &f.client_secret).await {
+            Ok(Some(found)) => {
+                vc = Some(found);
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!(client_id = %f.client_id, error = %e, "client verifier failed");
+                verifier_errors.push(e.to_string());
+            }
         }
     }
-    let vc = vc.ok_or(IdpError::InvalidClient)?;
+    let vc = match vc {
+        Some(vc) => vc,
+        None if !verifier_errors.is_empty() => {
+            return Err(IdpError::VerificationUnavailable(
+                verifier_errors.join("; "),
+            ));
+        }
+        None => return Err(IdpError::InvalidClient),
+    };
 
     let km = st.keys.active().await?;
     let exp = chrono::Utc::now().timestamp() as u64 + vc.ttl_secs;
@@ -348,6 +370,19 @@ mod tests {
                 extra_claims: extra.as_object().cloned().unwrap_or_default(),
                 ttl_secs: 600,
             }
+        }
+    }
+
+    /// A verifier that always errors — stands in for a transient infra fault
+    /// (e.g. the catalog's or the Data API's DB being briefly unreachable).
+    /// Used to prove the `token_endpoint` loop does not short-circuit on the
+    /// first `Err`: independent audiences must not fail each other.
+    struct AlwaysErrorsVerifier;
+
+    #[async_trait::async_trait]
+    impl ClientVerifier for AlwaysErrorsVerifier {
+        async fn verify(&self, _: &str, _: &str) -> Result<Option<VerifiedClient>, IdpError> {
+            Err(IdpError::Db("simulated outage".into()))
         }
     }
 
@@ -560,6 +595,49 @@ mod tests {
         .await;
         assert_eq!(err.status, 401);
         assert_eq!(err.body["error"], "invalid_client");
+    }
+
+    /// The verifier loop must not short-circuit on the first `Err`: with a
+    /// failing first verifier and a matching second one, the request must
+    /// still succeed. Before this test existed, `v.verify(...).await?` aborted
+    /// the whole request on the FIRST verifier that errored — harmless with one
+    /// verifier, but once a second (independent) audience is registered, a
+    /// transient fault in one registry would wrongly 500 every request meant
+    /// for the other.
+    #[tokio::test]
+    async fn a_failing_verifier_does_not_block_a_later_match() {
+        let st = test_idp_state_with(vec![
+            Arc::new(AlwaysErrorsVerifier),
+            Arc::new(FakeVerifier::with_extra_claims(serde_json::json!({
+                "ws": "22222222-2222-2222-2222-222222222222",
+            }))),
+        ])
+        .await;
+
+        let resp = post_token(
+            &st,
+            "grant_type=client_credentials&client_id=api1&client_secret=s",
+        )
+        .await;
+        let c = decode_claims_without_verifying(&resp.access_token);
+        assert_eq!(c["aud"], "data-api");
+        assert_eq!(c["ws"], "22222222-2222-2222-2222-222222222222");
+    }
+
+    /// When every verifier errors (none positively found the client valid OR
+    /// invalid), the endpoint must not claim `401 invalid_client` — that would
+    /// assert something it never actually checked. It must surface as a server
+    /// error instead.
+    #[tokio::test]
+    async fn when_every_verifier_errors_the_response_is_a_server_error_not_401() {
+        let st = test_idp_state_with(vec![Arc::new(AlwaysErrorsVerifier)]).await;
+        let err = post_token_expecting_error(
+            &st,
+            "grant_type=client_credentials&client_id=whoever&client_secret=x",
+        )
+        .await;
+        assert_eq!(err.status, 500);
+        assert_eq!(err.body["error"], "server_error");
     }
 
     /// A verifier supplies `extra_claims`, so it must not be able to overwrite
