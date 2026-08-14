@@ -1759,7 +1759,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let idp = Some(egret_machine_idp::IdpState {
         keys: std::sync::Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone())),
         issuer: egret_public_url.clone(),
-        clients: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
+        verifiers: vec![std::sync::Arc::new(
+            egret_catalog_engine::CatalogStore::new(db.clone()),
+        )],
     });
 
     let app = build_router(AppState {

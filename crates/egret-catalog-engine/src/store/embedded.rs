@@ -411,12 +411,52 @@ impl egret_machine_idp::ClientVerifier for CatalogStore {
             .await
             .map_err(|e| egret_machine_idp::IdpError::Db(e.to_string()))?
         {
-            Some((warehouse, catalog_role)) => Ok(Some(egret_machine_idp::VerifiedClient {
-                client_id: client_id.to_string(),
+            Some((warehouse, catalog_role)) => Ok(Some(catalog_verified_client(
+                client_id,
                 warehouse,
                 catalog_role,
-            })),
+            ))),
             None => Ok(None),
         }
+    }
+}
+
+/// The token shape a Catalog Client gets: `aud: catalog`, its warehouse + role,
+/// and a 1h TTL. A published contract with every deployed Iceberg client — kept
+/// as a pure function so it can be pinned by a unit test without a database.
+fn catalog_verified_client(
+    client_id: &str,
+    warehouse: String,
+    catalog_role: String,
+) -> egret_machine_idp::VerifiedClient {
+    egret_machine_idp::VerifiedClient {
+        client_id: client_id.to_string(),
+        audience: "catalog".into(),
+        extra_claims: serde_json::json!({
+            "warehouse": warehouse,
+            "roles": [catalog_role],
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_default(),
+        ttl_secs: 3600,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::catalog_verified_client;
+
+    /// Pins the catalog half of the multi-audience IdP contract: the machine-IdP
+    /// copies these straight into the JWT, so a change here changes every
+    /// deployed Iceberg client's token.
+    #[test]
+    fn catalog_client_token_shape_is_fixed() {
+        let vc = catalog_verified_client("cat1", "wh1".into(), "role1".into());
+        assert_eq!(vc.client_id, "cat1");
+        assert_eq!(vc.audience, "catalog");
+        assert_eq!(vc.ttl_secs, 3600, "catalog TTL must stay 3600");
+        assert_eq!(vc.extra_claims["warehouse"], "wh1");
+        assert_eq!(vc.extra_claims["roles"], serde_json::json!(["role1"]));
     }
 }
