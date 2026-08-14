@@ -317,10 +317,11 @@ Create `migrations/0121_dataapi_endpoints.sql`, in the house style (explain *why
 CREATE TABLE dataapi.endpoints (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id  uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  -- Cross-schema FK, as for dataapi.service_accounts -> users: `folders` is
+  -- Cross-schema FK into the ANALYTICS schema (folders lives there, not public),
+  -- as dataapi.service_accounts does into users: `folders` is
   -- already a shared table serving chart/dashboard/dataset, and duplicating it
   -- per schema would be worse than the ownership bend.
-  folder_id     uuid REFERENCES folders(id) ON DELETE SET NULL,
+  folder_id     uuid REFERENCES analytics.folders(id) ON DELETE SET NULL,
   name          text NOT NULL,
   description   text NOT NULL DEFAULT '',
   -- The URL path is FREE-FORM and user-typed. It is deliberately NOT derived
