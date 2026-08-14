@@ -90,6 +90,9 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
         authz: egret_workspace::rbac::Authorizer::new(db),
         pdp,
         issuer: "https://egret.test".into(),
+        // Best-effort sink with its receiver dropped — see `audit.rs` for the
+        // suite that actually reads the events.
+        audit: egret_audit::AuditSink::new(1).0,
     }
 }
 

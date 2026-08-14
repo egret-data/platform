@@ -170,6 +170,9 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>, port: Arc<FakePort>
         pdp,
         query: port,
         issuer: "https://egret.test".into(),
+        // Best-effort sink with its receiver dropped — see `audit.rs` for the
+        // suite that actually reads the events.
+        audit: egret_audit::AuditSink::new(1).0,
     }
 }
 

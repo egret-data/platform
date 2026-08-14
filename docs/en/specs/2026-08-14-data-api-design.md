@@ -1,6 +1,6 @@
 # Data API — design
 
-> **Status:** P2 (service accounts + OAuth2 clients + management routes) SHIPPED; P3–P5 not yet implemented · **Date:** 2026-08-14 · **Reference:** [sqlrest](https://github.com/inrgihc/sqlrest) v1.9.0 (domain model + UX only; no code reuse — sqlrest is Java/Spring, egret is Rust)
+> **Status:** P2 (service accounts + OAuth2 clients + management routes) and P3 (endpoint drafts, validate/publish/rollback/disable, audit) SHIPPED; **no endpoint is callable yet** — the serving surface `/data-api/v1` is P4, the frontend P5 · **Date:** 2026-08-14 · **Reference:** [sqlrest](https://github.com/inrgihc/sqlrest) v1.9.0 (domain model + UX only; no code reuse — sqlrest is Java/Spring, egret is Rust)
 
 ## 1. Problem
 
@@ -272,7 +272,22 @@ draft ──validate──> publish(v N) ──> live
 
 **Allowed methods in v1 are `GET` and `POST`, both read-only.** `POST` exists only for parameter payloads too large or too structured for a query string; it carries the same single-SELECT restriction. `PUT`/`PATCH`/`DELETE` are rejected — accepting them would imply a write semantics v1 does not have.
 
-Publish and rollback will be emitted as `egret-audit` events — no extra table. **Client issue and client revocation are P3 too, and are not emitted today**: the P2 management routes exist and mint credentials, but `DataApiState` carries no audit sink, so issuing or revoking a client currently leaves no audit record. That is a stated gap, not an oversight to be read past — until P3 wires the sink, the only trace of a credential's life is the `dataapi.clients` row itself (`created_by`, `created_at`, `revoked_at`, `last_used_at`).
+**Six mutations are emitted as `egret-audit` events** — no extra table. `DataApiState` carries the same `AuditSink` every other seam receives, so they land in the one `audit_log` an operator already queries rather than in a Data-API-local trail:
+
+| Route | `action` | `resource_type` | `detail` |
+|---|---|---|---|
+| `POST …/endpoints/{id}/publish` | `data_api_endpoint:publish` | `data_api_endpoint` | `version`, `version_id`, `note` |
+| `POST …/endpoints/{id}/rollback` | `data_api_endpoint:rollback` | `data_api_endpoint` | `version`, `version_id` — the version made LIVE, not the `VersionRef` the caller typed |
+| `POST …/endpoints/{id}/disable` | `data_api_endpoint:disable` | `data_api_endpoint` | `state` |
+| `DELETE …/endpoints/{id}` | `data_api_endpoint:delete` | `data_api_endpoint` | — |
+| `POST …/service-accounts/{id}/clients` | `data_api_client:issue` | `data_api_client` | `client_id`, `service_account_id`, `name`, `expires_at` |
+| `DELETE …/clients/{id}` | `data_api_client:revoke` | `data_api_client` | — |
+
+All six go through `egret_audit::mutation_for`, so the workspace, the acting principal and any impersonator are stamped by construction. `resource_id` is the endpoint or client uuid.
+
+**A `client_secret` is never in the detail, and that is a rule rather than an omission.** The issue event records `client_id` and the account — which credential was minted, the question an auditor actually asks — and not the secret, which answers none of it. `audit_log` is append-only and read by more people, for longer, than the one-shot issue response ever reaches: a secret written there outlives every rotation, every revocation and the `dataapi.clients` row itself, and is the one credential lifetime nothing in the product can shorten. `crates/egret-dataapi/tests/audit.rs` asserts both that no `client_secret` key is present **and** that the secret's own bytes appear nowhere in the detail, since a renamed field would walk past a key-only check.
+
+**Two stated gaps, so the list above is not read as more than it is.** `POST …/endpoints/{id}/enable` emits nothing, so an endpoint taken out of service and put back leaves only the `disable` half on the record; and `emit` is a non-blocking `try_send` that drops the event (with a warning) on a full channel, so an audit record is best-effort evidence and never a precondition of the mutation it describes.
 
 **Operational caveat that must surface in the UI:** publishing an endpoint does **not** grant data access. Because queries run as the service account under Ranger enforcement, an admin must also grant that service account in Ranger. An endpoint published without that step fails with an engine permission error, which must be mapped to a message saying so rather than leaking the raw engine error.
 
@@ -387,7 +402,7 @@ One stable, machine-readable envelope:
 - `dataapi.access_log` records every call. It is the fastest-growing table in the system: partition monthly plus a retention job, reusing the existing gc-worker pattern from catalog CE6 rather than writing a new one.
 - Management UI statistics (call count, error rate, p50/p95, cache hit rate per endpoint) are computed from `access_log` — the equivalent of sqlrest's `HourCount` / `DateCount` / `NameCount`.
 - `request_id` is propagated to the engine and stored alongside `engine_query_id`, so a slow API call traces back to the exact query on Trino/StarRocks.
-- Publish, rollback, client issue and client revocation are to be `egret-audit` events. All four are **P3** — none is emitted as of P2 (§5.3).
+- Publish, rollback, disable, endpoint deletion, client issue and client revocation ARE `egret-audit` events as of P3 — see §5.3 for the exact `action`/`resource_type`/`detail` of each, for why no `client_secret` is ever in a detail, and for the two gaps (`enable` emits nothing; `emit` is best-effort).
 
 ## 9. Testing
 

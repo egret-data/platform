@@ -119,6 +119,16 @@ pub struct DataApiState {
     /// handed back with a new client is derived from it so a caller never has to
     /// guess where to exchange the credential.
     pub issuer: String,
+    /// The append-only audit trail. The SAME sink `CpState` receives, so a Data
+    /// API mutation lands in the one `audit_log` an operator already reads
+    /// rather than in a second, seam-local trail nobody queries.
+    ///
+    /// [`egret_audit::AuditSink::emit`] is a non-blocking `try_send` that drops
+    /// (with a warn) on a full channel and never returns an error, which is why
+    /// no handler below changes its signature to carry an audit failure. That is
+    /// also the honest bound on what these events promise: an audit record is
+    /// best-effort evidence, never a precondition of the mutation.
+    pub audit: egret_audit::AuditSink,
 }
 
 impl FromRef<DataApiState> for SessionService {
@@ -427,30 +437,47 @@ async fn create_service_account(
     // every delete route, and permanently holding the UNIQUE email that would
     // make a retry fail too.
     //
-    // `UserRepo::insert_service` is not used here for the same reason: it runs
-    // on the pool and cannot join this transaction. The CHECK constraint it
-    // documents (`users_service_has_no_password`, 0119) is enforced by the
-    // database, not by that method, so writing the row here loses nothing.
+    // The `users` row is written by `UserRepo::insert_service_with`, NOT by an
+    // INSERT spelled out here. P2 inlined one because `insert_service` ran on
+    // the pool and could not join this transaction — which left the repo method
+    // with zero production callers, two copies of the same statement free to
+    // drift, and `egret-auth`'s tests pinning the copy production had stopped
+    // taking. The method is now generic over the executor, so `&mut *tx`
+    // satisfies it and there is exactly one write again.
     let mut tx = st.db.pool.begin().await.map_err(db_err)?;
-    let inserted: Result<(Uuid, DateTime<Utc>), sqlx::Error> = async {
-        let user_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO users (provider, email, name) VALUES ('service', $1, $2) RETURNING id",
-        )
-        .bind(&email)
-        .bind(name)
-        .fetch_one(&mut *tx)
-        .await?;
+    let inserted: Result<(UserId, DateTime<Utc>), DataApiError> = async {
+        // Either UNIQUE can fire and both mean the same thing to the caller:
+        // this workspace already has that service account. `users.email` is
+        // derived from the name and the workspace slug, so an email collision IS
+        // a name collision seen from the other table — which is why
+        // `insert_service_with`'s own "user already exists" is re-worded here
+        // rather than surfaced. It names a synthetic address the caller never
+        // chose and would read as a platform-wide clash.
+        let user_id = UserRepo::insert_service_with(&mut *tx, &email, name)
+            .await
+            .map_err(|e| match e {
+                Error::Conflict(_) => {
+                    Error::Conflict(format!("service account already exists: {name}"))
+                }
+                other => other,
+            })?;
         let created_at: DateTime<Utc> = sqlx::query_scalar(
             "INSERT INTO dataapi.service_accounts (user_id, workspace_id, name, description, created_by) \
              VALUES ($1, $2, $3, $4, $5) RETURNING created_at",
         )
-        .bind(user_id)
+        .bind(user_id.0)
         .bind(ctx.workspace_id.0)
         .bind(name)
         .bind(&body.description)
         .bind(ctx.principal.user_id.0)
         .fetch_one(&mut *tx)
-        .await?;
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(d) if d.is_unique_violation() => {
+                Error::Conflict(format!("service account already exists: {name}"))
+            }
+            _ => db_err(e),
+        })?;
         Ok((user_id, created_at))
     }
     .await;
@@ -464,19 +491,9 @@ async fn create_service_account(
             // Explicit, though dropping `tx` would also roll back — the rollback
             // is the whole point of this branch and should not be implicit.
             let _ = tx.rollback().await;
-            // Either UNIQUE can fire and both mean the same thing to the caller:
-            // this workspace already has that service account. `users.email` is
-            // derived from the name and the workspace slug, so an email
-            // collision IS a name collision seen from the other table.
-            return Err(match &e {
-                sqlx::Error::Database(d) if d.is_unique_violation() => {
-                    Error::Conflict(format!("service account already exists: {name}"))
-                }
-                _ => db_err(e),
-            });
+            return Err(e);
         }
     };
-    let user_id = UserId(user_id);
 
     Ok((
         StatusCode::CREATED,
@@ -630,6 +647,29 @@ async fn issue_client(
         .clients
         .create(sa, &body.name, body.expires_at, ctx.principal.user_id)
         .await?;
+    // **`c.client_secret` is deliberately absent from `detail`, and this is the
+    // one place in the crate where it could have leaked.** `audit_log` is
+    // append-only and read by more people than the issue response ever reaches,
+    // so a secret written here outlives every rotation, every revocation and the
+    // client row itself — the one credential lifetime nothing can shorten. The
+    // `client_id` and the account identify WHICH credential was minted, which is
+    // the whole question an auditor asks; the secret answers none of it.
+    // `issuing_a_client_audits_the_client_id_and_never_the_secret` in
+    // `tests/audit.rs` holds this, checking the KEY and the secret's VALUE — a
+    // renamed field would walk straight past a key-only assertion.
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "data_api_client:issue",
+        "data_api_client",
+        Some(c.id.to_string()),
+        serde_json::json!({
+            "client_id": c.client_id,
+            "service_account_id": sa,
+            "name": body.name,
+            "expires_at": body.expires_at.map(|t| t.to_rfc3339()),
+        }),
+    ));
     Ok((
         StatusCode::CREATED,
         Json(DataApiNewClientDto {
@@ -665,6 +705,17 @@ async fn revoke_client(
     egret_core::authz::require(&*st.pdp, &ctx, SA_MANAGE).await?;
     let id = scoped_client(&st, ctx.workspace_id.0, id).await?;
     st.clients.revoke(id).await?;
+    // Emitted AFTER the revoke, so the trail records what happened rather than
+    // what was attempted: `revoke` returning `Err` short-circuits above and no
+    // event is written for a revocation that did not take.
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "data_api_client:revoke",
+        "data_api_client",
+        Some(id.to_string()),
+        serde_json::json!({}),
+    ));
     Ok(Json(Ack::ok()))
 }
 
@@ -848,6 +899,14 @@ async fn delete_endpoint(
     // the workspace predicate is in the DELETE rather than in a separate lookup
     // that could go missing.
     st.endpoints.delete(ctx.workspace_id.0, id).await?;
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "data_api_endpoint:delete",
+        "data_api_endpoint",
+        Some(id.to_string()),
+        serde_json::json!({}),
+    ));
     Ok(Json(Ack::ok()))
 }
 
@@ -974,11 +1033,27 @@ async fn publish_endpoint(
     // `EndpointStore::publish` on why that is stronger than wrapping them in the
     // transaction, not weaker.
     let (draft, columns) = validated_draft(&st, ws, ctx.principal.user_id, id).await?;
-    Ok(Json(
-        st.endpoints
-            .publish(ws, id, ctx.principal.user_id, &note, &draft, columns)
-            .await?,
-    ))
+    let published = st
+        .endpoints
+        .publish(ws, id, ctx.principal.user_id, &note, &draft, columns)
+        .await?;
+    // The version NUMBER is the load-bearing field: `dataapi.endpoint_versions`
+    // is immutable, so "who put version N live, and when" is the question the
+    // trail has to answer, and it is the one thing a later rollback cannot
+    // rewrite.
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ws),
+        "data_api_endpoint:publish",
+        "data_api_endpoint",
+        Some(id.to_string()),
+        serde_json::json!({
+            "version": published.version,
+            "version_id": published.version_id,
+            "note": note,
+        }),
+    ));
+    Ok(Json(published))
 }
 
 #[utoipa::path(
@@ -1015,11 +1090,25 @@ async fn rollback_endpoint(
             ))
         }
     };
-    Ok(Json(
-        st.endpoints
-            .rollback(ctx.workspace_id.0, id, target)
-            .await?,
-    ))
+    let rolled = st
+        .endpoints
+        .rollback(ctx.workspace_id.0, id, target)
+        .await?;
+    // The version the endpoint is now serving, resolved — not the `VersionRef`
+    // the caller typed. A rollback named by number and one named by id are the
+    // same act, and the trail should not make an auditor reconstruct which.
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "data_api_endpoint:rollback",
+        "data_api_endpoint",
+        Some(id.to_string()),
+        serde_json::json!({
+            "version": rolled.version,
+            "version_id": rolled.version_id,
+        }),
+    ));
+    Ok(Json(rolled))
 }
 
 #[utoipa::path(
@@ -1044,7 +1133,16 @@ async fn disable_endpoint(
     Path((_ws_ignored, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DataApiEndpointDto>, DataApiError> {
     egret_core::authz::require(&*st.pdp, &ctx, EP_MANAGE).await?;
-    Ok(Json(st.endpoints.disable(ctx.workspace_id.0, id).await?))
+    let disabled = st.endpoints.disable(ctx.workspace_id.0, id).await?;
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "data_api_endpoint:disable",
+        "data_api_endpoint",
+        Some(id.to_string()),
+        serde_json::json!({ "state": disabled.state }),
+    ));
+    Ok(Json(disabled))
 }
 
 /// The other half of `disable`, and the reason `disable` keeps

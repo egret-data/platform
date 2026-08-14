@@ -1810,6 +1810,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         authz: Authorizer::new(db.clone()),
         pdp: pdp.clone(),
         issuer: egret_public_url.clone(),
+        // The SAME sink `CpState` and every other seam receives (P3 Task 5), so
+        // publishing an endpoint or minting a client lands in the one `audit_log`
+        // an operator already queries, not in a Data-API-local trail.
+        audit: audit_sink.clone(),
     });
 
     let app = build_router(AppState {

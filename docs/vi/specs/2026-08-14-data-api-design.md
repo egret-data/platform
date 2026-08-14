@@ -1,6 +1,6 @@
 # Data API — thiết kế
 
-> **Trạng thái:** P2 (service account + client OAuth2 + route quản trị) ĐÃ SHIP; P3–P5 chưa triển khai · **Ngày:** 2026-08-14 · **Tham chiếu:** [sqlrest](https://github.com/inrgihc/sqlrest) v1.9.0 (chỉ tham chiếu domain model + UX; không tái sử dụng code — sqlrest là Java/Spring, egret là Rust)
+> **Trạng thái:** P2 (service account + client OAuth2 + route quản trị) và P3 (draft endpoint, validate/publish/rollback/disable, audit) ĐÃ SHIP; **chưa endpoint nào gọi được** — bề mặt phục vụ `/data-api/v1` thuộc P4, frontend thuộc P5 · **Ngày:** 2026-08-14 · **Tham chiếu:** [sqlrest](https://github.com/inrgihc/sqlrest) v1.9.0 (chỉ tham chiếu domain model + UX; không tái sử dụng code — sqlrest là Java/Spring, egret là Rust)
 >
 > *Bản tiếng Việt tham chiếu. Bản chuẩn là [docs/en/specs/2026-08-14-data-api-design.md](../../en/specs/2026-08-14-data-api-design.md).*
 
@@ -264,7 +264,22 @@ draft ──validate──> publish(v N) ──> live
 
 **Method cho phép ở v1 là `GET` và `POST`, cả hai đều chỉ đọc.** `POST` tồn tại chỉ để nhận payload tham số quá lớn hoặc quá có cấu trúc cho query string; nó chịu cùng ràng buộc một-câu-SELECT. `PUT`/`PATCH`/`DELETE` bị từ chối — chấp nhận chúng sẽ ngụ ý một ngữ nghĩa ghi mà v1 không có.
 
-Publish và rollback sẽ được phát ra dưới dạng sự kiện `egret-audit` — không thêm bảng. **Cấp client và thu hồi client cũng thuộc P3, và hiện chưa được phát ra**: các route quản trị P2 đã tồn tại và đã mint credential, nhưng `DataApiState` không mang audit sink nào, nên việc cấp hay thu hồi một client hiện không để lại bản ghi audit. Đây là một khoảng trống được nói rõ, không phải chi tiết để đọc lướt — cho tới khi P3 đấu sink vào, dấu vết duy nhất về vòng đời của một credential là chính dòng `dataapi.clients` (`created_by`, `created_at`, `revoked_at`, `last_used_at`).
+**Sáu mutation được phát ra dưới dạng sự kiện `egret-audit`** — không thêm bảng. `DataApiState` mang đúng cái `AuditSink` mà mọi seam khác nhận, nên chúng rơi vào cùng một `audit_log` mà người vận hành vẫn truy vấn, chứ không phải một dấu vết riêng của Data API:
+
+| Route | `action` | `resource_type` | `detail` |
+|---|---|---|---|
+| `POST …/endpoints/{id}/publish` | `data_api_endpoint:publish` | `data_api_endpoint` | `version`, `version_id`, `note` |
+| `POST …/endpoints/{id}/rollback` | `data_api_endpoint:rollback` | `data_api_endpoint` | `version`, `version_id` — là version được đưa LÊN LIVE, không phải `VersionRef` mà caller gõ |
+| `POST …/endpoints/{id}/disable` | `data_api_endpoint:disable` | `data_api_endpoint` | `state` |
+| `DELETE …/endpoints/{id}` | `data_api_endpoint:delete` | `data_api_endpoint` | — |
+| `POST …/service-accounts/{id}/clients` | `data_api_client:issue` | `data_api_client` | `client_id`, `service_account_id`, `name`, `expires_at` |
+| `DELETE …/clients/{id}` | `data_api_client:revoke` | `data_api_client` | — |
+
+Cả sáu đều đi qua `egret_audit::mutation_for`, nên workspace, principal thực hiện và impersonator (nếu có) được đóng dấu theo cấu trúc. `resource_id` là uuid của endpoint hoặc client.
+
+**`client_secret` không bao giờ nằm trong `detail`, và đây là một quy tắc chứ không phải một chỗ quên.** Sự kiện cấp client ghi `client_id` và service account — tức là credential nào đã được mint, đúng câu hỏi mà người audit thực sự đặt ra — chứ không ghi secret, thứ không trả lời câu hỏi nào cả. `audit_log` là append-only và được nhiều người đọc, trong thời gian dài hơn, so với response cấp-một-lần: một secret ghi vào đó sống lâu hơn mọi lần xoay vòng, mọi lần thu hồi, và lâu hơn cả chính dòng `dataapi.clients` — đó là vòng đời credential duy nhất mà sản phẩm không rút ngắn được. `crates/egret-dataapi/tests/audit.rs` khẳng định cả hai điều: không có key `client_secret`, **và** các byte của chính secret đó không xuất hiện ở bất kỳ đâu trong `detail`, vì một field bị đổi tên sẽ lọt qua phép kiểm tra chỉ theo key.
+
+**Hai khoảng trống được nói rõ, để bảng trên không bị đọc thành nhiều hơn thực tế.** `POST …/endpoints/{id}/enable` không phát ra gì, nên một endpoint bị ngừng phục vụ rồi bật lại chỉ để lại nửa `disable` trên hồ sơ; và `emit` là `try_send` không chặn, sẽ bỏ sự kiện (kèm cảnh báo) khi kênh đầy — nên bản ghi audit là bằng chứng nỗ-lực-tối-đa, không bao giờ là điều kiện tiên quyết của mutation mà nó mô tả.
 
 **Cảnh báo vận hành phải hiện lên UI:** publish endpoint **không** cấp quyền dữ liệu. Vì query chạy dưới danh nghĩa service account với Ranger enforcement, admin còn phải cấp quyền cho chính service account đó trong Ranger. Endpoint publish mà thiếu bước này sẽ lỗi permission từ engine, và lỗi đó phải được map thành thông báo nói rõ điều này thay vì để lộ raw engine error.
 
@@ -379,7 +394,7 @@ Một envelope ổn định, máy đọc được:
 - `dataapi.access_log` ghi lại mọi lời gọi. Đây là bảng tăng nhanh nhất hệ thống: partition theo tháng cộng một job dọn theo retention, tái dùng gc-worker pattern có sẵn từ catalog CE6 thay vì viết mới.
 - Thống kê trên management UI (số lần gọi, tỉ lệ lỗi, p50/p95, cache hit rate theo endpoint) tính từ `access_log` — tương đương `HourCount` / `DateCount` / `NameCount` của sqlrest.
 - `request_id` được truyền xuống engine và lưu cạnh `engine_query_id`, để một lời gọi API chậm truy ngược về đúng query trên Trino/StarRocks.
-- Publish, rollback, cấp client và thu hồi client sẽ là sự kiện `egret-audit`. Cả bốn đều thuộc **P3** — chưa cái nào được phát ra tính đến P2 (§5.3).
+- Publish, rollback, disable, xoá endpoint, cấp client và thu hồi client ĐÃ là sự kiện `egret-audit` kể từ P3 — xem §5.3 để biết `action`/`resource_type`/`detail` chính xác của từng cái, vì sao không bao giờ có `client_secret` trong `detail`, và hai khoảng trống (`enable` không phát ra gì; `emit` là nỗ-lực-tối-đa).
 
 ## 9. Kiểm thử
 

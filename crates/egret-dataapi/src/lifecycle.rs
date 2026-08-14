@@ -57,10 +57,12 @@
 //! [`check_single_select`] and [`check_params`] are shape checks over a SCANNER,
 //! not a parser. They are a deny-list, not a proof.
 //!
-//! **The claim about `#` has been wrong in four successive rounds, in three
-//! different directions, and every time from over-reading one instrument.** It was
-//! called an LF-terminated comment, then a CR-terminated one, then a syntax error.
-//! It is none of those:
+//! **The claim about `#` was wrong in three successive rounds — 2, 3 and 4 — in
+//! three different directions, and every time from over-reading one instrument.**
+//! Round 2 called it a comment terminated by CR or LF; round 3 narrowed that to
+//! LF only; round 4 called it a syntax error. (Round 5 is the correction below,
+//! and round 1 never mentioned `#` at all — the arm did not exist yet.) It is
+//! none of the three:
 //!
 //! > **Measured on live StarRocks 4.1.3 with `mysql -c`: `#` is ACCEPTED AND
 //! > IGNORED.** `SELECT 1 #x` returns a column named `x` with value 1 — byte for
@@ -89,9 +91,20 @@
 //! |---|---|---|
 //! | `'…'` literal | region ending at `''`, or at `\` under one of [`ESCAPING_READINGS`] | not engine-specific: both readings are checked, so neither dialect's rule is assumed |
 //! | `"…"` / `` `…` `` identifier | region ending at the matching quote, same escape rules | as above |
-//! | `--` comment | comment to LF or CR | Trino `SIMPLE_COMMENT` = `'--' ~[\r\n]*` (grammar). StarRocks 4.1.3, **`mysql -c`**: `SELECT 1 AS a --x AND nonexistent_col` → `a=1` (so the rest of the line IS commented out, and no trailing whitespace is required), and a bare CR ends it |
-//! | `#` | comment to LF — **deliberately unlike either engine**, see below | StarRocks 4.1.3, **`mysql -c`**: `SELECT 1 #x` → column `x` = 1, identical to `SELECT 1 x`; `SELECT 1 AS a # UNION ALL SELECT 2` → 1 and 2. So `#` is accepted and IGNORED — not a comment, not an error. Trino: no `#` token (`SqlBase.g4`, `UNRECOGNIZED : .;`) — grammar only, the local Trino is JWT-gated and was not probed |
+//! | `--` comment | comment to LF or CR | Trino `SIMPLE_COMMENT` = `'--' ~[\r\n]*` (grammar). StarRocks 4.1.3, **`mysql -c`**: `SELECT 1 AS a --x AND nonexistent_col` → `a=1` (so the rest of the line IS commented out, and no trailing whitespace is required). **The CR terminator is measured too**, on the same engine and client — not inferred from the Trino rule that happens to agree with it |
+//! | `#` | comment to LF — **deliberately unlike either engine**, see below | StarRocks 4.1.3, **`mysql -c`**: `SELECT 1 #x` → column `x` = 1, identical to `SELECT 1 x`; `SELECT 1 AS a # UNION ALL SELECT 2` → 1 and 2. So `#` is accepted and IGNORED — not a comment, not an error. Trino: no `#` token — `SqlBase.g4` read from source in this workspace (`trino/core/trino-grammar/src/main/antlr4/io/trino/grammar/sql/SqlBase.g4`; `grep "'#'"` matches nothing, and `UNRECOGNIZED : .;` is the catch-all), so `#` is a parse error there. First-hand reading of the authoritative lexer rather than recollection — but still a reading, not a probe: the local Trino is JWT-gated |
 //! | `/* … */` comment | comment to the first `*/` | nesting not modelled; leftovers can only over-reject |
+//!
+//! **What stops a `#`-hidden `;` reaching a published snapshot is measured, not
+//! argued.** To StarRocks `SELECT 1 #x\r; DROP TABLE t` is `SELECT 1 x ; DROP
+//! TABLE t` — a real second statement this scanner does not see. The wrapper is
+//! what refuses it: `Connector::describe` sends
+//! `SELECT * FROM (\n{sql}\n) AS _egret_ds LIMIT 0`
+//! (`egret-query/src/execution/connector/mod.rs:82`, StarRocks override at
+//! `connector/starrocks.rs:206`), and an embedded `;` inside that subquery is an
+//! error on the engine. Publish gates on the describe, so the guarantee is the
+//! wrapper, not the lexer — and it is an observed engine error, not a deduction
+//! from the grammar.
 //!
 //! **Why `#` is stripped anyway, and what that costs.** No engine
 //! [`egret_query_api::Engine`] can name treats `#` as a comment, so this row is the
@@ -105,8 +118,11 @@
 //! `#` to end-of-line, the placeholder does not survive, and [`check_params`]
 //! refuses a legitimate definition. The false rejection is real, obscure (it needs
 //! a `#` before a placeholder on the same line), and accepted deliberately: the
-//! author's fix is to delete a character that does nothing on either engine, while
-//! the alternative is carrying a form that would be a live hole the day a
+//! author's fix is to delete a character that is inert on StarRocks and illegal on
+//! Trino — by the table's own row, `#` has no token there and falls to
+//! `UNRECOGNIZED`, so on Trino it is not a no-op but a parse error. Deleting it is
+//! therefore a fix on one engine and a no-cost tidy-up on the other. The
+//! alternative is carrying a form that would be a live hole the day a
 //! MySQL-compatible front end appears.
 //!
 //! Each row is pinned by a test. What is NOT claimed is the generalisation "no
@@ -279,13 +295,18 @@ fn strip_comments_and_strings(
             //   SELECT 1 #x                        -> column `x` = 1  (same as `SELECT 1 x`)
             //   SELECT 1 AS a # UNION ALL SELECT 2 -> 1 and 2         (the UNION RUNS)
             //
-            // Not a comment, and not an error. Trino has no `#` token either —
-            // `SqlBase.g4` lexes nothing for it and `UNRECOGNIZED : .;` makes it a
-            // parse error; that half is GRAMMAR-based, not measured, because the
-            // local Trino is JWT-gated.
+            // Not a comment on StarRocks, and not an error there. On Trino it IS
+            // an error: `SqlBase.g4` — read from source in this workspace at
+            // `trino/core/trino-grammar/src/main/antlr4/io/trino/grammar/sql/SqlBase.g4`,
+            // where `grep "'#'"` matches nothing and `UNRECOGNIZED : .;` is the
+            // catch-all — lexes no `#` token, so it is a parse error. That half is
+            // a first-hand reading of the authoritative lexer rather than a
+            // recollection, but it is still a reading and not a probe: the local
+            // Trino is JWT-gated.
             //
-            // Four rounds got this wrong in three directions (LF comment, CR
-            // comment, syntax error), each by over-reading one probe. The
+            // Rounds 2, 3 and 4 got this wrong in three directions — a comment
+            // ending at CR or LF, then the same narrowed to LF only, then a
+            // syntax error — each by over-reading one probe. The
             // `ERROR 1064: Unexpected input 'x'` that looked like proof `#` was
             // illegal was the engine objecting to `x`, not to `#`. Only a probe
             // whose SUCCESS case separates the hypotheses settles it, which is why
@@ -302,12 +323,16 @@ fn strip_comments_and_strings(
             // ignored), and this arm strips the placeholder away with the rest of
             // the line, so `check_params` refuses a legitimate definition. Obscure
             // — it needs a `#` before a placeholder on one line — and accepted
-            // deliberately; the author deletes a character that does nothing on
-            // either engine.
+            // deliberately; the author deletes a character that is inert on
+            // StarRocks and illegal on Trino, so the deletion is a fix on one
+            // engine and free on the other.
             //
             // Rejecting `#` outright would also be defensible, and is currently
-            // BLOCKED by four assertions that require it to be accepted — see
-            // `a_carriage_return_does_not_carry_a_parameter_out_of_a_hash_region`.
+            // BLOCKED by THREE assertions that require `check_single_select` to
+            // accept a statement containing `#`, with three more assertions
+            // downstream of the arm — six across four tests. See
+            // `a_carriage_return_does_not_carry_a_parameter_out_of_a_hash_region`
+            // for the full accounting.
             b'#' => {
                 while i < b.len() && b[i] != b'\n' {
                     i += 1;
@@ -1200,14 +1225,30 @@ mod tests {
     /// **Banning `#` outright remains BLOCKED, and that is an open question, not
     /// a settled design.** A previous round dropped one assertion here
     /// (`check_params("SELECT 1 AS n #x\n{{p}}") == Ok(())`) and claimed that
-    /// freed the option. It did not: four assertions still require
-    /// `check_single_select` to ACCEPT a statement containing `#` — three in
-    /// [`a_hash_region_is_scanned_as_inert_to_end_of_line`] and one in
-    /// [`a_carriage_return_ends_a_dash_comment_but_not_a_hash_region`]. Anyone
-    /// making `#` a hard rejection must change those four deliberately. The
-    /// trade-off is genuine: banning is immune to the terminator question that
-    /// cost several rounds, while stripping keeps SQL that is legal on StarRocks
-    /// today publishable. Not decided here.
+    /// freed the option. It did not — but the count that replaced it was wrong
+    /// too, in both directions. **Three** assertions require `check_single_select`
+    /// to ACCEPT a statement containing `#`, not four:
+    ///
+    /// * [`a_hash_region_is_scanned_as_inert_to_end_of_line`] — TWO acceptances
+    ///   (`SELECT 1 # trailing note`, `SELECT 1 # ; DROP TABLE t\n`). Its third
+    ///   assertion is the opposite: `SELECT 1 #x\n; DROP TABLE t` must be
+    ///   REJECTED as multiple statements, and a ban would keep rejecting it.
+    /// * [`a_carriage_return_ends_a_dash_comment_but_not_a_hash_region`] — ONE
+    ///   acceptance, `SELECT 1 #x\r; DROP TABLE t`.
+    ///
+    /// **Six** assertions across **four** tests would actually need revisiting,
+    /// because three more are downstream of the arm rather than of the acceptance
+    /// rule: the rejection just named, plus the two `check_params` assertions that
+    /// exist only because the arm strips the placeholder —
+    /// [`stripping_a_hash_region_falsely_rejects_sql_that_is_valid_on_starrocks`]
+    /// and the one in this test. Anyone making `#` a hard rejection must go
+    /// through all six deliberately: the three acceptances FLIP to rejections,
+    /// the multiple-statements rejection survives but for a different reason, and
+    /// the two `check_params` assertions become moot — those inputs never reach
+    /// the placeholder rule once the statement itself is refused. The
+    /// trade-off is genuine: banning is
+    /// immune to the terminator question that cost three rounds, while stripping
+    /// keeps SQL that is legal on StarRocks today publishable. Not decided here.
     ///
     /// Anti-triviality for the assertion below is carried by
     /// [`a_placeholder_in_a_value_position_is_still_accepted`], which fails if

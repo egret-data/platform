@@ -25,6 +25,10 @@ egret-workspace.workspace = true
 # crate must never depend on `egret-query` itself: the whole point of the port
 # is that the Data API can move to its own binary by swapping the impl.
 egret-query-api.workspace = true
+# The append-only audit trail (Task 5). `AuditSink::emit` is a non-blocking
+# `try_send` on an mpsc channel — it never awaits and never fails the caller, so
+# no handler's error type changes to carry it.
+egret-audit.workspace = true
 axum.workspace = true
 sqlx.workspace = true
 serde.workspace = true

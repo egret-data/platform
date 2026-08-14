@@ -66,6 +66,11 @@ fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {
         authz: egret_workspace::rbac::Authorizer::new(db),
         pdp,
         issuer: "https://egret.test".into(),
+        // A sink whose receiver is dropped immediately: `emit` is best-effort
+        // and logs rather than failing when the channel is closed, so nothing in
+        // this file depends on it. What the audited routes emit is asserted in
+        // `audit.rs`, which keeps the receiver.
+        audit: egret_audit::AuditSink::new(1).0,
     }
 }
 
