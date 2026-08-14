@@ -711,14 +711,18 @@ async fn publish_refuses_an_invalid_definition_without_calling_the_engine() {
             serde_json::json!([{ "name": "p", "type": "string", "location": "query" }]),
             "placeholder inside a block comment",
         ),
-        // `#` is not a comment on either engine `Engine` can name (StarRocks
-        // 4.1.3 measured with `mysql -c`: ERROR 1064; Trino: no `#` token), so a
-        // real engine would reject this at describe time anyway. The validator
-        // refuses it first, at no cost, which is what puts the rule in place
-        // ahead of any MySQL-compatible front end that does comment on `#`.
-        // Earlier rounds of this task called it a live serve-time injection —
-        // that came from probing through the bare `mysql` client, which strips
-        // `#…` before the server sees it. See `lifecycle.rs`' scanner comment.
+        // `#` is not a comment on either engine `Engine` can name. On StarRocks
+        // 4.1.3, measured with `mysql -c`, it is accepted and IGNORED
+        // (`SELECT 1 #x` returns a column named `x`); Trino has no `#` token.
+        // The validator refuses this shape as a forward-looking rule — it must
+        // hold before any MySQL-compatible front end where `#` IS a comment and
+        // the placeholder would sit inside one.
+        //
+        // Deliberately no claim about what the ENGINE would do with this string:
+        // earlier rounds of this task asserted first that it was a live
+        // serve-time injection and then that describe would reject it, and both
+        // were wrong. What is pinned below is the 400 and the absent version row.
+        // See `lifecycle.rs`' scanner comment for the measurement of record.
         (
             "SELECT n FROM t # {{p}}",
             serde_json::json!([{ "name": "p", "type": "string", "location": "query" }]),

@@ -57,64 +57,79 @@
 //! [`check_single_select`] and [`check_params`] are shape checks over a SCANNER,
 //! not a parser. They are a deny-list, not a proof.
 //!
-//! **The claim here has been wrong four times, each time by being broader than
-//! the code — and the fourth time the CODE was right and the JUSTIFICATION was
-//! wrong.** Round 3's version equated *modelling a form* with *modelling it
-//! correctly*: the scanner had a `#` arm, so `#` went on the list of forms it
-//! models, with a terminator that turned out to be fictional. Round 4 then found
-//! that the terminator was fictional because the *evidence* was: `#` had been
-//! probed through the `mysql` CLI, which defaults to `--skip-comments` and strips
-//! `#…` **client-side**. The measurement described the client, not the engine.
+//! **The claim about `#` has been wrong in four successive rounds, in three
+//! different directions, and every time from over-reading one instrument.** It was
+//! called an LF-terminated comment, then a CR-terminated one, then a syntax error.
+//! It is none of those:
 //!
-//! So the claim is stated per form, against the LEXER RULE, and each row records
-//! **how its evidence was obtained** — because a row is only as good as that.
-//! `mysql -c` (send comments to the server, which is what `mysql_async` does) and
-//! bare `mysql` disagree, and only one of them is measuring StarRocks.
+//! > **Measured on live StarRocks 4.1.3 with `mysql -c`: `#` is ACCEPTED AND
+//! > IGNORED.** `SELECT 1 #x` returns a column named `x` with value 1 — byte for
+//! > byte the same answer as `SELECT 1 x`. And `SELECT 1 AS a # UNION ALL SELECT 2`
+//! > returns both 1 and 2, so the text after `#` is executed, not commented out.
+//!
+//! The earlier `ERROR 1064: Unexpected input 'x'` that was read as "`#` is a syntax
+//! error" was an error about the token **`x`** in `#x AND nonexistent_col` — the
+//! engine complaining about what followed `#`, not about `#`.
+//!
+//! **The methodological lesson, which is the real output of five rounds: an error
+//! message names the token the parser choked on, not the construct you were
+//! probing.** A row below is only as good as a measurement whose SUCCESS case
+//! distinguishes the hypotheses. `SELECT 1 #x` returning a column named `x` does
+//! that — it is compatible with "`#` is ignored" and with nothing else. An error
+//! mentioning `x` is compatible with three different stories about `#`, which is
+//! why it produced three different wrong claims.
+//!
+//! So each row records both the rule and the measurement that decides it.
+//! `mysql -c` (comments sent to the server, as `mysql_async` does) is the only
+//! client mode that measures StarRocks rather than the CLI.
 //!
 //! A `{{param}}` is refused inside:
 //!
-//! | Form | Terminated at | Evidence, and how it was gathered |
+//! | Form | Scanner treats it as | Evidence, and how it was gathered |
 //! |---|---|---|
-//! | `'…'` literal | `''`, or `\` under one of [`ESCAPING_READINGS`] | not engine-specific: both readings are checked, so neither dialect's rule is assumed |
-//! | `"…"` / `` `…` `` identifier | matching quote, same escape rules | as above |
-//! | `--` comment | LF or CR | Trino `SIMPLE_COMMENT` = `'--' ~[\r\n]*` (grammar). StarRocks 4.1.3 measured with **`mysql -c`**: `SELECT 1 AS a --x AND nonexistent_col` → `a=1`, and a bare CR ends it |
-//! | `#` | not a comment on any supported engine — stripped **defensively**, see below | StarRocks 4.1.3 measured with **`mysql -c`**: `SELECT 1 AS a #x …` → `ERROR 1064: Unexpected input 'x'`. Trino: no `#` token (`SqlBase.g4`, `UNRECOGNIZED : .;`) — grammar only, the local Trino is JWT-gated |
-//! | `/* … */` comment | first `*/` | nesting not modelled; leftovers can only over-reject |
+//! | `'…'` literal | region ending at `''`, or at `\` under one of [`ESCAPING_READINGS`] | not engine-specific: both readings are checked, so neither dialect's rule is assumed |
+//! | `"…"` / `` `…` `` identifier | region ending at the matching quote, same escape rules | as above |
+//! | `--` comment | comment to LF or CR | Trino `SIMPLE_COMMENT` = `'--' ~[\r\n]*` (grammar). StarRocks 4.1.3, **`mysql -c`**: `SELECT 1 AS a --x AND nonexistent_col` → `a=1` (so the rest of the line IS commented out, and no trailing whitespace is required), and a bare CR ends it |
+//! | `#` | comment to LF — **deliberately unlike either engine**, see below | StarRocks 4.1.3, **`mysql -c`**: `SELECT 1 #x` → column `x` = 1, identical to `SELECT 1 x`; `SELECT 1 AS a # UNION ALL SELECT 2` → 1 and 2. So `#` is accepted and IGNORED — not a comment, not an error. Trino: no `#` token (`SqlBase.g4`, `UNRECOGNIZED : .;`) — grammar only, the local Trino is JWT-gated and was not probed |
+//! | `/* … */` comment | comment to the first `*/` | nesting not modelled; leftovers can only over-reject |
 //!
-//! **Why `#` is stripped even though it comments nothing.** Neither of the two
-//! engines [`egret_query_api::Engine`] can name treats `#` as a comment, so a bare
-//! `#` outside a literal is a syntax error on both — which means stripping it
-//! cannot cost a valid statement, and also that the exploit narratives told about
-//! it in rounds 2 and 3 were never reachable (publish gates on `describe_as`,
-//! which is handed the probe raw, and `#x` fails to parse there). It is kept as a
-//! guard against a future MySQL-compatible front end that *does* comment on `#`,
-//! at a cost of zero. Nothing in the current engine set depends on it.
+//! **Why `#` is stripped anyway, and what that costs.** No engine
+//! [`egret_query_api::Engine`] can name treats `#` as a comment, so this row is the
+//! one place the scanner deliberately models something no current engine does. It
+//! is kept as a standing guard for a future MySQL-compatible front end, where `#`
+//! *is* a comment and a `{{param}}` after one would be inside it.
+//!
+//! **That is not free, and the earlier claim that it was is withdrawn.**
+//! `SELECT 1 AS a # WHERE 1 = {{p}}` is a valid StarRocks statement — `#` is
+//! ignored, so it means `SELECT 1 AS a WHERE 1 = {{p}}`. The scanner strips from
+//! `#` to end-of-line, the placeholder does not survive, and [`check_params`]
+//! refuses a legitimate definition. The false rejection is real, obscure (it needs
+//! a `#` before a placeholder on the same line), and accepted deliberately: the
+//! author's fix is to delete a character that does nothing on either engine, while
+//! the alternative is carrying a form that would be a live hole the day a
+//! MySQL-compatible front end appears.
 //!
 //! Each row is pinned by a test. What is NOT claimed is the generalisation "no
 //! serve-time caller can escape a value position": a form this scanner does not
 //! model — or models with the wrong terminator — looks exactly like a value
 //! position, and there is nothing in the code that would notice. **Adding a form
-//! to [`strip_comments_and_strings`] is half the work. The other half is
-//! establishing its terminator against the engine — by measurement where the
-//! engine is reachable and by its grammar where it is not — and recording in the
-//! table both which of the two it was AND the exact method, down to the client
-//! flags. Every defect in this file has been the scanner disagreeing with a real
-//! lexer, and the last one was the measurement disagreeing with the engine.**
+//! to [`strip_comments_and_strings`] is half the work. The other half is a
+//! measurement whose success case distinguishes the hypotheses, recorded in the
+//! table with its exact method down to the client flags. Every defect in this file
+//! has been the scanner disagreeing with a real lexer; the last two were the
+//! MEASUREMENT disagreeing with the engine.**
 //!
 //! Known gaps. All are currently believed to need `data_api_endpoint:manage` (an
 //! authoring permission) rather than a serve-time token — a weaker statement than
-//! it sounds, since that is what was believed about `#` twice (wrongly in the
-//! other direction, as it turned out):
+//! it sounds, given how often the beliefs in this section have been revised:
 //!
 //! * MySQL/StarRocks `/*! … */` executable comments are treated as ordinary block
 //!   comments, so their contents are stripped rather than scanned. Measured on
-//!   live StarRocks 4.1.3: `/*!, 2 AS b */`, `/*!50000, …*/` and `/*!00000, …*/`
-//!   all return ONE column, so that engine does not execute them and there is no
-//!   reachable smuggle there today. Kept on the list because it is
+//!   live StarRocks 4.1.3 **both with and without `-c`**: `/*!, 2 AS b */`,
+//!   `/*!50000, …*/` and `/*!00000, …*/` all return ONE column either way, so the
+//!   client flags never mattered here and that engine does not execute them. No
+//!   reachable smuggle today; kept on the list only because it is
 //!   version-dependent and MySQL-family behaviour has historically differed.
-//!   **The client flags behind that measurement are not recorded**, and the `#`
-//!   episode is exactly what an unrecorded method costs — re-take it with
-//!   `mysql -c` before relying on it.
 //! * `WITH … DELETE` and `SELECT … INTO OUTFILE` pass the head-word check.
 //! * `SELECT 1;;` passes, because `trim_end_matches(';')` strips every trailing
 //!   semicolon rather than exactly one.
@@ -231,7 +246,9 @@ impl From<ValidationError> for Error {
 /// A `--` comment ends at `\r` as well as `\n`. Trino's lexer is
 /// `'--' ~[\r\n]* '\r'? '\n'?`, so a bare CR ends the comment there; stopping
 /// only at LF would let `SELECT 1 --x\r; DROP TABLE t` past a scan that never saw
-/// the `;`.
+/// the `;`. A `#` region ends at `\n` only, and is modelled on no engine at all —
+/// see the arm's own comment, which carries the measurement and the false
+/// rejection it costs.
 ///
 /// Double-quoted and backtick-quoted regions are elided as well: they are
 /// identifiers on Trino and (in some modes) strings on StarRocks, and either way
@@ -253,35 +270,44 @@ fn strip_comments_and_strings(
     let mut i = 0;
     while i < b.len() {
         match b[i] {
-            // `#` — DEFENSIVE. Neither engine treats it as a comment.
+            // `#` — DEFENSIVE, and the only arm here that models something NO
+            // supported engine does.
             //
-            // StarRocks 4.1.3, measured with `mysql -c` (which sends comments to
-            // the server, as `mysql_async` does):
+            // On StarRocks 4.1.3, measured with `mysql -c` (comments sent to the
+            // server, as `mysql_async` does), `#` is ACCEPTED AND IGNORED:
             //
-            //   SELECT 1 AS a #x AND nonexistent_col   -> ERROR 1064: Unexpected input 'x'
-            //   SELECT 1 AS a --x AND nonexistent_col  -> a=1
+            //   SELECT 1 #x                        -> column `x` = 1  (same as `SELECT 1 x`)
+            //   SELECT 1 AS a # UNION ALL SELECT 2 -> 1 and 2         (the UNION RUNS)
             //
-            // So `#` is a syntax error there, not a comment. Trino has no `#`
-            // token either — `SqlBase.g4` lexes nothing for it and
-            // `UNRECOGNIZED : .;` makes it a parse error. That half is GRAMMAR
-            // based rather than measured: the local Trino is JWT-gated.
+            // Not a comment, and not an error. Trino has no `#` token either —
+            // `SqlBase.g4` lexes nothing for it and `UNRECOGNIZED : .;` makes it a
+            // parse error; that half is GRAMMAR-based, not measured, because the
+            // local Trino is JWT-gated.
             //
-            // Two earlier rounds attributed a MySQL-style `#` comment to StarRocks
-            // and built exploit narratives on it. Both were artifacts of probing
-            // through the bare `mysql` client, which defaults to `--skip-comments`
-            // and strips `#…` before the bytes ever reach the server — the
-            // measurement described the client. Neither narrative was reachable:
-            // publish gates on `describe_as`, which is handed the probe raw, and
-            // `#x` does not parse there, so such a definition could never publish.
+            // Four rounds got this wrong in three directions (LF comment, CR
+            // comment, syntax error), each by over-reading one probe. The
+            // `ERROR 1064: Unexpected input 'x'` that looked like proof `#` was
+            // illegal was the engine objecting to `x`, not to `#`. Only a probe
+            // whose SUCCESS case separates the hypotheses settles it, which is why
+            // `SELECT 1 #x` returning a column named `x` is the measurement of
+            // record.
             //
-            // The arm is kept anyway, at a cost of zero. A bare `#` outside a
-            // literal cannot appear in a statement either engine accepts, so
-            // stripping it can never cost a valid query; and it guards against a
-            // future MySQL-compatible front end that DOES comment on `#`. LF-only
-            // termination is the MySQL rule such a front end would most likely
-            // bring, and is the conservative choice for a form no current engine
-            // defines. Rejecting `#` outright would be safer still — see the note
-            // on `a_carriage_return_does_not_carry_a_parameter_out_of_a_hash_comment`.
+            // The arm is kept as a standing guard for a future MySQL-compatible
+            // front end, where `#` IS a comment and a placeholder after one would
+            // sit inside it. LF-only termination is the MySQL rule such a front
+            // end would bring.
+            //
+            // It is NOT free, and the earlier claim that it was is withdrawn:
+            // `SELECT 1 AS a # WHERE 1 = {{p}}` is valid StarRocks (the `#` is
+            // ignored), and this arm strips the placeholder away with the rest of
+            // the line, so `check_params` refuses a legitimate definition. Obscure
+            // — it needs a `#` before a placeholder on one line — and accepted
+            // deliberately; the author deletes a character that does nothing on
+            // either engine.
+            //
+            // Rejecting `#` outright would also be defensible, and is currently
+            // BLOCKED by four assertions that require it to be accepted — see
+            // `a_carriage_return_does_not_carry_a_parameter_out_of_a_hash_region`.
             b'#' => {
                 while i < b.len() && b[i] != b'\n' {
                     i += 1;
@@ -1101,12 +1127,15 @@ mod tests {
     }
 
     /// `#` is stripped to end-of-line even though NO supported engine comments on
-    /// it — StarRocks 4.1.3 (`mysql -c`) makes it `ERROR 1064`, and Trino has no
-    /// `#` token (`SqlBase.g4`: nothing lexes it, `UNRECOGNIZED : .;`). These
-    /// statements are therefore all unpublishable for a reason this scanner never
-    /// sees: `describe_as` rejects them. What is pinned here is only that the
-    /// SCANNER treats the region as inert, which is what makes the placeholder
-    /// rule below hold for a future front end that does comment on `#`.
+    /// it: StarRocks 4.1.3 (`mysql -c`) ACCEPTS AND IGNORES it — `SELECT 1 #x`
+    /// returns a column named `x` — and Trino has no `#` token at all
+    /// (`SqlBase.g4`: nothing lexes it, `UNRECOGNIZED : .;`).
+    ///
+    /// **This pins the SCANNER only.** No claim is made here about whether these
+    /// statements publish; that depends on what `describe_as` does with each one,
+    /// which has not been measured for these strings. The scanner's behaviour is
+    /// what makes the placeholder rule below hold in advance for a front end that
+    /// does comment on `#`.
     #[test]
     fn a_hash_region_is_scanned_as_inert_to_end_of_line() {
         assert!(check_single_select("SELECT 1 # trailing note").is_ok());
@@ -1118,36 +1147,71 @@ mod tests {
         );
     }
 
+    /// **The price of the `#` arm, pinned so the doc cannot quietly overstate it.**
+    ///
+    /// `SELECT 1 AS a # WHERE 1 = {{p}}` is a VALID StarRocks statement: `#` is
+    /// accepted and ignored there (`SELECT 1 #x` → column `x`), so it means
+    /// `SELECT 1 AS a WHERE 1 = {{p}}`. The scanner strips from `#` to
+    /// end-of-line, the placeholder does not survive, and a legitimate definition
+    /// is refused.
+    ///
+    /// This is a real false rejection, accepted deliberately — the module comment
+    /// says so, and this test is what stops that admission drifting back into
+    /// "stripping `#` is free", which it was called for two rounds.
+    #[test]
+    fn stripping_a_hash_region_falsely_rejects_sql_that_is_valid_on_starrocks() {
+        assert_eq!(
+            check_params(
+                "SELECT 1 AS a # WHERE 1 = {{p}}",
+                &[param("p", ParamType::String)]
+            ),
+            Err(ValidationError::PlaceholderInsideQuotedText("p".into())),
+            "obscure, but real: the author must delete a `#` that does nothing"
+        );
+        // The same query without the stray `#` is accepted, which is what makes
+        // the line above a FALSE rejection rather than a rejection on some other
+        // ground.
+        assert_eq!(
+            check_params(
+                "SELECT 1 AS a WHERE 1 = {{p}}",
+                &[param("p", ParamType::String)]
+            ),
+            Ok(())
+        );
+    }
+
     /// A CR does not end a `#` region for this scanner, so a placeholder after
     /// one is still treated as inside it and refused.
     ///
-    /// **What this does NOT pin, and what earlier rounds wrongly said it did.**
-    /// Rounds 2 and 3 justified this assertion with a StarRocks mechanism — "`#`
-    /// starts a comment there, a CR does not close it, so the parameter is inside
-    /// a live comment and a newline-bearing value breaks out". That mechanism is
-    /// fictional. It came from probing through the bare `mysql` client, which
-    /// defaults to `--skip-comments` and strips `#…` before the server sees it;
-    /// with `mysql -c`, StarRocks 4.1.3 answers `ERROR 1064: Unexpected input
-    /// 'x'`. `#` is not a comment on either supported engine, and no such
-    /// definition could ever have published, because `describe_as` is handed the
-    /// probe raw and it does not parse.
+    /// **What this does NOT pin.** Rounds 2 and 3 justified the assertion with a
+    /// StarRocks mechanism — "`#` starts a comment there, a CR does not close it,
+    /// so the parameter sits in a live comment and a newline-bearing value breaks
+    /// out". Round 4 replaced that with "`#` is a syntax error there". Both are
+    /// false. Measured with `mysql -c` on StarRocks 4.1.3, `#` is accepted and
+    /// IGNORED: `SELECT 1 #x` returns a column named `x`, and
+    /// `SELECT 1 AS a # UNION ALL SELECT 2` returns 1 and 2. The
+    /// `ERROR 1064: Unexpected input 'x'` cited in round 4 was the engine
+    /// objecting to `x`, not to `#`.
     ///
-    /// The assertion stays because over-rejecting is right and free: the region
-    /// is meaningless on today's engines, so nothing legitimate is being refused,
-    /// and the rule holds in advance for a MySQL-compatible front end that does
-    /// comment on `#`. It pins scanner behaviour, not engine behaviour.
+    /// So this assertion pins SCANNER behaviour and makes no engine claim. It
+    /// stays because the rule must be in place ahead of a MySQL-compatible front
+    /// end, where `#` is a comment and this placeholder would be inside one.
     ///
-    /// **Deliberately not pinned: that `#` must remain merely stripped.** An
-    /// earlier version of this test also asserted
-    /// `check_params("SELECT 1 AS n #x\n{{p}}") == Ok(())`, as a guard against the
-    /// assertion above being satisfied by simply banning `#`. That guard is gone,
-    /// because banning `#` outright is arguably the SAFER design now that no
-    /// engine defines it — it would be immune to the terminator question that
-    /// caused three rounds of churn — and a test forbidding the better option is
-    /// worse than no test. Anti-triviality is covered by
+    /// **Banning `#` outright remains BLOCKED, and that is an open question, not
+    /// a settled design.** A previous round dropped one assertion here
+    /// (`check_params("SELECT 1 AS n #x\n{{p}}") == Ok(())`) and claimed that
+    /// freed the option. It did not: four assertions still require
+    /// `check_single_select` to ACCEPT a statement containing `#` — three in
+    /// [`a_hash_region_is_scanned_as_inert_to_end_of_line`] and one in
+    /// [`a_carriage_return_ends_a_dash_comment_but_not_a_hash_region`]. Anyone
+    /// making `#` a hard rejection must change those four deliberately. The
+    /// trade-off is genuine: banning is immune to the terminator question that
+    /// cost several rounds, while stripping keeps SQL that is legal on StarRocks
+    /// today publishable. Not decided here.
+    ///
+    /// Anti-triviality for the assertion below is carried by
     /// [`a_placeholder_in_a_value_position_is_still_accepted`], which fails if
-    /// legitimate placeholders stop being accepted. Revisit if a front end that
-    /// comments on `#` ever appears.
+    /// legitimate placeholders stop being accepted.
     #[test]
     fn a_carriage_return_does_not_carry_a_parameter_out_of_a_hash_region() {
         assert_eq!(
@@ -1176,10 +1240,22 @@ mod tests {
             check_single_select("SELECT 1 --x\r\nFROM t").is_ok(),
             "the ordinary CRLF form still comments out its own line"
         );
-        // `#`: the scanner runs the region to the LF, so the `;` is inside it.
-        // Harmless either way — the statement does not parse on either engine —
-        // but it must stay consistent with the placeholder rule, which does the
-        // real work.
+        // `#`: the scanner runs the region to the LF, so the `;` is inside it and
+        // this passes the statement check.
+        //
+        // **This is the weakest assertion in the file, so be precise about what
+        // saves it.** To StarRocks the string is `SELECT 1 x ; DROP TABLE t` —
+        // `#` is ignored, so the `;` is a REAL statement separator that this check
+        // does not see. It is not "harmless because it does not parse"; an earlier
+        // version said that and it was false.
+        //
+        // What actually stops it is the describe wrapper. `Connector::describe`
+        // sends `SELECT * FROM (\n{sql}\n) AS _egret_ds LIMIT 0`
+        // (`egret-query/src/execution/connector/mod.rs:82`, and the StarRocks
+        // override at `connector/starrocks.rs:206`), which puts the whole
+        // statement inside a subquery — where an embedded `;` is a syntax error.
+        // Publish gates on that describe, so this cannot reach a published
+        // snapshot. The guarantee is the wrapper, not the lexer.
         assert!(check_single_select("SELECT 1 #x\r; DROP TABLE t").is_ok());
     }
 
@@ -1261,14 +1337,17 @@ mod tests {
             // Comments too: a value carrying `*/` closes a block comment early.
             "SELECT 1 AS n /* {{p}} */",
             "SELECT 1 AS n -- {{p}}",
-            // `#` is not a comment on either supported engine (StarRocks 4.1.3
-            // via `mysql -c`: ERROR 1064; Trino: no `#` token), so these are
-            // unpublishable anyway — `describe_as` rejects them. Refused here
-            // regardless, at no cost, so the rule is already in place for a
-            // MySQL-compatible front end that does comment on `#`. Earlier rounds
-            // described this as a live serve-time injection; that narrative came
-            // from a measurement through the bare `mysql` client, which strips
-            // `#…` itself. See the note on
+            // `#` is not a comment on either supported engine — on StarRocks
+            // 4.1.3 (`mysql -c`) it is accepted and IGNORED, and Trino has no `#`
+            // token. So these are refused for a forward-looking reason rather
+            // than a current one: the rule must be in place before any
+            // MySQL-compatible front end where `#` IS a comment and this
+            // placeholder would sit inside it.
+            //
+            // No claim is made here that these strings would otherwise publish or
+            // fail — that depends on `describe_as`, which has not been measured
+            // for them. Earlier rounds asserted both directions and were wrong
+            // both times; see the note on
             // `a_carriage_return_does_not_carry_a_parameter_out_of_a_hash_region`.
             "SELECT 1 AS n # {{p}}",
             "SELECT 1 AS n #{{p}}",
