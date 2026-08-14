@@ -7,7 +7,8 @@
 --         clients, grants), all storage connections + orphan secrets, the whole
 --         lakekeeper catalog schema (namespaces, tables, snapshots, metadata),
 --         every OTHER (test) workspace — which cascades to its notebooks,
---         dashboards, connections, etc. — and every orphan/test user left over.
+--         dashboards, connections, etc. — every RBAC role outside the five the
+--         schema seeds, and every orphan/test user left over.
 --
 -- The lakekeeper schema is DROPPED rather than surgically truncated (it has
 -- ~45 tables + triggers); `egret serve` re-migrates + re-bootstraps an empty
@@ -34,6 +35,23 @@ DELETE FROM catalog.warehouses;
 -- Every workspace except the two seeded ones; FKs cascade the rest
 -- (notebooks, dashboards, database/storage connections, secrets, …).
 DELETE FROM public.workspaces WHERE slug NOT IN ('demo', 'eng');
+
+-- Every RBAC role except the five the schema seeds (migration 0003). Integration
+-- tests create roles by the hundred — `appwiring-*`, `bi_authz_*`, `hotreload-*`,
+-- `forbid_test_*`, `attacker_role-*` — and nothing ever removed them, so they
+-- accumulated across every run and every reset. Two consequences, both real:
+--
+--   * the Add-member Role picker becomes a list of ~1800 entries with the five
+--     usable ones buried in it;
+--   * some of those roles carry permissions that are not in
+--     `egret_core::rbac::PERMISSIONS` (`a:read`, `x:read`, `role:create`, …), and
+--     the startup check in egret-bin PANICS on them under `debug_assertions` — so
+--     a `just serve` eventually refuses to start on a developer's own database.
+--
+-- `role_permissions` and `access_grants` both cascade from `roles`, and
+-- `roles.parent_role_id` is ON DELETE SET NULL, so this one statement is enough.
+DELETE FROM public.roles
+ WHERE name NOT IN ('platform_admin', 'data_steward', 'ws_admin', 'ws_editor', 'ws_viewer');
 
 -- Prune orphan/test users. Keep set = the break-glass admin + seeded SSO users,
 -- plus everyone still referenced by surviving rows (they own kept content, and

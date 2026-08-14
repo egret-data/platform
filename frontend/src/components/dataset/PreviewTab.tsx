@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -6,7 +7,7 @@ import { ChartTable, type ResultColumn } from "@/components/chart/ChartTable";
 import type { ColumnFormat } from "@/components/chart/format-types";
 import { parseFormat } from "@/components/dataset/FormatPicker";
 import type { DatasetColumn } from "@/api/datasets";
-import { useDatasetsDsData } from "@/api/generated/datasets/datasets";
+import { datasetsDsData } from "@/api/generated/datasets/datasets";
 
 interface Props {
   ws: string;
@@ -21,8 +22,25 @@ const PREVIEW_LIMIT = 100;
 // governed viewer without data access gets a 403/5xx here — we surface the
 // message rather than crash.
 export function PreviewTab({ ws, datasetId, columns = [] }: Props) {
-  const preview = useDatasetsDsData();
-  const { mutate } = preview;
+  // A QUERY, not a mutation-fired-from-an-effect.
+  //
+  // This used to call the generated `useDatasetsDsData()` mutation from a mount
+  // effect, guarded by a ref so a re-render could not re-fire it. Under
+  // `React.StrictMode` — which is on in dev (main.tsx) — effects run twice, the
+  // guard suppressed the second run, and the component was left reporting
+  // `isPending` forever: permanent skeletons and a disabled Refresh button, even
+  // though the POST had already come back 200.
+  //
+  // "Fetch on mount, refetch on demand" is what a query IS. react-query then owns
+  // the deduplication the ref guard was hand-rolling, and StrictMode's double
+  // effect stops mattering. `retry: false` keeps the old behaviour (mutations do
+  // not retry); the endpoint is a POST only because it carries a body.
+  const preview = useQuery({
+    queryKey: ["dataset-preview", ws, datasetId, PREVIEW_LIMIT],
+    queryFn: () => datasetsDsData(ws, datasetId, { limit: PREVIEW_LIMIT }),
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
 
   // Apply each column's semantic-layer format (a ColumnFormat) to the preview,
   // so setting e.g. Currency on a column is visible here, not just stored.
@@ -42,18 +60,8 @@ export function PreviewTab({ ws, datasetId, columns = [] }: Props) {
     return m;
   }, [columns]);
 
-  // Run once on mount (and if the target dataset changes); guarded so a
-  // re-render doesn't re-fire the request.
-  const ranFor = useRef<string | null>(null);
-  useEffect(() => {
-    const key = `${ws}/${datasetId}`;
-    if (ranFor.current === key) return;
-    ranFor.current = key;
-    mutate({ workspace: ws, id: datasetId, data: { limit: PREVIEW_LIMIT } });
-  }, [ws, datasetId, mutate]);
-
   function refresh() {
-    mutate({ workspace: ws, id: datasetId, data: { limit: PREVIEW_LIMIT } });
+    preview.refetch();
   }
 
   const result = preview.data?.status === 200 ? preview.data.data : undefined;
@@ -63,8 +71,11 @@ export function PreviewTab({ ws, datasetId, columns = [] }: Props) {
       <span className="text-sm text-muted-foreground">
         Preview — first {PREVIEW_LIMIT} rows
       </span>
-      <Button size="sm" variant="outline" onClick={refresh} disabled={preview.isPending}>
-        {preview.isPending ? "Loading…" : "Refresh"}
+      {/* `isFetching`, not `isPending`: with a query, `isPending` is only the
+          FIRST load, so a Refresh of already-loaded rows would otherwise give no
+          feedback and stay clickable mid-flight. */}
+      <Button size="sm" variant="outline" onClick={refresh} disabled={preview.isFetching}>
+        {preview.isFetching ? "Loading…" : "Refresh"}
       </Button>
     </div>
   );
