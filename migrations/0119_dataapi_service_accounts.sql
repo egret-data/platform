@@ -49,4 +49,5 @@ CREATE TABLE dataapi.clients (
   created_at         timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX dataapi_clients_sa_idx ON dataapi.clients (service_account_id);
-CREATE INDEX dataapi_clients_client_id_idx ON dataapi.clients (client_id);
+-- No index on `client_id`: the UNIQUE constraint above already creates one, and
+-- that is the index `ClientStore::verify`'s lookup uses.
