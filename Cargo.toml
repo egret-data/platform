@@ -104,6 +104,21 @@ rand = "0.8"
 sha2 = "0.10"
 base64 = "0.22"
 hex = "0.4"
+# The Data API's endpoint-SQL renderer (P4.5). `default-features = false` with an
+# explicit list: `macros` and `multi_template` are dropped so `{% macro %}`,
+# `{% call %}`, `{% include %}` and `{% extends %}` do not parse at all, and
+# `fuel` is named because it is NOT default-on. `json`, `urlencode`,
+# `custom_syntax`, `loop_controls` and `unstable_machinery` stay off — leaving
+# `custom_syntax` off also means no template author can change the `{{ }}`
+# delimiters out from under the renderer.
+minijinja = { version = "2.24", default-features = false, features = [
+    "builtins",
+    "serde",
+    "deserialization",
+    "std_collections",
+    "debug",
+    "fuel",
+] }
 # `cookie-private` moves onto the workspace entry: egret-auth and egret-bin used
 # to declare their own `axum-extra = "0.10"` WITH this feature, which is both why
 # a second axum-extra stayed in the tree and why egret-workspace compiled at all —

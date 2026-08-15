@@ -48,6 +48,12 @@ argon2.workspace = true
 rand.workspace = true
 base64.workspace = true
 utoipa.workspace = true
+# The endpoint-SQL renderer (`render.rs`). Chosen for one structural property:
+# `Environment::set_formatter` replaces value emission wholesale, so a template
+# has NO path from `{{ … }}` to raw SQL text — the formatter writes `?` and binds.
+# Feature set is pinned in the workspace manifest; read the comment there before
+# adding one.
+minijinja.workspace = true
 # The serving response cache's key (`serving/cache.rs`). A hash rather than a
 # concatenation so the key is fixed-length however many parameters an endpoint
 # declares, and so no separator question arises from a value containing one.

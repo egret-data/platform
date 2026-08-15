@@ -269,8 +269,10 @@ pub enum ValidationError {
     DuplicateParameter(String),
     #[error(
         "parameter `{{{{{0}}}}}` is referenced from inside a string literal, a quoted identifier \
-         or a comment. Its value is substituted there as an ALREADY-QUOTED literal, which closes \
-         the enclosing one and lets any caller inject SQL — write the placeholder as an operand \
+         or a comment. A placeholder there is not a value position: the renderer emits a bind \
+         marker the engine reads as text, so the value would be bound to a position that does \
+         not exist — and on a renderer that interpolates instead, the substituted literal closes \
+         the enclosing one and lets any caller inject SQL. Write the placeholder as an operand \
          instead, e.g. `LIKE concat('%', {{{{{0}}}}}, '%')`"
     )]
     PlaceholderInsideQuotedText(String),
@@ -347,7 +349,10 @@ impl From<ValidationError> for Error {
 ///
 /// Nested block comments (which Postgres allows and Trino does not) end at the
 /// first `*/`; the leftovers can only cause a rejection, never an acceptance.
-fn strip_comments_and_strings(
+/// `pub(crate)` for `render::structural_placeholders`, which counts the bind
+/// markers standing in SQL structure in a RENDERED statement — the same question
+/// this answers for a placeholder in an unrendered one.
+pub(crate) fn strip_comments_and_strings(
     sql: &str,
     backslash_escapes: bool,
 ) -> std::result::Result<String, ValidationError> {
@@ -546,12 +551,19 @@ fn check_single_select_under(
 
 /// Every `{{ name }}` reference in `sql`, in order of appearance.
 ///
-/// Scans the RAW SQL, not the stripped form, because the renderer that will
-/// substitute these at serve time is itself a raw scan (`egret-query`'s
-/// `execution::template::render`). Matching its view is what keeps validation
-/// honest: a placeholder inside a string literal WILL be substituted there, so
-/// pretending it is inert here would declare a definition valid that behaves
-/// differently in production.
+/// Scans the RAW SQL, not the stripped form, because the renderer that
+/// substitutes these at serve time — [`crate::render::render`] — is a template
+/// engine that has no idea what SQL quoting is: it emits a bind marker wherever
+/// the placeholder stands, string literal or not. Matching that view is what
+/// keeps validation honest.
+///
+/// **The comment this replaces named `egret-query`'s
+/// `execution::template::render`.** That renderer is SQL Lab's, it interpolates
+/// through `quote_string`, and nothing on the Data API serving path has ever
+/// called it — the rule below was written against a renderer that was never
+/// wired in. The rule itself is right and P4.5 made it load-bearing: a
+/// placeholder that survives [`strip_comments_and_strings`] stands where a value
+/// stands, which is exactly where a bind marker may go.
 fn placeholders(sql: &str) -> std::result::Result<Vec<String>, ValidationError> {
     let mut found = Vec::new();
     let mut rest = sql;
@@ -589,9 +601,11 @@ fn placeholders(sql: &str) -> std::result::Result<Vec<String>, ValidationError> 
 /// correctness property, and its attacker is not the author: it is any holder of
 /// a Data API token, at serve time, long after this ran.
 ///
-/// `template::render` substitutes a placeholder with `quote_string(engine, v)` —
-/// an **already-quoted** literal. That is safe exactly where a literal is what
-/// the grammar expects. Inside an open literal it is the opposite:
+/// A placeholder is replaced by a bind marker, and — before P4.5, on the
+/// renderer these rules were written against — by `quote_string(engine, v)`, an
+/// **already-quoted** literal. Either is safe exactly where a literal is what the
+/// grammar expects, and neither is safe inside an open one. Take the
+/// interpolating reading first, because it is the one that shows the injection:
 ///
 /// ```sql
 /// SELECT * FROM t WHERE a = 'x{{p}}y'
@@ -626,11 +640,11 @@ pub fn check_params(sql: &str, params: &[ParamSpec]) -> std::result::Result<(), 
         }
         seen.push(&p.name);
     }
-    // The RAW scan, matching what `template::render` will do at serve time. A
-    // placeholder inside a literal IS substituted there, so it counts as
-    // referenced — pretending otherwise would report it as an unused parameter
-    // and send the author to delete the declaration rather than move the
-    // placeholder.
+    // The RAW scan, matching what `crate::render::render` does at serve time: a
+    // placeholder inside a literal still emits a bind marker there, so it counts
+    // as referenced — pretending otherwise would report it as an unused
+    // parameter and send the author to delete the declaration rather than move
+    // the placeholder.
     let referenced = placeholders(sql)?;
     for name in &referenced {
         if !seen.contains(&name.as_str()) {
