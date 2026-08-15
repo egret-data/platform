@@ -130,6 +130,19 @@ impl egret_query_api::QueryExecPort for FakePort {
             Describe::Missing(m) => Err(Error::NotFound(m.into())),
         }
     }
+
+    /// Lifecycle is the AUTHORING path (draft → validate → publish); it only
+    /// ever describes. A call here would mean publish started executing SQL.
+    async fn execute_as(
+        &self,
+        _ws: Uuid,
+        _database_id: Uuid,
+        _principal: UserId,
+        _sql: &str,
+        _limits: egret_query_api::Limits,
+    ) -> Result<egret_core::TabularResult, Error> {
+        unreachable!("the authoring lifecycle must never execute a query")
+    }
 }
 
 struct Fixture {

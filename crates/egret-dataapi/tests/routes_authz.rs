@@ -48,6 +48,17 @@ impl egret_query_api::QueryExecPort for UnreachablePort {
     ) -> Result<Vec<egret_core::ColumnMeta>, egret_core::Error> {
         unreachable!("no route in this test should reach the query engine")
     }
+
+    async fn execute_as(
+        &self,
+        _ws: Uuid,
+        _database_id: Uuid,
+        _principal: egret_core::UserId,
+        _sql: &str,
+        _limits: egret_query_api::Limits,
+    ) -> Result<egret_core::TabularResult, egret_core::Error> {
+        unreachable!("no route in this test should reach the query engine")
+    }
 }
 
 fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> DataApiState {

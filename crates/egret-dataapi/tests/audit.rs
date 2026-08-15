@@ -54,6 +54,19 @@ impl egret_query_api::QueryExecPort for OkPort {
             ty: "integer".into(),
         }])
     }
+
+    /// This file exercises the AUTHORING mutations only; nothing here serves a
+    /// request, so a call would mean a route reached the engine unexpectedly.
+    async fn execute_as(
+        &self,
+        _ws: Uuid,
+        _database_id: Uuid,
+        _principal: UserId,
+        _sql: &str,
+        _limits: egret_query_api::Limits,
+    ) -> Result<egret_core::TabularResult, Error> {
+        unreachable!("authoring mutations must never execute a query")
+    }
 }
 
 /// One emitted mutation, flattened to what an assertion actually reads.

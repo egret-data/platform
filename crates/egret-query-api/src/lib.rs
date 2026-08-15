@@ -34,6 +34,26 @@ pub use dialect::quote_string;
 pub mod port;
 pub use port::QueryExecPort;
 
+/// Execution guards for one query: the row cap and the wall-clock budget.
+///
+/// Lives in the contract crate because [`QueryExecPort::execute_as`] takes it,
+/// and the whole point of that port is that the Data API can name it without
+/// depending on `egret-query`. `egret_query::execution::model` re-exports this
+/// exact type, so the seam's callers (the JobManager, the BI chart runner, the
+/// connection tester) are unchanged — one definition, two paths. Do not add a
+/// second `Limits` in the seam: two that drift is the failure mode this crate
+/// exists to prevent, the same reason `quote_string` lives here.
+///
+/// `max_rows` is a cap the connector detects rather than obeys silently: it
+/// fetches `max_rows + 1` and, if the extra row appears, sets
+/// [`TabularResult::truncated`] and drops it — so a caller can always tell a
+/// complete answer from a prefix of one.
+#[derive(Debug, Clone)]
+pub struct Limits {
+    pub max_rows: usize,
+    pub timeout: std::time::Duration,
+}
+
 /// Supported query engines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]

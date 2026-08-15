@@ -1,4 +1,5 @@
-//! `describe_as` must resolve a real column schema through the port, not a stub.
+//! `describe_as` must resolve a real column schema through the port, not a stub,
+//! and `execute_as` must return real rows through it under the same scoping rule.
 //!
 //! Engine + DB gated. Required:
 //!   * `DATABASE_URL`          — the metastore the registry/user repos read.
@@ -373,4 +374,125 @@ async fn describe_as_refuses_a_database_from_another_workspace() {
         .await
         .expect("the workspace's own database still describes");
     assert_eq!(cols.len(), 2);
+}
+
+/// A bounded serving limit: the Data API's per-endpoint cap, not the job runner's.
+fn small_limits() -> Limits {
+    Limits {
+        max_rows: 100,
+        timeout: std::time::Duration::from_secs(30),
+    }
+}
+
+/// `execute_as` is the serving half of the port: real rows off a live
+/// coordinator, under the caller's identity, and carrying the SAME scoping
+/// guarantee as `describe_as` — a `database_id` outside `ws` is `NotFound`
+/// before the principal is resolved and before any network call.
+#[tokio::test]
+async fn execute_as_returns_rows_and_scopes_to_the_workspace() {
+    let Some(f) = trino_engine_state().await else {
+        eprintln!("skip");
+        return;
+    };
+    let port: &dyn QueryExecPort = &f.st;
+
+    let out = port
+        .execute_as(f.ws, f.database_id, f.user, "SELECT 1 AS n", small_limits())
+        .await
+        .expect("execute must succeed");
+    assert_eq!(out.rows.len(), 1, "one row from a one-row SELECT");
+    assert_eq!(
+        out.columns[0].name, "n",
+        "column names come from the SELECT"
+    );
+    assert_eq!(
+        out.rows[0][0],
+        serde_json::json!(1),
+        "the actual cell value"
+    );
+    assert!(
+        !out.truncated,
+        "one row under a cap of 100 is not truncated"
+    );
+
+    // Same scoping guarantee describe_as carries: a database from another
+    // workspace is NotFound, checked before any network call. The SQL is valid
+    // and the connection is live, so the ONLY reason to fail is the scope.
+    let err = port
+        .execute_as(
+            f.ws,
+            f.foreign_database_id,
+            f.user,
+            "SELECT 1",
+            small_limits(),
+        )
+        .await
+        .expect_err("a foreign database must not execute");
+    assert!(
+        matches!(err, egret_core::Error::NotFound(_)),
+        "a foreign database must be NotFound (not Forbidden, which would confirm it exists), got {err:?}"
+    );
+}
+
+/// The cap must be visible to the caller. A silent truncation would let a Data
+/// API response look like the complete answer when it is a prefix of one.
+#[tokio::test]
+async fn execute_as_reports_truncation_rather_than_silently_capping() {
+    let Some(f) = trino_engine_state().await else {
+        eprintln!("skip");
+        return;
+    };
+    let port: &dyn QueryExecPort = &f.st;
+    let limits = Limits {
+        max_rows: 2,
+        timeout: std::time::Duration::from_secs(30),
+    };
+
+    let out = port
+        .execute_as(
+            f.ws,
+            f.database_id,
+            f.user,
+            "SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3",
+            limits,
+        )
+        .await
+        .expect("execute must succeed");
+    assert!(
+        out.truncated,
+        "the caller must be able to tell it did not get everything"
+    );
+    assert_eq!(out.rows.len(), 2, "capped at max_rows");
+}
+
+/// The error variants must not be flattened on the serving path either: bad SQL
+/// stays a 400 the endpoint author can act on, and must come from the engine's
+/// parser rather than a refused connection.
+#[tokio::test]
+async fn execute_as_rejects_invalid_sql_as_invalid_input() {
+    let Some(f) = trino_engine_state().await else {
+        eprintln!("skip");
+        return;
+    };
+    let port: &dyn QueryExecPort = &f.st;
+
+    let err = port
+        .execute_as(
+            f.ws,
+            f.database_id,
+            f.user,
+            "SELECT FROM WHERE",
+            small_limits(),
+        )
+        .await
+        .expect_err("a syntax error must surface as an error, not an empty result");
+    assert!(
+        matches!(err, egret_core::Error::InvalidInput(_)),
+        "bad SQL must map to InvalidInput, got {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("forbidden") && !msg.contains("connect"),
+        "the engine must have parsed the SQL, not refused the connection: {msg}"
+    );
 }

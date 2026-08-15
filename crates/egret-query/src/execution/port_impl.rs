@@ -3,12 +3,14 @@
 
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use egret_core::{ColumnMeta, Error, UserId};
+use egret_core::{ColumnMeta, Error, TabularResult, UserId};
 
 use crate::execution::connector::{build_connector, ConnSpec};
 use crate::execution::delegation_for;
+use crate::execution::model::Limits;
 use crate::execution::{EngineApiError, EngineError, EngineState};
 
 /// `describe` is called directly, with no JobManager wrapping it, so it carries
@@ -17,8 +19,9 @@ const DESCRIBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Map an engine failure onto the core error the endpoint author will see.
 ///
+/// Shared by `describe_as` and `execute_as` — deliberately one table, not two.
 /// A blanket `InvalidInput` would be a lie on the exact axis this port exists
-/// for: `describe_as` runs under the caller's identity precisely so a delegated
+/// for: both methods run under the caller's identity precisely so a delegated
 /// connection resolves under *their* Ranger policy, and a policy denial arrives
 /// as [`EngineError::Forbidden`]. Flattening that to a 400 would tell an author
 /// "invalid input: forbidden" when their SQL is perfect and their grant is
@@ -37,21 +40,23 @@ fn describe_error(e: EngineError) -> Error {
         EngineError::NotFound(s) => Error::NotFound(s),
         // The author's SQL (or the shape of it) is the problem — a 400 they can
         // act on. `Timeout` is here because for a `LIMIT 0` describe it means the
-        // query is too expensive to plan, not that the server is broken.
+        // query is too expensive to plan, and for `execute_as` it means the
+        // statement exceeded the budget the caller passed in `Limits` — in both
+        // cases the query, not the server, is what has to change.
         EngineError::BadRequest(s) | EngineError::Engine(s) | EngineError::Limit(s) => {
             Error::InvalidInput(s)
         }
-        EngineError::Timeout => Error::InvalidInput("describe timed out".into()),
+        EngineError::Timeout => Error::InvalidInput("query timed out".into()),
         // Infrastructure. Nothing the author can do, and the detail (host:port,
         // SQL state) must not reach them — `Error::Internal` redacts to
         // "internal error" on the wire.
-        // Unreachable today: `describe` builds its own `CancellationToken` and
-        // never triggers it. Internal rather than a 400, so if it ever does fire
-        // it reads as the bug it would be.
+        // `Cancelled` is unreachable today: both port methods build their own
+        // `CancellationToken` and never trigger it. Internal rather than a 400,
+        // so if it ever does fire it reads as the bug it would be.
         EngineError::Connect(_)
         | EngineError::Storage(_)
         | EngineError::Db(_)
-        | EngineError::Cancelled => Error::Internal(anyhow::anyhow!("describe: {detail}")),
+        | EngineError::Cancelled => Error::Internal(anyhow::anyhow!("query port: {detail}")),
     }
 }
 
@@ -67,6 +72,69 @@ fn delegation_error(e: EngineApiError) -> Error {
     }
 }
 
+/// Everything both port methods do before they touch the engine: scope the
+/// database to the workspace, resolve the principal, resolve delegation, open
+/// the secret, and build the connection spec.
+///
+/// **One function on purpose.** `describe_as` and `execute_as` are identical up
+/// to the call they make, and the part they share is the security-critical part:
+/// the workspace scope check and the delegation resolution that decides which
+/// identity the engine sees. A second copy would be free to drift — a bearer
+/// wired into one path and not the other, or (the failure P3 found by mutation)
+/// a scope check present in one and absent in the other. Adding a third caller
+/// means calling this, not copying it.
+///
+/// Returns a `ConnSpec`; the caller supplies the verb.
+async fn connect_as(
+    st: &EngineState,
+    ws: Uuid,
+    database_id: Uuid,
+    principal: UserId,
+) -> Result<ConnSpec, Error> {
+    // Fail closed BEFORE anything else: `database_id` reaches this port from a
+    // request body, so an unscoped call would let an author point an endpoint at
+    // another workspace's connection — reading its schema via `describe_as`, or
+    // its actual rows via `execute_as`. This is the second half of
+    // `routes::authorize` (the permission half stays with the caller, which has
+    // the WorkspaceContext this port does not). `get_in_workspace` reports a
+    // foreign row as NotFound, so absence and denial look identical — the same
+    // shape used everywhere else in this feature.
+    //
+    // Ordering is part of the guarantee: this runs before the principal lookup
+    // and before any connection is opened, so a refused id costs no network call
+    // and reveals nothing by timing.
+    st.databases
+        .get_in_workspace(ws, database_id)
+        .await
+        .map_err(|e| match e {
+            crate::registry::DatabaseError::NotFound(s) => Error::NotFound(s),
+            other => Error::Internal(anyhow::anyhow!("resolve database: {other}")),
+        })?;
+    // `delegation_for` needs the caller's email for the non-delegated arm;
+    // the port is handed only a user id, so resolve it here.
+    let email = st
+        .users
+        .find_by_id(principal)
+        .await
+        .map_err(|e| Error::Internal(anyhow::anyhow!("resolve principal: {e}")))?
+        .ok_or_else(|| Error::Internal(anyhow::anyhow!("principal not found")))?
+        .email;
+    let (db, session_user, bearer) = delegation_for(st, principal, &email, database_id)
+        .await
+        .map_err(delegation_error)?;
+    let secret = st
+        .databases
+        .open_secret(database_id)
+        .await
+        .map_err(|e| Error::Internal(anyhow::anyhow!("open secret: {e}")))?;
+    Ok(ConnSpec::from_database_as(
+        &db,
+        secret,
+        session_user,
+        bearer,
+    ))
+}
+
 #[async_trait::async_trait]
 impl egret_query_api::QueryExecPort for EngineState {
     async fn describe_as(
@@ -76,40 +144,35 @@ impl egret_query_api::QueryExecPort for EngineState {
         principal: UserId,
         sql: &str,
     ) -> Result<Vec<ColumnMeta>, Error> {
-        // Fail closed BEFORE anything else: `database_id` reaches this port from a
-        // request body, so an unscoped describe would let an author point an
-        // endpoint at another workspace's connection. This is the second half of
-        // `routes::authorize` (the permission half stays with the caller, which
-        // has the WorkspaceContext this port does not). `get_in_workspace` reports
-        // a foreign row as NotFound, so absence and denial look identical — the
-        // same shape used everywhere else in this feature.
-        self.databases
-            .get_in_workspace(ws, database_id)
-            .await
-            .map_err(|e| match e {
-                crate::registry::DatabaseError::NotFound(s) => Error::NotFound(s),
-                other => Error::Internal(anyhow::anyhow!("resolve database: {other}")),
-            })?;
-        // `delegation_for` needs the caller's email for the non-delegated arm;
-        // the port is handed only a user id, so resolve it here.
-        let email = self
-            .users
-            .find_by_id(principal)
-            .await
-            .map_err(|e| Error::Internal(anyhow::anyhow!("resolve principal: {e}")))?
-            .ok_or_else(|| Error::Internal(anyhow::anyhow!("principal not found")))?
-            .email;
-        let (db, session_user, bearer) = delegation_for(self, principal, &email, database_id)
-            .await
-            .map_err(delegation_error)?;
-        let secret = self
-            .databases
-            .open_secret(database_id)
-            .await
-            .map_err(|e| Error::Internal(anyhow::anyhow!("open secret: {e}")))?;
-        let spec = ConnSpec::from_database_as(&db, secret, session_user, bearer);
+        let spec = connect_as(self, ws, database_id, principal).await?;
         build_connector(&spec)
             .describe(sql, DESCRIBE_TIMEOUT)
+            .await
+            .map_err(describe_error)
+    }
+
+    async fn execute_as(
+        &self,
+        ws: Uuid,
+        database_id: Uuid,
+        principal: UserId,
+        sql: &str,
+        limits: Limits,
+    ) -> Result<TabularResult, Error> {
+        // Same prelude, same scoping guarantee, same error table as `describe_as`
+        // — only the verb differs.
+        let spec = connect_as(self, ws, database_id, principal).await?;
+        // No JobManager here: the Data API serves synchronously, so the caller's
+        // `limits.timeout` is the whole budget and there is nothing to cancel
+        // out of band. A fresh token rather than `None` keeps the connector's
+        // cooperative-cancellation path on one code path.
+        //
+        // `limits.max_rows` is not applied here — the connector fetches
+        // `max_rows + 1` and sets `truncated`, so the caller can tell a complete
+        // answer from a prefix. Capping the SQL with a `LIMIT` instead would
+        // erase that distinction.
+        build_connector(&spec)
+            .execute(sql, &limits, CancellationToken::new())
             .await
             .map_err(describe_error)
     }
