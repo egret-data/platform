@@ -48,7 +48,7 @@ pub use port::QueryExecPort;
 /// fetches `max_rows + 1` and, if the extra row appears, sets
 /// [`TabularResult::truncated`] and drops it — so a caller can always tell a
 /// complete answer from a prefix of one.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Limits {
     pub max_rows: usize,
     pub timeout: std::time::Duration,
