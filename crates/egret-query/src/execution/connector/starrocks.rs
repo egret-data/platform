@@ -10,6 +10,7 @@ use egret_core::{ColumnMeta, TabularResult};
 use super::{ConnSpec, Connector};
 use crate::execution::error::EngineError;
 use crate::execution::model::Limits;
+use egret_query_api::Param;
 
 /// Refuse any submission that could be split into more than one statement.
 ///
@@ -210,59 +211,77 @@ impl Connector for StarRocksConnector {
             Self::switch_identity(&mut conn, u).await?;
         }
 
+        // Text protocol: dates/decimals/strings all arrive as `Value::Bytes`,
+        // decoded by `bytes_to_json` using the declared column type.
         let mut result = conn
             .query_iter(sql)
             .await
             .map_err(|e| EngineError::Engine(e.to_string()))?;
 
-        // Read columns BEFORE consuming any rows — columns_ref() accesses the pending result set.
-        let columns: Vec<ColumnMeta> = result
-            .columns_ref()
-            .iter()
-            .map(|c| ColumnMeta {
-                name: c.name_str().to_string(),
-                ty: format!("{:?}", c.column_type()),
-            })
-            .collect();
-
-        // Capture per-column MySQL types for type-aware value coercion.
-        let col_types: Vec<mysql_async::consts::ColumnType> = result
-            .columns_ref()
-            .iter()
-            .map(|c| c.column_type())
-            .collect();
-
-        let cap = limits.max_rows;
-        let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
-
-        loop {
-            if cancel.is_cancelled() {
-                drop(result);
-                let _ = conn.disconnect().await;
-                return Err(EngineError::Cancelled);
-            }
-            match result
-                .next()
-                .await
-                .map_err(|e| EngineError::Engine(e.to_string()))?
-            {
-                None => break,
-                Some(row) => {
-                    rows.push(row_to_json(row, &col_types));
-                    if rows.len() > cap {
-                        break;
-                    }
-                }
-            }
-        }
-
+        let drained = drain_rows(&mut result, limits.max_rows, &cancel).await;
         drop(result);
         let _ = conn.disconnect().await;
+        let (columns, rows, truncated) = drained?;
 
-        let truncated = rows.len() > cap;
-        if truncated {
-            rows.truncate(cap);
+        Ok(TabularResult {
+            columns,
+            row_count: rows.len() as u64,
+            rows,
+            bytes_scanned: None,
+            truncated,
+        })
+    }
+
+    /// Bind `params` via `mysql_async`'s prepared-statement (binary protocol)
+    /// path: `prep` then `exec_iter`. Every param is carried as text
+    /// (`Value::Bytes`) or a native numeric — StarRocks reports every bound
+    /// parameter as `MYSQL_TYPE_VAR_STRING` and does no type inference of its
+    /// own, so the `CAST(? AS ...)` in the caller's SQL is what gives a bound
+    /// value its type, not the wire representation here.
+    ///
+    /// `values` is built by mapping `params` 1:1 — never by separately
+    /// deriving an expected placeholder count from the SQL text and a value
+    /// count from `params`. A StarRocks `StmtParamsMismatch` kills the whole
+    /// connection (a later `SELECT 1` on it fails with "Connection to the
+    /// server is closed"), so those two counts must never be able to disagree.
+    async fn execute_with_params(
+        &self,
+        sql: &str,
+        params: &[Param],
+        limits: &Limits,
+        cancel: CancellationToken,
+    ) -> Result<TabularResult, EngineError> {
+        if params.is_empty() {
+            return self.execute(sql, limits, cancel).await;
         }
+        self.guard()?;
+        let mut conn = mysql_async::Conn::new(self.opts.clone())
+            .await
+            .map_err(|e| EngineError::Connect(e.to_string()))?;
+
+        if let Some(u) = &self.execute_as {
+            Self::switch_identity(&mut conn, u).await?;
+        }
+
+        let stmt = conn
+            .prep(sql)
+            .await
+            .map_err(|e| EngineError::Engine(e.to_string()))?;
+
+        let values: Vec<mysql_async::Value> = params.iter().map(param_to_value).collect();
+
+        // Binary protocol: DATE/DATETIME now arrive as `Value::Date(..)`, not
+        // `Bytes` — decoded by the `V::Date` arm in `row_to_json` below.
+        let mut result = conn
+            .exec_iter(stmt, values)
+            .await
+            .map_err(|e| EngineError::Engine(e.to_string()))?;
+
+        let drained = drain_rows(&mut result, limits.max_rows, &cancel).await;
+        drop(result);
+        let _ = conn.disconnect().await;
+        let (columns, rows, truncated) = drained?;
+
         Ok(TabularResult {
             columns,
             row_count: rows.len() as u64,
@@ -314,6 +333,79 @@ impl Connector for StarRocksConnector {
     }
 }
 
+/// Drain a pending result set (text or binary protocol — both are `Protocol`
+/// impls over the same `QueryResult` API) into columns + JSON rows, applying
+/// the row cap and cooperative cancellation. Shared by `execute` and
+/// `execute_with_params`, which differ only in how the result was produced.
+async fn drain_rows<P: mysql_async::prelude::Protocol>(
+    result: &mut mysql_async::QueryResult<'_, 'static, P>,
+    cap: usize,
+    cancel: &CancellationToken,
+) -> Result<(Vec<ColumnMeta>, Vec<Vec<serde_json::Value>>, bool), EngineError> {
+    // Read columns BEFORE consuming any rows — columns_ref() accesses the pending result set.
+    let columns: Vec<ColumnMeta> = result
+        .columns_ref()
+        .iter()
+        .map(|c| ColumnMeta {
+            name: c.name_str().to_string(),
+            ty: format!("{:?}", c.column_type()),
+        })
+        .collect();
+
+    // Capture per-column MySQL types for type-aware value coercion.
+    let col_types: Vec<mysql_async::consts::ColumnType> = result
+        .columns_ref()
+        .iter()
+        .map(|c| c.column_type())
+        .collect();
+
+    let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+
+    loop {
+        if cancel.is_cancelled() {
+            return Err(EngineError::Cancelled);
+        }
+        match result
+            .next()
+            .await
+            .map_err(|e| EngineError::Engine(e.to_string()))?
+        {
+            None => break,
+            Some(row) => {
+                rows.push(row_to_json(row, &col_types));
+                if rows.len() > cap {
+                    break;
+                }
+            }
+        }
+    }
+
+    let truncated = rows.len() > cap;
+    if truncated {
+        rows.truncate(cap);
+    }
+    Ok((columns, rows, truncated))
+}
+
+/// Map a bound [`Param`] to the `mysql_async::Value` sent over the binary
+/// protocol. `Decimal`/`Str`/`Date`/`Timestamp` all go over as `Bytes` of
+/// their text form: StarRocks reports every bound parameter as
+/// `MYSQL_TYPE_VAR_STRING` regardless of the value's Rust variant, so there is
+/// no native wire type to prefer for a date or a decimal, and text is what
+/// preserves exact precision (no float rounding on a `Decimal`).
+fn param_to_value(p: &Param) -> mysql_async::Value {
+    use mysql_async::Value as V;
+    match p {
+        Param::Null => V::NULL,
+        Param::Bool(b) => V::Int(i64::from(*b)),
+        Param::I64(n) => V::Int(*n),
+        Param::F64(f) => V::Double(*f),
+        Param::Decimal(s) | Param::Str(s) | Param::Date(s) | Param::Timestamp(s) => {
+            V::Bytes(s.as_bytes().to_vec())
+        }
+    }
+}
+
 fn row_to_json(
     row: mysql_async::Row,
     col_types: &[mysql_async::consts::ColumnType],
@@ -329,6 +421,20 @@ fn row_to_json(
             // Text protocol returns everything as Bytes; use the declared column type
             // to decide coercion — prevents silent string→number corruption (e.g. "007"→7).
             Some(V::Bytes(b)) => bytes_to_json(b, col_types.get(i).copied()),
+            // Binary protocol only: `query()` returns dates as Bytes, `exec()` returns
+            // V::Date. Without this arm they fall through to the Debug-repr catch-all
+            // below and reach the frontend as `Date("'2020-02-29'")`. Every test on
+            // `bytes_to_json` stays green when that happens, because on this path
+            // `bytes_to_json` is no longer the function being called.
+            Some(&V::Date(y, mo, d, h, mi, s, us)) => {
+                serde_json::Value::String(if h == 0 && mi == 0 && s == 0 && us == 0 {
+                    format!("{y:04}-{mo:02}-{d:02}")
+                } else if us == 0 {
+                    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}")
+                } else {
+                    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}.{us:06}")
+                })
+            }
             Some(other) => serde_json::Value::String(format!("{:?}", other)),
         })
         .collect()
