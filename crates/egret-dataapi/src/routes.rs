@@ -116,8 +116,15 @@ pub struct DataApiState {
     /// swapping the implementation.
     pub query: Arc<dyn egret_query_api::QueryExecPort>,
     /// The machine-IdP's signing keys — the SAME store `IdpState` mints with, so
-    /// the serving path verifies against the key that signed the token rather
-    /// than against a second copy that could rotate independently.
+    /// there is one source of truth for what egret's signing key currently is.
+    ///
+    /// **Sharing it does NOT make key rotation safe**, and it would be easy to
+    /// read it that way: `verify_serving_token` verifies against `active()`
+    /// only, and mint and verify both follow `active()` forward together, so at
+    /// a rotation every already-issued token becomes unverifiable no matter how
+    /// many instances of the store exist. Closing that needs verification
+    /// against every JWK from `all_public_jwks()`; deferred, because no rotation
+    /// tooling exists in-tree yet and the Data API TTL is 600s.
     ///
     /// Read only by [`crate::serving`]: `verify_serving_token` takes the active
     /// key's public JWK. The management routes above authenticate a HUMAN

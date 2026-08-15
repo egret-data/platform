@@ -1781,8 +1781,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // `issuer` is egret's public root URL (the JWT `iss` + OIDC issuer lakekeeper
     // will trust in EB-3's Authorizer integration).
     // One key store, shared: the IdP signs with it and the Data API serving path
-    // (P4) verifies against it. Two independent stores would drift the moment a
-    // key rotates and reject tokens egret itself had just minted.
+    // (P4) verifies against it, so there is a single source of truth for what
+    // egret's signing key currently is. This is NOT a rotation fix — both sides
+    // read `active()` and would follow a rotation forward together either way;
+    // see `DataApiState::keys` for what closing that would actually take.
     let signing_keys: std::sync::Arc<dyn egret_machine_idp::SigningKeyStore> =
         std::sync::Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone()));
     let idp = Some(egret_machine_idp::IdpState {

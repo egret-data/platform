@@ -206,6 +206,9 @@ async fn a_token_whose_identity_claims_are_missing_or_malformed_is_refused() {
         ("egret_user_id", Some(serde_json::json!("not-a-uuid"))),
         ("sub", None),
         ("sub", Some(serde_json::json!(""))),
+        // Whitespace-only: `is_empty()` alone would let this through and write
+        // " " into the access log as a client id.
+        ("sub", Some(serde_json::json!("   "))),
     ] {
         let t = f.mint_with_claim(claim, value.clone()).await;
         assert!(
@@ -216,6 +219,109 @@ async fn a_token_whose_identity_claims_are_missing_or_malformed_is_refused() {
             "claim {claim} = {value:?} was accepted"
         );
     }
+}
+
+/// Collects `tracing` output so a test can assert on it.
+#[derive(Clone, Default)]
+struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log lock").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+    type Writer = LogWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        LogWriter(self.0.clone())
+    }
+}
+
+/// Run `verify_serving_token` against `token` with a DEBUG subscriber installed
+/// and return everything it logged.
+///
+/// `set_default` is thread-local and `#[tokio::test]` gives each test its own
+/// current-thread runtime, so this captures this test's events and no others.
+async fn logs_from_verifying(f: &Fixture, token: &str) -> String {
+    let cap = LogCapture::default();
+    let sub = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(cap.clone())
+        .without_time()
+        .finish();
+    {
+        let _guard = tracing::subscriber::set_default(sub);
+        let r = verify_serving_token(&*f.keys, token).await;
+        assert!(
+            matches!(r, Err(ServingError::Unauthorized)),
+            "expected a refusal so there is a reason to log"
+        );
+    }
+    let bytes = cap.0.lock().expect("log lock").clone();
+    String::from_utf8(bytes).expect("log output is utf-8")
+}
+
+/// The doc on `verify_serving_token` promises that the caller learns only that
+/// authentication failed while the reason "goes to the log". Nothing made that
+/// true until this test: `Unauthorized` is a unit variant, so if the arm does
+/// not log, the reason is destroyed at the point it existed and no later stage —
+/// not the access log, not an operator — can recover it. Every arm, or the
+/// promise is prose.
+#[tokio::test]
+async fn every_rejection_logs_a_distinguishable_reason() {
+    let f = fixture().await;
+
+    let expired = f
+        .mint_token_expiring_at("data-api", f.ws, f.user, past())
+        .await;
+    let no_exp = f.mint_token_without_exp("data-api", f.ws, f.user).await;
+    let catalog = f.mint_token("catalog", f.ws, f.user).await;
+    let foreign = f.mint_with_foreign_key("data-api", f.ws, f.user).await;
+    let bad_ws = f
+        .mint_with_claim("ws", Some(serde_json::json!("not-a-uuid")))
+        .await;
+    let bad_user = f
+        .mint_with_claim("egret_user_id", Some(serde_json::json!("not-a-uuid")))
+        .await;
+    let bad_sub = f.mint_with_claim("sub", None).await;
+
+    for (token, expected) in [
+        ("", "empty bearer"),
+        (foreign.as_str(), "signature"),
+        (no_exp.as_str(), "no exp claim"),
+        (expired.as_str(), "expired"),
+        (catalog.as_str(), "wrong audience"),
+        (bad_ws.as_str(), "ws claim"),
+        (bad_user.as_str(), "egret_user_id claim"),
+        (bad_sub.as_str(), "sub claim"),
+    ] {
+        let logged = logs_from_verifying(&f, token).await;
+        assert!(
+            logged.contains(expected),
+            "rejection did not log {expected:?}; got: {logged:?}"
+        );
+    }
+}
+
+/// The log must describe the refusal without reproducing the credential. A
+/// bearer token in a log file is a bearer token an operator can replay.
+#[tokio::test]
+async fn a_refusal_never_logs_the_token_itself() {
+    let f = fixture().await;
+    let catalog = f.mint_token("catalog", f.ws, f.user).await;
+    let logged = logs_from_verifying(&f, &catalog).await;
+    let signature = catalog.split('.').nth(2).expect("jwt has a signature");
+    assert!(
+        !logged.contains(signature),
+        "the token's signature reached the log: {logged:?}"
+    );
 }
 
 /// Not a JWT at all. The serving path receives whatever a caller put in the
