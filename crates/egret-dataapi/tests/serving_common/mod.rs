@@ -24,7 +24,8 @@ use egret_dataapi::{management_router, serving_router, ClientStore, DataApiState
 use egret_machine_idp::{generate_rsa_key, sign_claims, IdpError, KeyMaterial, SigningKeyStore};
 use egret_metastore::Db;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -90,6 +91,60 @@ impl egret_query_api::QueryExecPort for FakePort {
             bytes_scanned: None,
             truncated: false,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A rate-limit store on a clock the test drives.
+// ---------------------------------------------------------------------------
+
+/// Wraps the real [`TokenBucket`] and substitutes a clock the test controls for
+/// the `now` the handler reads.
+///
+/// The handler calls `Instant::now()` itself, which is correct in production and
+/// makes an integration test a race: `{per_key_qps: 1}` means a call that must
+/// be refused turns into a 200 the moment more than a second passes between two
+/// `oneshot`s — on a loaded CI box, or behind one slow query. Those are exactly
+/// the assertions that get `#[ignore]`d after the third flake, and an ignored
+/// rate-limit test is no rate limit at all.
+///
+/// Freezing the clock also buys the assertion a wall clock cannot make without
+/// sleeping: advance it and the SAME client is admitted again, which is the
+/// refill that separates this limiter from a lockout.
+///
+/// The bucket ITSELF is the real one — only the clock is substituted, so this
+/// still measures the shipped implementation.
+pub struct TestClock {
+    inner: egret_dataapi::serving::TokenBucket,
+    now: Mutex<Instant>,
+}
+
+impl TestClock {
+    pub fn new() -> Self {
+        Self {
+            inner: egret_dataapi::serving::TokenBucket::new(),
+            now: Mutex::new(Instant::now()),
+        }
+    }
+
+    /// Move the clock forward. Every instant this store hands the bucket is
+    /// derived from one starting point plus explicit advances, so no two of them
+    /// can accidentally coincide.
+    pub fn advance(&self, by: Duration) {
+        let mut g = self.now.lock().unwrap();
+        *g += by;
+    }
+}
+
+impl egret_dataapi::serving::RateLimitStore for TestClock {
+    fn check_at(
+        &self,
+        key: &str,
+        rate: egret_dataapi::serving::Rate,
+        _now: Instant,
+    ) -> Result<(), Duration> {
+        let now = *self.now.lock().unwrap();
+        self.inner.check_at(key, rate, now)
     }
 }
 
@@ -161,6 +216,8 @@ pub struct Fixture {
     /// `delegated = true` — where a `shared` cache is refused at publish time.
     pub delegated_database_id: Uuid,
     pub port: Arc<FakePort>,
+    /// The rate limiter's clock. Frozen unless a test advances it.
+    pub clock: Arc<TestClock>,
 }
 
 async fn insert_user(db: &Db, tag: &str) -> Uuid {
@@ -255,6 +312,7 @@ pub async fn fixture() -> Option<Fixture> {
             .expect("build CedarPdp"),
     );
     let port = Arc::new(FakePort::default());
+    let clock = Arc::new(TestClock::new());
     let st = DataApiState {
         db: db.clone(),
         clients: ClientStore::new(db.clone()),
@@ -276,7 +334,7 @@ pub async fn fixture() -> Option<Fixture> {
         // request they would be a cache that never hits and a limit nobody
         // reaches, and every test here would pass vacuously.
         cache: egret_dataapi::serving::ResponseCache::new(),
-        rate_limits: Arc::new(egret_dataapi::serving::TokenBucket::new()),
+        rate_limits: clock.clone(),
     };
 
     let session = st
@@ -303,6 +361,7 @@ pub async fn fixture() -> Option<Fixture> {
         database_id,
         delegated_database_id,
         port,
+        clock,
     })
 }
 
@@ -422,15 +481,43 @@ impl Fixture {
         cache: serde_json::Value,
         rate_limit: serde_json::Value,
     ) -> Uuid {
+        self.publish_with_params(
+            path,
+            database_id,
+            cache,
+            rate_limit,
+            "SELECT 1 AS n",
+            serde_json::json!([]),
+        )
+        .await
+    }
+
+    /// The same, with declared `params` and the SQL that references them.
+    ///
+    /// P3's `check_params` refuses to publish a parameter no placeholder
+    /// references, so the two arguments move together — a fixture that declared
+    /// a parameter without using it would fail at publish, not at the assertion
+    /// under test.
+    pub async fn publish_with_params(
+        &self,
+        path: &str,
+        database_id: Uuid,
+        cache: serde_json::Value,
+        rate_limit: serde_json::Value,
+        sql: &str,
+        params: serde_json::Value,
+    ) -> Uuid {
         let ep: Uuid = sqlx::query_scalar(
             "INSERT INTO dataapi.endpoints \
-               (workspace_id, name, path, method, database_id, sql, cache, rate_limit, created_by) \
-             VALUES ($1, $2, $3, 'GET', $4, 'SELECT 1 AS n', $5, $6, $7) RETURNING id",
+               (workspace_id, name, path, method, database_id, sql, params, cache, rate_limit, created_by) \
+             VALUES ($1, $2, $3, 'GET', $4, $5, $6, $7, $8, $9) RETURNING id",
         )
         .bind(self.ws_id)
         .bind(format!("ep-{}", Uuid::new_v4().simple()))
         .bind(path)
         .bind(database_id)
+        .bind(sql)
+        .bind(&params)
         .bind(&cache)
         .bind(&rate_limit)
         .bind(self.admin)

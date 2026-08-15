@@ -373,7 +373,18 @@ The cache config therefore carries a `scope`:
 - `per_principal` (default) — the cache key includes `service_account_id`.
 - `shared` — permitted **only when the connection is not delegated**. Checked at validate time, so a misconfiguration cannot be published in the first place.
 
+The key itself is `endpoint_id ‖ version ‖ declared params ‖ principal`, hashed with **every field length-prefixed** and the principal LAST. Two rules that step 7 must not undo when it replaces the parameter map with the rendered one:
+
+- **Only DECLARED parameters are keyed.** An undeclared parameter cannot affect the response, so it must not affect the entry either — hashing the whole query string lets one authenticated client mint unbounded entries in a cache shared by every workspace in the process.
+- **Length-prefixed, never delimited.** A delimiter is only safe while values cannot contain it, which today is true because `http::Uri` refuses control bytes in a raw query string — a property held by a crate the cache never mentions, and one that disappears the moment parameters are DECODED. With a `0x00` delimiter, `?a=1%00b%002` hashes identically to `?a=1&b=2`. Same principal, so never a cross-identity leak, but once parameters reach the SQL it is one filter's rows served for another's.
+
+Cross-identity collision is closed by the LAYOUT rather than by the delimiting: equal byte streams are equal in length and the principal is the last 16 bytes, so `params_a ‖ A == params_b ‖ B` forces `A == B` whatever the parameters contain.
+
 Placing this check at validate time rather than at runtime means the unsafe **shape** can never enter `endpoint_versions`. That is precisely what publish-time validation guarantees, and it is not the whole problem: `query.databases.delegated` is mutable, so a connection can be flipped to delegated *after* a `shared` version was published, and no re-validation runs when it is. The residual is closed on the serving side, by the frozen witness §5.3 describes — **P4 compares `EndpointSnapshot.delegated` against the live column before serving from a shared cache and refuses when they disagree.**
+
+The serving-side comparison is **not gated on `cache.enabled`**, matching the publish-time check, which also refuses a `shared` scope whether or not the cache is currently on: the safe-looking configuration is one draft edit from the unsafe one. The cost of that choice, stated rather than left to be discovered — an endpoint with `enabled: false` and a leftover `scope: shared` **hard-503s on a delegation flip even though it caches nothing and provably cannot leak**. That is a false positive. It is accepted because the operator's fix is the same either way (re-publish, or put the connection back) and because a refusal they can act on beats a latent misconfiguration that surfaces the day someone turns the cache on.
+
+The comparison is a metastore read on every call to a `shared` endpoint, **including calls that would have been cache hits** — checking after the hit would mean serving the stale entry and asking afterwards, which is the leak. `per_principal` endpoints return before the read. If that cost ever matters, memoise `(database_id → delegated)` with a short TTL rather than moving the check: a memo's staleness window is bounded and stated, a re-ordered check's is not.
 
 ### 6.4 Rate limiting
 

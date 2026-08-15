@@ -50,8 +50,9 @@ const TTL_CEILING_SECS: u64 = 3_600;
 
 /// Total bytes the in-process cache will hold. A served response can be up to
 /// `limits.max_rows` rows, so an unbounded map is a memory fault waiting for the
-/// first wide endpoint; over budget, nothing new is cached (correctness is
-/// unaffected — a miss re-executes).
+/// first wide endpoint. Over budget the OLDEST entries are evicted — see
+/// [`ResponseCache::put_at`] for why declining instead was a cross-tenant
+/// availability bug.
 const CACHE_BYTE_BUDGET: usize = 64 * 1024 * 1024;
 
 /// Largest single response that may be cached. One enormous entry must not be
@@ -59,15 +60,50 @@ const CACHE_BYTE_BUDGET: usize = 64 * 1024 * 1024;
 /// pinning 64 MiB for its TTL.
 const MAX_ENTRY_BYTES: usize = 4 * 1024 * 1024;
 
+/// Entries held at once, across every endpoint and workspace in the process.
+///
+/// A second bound beside the byte budget because they bind at different times:
+/// 4096 one-row responses are a rounding error in bytes and still 4096 hash
+/// entries plus 4096 live `Arc`s. The rate-limit buckets carry the same kind of
+/// cap (`PRUNE_ABOVE`) for the same reason.
+const MAX_ENTRIES: usize = 4_096;
+
 /// What a cached response is keyed by.
 ///
 /// `principal` is present unless the snapshot says `shared` AND the delegated
 /// re-check passed — see the module comment for why that is the whole safety
 /// argument.
 ///
-/// Hashed rather than concatenated so the key is a fixed length regardless of
-/// how many parameters an endpoint declares, and so no separator question
-/// arises from a parameter value containing one.
+/// # Why two identities cannot collide, structurally
+///
+/// The hashed stream is `endpoint(16) ‖ version(4) ‖ params ‖ principal(16)`,
+/// and the principal is the LAST 16 bytes. Two byte streams that are equal are
+/// equal in length, so `params_a ‖ A == params_b ‖ B` forces `A == B` — no
+/// arrangement of parameter bytes can push one identity's suffix out of
+/// position, whatever the parameters contain. That is a property of the layout
+/// rather than of the delimiting, and it holds even if everything below were
+/// wrong.
+///
+/// The `b"shared"` marker for an absent principal is therefore
+/// defence-in-depth, not the load-bearing part: `shared` vs `per_principal` is
+/// frozen in the snapshot, so one endpoint version can never mint keys in both
+/// spaces to begin with.
+///
+/// # Why every field is LENGTH-PREFIXED and not delimited
+///
+/// The first version delimited with `0x00`, which was safe only because
+/// `http::Uri` refuses that byte in a raw query string — a property held by a
+/// crate this module never mentions, and one that evaporates the moment step 7
+/// hashes DECODED parameters. At that point `?a=1%00b%002` would hash
+/// byte-identically to `?a=1&b=2`. Same principal both times, so never a
+/// cross-identity leak, but once parameters reach the SQL that is one filter's
+/// rows served for another's — and a parameter is very often a tenant or a date.
+///
+/// A `u64` length before every field removes the question rather than relying on
+/// an alphabet: no byte is special, so no value can be spelled to look like
+/// structure. The per-key value LIST is counted the same way, which is why
+/// repeated parameters are a `Vec` here and not a joined string — a joiner has
+/// exactly the forgeability this construction exists to remove.
 ///
 /// **The endpoint's identity is its `endpoint_id`, never its request path.**
 /// axum percent-decodes the wildcard capture, so `reports%2Fdaily` and
@@ -76,24 +112,26 @@ const MAX_ENTRY_BYTES: usize = 4 * 1024 * 1024;
 pub fn cache_key(
     endpoint_id: Uuid,
     version: i32,
-    params: &BTreeMap<String, String>,
+    params: &BTreeMap<String, Vec<String>>,
     principal: Option<UserId>,
 ) -> String {
     let mut h = Sha256::new();
     h.update(endpoint_id.as_bytes());
     h.update(version.to_le_bytes());
+    h.update((params.len() as u64).to_le_bytes());
     // A `BTreeMap` so the iteration order is the KEY's and not the request's:
     // `?a=1&b=2` and `?b=2&a=1` are the same call and must hit the same entry.
-    for (k, v) in params {
+    for (k, values) in params {
+        h.update((k.len() as u64).to_le_bytes());
         h.update(k.as_bytes());
-        h.update([0u8]);
-        h.update(v.as_bytes());
-        h.update([0u8]);
+        h.update((values.len() as u64).to_le_bytes());
+        for v in values {
+            h.update((v.len() as u64).to_le_bytes());
+            h.update(v.as_bytes());
+        }
     }
     match principal {
         Some(p) => h.update(p.0.as_bytes()),
-        // A literal marker rather than nothing: without it a shared entry and a
-        // per-principal entry for the nil UUID would collide.
         None => h.update(b"shared"),
     }
     format!("{:x}", h.finalize())
@@ -110,6 +148,27 @@ pub fn cache_key(
 /// because the flag is one draft edit away from `true`; the serving side takes
 /// the same position, so an operator sees the drift when it happens rather than
 /// when someone enables the cache.
+///
+/// The cost of that choice, stated rather than left to be discovered: an
+/// endpoint with `enabled: false` and a leftover `scope: shared` **hard-503s on
+/// a delegation flip even though it caches nothing and provably cannot leak.**
+/// The decision stands — the safe-looking configuration is one edit from the
+/// unsafe one, and a refusal an operator can act on beats a latent one — but it
+/// is a false positive and it is written down in spec §6.3 as one.
+///
+/// # Cost, per request
+///
+/// This is a metastore round-trip on EVERY call to a `shared` endpoint,
+/// including calls that would have been cache hits. The placement is deliberate:
+/// checking after the hit would mean serving the stale entry first and asking
+/// afterwards, which is the leak. It is also the reason the check returns early
+/// for `per_principal` — the common case must not pay for it.
+///
+/// If that round-trip ever matters, memoise `(database_id → delegated)` with a
+/// short TTL rather than moving the check: the window a memo opens is bounded
+/// and stated, while a re-ordered check is unbounded. Nothing memoises today,
+/// because a single indexed primary-key read next to a query execution is not
+/// yet worth the staleness.
 pub async fn shared_cache_allowed(db: &Db, snap: &EndpointSnapshot) -> Result<bool, ServingError> {
     if snap.cache.scope != CacheScope::Shared {
         return Ok(false);
@@ -150,9 +209,26 @@ pub async fn shared_cache_allowed(db: &Db, snap: &EndpointSnapshot) -> Result<bo
     Ok(!live)
 }
 
-/// The snapshot's TTL, clamped. See [`TTL_CEILING_SECS`].
-pub fn cache_ttl(snap: &EndpointSnapshot) -> Duration {
-    Duration::from_secs((snap.cache.ttl_seconds as u64).clamp(1, TTL_CEILING_SECS))
+/// How long this snapshot's responses may be cached, or `None` for "do not
+/// cache". The ONE place that decides whether the cache is consulted at all.
+///
+/// **`ttl_seconds: 0` means do not cache, even with `enabled: true`.** Nothing
+/// validates it, and an earlier version clamped it into `1..=TTL_CEILING`, so an
+/// author spelling "don't cache this" as a zero TTL got a one-second cache —
+/// the one place where a published `0` silently became non-zero behaviour.
+/// Every other clamp in the serving path widens a nonsensical value into a
+/// working one; this one would have invented a caching policy the author
+/// declined.
+///
+/// A too-LARGE TTL is still clamped rather than refused, because there the
+/// author's intent ("cache for a long time") is honoured, just bounded.
+pub fn cache_ttl(snap: &EndpointSnapshot) -> Option<Duration> {
+    if !snap.cache.enabled || snap.cache.ttl_seconds == 0 {
+        return None;
+    }
+    Some(Duration::from_secs(
+        (snap.cache.ttl_seconds as u64).min(TTL_CEILING_SECS),
+    ))
 }
 
 /// A cached response body: the SHAPED rows plus the row count that described
@@ -173,12 +249,62 @@ struct Entry {
     row_count: u64,
     expires: Instant,
     bytes: usize,
+    /// Insertion order, for eviction. Not a timestamp: two entries written in
+    /// the same `Instant` still have to be orderable, and `now` is supplied by
+    /// the caller so it need not advance between two writes at all.
+    seq: u64,
 }
 
 #[derive(Default)]
 struct Inner {
     entries: HashMap<String, Entry>,
+    /// Maintained INCREMENTALLY on every insert and removal. The first version
+    /// re-summed every entry on each write while holding this mutex, which made
+    /// each write O(n) under exactly the load that grows n.
     bytes: usize,
+    seq: u64,
+}
+
+impl Inner {
+    fn remove(&mut self, key: &str) -> Option<Entry> {
+        let e = self.entries.remove(key)?;
+        self.bytes = self.bytes.saturating_sub(e.bytes);
+        Some(e)
+    }
+
+    /// Drop every entry whose TTL has passed. O(n), so it runs only when a limit
+    /// is about to bind — expiry is otherwise handled on read.
+    fn drop_expired(&mut self, now: Instant) {
+        let mut freed = 0usize;
+        self.entries.retain(|_, e| {
+            let live = e.expires > now;
+            if !live {
+                freed += e.bytes;
+            }
+            live
+        });
+        self.bytes = self.bytes.saturating_sub(freed);
+    }
+
+    /// Evict the oldest entry by insertion order. Returns false when there is
+    /// nothing left to evict.
+    ///
+    /// Oldest-first rather than least-recently-used: entries of one endpoint all
+    /// carry the same TTL, so insertion order already approximates expiry order,
+    /// and an LRU needs a second index maintained on the read path — which is
+    /// the path that must stay cheap.
+    fn evict_oldest(&mut self) -> bool {
+        let Some(key) = self
+            .entries
+            .iter()
+            .min_by_key(|(_, e)| e.seq)
+            .map(|(k, _)| k.clone())
+        else {
+            return false;
+        };
+        self.remove(&key);
+        true
+    }
 }
 
 /// In-memory, per-process response cache with an injected clock.
@@ -206,9 +332,7 @@ impl ResponseCache {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let e = g.entries.get(key)?;
         if e.expires <= now {
-            let bytes = e.bytes;
-            g.entries.remove(key);
-            g.bytes = g.bytes.saturating_sub(bytes);
+            g.remove(key);
             return None;
         }
         Some(CachedResponse {
@@ -219,9 +343,25 @@ impl ResponseCache {
 
     /// Store a response under `key` for `ttl`.
     ///
-    /// Returns whether it was stored. A refusal (too large, or the budget is
-    /// full of live entries) is a performance outcome and never a correctness
-    /// one — the next call misses and re-executes.
+    /// Returns whether it was stored — `false` only for a body larger than
+    /// [`MAX_ENTRY_BYTES`], which is a performance outcome and never a
+    /// correctness one (the next call misses and re-executes).
+    ///
+    /// # Why a full cache EVICTS rather than declines
+    ///
+    /// The first version declined to store once the budget was full, which made
+    /// one client's key space everyone else's problem: entries are global to the
+    /// process, so a single authenticated caller minting distinct keys could
+    /// fill 64 MiB and stop caching for **every endpoint in every workspace**
+    /// until those entries lapsed — up to an hour. Correctness was untouched and
+    /// that is exactly why it was easy to wave through; it is a cross-tenant
+    /// availability effect produced by one client.
+    ///
+    /// Evicting the oldest entry instead makes the same pressure self-limiting:
+    /// the noisy key space evicts ITSELF as fast as it is written, because its
+    /// own entries are the newest and the oldest in turn. Two bounds, not one —
+    /// a byte budget and an entry count — since many small entries exhaust the
+    /// map long before they exhaust the bytes.
     pub fn put_at(
         &self,
         key: String,
@@ -236,22 +376,30 @@ impl ResponseCache {
             return false;
         }
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        // Prune on write rather than on a timer: without it the map keeps every
-        // key ever seen, and expiry-on-read only reclaims keys someone asks for
-        // again — which is exactly the set that does NOT need reclaiming.
-        g.entries.retain(|_, e| e.expires > now);
-        g.bytes = g.entries.values().map(|e| e.bytes).sum();
-        if let Some(old) = g.entries.remove(&key) {
-            g.bytes = g.bytes.saturating_sub(old.bytes);
+        // Replacing an existing key must release its bytes before the limits are
+        // measured, or a re-publish of a large response counts twice.
+        g.remove(&key);
+
+        let over =
+            |g: &Inner| g.bytes + bytes > CACHE_BYTE_BUDGET || g.entries.len() + 1 > MAX_ENTRIES;
+        if over(&g) {
+            // Expired entries are reclaimed FIRST, so a live one is never
+            // evicted while dead ones are still held. This is the only path that
+            // walks the whole map, and it runs only when a limit binds — expiry
+            // is otherwise handled on read.
+            g.drop_expired(now);
         }
-        if g.bytes + bytes > CACHE_BYTE_BUDGET {
-            tracing::warn!(
-                held = g.bytes,
-                incoming = bytes,
-                "data-api response cache is at its byte budget; not caching"
-            );
-            return false;
+        while over(&g) {
+            if !g.evict_oldest() {
+                // Unreachable while `bytes <= MAX_ENTRY_BYTES < CACHE_BYTE_BUDGET`
+                // and `MAX_ENTRIES >= 1`; a `break` rather than an `unwrap` so a
+                // future constant change is a missed cache, not a hang.
+                break;
+            }
         }
+
+        g.seq += 1;
+        let seq = g.seq;
         g.bytes += bytes;
         g.entries.insert(
             key,
@@ -260,6 +408,7 @@ impl ResponseCache {
                 row_count,
                 expires: now + ttl,
                 bytes,
+                seq,
             },
         );
         true
@@ -268,6 +417,11 @@ impl ResponseCache {
     #[cfg(test)]
     fn len(&self) -> usize {
         self.inner.lock().unwrap().entries.len()
+    }
+
+    #[cfg(test)]
+    fn bytes(&self) -> usize {
+        self.inner.lock().unwrap().bytes
     }
 }
 
@@ -295,11 +449,12 @@ fn estimate_bytes(v: &serde_json::Value) -> usize {
 mod tests {
     use super::*;
 
-    fn params(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
+    fn params(pairs: &[(&str, &str)]) -> BTreeMap<String, Vec<String>> {
+        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (k, v) in pairs {
+            out.entry(k.to_string()).or_default().push(v.to_string());
+        }
+        out
     }
 
     #[test]
@@ -324,9 +479,10 @@ mod tests {
 
     #[test]
     fn a_shared_key_does_not_collide_with_the_nil_principal() {
-        // Why `None` hashes a literal marker instead of hashing nothing: the nil
-        // UUID is a real `UserId` value, and "absent" must not be spellable by
-        // any principal.
+        // Defence-in-depth rather than the load-bearing part: `scope` is frozen
+        // in the snapshot, so one endpoint version cannot mint keys in both
+        // spaces. Pinned anyway, because "absent" must not be spellable by any
+        // principal if that ever stops being true.
         let ep = Uuid::new_v4();
         assert_ne!(
             cache_key(ep, 1, &BTreeMap::new(), None),
@@ -338,8 +494,8 @@ mod tests {
     fn params_are_order_independent_but_value_sensitive() {
         let ep = Uuid::new_v4();
         let p = UserId(Uuid::new_v4());
-        let one: BTreeMap<_, _> = params(&[("a", "1"), ("b", "2")]);
-        let other: BTreeMap<_, _> = params(&[("b", "2"), ("a", "1")]);
+        let one = params(&[("a", "1"), ("b", "2")]);
+        let other = params(&[("b", "2"), ("a", "1")]);
         assert_eq!(
             cache_key(ep, 1, &one, Some(p)),
             cache_key(ep, 1, &other, Some(p)),
@@ -349,11 +505,63 @@ mod tests {
             cache_key(ep, 1, &one, Some(p)),
             cache_key(ep, 1, &params(&[("a", "1"), ("b", "3")]), Some(p)),
         );
-        // The delimiters, pinned: without them `{a: "1", b: "2"}` and
+        // The field boundaries, pinned: without them `{a: "1", b: "2"}` and
         // `{ab: "12"}` hash the same bytes.
         assert_ne!(
             cache_key(ep, 1, &one, Some(p)),
             cache_key(ep, 1, &params(&[("ab", "12")]), Some(p)),
+        );
+    }
+
+    #[test]
+    fn a_value_containing_the_old_delimiter_bytes_cannot_forge_a_boundary() {
+        // The first version delimited with `0x00` and joined repeats with
+        // `\u{1}`, which was safe only because `http::Uri` refuses those bytes in
+        // a raw query string — a property held by a crate this module never
+        // mentions, and one that disappears the moment step 7 hashes DECODED
+        // values. These are the exact forgeries that would then have worked:
+        //
+        //   ?a=1%00b%002  vs  ?a=1&b=2
+        //   ?a=%011       vs  ?a=&a=1
+        //
+        // Same principal in both, so never a cross-identity leak — but once
+        // parameters reach the SQL it is one filter's rows served for another's,
+        // and a parameter is very often a tenant or a date.
+        let ep = Uuid::new_v4();
+        let p = Some(UserId(Uuid::new_v4()));
+        assert_ne!(
+            cache_key(ep, 1, &params(&[("a", "1\u{0}b\u{0}2")]), p),
+            cache_key(ep, 1, &params(&[("a", "1"), ("b", "2")]), p),
+            "a NUL inside a value must not be able to spell a field boundary"
+        );
+        assert_ne!(
+            cache_key(ep, 1, &params(&[("a", "\u{1}1")]), p),
+            cache_key(ep, 1, &params(&[("a", ""), ("a", "1")]), p),
+            "a joiner byte inside a value must not be able to spell a repeat"
+        );
+        // And the general case the length prefixes buy: no split of the same
+        // bytes across the key/value boundary can collide.
+        assert_ne!(
+            cache_key(ep, 1, &params(&[("ab", "cd")]), p),
+            cache_key(ep, 1, &params(&[("abc", "d")]), p),
+        );
+    }
+
+    #[test]
+    fn a_repeated_parameter_is_not_the_same_as_one_joined_value() {
+        // Repeats are a `Vec` rather than a joined string precisely so this
+        // holds without depending on which byte the joiner would have been.
+        let ep = Uuid::new_v4();
+        let p = Some(UserId(Uuid::new_v4()));
+        assert_ne!(
+            cache_key(ep, 1, &params(&[("a", "1"), ("a", "2")]), p),
+            cache_key(ep, 1, &params(&[("a", "12")]), p),
+        );
+        // Order WITHIN one parameter's repeats is significant — `?a=1&a=2` and
+        // `?a=2&a=1` are different calls to any renderer that reads them.
+        assert_ne!(
+            cache_key(ep, 1, &params(&[("a", "1"), ("a", "2")]), p),
+            cache_key(ep, 1, &params(&[("a", "2"), ("a", "1")]), p),
         );
     }
 
@@ -388,31 +596,124 @@ mod tests {
     }
 
     #[test]
-    fn a_write_prunes_entries_that_expired_without_being_read_again() {
-        // Expiry-on-read only reclaims keys someone asks for again — precisely
-        // the set that does not need reclaiming.
-        let c = ResponseCache::new();
-        let t0 = Instant::now();
-        let d = || Arc::new(serde_json::json!([{ "n": 1 }]));
-        c.put_at("a".into(), d(), 1, Duration::from_secs(10), t0);
-        c.put_at("b".into(), d(), 1, Duration::from_secs(10), t0);
-        assert_eq!(c.len(), 2);
-
-        c.put_at(
-            "c".into(),
-            d(),
-            1,
-            Duration::from_secs(10),
-            t0 + Duration::from_secs(30),
-        );
-        assert_eq!(c.len(), 1, "the two stale entries must be gone");
-    }
-
-    #[test]
     fn an_oversized_response_is_not_cached() {
         let c = ResponseCache::new();
         let big = Arc::new(serde_json::Value::String("x".repeat(MAX_ENTRY_BYTES + 1)));
         assert!(!c.put_at("k".into(), big, 1, Duration::from_secs(60), Instant::now()));
         assert_eq!(c.len(), 0);
+    }
+
+    #[test]
+    fn a_full_cache_evicts_the_oldest_rather_than_declining_to_store() {
+        // The cross-tenant availability bug this replaced: `put_at` used to
+        // DECLINE once full, so one client minting distinct keys could stop
+        // caching for every endpoint in every workspace until its entries
+        // lapsed — up to an hour. Evicting makes the pressure self-limiting.
+        let c = ResponseCache::new();
+        let t0 = Instant::now();
+        let d = || Arc::new(serde_json::json!([{ "n": 1 }]));
+        let ttl = Duration::from_secs(600);
+        for i in 0..MAX_ENTRIES {
+            assert!(c.put_at(format!("k{i}"), d(), 1, ttl, t0));
+        }
+        assert_eq!(c.len(), MAX_ENTRIES);
+
+        // One past the cap: stored, and the map has not grown.
+        assert!(
+            c.put_at("newest".into(), d(), 1, ttl, t0),
+            "a full cache must still store — declining is what starved everyone else"
+        );
+        assert_eq!(c.len(), MAX_ENTRIES);
+        assert!(
+            c.get_at("newest", t0).is_some(),
+            "the new entry must be live"
+        );
+        assert!(
+            c.get_at("k0", t0).is_none(),
+            "the OLDEST entry is the one that goes"
+        );
+        assert!(c.get_at("k1", t0).is_some(), "…and only that one");
+    }
+
+    #[test]
+    fn expired_entries_are_reclaimed_before_a_live_one_is_evicted() {
+        // Ordering inside `put_at`: dead entries first, live ones only if the
+        // limit still binds. Without it a full cache of expired entries would
+        // evict its one live entry to make room.
+        let c = ResponseCache::new();
+        let t0 = Instant::now();
+        let d = || Arc::new(serde_json::json!([{ "n": 1 }]));
+        for i in 0..MAX_ENTRIES - 1 {
+            c.put_at(format!("old{i}"), d(), 1, Duration::from_secs(10), t0);
+        }
+        // One entry with a long TTL, written last so it is also the NEWEST —
+        // eviction by insertion order would keep it anyway. Written first would
+        // not distinguish the two rules.
+        c.put_at("survivor".into(), d(), 1, Duration::from_secs(600), t0);
+        assert_eq!(c.len(), MAX_ENTRIES);
+
+        // Half a minute later every `old*` entry is dead. The next write must
+        // reclaim them wholesale rather than evict one at a time.
+        let later = t0 + Duration::from_secs(30);
+        c.put_at("fresh".into(), d(), 1, Duration::from_secs(600), later);
+        assert_eq!(c.len(), 2, "only the two live entries remain");
+        assert!(c.get_at("survivor", later).is_some());
+        assert!(c.get_at("fresh", later).is_some());
+    }
+
+    #[test]
+    fn replacing_a_key_does_not_double_count_its_bytes() {
+        let c = ResponseCache::new();
+        let t0 = Instant::now();
+        let d = || Arc::new(serde_json::json!([{ "n": 1 }]));
+        let ttl = Duration::from_secs(60);
+        c.put_at("k".into(), d(), 1, ttl, t0);
+        let after_first = c.bytes();
+        c.put_at("k".into(), d(), 1, ttl, t0);
+        assert_eq!(c.len(), 1);
+        assert_eq!(
+            c.bytes(),
+            after_first,
+            "an overwrite must release the old entry's bytes"
+        );
+    }
+
+    #[test]
+    fn a_zero_ttl_means_do_not_cache_even_when_enabled() {
+        // The one place a published 0 could silently become non-zero behaviour:
+        // an earlier version clamped into `1..=CEILING`, so an author spelling
+        // "don't cache" as a zero TTL got a one-second cache.
+        assert_eq!(cache_ttl(&snapshot_with_cache(true, 0)), None);
+        assert_eq!(cache_ttl(&snapshot_with_cache(false, 60)), None);
+        assert_eq!(
+            cache_ttl(&snapshot_with_cache(true, 60)),
+            Some(Duration::from_secs(60))
+        );
+        // A too-large TTL is still clamped rather than refused — there the
+        // author's intent is honoured, just bounded.
+        assert_eq!(
+            cache_ttl(&snapshot_with_cache(true, u32::MAX)),
+            Some(Duration::from_secs(TTL_CEILING_SECS))
+        );
+    }
+
+    fn snapshot_with_cache(enabled: bool, ttl_seconds: u32) -> EndpointSnapshot {
+        EndpointSnapshot {
+            sql: "SELECT 1".into(),
+            method: "GET".into(),
+            path: "/x".into(),
+            database_id: Uuid::nil(),
+            params: vec![],
+            output: serde_json::from_value(serde_json::json!({})).unwrap(),
+            cache: egret_dataapi_api::CacheSpec {
+                enabled,
+                ttl_seconds,
+                scope: CacheScope::PerPrincipal,
+            },
+            limits: serde_json::from_value(serde_json::json!({})).unwrap(),
+            rate_limit: serde_json::from_value(serde_json::json!({})).unwrap(),
+            delegated: false,
+            columns: vec![],
+        }
     }
 }

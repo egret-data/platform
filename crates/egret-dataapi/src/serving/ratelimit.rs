@@ -48,10 +48,18 @@ use uuid::Uuid;
 const RATE_CEILING: f64 = 10_000.0;
 
 /// How long a bucket may sit untouched before a prune may drop it, and the size
-/// at which pruning runs at all. A dropped bucket comes back full, which is what
-/// this much idleness would have refilled it to anyway for any rate at or above
-/// `burst / IDLE_SECS` — the alternative is a map that grows with every client
-/// id ever seen.
+/// at which pruning runs at all. The alternative is a map that grows with every
+/// client id ever seen.
+///
+/// **A dropped bucket comes back FULL**, which is what this much idleness would
+/// have refilled it to for any rate at or above `burst / IDLE_SECS` — and that
+/// caveat is reachable, not vacuous: `{per_key_qps: 1, burst: 10000}` refills
+/// 600 tokens in 600 seconds and returns with 10 000. It takes an odd
+/// configuration (a burst thousands of times the rate) AND a map over
+/// [`PRUNE_ABOVE`], so the exposure is one extra burst for a client that was
+/// idle ten minutes on an endpoint whose author asked for a 10 000-deep burst.
+/// Stated rather than hidden; a shared store (the reason [`RateLimitStore`] is a
+/// trait) would not have the same freedom.
 const IDLE_SECS: u64 = 600;
 const PRUNE_ABOVE: usize = 4_096;
 

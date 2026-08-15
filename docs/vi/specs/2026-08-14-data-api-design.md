@@ -365,7 +365,18 @@ Vì vậy cấu hình cache mang theo một `scope`:
 - `per_principal` (mặc định) — cache key gồm `service_account_id`.
 - `shared` — **chỉ được phép khi connection không delegated**. Kiểm tại validate time, để cấu hình sai không thể publish ngay từ đầu.
 
+Bản thân key là `endpoint_id ‖ version ‖ tham số đã khai báo ‖ principal`, băm với **mọi trường có tiền tố độ dài** và principal nằm CUỐI. Hai quy tắc mà bước 7 không được phá khi thay map tham số bằng bản đã render:
+
+- **Chỉ băm tham số ĐÃ KHAI BÁO.** Tham số không khai báo không thể ảnh hưởng đến response, nên cũng không được ảnh hưởng đến entry — băm cả query string cho phép một client đã xác thực tạo ra vô hạn entry trong cache dùng chung cho mọi workspace trong process.
+- **Tiền tố độ dài, không dùng ký tự phân tách.** Ký tự phân tách chỉ an toàn khi giá trị không thể chứa nó, hôm nay đúng vì `http::Uri` từ chối các byte điều khiển trong query string thô — một tính chất do một crate mà cache không hề nhắc tới nắm giữ, và nó biến mất ngay khi tham số được GIẢI MÃ. Với ký tự phân tách `0x00`, `?a=1%00b%002` băm ra y hệt `?a=1&b=2`. Cùng principal, nên không bao giờ là rò rỉ xuyên danh tính, nhưng khi tham số đi vào SQL thì đó là số dòng của bộ lọc này được phục vụ cho bộ lọc khác.
+
+Va chạm xuyên danh tính bị chặn bởi CÁCH XẾP chứ không bởi ký tự phân tách: hai chuỗi byte bằng nhau thì bằng độ dài, và principal là 16 byte cuối, nên `params_a ‖ A == params_b ‖ B` bắt buộc `A == B` bất kể tham số chứa gì.
+
 Đặt kiểm tra này ở validate time thay vì runtime nghĩa là **hình dạng** không an toàn không bao giờ vào được `endpoint_versions`. Đó chính xác là thứ mà validate lúc publish bảo đảm, và nó không phải toàn bộ vấn đề: `query.databases.delegated` có thể đổi, nên một connection có thể bị lật thành delegated *sau khi* một version `shared` đã publish, và không có lần validate lại nào chạy khi đó. Phần dư được bịt ở phía serving, bằng nhân chứng đã đóng băng mà §5.3 mô tả — **P4 so `EndpointSnapshot.delegated` với cột đang sống trước khi phục vụ từ một cache shared và từ chối khi hai giá trị lệch nhau.**
+
+Phép so ở phía serving **không phụ thuộc `cache.enabled`**, khớp với kiểm tra lúc publish — vốn cũng từ chối scope `shared` bất kể cache đang bật hay tắt: cấu hình trông an toàn chỉ cách cấu hình không an toàn một lần sửa draft. Cái giá của lựa chọn đó, nói thẳng ra thay vì để người sau tự phát hiện — endpoint có `enabled: false` và `scope: shared` còn sót lại sẽ **503 cứng khi delegated bị lật, dù nó không cache gì và chứng minh được là không thể rò rỉ**. Đó là một false positive. Chấp nhận nó vì cách sửa của người vận hành là như nhau trong cả hai trường hợp (publish lại, hoặc đưa connection về cũ), và vì một lời từ chối họ xử lý được thì hơn một cấu hình sai nằm im đến ngày có người bật cache lên.
+
+Phép so là một lượt đọc metastore cho mọi lời gọi tới endpoint `shared`, **kể cả những lời gọi lẽ ra là cache hit** — kiểm sau khi hit nghĩa là đã phục vụ entry cũ rồi mới hỏi, và đó chính là chỗ rò. Endpoint `per_principal` trả về trước lượt đọc đó. Nếu chi phí này thành vấn đề, hãy memoise `(database_id → delegated)` với TTL ngắn thay vì đổi thứ tự kiểm: cửa sổ cũ của một memo là hữu hạn và được nói rõ, còn của một phép kiểm bị đổi chỗ thì không.
 
 ### 6.4 Rate limit
 

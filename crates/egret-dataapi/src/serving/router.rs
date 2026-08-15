@@ -378,7 +378,7 @@ async fn serve(
     // while caching would report it the moment someone flipped `enabled` rather
     // than the moment the configuration became unsafe.
     let shared = shared_cache_allowed(&st.db, &snap).await?;
-    let params = query_params(raw_query.as_deref());
+    let params = declared_query_params(raw_query.as_deref(), &snap);
     // The principal is in the key unless a re-checked `shared` says otherwise —
     // Ranger filters per principal, so this is the difference between a cache
     // and a cross-identity leak.
@@ -389,7 +389,10 @@ async fn serve(
         (!shared).then_some(principal.user_id),
     );
 
-    if snap.cache.enabled {
+    // `cache_ttl` is the single decision about whether this endpoint caches at
+    // all: `enabled: false` and a `ttl_seconds` of 0 both answer `None`.
+    let ttl = cache_ttl(&snap);
+    if ttl.is_some() {
         if let Some(hit) = st.cache.get_at(&key, now) {
             let request_id = Uuid::new_v4().to_string();
             tracing::debug!(
@@ -452,14 +455,9 @@ async fn serve(
     // the raw result would let a hit and a miss disagree about whether the
     // endpoint had drifted.
     let data = shape_rows(&out, &snap)?;
-    if snap.cache.enabled {
-        st.cache.put_at(
-            key,
-            Arc::new(data.clone()),
-            out.row_count,
-            cache_ttl(&snap),
-            now,
-        );
+    if let Some(ttl) = ttl {
+        st.cache
+            .put_at(key, Arc::new(data.clone()), out.row_count, ttl, now);
     }
 
     Ok(Json(ServingResponse {
@@ -474,30 +472,50 @@ async fn serve(
     }))
 }
 
-/// The request's query string, as the cache key's parameter map.
+/// The DECLARED query parameters of this request, as the cache key's map.
 ///
-/// **Not decoded, and not validated.** Step 7 (rendering declared `params` into
-/// the SQL) is a later task and owns both; until it lands no caller input
-/// reaches the engine at all, so this map's only job is to keep two calls that
-/// differ in their query string out of each other's cache entry. Leaving it
-/// undecoded errs toward a MISS: two encodings of the same value are two
-/// entries, which costs an execution and never serves the wrong rows. When step
-/// 7 lands, the rendered parameters (defaults applied, body parameters
-/// included) replace this — a default-valued parameter is part of what produced
-/// the rows and must be part of the key.
+/// # Only what the snapshot declares
 ///
-/// A repeated key keeps every occurrence rather than the last, so `?a=1&a=2`
-/// and `?a=2` cannot share an entry.
-fn query_params(raw: Option<&str>) -> BTreeMap<String, String> {
-    let mut out: BTreeMap<String, String> = BTreeMap::new();
+/// Anything the author did not declare is dropped, which bounds the key space
+/// for one endpoint and one principal to the parameters that exist. Hashing the
+/// whole query string instead — the first version — let one authenticated client
+/// mint unbounded distinct entries with `?junk=1`, `?junk=2`, …, each holding
+/// memory in a process-wide cache shared by every workspace. The cache's own
+/// eviction now bounds the damage, but a key space bounded at the source is the
+/// better half of that fix: an undeclared parameter cannot affect the response,
+/// so it must not be able to affect the entry either.
+///
+/// It is also what step 7 needs regardless — the rendered set is exactly the
+/// declared set.
+///
+/// # Still not decoded, and still not validated
+///
+/// Step 7 owns both, and until it lands no caller input reaches the engine at
+/// all. Leaving values raw errs toward a MISS: two encodings of one value are
+/// two entries, which costs an execution and never serves the wrong rows. When
+/// step 7 lands, the RENDERED parameters (defaults applied, body parameters
+/// included) replace this — a default-valued parameter absent from the URL is
+/// still part of what produced the rows.
+///
+/// Repeats are kept as a LIST, not joined: [`cache_key`] length-prefixes each
+/// element, so `?a=1&a=2` cannot be spelled as a single value and vice versa.
+/// A joiner byte would reintroduce exactly the forgeability the length prefixes
+/// remove — see [`cache_key`]'s comment on why that matters the moment values
+/// are decoded.
+fn declared_query_params(
+    raw: Option<&str>,
+    snap: &EndpointSnapshot,
+) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    if snap.params.is_empty() {
+        return out;
+    }
     for pair in raw.unwrap_or("").split('&').filter(|s| !s.is_empty()) {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        out.entry(k.to_string())
-            .and_modify(|held| {
-                held.push('\u{1}');
-                held.push_str(v);
-            })
-            .or_insert_with(|| v.to_string());
+        if !snap.params.iter().any(|p| p.name == k) {
+            continue;
+        }
+        out.entry(k.to_string()).or_default().push(v.to_string());
     }
     out
 }

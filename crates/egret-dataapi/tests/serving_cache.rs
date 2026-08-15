@@ -234,15 +234,31 @@ async fn a_per_principal_endpoint_is_unaffected_by_the_delegated_column() {
         .await;
 }
 
+/// An endpoint declaring one query parameter, `day`.
+///
+/// P3 refuses to publish a parameter no placeholder references, so the SQL has
+/// to use it. Nothing renders it yet (step 7), and the fake engine ignores the
+/// SQL — what is under test here is the KEY.
+async fn publish_with_day_param(f: &serving_common::Fixture, path: &str) {
+    f.publish_with_params(
+        path,
+        f.database_id,
+        per_principal_cache(),
+        no_limits(),
+        "SELECT 1 AS n WHERE d = {{day}}",
+        serde_json::json!([{ "name": "day", "type": "string", "location": "query" }]),
+    )
+    .await;
+}
+
 #[tokio::test]
-async fn different_query_strings_do_not_share_an_entry() {
+async fn different_values_of_a_declared_param_do_not_share_an_entry() {
     // Params do not reach the SQL until step 7, so this cannot be asserted on
-    // the ROWS yet — what it pins is that the two calls are two entries, which
-    // is the property step 7 will depend on. Measured at the engine: the second
+    // the ROWS yet — what it pins is that two values are two entries, which is
+    // the property step 7 will depend on. Measured at the engine: the second
     // call must miss.
     let f = skip_without_db!();
-    f.publish("/q", f.database_id, per_principal_cache(), no_limits())
-        .await;
+    publish_with_day_param(&f, "/q").await;
 
     let before = f.port.executions();
     f.call_as(f.principal_a, "q?day=2026-01-01").await;
@@ -250,7 +266,7 @@ async fn different_query_strings_do_not_share_an_entry() {
     assert_eq!(
         f.port.executions(),
         before + 2,
-        "two different query strings must be two cache entries"
+        "two values of a declared parameter must be two cache entries"
     );
 
     let repeat = f.call_as(f.principal_a, "q?day=2026-01-01").await;
@@ -258,5 +274,65 @@ async fn different_query_strings_do_not_share_an_entry() {
         repeat.cached(),
         "…and repeating one of them must still hit: {}",
         repeat.body
+    );
+}
+
+#[tokio::test]
+async fn an_undeclared_query_param_cannot_mint_cache_entries() {
+    // The key is built from the DECLARED parameters only. Hashing the whole
+    // query string instead let one authenticated client mint unbounded distinct
+    // entries with `?junk=1`, `?junk=2`, … in a cache shared by every endpoint
+    // in every workspace in the process — a cross-tenant availability effect
+    // from a single client, with correctness untouched (which is what made it
+    // easy to miss).
+    //
+    // An undeclared parameter cannot affect the response, so it must not be able
+    // to affect the entry either.
+    let f = skip_without_db!();
+    publish_with_day_param(&f, "/j").await;
+
+    let before = f.port.executions();
+    let first = f.call_as(f.principal_a, "j?day=2026-01-01&junk=1").await;
+    assert!(!first.cached());
+    for i in 2..12 {
+        let res = f
+            .call_as(f.principal_a, &format!("j?day=2026-01-01&junk={i}"))
+            .await;
+        assert!(
+            res.cached(),
+            "junk={i} must hit the entry the declared params identify: {}",
+            res.body
+        );
+    }
+    assert_eq!(
+        f.port.executions(),
+        before + 1,
+        "ten spellings of one undeclared parameter must be ONE entry and one execution"
+    );
+}
+
+#[tokio::test]
+async fn a_zero_ttl_does_not_become_a_one_second_cache() {
+    // `ttl_seconds: 0` with `enabled: true` is an author saying "do not cache".
+    // Clamping it into `1..=CEILING` — which the first version did — invents a
+    // caching policy they declined. It is the one place a published 0 could
+    // silently become non-zero behaviour.
+    let f = skip_without_db!();
+    f.publish(
+        "/zero",
+        f.database_id,
+        serde_json::json!({ "enabled": true, "ttl_seconds": 0 }),
+        no_limits(),
+    )
+    .await;
+
+    let before = f.port.executions();
+    let one = f.call_as(f.principal_a, "zero").await;
+    let two = f.call_as(f.principal_a, "zero").await;
+    assert!(!one.cached() && !two.cached(), "{} {}", one.body, two.body);
+    assert_eq!(
+        f.port.executions(),
+        before + 2,
+        "a zero TTL must execute every call"
     );
 }

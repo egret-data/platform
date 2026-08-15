@@ -7,10 +7,15 @@
 //! published limits, keys them on the identities it claims to, and answers 429
 //! with a `Retry-After`.
 //!
-//! **These tests deliberately use `per_key_qps = 1`, the slowest rate the
-//! published `u32` can express**, so the calls that must be refused are refused
-//! for a full second after the one that was admitted. Nothing here sleeps, and
-//! nothing here depends on two calls being close together beyond that second.
+//! **The clock is frozen.** The handler reads `Instant::now()` itself, so an
+//! earlier version of this file raced the wall clock: at `per_key_qps = 1` a
+//! call that must be refused becomes a 200 the moment more than a second passes
+//! between two `oneshot`s — a loaded CI box, or one slow query, and the suite
+//! flakes. A rate-limit test that flakes gets `#[ignore]`d, and an ignored
+//! rate-limit test is no rate limit at all. `serving_common::TestClock` wraps
+//! the REAL `TokenBucket` and substitutes only the clock, so what is measured is
+//! still the shipped implementation, and `f.clock.advance(…)` buys the
+//! assertion a wall clock cannot make without sleeping: the refill.
 //!
 //! DB-gated; self-skips when `DATABASE_URL` is unset — check the DURATION.
 
@@ -18,6 +23,7 @@ mod serving_common;
 
 use axum::http::StatusCode;
 use serving_common::fixture;
+use std::time::Duration;
 
 macro_rules! skip_without_db {
     () => {
@@ -67,6 +73,54 @@ async fn a_client_over_its_published_limit_gets_429_with_a_retry_after() {
     assert!(
         secs >= 1,
         "Retry-After: 0 invites an immediate retry that is refused again, got {secs}"
+    );
+
+    // The stated wait is honoured: after it, the SAME client is admitted again.
+    // This is what separates a refilling bucket from `egret-auth`'s lockout, and
+    // it is unassertable on a wall clock without sleeping for it.
+    f.clock.advance(Duration::from_secs(secs));
+    let third = f.call_as(f.principal_a, "rl").await;
+    assert_eq!(
+        third.status,
+        StatusCode::OK,
+        "the client must be admitted once the bucket has refilled: {}",
+        third.body
+    );
+}
+
+#[tokio::test]
+async fn a_refused_client_is_not_locked_out_of_a_later_window() {
+    // `egret-auth`'s limiter LOCKS a key for a fixed period once tripped, so a
+    // caller that keeps knocking never gets in. Copying its shape without its
+    // semantics is the mistake this module exists to avoid, and this is the
+    // assertion that would catch a regression to it: knock while refused, then
+    // wait, then be admitted.
+    let f = skip_without_db!();
+    f.publish(
+        "/lock",
+        f.database_id,
+        no_cache(),
+        serde_json::json!({ "per_key_qps": 1, "burst": 1 }),
+    )
+    .await;
+
+    assert_eq!(
+        f.call_as(f.principal_a, "lock").await.status,
+        StatusCode::OK
+    );
+    for _ in 0..3 {
+        assert_eq!(
+            f.call_as(f.principal_a, "lock").await.status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "still inside the same second"
+        );
+    }
+
+    f.clock.advance(Duration::from_secs(1));
+    assert_eq!(
+        f.call_as(f.principal_a, "lock").await.status,
+        StatusCode::OK,
+        "three refused attempts must not have extended the wait"
     );
 }
 
