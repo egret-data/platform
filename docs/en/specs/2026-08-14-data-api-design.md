@@ -508,7 +508,15 @@ CI runs in full locally before merge, including `cargo fmt`. Never run two works
 Deferred deliberately, each recorded so it is a decision rather than an omission:
 
 - **Writes (INSERT/UPDATE/DELETE)** and multi-statement transactions — needs transaction boundaries, rollback, write audit, and a policy for who may publish a write endpoint.
-- **Bound parameters at the connector layer.** This is the largest deferral in the document and the one most likely to be misread, so the reasoning is here rather than only in §3.
+- ~~**Bound parameters at the connector layer.**~~ **SUPERSEDED 2026-08-15 by
+  `2026-08-15-data-api-parameters-design.md` (P4.5) — bound parameters are being built.** The
+  reasoning below stands as the record of why it was deferred, with three corrections measured
+  since: the fix is **not** subtractive (Trino has no wire-level parameter channel, so
+  `quote_string` survives on that path, and `egret-bi` still interpolates); StarRocks *does*
+  bind at the wire; and the cost was measured at roughly one extra round trip per query. Read
+  the P4.5 spec, not this bullet, for what is being implemented.
+
+  This was the largest deferral in the document and the one most likely to be misread, so the reasoning is here rather than only in §3.
 
   sqlrest — the implementation this design is modelled on — does **not** interpolate. Its MyBatis `#{param}` becomes a real `ParameterMapping`, i.e. a driver bind. We interpolate an escaped literal instead. On the parameter axis the reference implementation is therefore *structurally safer* than what we built.
 
@@ -516,7 +524,17 @@ Deferred deliberately, each recorded so it is a decision rather than an omission
 
   **It was deferred for cost, not because interpolation was judged adequate.** `Connector::execute` takes `sql: &str` with no parameter channel; StarRocks could bind natively through `mysql_async`, but Trino needs `X-Trino-Prepared-Statement` plus `EXECUTE … USING`, which is a `Connector` trait change and a second protocol path. Doing it would *delete* the dialect escaper, the raw-byte statement check, and the placeholder-position check — the fix is subtractive, which is the strongest argument for it.
 
-- **Dynamic SQL** — conditional predicates that appear only when a parameter was supplied. sqlrest has this through MyBatis `<if>`, `<where>`, `<set>`, `<choose>`/`<when>`, `<foreach>`; we have none. `{{param}}` substitutes unconditionally, so an optional filter must be written `WHERE (region = {{r}} OR {{r}} IS NULL)`, which is awkward and usually defeats the index the predicate existed for.
+- ~~**Dynamic SQL**~~ **SUPERSEDED 2026-08-15 by `2026-08-15-data-api-parameters-design.md`
+  (P4.5) — conditionals arrive with the renderer.** The rbatis analysis below is still correct
+  and was re-verified (`rbatis` is "Compile Time Async Dynamic SQL ORM"; `rbatis-codegen`
+  exposes only `TokenStream` producers). What changed: the answer is `minijinja` at runtime,
+  whose `set_formatter` makes binding the only thing a template can do — so the "build the
+  smallest thing" advice below is met without a bespoke construct, and the "bound parameters
+  first" ordering is satisfied inside one phase because the formatter **is** the binding. The
+  Superset comparison below is also corrected there: it is a *Python* Jinja2 risk that
+  minijinja's closed value model does not carry.
+
+  Conditional predicates that appear only when a parameter was supplied. sqlrest has this through MyBatis `<if>`, `<where>`, `<set>`, `<choose>`/`<when>`, `<foreach>`; we have none. `{{param}}` substitutes unconditionally, so an optional filter must be written `WHERE (region = {{r}} OR {{r}} IS NULL)`, which is awkward and usually defeats the index the predicate existed for.
 
   **`rbatis` does not solve this**, and the reason is worth recording so it is not re-proposed. Its dynamic SQL is compile-time: `rb_html(args: TokenStream, func: TokenStream) -> TokenStream` is a proc macro over a `syn::ItemFn`, so the template must be a literal in Rust source at build time. A Data API endpoint is a row in `dataapi.endpoint_versions.snapshot`, authored by a user and published while the system is running — no macro can run over it. It is also inseparable from its own `rbdc` driver layer, which has no Trino driver and would mean rebuilding per-user delegation, engine JWTs and Ranger.
 

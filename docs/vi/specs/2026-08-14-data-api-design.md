@@ -500,7 +500,15 @@ CI chạy đầy đủ ở local trước khi merge, gồm cả `cargo fmt`. Kh�
 Cố ý hoãn, mỗi mục đều được ghi lại để nó là một quyết định chứ không phải một thiếu sót:
 
 - **Ghi (INSERT/UPDATE/DELETE)** và transaction nhiều statement — cần transaction boundary, rollback, audit ghi, và chính sách về việc ai được publish endpoint ghi.
-- **Bound parameter ở tầng connector.** Đây là mục hoãn lớn nhất trong tài liệu này và là mục dễ bị đọc sai nhất, nên lập luận đặt ở đây chứ không chỉ ở §3.
+- ~~**Bound parameter ở tầng connector.**~~ **ĐÃ BỊ THAY THẾ 2026-08-15 bởi
+  `2026-08-15-data-api-parameters-design.md` (P4.5) — bound parameters đang được xây.** Lập
+  luận bên dưới vẫn giữ lại làm hồ sơ vì sao nó từng bị hoãn, kèm ba điểm đã đo lại và **sai**:
+  bản vá **không** mang tính trừ đi (Trino không có kênh tham số ở tầng dây, nên `quote_string`
+  vẫn sống trên đường đó, và `egret-bi` vẫn nội suy); StarRocks thì **có** bind thật ở tầng
+  dây; và chi phí đo được chỉ khoảng thêm một round trip mỗi truy vấn. Đọc spec P4.5, đừng đọc
+  gạch đầu dòng này, để biết cái gì đang được cài đặt.
+
+  Đây từng là mục hoãn lớn nhất trong tài liệu này và là mục dễ bị đọc sai nhất, nên lập luận đặt ở đây chứ không chỉ ở §3.
 
   sqlrest — bản triển khai mà thiết kế này lấy làm mẫu — **không** nội suy. `#{param}` của MyBatis trở thành một `ParameterMapping` thật, tức là driver bind. Chúng ta thì ghép một literal đã escape. Vậy trên trục tham số, bản tham chiếu *an toàn hơn về mặt cấu trúc* so với thứ chúng ta đã dựng.
 
@@ -508,7 +516,17 @@ Cố ý hoãn, mỗi mục đều được ghi lại để nó là một quyết
 
   **Nó bị hoãn vì chi phí, không phải vì nội suy được đánh giá là đủ tốt.** `Connector::execute` nhận `sql: &str` và không có kênh tham số; StarRocks bind được trực tiếp qua `mysql_async`, nhưng Trino cần `X-Trino-Prepared-Statement` cộng `EXECUTE … USING`, tức là đổi trait `Connector` và thêm một đường giao thức thứ hai. Làm nó sẽ **xoá bỏ** escaper theo dialect, phép kiểm statement trên byte thô, và phép kiểm vị trí placeholder — bản vá mang tính trừ đi, và đó là lập luận mạnh nhất ủng hộ nó.
 
-- **Dynamic SQL** — mệnh đề điều kiện chỉ xuất hiện khi tham số được truyền. sqlrest có nhờ MyBatis `<if>`, `<where>`, `<set>`, `<choose>`/`<when>`, `<foreach>`; chúng ta không có gì. `{{param}}` thay thế vô điều kiện, nên một filter tuỳ chọn phải viết thành `WHERE (region = {{r}} OR {{r}} IS NULL)` — vừa gượng vừa thường làm hỏng chính index mà mệnh đề đó sinh ra để dùng.
+- ~~**Dynamic SQL**~~ **ĐÃ BỊ THAY THẾ 2026-08-15 bởi `2026-08-15-data-api-parameters-design.md`
+  (P4.5) — điều kiện đến cùng bộ render.** Phần phân tích rbatis bên dưới vẫn đúng và đã được
+  kiểm lại (`rbatis` tự mô tả là "Compile Time Async Dynamic SQL ORM"; `rbatis-codegen` chỉ phơi
+  ra các hàm sinh `TokenStream`). Cái đã đổi: câu trả lời là `minijinja` chạy lúc runtime, nơi
+  `set_formatter` khiến bind là việc **duy nhất** một template làm được — nên lời khuyên "làm
+  thứ nhỏ nhất" bên dưới được thoả mà không cần cấu trúc tự chế, và thứ tự "bound parameters
+  first" được thoả ngay trong một phase vì formatter **chính là** cơ chế bind. So sánh với
+  Superset bên dưới cũng được sửa ở đó: đó là rủi ro của Jinja2 **Python**, mô hình giá trị đóng
+  của minijinja không mang theo.
+
+  Mệnh đề điều kiện chỉ xuất hiện khi tham số được truyền. sqlrest có nhờ MyBatis `<if>`, `<where>`, `<set>`, `<choose>`/`<when>`, `<foreach>`; chúng ta không có gì. `{{param}}` thay thế vô điều kiện, nên một filter tuỳ chọn phải viết thành `WHERE (region = {{r}} OR {{r}} IS NULL)` — vừa gượng vừa thường làm hỏng chính index mà mệnh đề đó sinh ra để dùng.
 
   **`rbatis` không giải quyết được việc này**, và lý do đáng ghi lại để không ai đề xuất lại. Dynamic SQL của nó là compile-time: `rb_html(args: TokenStream, func: TokenStream) -> TokenStream` là một proc macro trên `syn::ItemFn`, nên template phải là literal trong source Rust lúc build. Còn một endpoint của Data API là một hàng trong `dataapi.endpoint_versions.snapshot`, do người dùng viết và publish khi hệ thống đang chạy — không macro nào chạy trên nó được. Nó cũng không tách rời khỏi tầng driver `rbdc` của chính nó, mà `rbdc` không có driver Trino và dùng nó nghĩa là dựng lại delegation per-user, engine JWT và Ranger.
 
