@@ -39,16 +39,38 @@
 -- workspace with no entitlement row. So from the moment this migration runs,
 -- every current workspace admin holds `data_api_endpoint:invoke` workspace-wide.
 --
--- **What that is worth in practice is nothing, and the reason is worth writing
--- down rather than leaving to be inferred**: the serving surface authenticates a
--- `data-api` audience JWT minted for a SERVICE ACCOUNT and nothing else — a
--- human's browser session cannot reach `/data-api/v1/…` at all (spec §6.1). A
--- ws_admin therefore cannot use this permission directly. It is seeded so the
--- catalog is consistent (every workspace permission a built-in role could
--- plausibly need appears on the role that administers that workspace) and so a
--- future in-product "try it" console run as the human has something to check.
--- An operator who does not want it can remove it from `ws_admin`; nothing on the
--- serving path depends on the seed.
+-- **It is inert for a HUMAN SESSION, and that is the only claim to make here.**
+-- The serving surface authenticates a `data-api` audience JWT minted for a
+-- SERVICE ACCOUNT and nothing else — a human's browser session cannot reach
+-- `/data-api/v1/…` at all (spec §6.1) — so a ws_admin cannot use this permission
+-- directly. It is seeded so the catalog is consistent (every workspace
+-- permission a built-in role could plausibly need appears on the role that
+-- administers that workspace) and so a future in-product "try it" console run as
+-- the human has something to check.
+--
+-- **What is NOT inert, and must not be described as such: a SERVICE ACCOUNT
+-- holding a role that carries this permission has workspace-wide invoke.**
+-- `MemberRepo::add` writes a workspace-scoped `access_grants` row for any
+-- `principal_id` uuid with NO `users.provider` filter, and it accepts any role
+-- that exists at workspace scope. So adding a service account's user id as a
+-- workspace member — as `ws_admin`, or as `data_api_invoker` itself — grants it
+-- this permission at WORKSPACE scope, and the Cedar workspace template's
+-- cascading `resource in ?resource` reaches every endpoint in the workspace at
+-- once. Before this migration a `ws_admin` membership did not carry invoke;
+-- after it, it does.
+--
+-- That is not a boundary crossing — the same admin can already grant every
+-- endpoint one at a time through
+-- `POST /api/ws/{workspace}/data-api/endpoints/{id}/grants` — but it is a
+-- one-click version of a thing the per-endpoint route makes deliberate, and it
+-- leaves no per-endpoint record of what was granted. **P5's member picker must
+-- therefore either exclude `provider = 'service'` principals or label the
+-- consequence at the point of choosing**, and it must not offer
+-- `data_api_invoker` as a membership role at all: that role exists to be granted
+-- object-scoped, and as a membership it means "invoke everything here".
+--
+-- An operator who does not want the seed can remove it from `ws_admin`; nothing
+-- on the serving path depends on it.
 INSERT INTO role_permissions (role_id, permission)
 SELECT id, 'data_api_endpoint:invoke'
   FROM roles

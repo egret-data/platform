@@ -521,6 +521,24 @@ async fn run(
     // hides existence from a caller who has proved nothing; here there is
     // nothing left to hide, and a 404 would send the operator hunting for an
     // endpoint someone had supposedly deleted.
+    //
+    // **This runs BEFORE the limiter, so a `not_granted` refusal is unlimited**,
+    // and that is spec §6.2's step order rather than an oversight. A valid token
+    // hammering an endpoint it was never granted costs two SELECTs per refusal
+    // (`get_by_slug`, `live_snapshot`) plus one PDP decision, with no bucket to
+    // stop it. It is the same exposure the step-2 404s already carry for the same
+    // structural reason: the limiter is keyed on `endpoint_id`, which only exists
+    // once step 2 has resolved it, so nothing before step 2 can be limited at
+    // all and steps 3 and 4 sit in that same window. **Do not reorder this to
+    // fix that** — moving the limiter above step 4 would mean spending a
+    // published per-endpoint allowance on callers who may not use the endpoint,
+    // which lets one ungranted client exhaust a granted one's budget.
+    //
+    // If the 403 storm is ever the thing that matters, the fix is a limiter
+    // keyed on the PRINCIPAL rather than on the endpoint, applied where step 1
+    // finishes — a different bucket with a different key, not this one moved.
+    // The access log records every refusal (see `serve`), so the storm is
+    // visible before it is expensive.
     invoke_allowed(st, &principal, ws.id, endpoint_id).await?;
 
     // Step 5 — rate limit. BOTH published keys: the client's own allowance and

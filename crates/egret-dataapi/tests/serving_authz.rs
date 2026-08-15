@@ -851,6 +851,85 @@ async fn the_stored_row_is_the_shape_the_pdp_reads() {
     );
 }
 
+/// A grant must not outlive the endpoint it names.
+///
+/// `access_grants.scope_id` is polymorphic with no FK and no cleanup trigger, so
+/// nothing at the database level does this. An orphan is not exploitable — the
+/// serving path can never resolve a deleted endpoint — but it accumulates
+/// without bound and the grants list renders it with a null name.
+#[tokio::test]
+async fn deleting_an_endpoint_takes_its_grants_with_it() {
+    let f = skip_without_db!();
+    let ep = f.publish_endpoint("GET", "/x", "SELECT 1 AS n").await;
+    let keep = f.publish_endpoint("GET", "/keep", "SELECT 1 AS n").await;
+    f.grant_invoke(f.service_account, ep).await;
+    f.grant_invoke(f.service_account, keep).await;
+
+    let r = f
+        .mgmt_send(
+            &f.manager,
+            "DELETE",
+            &format!("/api/ws/{}/data-api/endpoints/{ep}", f.ws_slug),
+            None,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "delete failed: {}", r.body);
+
+    let orphans: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access_grants WHERE scope_type = 'object' AND scope_id = $1",
+    )
+    .bind(ep)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(orphans, 0, "the deleted endpoint's grants outlived it");
+
+    // And the sweep is scoped: the OTHER endpoint's grant is untouched.
+    let survivors: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access_grants WHERE scope_type = 'object' AND scope_id = $1",
+    )
+    .bind(keep)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        survivors, 1,
+        "the sweep took a grant on an endpoint it was not deleting"
+    );
+    assert_eq!(f.call("keep").await.status, StatusCode::OK);
+}
+
+/// A 404 delete must not sweep anything — the containment check has to come
+/// first, or a caller could clear another workspace's grants on an id it was
+/// never allowed to name.
+#[tokio::test]
+async fn a_refused_delete_sweeps_no_grants() {
+    let f = skip_without_db!();
+    let ep = f.publish_endpoint("GET", "/x", "SELECT 1 AS n").await;
+    f.grant_invoke(f.service_account, ep).await;
+
+    // The other workspace's manager, naming this workspace's endpoint.
+    let r = f
+        .mgmt_send(
+            &f.other_manager,
+            "DELETE",
+            &format!("/api/ws/{}/data-api/endpoints/{ep}", f.other_ws_slug),
+            None,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
+
+    let kept: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access_grants WHERE scope_type = 'object' AND scope_id = $1",
+    )
+    .bind(ep)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(kept, 1, "a refused delete swept a grant it never owned");
+    assert_eq!(f.call("x").await.status, StatusCode::OK);
+}
+
 /// Granting twice is a no-op, not a 500 on the unique key.
 #[tokio::test]
 async fn granting_twice_is_idempotent() {

@@ -1460,13 +1460,21 @@ async fn grant_endpoint_invoke(
     .await
     .map_err(db_err)?;
 
+    // `object_type` is in the predicate even though nothing can currently write
+    // an object grant on this `(principal, role, scope_id)` with a different
+    // one. This is the query that decides which row the caller is told it just
+    // wrote, and the whole point of this feature is that all six columns of a
+    // grant have to agree — a re-read that identifies the row by five of them
+    // would be the one place in the pair where that stopped being true.
     let (grant_id, created_at): (Uuid, DateTime<Utc>) = sqlx::query_as(
         "SELECT id, created_at FROM access_grants \
          WHERE principal_type = 'user' AND principal_id = $1 AND role_id = $2 \
-           AND scope_type = 'object' AND scope_id = $3 AND effect = 'allow'",
+           AND scope_type = 'object' AND object_type = $3 AND scope_id = $4 \
+           AND effect = 'allow'",
     )
     .bind(sa)
     .bind(role)
+    .bind(crate::endpoints::OBJECT_KIND)
     .bind(id)
     .fetch_one(&st.db.pool)
     .await
